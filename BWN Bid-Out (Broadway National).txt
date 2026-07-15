@@ -1,0 +1,934 @@
+// ==UserScript==
+// @name         BWN Bid-Out (Broadway National)
+// @namespace    broadwaynational.bwn
+// @version      0.7.0
+// @description  Sends a competitive-pricing request to several vendors from a work order. Adds a "Bid-Out" dropdown to the See-Who-Is-Available row: pulls the assignable Umbrava vendors near the site with their emails, can find net-new vendors nearby through Google Places and look up their emails via the BWN scrape-contacts function, and takes pasted outside addresses. You pick who's included, then review the exact recipient list and the rendered email before anything sends. Send from your own mailbox via the SWA send-bid function (Microsoft Graph), or open a plain Outlook draft. Vendors are BCC'd; nothing sends until you click Send. Network access is limited to Umbrava (same-origin), Google Places, and your SWA host.
+// @match        https://app.umbrava.com/work-orders/*
+// @run-at       document-idle
+// @noframes
+// @grant        GM_xmlhttpRequest
+// @grant        GM_getValue
+// @grant        GM_setValue
+// @grant        GM_registerMenuCommand
+// @connect      places.googleapis.com
+// @connect      green-stone-0717dab0f.7.azurestaticapps.net
+// ==/UserScript==
+
+(function () {
+  'use strict';
+
+  var VER = '0.6.0';
+  console.info('[BWN BID-OUT] v' + VER + ' - 3-step Build Requests wizard (WO details -> select vendors -> review) · Umbrava vendors + Places net-new discovery + email scrape · one-click Graph send via SWA (Outlook-draft fallback)');
+
+  var COMPANY_ADDR = 'Broadway National Group, 100 Davids Dr, Hauppauge, NY 11788';
+  var DEFAULT_MILES = 50;
+  var MAX_BCC = 60;
+  var PLACES_URL = 'https://places.googleapis.com/v1/places:searchText';
+  var SCRAPE_URL = 'https://green-stone-0717dab0f.7.azurestaticapps.net/api/scrape-contacts';
+  var SEND_URL = 'https://green-stone-0717dab0f.7.azurestaticapps.net/api/send-bid';
+  var LOGO_SRC = 'https://green-stone-0717dab0f.7.azurestaticapps.net/assets/bwn-logo.png';
+  var COMPANY_PHONE = '1.631.737.3140';
+
+  // ---- Umbrava in-page GraphQL (same-origin, Auth0 bearer) -------------------
+  function authToken() {
+    try {
+      var k = Object.keys(localStorage).find(function (x) { return /@@auth0spajs@@::.*::https:\/\/app\.umbrava\.com\/api::/.test(x); });
+      if (!k) return null;
+      var v = JSON.parse(localStorage.getItem(k));
+      return (v && v.body && v.body.access_token) || null;
+    } catch (e) { return null; }
+  }
+  function actor() {
+    try {
+      var k = Object.keys(localStorage).find(function (x) { return /@@auth0spajs@@::.*::@@user@@/.test(x); });
+      var u = k ? ((JSON.parse(localStorage.getItem(k)) || {}).decodedToken || {}).user : null;
+      return { name: (u && u.name) || '', email: (u && u.email) || '' };
+    } catch (e) { return { name: '', email: '' }; }
+  }
+  function gql(query, variables) {
+    var tok = authToken();
+    if (!tok) return Promise.reject(new Error('Not signed in to Umbrava (no session token found).'));
+    return fetch('/api/graphql', {
+      method: 'POST',
+      headers: { 'Authorization': 'Bearer ' + tok, 'Content-Type': 'application/json' },
+      body: JSON.stringify({ query: query, variables: variables || {} })
+    }).then(function (r) { return r.json(); }).then(function (j) {
+      if (j && j.errors && j.errors.length) throw new Error(j.errors[0].message || 'GraphQL error');
+      return j.data;
+    });
+  }
+
+  function woNumber() {
+    var m = location.pathname.match(/\/work-orders\/(\d+)/);
+    return m ? parseInt(m[1], 10) : null;
+  }
+
+  var WO_Q =
+    'query($n:Int!){ workOrder(workOrderNumber:$n){ number trackingNumber scopeOfWork serviceInstructions ' +
+    'locationId locationName workOrderTypeId address{ latitude longitude addressLine1 city state postalCode } ' +
+    'trades{ id name } priority{ label } doNotExceed{ amount } } }';
+  function loadWO(n) { return gql(WO_Q, { n: n }).then(function (d) { return d && d.workOrder; }); }
+
+  var VEND_Q =
+    'query($t:[ID!]!,$loc:ID!,$type:Int!,$lat:Float,$lng:Float,$take:Int!){ ' +
+    'getAssignableVendors(tradeIds:$t, tradeFilterOption:Any, locationId:$loc, workOrderTypeId:$type, ' +
+    'locationLatitude:$lat, locationLongitude:$lng, page:{skip:0,take:$take}, ' +
+    'sortBy:[{columnName:"distanceFromLocation",direction:ASC}], filter:[]){ value{ rowCount items{ ' +
+    'id name distanceFromLocation averageRating ratingCount mainContactInfo{ emailAddress mainPhoneNumber } } } } }';
+  function loadVendors(wo, take) {
+    var trades = (wo.trades || []).map(function (t) { return t.id; }).filter(Boolean);
+    var lat = wo.address ? wo.address.latitude : null;
+    var lng = wo.address ? wo.address.longitude : null;
+    return gql(VEND_Q, { t: trades, loc: wo.locationId, type: wo.workOrderTypeId || 8, lat: lat, lng: lng, take: take || 60 })
+      .then(function (d) {
+        var v = d && d.getAssignableVendors && d.getAssignableVendors.value;
+        return { rowCount: (v && v.rowCount) || 0, items: (v && v.items) || [] };
+      });
+  }
+
+  function parseEmails(text) {
+    var out = [], seen = {};
+    (String(text || '').match(/[A-Za-z0-9._%+\-]+@[A-Za-z0-9.\-]+\.[A-Za-z]{2,}/g) || []).forEach(function (e) {
+      var k = e.toLowerCase(); if (!seen[k]) { seen[k] = 1; out.push(e); }
+    });
+    return out;
+  }
+
+  // ---- Net-new discovery: Google Places (own key) + our SWA email scraper -----
+  function gmPost(url, headers, bodyObj, timeoutMs) {
+    return new Promise(function (resolve, reject) {
+      try {
+        GM_xmlhttpRequest({
+          method: 'POST', url: url, headers: headers, data: JSON.stringify(bodyObj), timeout: timeoutMs || 60000,
+          onload: function (r) { var j = null; try { j = JSON.parse(r.responseText); } catch (e) { } resolve({ status: r.status, json: j }); },
+          onerror: function () { reject(new Error('network error')); },
+          ontimeout: function () { reject(new Error('timed out')); }
+        });
+      } catch (e) { reject(e); }
+    });
+  }
+  function haversineMi(aLat, aLng, bLat, bLng) {
+    if ([aLat, aLng, bLat, bLng].some(function (x) { return typeof x !== 'number'; })) return null;
+    var R = 3958.8, dLat = (bLat - aLat) * Math.PI / 180, dLng = (bLng - aLng) * Math.PI / 180;
+    var s = Math.sin(dLat / 2) * Math.sin(dLat / 2) + Math.cos(aLat * Math.PI / 180) * Math.cos(bLat * Math.PI / 180) * Math.sin(dLng / 2) * Math.sin(dLng / 2);
+    return R * 2 * Math.atan2(Math.sqrt(s), Math.sqrt(1 - s));
+  }
+  function normName(s) { return String(s || '').toLowerCase().replace(/&/g, ' and ').replace(/\b(inc|llc|corp|co|company|ltd|the|and|of)\b/g, ' ').replace(/[^a-z0-9]+/g, ''); }
+  function domainOf(u) { try { return new URL(u).hostname.toLowerCase().replace(/^www\./, ''); } catch (e) { return ''; } }
+
+  function placesSearch(wo, miles) {
+    var key = GM_getValue('places_key', '');
+    if (!key) return Promise.reject(new Error('NO_PLACES_KEY'));
+    if (!wo.address || typeof wo.address.latitude !== 'number') return Promise.reject(new Error('This WO has no map coordinates to search around.'));
+    var trade = (wo.trades && wo.trades[0] && wo.trades[0].name) || '';
+    var body = {
+      textQuery: (trade ? trade + ' ' : '') + 'contractor',
+      maxResultCount: 20,
+      locationBias: { circle: { center: { latitude: wo.address.latitude, longitude: wo.address.longitude }, radius: Math.min(50000, Math.max(1000, Math.round((miles || 25) * 1609))) } }
+    };
+    var headers = { 'Content-Type': 'application/json', 'X-Goog-Api-Key': key, 'X-Goog-FieldMask': 'places.id,places.displayName,places.formattedAddress,places.nationalPhoneNumber,places.websiteUri,places.rating,places.userRatingCount,places.location' };
+    return gmPost(PLACES_URL, headers, body, 20000).then(function (r) {
+      if (r.status < 200 || r.status >= 300) throw new Error('Places API ' + r.status + (r.json && r.json.error ? ': ' + r.json.error.message : ''));
+      return (r.json && r.json.places) || [];
+    });
+  }
+  function scrapeEmails(urls) {
+    var key = GM_getValue('ingest_key', '');
+    if (!key) return Promise.resolve({ map: {}, skipped: true });
+    if (!urls.length) return Promise.resolve({ map: {}, skipped: false });
+    return gmPost(SCRAPE_URL, { 'Content-Type': 'application/json', 'x-bwn-key': key }, { urls: urls }, 90000).then(function (r) {
+      if (r.status < 200 || r.status >= 300 || !r.json || !r.json.ok) return { map: {}, skipped: false, err: (r.json && r.json.error) || ('HTTP ' + r.status) };
+      var map = {}, res = r.json.results || {};
+      Object.keys(res).forEach(function (u) { map[u] = (res[u].emails || [])[0] || ''; });
+      return { map: map, skipped: false };
+    }).catch(function (e) { return { map: {}, skipped: false, err: e.message }; });
+  }
+  // Places discovery → dedupe vs the Umbrava list (+ self) → scrape emails.
+  function discoverNetNew(wo, miles, umbravaItems) {
+    var umbNames = {}, umbDomains = {};
+    (umbravaItems || []).forEach(function (v) {
+      umbNames[normName(v.name)] = 1;
+      var em = v.mainContactInfo && v.mainContactInfo.emailAddress; var d = em ? (em.split('@')[1] || '').toLowerCase() : '';
+      if (d) umbDomains[d] = 1;
+    });
+    return placesSearch(wo, miles).then(function (places) {
+      var seen = {}, leads = [];
+      places.forEach(function (p) {
+        var name = (p.displayName && p.displayName.text) || '';
+        if (!name) return;
+        var web = p.websiteUri || '', dom = domainOf(web), nn = normName(name);
+        if (umbNames[nn] || (dom && umbDomains[dom])) return;   // already in Umbrava → omit redundant
+        var key = dom || nn; if (seen[key]) return; seen[key] = 1; // dedupe Places against itself
+        var mi = p.location ? haversineMi(wo.address.latitude, wo.address.longitude, p.location.latitude, p.location.longitude) : null;
+        leads.push({ name: name, phone: p.nationalPhoneNumber || '', website: web, rating: p.rating, ratingCount: p.userRatingCount, mi: mi, email: '' });
+      });
+      var urls = leads.map(function (l) { return l.website; }).filter(Boolean);
+      return scrapeEmails(urls).then(function (sr) {
+        leads.forEach(function (l) { if (l.website && sr.map[l.website]) l.email = sr.map[l.website]; });
+        return { leads: leads, scrapeSkipped: sr.skipped, scrapeErr: sr.err };
+      });
+    });
+  }
+
+  // ---- Email assembly (BCC blast - recipients must not see each other) --------
+  // Plain-text fallback body (Outlook draft). Mirrors the HTML: honors the include toggles
+  // + additional info, city/state only (NO client name or street address - hard rule).
+  function buildBidEmail(wo, recipients, req) {
+    var me = actor();
+    var inc = req.include || {};
+    var tradeLbl = (wo.trades || []).map(function (t) { return t.name; }).join(', ') || 'Service';
+    var cityState = wo.address ? ((wo.address.city || '') + (wo.address.state ? ', ' + wo.address.state : '')) : '';
+    var subject = req.subject || bidSubject(wo, req);
+    var L = [];
+    L.push('Hello,');
+    L.push('');
+    L.push('Broadway National Group is requesting competitive pricing for the work below. Please reply with your best bid.');
+    L.push('');
+    if (inc.priority !== false && wo.priority && wo.priority.label) L.push('Priority: ' + wo.priority.label);
+    if (inc.trades !== false) L.push('Trade(s): ' + tradeLbl);
+    if (inc.location !== false && cityState) L.push('Location: ' + cityState);
+    if (req.respondBy) L.push('Please respond by: ' + fmtRespondBy(req.respondBy));
+    if (req.arrive) L.push('Arrive by: ' + fmtRespondBy(req.arrive));
+    if (req.nte) L.push('NTE (not-to-exceed): $' + req.nte);
+    if (req.techs) L.push('# of Techs: ' + req.techs);
+    if (req.travelRate) L.push('Travel Rate: $' + req.travelRate + ' / hr');
+    if (req.rate) L.push('Rate: $' + req.rate + ' / hr');
+    if (inc.reference !== false) L.push('Reference: Tracking #' + (wo.trackingNumber || ''));
+    L.push('Scope: ' + (req.scope || wo.scopeOfWork || ''));
+    var addl = (req.addl || '').trim();
+    if (addl) { L.push(''); L.push('Additional information: ' + addl); }
+    if (inc.service !== false && (wo.serviceInstructions || '').trim()) { L.push(''); L.push('Service instructions: ' + wo.serviceInstructions.trim()); }
+    if (req.rateOffer) { L.push(''); L.push('Please include your current rate offer (labor + trip rates).'); }
+    L.push('');
+    L.push('Please reply to this email with your quote - labor rate, trip charge, and any material/parts costs. Thank you.');
+    L.push('');
+    var sigName = req.contactName || me.name || 'Broadway National Group';
+    var sigEmail = req.contactEmail || me.email || '';
+    L.push('- ' + sigName + (sigEmail ? ' · ' + sigEmail : ''));
+    L.push('');
+    L.push('--');
+    L.push(COMPANY_ADDR + '. This is a request for pricing sent to service vendors. To stop receiving bid requests, reply "UNSUBSCRIBE".');
+    var bcc = recipients.map(function (v) { return v.email; }).filter(Boolean);
+    return { subject: subject, body: L.join('\n'), bcc: bcc, tracking: String(wo.trackingNumber || '') };
+  }
+  function openDraft(mail) {
+    try { navigator.clipboard.writeText(mail.body).catch(function () { }); } catch (e) { }
+    var url = 'mailto:?bcc=' + encodeURIComponent(mail.bcc.join(',')) +
+      '&subject=' + encodeURIComponent(mail.subject) + '&body=' + encodeURIComponent(mail.body);
+    var a = document.createElement('a'); a.href = url; a.style.display = 'none';
+    document.body.appendChild(a); a.click(); setTimeout(function () { a.remove(); }, 0);
+  }
+
+  // ---- Branded HTML email (the Phase-B one-click send body) --------------------
+  // The scratchpad bidout-email-template, embedded. Outlook-safe: tables + inline CSS +
+  // bgcolor attrs, 600px card, BWN design system (green #1a5f3e, system stack, 400/500).
+  // OMITS the client name and street address (city/state only) - hard rule.
+  var BID_TEMPLATE =
+    '<div style="display:none;max-height:0;overflow:hidden;">Broadway National - request for competitive pricing. Please reply with your best bid.</div>' +
+    '<table role="presentation" width="100%" cellpadding="0" cellspacing="0" bgcolor="#eef3f0" style="background:#eef3f0;margin:0;padding:24px 0;font-family:-apple-system,BlinkMacSystemFont,\'Segoe UI\',\'Helvetica Neue\',Arial,sans-serif;font-size:16px;font-weight:400;color:#1f2a24;"><tr><td align="center">' +
+    '<table role="presentation" width="600" cellpadding="0" cellspacing="0" bgcolor="#ffffff" style="width:600px;max-width:600px;background:#ffffff;border-radius:10px;overflow:hidden;border:1px solid #dde6e1;">' +
+    '<tr><td align="center" bgcolor="#1a5f3e" style="background:#1a5f3e;padding:22px 24px 8px;"><img src="{{LOGO_SRC}}" alt="Broadway National" width="300" height="36" style="display:block;border:0;width:300px;height:36px;margin:0 auto;" /></td></tr>' +
+    '<tr><td bgcolor="#1a5f3e" style="background:#1a5f3e;padding:2px 24px 18px;">' +
+    '<div style="color:#ffffff;font-size:20px;font-weight:500;line-height:32px;text-align:center;">Request for Pricing</div>' +
+    '<div style="color:#c3e2d1;font-size:14px;font-weight:400;text-align:center;margin-top:2px;">Broadway National Group</div>' +
+    '<div style="color:#c3e2d1;font-size:12px;font-weight:500;text-align:right;margin-top:6px;">Reference #{{TRACKING}}</div></td></tr>' +
+    '<tr><td style="padding:14px 24px 0;"><table role="presentation" width="100%" cellpadding="0" cellspacing="0"><tr>' +
+    '<td bgcolor="#fff4e8" style="background:#fff4e8;border:1px solid #f2dcbd;border-radius:8px;padding:11px 14px;color:#8a4b12;font-size:14px;font-weight:400;text-align:center;line-height:1.5;">' +
+    'This is a request for <span style="font-weight:500;">competitive pricing</span> - it is not a work order. Please reply to this email with your best bid.</td></tr></table></td></tr>' +
+    '{{DETAILS}}' +
+    '<tr><td style="padding:16px 24px 0;"><div style="color:#0d3d26;font-size:12px;font-weight:500;">Scope</div>' +
+    '<div style="color:#1f2a24;font-size:16px;font-weight:400;margin-top:4px;line-height:1.55;">{{SCOPE}}</div></td></tr>' +
+    '<tr><td style="padding:18px 24px;"><table role="presentation" width="100%" cellpadding="0" cellspacing="0"><tr>' +
+    '<td bgcolor="#1a5f3e" style="background:#1a5f3e;border-radius:8px;padding:13px 16px;text-align:center;color:#ffffff;font-size:14px;font-weight:500;line-height:1.5;">' +
+    'Interested? Reply to this email with your quote -<br>labor rate, trip charge, and any material/parts costs.</td></tr></table></td></tr>' +
+    '{{ADDL_BLOCK}}' +
+    '{{SERVICE_BLOCK}}' +
+    '<tr><td style="padding:14px 24px 0;"><hr style="border:0;border-top:1px solid #dde6e1;margin:0;"></td></tr>' +
+    '<tr><td style="padding:14px 24px 0;"><div style="color:#0d3d26;font-size:14px;font-weight:500;margin-bottom:6px;">Broadway National Contact</div>' +
+    '<table role="presentation" width="100%" cellpadding="0" cellspacing="0"><tr>' +
+    '<td width="34%" style="vertical-align:top;"><div style="color:#66786e;font-size:12px;font-weight:500;">Requester</div><div style="color:#1f2a24;font-size:14px;font-weight:400;margin-top:2px;">{{REQUESTER}}</div></td>' +
+    '<td width="40%" style="vertical-align:top;"><div style="color:#66786e;font-size:12px;font-weight:500;">Email</div><div style="font-size:14px;font-weight:400;margin-top:2px;"><a href="mailto:{{REQ_EMAIL}}" style="color:#1a5f3e;text-decoration:none;">{{REQ_EMAIL}}</a></div></td>' +
+    '<td width="26%" style="vertical-align:top;"><div style="color:#66786e;font-size:12px;font-weight:500;">Phone</div><div style="color:#1f2a24;font-size:14px;font-weight:400;margin-top:2px;">{{REQ_PHONE}}</div></td></tr></table></td></tr>' +
+    '<tr><td style="padding:18px 24px 22px;"><div style="color:#66786e;font-size:12px;font-weight:400;line-height:1.55;text-align:center;">' +
+    'Broadway National Group · 100 Davids Dr, Hauppauge, NY 11788<br>' +
+    'This is a request for pricing sent to service vendors. To stop receiving bid requests, reply &quot;UNSUBSCRIBE&quot;.</div></td></tr>' +
+    '</table></td></tr></table>';
+
+  // Accepts a date-only 'YYYY-MM-DD' OR a datetime-local 'YYYY-MM-DDTHH:mm'. Date-only
+  // output is byte-for-byte what it always was; when a time is present it is appended.
+  function fmtRespondBy(iso) {
+    var m = /^(\d{4})-(\d{2})-(\d{2})(?:[T ](\d{2}):(\d{2}))?$/.exec(iso || '');
+    if (!m) return 'At your earliest convenience';
+    var DAYS = ['Sunday', 'Monday', 'Tuesday', 'Wednesday', 'Thursday', 'Friday', 'Saturday'];
+    var MONS = ['January', 'February', 'March', 'April', 'May', 'June', 'July', 'August', 'September', 'October', 'November', 'December'];
+    var hasTime = m[4] != null;
+    var d = new Date(+m[1], +m[2] - 1, +m[3], hasTime ? +m[4] : 0, hasTime ? +m[5] : 0);   // local, not UTC - a date input must not shift a day
+    var base = DAYS[d.getDay()] + ', ' + MONS[d.getMonth()] + ' ' + d.getDate() + ', ' + d.getFullYear();
+    if (!hasTime) return base;
+    var h12 = d.getHours() % 12; if (h12 === 0) h12 = 12;
+    var mm = d.getMinutes() < 10 ? '0' + d.getMinutes() : '' + d.getMinutes();
+    return base + ' at ' + h12 + ':' + mm + ' ' + (d.getHours() < 12 ? 'AM' : 'PM');
+  }
+  function nl2br(s) { return esc(s).replace(/\n/g, '<br>'); }
+
+  function detailCell(label, value) {
+    return '<td width="50%" style="vertical-align:top;padding-right:10px;">' +
+      '<div style="color:#0d3d26;font-size:12px;font-weight:500;">' + esc(label) + '</div>' +
+      '<div style="color:#1f2a24;font-size:14px;font-weight:400;margin-top:3px;">' + esc(value) + '</div></td>';
+  }
+  function detailRows(pairs) {
+    var out = '';
+    for (var i = 0; i < pairs.length; i += 2) {
+      out += '<tr><td style="padding:14px 24px 0;"><table role="presentation" width="100%" cellpadding="0" cellspacing="0"><tr>' +
+        detailCell(pairs[i].label, pairs[i].value) +
+        (pairs[i + 1] ? detailCell(pairs[i + 1].label, pairs[i + 1].value) : '<td width="50%"></td>') +
+        '</tr></table></td></tr>';
+    }
+    return out;
+  }
+  // Subject built from the info actually being sent (honors the include toggles).
+  function bidSubject(wo, req) {
+    var inc = req.include || {};
+    var tl = (wo.trades || []).map(function (t) { return t.name; }).join(', ');
+    var cs = wo.address ? ((wo.address.city || '') + (wo.address.state ? ', ' + wo.address.state : '')) : '';
+    var bits = [];
+    if (inc.trades !== false && tl) bits.push(tl);
+    if (inc.location !== false && cs) bits.push(cs);
+    return 'Request for Pricing' + (bits.length ? ': ' + bits.join(' - ') : '') + ' (Ref #' + (wo.trackingNumber || '') + ')';
+  }
+
+  // Fill the template. EVERY interpolated value is HTML-escaped (esc/nl2br). The detail
+  // grid, subject, and sections reflect ONLY the fields the coordinator chose to include,
+  // plus any free-text "Additional information".
+  function buildBidHtml(wo, req, fromEmail) {
+    var me = actor();
+    var inc = req.include || {};
+    var tradeLbl = (wo.trades || []).map(function (t) { return t.name; }).join(', ') || 'Service';
+    var cityState = wo.address ? ((wo.address.city || '') + (wo.address.state ? ', ' + wo.address.state : '')) : '';
+    var pairs = [];
+    if (inc.priority !== false && wo.priority && wo.priority.label) pairs.push({ label: 'Priority', value: wo.priority.label });
+    if (req.respondBy) pairs.push({ label: 'Respond By', value: fmtRespondBy(req.respondBy) });
+    if (req.arrive) pairs.push({ label: 'Arrive By', value: fmtRespondBy(req.arrive) });
+    if (req.nte) pairs.push({ label: 'NTE', value: '$' + req.nte });
+    if (req.techs) pairs.push({ label: '# of Techs', value: req.techs });
+    if (req.travelRate) pairs.push({ label: 'Travel Rate', value: '$' + req.travelRate + ' / hr' });
+    if (req.rate) pairs.push({ label: 'Rate', value: '$' + req.rate + ' / hr' });
+    if (inc.trades !== false) pairs.push({ label: 'Trade(s)', value: tradeLbl });
+    if (inc.location !== false && cityState) pairs.push({ label: 'Location', value: cityState });
+    if (inc.reference !== false) pairs.push({ label: 'Reference', value: 'Tracking #' + (wo.trackingNumber || '') });
+    var details = pairs.length ? (detailRows(pairs) + '<tr><td style="padding:16px 24px 0;"><hr style="border:0;border-top:1px solid #dde6e1;margin:0;"></td></tr>') : '';
+    var addl = (req.addl || '').trim();
+    var addlBlock = addl
+      ? '<tr><td style="padding:16px 24px 0;"><div style="color:#0d3d26;font-size:12px;font-weight:500;">Additional Information</div>' +
+        '<div style="color:#1f2a24;font-size:14px;font-weight:400;margin-top:4px;line-height:1.55;">' + nl2br(addl) + '</div></td></tr>'
+      : '';
+    var rateOfferBlock = req.rateOffer
+      ? '<tr><td style="padding:14px 24px 0;"><table role="presentation" width="100%" cellpadding="0" cellspacing="0"><tr>' +
+        '<td bgcolor="#e8f3ed" style="background:#e8f3ed;border:1px solid #cfe6da;border-radius:8px;padding:11px 14px;color:#0d3d26;font-size:14px;font-weight:400;line-height:1.5;">' +
+        'Please include your current rate offer (labor + trip rates).</td></tr></table></td></tr>'
+      : '';
+    var svc = (wo.serviceInstructions || '').trim();
+    var svcBlock = (inc.service !== false && svc)
+      ? '<tr><td style="padding:0 24px 4px;"><div style="color:#0d3d26;font-size:14px;font-weight:500;">Service Instructions</div>' +
+        '<div style="color:#5a6b62;font-size:12px;font-weight:400;margin-top:4px;line-height:1.5;">' + nl2br(svc) + '</div></td></tr>'
+      : '';
+    return BID_TEMPLATE
+      .replace(/\{\{LOGO_SRC\}\}/g, LOGO_SRC)
+      .replace(/\{\{TRACKING\}\}/g, esc(wo.trackingNumber || ''))
+      .replace(/\{\{DETAILS\}\}/g, details)
+      .replace(/\{\{SCOPE\}\}/g, nl2br(req.scope || wo.scopeOfWork || '') || '-')
+      .replace(/\{\{ADDL_BLOCK\}\}/g, addlBlock + rateOfferBlock)
+      .replace(/\{\{SERVICE_BLOCK\}\}/g, svcBlock)
+      .replace(/\{\{REQUESTER\}\}/g, esc(req.contactName || me.name || 'Broadway National Group'))
+      .replace(/\{\{REQ_EMAIL\}\}/g, esc(fromEmail || req.contactEmail || me.email || ''))
+      .replace(/\{\{REQ_PHONE\}\}/g, esc(req.contactPhone || GM_getValue('sender_phone', '') || COMPANY_PHONE));
+  }
+
+  // One-click send via the SWA send-bid function (Microsoft Graph, from the coordinator's
+  // own mailbox). Same x-bwn-key gate as scrape-contacts. The server independently
+  // enforces the from-allowlist, BCC cap, and a daily recipient ceiling.
+  function sendBid(fromEmail, mail, html) {
+    var key = GM_getValue('ingest_key', '');
+    if (!key) return Promise.resolve({ ok: false, code: 'NO_KEY' });
+    return gmPost(SEND_URL, { 'Content-Type': 'application/json', 'x-bwn-key': key },
+      { from: fromEmail, bcc: mail.bcc, subject: mail.subject, html: html, tracking: mail.tracking || null }, 60000)
+      .then(function (r) {
+        if (r.status === 200 && r.json && r.json.ok) return { ok: true, sent: r.json.sent };
+        return { ok: false, code: r.status, msg: (r.json && r.json.error) || ('HTTP ' + r.status) };
+      })
+      .catch(function (e) { return { ok: false, code: 'NET', msg: e.message }; });
+  }
+
+  // ---- UI ---------------------------------------------------------------------
+  function esc(s) { return String(s == null ? '' : s).replace(/[&<>"]/g, function (c) { return { '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;' }[c]; }); }
+
+  // BWN design system: system font stack; 16/14/20-500/12-500 scale; weights 400/500 only;
+  // buttons text-transform:none; brand tokens (green #1a5f3e / dk #0d3d26, text #1f2a24 /
+  // muted #5a6b62, border #dde6e1, tint #e8f3ed, warn #8a4b12). See memory bwn-design-system.
+  var FONT = "-apple-system,BlinkMacSystemFont,'Segoe UI','Helvetica Neue',Arial,sans-serif";
+  function ensureStyle() {
+    if (document.getElementById('bwn-bidout-style')) return;
+    var st = document.createElement('style'); st.id = 'bwn-bidout-style';
+    st.textContent =
+      '#bwn-bidout-fab{position:fixed;right:18px;bottom:76px;z-index:2147483000;background:#1a5f3e;color:#fff;border:none;border-radius:24px;padding:11px 16px;font:500 14px/1 ' + FONT + ';text-transform:none;box-shadow:0 6px 20px rgba(13,38,26,.28);cursor:pointer;}' +
+      '.bwn-bo-dd{position:relative;display:inline-block;margin-left:8px;vertical-align:middle;}' +
+      '.bwn-bo-ddbtn{background:#1a5f3e;color:#fff;border:none;border-radius:8px;padding:9px 14px;font:500 14px/1 ' + FONT + ';text-transform:none;cursor:pointer;}' +
+      '.bwn-bo-ddbtn .cv{opacity:.85;margin-left:3px;}' +
+      '.bwn-bo-ddmenu{position:absolute;top:100%;left:0;margin-top:4px;background:#fff;border:1px solid #dde6e1;border-radius:8px;box-shadow:0 8px 24px rgba(13,38,26,.14);min-width:230px;z-index:2147483000;overflow:hidden;}' +
+      '.bwn-bo-dditem{display:block;width:100%;text-align:left;background:#fff;border:none;padding:10px 14px;font:400 14px ' + FONT + ';color:#1f2a24;cursor:pointer;white-space:nowrap;text-transform:none;}' +
+      '.bwn-bo-dditem:hover{background:#eef3f0;}' +
+      '#bwn-bidout-ov{position:fixed;inset:0;z-index:2147483001;background:rgba(13,38,26,.5);display:flex;align-items:center;justify-content:center;font-family:' + FONT + ';}' +
+      '.bwn-bo{width:740px;max-width:96vw;max-height:92vh;overflow:auto;background:#fff;border-radius:14px;box-shadow:0 18px 60px rgba(13,38,26,.28);color:#1f2a24;font-size:16px;}' +
+      '.bwn-bo-hd{background:linear-gradient(135deg,#1a5f3e,#0d3d26);color:#fff;padding:16px 18px;font:500 20px/32px ' + FONT + ';display:flex;align-items:center;gap:10px;}' +
+      '.bwn-bo-hd .x{margin-left:auto;background:transparent;border:none;color:#fff;font-size:20px;line-height:1;cursor:pointer;}' +
+      '.bwn-bo-bd{padding:14px 18px;}' +
+      '.bwn-bo-wo{font:500 14px ' + FONT + ';color:#0d3d26;margin-bottom:8px;}' +
+      '.bwn-bo-sub{font:400 12px ' + FONT + ';color:#5a6b62;margin-bottom:10px;}' +
+      '.bwn-bo-row{display:flex;gap:10px;align-items:center;flex-wrap:wrap;margin:8px 0;}' +
+      '.bwn-bo-row label{font:500 12px ' + FONT + ';color:#5a6b62;}' +
+      '.bwn-bo-row input,.bwn-bo textarea{border:1px solid #dde6e1;border-radius:8px;padding:7px 9px;font:400 14px ' + FONT + ';color:#1f2a24;box-sizing:border-box;}' +
+      '.bwn-bo textarea{width:100%;resize:vertical;}' +
+      '.bwn-bo-list{border:1px solid #dde6e1;border-radius:10px;max-height:260px;overflow:auto;margin:6px 0;}' +
+      '.bwn-bo-v{display:flex;gap:10px;align-items:center;padding:8px 10px;border-bottom:1px solid #eef2f4;font:400 14px ' + FONT + ';}' +
+      '.bwn-bo-v:last-child{border-bottom:none;}' +
+      '.bwn-bo-v .nm{font-weight:500;flex:1;}' +
+      '.bwn-bo-v .mi{color:#5a6b62;font-size:12px;white-space:nowrap;}' +
+      '.bwn-bo-v .em{color:#1a5f3e;font-size:12px;}' +
+      '.bwn-bo-v .noem{color:#8a4b12;font-size:12px;text-decoration:none;}' +
+      '.bwn-bo-v a.noem:hover{text-decoration:underline;}' +
+      '.bwn-bo-mini{border:none;background:#e8f3ed;color:#1a5f3e;border-radius:8px;padding:7px 12px;font:500 14px ' + FONT + ';text-transform:none;cursor:pointer;}' +
+      '.bwn-bo-ft{display:flex;gap:10px;align-items:center;padding:12px 18px;border-top:1px solid #dde6e1;background:#f7faf8;}' +
+      '.bwn-bo-ft .sp{margin-right:auto;font:400 12px ' + FONT + ';color:#5a6b62;}' +
+      '.bwn-bo-ft button{border:1px solid #dde6e1;background:#fff;border-radius:8px;padding:8px 14px;font:500 14px ' + FONT + ';text-transform:none;cursor:pointer;}' +
+      '.bwn-bo-ft button.pri{background:#1a5f3e;border-color:#1a5f3e;color:#fff;}' +
+      '.bwn-bo-note{font:400 12px ' + FONT + ';color:#5a6b62;margin-top:6px;line-height:1.4;}' +
+      '.bwn-bo-inc{display:flex;gap:6px 16px;flex-wrap:wrap;margin:2px 0 6px;}' +
+      '.bwn-bo-chk{display:inline-flex;align-items:center;gap:6px;font:400 14px ' + FONT + ';color:#1f2a24;cursor:pointer;}' +
+      '.bwn-bo-chk input{margin:0;}' +
+      '.bwn-bo-pv{border:1px solid #dde6e1;border-radius:10px;overflow:hidden;margin:8px 0;background:#eef3f0;}' +
+      '.bwn-bo-pv iframe{display:block;width:100%;height:430px;border:none;background:#eef3f0;}' +
+      '.bwn-bo-bcc{max-height:76px;overflow:auto;border:1px solid #dde6e1;border-radius:8px;padding:6px 9px;font:400 12px ' + FONT + ';color:#1f2a24;background:#f7faf8;line-height:1.7;margin:4px 0 8px;}' +
+      '.bwn-bo-meta{display:flex;gap:10px;align-items:center;flex-wrap:wrap;margin:6px 0;font:500 12px ' + FONT + ';color:#5a6b62;}' +
+      '.bwn-bo-meta input{border:1px solid #dde6e1;border-radius:8px;padding:7px 9px;font:400 14px ' + FONT + ';color:#1f2a24;min-width:260px;}' +
+      '.bwn-bo-meta .sj{font:400 14px ' + FONT + ';color:#1f2a24;}' +
+      '.bwn-bo-steps{display:flex;align-items:center;gap:6px;margin:0 0 16px;flex-wrap:wrap;}' +
+      '.bwn-bo-step{display:flex;align-items:center;gap:7px;}' +
+      '.bwn-bo-step .dot{width:24px;height:24px;border-radius:50%;background:#e8f3ed;border:1px solid #dde6e1;color:#5a6b62;display:inline-flex;align-items:center;justify-content:center;font:500 12px ' + FONT + ';}' +
+      '.bwn-bo-step .lbl{font:500 13px ' + FONT + ';color:#5a6b62;}' +
+      '.bwn-bo-step.on .dot,.bwn-bo-step.done .dot{background:#1a5f3e;border-color:#1a5f3e;color:#fff;}' +
+      '.bwn-bo-step.on .lbl{color:#0d3d26;}' +
+      '.bwn-bo-bar{flex:1;min-width:16px;height:2px;background:#dde6e1;}' +
+      '.bwn-bo-grid2{display:grid;grid-template-columns:1fr 1fr;gap:10px 14px;margin:6px 0;}' +
+      '.bwn-bo-fld{display:flex;flex-direction:column;gap:4px;min-width:0;}' +
+      '.bwn-bo-fld label{font:500 12px ' + FONT + ';color:#5a6b62;}' +
+      '.bwn-bo-fld input{border:1px solid #dde6e1;border-radius:8px;padding:7px 9px;font:400 14px ' + FONT + ';color:#1f2a24;box-sizing:border-box;width:100%;}' +
+      '.bwn-bo-ro{font:400 14px ' + FONT + ';color:#1f2a24;padding:7px 0;}' +
+      '.bwn-bo-chips{display:flex;gap:6px;flex-wrap:wrap;}' +
+      '.bwn-bo-chip{display:inline-block;background:#e8f3ed;color:#0d3d26;border:1px solid #cfe6da;border-radius:999px;padding:4px 11px;font:500 12px ' + FONT + ';}' +
+      '.bwn-bo-sum{border:1px solid #dde6e1;border-radius:10px;background:#f7faf8;padding:12px 14px;margin:2px 0 12px;}' +
+      '.bwn-bo-sumhd{font:500 14px ' + FONT + ';color:#0d3d26;margin-bottom:8px;}' +
+      '.bwn-bo-sumfld{display:flex;gap:12px;padding:6px 0;border-top:1px solid #eef2f4;}' +
+      '.bwn-bo-sumfld:first-of-type{border-top:none;}' +
+      '.bwn-bo-sumfld .k{flex:0 0 128px;font:500 12px ' + FONT + ';color:#5a6b62;}' +
+      '.bwn-bo-sumfld .v{flex:1;font:400 14px ' + FONT + ';color:#1f2a24;white-space:pre-wrap;min-width:0;}' +
+      '.bwn-bo-sumnote{font:500 12px ' + FONT + ';color:#1a5f3e;margin:8px 0 2px;}';
+    document.head.appendChild(st);
+  }
+
+  function toast(msg) {
+    var t = document.createElement('div');
+    t.style.cssText = 'position:fixed;bottom:120px;right:18px;z-index:2147483002;background:#0d3d26;color:#fff;padding:10px 16px;border-radius:8px;font:500 14px ' + FONT + ';box-shadow:0 6px 24px rgba(13,38,26,.3);max-width:380px;';
+    t.textContent = 'Bid-Out: ' + msg; document.body.appendChild(t);
+    setTimeout(function () { t.remove(); }, 5500);
+  }
+
+  var openState = null;
+
+  function openPanel() {
+    var n = woNumber();
+    if (!n) { toast('Open a work order first.'); return; }
+    ensureStyle();
+    var old = document.getElementById('bwn-bidout-ov'); if (old) old.remove();
+    var ov = document.createElement('div'); ov.id = 'bwn-bidout-ov';
+    var box = document.createElement('div'); box.className = 'bwn-bo';
+    box.innerHTML =
+      '<div class="bwn-bo-hd">📤 Bid-Out - competitive pricing request<button class="x" title="Close">×</button></div>' +
+      '<div class="bwn-bo-bd"><div id="bwn-bo-body">Loading work order + area vendors…</div></div>';
+    ov.appendChild(box); document.body.appendChild(ov);
+    function close() { ov.remove(); openState = null; }
+    ov.addEventListener('mousedown', function (e) { if (e.target === ov) close(); });
+    box.querySelector('.x').addEventListener('click', close);
+
+    loadWO(n).then(function (wo) {
+      if (!wo) throw new Error('Work order ' + n + ' not found.');
+      return loadVendors(wo, 60).then(function (res) { renderPanel(box, wo, res, close); });
+    }).catch(function (e) {
+      var b = box.querySelector('#bwn-bo-body');
+      if (b) b.innerHTML = '<div style="color:#b91c1c;font:600 13px system-ui;">Couldn’t load: ' + esc(e.message) + '</div>';
+    });
+  }
+
+  // ---- 3-step wizard modeled on Umbrava's "Build Requests" flow ----------------
+  // Step 1 Work Order Details -> Step 2 Select Vendors -> Step 3 Review. Every field
+  // lives in openState so values persist across Back/Next (re-render reads openState).
+  // HARD RULES: never auto-send (Send is the only trigger, on step 3); vendors BCC-only;
+  // city/state only (no client name / street address); CAN-SPAM footer; MAX_BCC cap.
+  function renderPanel(box, wo, res, close) {
+    var body = box.querySelector('#bwn-bo-body');
+    var me = actor();
+    var tradeLbl = (wo.trades || []).map(function (t) { return t.name; }).join(', ') || 'Service';
+    var priorityLbl = (wo.priority && wo.priority.label) || '';
+    var hasService = !!((wo.serviceInstructions || '').trim());
+
+    if (openState.step == null) openState.step = 1;
+    if (openState.miles == null) openState.miles = DEFAULT_MILES;
+    if (openState.scope == null) openState.scope = wo.scopeOfWork || '';
+    if (openState.respond == null) openState.respond = '';
+    if (openState.arrive == null) openState.arrive = '';
+    if (openState.nte == null) openState.nte = '';
+    if (openState.techs == null) openState.techs = '';
+    if (openState.travelRate == null) openState.travelRate = '';
+    if (openState.rate == null) openState.rate = '';
+    if (openState.rateOffer == null) openState.rateOffer = false;
+    if (openState.inviteText == null) openState.inviteText = '';
+    if (openState.netNew == null) openState.netNew = [];
+    if (openState.netNewMsg == null) openState.netNewMsg = '';
+    if (openState.include == null) openState.include = { priority: true, trades: true, location: true, service: hasService, reference: true };
+    if (openState.addl == null) openState.addl = '';
+    if (openState.picked == null) openState.picked = {};   // email(lc) -> bool; absent = default checked
+    if (openState.contactName == null) openState.contactName = me.name || '';
+    if (openState.contactEmail == null) openState.contactEmail = GM_getValue('send_from', '') || me.email || '';
+    if (openState.contactPhone == null) openState.contactPhone = GM_getValue('sender_phone', '') || '';
+
+    function val(id) { var e = document.getElementById(id); return e ? e.value : undefined; }
+    function chk(id) { var e = document.getElementById(id); return e ? e.checked : undefined; }
+    function isPicked(email) { if (!email) return false; var k = email.toLowerCase(); return (k in openState.picked) ? openState.picked[k] : true; }
+
+    // Read whatever step-scoped fields are on screen; only present ids are captured.
+    function capture() {
+      var v;
+      if ((v = val('bo-scope')) !== undefined) openState.scope = v;
+      if ((v = val('bo-respond')) !== undefined) openState.respond = v;
+      if ((v = val('bo-arrive')) !== undefined) openState.arrive = v;
+      if ((v = val('bo-nte')) !== undefined) openState.nte = v;
+      if ((v = val('bo-techs')) !== undefined) openState.techs = v;
+      if ((v = val('bo-travel')) !== undefined) openState.travelRate = v;
+      if ((v = val('bo-rate')) !== undefined) openState.rate = v;
+      if ((v = val('bo-addl')) !== undefined) openState.addl = v;
+      if ((v = val('bo-invite')) !== undefined) openState.inviteText = v;
+      if ((v = val('bo-cname')) !== undefined) openState.contactName = v;
+      if ((v = val('bo-cemail')) !== undefined) openState.contactEmail = v;
+      if ((v = val('bo-cphone')) !== undefined) openState.contactPhone = v;
+      if ((v = chk('bo-rateoffer')) !== undefined) openState.rateOffer = v;
+      if ((v = chk('bo-inc-service')) !== undefined) openState.include.service = v;
+      body.querySelectorAll('input[data-inc]').forEach(function (cb) { openState.include[cb.getAttribute('data-inc')] = cb.checked; });
+    }
+
+    // Dedup recipient list from picked vendors + net-new + pasted emails (openState-driven).
+    function collectRecipients() {
+      var recips = [], seen = {};
+      function add(email) { if (!email) return; var k = email.toLowerCase(); if (!seen[k]) { seen[k] = 1; recips.push({ email: email }); } }
+      (openState.rowVendors || []).forEach(function (v) { if (v.email && isPicked(v.email)) add(v.email); });
+      (openState.netNew || []).forEach(function (l) { if (l.email && isPicked(l.email)) add(l.email); });
+      parseEmails(openState.inviteText || '').forEach(add);
+      return recips;
+    }
+
+    function vendorRows() {
+      var items = (res.items || []).filter(function (v) { return v.distanceFromLocation == null || v.distanceFromLocation <= openState.miles; });
+      openState.rowVendors = items.map(function (v) {
+        return { id: v.id, name: v.name, mi: v.distanceFromLocation, rating: v.averageRating, ratingCount: v.ratingCount, email: (v.mainContactInfo && v.mainContactInfo.emailAddress) || '' };
+      });
+      return openState.rowVendors.map(function (v, i) {
+        var hasEmail = !!v.email;
+        return '<div class="bwn-bo-v">' +
+          '<input type="checkbox" data-i="' + i + '"' + (hasEmail ? (isPicked(v.email) ? ' checked' : '') : ' disabled') + '>' +
+          '<span class="nm">' + esc(v.name) + '</span>' +
+          (v.rating ? '<span class="mi">★ ' + v.rating.toFixed(1) + ' (' + (v.ratingCount || 0) + ')</span>' : '') +
+          '<span class="mi">' + (v.mi != null ? v.mi.toFixed(1) + ' mi' : '-') + '</span>' +
+          (hasEmail ? '<span class="em">' + esc(v.email) + '</span>' : '<span class="noem">no email - phone only</span>') +
+          '</div>';
+      }).join('');
+    }
+
+    function incChk(key, label) {
+      return '<label class="bwn-bo-chk"><input type="checkbox" data-inc="' + key + '"' + (openState.include[key] !== false ? ' checked' : '') + '> ' + esc(label) + '</label>';
+    }
+    function tradeChipsHtml() {
+      return (wo.trades || []).length
+        ? (wo.trades || []).map(function (t) { return '<span class="bwn-bo-chip">' + esc(t.name) + '</span>'; }).join('')
+        : '<span class="bwn-bo-chip">Service</span>';
+    }
+    function stepperHtml() {
+      var labels = ['Work Order Details', 'Select Vendors', 'Review'];
+      var h = '<div class="bwn-bo-steps">';
+      for (var i = 0; i < labels.length; i++) {
+        var num = i + 1;
+        var cls = num === openState.step ? ' on' : (num < openState.step ? ' done' : '');
+        h += '<div class="bwn-bo-step' + cls + '"><span class="dot">' + (num < openState.step ? '✓' : num) + '</span><span class="lbl">' + esc(labels[i]) + '</span></div>';
+        if (i < labels.length - 1) h += '<span class="bwn-bo-bar"></span>';
+      }
+      return h + '</div>';
+    }
+    function woLineHtml() {
+      return '<div class="bwn-bo-wo">Tracking #' + esc(wo.trackingNumber) + ' · ' + esc(tradeLbl) + ' · ' + esc(wo.locationName || '') + '</div>' +
+        '<div class="bwn-bo-sub">' + esc((wo.address ? (wo.address.city + ', ' + wo.address.state) : '')) + ' · ' + esc(res.rowCount) + ' assignable vendors for this trade</div>';
+    }
+    function clearFooter() { var ex = box.querySelector('.bwn-bo-ft'); if (ex) ex.remove(); }
+    function footer(html) { var ft = document.createElement('div'); ft.className = 'bwn-bo-ft'; ft.innerHTML = html; body.parentNode.appendChild(ft); return ft; }
+
+    function draw() {
+      clearFooter();
+      if (openState.step === 2) return drawVendors();
+      if (openState.step === 3) return drawReview();
+      return drawDetails();
+    }
+
+    // ---- Step 1: Work Order Details (all optional except Scope) -----------------
+    function drawDetails() {
+      var svcChk = hasService
+        ? '<label class="bwn-bo-chk" style="margin-left:auto;"><input type="checkbox" id="bo-inc-service"' + (openState.include.service !== false ? ' checked' : '') + '> Include Service Instructions</label>'
+        : '';
+      body.innerHTML =
+        stepperHtml() +
+        woLineHtml() +
+        '<div class="bwn-bo-grid2">' +
+          '<div class="bwn-bo-fld"><label>Trade(s)</label><div class="bwn-bo-chips">' + tradeChipsHtml() + '</div></div>' +
+          '<div class="bwn-bo-fld"><label>Priority</label><div class="bwn-bo-ro">' + esc(priorityLbl || 'Not set') + '</div></div>' +
+        '</div>' +
+        '<div class="bwn-bo-row" style="margin-bottom:0;"><label>Scope</label>' + svcChk + '</div>' +
+        '<textarea id="bo-scope" rows="3" placeholder="Describe the work to be priced">' + esc(openState.scope) + '</textarea>' +
+        '<div class="bwn-bo-grid2">' +
+          '<div class="bwn-bo-fld"><label>Respond By</label><input id="bo-respond" type="datetime-local" value="' + esc(openState.respond) + '"></div>' +
+          '<div class="bwn-bo-fld"><label>Arrive By</label><input id="bo-arrive" type="datetime-local" value="' + esc(openState.arrive) + '"></div>' +
+        '</div>' +
+        '<div class="bwn-bo-grid2">' +
+          '<div class="bwn-bo-fld"><label>NTE $</label><input id="bo-nte" type="number" min="0" step="1" value="' + esc(openState.nte) + '"></div>' +
+          '<div class="bwn-bo-fld"><label># of Techs</label><input id="bo-techs" type="number" min="0" step="1" value="' + esc(openState.techs) + '"></div>' +
+          '<div class="bwn-bo-fld"><label>Travel Rate $ /hr</label><input id="bo-travel" type="number" min="0" step="1" value="' + esc(openState.travelRate) + '"></div>' +
+          '<div class="bwn-bo-fld"><label>Rate $ /hr</label><input id="bo-rate" type="number" min="0" step="1" value="' + esc(openState.rate) + '"></div>' +
+        '</div>' +
+        '<label class="bwn-bo-chk" style="margin:2px 0 8px;"><input type="checkbox" id="bo-rateoffer"' + (openState.rateOffer ? ' checked' : '') + '> Receive Rate Offer</label>' +
+        '<div class="bwn-bo-row"><label>Additional information (optional)</label></div>' +
+        '<textarea id="bo-addl" rows="2" placeholder="Anything pertinent to include: access hours, # of units, parking, on-site contact, equipment make/model, etc.">' + esc(openState.addl) + '</textarea>' +
+        '<div class="bwn-bo-row"><label>Include in request</label></div>' +
+        '<div class="bwn-bo-inc">' + incChk('priority', 'Priority') + incChk('location', 'Location (city/state)') + incChk('reference', 'Reference #') + '</div>' +
+        '<div class="bwn-bo-row"><label>Your contact details (shown in the request)</label></div>' +
+        '<div class="bwn-bo-grid2">' +
+          '<div class="bwn-bo-fld"><label>Name</label><input id="bo-cname" type="text" value="' + esc(openState.contactName) + '"></div>' +
+          '<div class="bwn-bo-fld"><label>Email</label><input id="bo-cemail" type="email" value="' + esc(openState.contactEmail) + '"></div>' +
+          '<div class="bwn-bo-fld"><label>Phone</label><input id="bo-cphone" type="text" value="' + esc(openState.contactPhone) + '" placeholder="' + esc(COMPANY_PHONE) + '"></div>' +
+        '</div>';
+      var ft = footer('<span class="sp"></span><button id="bo-cancel">Cancel</button><button class="pri" id="bo-next">Next →</button>');
+      ft.querySelector('#bo-cancel').addEventListener('click', close);
+      ft.querySelector('#bo-next').addEventListener('click', function () {
+        capture();
+        if (!(openState.scope || '').trim()) { toast('Add a Scope before continuing.'); return; }
+        openState.step = 2; draw();
+      });
+    }
+
+    // ---- Step 2: Select Vendors (the existing picker, unchanged behavior) --------
+    function drawVendors() {
+      body.innerHTML =
+        stepperHtml() +
+        woLineHtml() +
+        '<div class="bwn-bo-row"><label>Distance</label>' +
+        '<label>Within</label><input id="bo-miles" type="number" min="1" step="5" value="' + openState.miles + '" style="width:70px;"> mi ' +
+        '<button id="bo-reload" class="bwn-bo-mini">Apply</button></div>' +
+        '<div class="bwn-bo-row"><label>Our vendors near this WO</label>' +
+        '<button id="bo-all" style="border:none;background:transparent;color:#1b4d3e;font:600 12px system-ui;cursor:pointer;">Select all with email</button></div>' +
+        '<div class="bwn-bo-list">' + vendorRows() + '</div>' +
+        '<div class="bwn-bo-row"><label>Net-new vendors near here (Google Places)</label>' +
+        '<button id="bo-find" class="bwn-bo-mini">🔎 Find area vendors</button></div>' +
+        '<div id="bo-netnew"></div>' +
+        '<div class="bwn-bo-row"><label>Invite others - paste emails</label></div>' +
+        '<textarea id="bo-invite" rows="2" placeholder="Add any outside vendor emails - one per line or comma-separated: name &lt;email@co.com&gt; or just email@co.com">' + esc(openState.inviteText) + '</textarea>' +
+        '<div class="bwn-bo-note" id="bo-invite-note"></div>' +
+        '<div class="bwn-bo-note">Everyone is BCC’d (they can’t see each other). Next: review the branded email + exact recipients, then send one-click from your mailbox (or open an Outlook draft). Nothing sends without your click. A CAN-SPAM footer + opt-out is included.</div>';
+      var ft = footer('<span class="sp" id="bo-count"></span><button id="bo-back">← Back</button><button class="pri" id="bo-next">Next →</button>');
+
+      function refreshCount() {
+        var u = body.querySelectorAll('input[data-i]:checked').length;
+        var nn = body.querySelectorAll('input[data-nn]:checked').length;
+        var extra = parseEmails(val('bo-invite') || '').length;
+        var total = u + nn + extra;
+        var el = document.getElementById('bo-count');
+        if (el) el.textContent = total + ' recipient' + (total === 1 ? '' : 's') + ' (' + u + ' our vendors' + (nn ? ', ' + nn + ' net-new' : '') + (extra ? ', ' + extra + ' pasted' : '') + ')';
+      }
+      function renderNetNew() {
+        var c = document.getElementById('bo-netnew'); if (!c) return;
+        var leads = openState.netNew || [];
+        var head = openState.netNewMsg ? '<div class="bwn-bo-note">' + esc(openState.netNewMsg) + '</div>' : '';
+        if (!leads.length) { c.innerHTML = head; return; }
+        var withEmail = leads.filter(function (l) { return l.email; }).length;
+        c.innerHTML = '<div class="bwn-bo-note">' + leads.length + ' net-new found · ' + withEmail + ' with email (rest are website/phone - grab their email into the box below).</div>' +
+          '<div class="bwn-bo-list">' + leads.map(function (l, i) {
+            var he = !!l.email;
+            return '<div class="bwn-bo-v">' +
+              '<input type="checkbox" data-nn="' + i + '"' + (he ? (isPicked(l.email) ? ' checked' : '') : ' disabled') + '>' +
+              '<span class="nm">' + esc(l.name) + '</span>' +
+              (l.rating ? '<span class="mi">★ ' + (+l.rating).toFixed(1) + '</span>' : '') +
+              '<span class="mi">' + (l.mi != null ? l.mi.toFixed(1) + ' mi' : '') + '</span>' +
+              (he ? '<span class="em">' + esc(l.email) + '</span>'
+                : (l.website ? '<a class="noem" href="' + esc(l.website) + '" target="_blank" rel="noopener">open site ↗</a>' : '<span class="noem">no site/email</span>')) +
+              '</div>';
+          }).join('') + '</div>' + head;
+        c.querySelectorAll('input[data-nn]').forEach(function (cb) {
+          cb.addEventListener('change', function () {
+            var v = openState.netNew[+cb.getAttribute('data-nn')];
+            if (v && v.email) openState.picked[v.email.toLowerCase()] = cb.checked;
+            refreshCount();
+          });
+        });
+      }
+
+      body.querySelectorAll('input[data-i]').forEach(function (cb) {
+        cb.addEventListener('change', function () {
+          var v = openState.rowVendors[+cb.getAttribute('data-i')];
+          if (v && v.email) openState.picked[v.email.toLowerCase()] = cb.checked;
+          refreshCount();
+        });
+      });
+      var inviteEl = document.getElementById('bo-invite');
+      function refreshInvite() {
+        var em = parseEmails(val('bo-invite') || '');
+        var el = document.getElementById('bo-invite-note');
+        if (el) el.textContent = em.length ? (em.length + ' pasted email' + (em.length === 1 ? '' : 's') + ' will be added.') : '';
+        refreshCount();
+      }
+      inviteEl.addEventListener('input', refreshInvite);
+      renderNetNew(); refreshInvite();
+      if (openState.focusInvite) { openState.focusInvite = false; try { inviteEl.scrollIntoView({ block: 'center' }); inviteEl.focus(); } catch (e) { } }
+
+      document.getElementById('bo-all').addEventListener('click', function () {
+        body.querySelectorAll('input[data-i]:not([disabled])').forEach(function (cb) {
+          cb.checked = true;
+          var v = openState.rowVendors[+cb.getAttribute('data-i')];
+          if (v && v.email) openState.picked[v.email.toLowerCase()] = true;
+        });
+        refreshCount();
+      });
+      document.getElementById('bo-reload').addEventListener('click', function () {
+        capture(); var m = parseInt(val('bo-miles'), 10); if (m > 0) openState.miles = m;
+        draw();
+      });
+      document.getElementById('bo-find').addEventListener('click', function () {
+        capture();
+        if (!GM_getValue('places_key', '')) { openState.netNewMsg = 'Set your Google Places API key: Tampermonkey menu → "Set Google Places API key", then try again.'; renderNetNew(); return; }
+        var btn = document.getElementById('bo-find'); if (btn) { btn.disabled = true; btn.textContent = 'Searching…'; }
+        openState.netNewMsg = 'Searching Google Places + looking up emails… (up to ~1 min)';
+        renderNetNew();
+        discoverNetNew(wo, openState.miles, res.items).then(function (out) {
+          openState.netNew = out.leads || [];
+          openState.netNewMsg = out.scrapeSkipped ? 'Emails skipped - set the SWA ingest key (menu) to auto-fill them. Leads show website/phone for now.'
+            : (out.scrapeErr ? ('Email lookup issue (' + out.scrapeErr + ') - leads shown; you can still open sites for emails.') : '');
+          renderNetNew(); refreshCount();
+        }).catch(function (e) {
+          openState.netNew = [];
+          openState.netNewMsg = e && e.message === 'NO_PLACES_KEY' ? 'Set your Google Places API key via the Tampermonkey menu, then try again.' : ('Search failed: ' + (e && e.message));
+          renderNetNew();
+        }).then(function () { var b = document.getElementById('bo-find'); if (b) { b.disabled = false; b.textContent = '🔎 Find area vendors'; } });
+      });
+      ft.querySelector('#bo-back').addEventListener('click', function () { capture(); openState.step = 1; draw(); });
+      ft.querySelector('#bo-next').addEventListener('click', function () {
+        capture();
+        var recips = collectRecipients();
+        if (!recips.length) { toast('Select at least one vendor, or add an outside email.'); return; }
+        if (recips.length > MAX_BCC) { toast('Too many (' + recips.length + '); cap is ' + MAX_BCC + ' per blast.'); return; }
+        openState.step = 3; draw();
+      });
+      refreshCount();
+    }
+
+    // ---- Step 3: Review - Umbrava-style summary + branded email + the ONLY Send gate
+    // HARD RULE: never auto-send. Graph fires the moment we POST, so the human review
+    // that used to happen in the Outlook draft happens HERE - recipients + rendered
+    // body + editable From, and nothing sends until the coordinator clicks Send.
+    function drawReview() {
+      var req = {
+        scope: (openState.scope || '').trim(),
+        respondBy: openState.respond,
+        arrive: openState.arrive,
+        nte: openState.nte,
+        techs: openState.techs,
+        travelRate: openState.travelRate,
+        rate: openState.rate,
+        rateOffer: openState.rateOffer,
+        include: openState.include,
+        addl: (openState.addl || '').trim(),
+        contactName: openState.contactName,
+        contactEmail: openState.contactEmail,
+        contactPhone: openState.contactPhone
+      };
+      req.subject = openState.subject || bidSubject(wo, req);   // keep a coordinator-edited subject across Back/Next
+      var recips = collectRecipients();
+      var mail = buildBidEmail(wo, recips, req);
+      var fromDefault = openState.contactEmail || GM_getValue('send_from', '') || me.email || '';
+      function htmlFor(from) { return buildBidHtml(wo, req, from); }
+
+      function sfld(k, v) { return '<div class="bwn-bo-sumfld"><div class="k">' + esc(k) + '</div><div class="v">' + esc(v) + '</div></div>'; }
+      var n = recips.length;
+      var sum = '<div class="bwn-bo-sum"><div class="bwn-bo-sumhd">Request summary</div>' +
+        sfld('Respond By', fmtRespondBy(req.respondBy)) +
+        sfld('Send to', n + ' vendor' + (n === 1 ? '' : 's')) +
+        (priorityLbl ? sfld('Priority', priorityLbl) : '') +
+        (req.arrive ? sfld('Arrive By', fmtRespondBy(req.arrive)) : '') +
+        '<div class="bwn-bo-sumfld"><div class="k">Trade(s)</div><div class="v"><div class="bwn-bo-chips">' + tradeChipsHtml() + '</div></div></div>' +
+        '<div class="bwn-bo-sumfld"><div class="k">Scope</div><div class="v">' + esc(req.scope || '-') + '</div></div>' +
+        ((openState.include.service !== false && hasService) ? '<div class="bwn-bo-sumnote">Service Instructions Included</div>' : '') +
+        (req.nte ? sfld('NTE', '$' + req.nte) : '') +
+        (req.techs ? sfld('# of Techs', req.techs) : '') +
+        (req.travelRate ? sfld('Travel Rate', '$' + req.travelRate + ' / hr') : '') +
+        (req.rate ? sfld('Rate', '$' + req.rate + ' / hr') : '') +
+        (req.rateOffer ? sfld('Rate Offer', 'Requested') : '') +
+        sfld('Contact Name', req.contactName || me.name || 'Broadway National Group') +
+        sfld('Contact Email', fromDefault) +
+        sfld('Contact Phone', req.contactPhone || GM_getValue('sender_phone', '') || COMPANY_PHONE) +
+        '</div>';
+
+      body.innerHTML =
+        stepperHtml() +
+        '<div class="bwn-bo-wo">Review - nothing has been sent yet</div>' +
+        sum +
+        '<div class="bwn-bo-meta"><span>From</span><input id="bo-from" type="email" value="' + esc(fromDefault) + '" placeholder="you@broadwaynational.com"></div>' +
+        '<div class="bwn-bo-meta"><span>Subject</span><input id="bo-subj" type="text" value="' + esc(mail.subject) + '" style="flex:1;min-width:300px;"></div>' +
+        '<div class="bwn-bo-meta"><span>BCC - ' + mail.bcc.length + ' vendor' + (mail.bcc.length === 1 ? '' : 's') + ' (they can’t see each other)</span></div>' +
+        '<div class="bwn-bo-bcc">' + mail.bcc.map(esc).join(' · ') + '</div>' +
+        '<div class="bwn-bo-pv"><iframe id="bo-pv" sandbox=""></iframe></div>' +
+        '<div class="bwn-bo-note">Sent one-click from YOUR mailbox via Microsoft Graph (lands in your Sent Items; replies come to you). ' +
+        'If one-click send isn’t configured yet, use "Outlook draft instead" - same recipients, plain-text body.</div>';
+      var pv = document.getElementById('bo-pv');
+      pv.srcdoc = htmlFor(fromDefault);
+      var fromEl = document.getElementById('bo-from');
+      fromEl.addEventListener('change', function () { pv.srcdoc = htmlFor(fromEl.value.trim()); });
+
+      var pft = footer('<span class="sp">' + mail.bcc.length + ' recipient' + (mail.bcc.length === 1 ? '' : 's') + ', all BCC</span>' +
+        '<button id="bo-back">← Back</button>' +
+        '<button id="bo-draft">Outlook draft instead</button>' +
+        '<button class="pri" id="bo-send">⚡ Send now (' + mail.bcc.length + ')</button>');
+      function syncSubject() { var s = (document.getElementById('bo-subj') || {}).value; if (s != null && s.trim()) { mail.subject = s.trim(); openState.subject = s.trim(); } }
+      pft.querySelector('#bo-back').addEventListener('click', function () {
+        var f = val('bo-from'); if (f !== undefined) openState.contactEmail = f.trim();
+        var sj = val('bo-subj'); if (sj !== undefined && sj.trim()) openState.subject = sj.trim();   // persist an edited subject like From
+        openState.step = 2; draw();
+      });
+      pft.querySelector('#bo-draft').addEventListener('click', function () {
+        syncSubject();
+        openDraft(mail);
+        toast('Draft opened for ' + mail.bcc.length + ' recipient' + (mail.bcc.length === 1 ? '' : 's') + ' (BCC). Review + send in your mail client. Body also copied to clipboard.');
+        close();
+      });
+      pft.querySelector('#bo-send').addEventListener('click', function () {
+        var from = (fromEl.value || '').trim();
+        if (!/^[^\s@]+@[^\s@]+\.[A-Za-z]{2,}$/.test(from)) { toast('Enter your send-from email first.'); return; }
+        if (!GM_getValue('ingest_key', '')) { toast('Set the SWA ingest key first (Tampermonkey menu → "Set SWA ingest key") - or use "Outlook draft instead".'); return; }
+        syncSubject();
+        var btn = document.getElementById('bo-send');
+        btn.disabled = true; btn.textContent = 'Sending…';
+        sendBid(from, mail, htmlFor(from)).then(function (r) {
+          if (r.ok) {
+            GM_setValue('send_from', from);
+            toast('✅ Sent to ' + r.sent + ' vendor' + (r.sent === 1 ? '' : 's') + ' from ' + from + '. Replies come to your inbox; the email is in your Sent Items.');
+            close(); return;
+          }
+          btn.disabled = false; btn.textContent = '⚡ Send now (' + mail.bcc.length + ')';
+          if (r.code === 'NO_KEY') { toast('Set the SWA ingest key first (Tampermonkey menu).'); return; }
+          if (r.code === 503 && /awaiting/i.test(r.msg || '')) { toast('One-click send isn’t live yet - the Graph app registration is still pending with IT. Use "Outlook draft instead" for now.'); return; }
+          if (r.code === 403 && /allowlist/i.test(r.msg || '')) { toast('That send-from address isn’t on the server allowlist - ask IT/admin to add it (BID_FROM_ALLOWED).'); return; }
+          if (r.code === 429) { toast('Daily send ceiling reached - try again tomorrow or use the Outlook draft.'); return; }
+          toast('Send failed: ' + (r.msg || 'unknown error') + ' - you can still use "Outlook draft instead".');
+        });
+      });
+    }
+
+    draw();
+  }
+
+  // ---- Launcher: "📤 Bid-Out ▾" dropdown in the See-Who-Is-Available row -------
+  function launchPanel(opts) { openState = {}; if (opts && opts.invite) openState.focusInvite = true; openPanel(); }
+  function actionRow() {
+    var btns = document.querySelectorAll('button');
+    for (var i = 0; i < btns.length; i++) {
+      if (/see who is available/i.test((btns[i].textContent || '').trim())) return btns[i].parentElement;
+    }
+    return null;
+  }
+  function buildDropdown() {
+    var wrap = document.createElement('span'); wrap.id = 'bwn-bidout-dd'; wrap.className = 'bwn-bo-dd';
+    var btn = document.createElement('button'); btn.type = 'button'; btn.className = 'bwn-bo-ddbtn';
+    btn.innerHTML = '📤 Bid-Out <span class="cv">▾</span>';
+    var menu = document.createElement('div'); menu.className = 'bwn-bo-ddmenu'; menu.style.display = 'none';
+    function item(label, opts) {
+      var it = document.createElement('button'); it.type = 'button'; it.className = 'bwn-bo-dditem'; it.textContent = label;
+      it.addEventListener('click', function (e) { e.stopPropagation(); menu.style.display = 'none'; launchPanel(opts); });
+      return it;
+    }
+    menu.appendChild(item('Bid out to our vendors', {}));
+    menu.appendChild(item('Invite outside / net-new vendors too…', { invite: true }));
+    function onDoc(e) { if (!wrap.contains(e.target)) { menu.style.display = 'none'; document.removeEventListener('mousedown', onDoc, true); } }
+    btn.addEventListener('click', function (e) {
+      e.stopPropagation(); var show = menu.style.display === 'none'; menu.style.display = show ? 'block' : 'none';
+      if (show) document.addEventListener('mousedown', onDoc, true);
+    });
+    wrap.appendChild(btn); wrap.appendChild(menu);
+    return wrap;
+  }
+  function mountFloating() {
+    if (document.getElementById('bwn-bidout-fab')) return;
+    var b = document.createElement('button'); b.id = 'bwn-bidout-fab'; b.type = 'button';
+    b.textContent = '📤 Bid-Out'; b.title = 'Competitive pricing request to area vendors';
+    b.addEventListener('click', function () { launchPanel({}); });
+    document.body.appendChild(b);
+  }
+  function mountLauncher() {
+    if (!woNumber()) return;
+    ensureStyle();
+    var row = actionRow();
+    if (row) { var fab = document.getElementById('bwn-bidout-fab'); if (fab) fab.remove(); if (!row.querySelector('#bwn-bidout-dd')) row.appendChild(buildDropdown()); }
+    else { mountFloating(); }
+  }
+  var lastPath = '';
+  function tick() {
+    if (location.pathname !== lastPath) {
+      lastPath = location.pathname;
+      var dd = document.getElementById('bwn-bidout-dd'); if (dd) dd.remove();
+      var fab = document.getElementById('bwn-bidout-fab'); if (fab) fab.remove();
+    }
+    if (woNumber()) { if (!document.getElementById('bwn-bidout-dd')) mountLauncher(); }
+    else { var dd2 = document.getElementById('bwn-bidout-dd'); if (dd2) dd2.remove(); var fab2 = document.getElementById('bwn-bidout-fab'); if (fab2) fab2.remove(); }
+  }
+  setInterval(tick, 800);
+  tick();
+
+  // ---- Command bus: let the Service Request helper (AI script) open this invite wizard
+  // from inside Umbrava's native "Build Requests" modal, so a coordinator can add net-new
+  // (outside-network) vendors without leaving that screen. Reuses the FULL review-before-send
+  // flow here - net-new de-dup, BCC-only, city/state-only, CAN-SPAM, human review. Nothing
+  // auto-sends. No-op off a WO page.
+  document.addEventListener('bwn:cmd', function (e) {
+    var d = e && e.detail; if (!d || !woNumber()) return;
+    if (d.id === 'bidout:invite') launchPanel({ invite: true });
+    else if (d.id === 'bidout:open') launchPanel({});
+  }, false);
+
+  // ---- Key management (Tampermonkey menu) ------------------------------------
+  try {
+    GM_registerMenuCommand('Set Google Places API key', function () {
+      var v = prompt('Google Places API key (for net-new vendor discovery):', GM_getValue('places_key', '') || '');
+      if (v !== null) { GM_setValue('places_key', v.trim()); toast(v.trim() ? 'Places key saved.' : 'Places key cleared.'); }
+    });
+    GM_registerMenuCommand('Set SWA ingest key', function () {
+      var v = prompt('SWA ingest key (same value as the connector WO_INGEST_KEY - used to fetch net-new emails + one-click send):', GM_getValue('ingest_key', '') || '');
+      if (v !== null) { GM_setValue('ingest_key', v.trim()); toast(v.trim() ? 'Ingest key saved.' : 'Ingest key cleared.'); }
+    });
+    GM_registerMenuCommand('Set send-from email (one-click send)', function () {
+      var v = prompt('Your send-from mailbox (must be on the server allowlist; the bid email sends from + replies to this):', GM_getValue('send_from', '') || (actor().email || ''));
+      if (v !== null) { GM_setValue('send_from', v.trim()); toast(v.trim() ? 'Send-from saved.' : 'Send-from cleared.'); }
+    });
+    GM_registerMenuCommand('Set your phone (bid email contact)', function () {
+      var v = prompt('Phone shown in the bid email contact block (blank = company main ' + COMPANY_PHONE + '):', GM_getValue('sender_phone', '') || '');
+      if (v !== null) { GM_setValue('sender_phone', v.trim()); toast(v.trim() ? 'Phone saved.' : 'Phone cleared (company main used).'); }
+    });
+  } catch (e) { /* GM menu unavailable */ }
+})();
