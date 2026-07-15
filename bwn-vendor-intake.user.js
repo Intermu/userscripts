@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         BWN Vendor Intake (Broadway National)
 // @namespace    broadwaynational.bwn
-// @version      0.4.0
+// @version      0.5.0
 // @downloadURL  https://raw.githubusercontent.com/Intermu/userscripts/main/bwn-vendor-intake.user.js
 // @updateURL    https://raw.githubusercontent.com/Intermu/userscripts/main/bwn-vendor-intake.user.js
 // @description  Prefills Umbrava's Create Vendor form (and the detail-page Tax ID) from a Prospect Set-Up Form or a W-9. Fillable PDFs are read straight from their form fields; SCANNED W-9s are read by on-device OCR (Tesseract + pdf.js, fetched once at install, run entirely in the browser). The document and its tax ID never leave your machine. Adds a "Prefill from document" button; every extracted field is a suggestion to review before saving - the TIN especially, since OCR can misread digits.
@@ -21,7 +21,7 @@
 (function () {
   'use strict';
 
-  var VER = '0.4.0';
+  var VER = '0.5.0';
   // v0.4.0 - real IRS fillable W-9 support: map by FIELD NAME (UTF-16BE-decoded f1_/c1_1 names)
   // after inflating compressed object streams, since the IRS form carries no /TU tooltips; the
   // tooltip mapping stays as a fallback for other fillable forms. Also fixed stream inflation to
@@ -457,30 +457,89 @@
     if (opt) { setNativeValue(sel, opt.value); return true; }
     return false;
   }
+  // ---- Custom-autocomplete selection (Trade(s)) ---------------------------
+  // Umbrava's Trade(s) is a custom autocomplete (an <input aria-autocomplete="list">, options as
+  // [role="option"] in a portal listbox, MULTI-select + grouped). Pre-typing sets the text but does
+  // NOT select - you must CLICK an option. This is the same engine used in BWN WO Intake.
+  function normText(s) { return String(s || '').replace(/\s+/g, ' ').trim(); }
+  function delay(ms) { return new Promise(function (r) { setTimeout(r, ms); }); }
+  function waitOptions(timeoutMs) {
+    return new Promise(function (res) {
+      var t0 = Date.now();
+      (function poll() {
+        var opts = [].slice.call(document.querySelectorAll('[role="option"]'));
+        if (opts.length) return res(opts);
+        if (Date.now() - t0 > (timeoutMs || 1800)) return res([]);
+        setTimeout(poll, 80);
+      })();
+    });
+  }
+  // Best option for a target string: exact, then starts-with, then contains (case-insensitive).
+  // Contains handles the grouped Trade text (option label = group + subtrade, e.g. "LightingExterior Lighting").
+  function bestOption(opts, target) {
+    var t = normText(target).toLowerCase(); if (!t) return null;
+    var txt = opts.map(function (o) { return normText(o.textContent).toLowerCase(); });
+    var i;
+    for (i = 0; i < opts.length; i++) if (txt[i] === t) return opts[i];
+    for (i = 0; i < opts.length; i++) if (txt[i].indexOf(t) === 0) return opts[i];
+    for (i = 0; i < opts.length; i++) if (txt[i].indexOf(t) >= 0) return opts[i];
+    return null;
+  }
+  // Type into an autocomplete WITHOUT blurring - a blur closes the option list before we can click.
+  function acType(el, val) {
+    var setter = Object.getOwnPropertyDescriptor(window.HTMLInputElement.prototype, 'value').set;
+    setter.call(el, val);
+    el.dispatchEvent(new Event('input', { bubbles: true }));
+    el.dispatchEvent(new KeyboardEvent('keyup', { bubbles: true }));
+  }
+  // Open, filter by searchTerm, then click the best-matching option. Returns 'selected'|'typed'|'disabled'|'skip'.
+  function selectAC(el, searchTerm, matchTarget) {
+    return new Promise(function (resolve) {
+      if (!el) return resolve('skip');
+      if (el.disabled || el.getAttribute('aria-disabled') === 'true') return resolve('disabled');
+      el.focus();
+      el.dispatchEvent(new MouseEvent('mousedown', { bubbles: true, cancelable: true, view: window }));
+      if (searchTerm) acType(el, searchTerm);
+      waitOptions(1800).then(function (opts) {
+        var pick = bestOption(opts, matchTarget || searchTerm);
+        if (pick) {
+          ['pointerdown', 'mousedown', 'mouseup', 'click'].forEach(function (t) { pick.dispatchEvent(new MouseEvent(t, { bubbles: true, cancelable: true, view: window })); });
+          return resolve('selected');
+        }
+        resolve(searchTerm ? 'typed' : 'skip');
+      });
+    });
+  }
   // Type is a MUI multi-select: open, click the option, close with Escape (never
   // click the backdrop - that can close the whole dialog).
   function setType(label) {
     try {
       var trig = document.getElementById('mui-component-select-details.vendorTypes');
       if (!trig || new RegExp(label, 'i').test(trig.textContent || '')) return;
-      trig.click();
-      setTimeout(function () {
-        var menu = document.querySelector('ul[role="listbox"]');
-        var opt = menu ? [...menu.querySelectorAll('[role="option"],li')].find(function (o) { return new RegExp('^' + label + '$', 'i').test((o.textContent || '').trim()); }) : null;
-        if (opt) opt.click();
-        (menu || document.body).dispatchEvent(new KeyboardEvent('keydown', { key: 'Escape', code: 'Escape', keyCode: 27, which: 27, bubbles: true }));
-      }, 200);
+      // A MUI Select opens on MOUSEDOWN, not click - a plain .click() never opens the menu (so the
+      // old trig.click() silently no-opped and Type never got set). Open, poll for the option, then
+      // click it (the options are multi-select checkbox items), and close with Escape.
+      trig.dispatchEvent(new MouseEvent('mousedown', { bubbles: true, cancelable: true, view: window }));
+      var want = new RegExp('^\\s*' + label + '\\s*$', 'i'), n = 0;
+      (function pick() {
+        var menu = document.querySelector('ul[role="listbox"], .MuiMenu-list');
+        var opt = menu ? [...menu.querySelectorAll('[role="option"],li,.MuiMenuItem-root')].find(function (o) { return want.test((o.textContent || '').trim()); }) : null;
+        if (opt) {
+          ['pointerdown', 'mousedown', 'mouseup', 'click'].forEach(function (t) { opt.dispatchEvent(new MouseEvent(t, { bubbles: true, cancelable: true, view: window })); });
+          (menu || document.body).dispatchEvent(new KeyboardEvent('keydown', { key: 'Escape', code: 'Escape', keyCode: 27, which: 27, bubbles: true }));
+          return;
+        }
+        if (++n < 12) setTimeout(pick, 70);
+        else document.body.dispatchEvent(new KeyboardEvent('keydown', { key: 'Escape', code: 'Escape', keyCode: 27, which: 27, bubbles: true }));
+      })();
     } catch (e) { /* Type stays for manual pick */ }
   }
-  // Trade(s) is a MUI Autocomplete with a nested taxonomy; a programmatic pick is
-  // unreliable, so type the value to open the filtered list and let the user pick.
-  function pretypeTrade(root, trade) {
-    if (!trade) return false;
+  // Trade(s) is a custom autocomplete with a nested taxonomy. Actually SELECT it by clicking the
+  // matching option (typing alone never registers the pick). Returns 'selected'|'typed'|'disabled'|'skip'.
+  function selectTrade(root, trade) {
+    if (!trade) return Promise.resolve('skip');
     var input = fieldByLabel(root, /^Trade\(s\)/) || (root.querySelector('.MuiAutocomplete-root input'));
-    if (!input) return false;
-    input.focus();
-    setNativeValue(input, trade);
-    return true;
+    return selectAC(input, trade, trade);
   }
 
   function fillStep1(root, f) {
@@ -511,10 +570,17 @@
       setL(/^Street/, addr.street);
       setL(/^City/, addr.city);
       setL(/^Postal Code|^Zip/, addr.zip);
+      // State/Province is a custom autocomplete whose options are the 2-letter code (typing "PA"
+      // -> option "PA"; a full name matches nothing) - so CLICK the option, not just type. Both the
+      // W-9 and prospect extractors already give a 2-letter code. Handle a native <select> too.
       var st = fieldByLabel(root, /^State\/Province|^State/);
-      if (st && addr.state) { if (st.tagName === 'SELECT') setSelectByText(st, addr.state); else setNativeValue(st, addr.state); }
+      if (st && addr.state) {
+        if (st.tagName === 'SELECT') setSelectByText(st, addr.state);
+        else if (st.getAttribute('aria-autocomplete') === 'list') selectAC(st, addr.state, addr.state);
+        else setNativeValue(st, addr.state);
+      }
       var nm = fieldByLabel(root, /^Name/); if (nm && !nm.value) setNativeValue(nm, 'Business');
-      toast('Filled the address on step 2. Check State/Province and Country, then Validate.', 9000);
+      toast('Filled the address on step 2 (State selected). Set Country, then Validate.', 9000);
     });
     obs.observe(document.body, { childList: true, subtree: true });
     setTimeout(function () { obs.disconnect(); }, 300000);
@@ -546,16 +612,20 @@
     setTimeout(function () { obs.disconnect(); }, 300000);
   }
 
-  function fillFromProspect(root, f) {
+  async function fillFromProspect(root, f) {
     var addr = splitAddr(f.mailing_addr);
-    var done = fillStep1(root, f);
+    var done = fillStep1(root, f);          // this also fires setType('Contractor') on a 200ms timer
     var trade = firstTrade(f.trades);
-    var typed = pretypeTrade(root, trade);
+    // Let the Type MUI menu finish opening/clicking/closing before we open the Trade listbox,
+    // so the two portaled option lists do not collide.
+    var tradeRes = 'skip';
+    if (trade) { await delay(450); tradeRes = await selectTrade(root, trade); }
     watchStep2(addr);
     surfaceDup(root);
     var notes = [];
     if (done.length) notes.push('Filled ' + done.join(', ') + ', Type=Contractor');
-    if (typed) notes.push('typed Trade(s) "' + trade + '" - pick it from the list');
+    if (tradeRes === 'selected') notes.push('selected Trade(s) "' + trade + '"');
+    else if (tradeRes === 'typed') notes.push('typed Trade(s) "' + trade + '" - pick it from the list');
     notes.push('set Entity yourself (C vs S corp)');
     if (addr.street) notes.push('address fills on step 2');
     toast(notes.join(' · '), 12000);

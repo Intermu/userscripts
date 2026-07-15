@@ -1,10 +1,10 @@
 // ==UserScript==
 // @name         BWN WO Intake (Broadway National)
 // @namespace    broadwaynational.bwn
-// @version      0.3.0
+// @version      0.4.0
 // @downloadURL  https://raw.githubusercontent.com/Intermu/userscripts/main/bwn-wo-intake.user.js
 // @updateURL    https://raw.githubusercontent.com/Intermu/userscripts/main/bwn-wo-intake.user.js
-// @description  Drop a client PO email (.msg or .eml) onto the Create Work Order modal and it prefills the fields from the email body - Scope (the Description), Source PO #, Client, Location (PFJ store #, zero-padded), Trade (from the asset), and Priority - and surfaces the Client DNE (the PO NTE). Then, after you Create the WO, it hands the email to BWN Drop Upload to attach it to the new WO's Documents and draft the email note. Reads the email entirely in the browser via a built-in Outlook .msg reader; nothing is uploaded to any server. Best-effort: review every field before you click Create.
+// @description  Drop a client PO email (.msg or .eml) onto the Create Work Order modal and it prefills the fields from the email body - Scope (the Description), Source PO #, then selects Client, Location (PFJ store #, zero-padded), Trade (from the asset) and Priority by clicking the real dropdown option, and fills Client DNE (the PO NTE) once the client unlocks it. Then, after you Create the WO, it hands the email to BWN Drop Upload to attach it to the new WO's Documents and draft the email note. Reads the email entirely in the browser via a built-in Outlook .msg reader; nothing is uploaded to any server. Best-effort: review every field before you click Create.
 // @match        https://app.umbrava.com/*
 // @run-at       document-idle
 // @noframes
@@ -13,7 +13,7 @@
 
 (function () {
   'use strict';
-  var VER = '0.3.0';
+  var VER = '0.4.0';
   var FONT = "-apple-system,BlinkMacSystemFont,'Segoe UI','Helvetica Neue',Arial,sans-serif";
   console.info('[BWN WO INTAKE] v' + VER + ' - drop a PO email (.msg/.eml) on Create Work Order to prefill + auto-attach to the new WO Documents (via Drop Upload); reads locally, nothing leaves the browser');
 
@@ -105,10 +105,14 @@
     if (/hvac|heat|cool|\bac\b|air cond|\brtu\b|furnace|condenser|refriger|freezer|cooler|chiller/.test(s)) return 'HVAC';
     if (/plumb|toilet|drain|water heater|sink|faucet|urinal|sewer|grease/.test(s)) return 'Plumbing';
     if (/electric|breaker|panel|wiring|outlet|transformer|generator/.test(s)) return 'Electrical';
-    if (/door|lock|hardware|gate|overhead|dock/.test(s)) return 'Doors and Hardware';
-    if (/\bsign|signage|reader board|monument/.test(s)) return 'Signage';
-    if (/fuel|pump|dispenser|petroleum|\btank\b|\bmpd\b|forecourt/.test(s)) return 'Fuel Systems';
-    if (/roof|leak|gutter/.test(s)) return 'Roofing';
+    if (/door|hardware|overhead|dock/.test(s)) return 'Doors and Hardware';
+    if (/\block\b|padlock|deadbolt|keyed/.test(s)) return 'Locks';
+    if (/\bsign|signage|reader board|monument|marquee/.test(s)) return 'Signage';
+    if (/roof|\bleak\b|gutter|fascia|soffit|siding|skylight/.test(s)) return 'Roofing and Siding';
+    if (/window|glass|mirror|tint/.test(s)) return 'Windows and Glass';
+    if (/gate|fence/.test(s)) return 'Gates and Fences';
+    if (/camera|access control|security alarm|\bcctv\b/.test(s)) return 'Security';
+    // Umbrava has no fuel/dispenser trade, so fuel assets fall through to '' (user picks).
     return '';
   }
   function extractWo(subject, body, senderEmail) {
@@ -131,46 +135,120 @@
     var s = document.querySelector('textarea#scopeOfWork') || document.querySelector('input#client-dropdown');
     return s ? (s.closest('.MuiDialog-container, [role="dialog"], .MuiPaper-root') || null) : null;
   }
-  function pretype(root, sel, val) { if (!val) return false; var el = root.querySelector(sel); if (!el || el.disabled) return false; el.focus(); setNativeValue(el, val); return true; }
-  // Best-effort MUI Select: find by its label, open, click the option matching optRe, close.
-  function setMuiSelect(root, labelRe, optRe) {
+  function delay(ms) { return new Promise(function (r) { setTimeout(r, ms); }); }
+  function normText(s) { return String(s || '').replace(/\s+/g, ' ').trim(); }
+  // Find an input by its field label - for fields with a dynamic id (Priority) or no id (Client DNE).
+  function inputByLabel(root, re) {
     var labs = [].slice.call(root.querySelectorAll('label, .MuiInputLabel-root'));
-    var lab = labs.filter(function (l) { return labelRe.test((l.textContent || '').trim()); })[0];
-    var fc = lab ? (lab.closest('.MuiFormControl-root') || lab.parentElement) : null;
-    var trig = fc ? fc.querySelector('.MuiSelect-select, [role="combobox"], [role="button"]') : null;
-    if (!trig) return false;
-    try {
-      trig.click();
-      setTimeout(function () {
-        var menu = document.querySelector('ul[role="listbox"], .MuiMenu-list');
-        var opt = menu ? [].slice.call(menu.querySelectorAll('[role="option"], li')).filter(function (o) { return optRe.test((o.textContent || '').trim()); })[0] : null;
-        if (opt) opt.click();
-        (menu || document.body).dispatchEvent(new KeyboardEvent('keydown', { key: 'Escape', code: 'Escape', keyCode: 27, which: 27, bubbles: true }));
-      }, 220);
-      return true;
-    } catch (e) { return false; }
+    var lab = labs.filter(function (l) { return re.test(normText(l.textContent)); })[0];
+    if (!lab) return null;
+    var fc = lab.closest('.MuiFormControl-root, .MuiTextField-root') || lab.parentElement;
+    return fc ? fc.querySelector('input, textarea') : null;
+  }
+  function waitEnabled(root, sel, timeoutMs) {
+    return new Promise(function (res) {
+      var t0 = Date.now();
+      (function poll() {
+        var el = root.querySelector(sel);
+        if (el && !el.disabled && el.getAttribute('aria-disabled') !== 'true') return res(el);
+        if (Date.now() - t0 > (timeoutMs || 2500)) return res(el || null);
+        setTimeout(poll, 120);
+      })();
+    });
+  }
+  function waitOptions(timeoutMs) {
+    return new Promise(function (res) {
+      var t0 = Date.now();
+      (function poll() {
+        var opts = [].slice.call(document.querySelectorAll('[role="option"]'));
+        if (opts.length) return res(opts);
+        if (Date.now() - t0 > (timeoutMs || 1800)) return res([]);
+        setTimeout(poll, 80);
+      })();
+    });
+  }
+  // Best option for a target string: exact, then starts-with, then contains (case-insensitive).
+  function bestOption(opts, target) {
+    var t = normText(target).toLowerCase(); if (!t) return null;
+    var txt = opts.map(function (o) { return normText(o.textContent).toLowerCase(); });
+    var i;
+    for (i = 0; i < opts.length; i++) if (txt[i] === t) return opts[i];
+    for (i = 0; i < opts.length; i++) if (txt[i].indexOf(t) === 0) return opts[i];
+    for (i = 0; i < opts.length; i++) if (txt[i].indexOf(t) >= 0) return opts[i];
+    return null;
+  }
+  // Type into an autocomplete WITHOUT blurring - a blur closes the option list before we can click.
+  function acType(el, val) {
+    var setter = Object.getOwnPropertyDescriptor(window.HTMLInputElement.prototype, 'value').set;
+    setter.call(el, val);
+    el.dispatchEvent(new Event('input', { bubbles: true }));
+    el.dispatchEvent(new KeyboardEvent('keyup', { bubbles: true }));
+  }
+  // Umbrava's Client / Location / Trade / Priority are custom autocompletes (aria-autocomplete=
+  // "list"): pre-typing does NOT select - you must click an option in the listbox, and that click
+  // is what cascades (Client unlocks Location + reveals Client DNE; Location unlocks Asset). Open,
+  // filter by searchTerm, then click the best match. Returns 'selected'|'typed'|'disabled'|'skip'.
+  function selectAC(el, searchTerm, matchTarget) {
+    return new Promise(function (resolve) {
+      if (!el) return resolve('skip');
+      if (el.disabled || el.getAttribute('aria-disabled') === 'true') return resolve('disabled');
+      el.focus();
+      el.dispatchEvent(new MouseEvent('mousedown', { bubbles: true, cancelable: true, view: window }));
+      if (searchTerm) acType(el, searchTerm);
+      waitOptions(1800).then(function (opts) {
+        var pick = bestOption(opts, matchTarget || searchTerm);
+        if (pick) {
+          ['pointerdown', 'mousedown', 'mouseup', 'click'].forEach(function (t) { pick.dispatchEvent(new MouseEvent(t, { bubbles: true, cancelable: true, view: window })); });
+          return resolve('selected');
+        }
+        resolve(searchTerm ? 'typed' : 'skip');
+      });
+    });
   }
   function fillWo(root, wo) {
-    var done = [], assist = [], info = [];
+    var done = [], picked = [], hint = [];
     function setV(sel, v, label) { var el = root.querySelector(sel); if (el && v) { setNativeValue(el, v); done.push(label); } }
     setV('textarea#scopeOfWork', wo.scope, 'Scope');
     setV('input#sourcePurchaseOrderNumber', wo.po, 'Source PO #');
     setV('input#sourceJobNumber', wo.sourceJob, 'Source Job #');
-    // Dependent autocompletes: Client first (Location/Trade filter after Client is picked).
-    if (pretype(root, 'input#client-dropdown', wo.client)) assist.push('Client "' + wo.client + '"');
-    if (pretype(root, 'input#location-dropdown', wo.location)) assist.push('Location "' + wo.location + '"'); else if (wo.location) info.push('Location: type "' + wo.location + '" after Client');
-    if (pretype(root, 'input#trades', wo.trade)) assist.push('Trade "' + wo.trade + '"'); else if (wo.trade) info.push('Trade: ' + wo.trade);
-    if (wo.priorityLevel) { if (setMuiSelect(root, /priority/i, new RegExp('\\b' + wo.priorityLevel + '\\b', 'i'))) assist.push('Priority ' + wo.priorityLevel); else info.push('Priority: set ' + wo.priorityLevel); }
-    // Client DNE has no field in this modal - surface it (set on the WO after Create). Never
-    // put it in Vendor NTE: the PO NTE is the CLIENT ceiling, not what we authorize a vendor.
-    if (wo.clientDne) info.push('Client DNE (PO NTE): $' + wo.clientDne + ' - set on the WO after Create');
     try { PENDING = wo._file ? { file: wo._file, po: wo.po, client: wo.client } : null; } catch (e) { }
-    var parts = [];
-    if (done.length) parts.push('Filled ' + done.join(', '));
-    if (assist.length) parts.push('typed ' + assist.join(' / ') + ' - pick from the list');
-    if (info.length) parts.push(info.join(' · '));
-    parts.push('review before Create');
-    toast('From the PO email - ' + parts.join(' · '), 15000);
+
+    // The dropdowns cascade, so select in order and wait for each dependent field to appear/enable:
+    // Client -> (Location unlocks + Client DNE appears) -> Location -> Trade -> Priority.
+    (async function () {
+      if (wo.client) {
+        var rc = await selectAC(root.querySelector('input#client-dropdown'), wo.client, wo.client);
+        if (rc === 'selected') { picked.push('Client "' + wo.client + '"'); await delay(650); }   // let Location unlock + Client DNE render
+        else hint.push('Client: pick "' + wo.client + '"');
+      }
+      // Client DNE = the PO NTE (the CLIENT ceiling, never the vendor NTE). The field only exists
+      // once a client is selected - that is why it never populated before.
+      if (wo.clientDne) {
+        var dne = inputByLabel(root, /^client dne/i);
+        if (dne) { setNativeValue(dne, wo.clientDne); done.push('Client DNE $' + wo.clientDne); }
+        else hint.push('Client DNE: $' + wo.clientDne);
+      }
+      if (wo.location) {
+        await waitEnabled(root, 'input#location-dropdown', 2500);
+        var store = wo.location.replace(/\D/g, '') || wo.location;   // search by the store number, match the "PFJ ####" option
+        var rl = await selectAC(root.querySelector('input#location-dropdown'), store, wo.location);
+        if (rl === 'selected') picked.push('Location "' + wo.location + '"'); else hint.push('Location: pick ' + wo.location);
+      }
+      if (wo.trade) {
+        var rt = await selectAC(root.querySelector('input#trades'), wo.trade, wo.trade);
+        if (rt === 'selected') picked.push('Trade "' + wo.trade + '"'); else hint.push('Trade: ' + wo.trade + ' (pick the closest)');
+      }
+      if (wo.priorityLevel) {
+        var rp = await selectAC(inputByLabel(root, /^priority/i), wo.priorityLevel, wo.priorityLevel);
+        if (rp === 'selected') picked.push('Priority ' + wo.priorityLevel); else hint.push('Priority: set ' + wo.priorityLevel);
+      }
+      var parts = [];
+      if (done.length) parts.push('Filled ' + done.join(', '));
+      if (picked.length) parts.push('selected ' + picked.join(' / '));
+      if (hint.length) parts.push('check: ' + hint.join(' · '));
+      parts.push('review before Create');
+      toast('From the PO email - ' + parts.join(' · '), 15000);
+    })();
   }
 
   // ---- Stage 2: carry the dropped email to the new WO, then auto-attach to Documents ------

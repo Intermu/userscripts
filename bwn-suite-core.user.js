@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         BWN Suite - Core (Broadway National)
 // @namespace    broadwaynational.bwn
-// @version      1.48.0
+// @version      1.49.0
 // @downloadURL  https://raw.githubusercontent.com/Intermu/userscripts/main/bwn-suite-core.user.js
 // @updateURL    https://raw.githubusercontent.com/Intermu/userscripts/main/bwn-suite-core.user.js
 // @description  Runs several Umbrava helpers for BWN coordinators, all in the browser with no network access. Includes: PO Approval + ETA Builder; WO Assist (GP/ETA, a stall watchdog, DNE calculator, and a next-action playbook); Email Leak Guard (checks recipients against vendor names, PO amounts, and client budget references before an outbound email sends); WO List Heat (a triage overlay + My Day strip on the work-order list); and the BWN Launcher (opens the Azure Static Web App tools with the current WO's context). Modules share state through sessionStorage/localStorage. No network calls, no privileged grants. Toggle modules in BWN_MODULES below.
@@ -2237,18 +2237,49 @@
       return null;
     }
     // Best-effort: set the Add Note composer's note-type control to `label` (e.g. "Internal").
-    // Scoped to the just-opened composer and gated on a note-type vocabulary so we only ever
-    // touch a control whose values actually read like note types - never an unrelated dropdown,
-    // and never an existing note's display chip elsewhere on the page. No-ops safely (the note
-    // still posts) when the control isn't found. The type may be a native <select>, a visible
-    // tab/chip, or a MUI Select whose listbox portals to <body> (so options are matched
-    // document-wide only AFTER we open a type trigger found inside the composer).
+    // Scoped to the just-opened composer. No-ops safely (the note still posts) when the control
+    // isn't found. Umbrava's CURRENT note-type control is a custom autocomplete (an
+    // aria-autocomplete="list" input labelled "Type"); pre-typing does NOT select it - you must
+    // CLICK the option - so branch 0 handles that. The legacy branches (native <select>, a visible
+    // tab/chip, a MUI Select whose listbox portals to <body>) are kept as fallbacks for other UIs
+    // and are gated on a note-type vocabulary so they never touch an unrelated dropdown.
     var NOTE_TYPE_VOCAB = /^(internal|vendor|client|billing|general|public|private|customer)$/i;
     function setNoteType(label, scope) {
       if (!label) return false;
       scope = scope || document;
       var esc = String(label).replace(/[.*+?^${}()|[\]\\]/g, function (m) { return '\\' + m; });
       var want = new RegExp('^\\s*' + esc + '\\s*$', 'i');
+      // 0) the current Umbrava UI: a custom autocomplete (aria-autocomplete="list") labelled
+      //    "Type". Find it by its label inside the composer, open + filter, then CLICK the option
+      //    (typing alone never registers the pick). Async - options render a tick after opening.
+      var flabs = scope.querySelectorAll('label'), acInput = null;
+      for (var a = 0; a < flabs.length; a++) {
+        if (!/^\s*type\b/i.test((flabs[a].textContent || '').trim())) continue;
+        var afc = flabs[a].closest('.MuiFormControl-root') || flabs[a].parentElement;
+        var ai = afc ? afc.querySelector('input[aria-autocomplete="list"]') : null;
+        if (ai) { acInput = ai; break; }
+      }
+      if (acInput) {
+        try {
+          acInput.focus();
+          acInput.dispatchEvent(new MouseEvent('mousedown', { bubbles: true, cancelable: true, view: window }));
+          var vset = Object.getOwnPropertyDescriptor(window.HTMLInputElement.prototype, 'value').set;
+          vset.call(acInput, label); acInput.dispatchEvent(new Event('input', { bubbles: true })); acInput.dispatchEvent(new KeyboardEvent('keyup', { bubbles: true }));
+          var contain = new RegExp(esc, 'i'), nn = 0;
+          (function pickAC() {
+            var os = document.querySelectorAll('[role="option"]'), exact = null, part = null;
+            for (var q = 0; q < os.length; q++) {
+              var tx = (os[q].textContent || '').replace(/\s+/g, ' ').trim();
+              if (want.test(tx)) { exact = os[q]; break; }
+              if (!part && contain.test(tx)) part = os[q];
+            }
+            var opt = exact || part;
+            if (opt) { ['pointerdown', 'mousedown', 'mouseup', 'click'].forEach(function (t) { opt.dispatchEvent(new MouseEvent(t, { bubbles: true, cancelable: true, view: window })); }); return; }
+            if (++nn < 12) setTimeout(pickAC, 70);
+          })();
+        } catch (e) { }
+        return true;
+      }
       // 1) native <select> whose options read like note types
       var sels = scope.querySelectorAll('select');
       for (var i = 0; i < sels.length; i++) {
