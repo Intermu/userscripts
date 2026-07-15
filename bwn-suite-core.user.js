@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         BWN Suite - Core (Broadway National)
 // @namespace    broadwaynational.bwn
-// @version      1.47.0
+// @version      1.48.0
 // @downloadURL  https://raw.githubusercontent.com/Intermu/userscripts/main/bwn-suite-core.user.js
 // @updateURL    https://raw.githubusercontent.com/Intermu/userscripts/main/bwn-suite-core.user.js
 // @description  Runs several Umbrava helpers for BWN coordinators, all in the browser with no network access. Includes: PO Approval + ETA Builder; WO Assist (GP/ETA, a stall watchdog, DNE calculator, and a next-action playbook); Email Leak Guard (checks recipients against vendor names, PO amounts, and client budget references before an outbound email sends); WO List Heat (a triage overlay + My Day strip on the work-order list); and the BWN Launcher (opens the Azure Static Web App tools with the current WO's context). Modules share state through sessionStorage/localStorage. No network calls, no privileged grants. Toggle modules in BWN_MODULES below.
@@ -3077,6 +3077,19 @@
     // helper needs isn't already on the WO (no PO date, no noted ETA) - so it asks
     // exactly when the coordinator has to decide, and never nags otherwise.
     var ecdAutoShownFor = null;
+    // Is an Umbrava-native modal open? BWN overlays use #bwn-* ids + custom styling, never
+    // MUI's dialog classes, so this catches only Umbrava's own dialogs (Create WO / Create
+    // Vendor / Build Requests / Edit Billing, etc.).
+    function umbravaModalOpen() {
+      var mods = document.querySelectorAll('.MuiModal-root, .MuiDialog-container');
+      for (var i = 0; i < mods.length; i++) {
+        var m = mods[i];
+        if (m.id && /^bwn-/.test(m.id)) continue;
+        var r = m.getBoundingClientRect ? m.getBoundingClientRect() : null;
+        if ((r && r.width > 0 && r.height > 0) || m.offsetParent !== null) return true;
+      }
+      return false;
+    }
     function maybeAutoECD(state) {
       var woId = currentWOId();
       if (!woId || ecdAutoShownFor === woId || document.getElementById('bwn-ecd-overlay')) return;
@@ -3091,6 +3104,10 @@
       var hasActivePO = state.pos.some(function (p) { return !p.done && p.amount > 0; });
       if (!state.due && !hasActivePO) return;   // no ECD and no active work → nothing to target yet
       if (ecdHasEtaSignal(state)) return;        // ETA is on file → the ecd action + "Set ECD…" button cover it without a popup
+      // Defer while an Umbrava modal is open (Create WO / Vendor / Build Requests, etc.): the
+      // ECD overlay would sit on top and block it. Do NOT burn the once-per-WO guard - the
+      // refresh loop re-checks, so the popup opens once the modal closes.
+      if (umbravaModalOpen()) return;
       ecdAutoShownFor = woId;
       ecdHelperOpen(state);
     }
