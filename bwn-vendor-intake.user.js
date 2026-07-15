@@ -2,6 +2,8 @@
 // @name         BWN Vendor Intake (Broadway National)
 // @namespace    broadwaynational.bwn
 // @version      0.1.0
+// @downloadURL  https://raw.githubusercontent.com/Intermu/userscripts/main/bwn-vendor-intake.user.js
+// @updateURL    https://raw.githubusercontent.com/Intermu/userscripts/main/bwn-vendor-intake.user.js
 // @description  Prefills Umbrava's Create Vendor form from a Prospect Set-Up Form. Adds a "Prefill from document" button to the modal: you pick the filled PDF, it reads the fields in the browser and fills Company, contact name/email/phone, Type, and the address, then opens the Trade(s) list for you to pick. It flags when Umbrava already has a matching vendor. Entity is left for you (the W-9 says C vs S corp, and that file is a scanned image). Runs entirely in the browser - no network access, no keys, nothing leaves your machine.
 // @match        https://app.umbrava.com/*
 // @run-at       document-idle

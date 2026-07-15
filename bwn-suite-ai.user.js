@@ -1,7 +1,9 @@
 // ==UserScript==
 // @name         BWN Suite - AI (Broadway National)
 // @namespace    broadwaynational.bwn
-// @version      1.27.0
+// @version      1.28.0
+// @downloadURL  https://raw.githubusercontent.com/Intermu/userscripts/main/bwn-suite-ai.user.js
+// @updateURL    https://raw.githubusercontent.com/Intermu/userscripts/main/bwn-suite-ai.user.js
 // @description  The Umbrava tools that call outside APIs, kept separate from the zero-egress Core script. Client Update and WO Audit drafts (Anthropic Claude; draft-only, scrubbed before sending, you review before posting); Find Techs / Find Suppliers (Google Places; vendor leads near a WO); and Job View (opens the Ops-Dashboard job card on the WO page - WO details from Umbrava plus the authored case file and next actions, read-only). Network access is limited by the browser to the declared API hosts and the BWN Static Web App. API keys are stored in Tampermonkey's storage via the menu commands and never enter the page. Toggle modules in BWN_MODULES below.
 // @match        https://app.umbrava.com/*
 // @run-at       document-idle
@@ -26,7 +28,7 @@
     serviceRequest: true  // Augment Umbrava's Build Requests modal (NTE preset + team inbox)
   };
 
-  var BWN_VER = '1.27.0';
+  var BWN_VER = '1.28.0';
 
   // Module overrides set by the Ops Suite panel (Core); reload to apply. Both
   // scripts read the shared bwn:modules blob and honor only their own keys.
@@ -4967,29 +4969,141 @@ if (BWN_MODULES.jobView) BWN.safeModule('jobView', function () {
       }
     }
 
-    // Stage 2: a one-click jump from the Select-Vendors step into Bid-Out's net-new invite
-    // wizard (outside-network vendors), so the coordinator doesn't leave the flow. Bid-Out owns
-    // the sourcing + de-dup + review-before-send; we only dispatch the command. Re-injected if
-    // React re-renders the list away.
-    function ensureNetNewButton(panel) {
-      if (document.getElementById('bwn-sr-netnew')) return;
-      var btn = document.createElement('button');
-      btn.id = 'bwn-sr-netnew';
-      btn.type = 'button';
-      btn.textContent = '＋ Invite net-new vendors (outside the network)';
-      btn.style.cssText = 'display:block;width:calc(100% - 4px);margin:8px 2px 10px;padding:9px 12px;border:1px dashed #1a5f3e;border-radius:8px;background:#f1f9f4;color:#0d3d26;font:500 12px -apple-system,BlinkMacSystemFont,"Segoe UI",Arial,sans-serif;cursor:pointer;text-align:center;';
-      btn.addEventListener('click', function (e) {
-        e.preventDefault(); e.stopPropagation();
-        try { document.dispatchEvent(new CustomEvent('bwn:cmd', { detail: { id: 'bidout:invite' } })); } catch (x) { }
-        srToast('Opening the net-new invite tool - review before anything sends.');
+    // ---- Stage 2: net-new (outside-network) vendors INLINE in the Select-Vendors step -------
+    // Sourced from Google Places on a "Find nearby" click, de-duped against the network vendors
+    // Umbrava is already showing, and selectable right here. "Invite selected" hands the chosen
+    // leads to Bid-Out's review-before-send (Umbrava CANNOT dispatch non-network vendors, so
+    // their outreach goes through our CAN-SPAM-safe email flow - nothing auto-sends). Re-injected
+    // if React re-renders the list away; sourced leads (SR_LEADS) survive the re-inject.
+    var SR_MASK = 'places.id,places.displayName,places.formattedAddress,places.nationalPhoneNumber,places.websiteUri,places.rating,places.userRatingCount,places.location';
+    var SR_LEADS = [];
+    function srEsc(s) { return String(s == null ? '' : s).replace(/[&<>"]/g, function (m) { return { '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;' }[m]; }); }
+    function srNorm(s) { return String(s || '').toLowerCase().replace(/&/g, ' and ').replace(/\./g, '').replace(/\b(inc|llc|corp|co|company|ltd|the|and|of)\b/g, ' ').replace(/[^a-z0-9]+/g, ''); }
+    function srMiles(aLat, aLng, bLat, bLng) {
+      if (![aLat, aLng, bLat, bLng].every(function (n) { return typeof n === 'number'; })) return null;
+      var R = 3958.8, dLat = (bLat - aLat) * Math.PI / 180, dLng = (bLng - aLng) * Math.PI / 180;
+      var s = Math.sin(dLat / 2) * Math.sin(dLat / 2) + Math.cos(aLat * Math.PI / 180) * Math.cos(bLat * Math.PI / 180) * Math.sin(dLng / 2) * Math.sin(dLng / 2);
+      return R * 2 * Math.atan2(Math.sqrt(s), Math.sqrt(1 - s));
+    }
+    function srWoAddr() {
+      try { var b = BWN.busGet(BWN.woId(), 12 * 3600000); if (b && b.addr) return b.addr; } catch (e) { }
+      var el = document.querySelector('[data-testid="wo-location-dropdown-input-label"]') || document.querySelector('[data-testid="wo-location-dropdown-input"] input');
+      return el ? String(el.value || el.textContent || '').replace(/\s+/g, ' ').trim() : '';
+    }
+    function srWoTrade() {
+      var el = document.querySelector('[data-testid="wo-trades-dropdown"]') || document.querySelector('[data-testid="trades-dropdown-field"]');
+      var t = el ? String(el.textContent || '').replace(/\s+/g, ' ').trim() : '';
+      return (t.split(/[,;]/)[0] || '').trim();
+    }
+    function srPlaces(body, mask, cb) {
+      var key = GM_getValue('places_key', '');
+      if (!key) { cb(new Error('Set the Google Places API key (Tampermonkey menu) to find net-new vendors.')); return; }
+      try {
+        GM_xmlhttpRequest({
+          method: 'POST', url: 'https://places.googleapis.com/v1/places:searchText',
+          headers: { 'Content-Type': 'application/json', 'X-Goog-Api-Key': key, 'X-Goog-FieldMask': mask },
+          data: JSON.stringify(body), timeout: 20000,
+          onload: function (r) { try { var j = JSON.parse(r.responseText || '{}'); if (r.status < 200 || r.status >= 300) { cb(new Error('Places ' + r.status + (j.error ? ': ' + j.error.message : ''))); return; } cb(null, j.places || []); } catch (e) { cb(e); } },
+          onerror: function () { cb(new Error('Network error calling Places (check @connect / key).')); },
+          ontimeout: function () { cb(new Error('Places request timed out.')); }
+        });
+      } catch (e) { cb(e); }
+    }
+    function srNetworkNames(panel) {
+      var out = {};
+      panel.querySelectorAll('a[href^="/vendors/"]').forEach(function (a) {
+        var n = srNorm((a.textContent || '').replace(/\s+/g, ' ').trim()); if (n.length >= 4) out[n] = 1;
       });
-      var firstCard = panel.querySelector('a[href^="/vendors/"]');
-      if (firstCard && firstCard.parentElement && firstCard.parentElement.parentElement) {
-        var list = firstCard.parentElement;
-        list.parentElement.insertBefore(btn, list);   // just above the vendor list
-      } else {
-        panel.insertBefore(btn, panel.firstChild);
-      }
+      return out;
+    }
+    function srFindNetNew(panel, cb) {
+      var addr = srWoAddr(); if (!addr) { cb(new Error('No work-order address found to search around.')); return; }
+      var trade = srWoTrade();
+      srPlaces({ textQuery: addr, maxResultCount: 1 }, 'places.location', function (e1, centers) {
+        var c = (!e1 && centers && centers[0] && centers[0].location) ? centers[0].location : null;
+        var body = { textQuery: (trade ? trade + ' ' : '') + 'contractor near ' + addr, maxResultCount: 20 };
+        if (c) body.locationBias = { circle: { center: c, radius: 50000 } };
+        srPlaces(body, SR_MASK, function (e2, places) {
+          if (e2) { cb(e2); return; }
+          var net = srNetworkNames(panel), seen = {}, leads = [];
+          (places || []).forEach(function (p) {
+            var name = (p.displayName && p.displayName.text) || ''; if (!name) return;
+            var nn = srNorm(name); if (!nn || net[nn] || seen[nn]) return; seen[nn] = 1;
+            leads.push({
+              name: name, phone: p.nationalPhoneNumber || '', website: /^https?:\/\//i.test(p.websiteUri || '') ? p.websiteUri : '',
+              rating: (typeof p.rating === 'number') ? p.rating : null, ratingCount: p.userRatingCount || 0,
+              mi: (c && p.location) ? srMiles(c.latitude, c.longitude, p.location.latitude, p.location.longitude) : null
+            });
+          });
+          leads.sort(function (a, b) { return (a.mi == null ? 1e9 : a.mi) - (b.mi == null ? 1e9 : b.mi); });
+          cb(null, leads);
+        });
+      });
+    }
+    function srRenderRows(listEl) {
+      if (!SR_LEADS.length) { listEl.innerHTML = '<div style="font-size:11.5px;color:#64748b;padding:6px 2px;">No net-new vendors found nearby (all matches may already be in your network).</div>'; return; }
+      listEl.innerHTML = SR_LEADS.map(function (l, i) {
+        var rating = l.rating != null ? ('★ ' + l.rating.toFixed(1) + ' (' + (l.ratingCount || 0) + ')') : 'unrated';
+        var miles = l.mi != null ? (l.mi.toFixed(1) + ' mi') : '';
+        var site = l.website ? '<a href="' + srEsc(l.website) + '" target="_blank" rel="noopener noreferrer" style="color:#1a5f3e;">site</a>' : '';
+        return '<label style="display:flex;align-items:center;gap:8px;padding:6px 4px;border-bottom:1px solid #eef2f7;font-size:12px;cursor:pointer;">' +
+          '<input type="checkbox" data-lead="' + i + '" checked style="flex:none;">' +
+          '<span style="flex:1;min-width:0;"><span style="font-weight:500;color:#0d3d26;">' + srEsc(l.name) + '</span> <span style="color:#94a3b8;font-size:10px;">outside network</span></span>' +
+          '<span style="color:#64748b;font-size:10.5px;white-space:nowrap;">' + miles + '</span>' +
+          '<span style="color:#64748b;font-size:10.5px;white-space:nowrap;">' + rating + '</span>' +
+          '<span style="font-size:10.5px;white-space:nowrap;">' + site + '</span></label>';
+      }).join('');
+    }
+    function srLca(a, b) { var A = []; for (var x = a; x; x = x.parentElement) A.push(x); for (var y = b; y; y = y.parentElement) { if (A.indexOf(y) !== -1) return y; } return null; }
+    function srUpdateInvite(sec) {
+      var n = sec.querySelectorAll('[data-sr-list] input[data-lead]:checked').length;
+      var b = sec.querySelector('[data-sr-invite]'); if (b) { b.textContent = 'Invite selected' + (n ? ' (' + n + ')' : '') + ' →'; b.disabled = !n; b.style.opacity = n ? '1' : '.5'; }
+    }
+    function ensureNetNewSection(panel) {
+      if (document.getElementById('bwn-sr-netnew')) return;
+      var sec = document.createElement('div');
+      sec.id = 'bwn-sr-netnew';
+      sec.style.cssText = 'margin:10px 2px 4px;padding:10px 12px;border:1px dashed #1a5f3e;border-radius:8px;background:#f7fbf9;font-family:-apple-system,BlinkMacSystemFont,"Segoe UI",Arial,sans-serif;';
+      sec.innerHTML =
+        '<div style="display:flex;align-items:center;gap:8px;margin-bottom:6px;">' +
+        '<span style="font:600 11px ui-monospace,\'Segoe UI Mono\',monospace;letter-spacing:.06em;text-transform:uppercase;color:#0d3d26;">Net-new vendors (outside the network)</span>' +
+        '<button type="button" data-sr-find style="margin-left:auto;font:500 11px -apple-system,BlinkMacSystemFont,\'Segoe UI\',Arial,sans-serif;padding:4px 10px;border:1px solid #1a5f3e;border-radius:6px;background:#fff;color:#0d3d26;cursor:pointer;">🔎 Find nearby</button>' +
+        '</div>' +
+        '<div data-sr-status style="font-size:11px;color:#64748b;margin-bottom:4px;">Google-sourced, de-duped against the vendors above. They go out via our review-before-send email (Umbrava can\'t dispatch them).</div>' +
+        '<div data-sr-list></div>' +
+        '<div data-sr-foot style="display:none;margin-top:8px;text-align:right;"><button type="button" data-sr-invite style="font:500 12px -apple-system,BlinkMacSystemFont,\'Segoe UI\',Arial,sans-serif;padding:7px 14px;border:none;border-radius:6px;background:#1a5f3e;color:#fff;cursor:pointer;">Invite selected →</button></div>';
+      var statusEl = sec.querySelector('[data-sr-status]'), listEl = sec.querySelector('[data-sr-list]'), footEl = sec.querySelector('[data-sr-foot]');
+      sec.querySelector('[data-sr-find]').addEventListener('click', function (e) {
+        e.preventDefault(); e.stopPropagation();
+        var fb = sec.querySelector('[data-sr-find]'); fb.disabled = true; fb.textContent = 'Searching…';
+        statusEl.textContent = 'Searching Google for vendors near the job…';
+        srFindNetNew(panel, function (err, leads) {
+          fb.disabled = false; fb.textContent = '🔎 Find nearby';
+          if (err) { statusEl.textContent = err.message || 'Search failed.'; return; }
+          SR_LEADS = leads || [];
+          statusEl.textContent = SR_LEADS.length + ' net-new vendor' + (SR_LEADS.length === 1 ? '' : 's') + ' found (not already in your network).';
+          srRenderRows(listEl); footEl.style.display = SR_LEADS.length ? 'block' : 'none'; srUpdateInvite(sec);
+        });
+      });
+      listEl.addEventListener('change', function () { srUpdateInvite(sec); });
+      sec.querySelector('[data-sr-invite]').addEventListener('click', function (e) {
+        e.preventDefault(); e.stopPropagation();
+        var chosen = [];
+        listEl.querySelectorAll('input[data-lead]:checked').forEach(function (cb) { var l = SR_LEADS[+cb.getAttribute('data-lead')]; if (l) chosen.push(l); });
+        if (!chosen.length) { srToast('Select at least one net-new vendor to invite.'); return; }
+        try { document.dispatchEvent(new CustomEvent('bwn:cmd', { detail: { id: 'bidout:invite', leads: chosen } })); } catch (x) { }
+        srToast(chosen.length + ' net-new vendor' + (chosen.length === 1 ? '' : 's') + ' handed to the invite tool - review before anything sends.');
+      });
+      // Place just below Umbrava's network vendor list (sibling after the list container).
+      var cards = panel.querySelectorAll('a[href^="/vendors/"]');
+      if (cards.length) {
+        var anchor = cards.length > 1 ? srLca(cards[0], cards[cards.length - 1]) : cards[0].parentElement;
+        if (anchor && anchor.parentElement) anchor.parentElement.insertBefore(sec, anchor.nextSibling);
+        else if (anchor) anchor.appendChild(sec);
+        else panel.appendChild(sec);
+      } else { panel.appendChild(sec); }
+      // Restore a prior search across a React-driven re-inject.
+      if (SR_LEADS.length) { srRenderRows(listEl); footEl.style.display = 'block'; srUpdateInvite(sec); }
     }
 
     function scan() {
@@ -5003,7 +5117,7 @@ if (BWN_MODULES.jobView) BWN.safeModule('jobView', function () {
         enhance(panel);
       }
       // Stage 2: only on the Select-Vendors step (matched by its stable labels).
-      if (/Vendors in Area|Active Vendors Only|Select All/i.test(panel.textContent || '')) ensureNetNewButton(panel);
+      if (/Vendors in Area|Active Vendors Only|Select All/i.test(panel.textContent || '')) ensureNetNewSection(panel);
       else { var b = document.getElementById('bwn-sr-netnew'); if (b) b.remove(); }
     }
 

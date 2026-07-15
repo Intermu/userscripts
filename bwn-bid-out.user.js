@@ -1,7 +1,9 @@
 // ==UserScript==
 // @name         BWN Bid-Out (Broadway National)
 // @namespace    broadwaynational.bwn
-// @version      0.7.0
+// @version      0.8.0
+// @downloadURL  https://raw.githubusercontent.com/Intermu/userscripts/main/bwn-bid-out.user.js
+// @updateURL    https://raw.githubusercontent.com/Intermu/userscripts/main/bwn-bid-out.user.js
 // @description  Sends a competitive-pricing request to several vendors from a work order. Adds a "Bid-Out" dropdown to the See-Who-Is-Available row: pulls the assignable Umbrava vendors near the site with their emails, can find net-new vendors nearby through Google Places and look up their emails via the BWN scrape-contacts function, and takes pasted outside addresses. You pick who's included, then review the exact recipient list and the rendered email before anything sends. Send from your own mailbox via the SWA send-bid function (Microsoft Graph), or open a plain Outlook draft. Vendors are BCC'd; nothing sends until you click Send. Network access is limited to Umbrava (same-origin), Google Places, and your SWA host.
 // @match        https://app.umbrava.com/work-orders/*
 // @run-at       document-idle
@@ -461,7 +463,22 @@
 
     loadWO(n).then(function (wo) {
       if (!wo) throw new Error('Work order ' + n + ' not found.');
-      return loadVendors(wo, 60).then(function (res) { renderPanel(box, wo, res, close); });
+      return loadVendors(wo, 60).then(function (res) {
+        var seed = openState.seedLeads;
+        if (seed && seed.length) {
+          // Seeded from the Service Request modal (net-new the coordinator picked inline): scrape
+          // emails for those leads, seed them into the wizard (pre-picked), open on Select Vendors.
+          var b0 = box.querySelector('#bwn-bo-body'); if (b0) b0.textContent = 'Finding emails for the selected net-new vendors…';
+          var urls = seed.map(function (l) { return l.website; }).filter(Boolean);
+          return scrapeEmails(urls).then(function (sr) {
+            openState.netNew = seed.map(function (l) { return { name: l.name, phone: l.phone || '', website: l.website || '', rating: l.rating, ratingCount: l.ratingCount, mi: l.mi, email: (l.website && sr.map[l.website]) || l.email || '' }; });
+            openState.seedLeads = null;
+            openState.step = 2;   // land on Select Vendors with the seeded net-new pre-picked
+            renderPanel(box, wo, res, close);
+          });
+        }
+        renderPanel(box, wo, res, close);
+      });
     }).catch(function (e) {
       var b = box.querySelector('#bwn-bo-body');
       if (b) b.innerHTML = '<div style="color:#b91c1c;font:600 13px system-ui;">Couldn’t load: ' + esc(e.message) + '</div>';
@@ -846,7 +863,7 @@
   }
 
   // ---- Launcher: "📤 Bid-Out ▾" dropdown in the See-Who-Is-Available row -------
-  function launchPanel(opts) { openState = {}; if (opts && opts.invite) openState.focusInvite = true; openPanel(); }
+  function launchPanel(opts) { openState = {}; if (opts && opts.invite) openState.focusInvite = true; if (opts && opts.seedLeads && opts.seedLeads.length) openState.seedLeads = opts.seedLeads; openPanel(); }
   function actionRow() {
     var btns = document.querySelectorAll('button');
     for (var i = 0; i < btns.length; i++) {
@@ -908,7 +925,7 @@
   // auto-sends. No-op off a WO page.
   document.addEventListener('bwn:cmd', function (e) {
     var d = e && e.detail; if (!d || !woNumber()) return;
-    if (d.id === 'bidout:invite') launchPanel({ invite: true });
+    if (d.id === 'bidout:invite') launchPanel({ invite: true, seedLeads: (d.leads && d.leads.length) ? d.leads : null });
     else if (d.id === 'bidout:open') launchPanel({});
   }, false);
 
