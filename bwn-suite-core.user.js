@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         BWN Suite - Core (Broadway National)
 // @namespace    broadwaynational.bwn
-// @version      1.46.0
+// @version      1.47.0
 // @downloadURL  https://raw.githubusercontent.com/Intermu/userscripts/main/bwn-suite-core.user.js
 // @updateURL    https://raw.githubusercontent.com/Intermu/userscripts/main/bwn-suite-core.user.js
 // @description  Runs several Umbrava helpers for BWN coordinators, all in the browser with no network access. Includes: PO Approval + ETA Builder; WO Assist (GP/ETA, a stall watchdog, DNE calculator, and a next-action playbook); Email Leak Guard (checks recipients against vendor names, PO amounts, and client budget references before an outbound email sends); WO List Heat (a triage overlay + My Day strip on the work-order list); and the BWN Launcher (opens the Azure Static Web App tools with the current WO's context). Modules share state through sessionStorage/localStorage. No network calls, no privileged grants. Toggle modules in BWN_MODULES below.
@@ -3504,11 +3504,12 @@
     function onWO() { return /\/work-orders\//.test(location.pathname); }
 
     function refresh() {
-      // The visible WO Assist dock (floating pill + checklist card) is RETIRED - its display,
-      // pills, and next-steps now live at the top of the AI Job View modal, fed by the bus
-      // payload published below. The ENGINE stays fully live here: compute, actioned
-      // auto-detect, PO grouping, ECD auto-pop, preflight, and the bus publish all still run.
-      // Flip SHOW_WO_DOCK to true to bring the old side-dock back.
+      // The NEXT ACTIONS checklist card renders on the WO page (its original location, above
+      // the PO block) AND the same steps show as pills at the top of the AI Job View, both fed
+      // by the bus payload published below. Only the floating GP/ETA pill + the legacy breakdown
+      // panel stay retired behind SHOW_WO_DOCK (flip to true to bring the full side-dock back).
+      // The ENGINE always runs: compute, actioned auto-detect, PO grouping, ECD auto-pop,
+      // preflight, and the bus publish.
       var SHOW_WO_DOCK = false;
       cacheDocsInv();   // runs on /documents + /billing (before the WO-anchor guards below return early there)
       if (!onWO()) {
@@ -3530,12 +3531,16 @@
       // steps from posted notes (idempotent - renderActsInline re-runs it when the dock shows).
       var waActs = []; try { waActs = nextActions(st); } catch (e) { }
       try { if (waActs.length) autoDetectActioned(waActs); } catch (e) { }
-      if (SHOW_WO_DOCK) { renderPill(st); renderActsInline(st); }
+      // NEXT ACTIONS list is restored to its original on-page location (the checklist card
+      // above the PO block). The Job View pills (fed by the bus publish below) stay too, so the
+      // same next-steps show in BOTH places, in unison. Only the floating GP/ETA pill + the
+      // legacy breakdown panel remain gated behind SHOW_WO_DOCK.
+      if (SHOW_WO_DOCK) renderPill(st);
       else {
         var _pl = document.getElementById(PILL_ID); if (_pl) _pl.remove();
         var _pn = document.getElementById(PANEL_ID); if (_pn) _pn.remove();
-        var _ac = document.getElementById(ACT_CARD_ID); if (_ac) _ac.remove();
       }
+      renderActsInline(st);
       try { renderPOGroups(); } catch (e) { /* PO grouping is best-effort - never break the engine */ }
       maybeAutoECD(st);
       maybePreflight(st);
