@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         BWN Bid-Out (Broadway National)
 // @namespace    broadwaynational.bwn
-// @version      0.8.0
+// @version      0.14.0
 // @downloadURL  https://raw.githubusercontent.com/Intermu/userscripts/main/bwn-bid-out.user.js
 // @updateURL    https://raw.githubusercontent.com/Intermu/userscripts/main/bwn-bid-out.user.js
 // @description  Sends a competitive-pricing request to several vendors from a work order. Adds a "Bid-Out" dropdown to the See-Who-Is-Available row: pulls the assignable Umbrava vendors near the site with their emails, can find net-new vendors nearby through Google Places and look up their emails via the BWN scrape-contacts function, and takes pasted outside addresses. You pick who's included, then review the exact recipient list and the rendered email before anything sends. Send from your own mailbox via the SWA send-bid function (Microsoft Graph), or open a plain Outlook draft. Vendors are BCC'd; nothing sends until you click Send. Network access is limited to Umbrava (same-origin), Google Places, and your SWA host.
@@ -28,6 +28,7 @@
   var PLACES_URL = 'https://places.googleapis.com/v1/places:searchText';
   var SCRAPE_URL = 'https://green-stone-0717dab0f.7.azurestaticapps.net/api/scrape-contacts';
   var SEND_URL = 'https://green-stone-0717dab0f.7.azurestaticapps.net/api/send-bid';
+  var STATUS_URL = 'https://green-stone-0717dab0f.7.azurestaticapps.net/api/bid-status';
   var LOGO_SRC = 'https://green-stone-0717dab0f.7.azurestaticapps.net/assets/bwn-logo.png';
   var COMPANY_PHONE = '1.631.737.3140';
 
@@ -108,6 +109,30 @@
         });
       } catch (e) { reject(e); }
     });
+  }
+  function gmGet(url, headers, timeoutMs) {
+    return new Promise(function (resolve, reject) {
+      try {
+        GM_xmlhttpRequest({
+          method: 'GET', url: url, headers: headers, timeout: timeoutMs || 30000,
+          onload: function (r) { var j = null; try { j = JSON.parse(r.responseText); } catch (e) { } resolve({ status: r.status, json: j }); },
+          onerror: function () { reject(new Error('network error')); },
+          ontimeout: function () { reject(new Error('timed out')); }
+        });
+      } catch (e) { reject(e); }
+    });
+  }
+  // Small stable string hash (cyrb53) for the idempotency key - see the send handler.
+  function cyrb53(str) {
+    var h1 = 0xdeadbeef, h2 = 0x41c6ce57;
+    for (var i = 0, ch; i < str.length; i++) {
+      ch = str.charCodeAt(i);
+      h1 = Math.imul(h1 ^ ch, 2654435761);
+      h2 = Math.imul(h2 ^ ch, 1597334677);
+    }
+    h1 = Math.imul(h1 ^ (h1 >>> 16), 2246822507) ^ Math.imul(h2 ^ (h2 >>> 13), 3266489909);
+    h2 = Math.imul(h2 ^ (h2 >>> 16), 2246822507) ^ Math.imul(h1 ^ (h1 >>> 13), 3266489909);
+    return (4294967296 * (2097151 & h2) + (h1 >>> 0)).toString(36);
   }
   function haversineMi(aLat, aLng, bLat, bLng) {
     if ([aLat, aLng, bLat, bLng].some(function (x) { return typeof x !== 'number'; })) return null;
@@ -197,6 +222,8 @@
     if (req.rate) L.push('Rate: $' + req.rate + ' / hr');
     if (inc.reference !== false) L.push('Reference: Tracking #' + (wo.trackingNumber || ''));
     L.push('Scope: ' + (req.scope || wo.scopeOfWork || ''));
+    if ((req.asset || '').trim()) { L.push(''); L.push('Asset / equipment: ' + req.asset.trim()); }
+    if ((req.history || '').trim()) { L.push(''); L.push('Site / service history: ' + req.history.trim()); }
     var addl = (req.addl || '').trim();
     if (addl) { L.push(''); L.push('Additional information: ' + addl); }
     if (inc.service !== false && (wo.serviceInstructions || '').trim()) { L.push(''); L.push('Service instructions: ' + wo.serviceInstructions.trim()); }
@@ -240,6 +267,8 @@
     '{{DETAILS}}' +
     '<tr><td style="padding:16px 24px 0;"><div style="color:#0d3d26;font-size:12px;font-weight:500;">Scope</div>' +
     '<div style="color:#1f2a24;font-size:16px;font-weight:400;margin-top:4px;line-height:1.55;">{{SCOPE}}</div></td></tr>' +
+    '{{ASSET_BLOCK}}' +
+    '{{HISTORY_BLOCK}}' +
     '<tr><td style="padding:18px 24px;"><table role="presentation" width="100%" cellpadding="0" cellspacing="0"><tr>' +
     '<td bgcolor="#1a5f3e" style="background:#1a5f3e;border-radius:8px;padding:13px 16px;text-align:center;color:#ffffff;font-size:14px;font-weight:500;line-height:1.5;">' +
     'Interested? Reply to this email with your quote -<br>labor rate, trip charge, and any material/parts costs.</td></tr></table></td></tr>' +
@@ -334,28 +363,67 @@
       ? '<tr><td style="padding:0 24px 4px;"><div style="color:#0d3d26;font-size:14px;font-weight:500;">Service Instructions</div>' +
         '<div style="color:#5a6b62;font-size:12px;font-weight:400;margin-top:4px;line-height:1.5;">' + nl2br(svc) + '</div></td></tr>'
       : '';
+    // PM/project enrichment (coordinator-entered): asset/equipment + site service history.
+    var asset = (req.asset || '').trim();
+    var assetBlock = asset
+      ? '<tr><td style="padding:16px 24px 0;"><div style="color:#0d3d26;font-size:12px;font-weight:500;">Asset / Equipment</div>' +
+        '<div style="color:#1f2a24;font-size:14px;font-weight:400;margin-top:4px;line-height:1.55;">' + nl2br(asset) + '</div></td></tr>'
+      : '';
+    var hist = (req.history || '').trim();
+    var historyBlock = hist
+      ? '<tr><td style="padding:16px 24px 0;"><div style="color:#0d3d26;font-size:12px;font-weight:500;">Site / Service History</div>' +
+        '<div style="color:#1f2a24;font-size:14px;font-weight:400;margin-top:4px;line-height:1.55;">' + nl2br(hist) + '</div></td></tr>'
+      : '';
+    // FUNCTION replacers throughout - a literal `$` in user text (e.g. a scope dollar amount)
+    // would otherwise be mangled by String.replace's `$&`/`$1` substitution rules.
     return BID_TEMPLATE
-      .replace(/\{\{LOGO_SRC\}\}/g, LOGO_SRC)
-      .replace(/\{\{TRACKING\}\}/g, esc(wo.trackingNumber || ''))
-      .replace(/\{\{DETAILS\}\}/g, details)
-      .replace(/\{\{SCOPE\}\}/g, nl2br(req.scope || wo.scopeOfWork || '') || '-')
-      .replace(/\{\{ADDL_BLOCK\}\}/g, addlBlock + rateOfferBlock)
-      .replace(/\{\{SERVICE_BLOCK\}\}/g, svcBlock)
-      .replace(/\{\{REQUESTER\}\}/g, esc(req.contactName || me.name || 'Broadway National Group'))
-      .replace(/\{\{REQ_EMAIL\}\}/g, esc(fromEmail || req.contactEmail || me.email || ''))
-      .replace(/\{\{REQ_PHONE\}\}/g, esc(req.contactPhone || GM_getValue('sender_phone', '') || COMPANY_PHONE));
+      .replace(/\{\{LOGO_SRC\}\}/g, function () { return LOGO_SRC; })
+      .replace(/\{\{TRACKING\}\}/g, function () { return esc(wo.trackingNumber || ''); })
+      .replace(/\{\{DETAILS\}\}/g, function () { return details; })
+      .replace(/\{\{SCOPE\}\}/g, function () { return nl2br(req.scope || wo.scopeOfWork || '') || '-'; })
+      .replace(/\{\{ASSET_BLOCK\}\}/g, function () { return assetBlock; })
+      .replace(/\{\{HISTORY_BLOCK\}\}/g, function () { return historyBlock; })
+      .replace(/\{\{ADDL_BLOCK\}\}/g, function () { return addlBlock + rateOfferBlock; })
+      .replace(/\{\{SERVICE_BLOCK\}\}/g, function () { return svcBlock; })
+      .replace(/\{\{REQUESTER\}\}/g, function () { return esc(req.contactName || me.name || 'Broadway National Group'); })
+      .replace(/\{\{REQ_EMAIL\}\}/g, function () { return esc(fromEmail || req.contactEmail || me.email || ''); })
+      .replace(/\{\{REQ_PHONE\}\}/g, function () { return esc(req.contactPhone || GM_getValue('sender_phone', '') || COMPANY_PHONE); });
   }
 
   // One-click send via the SWA send-bid function (Microsoft Graph, from the coordinator's
   // own mailbox). Same x-bwn-key gate as scrape-contacts. The server independently
   // enforces the from-allowlist, BCC cap, and a daily recipient ceiling.
-  function sendBid(fromEmail, mail, html) {
+  // idem = a STABLE per-attempt key (see the send handler). The server dedupes on it, so a
+  // retry after a client timeout can NEVER double-send. Timeout is generous (180s) because
+  // the per-vendor server path sends one email per vendor; a socket that closes early does
+  // NOT stop the server, hence the idem guard.
+  function sendBid(fromEmail, mail, html, idem) {
     var key = GM_getValue('ingest_key', '');
     if (!key) return Promise.resolve({ ok: false, code: 'NO_KEY' });
     return gmPost(SEND_URL, { 'Content-Type': 'application/json', 'x-bwn-key': key },
-      { from: fromEmail, bcc: mail.bcc, subject: mail.subject, html: html, tracking: mail.tracking || null }, 60000)
+      { from: fromEmail, bcc: mail.bcc, subject: mail.subject, html: html, tracking: mail.tracking || null, idem: idem || null }, 180000)
       .then(function (r) {
-        if (r.status === 200 && r.json && r.json.ok) return { ok: true, sent: r.json.sent };
+        if (r.status === 200 && r.json && r.json.ok) {
+          // tracked/sendId/failed present only in per-vendor mode (server TRACK_BASE_URL set).
+          return { ok: true, sent: r.json.sent, tracked: !!r.json.tracked, sendId: r.json.sendId || null, failed: r.json.failed || 0, duplicate: !!r.json.duplicate };
+        }
+        if (r.status === 409) return { ok: false, code: 'IN_PROGRESS' };   // our 409 always means in-flight, even if the body didn't parse
+        return { ok: false, code: r.status, msg: (r.json && r.json.error) || ('HTTP ' + r.status) };
+      })
+      .catch(function (e) { return { ok: false, code: 'NET', msg: e.message }; });
+  }
+
+  // Read side of per-vendor read-receipts: ask the SWA which vendors opened our bid for
+  // this WO (resolved by tracking #). Same x-bwn-key gate as send. Returns [] gracefully
+  // when tracking isn't live yet (503/404) so the UI can say "no data" instead of erroring.
+  function bidStatus(tracking) {
+    var key = GM_getValue('ingest_key', '');
+    if (!key) return Promise.resolve({ ok: false, code: 'NO_KEY' });
+    if (!tracking) return Promise.resolve({ ok: true, sends: [] });
+    return gmGet(STATUS_URL + '?tracking=' + encodeURIComponent(tracking), { 'x-bwn-key': key }, 30000)
+      .then(function (r) {
+        if (r.status === 200 && r.json && r.json.ok) return { ok: true, sends: r.json.sends || [] };
+        if (r.status === 404) return { ok: true, sends: [] };
         return { ok: false, code: r.status, msg: (r.json && r.json.error) || ('HTTP ' + r.status) };
       })
       .catch(function (e) { return { ok: false, code: 'NET', msg: e.message }; });
@@ -512,6 +580,8 @@
     if (openState.netNewMsg == null) openState.netNewMsg = '';
     if (openState.include == null) openState.include = { priority: true, trades: true, location: true, service: hasService, reference: true };
     if (openState.addl == null) openState.addl = '';
+    if (openState.asset == null) openState.asset = '';       // PM/project: asset + equipment (make/model/spec, e.g. R34 vs R41)
+    if (openState.history == null) openState.history = '';   // PM/project: site / prior-service context
     if (openState.picked == null) openState.picked = {};   // email(lc) -> bool; absent = default checked
     if (openState.contactName == null) openState.contactName = me.name || '';
     if (openState.contactEmail == null) openState.contactEmail = GM_getValue('send_from', '') || me.email || '';
@@ -532,6 +602,8 @@
       if ((v = val('bo-travel')) !== undefined) openState.travelRate = v;
       if ((v = val('bo-rate')) !== undefined) openState.rate = v;
       if ((v = val('bo-addl')) !== undefined) openState.addl = v;
+      if ((v = val('bo-asset')) !== undefined) openState.asset = v;
+      if ((v = val('bo-history')) !== undefined) openState.history = v;
       if ((v = val('bo-invite')) !== undefined) openState.inviteText = v;
       if ((v = val('bo-cname')) !== undefined) openState.contactName = v;
       if ((v = val('bo-cemail')) !== undefined) openState.contactEmail = v;
@@ -628,6 +700,10 @@
         '<label class="bwn-bo-chk" style="margin:2px 0 8px;"><input type="checkbox" id="bo-rateoffer"' + (openState.rateOffer ? ' checked' : '') + '> Receive Rate Offer</label>' +
         '<div class="bwn-bo-row"><label>Additional information (optional)</label></div>' +
         '<textarea id="bo-addl" rows="2" placeholder="Anything pertinent to include: access hours, # of units, parking, on-site contact, equipment make/model, etc.">' + esc(openState.addl) + '</textarea>' +
+        '<div class="bwn-bo-row"><label>Asset / equipment (optional)</label></div>' +
+        '<textarea id="bo-asset" rows="2" placeholder="Make, model, and spec vendors need to bid accurately - e.g. Bohn condenser, refrigerant R448A (not R22), 3-ton RTU, panel amperage.">' + esc(openState.asset) + '</textarea>' +
+        '<div class="bwn-bo-row"><label>Site / service history (optional)</label></div>' +
+        '<textarea id="bo-history" rows="2" placeholder="Prior work or recurring issues at this site: last PM date, open deficiencies, warranty status, what a previous vendor found.">' + esc(openState.history) + '</textarea>' +
         '<div class="bwn-bo-row"><label>Include in request</label></div>' +
         '<div class="bwn-bo-inc">' + incChk('priority', 'Priority') + incChk('location', 'Location (city/state)') + incChk('reference', 'Reference #') + '</div>' +
         '<div class="bwn-bo-row"><label>Your contact details (shown in the request)</label></div>' +
@@ -820,9 +896,14 @@
       var fromEl = document.getElementById('bo-from');
       fromEl.addEventListener('change', function () { pv.srcdoc = htmlFor(fromEl.value.trim()); });
 
+      // draftBlocked persists in openState so the "maybe-sent -> disable the un-deduped Outlook
+      // draft" guard survives a Back/Next re-render (a fresh footer would otherwise re-enable it).
+      var draftDis = openState.draftBlocked
+        ? ' disabled title="Disabled - this bid may already have sent. Check &quot;Who opened&quot; before any resend."'
+        : '';
       var pft = footer('<span class="sp">' + mail.bcc.length + ' recipient' + (mail.bcc.length === 1 ? '' : 's') + ', all BCC</span>' +
         '<button id="bo-back">← Back</button>' +
-        '<button id="bo-draft">Outlook draft instead</button>' +
+        '<button id="bo-draft"' + draftDis + '>Outlook draft instead</button>' +
         '<button class="pri" id="bo-send">⚡ Send now (' + mail.bcc.length + ')</button>');
       function syncSubject() { var s = (document.getElementById('bo-subj') || {}).value; if (s != null && s.trim()) { mail.subject = s.trim(); openState.subject = s.trim(); } }
       pft.querySelector('#bo-back').addEventListener('click', function () {
@@ -841,16 +922,44 @@
         if (!/^[^\s@]+@[^\s@]+\.[A-Za-z]{2,}$/.test(from)) { toast('Enter your send-from email first.'); return; }
         if (!GM_getValue('ingest_key', '')) { toast('Set the SWA ingest key first (Tampermonkey menu → "Set SWA ingest key") - or use "Outlook draft instead".'); return; }
         syncSubject();
+        var html = htmlFor(from);
+        // Idempotency key derived PURELY from the bid content (from + sorted recipients +
+        // subject + body). No per-panel nonce on purpose: the same bid MUST dedup no matter how
+        // it is re-sent - a Back/Next retry, a reopened panel, even a second browser tab or
+        // device. The server's audit log is date-pruned to ~today+yesterday, so that becomes
+        // the natural dedup window: an identical re-bid days later finds no entry and is allowed,
+        // while an EDITED bid hashes differently and is always allowed.
+        // from + recipients are LOWERCASED to mirror the server's normalization (it lowercases
+        // before sending) - otherwise "Vendor@Co.com" vs "vendor@co.com" would miss dedup.
+        var idemFrom = from.toLowerCase();
+        var idemBcc = (mail.bcc || []).map(function (e) { return String(e || '').trim().toLowerCase(); }).sort().join(',');
+        var idem = 'b' + cyrb53([idemFrom, idemBcc, mail.subject || '', html].join('|'));
         var btn = document.getElementById('bo-send');
         btn.disabled = true; btn.textContent = 'Sending…';
-        sendBid(from, mail, htmlFor(from)).then(function (r) {
+        sendBid(from, mail, html, idem).then(function (r) {
           if (r.ok) {
             GM_setValue('send_from', from);
-            toast('✅ Sent to ' + r.sent + ' vendor' + (r.sent === 1 ? '' : 's') + ' from ' + from + '. Replies come to your inbox; the email is in your Sent Items.');
+            if (r.duplicate) { toast('This bid was already submitted - not re-sent. Use the "📊 Who opened" menu item to check status.'); close(); return; }
+            var failNote = (r.failed > 0) ? (' (' + r.failed + ' could not be sent)') : '';
+            var trackNote = r.tracked ? ' Per-vendor open tracking is on - use the "📊 Who opened" menu item to see who has viewed it.' : '';
+            toast('✅ Sent to ' + r.sent + ' vendor' + (r.sent === 1 ? '' : 's') + failNote + ' from ' + from + '. Replies come to your inbox; the email is in your Sent Items.' + trackNote);
             close(); return;
           }
           btn.disabled = false; btn.textContent = '⚡ Send now (' + mail.bcc.length + ')';
           if (r.code === 'NO_KEY') { toast('Set the SWA ingest key first (Tampermonkey menu).'); return; }
+          // "Maybe sent" outcomes: the request may have reached Graph and delivered some/all
+          // emails (timeout, still-in-flight, or a 5xx AFTER a possible send). We must NOT nudge
+          // the user to the Outlook draft - a mailto to every recipient with no dedup - so we
+          // DISABLE it and steer to the open-tracking view. A server resend of the unchanged
+          // bid is idempotent (safe); the draft is not.
+          var maybeSent = (r.code === 'NET' || r.code === 'IN_PROGRESS' || r.code === 500 || r.code === 502 || r.code === 504);
+          if (maybeSent) {
+            openState.draftBlocked = true;   // persist so a Back/Next re-render keeps the draft disabled
+            var draftBtn = document.getElementById('bo-draft');
+            if (draftBtn) { draftBtn.disabled = true; draftBtn.title = 'Disabled - this bid may already have sent. Check "Who opened" before any resend.'; }
+            if (r.code === 'IN_PROGRESS') { toast('This bid is still sending - give it a moment, then use "📊 Who opened" to confirm. Please don’t resend, and don’t use the Outlook draft (it would duplicate).'); return; }
+            toast('The send may have already gone out (server was slow or the connection dropped). Check "📊 Who opened" before resending. A server resend of the unchanged bid is de-duplicated; the Outlook draft is not, so it’s disabled.'); return;
+          }
           if (r.code === 503 && /awaiting/i.test(r.msg || '')) { toast('One-click send isn’t live yet - the Graph app registration is still pending with IT. Use "Outlook draft instead" for now.'); return; }
           if (r.code === 403 && /allowlist/i.test(r.msg || '')) { toast('That send-from address isn’t on the server allowlist - ask IT/admin to add it (BID_FROM_ALLOWED).'); return; }
           if (r.code === 429) { toast('Daily send ceiling reached - try again tomorrow or use the Outlook draft.'); return; }
@@ -860,6 +969,69 @@
     }
 
     draw();
+  }
+
+  // ---- Read-receipts: "who opened our bid" (per-vendor tracking) ---------------
+  function fmtWhen(iso) { if (!iso) return ''; try { return new Date(iso).toLocaleString(); } catch (e) { return String(iso); } }
+  function openStatusPanel() {
+    if (!woNumber()) { toast('Open a work order first.'); return; }
+    if (!GM_getValue('ingest_key', '')) { toast('Set the SWA ingest key first (Tampermonkey menu -> "Set SWA ingest key").'); return; }
+    ensureStyle();
+    var prev = document.getElementById('bwn-bo-statusov'); if (prev) prev.remove();
+    var ov = document.createElement('div'); ov.id = 'bwn-bo-statusov';
+    ov.style.cssText = 'position:fixed;inset:0;z-index:2147483600;background:rgba(15,30,22,.45);display:flex;align-items:flex-start;justify-content:center;padding:6vh 16px;font-family:' + FONT + ';';
+    var card = document.createElement('div');
+    card.style.cssText = 'background:#fff;border-radius:12px;max-width:560px;width:100%;max-height:84vh;overflow:auto;box-shadow:0 12px 40px rgba(0,0,0,.28);';
+    card.innerHTML = '<div style="padding:16px 20px;border-bottom:1px solid #dde6e1;display:flex;align-items:center;gap:10px;">' +
+      '<div style="font-size:16px;font-weight:500;color:#0d3d26;">Who opened our bid</div><span style="flex:1;"></span>' +
+      '<button id="bwn-bo-stclose" style="border:0;background:#eef2f0;border-radius:6px;padding:6px 10px;cursor:pointer;font-size:14px;color:#1f2a24;">Close</button></div>' +
+      '<div id="bwn-bo-stbody" style="padding:16px 20px;color:#1f2a24;font-size:14px;">Loading…</div>';
+    ov.appendChild(card); document.body.appendChild(ov);
+    function close() { ov.remove(); document.removeEventListener('keydown', onKey, true); }
+    function onKey(e) { if (e.key === 'Escape') close(); }
+    document.addEventListener('keydown', onKey, true);
+    ov.addEventListener('mousedown', function (e) { if (e.target === ov) close(); });
+    card.querySelector('#bwn-bo-stclose').addEventListener('click', close);
+    var body = card.querySelector('#bwn-bo-stbody');
+    loadWO(woNumber()).then(function (wo) {
+      var tracking = wo && wo.trackingNumber;
+      return bidStatus(tracking).then(function (res) { renderStatus(body, res, tracking); });
+    }).catch(function (e) { body.innerHTML = '<div style="color:#b91c1c;">Could not load: ' + esc(e.message) + '</div>'; });
+  }
+  function renderStatus(body, res, tracking) {
+    if (!res.ok) {
+      if (res.code === 'NO_KEY') { body.innerHTML = 'Set the SWA ingest key first (Tampermonkey menu).'; return; }
+      if (res.code === 503) { body.innerHTML = '<div style="color:#8a4b12;">Open tracking isn\'t live yet - it turns on once IT sets the tracking base URL on the SWA. Sends still go out; only this read-receipt view is dark.</div>'; return; }
+      body.innerHTML = '<div style="color:#b91c1c;">Could not load status: ' + esc(res.msg || ('HTTP ' + res.code)) + '</div>'; return;
+    }
+    var sends = res.sends || [];
+    if (!sends.length) {
+      body.innerHTML = '<div style="color:#5a6b62;">No tracked bid sends yet for ' + (tracking ? ('Tracking #' + esc(tracking)) : 'this work order') + '.<br><span style="font-size:12px;">Per-vendor tracking only records opens for bids sent after it was enabled.</span></div>';
+      return;
+    }
+    var html = '';
+    sends.forEach(function (s) {
+      var vs = s.vendors || [];
+      var openedN = vs.filter(function (v) { return v.opened; }).length;
+      var sentN = vs.filter(function (v) { return v.sendOk !== false; }).length;
+      html += '<div style="border:1px solid #dde6e1;border-radius:8px;margin-bottom:12px;overflow:hidden;">' +
+        '<div style="padding:10px 12px;background:#f3f7f5;border-bottom:1px solid #dde6e1;">' +
+        '<div style="font-weight:500;color:#0d3d26;">' + esc(s.subject || 'Bid request') + '</div>' +
+        '<div style="font-size:12px;color:#5a6b62;margin-top:2px;">Sent ' + esc(fmtWhen(s.ts)) + ' · ' + openedN + ' of ' + sentN + ' opened</div></div><div>';
+      vs.forEach(function (v) {
+        var icon, color, note;
+        if (v.sendOk === false) { icon = '⚠'; color = '#8a4b12'; note = 'not delivered'; }
+        else if (v.opened) { icon = '👁'; color = '#1a5f3e'; note = 'opened' + (v.openCount > 1 ? (' x' + v.openCount) : '') + (v.firstOpenTs ? (' · ' + fmtWhen(v.firstOpenTs)) : ''); }
+        else { icon = '○'; color = '#9aa8a1'; note = 'not opened yet'; }
+        html += '<div style="display:flex;align-items:center;gap:10px;padding:8px 12px;border-top:1px solid #eef2f0;">' +
+          '<span style="font-size:15px;width:18px;text-align:center;">' + icon + '</span>' +
+          '<span style="flex:1;min-width:0;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;">' + esc(v.email || v.name || '(unknown)') + '</span>' +
+          '<span style="font-size:12px;color:' + color + ';white-space:nowrap;">' + esc(note) + '</span></div>';
+      });
+      html += '</div></div>';
+    });
+    html += '<div style="font-size:11px;color:#9aa8a1;line-height:1.5;">Open tracking is a soft signal: some mail apps (Apple Mail Privacy, Gmail image proxy) pre-load images and can show an open the recipient never made. Use it to prioritize follow-up, not as proof of reading.</div>';
+    body.innerHTML = html;
   }
 
   // ---- Launcher: "📤 Bid-Out ▾" dropdown in the See-Who-Is-Available row -------
@@ -883,6 +1055,9 @@
     }
     menu.appendChild(item('Bid out to our vendors', {}));
     menu.appendChild(item('Invite outside / net-new vendors too…', { invite: true }));
+    var statusIt = document.createElement('button'); statusIt.type = 'button'; statusIt.className = 'bwn-bo-dditem'; statusIt.textContent = '📊 Who opened our bids';
+    statusIt.addEventListener('click', function (e) { e.stopPropagation(); menu.style.display = 'none'; openStatusPanel(); });
+    menu.appendChild(statusIt);
     function onDoc(e) { if (!wrap.contains(e.target)) { menu.style.display = 'none'; document.removeEventListener('mousedown', onDoc, true); } }
     btn.addEventListener('click', function (e) {
       e.stopPropagation(); var show = menu.style.display === 'none'; menu.style.display = show ? 'block' : 'none';
@@ -927,6 +1102,7 @@
     var d = e && e.detail; if (!d || !woNumber()) return;
     if (d.id === 'bidout:invite') launchPanel({ invite: true, seedLeads: (d.leads && d.leads.length) ? d.leads : null });
     else if (d.id === 'bidout:open') launchPanel({});
+    else if (d.id === 'bidout:status') openStatusPanel();
   }, false);
 
   // ---- Key management (Tampermonkey menu) ------------------------------------
