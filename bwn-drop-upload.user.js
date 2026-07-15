@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         BWN Drop Upload (Broadway National)
 // @namespace    broadwaynational.bwn
-// @version      1.3.4
+// @version      1.3.5
 // @downloadURL  https://raw.githubusercontent.com/Intermu/userscripts/main/bwn-drop-upload.user.js
 // @updateURL    https://raw.githubusercontent.com/Intermu/userscripts/main/bwn-drop-upload.user.js
 // @description  Drop files anywhere on an Umbrava work order to upload them. Opens the Documents tab and upload dialog, hands over the files, and builds each file's description from its contents. Emails are parsed locally (.msg via an OLE/MAPI reader, .eml via RFC822) into an Outlook-style block - From/Sent/To/Cc/Subject and the body - that becomes the WO note. Umbrava's Description field is a locked react-aria combobox that rejects programmatic fills, so the description goes on your clipboard for a one-tap Ctrl+V. You review and Save everything. Runs in the browser only: no network access, no grants.
@@ -15,7 +15,7 @@
 (function () {
   'use strict';
 
-  var VER = '1.3.4';
+  var VER = '1.3.5';
   console.info('[BWN DROP UPLOAD] v' + VER + ' · Email→note: real .msg (OLE/MAPI) + .eml parsing · Description: clipboard-paste assist (locked react-aria combobox)');
 
   // Active only on WO pages; checked at drag time so SPA navigation needs no watcher.
@@ -841,6 +841,10 @@
 
   window.addEventListener('dragenter', function (e) {
     if (!onWorkOrder() || !hasFiles(e)) return;
+    // Yield to the Create Work Order modal: when BWN WO Intake's drop zone is present (or the
+    // Create WO modal is open), a file drag is meant for THAT modal's prefill, not this page's
+    // document upload - so don't throw the full-screen overlay over it and steal the drop.
+    if (document.getElementById('bwn-wo-drop') || document.querySelector('textarea#scopeOfWork')) return;
     showOverlay();
   }, true);
 
