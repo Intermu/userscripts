@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         BWN Drop Upload (Broadway National)
 // @namespace    broadwaynational.bwn
-// @version      1.3.5
+// @version      1.3.6
 // @downloadURL  https://raw.githubusercontent.com/Intermu/userscripts/main/bwn-drop-upload.user.js
 // @updateURL    https://raw.githubusercontent.com/Intermu/userscripts/main/bwn-drop-upload.user.js
 // @description  Drop files anywhere on an Umbrava work order to upload them. Opens the Documents tab and upload dialog, hands over the files, and builds each file's description from its contents. Emails are parsed locally (.msg via an OLE/MAPI reader, .eml via RFC822) into an Outlook-style block - From/Sent/To/Cc/Subject and the body - that becomes the WO note. Umbrava's Description field is a locked react-aria combobox that rejects programmatic fills, so the description goes on your clipboard for a one-tap Ctrl+V. You review and Save everything. Runs in the browser only: no network access, no grants.
@@ -15,8 +15,8 @@
 (function () {
   'use strict';
 
-  var VER = '1.3.5';
-  console.info('[BWN DROP UPLOAD] v' + VER + ' · Email→note: real .msg (OLE/MAPI) + .eml parsing · Description: clipboard-paste assist (locked react-aria combobox)');
+  var VER = '1.3.6';
+  console.info('[BWN DROP UPLOAD] v' + VER + ' · Email→note: real .msg (OLE/MAPI) + .eml parsing · Description: clipboard-paste assist · bwn:cmd dropupload:files bridge (WO Intake auto-attach)');
 
   // Active only on WO pages; checked at drag time so SPA navigation needs no watcher.
   function onWorkOrder() {
@@ -855,6 +855,30 @@
 
   window.addEventListener('dragend', hideOverlay, true);
   window.addEventListener('drop', hideOverlay, true);
+
+  // Programmatic entry: BWN WO Intake hands the just-created WO's PO email (+ any attachments)
+  // here via bwn:cmd right after the WO is created, so they upload to Documents + draft the
+  // email note through the EXACT same flow as a manual drop. Acks so the caller knows it landed.
+  // No-op off a WO detail page or with no files.
+  document.addEventListener('bwn:cmd', function (e) {
+    var d = e && e.detail;
+    if (!d || d.id !== 'dropupload:files' || !d.files || !d.files.length || !onWorkOrder()) return;
+    var raw = [], dt = new DataTransfer();
+    for (var i = 0; i < d.files.length; i++) { try { dt.items.add(d.files[i]); raw.push(d.files[i]); } catch (e2) { } }
+    if (!raw.length) return;
+    try { document.dispatchEvent(new CustomEvent('bwn:evt', { detail: { id: 'dropupload:accepted', count: raw.length } })); } catch (e3) { }
+    var originTab = (function () { var t = document.querySelector('[role="tab"][aria-selected="true"]'); return t ? (t.textContent || '').trim() : ''; })();
+    var ctx = { aborted: false };
+    var described = Promise.all(raw.map(describeFile));
+    described.then(function (files) {
+      if (ctx.aborted) return;
+      var fresh = pending && (Date.now() - pending.ts < PENDING_TTL);
+      var merged = fresh ? pending.files.concat(files) : files;
+      var origin = (fresh && pending.originTab) ? pending.originTab : originTab;
+      pending = { ts: Date.now(), files: merged, noteText: buildNoteText(merged), originTab: origin };
+    });
+    handleDrop(dt, described, ctx);
+  }, false);
 
   // ---- Toast -----------------------------------------------------------------
 

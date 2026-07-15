@@ -1,10 +1,10 @@
 // ==UserScript==
 // @name         BWN WO Intake (Broadway National)
 // @namespace    broadwaynational.bwn
-// @version      0.2.0
+// @version      0.3.0
 // @downloadURL  https://raw.githubusercontent.com/Intermu/userscripts/main/bwn-wo-intake.user.js
 // @updateURL    https://raw.githubusercontent.com/Intermu/userscripts/main/bwn-wo-intake.user.js
-// @description  Drop a client PO email (.msg or .eml) onto the Create Work Order modal and it prefills the fields from the email body - Scope (the Description), Source PO #, Client, Location (PFJ store #, zero-padded), Trade (from the asset), and Priority - and surfaces the Client DNE (the PO NTE). Reads the email entirely in the browser via a built-in Outlook .msg reader; nothing is uploaded. (Auto-attaching the email + its files to the new WO's Documents is the next stage.) Best-effort: review every field before you click Create.
+// @description  Drop a client PO email (.msg or .eml) onto the Create Work Order modal and it prefills the fields from the email body - Scope (the Description), Source PO #, Client, Location (PFJ store #, zero-padded), Trade (from the asset), and Priority - and surfaces the Client DNE (the PO NTE). Then, after you Create the WO, it hands the email to BWN Drop Upload to attach it to the new WO's Documents and draft the email note. Reads the email entirely in the browser via a built-in Outlook .msg reader; nothing is uploaded to any server. Best-effort: review every field before you click Create.
 // @match        https://app.umbrava.com/*
 // @run-at       document-idle
 // @noframes
@@ -13,9 +13,9 @@
 
 (function () {
   'use strict';
-  var VER = '0.2.0';
+  var VER = '0.3.0';
   var FONT = "-apple-system,BlinkMacSystemFont,'Segoe UI','Helvetica Neue',Arial,sans-serif";
-  console.info('[BWN WO INTAKE] v' + VER + ' - drop a PO email (.msg/.eml) on Create Work Order to prefill; reads locally, nothing leaves the browser');
+  console.info('[BWN WO INTAKE] v' + VER + ' - drop a PO email (.msg/.eml) on Create Work Order to prefill + auto-attach to the new WO Documents (via Drop Upload); reads locally, nothing leaves the browser');
 
   function toast(msg, ms) {
     var t = document.createElement('div');
@@ -164,7 +164,7 @@
     // Client DNE has no field in this modal - surface it (set on the WO after Create). Never
     // put it in Vendor NTE: the PO NTE is the CLIENT ceiling, not what we authorize a vendor.
     if (wo.clientDne) info.push('Client DNE (PO NTE): $' + wo.clientDne + ' - set on the WO after Create');
-    try { PENDING_EMAIL = wo._file || null; } catch (e) { }
+    try { PENDING = wo._file ? { file: wo._file, po: wo.po, client: wo.client } : null; } catch (e) { }
     var parts = [];
     if (done.length) parts.push('Filled ' + done.join(', '));
     if (assist.length) parts.push('typed ' + assist.join(' / ') + ' - pick from the list');
@@ -173,7 +173,72 @@
     toast('From the PO email - ' + parts.join(' · '), 15000);
   }
 
-  var PENDING_EMAIL = null;
+  // ---- Stage 2: carry the dropped email to the new WO, then auto-attach to Documents ------
+  // On Create, stash the file(s) in IndexedDB (survives the create->WO-page hop, SPA nav OR a
+  // reload). On the new WO page, hand them to BWN Drop Upload via bwn:cmd - it uploads them to
+  // Documents AND drafts the email as a WO note (its existing flow). All local; no egress.
+  var PENDING = null;   // { file, po, client } - set on a successful drop
+  function idbReq(mode, fn) {
+    return new Promise(function (res, rej) {
+      var o = indexedDB.open('bwn-wo-intake', 1);
+      o.onupgradeneeded = function () { o.result.createObjectStore('pending'); };
+      o.onerror = function () { rej(o.error); };
+      o.onsuccess = function () {
+        var db = o.result, tx = db.transaction('pending', mode), st = tx.objectStore('pending'), rq;
+        try { rq = fn(st); } catch (e) { rej(e); return; }
+        tx.oncomplete = function () { res(rq ? rq.result : undefined); };
+        tx.onerror = function () { rej(tx.error); };
+      };
+    });
+  }
+  function idbPut(k, v) { return idbReq('readwrite', function (st) { st.put(v, k); }); }
+  function idbGet(k) { return idbReq('readonly', function (st) { return st.get(k); }); }
+  function idbDel(k) { return idbReq('readwrite', function (st) { st.delete(k); }).catch(function () { }); }
+
+  // On the modal's Create click (with a dropped email pending), persist for the new WO page.
+  // fromPath lets the new page tell a real create-navigation from a validation failure (modal
+  // stays -> same path -> we don't consume). Scoped to the modal's own Create button.
+  document.addEventListener('click', function (e) {
+    if (!PENDING || !PENDING.file) return;
+    var btn = e.target && e.target.closest ? e.target.closest('button') : null;
+    if (!btn || !/^create\b/i.test((btn.textContent || '').trim())) return;
+    var m = woModal(); if (!m || !m.contains(btn)) return;
+    idbPut('current', { ts: Date.now(), fromPath: location.pathname, files: [PENDING.file], po: PENDING.po || '', client: PENDING.client || '' }).catch(function () { });
+  }, true);
+
+  function waitWoReady(timeoutMs) {
+    return new Promise(function (resolve) {
+      var t0 = Date.now();
+      (function poll() {
+        if (document.querySelector('[role="tab"]') || document.querySelector('[data-testid^="documents-"]')) return resolve(true);
+        if (Date.now() - t0 > (timeoutMs || 9000)) return resolve(false);
+        setTimeout(poll, 250);
+      })();
+    });
+  }
+  var _consuming = false;
+  function maybeConsumePending() {
+    if (_consuming || !/\/work-orders\/\d+/.test(location.pathname)) return;
+    idbGet('current').then(function (p) {
+      if (!p || !p.files || !p.files.length) return;
+      if (Date.now() - p.ts > 3 * 60 * 1000) { idbDel('current'); return; }   // stale
+      if (p.fromPath === location.pathname) return;                            // create failed / not navigated yet - wait
+      _consuming = true;
+      idbDel('current');   // consume-once: delete before dispatch so a re-check can't double-fire
+      waitWoReady(9000).then(function () {
+        var acked = false;
+        function onAck(ev) { if (ev && ev.detail && ev.detail.id === 'dropupload:accepted') acked = true; }
+        document.addEventListener('bwn:evt', onAck, false);
+        try { document.dispatchEvent(new CustomEvent('bwn:cmd', { detail: { id: 'dropupload:files', files: p.files } })); } catch (e) { }
+        setTimeout(function () {
+          document.removeEventListener('bwn:evt', onAck, false);
+          if (acked) toast('Handed the PO email to Drop Upload - attaching to this WO\'s Documents + drafting the note. Review + Save.', 11000);
+          else toast('Could not auto-attach: BWN Drop Upload not detected (install/update it). Drag the .msg onto the Work Order to attach it.', 13000);
+          _consuming = false;
+        }, 1800);
+      });
+    }).catch(function () { });
+  }
 
   async function handleDrop(file, root) {
     try {
@@ -217,4 +282,8 @@
   obs.observe(document.body, { childList: true, subtree: true });
   setInterval(injectDropZone, 900);
   injectDropZone();
+  // Stage-2 consumer: on SPA path change to a new WO, and on direct load/reload onto one.
+  var _lastPath = location.pathname;
+  setInterval(function () { if (location.pathname !== _lastPath) { _lastPath = location.pathname; maybeConsumePending(); } }, 700);
+  maybeConsumePending();
 })();
