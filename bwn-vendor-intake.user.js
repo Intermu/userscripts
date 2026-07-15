@@ -184,7 +184,7 @@
   // The real IRS fillable W-9 has no /TU tooltips, UTF-16BE field names, and its values live in
   // compressed object streams (so inflateAll must run first). We decode each field's /T name and
   // read its scoped /V. The name-to-meaning map is the IRS convention verified against a real
-  // 2024 W-9 (see extractW9Fillable). Numbering is revision-specific, so we normalise leading
+  // 2024 W-9 (see extractW9Fillable). Numbering is revision-specific, so we normalize leading
   // zeros (2018 "f1_01" -> "f1_1") and validate lengths before trusting a TIN.
   function decodeName(bytes) {
     // bytes: a latin1 string (PDF escapes already resolved). UTF-16BE if it starts with a BE BOM.
@@ -214,7 +214,7 @@
     var occ = fieldOccurrences(s), text = {};
     for (var i = 0; i < occ.length; i++) {
       // Scope /V to THIS field's own dict: stop at the next /T (and cap the window) so a value
-      // never bleeds in from a neighbouring field.
+      // never bleeds in from a neighboring field.
       var next = (i + 1 < occ.length) ? occ[i + 1].start : s.length;
       var region = s.slice(occ[i].end, Math.min(next, occ[i].end + 600));
       var vm = region.match(/\/V\s*\(((?:\\.|[^)\\])*)\)/);
