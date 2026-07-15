@@ -1,21 +1,32 @@
 // ==UserScript==
 // @name         BWN Vendor Intake (Broadway National)
 // @namespace    broadwaynational.bwn
-// @version      0.2.0
+// @version      0.4.0
 // @downloadURL  https://raw.githubusercontent.com/Intermu/userscripts/main/bwn-vendor-intake.user.js
 // @updateURL    https://raw.githubusercontent.com/Intermu/userscripts/main/bwn-vendor-intake.user.js
-// @description  Prefills Umbrava's Create Vendor form from a Prospect Set-Up Form. Adds a "Prefill from document" button to the modal: you pick the filled PDF, it reads the fields in the browser and fills Company, contact name/email/phone, Type, and the address, then opens the Trade(s) list for you to pick. It flags when Umbrava already has a matching vendor. Entity is left for you (the W-9 says C vs S corp, and that file is a scanned image). Runs entirely in the browser - no network access, no keys, nothing leaves your machine.
+// @description  Prefills Umbrava's Create Vendor form (and the detail-page Tax ID) from a Prospect Set-Up Form or a W-9. Fillable PDFs are read straight from their form fields; SCANNED W-9s are read by on-device OCR (Tesseract + pdf.js, fetched once at install, run entirely in the browser). The document and its tax ID never leave your machine. Adds a "Prefill from document" button; every extracted field is a suggestion to review before saving - the TIN especially, since OCR can misread digits.
 // @match        https://app.umbrava.com/*
 // @run-at       document-idle
 // @noframes
-// @grant        none
+// @grant        GM_getResourceURL
+// @require      https://cdn.jsdelivr.net/npm/pdfjs-dist@3.11.174/build/pdf.min.js
+// @require      https://cdn.jsdelivr.net/npm/tesseract.js@6.0.1/dist/tesseract.min.js
+// @resource     pdfWorker   https://cdn.jsdelivr.net/npm/pdfjs-dist@3.11.174/build/pdf.worker.min.js
+// @resource     tessWorker  https://cdn.jsdelivr.net/npm/tesseract.js@6.0.1/dist/worker.min.js
+// @resource     tessCore    https://cdn.jsdelivr.net/npm/tesseract.js-core@6.0.0/tesseract-core-simd-lstm.wasm.js
+// @resource     tessCoreFb  https://cdn.jsdelivr.net/npm/tesseract.js-core@6.0.0/tesseract-core-lstm.wasm.js
+// @resource     tessLangEng https://cdn.jsdelivr.net/npm/@tesseract.js-data/eng@1.0.0/4.0.0_best_int/eng.traineddata.gz
 // ==/UserScript==
 
 (function () {
   'use strict';
 
-  var VER = '0.2.0';
-  console.info('[BWN VENDOR INTAKE] v' + VER + ' - prefill Create Vendor from the Prospect Set-Up Form or a fillable W-9 (local PDF parse, zero egress; TIN stays local)');
+  var VER = '0.4.0';
+  // v0.4.0 - real IRS fillable W-9 support: map by FIELD NAME (UTF-16BE-decoded f1_/c1_1 names)
+  // after inflating compressed object streams, since the IRS form carries no /TU tooltips; the
+  // tooltip mapping stays as a fallback for other fillable forms. Also fixed stream inflation to
+  // survive the browser DecompressionStream's strict "trailing junk" error. TIN still never egressed.
+  console.info('[BWN VENDOR INTAKE] v' + VER + ' - prefill Create Vendor from a Prospect Set-Up Form, fillable W-9, or SCANNED W-9 (on-device OCR); document + TIN stay local');
 
   var FONT = "-apple-system,BlinkMacSystemFont,'Segoe UI','Helvetica Neue',Arial,sans-serif";
 
@@ -39,17 +50,28 @@
     while ((m = re.exec(s))) { var k = unesc(m[1]).trim(), v = unesc(m[2]).trim(); if (k && v && !(k in out)) out[k] = v; }
     return out;
   }
+  // Inflate one stream. PDF stream slices routinely carry a few trailing bytes past the real
+  // deflate end (we cut at the next "endstream", not at the exact /Length), and the browser's
+  // DecompressionStream is STRICT - it throws "trailing junk" at flush. So pump the decoder by
+  // hand and keep the output collected BEFORE that error fires (all real data is already out by
+  // then). This is what lets us read the IRS fillable W-9, whose fields live in compressed
+  // object streams. (A single pipeThrough(...).arrayBuffer() would reject and lose everything.)
+  async function inflateOne(bytes, fmt) {
+    var ds, writer, reader;
+    try { ds = new DecompressionStream(fmt); writer = ds.writable.getWriter(); reader = ds.readable.getReader(); }
+    catch (e) { return null; }
+    writer.write(bytes).catch(function () { }); writer.close().catch(function () { });
+    var chunks = [], total = 0;
+    try { while (true) { var r = await reader.read(); if (r.done) break; chunks.push(r.value); total += r.value.length; } }
+    catch (e) { /* trailing junk after the valid data - keep what decompressed */ }
+    if (!total) return null;
+    var all = new Uint8Array(total), off = 0;
+    chunks.forEach(function (c) { all.set(c, off); off += c.length; });
+    return all;
+  }
   async function inflate(bytes) {
     if (typeof DecompressionStream !== 'function') return null;
-    var fmts = ['deflate', 'deflate-raw'];
-    for (var i = 0; i < fmts.length; i++) {
-      try {
-        var ds = new DecompressionStream(fmts[i]);
-        var ab = await new Response(new Blob([bytes]).stream().pipeThrough(ds)).arrayBuffer();
-        return new Uint8Array(ab);
-      } catch (e) { /* try next */ }
-    }
-    return null;
+    return (await inflateOne(bytes, 'deflate')) || (await inflateOne(bytes, 'deflate-raw'));
   }
   async function inflateAll(u8) {
     var s = latin1(u8), re = /stream\r?\n/g, m, chunks = [];
@@ -75,10 +97,14 @@
   }
 
   // ---- W-9 (best-effort, local) -------------------------------------------
-  // A FILLABLE IRS W-9 is an AcroForm too, but its field NAMES are cryptic (f1_01 ...),
-  // so we map by each field's TOOLTIP (/TU) - the human description - the way Core reads
-  // MUI fields by label. A SIGNED/SCANNED W-9 is an image with no form fields: it yields
-  // nothing here and is handled with a manual-entry message (OCR is the separate next stage).
+  // Two kinds of W-9 we can read locally:
+  //  (1) The REAL IRS fillable W-9. Its fields have cryptic XFA names (f1_1, c1_1[..]) with NO
+  //      /TU tooltips, UTF-16BE-encoded, and the values sit in compressed object streams. We map
+  //      by FIELD NAME after inflating (extractW9Fillable) - see the IRS convention there.
+  //  (2) A non-IRS fillable form that DOES carry /TU tooltips. We map by tooltip (extractW9) as a
+  //      fallback, the way Core reads MUI fields by label.
+  // A SIGNED/SCANNED W-9 is an image with no form fields: it yields nothing here and is handled
+  // by on-device OCR (the separate stage below).
   // Everything stays local; the TIN is never logged, toasted, or sent anywhere.
   function acroFieldsFromStr(s) {
     // For each /T(name), look a short window ahead for its /TU(tooltip) + /V(value) (same
@@ -153,17 +179,233 @@
     var tt = findTIN(af.text); out.tin = tt.tin; out.tinKind = tt.kind;
     return out;
   }
+
+  // ---- Fillable IRS W-9: map by FIELD NAME --------------------------------
+  // The real IRS fillable W-9 has no /TU tooltips, UTF-16BE field names, and its values live in
+  // compressed object streams (so inflateAll must run first). We decode each field's /T name and
+  // read its scoped /V. The name-to-meaning map is the IRS convention verified against a real
+  // 2024 W-9 (see extractW9Fillable). Numbering is revision-specific, so we normalise leading
+  // zeros (2018 "f1_01" -> "f1_1") and validate lengths before trusting a TIN.
+  function decodeName(bytes) {
+    // bytes: a latin1 string (PDF escapes already resolved). UTF-16BE if it starts with a BE BOM.
+    if (bytes.charCodeAt(0) === 0xFE && bytes.charCodeAt(1) === 0xFF) {
+      var out = '';
+      for (var i = 2; i + 1 < bytes.length; i += 2) out += String.fromCharCode((bytes.charCodeAt(i) << 8) | bytes.charCodeAt(i + 1));
+      return out;
+    }
+    return bytes;
+  }
+  function fieldOccurrences(s) {
+    // Every /T name occurrence (literal (..) or hex <..>) with its byte span, in document order.
+    var occ = [], re = /\/T\s*(?:\(((?:\\.|[^)\\])*)\)|<([0-9A-Fa-f\s]+)>)/g, m;
+    while ((m = re.exec(s))) {
+      var bytes;
+      if (m[1] !== undefined) bytes = unesc(m[1]);
+      else { var hx = m[2].replace(/\s+/g, ''), b = ''; for (var i = 0; i + 1 < hx.length; i += 2) b += String.fromCharCode(parseInt(hx.substr(i, 2), 16)); bytes = b; }
+      occ.push({ name: decodeName(bytes), start: m.index, end: re.lastIndex });
+    }
+    return occ;
+  }
+  function normKey(name) {
+    var m = /^f1_0*(\d+)\b/.exec(name);   // f1_01[0] / f1_1[0] -> f1_1 (revision-proof)
+    return m ? 'f1_' + m[1] : name;
+  }
+  function fillableFields(s) {
+    var occ = fieldOccurrences(s), text = {};
+    for (var i = 0; i < occ.length; i++) {
+      // Scope /V to THIS field's own dict: stop at the next /T (and cap the window) so a value
+      // never bleeds in from a neighbouring field.
+      var next = (i + 1 < occ.length) ? occ[i + 1].start : s.length;
+      var region = s.slice(occ[i].end, Math.min(next, occ[i].end + 600));
+      var vm = region.match(/\/V\s*\(((?:\\.|[^)\\])*)\)/);
+      var val = vm ? unesc(vm[1]).trim() : '';
+      if (!val) continue;
+      var k = normKey(occ[i].name);
+      if (!(k in text)) text[k] = val;   // first non-empty copy wins (fields recur across revisions)
+    }
+    // Federal tax classification is a RADIO group (c1_1[0..6]); its selection is a NAME object
+    // (/V /2), which the string-only /V regex above can't see. Read it from the c1_1 span only:
+    // prefer the group value /V, fall back to the selected widget's /AS.
+    var radioN = '', c = occ.filter(function (o) { return /^c1_1\[/.test(o.name); });
+    if (c.length) {
+      var span = s.slice(c[0].start, Math.min(c[c.length - 1].end + 300, s.length));
+      var gv = span.match(/\/V\s*\/([1-9])\b/), as = span.match(/\/AS\s*\/([1-9])\b/);
+      radioN = gv ? gv[1] : (as ? as[1] : '');
+    }
+    return { text: text, radioN: radioN, names: occ.map(function (o) { return o.name; }) };
+  }
+  // The IRS fillable W-9 uses c1_1[..] (classification radio) + f1_1[..] (name). That name
+  // signature is what tells us it is a W-9 even though there are no tooltips.
+  function looksLikeW9Fields(names) {
+    var hasRadio = names.some(function (n) { return /^c1_1\[/.test(n); });
+    var hasName = names.some(function (n) { return /^f1_0*1\[/.test(n); });
+    return hasRadio && hasName;
+  }
+  // Radio export value N -> classification (2024 W-9 box order, verified against a real form):
+  // 1 Individual/sole-prop, 2 C corp, 3 S corp, 4 Partnership, 5 Trust/estate, 6 LLC, 7 Other.
+  var W9_CLASS = { '1': 'individual', '2': 'c corp', '3': 's corp', '4': 'partnership', '5': 'trust estate', '6': 'llc', '7': 'other' };
+  function extractW9Fillable(ff) {
+    // IRS 2024 W-9 field map (verified): f1_1 Name (line 1), f1_2 Business name/DBA (line 2),
+    // f1_3 LLC tax-classification letter, f1_7 Address, f1_8 City/State/ZIP, f1_11+f1_12+f1_13 SSN,
+    // f1_14+f1_15 EIN. TIN parts are concatenated and length-checked so a shifted revision degrades
+    // to empty (manual) rather than a wrong number.
+    var out = { name: '', dba: '', entity: '', street: '', city: '', state: '', zip: '', tin: '', tinKind: '' };
+    var t = ff.text;
+    out.name = t.f1_1 || '';
+    out.dba = t.f1_2 || '';
+    out.street = t.f1_7 || '';
+    var csz = t.f1_8 || '';
+    if (csz) {
+      var mz = csz.match(/(.+?),?\s*([A-Za-z]{2})\s+(\d{5}(?:-\d{4})?)\s*$/);
+      if (mz) { out.city = mz[1].replace(/,\s*$/, '').trim(); out.state = mz[2].toUpperCase(); out.zip = mz[3]; }
+      else out.city = csz;
+    }
+    var e1 = (t.f1_14 || '').replace(/\D/g, ''), e2 = (t.f1_15 || '').replace(/\D/g, '');
+    var s1 = (t.f1_11 || '').replace(/\D/g, ''), s2 = (t.f1_12 || '').replace(/\D/g, ''), s3 = (t.f1_13 || '').replace(/\D/g, '');
+    if (e1.length === 2 && e2.length === 7) { out.tin = e1 + '-' + e2; out.tinKind = 'ein'; }
+    else if (s1.length === 3 && s2.length === 2 && s3.length === 4) { out.tin = s1 + '-' + s2 + '-' + s3; out.tinKind = 'ssn'; }
+    else {
+      var eA = e1 + e2, sA = s1 + s2 + s3;   // last resort: 9 digits total, split by kind
+      if (eA.length === 9) { out.tin = eA.slice(0, 2) + '-' + eA.slice(2); out.tinKind = 'ein'; }
+      else if (sA.length === 9) { out.tin = sA.slice(0, 3) + '-' + sA.slice(3, 5) + '-' + sA.slice(5); out.tinKind = 'ssn'; }
+    }
+    if (ff.radioN) {
+      var desc = W9_CLASS[ff.radioN] || '';
+      if (ff.radioN === '6') { var letter = (t.f1_3 || '').trim(); if (letter) desc = 'llc ' + letter; }   // LLC taxed as C/S/P
+      out.entity = classToEntity(desc);
+    }
+    return out;
+  }
+  function mergeW9(a, b) {   // fill only the fields a is missing, from b (tooltip fallback)
+    ['name', 'dba', 'entity', 'street', 'city', 'state', 'zip', 'tin', 'tinKind'].forEach(function (k) { if (!a[k] && b[k]) a[k] = b[k]; });
+    return a;
+  }
+
   async function readDoc(file) {
     var u8 = new Uint8Array(await file.arrayBuffer());
     var raw = latin1(u8);
     var prospect = fieldsFromStr(raw);
-    var af = acroFieldsFromStr(raw);
-    if (!prospect.company_name && !looksLikeW9(af)) {
+    var af = acroFieldsFromStr(raw);            // tooltip path (fallback)
+    var ff = fillableFields(raw);               // field-name path (IRS W-9)
+    // Only inflate if this is actually a fillable form (has an AcroForm). A scanned/image PDF has
+    // none, so we skip inflating its (large) image streams and fall straight to 'scan' -> OCR.
+    // The real IRS W-9 keeps its field values in compressed object streams, so we inflate unless
+    // we've already recognised the doc from the raw bytes.
+    var hasForm = /\/AcroForm|\/FT\s*\/(?:Tx|Btn|Ch)|\/TU\s*\(/.test(raw);
+    if (hasForm && !prospect.company_name && !looksLikeW9(af) && !looksLikeW9Fields(ff.names)) {
       var infl = await inflateAll(u8);
-      if (infl) { var r2 = latin1(infl); Object.assign(prospect, fieldsFromStr(r2)); var af2 = acroFieldsFromStr(r2); af.byTip = af.byTip.concat(af2.byTip); af.text += af2.text; }
+      if (infl) {
+        var r2 = latin1(infl);
+        Object.assign(prospect, fieldsFromStr(r2));
+        var af2 = acroFieldsFromStr(r2); af.byTip = af.byTip.concat(af2.byTip); af.text += af2.text;
+        ff = fillableFields(raw + '\n' + r2);
+      }
     }
-    var kind = looksLikeW9(af) ? 'w9' : (prospect.company_name || prospect.email || prospect.contact_names) ? 'prospect' : (af.byTip.length ? 'unknown' : 'scan');
-    return { kind: kind, prospect: prospect, w9: extractW9(af) };
+    var isW9 = looksLikeW9Fields(ff.names) || looksLikeW9(af);
+    var w9 = extractW9Fillable(ff);             // field-name first
+    if (isW9) w9 = mergeW9(w9, extractW9(af));  // then backfill any gaps from tooltips
+    var kind = isW9 ? 'w9'
+      : (prospect.company_name || prospect.email || prospect.contact_names) ? 'prospect'
+        : (af.byTip.length ? 'unknown' : 'scan');
+    return { kind: kind, prospect: prospect, w9: w9 };
+  }
+
+  // ---- Scanned-W-9 OCR (on-device, zero-egress) ---------------------------
+  // pdf.js rasterizes each page to a canvas; Tesseract (WASM in a Web Worker) OCRs it. The
+  // image + TIN never leave the browser - only the engine assets were fetched once at install
+  // via @require/@resource. The traineddata is served to the worker from a local @resource blob
+  // through a fetch-shim (langPath can't be a blob directly - naptha/tesseract.js#965).
+  // HEAVY libs load lazily: the worker + WASM only spin up the first time a scan is dropped.
+  var _tessWorker = null;
+  function wasmSimdOk() {
+    try { return WebAssembly.validate(new Uint8Array([0, 97, 115, 109, 1, 0, 0, 0, 1, 5, 1, 96, 0, 1, 123, 3, 2, 1, 0, 10, 10, 1, 8, 0, 65, 0, 253, 15, 253, 98, 11])); } catch (e) { return false; }
+  }
+  async function ocrWorker(onProgress) {
+    if (_tessWorker) return _tessWorker;
+    if (typeof Tesseract === 'undefined') throw new Error('OCR engine not loaded - reinstall this script from its URL so @require/@resource fetch the engine.');
+    var coreURL = GM_getResourceURL(wasmSimdOk() ? 'tessCore' : 'tessCoreFb');
+    var trainedURL = GM_getResourceURL('tessLangEng');   // .gz bytes, local blob (same-origin)
+    var realWorker = GM_getResourceURL('tessWorker');
+    // Wrapper worker: intercept any *.traineddata* fetch and serve the local blob instead.
+    var shim = 'var T=' + JSON.stringify(trainedURL) + ';var _f=self.fetch.bind(self);' +
+      'self.fetch=function(u,o){return String(u).indexOf(".traineddata")>=0?_f(T,o):_f(u,o);};' +
+      'importScripts(' + JSON.stringify(realWorker) + ');';
+    var workerURL = URL.createObjectURL(new Blob([shim], { type: 'text/javascript' }));
+    _tessWorker = await Tesseract.createWorker('eng', 1, {
+      workerPath: workerURL, corePath: coreURL, langPath: 'https://local/', gzip: true,
+      logger: onProgress ? function (m) { try { if (m && m.status === 'recognizing text') onProgress(m.progress); } catch (e) { } } : undefined
+    });
+    return _tessWorker;
+  }
+  async function rasterizePages(file, maxPages) {
+    var buf = await file.arrayBuffer();
+    pdfjsLib.GlobalWorkerOptions.workerSrc = GM_getResourceURL('pdfWorker');
+    var task = pdfjsLib.getDocument({ data: new Uint8Array(buf), isEvalSupported: false, disableFontFace: true });
+    var pdf = await task.promise, canvases = [];
+    try {
+      var pages = Math.min(pdf.numPages, maxPages || 2);   // a W-9 is 1 page; cap for safety
+      for (var n = 1; n <= pages; n++) {
+        var page = await pdf.getPage(n);
+        var base = page.getViewport({ scale: 1 });
+        var scale = Math.min(300 / 72, 4000 / Math.max(base.width, base.height));   // ~300 DPI, capped so canvas stays sane
+        var vp = page.getViewport({ scale: scale });
+        var cv = document.createElement('canvas'); cv.width = Math.ceil(vp.width); cv.height = Math.ceil(vp.height);
+        var ctx = cv.getContext('2d', { willReadFrequently: true, alpha: false });
+        await page.render({ canvasContext: ctx, viewport: vp, intent: 'print' }).promise;
+        var img = ctx.getImageData(0, 0, cv.width, cv.height), d = img.data;   // grayscale helps OCR
+        for (var i = 0; i < d.length; i += 4) { var g = (d[i] * 0.299 + d[i + 1] * 0.587 + d[i + 2] * 0.114) | 0; d[i] = d[i + 1] = d[i + 2] = g; }
+        ctx.putImageData(img, 0, 0);
+        canvases.push(cv);
+        page.cleanup();
+      }
+    } finally { try { await task.destroy(); } catch (e) { } }
+    return canvases;
+  }
+  async function ocrPdf(file, onProgress) {
+    if (typeof pdfjsLib === 'undefined') throw new Error('PDF engine not loaded - reinstall this script from its URL.');
+    var canvases = await rasterizePages(file, 2);
+    var worker = await ocrWorker(onProgress);
+    var text = '';
+    for (var i = 0; i < canvases.length; i++) {
+      var r = await worker.recognize(canvases[i]);
+      text += '\n' + ((r && r.data && r.data.text) || '');
+      canvases[i].width = canvases[i].height = 0;   // release the backing store
+    }
+    return text;
+  }
+  // Pull W-9 fields from OCR (or any) free text. Best-effort + label-anchored; the TIN region
+  // gets digit-confusion fixups (O->0 etc.) before matching. Everything is a SUGGESTION.
+  function extractW9FromText(text) {
+    var raw = String(text || '').replace(/\r/g, '');
+    var out = { name: '', dba: '', entity: '', street: '', city: '', state: '', zip: '', tin: '', tinKind: '' };
+    // On a scanned W-9 the value is on the line(s) AFTER the label, so skip past the label's
+    // own line, then return the first substantive line that isn't itself label boilerplate.
+    var LABEL_NOISE = /required on this line|as shown on|do not leave|if different|disregarded entity|check (the )?appropriate|number, street|apt\.?\s*or suite|see instructions|^\d+$/i;
+    function seg(startRe, stopRe) {
+      var m = startRe.exec(raw); if (!m) return '';
+      var rest = raw.slice(m.index + m[0].length);
+      var nl = rest.indexOf('\n');
+      var after = nl >= 0 ? rest.slice(nl + 1) : '';
+      var stop = stopRe ? after.search(stopRe) : -1;
+      var chunk = (stop >= 0 ? after.slice(0, stop) : after);
+      var lines = chunk.split(/\n/).map(function (l) { return l.replace(/^[\s:.\-]+/, '').trim(); }).filter(Boolean);
+      for (var i = 0; i < lines.length; i++) { if (!LABEL_NOISE.test(lines[i])) return lines[i]; }
+      return '';
+    }
+    var NEXT = /\n\s*\n|business name|federal tax|check (the )?appropriate|exempt|address|city,|requester|part i|taxpayer identification|social security|employer identification/i;
+    out.name = seg(/name\s*\(as shown[^)]*\)|^\s*1\s+name\b|name of entity\/individual/im, NEXT);
+    out.dba = seg(/business name[^\n]*|disregarded entity[^\n]*/i, /\n\s*\n|federal tax|check (the )?appropriate|exempt|address|city,/i);
+    out.street = seg(/address\s*\(number[^)]*\)|^\s*5\s+address\b/im, /\n\s*\n|city,|requester|part/i);
+    var csz = seg(/city,\s*state,?\s*and\s*zip[^\n]*|^\s*6\s+city\b/im, /\n\s*\n|requester|part/i);
+    if (csz) { var mz = csz.match(/(.+?),?\s*([A-Za-z]{2})\s+(\d{5}(?:-\d{4})?)/); if (mz) { out.city = mz[1].replace(/,\s*$/, '').trim(); out.state = mz[2].toUpperCase(); out.zip = mz[3]; } else out.city = csz; }
+    var mk = raw.match(/(?:\[x\]|\bx\b\s*|☒|■|✔|✓)\s*(individual|sole propriet|c corporation|s corporation|partnership|trust|estate|limited liability|llc)/i);
+    if (mk) out.entity = classToEntity(mk[1]);
+    // TIN: fix common digit misreads only within a window near a TIN label, then findTIN.
+    var numFixed = raw.replace(/(?:SSN|social security|EIN|employer identification|TIN|tax\s*id\.?)[\s\S]{0,40}/ig, function (chunk) {
+      return chunk.replace(/[OoQ]/g, '0').replace(/[lI|]/g, '1').replace(/S/g, '5').replace(/B/g, '8').replace(/Z/g, '2');
+    });
+    var tt = findTIN(numFixed); out.tin = tt.tin; out.tinKind = tt.kind;
+    return out;
   }
 
   // ---- Field mapping ------------------------------------------------------
@@ -345,8 +587,19 @@
       if (!root) { toast('Open the Create Vendor form first, then use Prefill.', 8000); return; }
       if (doc.kind === 'w9') return fillFromW9(root, doc.w9);
       if (doc.kind === 'prospect') return fillFromProspect(root, doc.prospect);
-      if (doc.kind === 'scan') { toast('That looks like a scanned/printed PDF (an image, no form fields). Scanned-W-9 reading (OCR) is the next stage - for now enter the tax fields manually.', 12000); return; }
-      toast('Could not read fields from that PDF. Use the filled Prospect Set-Up Form or a fillable IRS W-9 (a form you type into, not a scan).', 12000);
+      if (doc.kind === 'scan') {
+        toast('Scanned W-9 - running on-device OCR (~10-30s; the file stays in your browser)...', 45000);
+        var text = await ocrPdf(file);
+        var w9 = extractW9FromText(text);
+        if (w9.name || w9.tin || w9.dba || w9.street) {
+          fillFromW9(root, w9);
+          toast('OCR done - REVIEW every field before saving, the Tax ID especially (OCR can misread digits).', 15000);
+        } else {
+          toast('OCR ran but could not confidently read the W-9 fields - enter them manually.', 12000);
+        }
+        return;
+      }
+      toast('Could not read fields from that PDF. Use the filled Prospect Set-Up Form, a fillable IRS W-9, or a scanned W-9.', 12000);
     } catch (e) { toast('Prefill failed: ' + ((e && e.message) || e), 10000); }
   }
 
@@ -392,12 +645,16 @@
     btn.addEventListener('click', function () { file.value = ''; file.click(); });
     file.addEventListener('change', function () {
       if (!file.files || !file.files[0]) return;
-      readDoc(file.files[0]).then(function (doc) {
-        var el = document.querySelector('input[name="taxId"]');
-        if (doc.w9 && doc.w9.tin && el) { setNativeValue(el, doc.w9.tin); toast('Filled Tax ID from the W-9 (kept local).', 7000); }
-        else if (doc.kind === 'scan') toast('Scanned W-9 (image) - OCR support is the next stage; enter the Tax ID manually for now.', 9000);
-        else toast('Could not read a Tax ID from that file. Use a fillable IRS W-9.', 9000);
-      }).catch(function (e) { toast('Read failed: ' + ((e && e.message) || e), 8000); });
+      var f = file.files[0];
+      function fillTax(tin, note) { var el = document.querySelector('input[name="taxId"]'); if (el && tin) { setNativeValue(el, tin); toast('Filled Tax ID (' + note + ') - kept local. Verify before saving.', 9000); } else toast('No Tax ID found to fill.', 7000); }
+      readDoc(f).then(function (doc) {
+        if (doc.w9 && doc.w9.tin) return fillTax(doc.w9.tin, 'from W-9');
+        if (doc.kind === 'scan') {
+          toast('Scanned W-9 - running on-device OCR (~10-30s, stays local)...', 45000);
+          return ocrPdf(f).then(function (text) { var w9 = extractW9FromText(text); if (w9.tin) fillTax(w9.tin, 'OCR - verify the digits'); else toast('OCR could not read a Tax ID - enter it manually.', 10000); });
+        }
+        toast('Could not read a Tax ID from that file. Use a fillable IRS W-9 or a scanned W-9.', 9000);
+      }).catch(function (e) { toast('Read failed: ' + ((e && e.message) || e), 9000); });
     });
     bar.appendChild(btn); bar.appendChild(hint); bar.appendChild(file);
     var fc = tax.closest('.MuiFormControl-root, .MuiTextField-root') || tax.parentElement;
