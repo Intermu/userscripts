@@ -1,10 +1,10 @@
 // ==UserScript==
 // @name         BWN Bid-Out (Broadway National)
 // @namespace    broadwaynational.bwn
-// @version      0.14.0
+// @version      0.15.0
 // @downloadURL  https://raw.githubusercontent.com/Intermu/userscripts/main/bwn-bid-out.user.js
 // @updateURL    https://raw.githubusercontent.com/Intermu/userscripts/main/bwn-bid-out.user.js
-// @description  Sends a competitive-pricing request to several vendors from a work order. Adds a "Bid-Out" dropdown to the See-Who-Is-Available row: pulls the assignable Umbrava vendors near the site with their emails, can find net-new vendors nearby through Google Places and look up their emails via the BWN scrape-contacts function, and takes pasted outside addresses. You pick who's included, then review the exact recipient list and the rendered email before anything sends. Send from your own mailbox via the SWA send-bid function (Microsoft Graph), or open a plain Outlook draft. Vendors are BCC'd; nothing sends until you click Send. Network access is limited to Umbrava (same-origin), Google Places, and your SWA host.
+// @description  Email RFP to outside / net-new vendors, launched from a caret on Umbrava's own "See Who Is Available" button (network-vendor bidding stays native - no separate Bid-Out button). The caret menu opens the tracked email RFP wizard: finds net-new vendors nearby through Google Places, looks up their emails via the BWN scrape-contacts function, takes pasted outside addresses, and can still include assignable Umbrava vendors in the same email. You pick who's included, then review the exact recipient list and the rendered email before anything sends. Send from your own mailbox via the SWA send-bid function (Microsoft Graph), or open a plain Outlook draft. Vendors are BCC'd; nothing sends until you click Send. Network access is limited to Umbrava (same-origin), Google Places, and your SWA host.
 // @match        https://app.umbrava.com/work-orders/*
 // @run-at       document-idle
 // @noframes
@@ -19,7 +19,7 @@
 (function () {
   'use strict';
 
-  var VER = '0.6.0';
+  var VER = '0.15.0';
   console.info('[BWN BID-OUT] v' + VER + ' - 3-step Build Requests wizard (WO details -> select vendors -> review) · Umbrava vendors + Places net-new discovery + email scrape · one-click Graph send via SWA (Outlook-draft fallback)');
 
   var COMPANY_ADDR = 'Broadway National Group, 100 Davids Dr, Hauppauge, NY 11788';
@@ -441,9 +441,11 @@
     var st = document.createElement('style'); st.id = 'bwn-bidout-style';
     st.textContent =
       '#bwn-bidout-fab{position:fixed;right:18px;bottom:76px;z-index:2147483000;background:#1a5f3e;color:#fff;border:none;border-radius:24px;padding:11px 16px;font:500 14px/1 ' + FONT + ';text-transform:none;box-shadow:0 6px 20px rgba(13,38,26,.28);cursor:pointer;}' +
-      '.bwn-bo-dd{position:relative;display:inline-block;margin-left:8px;vertical-align:middle;}' +
-      '.bwn-bo-ddbtn{background:#1a5f3e;color:#fff;border:none;border-radius:8px;padding:9px 14px;font:500 14px/1 ' + FONT + ';text-transform:none;cursor:pointer;}' +
-      '.bwn-bo-ddbtn .cv{opacity:.85;margin-left:3px;}' +
+      // The caret rides Umbrava's own "See Who Is Available" button as a split-button: the flex
+      // row has gap:16px, so a -12px margin pulls the caret to ~4px off the native button; its
+      // background + height are copied from the native button at mount so it always matches.
+      '.bwn-bo-dd{position:relative;display:inline-block;margin-left:-12px;vertical-align:middle;align-self:center;}' +
+      '.bwn-bo-caret{color:#fff;border:none;border-radius:4px;padding:0 9px;font:500 14px/1 ' + FONT + ';text-transform:none;cursor:pointer;}' +
       '.bwn-bo-ddmenu{position:absolute;top:100%;left:0;margin-top:4px;background:#fff;border:1px solid #dde6e1;border-radius:8px;box-shadow:0 8px 24px rgba(13,38,26,.14);min-width:230px;z-index:2147483000;overflow:hidden;}' +
       '.bwn-bo-dditem{display:block;width:100%;text-align:left;background:#fff;border:none;padding:10px 14px;font:400 14px ' + FONT + ';color:#1f2a24;cursor:pointer;white-space:nowrap;text-transform:none;}' +
       '.bwn-bo-dditem:hover{background:#eef3f0;}' +
@@ -1034,33 +1036,43 @@
     body.innerHTML = html;
   }
 
-  // ---- Launcher: "📤 Bid-Out ▾" dropdown in the See-Who-Is-Available row -------
+  // ---- Launcher: a caret ON Umbrava's own "See Who Is Available" button --------
+  // Bidding OUR network vendors is native Umbrava (See Who Is Available -> Build Requests), so
+  // the old separate "Bid-Out" button + its "Bid out to our vendors" entry were redundant. The
+  // caret extends the native button with only what native CANNOT do: the tracked email RFP to
+  // outside / net-new vendors, and the read-receipt status. The native click stays untouched.
   function launchPanel(opts) { openState = {}; if (opts && opts.invite) openState.focusInvite = true; if (opts && opts.seedLeads && opts.seedLeads.length) openState.seedLeads = opts.seedLeads; openPanel(); }
-  function actionRow() {
+  function seeWhoBtn() {
     var btns = document.querySelectorAll('button');
     for (var i = 0; i < btns.length; i++) {
-      if (/see who is available/i.test((btns[i].textContent || '').trim())) return btns[i].parentElement;
+      if (/see who is available/i.test((btns[i].textContent || '').trim())) return btns[i];
     }
     return null;
   }
-  function buildDropdown() {
+  function buildCaret(nativeBtn) {
     var wrap = document.createElement('span'); wrap.id = 'bwn-bidout-dd'; wrap.className = 'bwn-bo-dd';
-    var btn = document.createElement('button'); btn.type = 'button'; btn.className = 'bwn-bo-ddbtn';
-    btn.innerHTML = '📤 Bid-Out <span class="cv">▾</span>';
+    var btn = document.createElement('button'); btn.type = 'button'; btn.className = 'bwn-bo-caret';
+    btn.textContent = '▾';
+    btn.title = 'More bid options: email RFP to outside / net-new vendors, read receipts';
+    btn.setAttribute('aria-label', 'More bid options');
+    // Match the native button so the pair reads as one split control (survives theme changes).
+    try {
+      var cs = getComputedStyle(nativeBtn);
+      btn.style.background = cs.backgroundColor;
+      btn.style.height = nativeBtn.offsetHeight + 'px';
+    } catch (e) { btn.style.background = '#0731a5'; btn.style.height = '36px'; }
     var menu = document.createElement('div'); menu.className = 'bwn-bo-ddmenu'; menu.style.display = 'none';
-    function item(label, opts) {
+    function item(label, onClick) {
       var it = document.createElement('button'); it.type = 'button'; it.className = 'bwn-bo-dditem'; it.textContent = label;
-      it.addEventListener('click', function (e) { e.stopPropagation(); menu.style.display = 'none'; launchPanel(opts); });
+      it.addEventListener('click', function (e) { e.stopPropagation(); menu.style.display = 'none'; onClick(); });
       return it;
     }
-    menu.appendChild(item('Bid out to our vendors', {}));
-    menu.appendChild(item('Invite outside / net-new vendors too…', { invite: true }));
-    var statusIt = document.createElement('button'); statusIt.type = 'button'; statusIt.className = 'bwn-bo-dditem'; statusIt.textContent = '📊 Who opened our bids';
-    statusIt.addEventListener('click', function (e) { e.stopPropagation(); menu.style.display = 'none'; openStatusPanel(); });
-    menu.appendChild(statusIt);
+    menu.appendChild(item('✉ Email RFP - outside / net-new vendors…', function () { launchPanel({ invite: true }); }));
+    menu.appendChild(item('📊 Who opened our bids', function () { openStatusPanel(); }));
     function onDoc(e) { if (!wrap.contains(e.target)) { menu.style.display = 'none'; document.removeEventListener('mousedown', onDoc, true); } }
     btn.addEventListener('click', function (e) {
-      e.stopPropagation(); var show = menu.style.display === 'none'; menu.style.display = show ? 'block' : 'none';
+      e.stopPropagation(); e.preventDefault();
+      var show = menu.style.display === 'none'; menu.style.display = show ? 'block' : 'none';
       if (show) document.addEventListener('mousedown', onDoc, true);
     });
     wrap.appendChild(btn); wrap.appendChild(menu);
@@ -1069,16 +1081,19 @@
   function mountFloating() {
     if (document.getElementById('bwn-bidout-fab')) return;
     var b = document.createElement('button'); b.id = 'bwn-bidout-fab'; b.type = 'button';
-    b.textContent = '📤 Bid-Out'; b.title = 'Competitive pricing request to area vendors';
-    b.addEventListener('click', function () { launchPanel({}); });
+    b.textContent = '📤 Email RFP'; b.title = 'Email RFP to outside / net-new vendors (network bidding = See Who Is Available)';
+    b.addEventListener('click', function () { launchPanel({ invite: true }); });
     document.body.appendChild(b);
   }
   function mountLauncher() {
     if (!woNumber()) return;
     ensureStyle();
-    var row = actionRow();
-    if (row) { var fab = document.getElementById('bwn-bidout-fab'); if (fab) fab.remove(); if (!row.querySelector('#bwn-bidout-dd')) row.appendChild(buildDropdown()); }
-    else { mountFloating(); }
+    var nb = seeWhoBtn();
+    if (nb) {
+      var fab = document.getElementById('bwn-bidout-fab'); if (fab) fab.remove();
+      if (!document.getElementById('bwn-bidout-dd')) nb.parentElement.insertBefore(buildCaret(nb), nb.nextSibling);
+    }
+    else { mountFloating(); }   // no native button on this layout - keep the floating entry
   }
   var lastPath = '';
   function tick() {
