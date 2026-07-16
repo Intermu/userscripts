@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         BWN Suite - Core (Broadway National)
 // @namespace    broadwaynational.bwn
-// @version      1.49.0
+// @version      1.50.0
 // @downloadURL  https://raw.githubusercontent.com/Intermu/userscripts/main/bwn-suite-core.user.js
 // @updateURL    https://raw.githubusercontent.com/Intermu/userscripts/main/bwn-suite-core.user.js
 // @description  Runs several Umbrava helpers for BWN coordinators, all in the browser with no network access. Includes: PO Approval + ETA Builder; WO Assist (GP/ETA, a stall watchdog, DNE calculator, and a next-action playbook); Email Leak Guard (checks recipients against vendor names, PO amounts, and client budget references before an outbound email sends); WO List Heat (a triage overlay + My Day strip on the work-order list); and the BWN Launcher (opens the Azure Static Web App tools with the current WO's context). Modules share state through sessionStorage/localStorage. No network calls, no privileged grants. Toggle modules in BWN_MODULES below.
@@ -44,7 +44,7 @@
   try { localStorage.setItem('bwn:status:core', JSON.stringify({ ver: BWN_VER, ts: Date.now() })); } catch (e) { /* best-effort */ }
 
   console.info('[BWN SUITE CORE] v' + BWN_VER + ' |',
-    'Shared Core 7 \u00b7 PO Approval 1.12 \u00b7 WO Assist 2.49 \u00b7 Leak Guard 2.0 \u00b7 List Heat 3.13 \u00b7 Launcher 2.0 \u00b7 Views 1.0 \u00b7 Palette 1.1 \u00b7 Visit 1.2 \u00b7 Reminders 1.1 \u00b7 Timeline 1.1 \u00b7 TripCal 1.3 \u00b7 Connector 1.2 |',
+    'Shared Core 7 \u00b7 PO Approval 1.12 \u00b7 WO Assist 2.50 \u00b7 Leak Guard 2.0 \u00b7 List Heat 3.14 \u00b7 Launcher 2.0 \u00b7 Views 1.0 \u00b7 Palette 1.1 \u00b7 Visit 1.2 \u00b7 Reminders 1.1 \u00b7 Timeline 1.1 \u00b7 TripCal 1.3 \u00b7 Connector 1.2 |',
     'enabled:', Object.keys(BWN_MODULES).filter(function (k) { return BWN_MODULES[k]; }).join(', '));
 
   // ===== BWN SHARED CORE v7 - KEEP IN SYNC across both suite scripts =====
@@ -2243,7 +2243,7 @@
     // CLICK the option - so branch 0 handles that. The legacy branches (native <select>, a visible
     // tab/chip, a MUI Select whose listbox portals to <body>) are kept as fallbacks for other UIs
     // and are gated on a note-type vocabulary so they never touch an unrelated dropdown.
-    var NOTE_TYPE_VOCAB = /^(internal|vendor|client|billing|general|public|private|customer)$/i;
+    var NOTE_TYPE_VOCAB = /^(internal|vendor|client|billing|general|public|private|customer|recap)$/i;
     function setNoteType(label, scope) {
       if (!label) return false;
       scope = scope || document;
@@ -3651,6 +3651,14 @@
           var nt = (a.openEcd || /^ecd/.test(a.key || '')) ? 'Internal' : undefined;
           insertWONote(noteText, function () { /* posted manually by the coordinator */ }, nt);
         } catch (e3) { }
+        return;
+      }
+      if (d.id === 'core:insertnote' && d.text) {
+        // Generic "prefill the Add Note composer with this text + set this Type" command, driven by
+        // the AI Draft buttons (e.g. Over-30 -> Type "Recap"). Reuses the same DOM-verified composer
+        // flow as core:act; the coordinator still reviews + saves the note manually.
+        try { navigator.clipboard.writeText(String(d.text)).catch(function () { }); } catch (e4) { }
+        insertWONote(String(d.text), function () { /* posted manually by the coordinator */ }, d.noteType || undefined);
         return;
       }
     }, 'woAssist:cmd'));
@@ -5234,7 +5242,7 @@
       // gain hits zero (min 2 passes), or the pass cap is reached.
       var STEP = 0.5, TICK_MS = 320, MID_MS = 110, MID2_MS = 220, MAX = 900, PASS_MAX = 5;
       var steps = 0, stable = 0, lastCount = -1, zeroGain = 0, edgeStable = 0;
-      var lastTop = -1, stuck = 0, forcedWindow = false;
+      var lastTop = -1, stuck = 0, forcedWindow = false, forcedWindowCount = -1;
       var pass = 1, passStartCount = 0, down = true;
       var target = umbravaTotal();
       var box = listScroller();
@@ -5285,10 +5293,19 @@
         if (Math.round(box.scrollTop) === lastTop) stuck++; else stuck = 0;
         lastTop = Math.round(box.scrollTop);
         if (stuck >= 4 && !forcedWindow) {
-          forcedWindow = true; stuck = 0;
+          forcedWindow = true; stuck = 0; forcedWindowCount = n;   // remember coverage at the switch, to judge gain
           console.info('[BWN HEAT] scroller not moving \u2014 falling back to window scrolling');
         } else if (stuck >= 6 && forcedWindow) {
-          finish('list did not load more rows under scroll \u2014 it may paginate instead of lazy-load');
+          // A frozen scrollTop is ALSO the normal terminal state of a fully-loaded list, so do NOT
+          // declare the scan dirty on that alone (that false positive nagged Over-30 Lines after a
+          // good Scan All). Judge by GAIN, matching the zero-gain principle below: dirty only if we
+          // are demonstrably short of a trusted badge total, or rows were still arriving when the
+          // scroll froze (we out-ran a lazy loader); otherwise the loaded view is exhausted = full
+          // coverage = CLEAN.
+          var gainedSinceForced = (forcedWindowCount >= 0) ? (n - forcedWindowCount) : 0;
+          if (target !== null && n < target) { finish('short of list total ' + target + ' (' + n + ') - it may paginate instead of lazy-load'); return; }
+          if (gainedSinceForced > 0) { finish('list did not load more rows under scroll - it may paginate instead of lazy-load'); return; }
+          finish(null);   // frozen, no new rows, and not short of a trusted total = exhausted = clean
           return;
         }
         stable = (n === lastCount) ? stable + 1 : 0;

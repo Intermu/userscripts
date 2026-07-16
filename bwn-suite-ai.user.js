@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         BWN Suite - AI (Broadway National)
 // @namespace    broadwaynational.bwn
-// @version      1.28.0
+// @version      1.29.0
 // @downloadURL  https://raw.githubusercontent.com/Intermu/userscripts/main/bwn-suite-ai.user.js
 // @updateURL    https://raw.githubusercontent.com/Intermu/userscripts/main/bwn-suite-ai.user.js
 // @description  The Umbrava tools that call outside APIs, kept separate from the zero-egress Core script. Client Update and WO Audit drafts (Anthropic Claude; draft-only, scrubbed before sending, you review before posting); Find Techs / Find Suppliers (Google Places; vendor leads near a WO); and Job View (opens the Ops-Dashboard job card on the WO page - WO details from Umbrava plus the authored case file and next actions, read-only). Network access is limited by the browser to the declared API hosts and the BWN Static Web App. API keys are stored in Tampermonkey's storage via the menu commands and never enter the page. Toggle modules in BWN_MODULES below.
@@ -60,7 +60,7 @@
   publishAiStatus();
 
   console.info('[BWN SUITE AI] v' + BWN_VER + ' |',
-    'Shared Core 7 \u00b7 Client Update 1.46 \u00b7 Find Techs 2.13 \u00b7 Connector 1.4 |',
+    'Shared Core 7 \u00b7 Client Update 1.47 \u00b7 Find Techs 2.13 \u00b7 Connector 1.4 |',
     'enabled:', Object.keys(BWN_MODULES).filter(function (k) { return BWN_MODULES[k]; }).join(', '));
 
   // ===== BWN SHARED CORE v7 - KEEP IN SYNC across both suite scripts =====
@@ -1305,6 +1305,7 @@
       scrub: false,                         // internal: keep amounts, vendor names, GP notes
       system: SYSTEM_PROMPT_AUDIT,
       maxTokens: 6000,                      // long audits exceed 2k tokens; was truncating mid-sentence
+      noteType: 'Recap',                    // enables the "Add as Recap note" button in the result modal
       prefix: function (basis) { return 'Internal audit - from ' + basis + '.\n\n'; }
     };
 
@@ -1315,7 +1316,8 @@
       scrub: false,                         // internal: keep full detail
       system: SYSTEM_PROMPT_OVER30,
       maxTokens: 200,                       // one terse line
-      prefix: function (basis) { return 'Over-30 audit line - from ' + basis + '. Review, then paste into the WO note.\n\n'; }
+      noteType: 'Recap',                    // enables the "Add as Recap note" button in the result modal
+      prefix: function (basis) { return 'Over-30 audit line - from ' + basis + '. Review, then add to the WO note (or paste).\n\n'; }
     };
 
     var NEXTSTEPS_MODE = {
@@ -1336,7 +1338,8 @@
       system: SYSTEM_PROMPT_RECENT,
       maxTokens: 1500,                      // short delta; not a full audit
       windowDays: 7,                        // only summarize notes from the last N days (relative to now)
-      prefix: function (basis) { return 'Recent update - from ' + basis + '. Review, then paste into the WO note.\n\n'; }
+      noteType: 'Recap',                    // enables the "Add as Recap note" button in the result modal
+      prefix: function (basis) { return 'Recent update - from ' + basis + '. Review, then add to the WO note (or paste).\n\n'; }
     };
 
     function buildUserContent(h, notes, mode, win) {
@@ -2067,6 +2070,18 @@
             var rgBtn = btn('Regenerate', false, function (e) { regenFn(!!(e && e.shiftKey)); });
             rgBtn.title = 'Redraft. Shift-click: also re-collect the notes fresh (bypasses the shared scan cache).';
             foot.appendChild(rgBtn);
+          }
+          if (mode.noteType) {
+            // "Add as <Type> note": hand the generated text to Core's composer bridge, which opens
+            // Umbrava's Add Note composer prefilled and sets the Type autocomplete (e.g. Recap).
+            // The coordinator still reviews + Saves in Umbrava (attribution stays theirs).
+            var noteBtn = btn('Add as ' + mode.noteType + ' note', true, function () {
+              try { document.dispatchEvent(new CustomEvent('bwn:cmd', { detail: { id: 'core:insertnote', text: stripMarkdown(ta.value), noteType: mode.noteType } })); } catch (e) { }
+              noteBtn.textContent = 'Opening note...'; noteBtn.disabled = true;
+              setTimeout(close, 600);
+            });
+            noteBtn.title = "Open Umbrava's Add Note composer prefilled with this + set Type to " + mode.noteType + ", then review + Save there. (Also copied to clipboard as a fallback.)";
+            foot.appendChild(noteBtn);
           }
           var copyBtn = btn('Copy', true, function () {
             GM_setClipboard(stripMarkdown(ta.value));   // clean text \u2014 no markdown markers
@@ -3349,7 +3364,7 @@ if (BWN_MODULES.jobView) BWN.safeModule('jobView', function () {
   }
 
   // loadO30Lines dropped - O30_LINES is pre-populated per open.
-  function o30LineHtml(jobId) {
+  function o30LineHtml(jobId, liveNoteTs) {
     if (!O30_LINES) return '';
     var rec = Object.prototype.hasOwnProperty.call(O30_LINES, jobId) ? O30_LINES[jobId] : null;
     if (!rec) { var dg = String(jobId || '').replace(/\D+/g, ''); if (dg && Object.prototype.hasOwnProperty.call(O30_LINES, dg)) rec = O30_LINES[dg]; }
@@ -3358,7 +3373,17 @@ if (BWN_MODULES.jobView) BWN.safeModule('jobView', function () {
     var when = isNaN(d.getTime()) ? '' : (d.getMonth() + 1) + '/' + d.getDate();
     var ageD = isNaN(d.getTime()) ? null : Math.floor((Date.now() - +d) / 86400000);
     var stale = ageD !== null && ageD > 7;
-    return '<div class="jm-section-label">Latest Over-30 line' + (when ? ' <span style="font-weight:500;color:var(--muted);">- entered ' + escapeHtml(when) + (rec.by ? ' by ' + escapeHtml(rec.by) : '') + (stale ? ' · <span style="color:#b45309;font-weight:500;">' + ageD + 'd old</span>' : '') + '</span>' : '') + '</div>'
+    // Newest-wins across authors: if the WO has a note NEWER than this stored line (e.g. a
+    // supervisor updated it since it was drafted), flag it as superseded so the coordinator
+    // re-runs Over 30 rather than trusting a stale line. (The Over-30 DRAFT already reads the
+    // newest note regardless of author; this surfaces staleness on the DISPLAYED stored line.)
+    var recTs = isNaN(d.getTime()) ? 0 : +d;
+    var lnTs = liveNoteTs ? (+new Date(liveNoteTs)) : 0;
+    var superseded = !!(recTs && lnTs && lnTs > recTs + 60000);
+    var flag = superseded
+      ? ' · <span style="color:#b45309;font-weight:600;">newer note since - re-run Over 30</span>'
+      : (stale ? ' · <span style="color:#b45309;font-weight:500;">' + ageD + 'd old</span>' : '');
+    return '<div class="jm-section-label">Latest Over-30 line' + (when ? ' <span style="font-weight:500;color:var(--muted);">- entered ' + escapeHtml(when) + (rec.by ? ' by ' + escapeHtml(rec.by) : '') + flag + '</span>' : '') + '</div>'
       + '<div class="jn-doc-card"><div class="np-text" style="font-family:ui-monospace,\'Segoe UI Mono\',\'SF Mono\',monospace;font-size:11.5px;">' + escapeHtml(rec.line) + '</div></div>';
   }
 
@@ -3565,7 +3590,7 @@ if (BWN_MODULES.jobView) BWN.safeModule('jobView', function () {
       + row('Vendor NTE', j.totalVendorNte > 0 ? fmt$0(j.totalVendorNte) : '-')
       + row('WO # / PO #', escapeHtml([(function () { var d = j.wo ? String(j.wo).replace(/\D+/g, '') : ''; return d ? 'W-' + d : ''; })(), j.po].filter(Boolean).join('  ·  ') || '-'))
       + '</div>'
-      + o30LineHtml(j.jobId)
+      + o30LineHtml(j.jobId, j.lastUpdated)
       + '<div class="jm-section-label">Drilldown Note</div>'
       + '<div class="jn-doc-card">' + (j.notes ? '<div class="np-text">' + escapeHtml(j.notes) + '</div>' : '<div class="np-text np-empty">No note on file.</div>') + '</div>'
       + statusHistoryHtml(j.jobId)
