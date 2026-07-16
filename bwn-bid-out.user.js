@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         BWN Bid-Out (Broadway National)
 // @namespace    broadwaynational.bwn
-// @version      0.15.0
+// @version      0.16.0
 // @downloadURL  https://raw.githubusercontent.com/Intermu/userscripts/main/bwn-bid-out.user.js
 // @updateURL    https://raw.githubusercontent.com/Intermu/userscripts/main/bwn-bid-out.user.js
 // @description  Email RFP to outside / net-new vendors, launched from a caret on Umbrava's own "See Who Is Available" button (network-vendor bidding stays native - no separate Bid-Out button). The caret menu opens the tracked email RFP wizard: finds net-new vendors nearby through Google Places, looks up their emails via the BWN scrape-contacts function, takes pasted outside addresses, and can still include assignable Umbrava vendors in the same email. You pick who's included, then review the exact recipient list and the rendered email before anything sends. Send from your own mailbox via the SWA send-bid function (Microsoft Graph), or open a plain Outlook draft. Vendors are BCC'd; nothing sends until you click Send. Network access is limited to Umbrava (same-origin), Google Places, and your SWA host.
@@ -19,7 +19,7 @@
 (function () {
   'use strict';
 
-  var VER = '0.15.0';
+  var VER = '0.16.0';
   console.info('[BWN BID-OUT] v' + VER + ' - 3-step Build Requests wizard (WO details -> select vendors -> review) · Umbrava vendors + Places net-new discovery + email scrape · one-click Graph send via SWA (Outlook-draft fallback)');
 
   var COMPANY_ADDR = 'Broadway National Group, 100 Davids Dr, Hauppauge, NY 11788';
@@ -27,6 +27,7 @@
   var MAX_BCC = 60;
   var PLACES_URL = 'https://places.googleapis.com/v1/places:searchText';
   var SCRAPE_URL = 'https://green-stone-0717dab0f.7.azurestaticapps.net/api/scrape-contacts';
+  var ENRICH_URL = 'https://green-stone-0717dab0f.7.azurestaticapps.net/api/enrich-contacts';
   var SEND_URL = 'https://green-stone-0717dab0f.7.azurestaticapps.net/api/send-bid';
   var STATUS_URL = 'https://green-stone-0717dab0f.7.azurestaticapps.net/api/bid-status';
   var LOGO_SRC = 'https://green-stone-0717dab0f.7.azurestaticapps.net/assets/bwn-logo.png';
@@ -170,6 +171,50 @@
       return { map: map, skipped: false };
     }).catch(function (e) { return { map: {}, skipped: false, err: e.message }; });
   }
+  // ZoomInfo named-contact fallback (via the key-gated SWA enrich-contacts function, which
+  // rides Broadway's existing ZoomInfo subscription). Only called for leads whose websites
+  // published no email; results are server-cached 30 days + daily-capped to protect the
+  // credit pool shared with the sales team. Degrades silently until credentials land.
+  var ZI_EMAIL_OK = /^[^\s@<>,;"']+@[^\s@<>,;"']+\.[A-Za-z]{2,}$/;   // strict (mirrors send-bid) - a "," or ";" in an address could smuggle recipients
+  function enrichContacts(companies) {
+    var key = GM_getValue('ingest_key', '');
+    if (!key || !companies.length) return Promise.resolve({ map: {}, note: '' });
+    return gmPost(ENRICH_URL, { 'Content-Type': 'application/json', 'x-bwn-key': key }, { companies: companies }, 90000).then(function (r) {
+      if (r.status === 503 && r.json && r.json.code === 'ZI_UNCONFIGURED') return { map: {}, note: 'ZoomInfo enrichment pending credentials (ask the ZoomInfo admin).' };
+      if (r.status < 200 || r.status >= 300 || !r.json || !r.json.ok) return { map: {}, note: '' };
+      var map = {}, res = r.json.results || {};
+      Object.keys(res).forEach(function (k) { var c = ((res[k] || {}).contacts || [])[0]; if (c && c.email && ZI_EMAIL_OK.test(c.email)) map[k] = c; });
+      var bits = [];
+      if (r.json.skippedForCap && r.json.skippedForCap.length) bits.push('ZoomInfo daily credit cap reached - ' + r.json.skippedForCap.length + ' lead(s) not enriched today.');
+      if (r.json.skippedForTime && r.json.skippedForTime.length) bits.push(r.json.skippedForTime.length + ' lead(s) deferred for time - Find again to continue.');
+      return { map: map, note: bits.join(' ') };
+    }).catch(function () { return { map: {}, note: '' }; });
+  }
+  // Shared ZoomInfo fallback: enrich the leads that still have no email, in batches of 4 (the
+  // server caps a call at 8 companies and budgets ~30s - small batches keep every response well
+  // inside the SWA gateway window and never silently strand leads 9+). Mutates the leads.
+  function ziKey(l) { return domainOf(l.website) || normName(l.name) || String(l.name || '').toLowerCase().replace(/\s+/g, ' ').trim(); }   // must mirror the server's keyOf
+  function ziFallback(leads) {
+    var need = (leads || []).filter(function (l) { return !l.email && l.name; });
+    if (!need.length) return Promise.resolve({ note: '' });
+    var chunks = [];
+    for (var i = 0; i < need.length; i += 4) chunks.push(need.slice(i, i + 4));
+    var map = {}, notes = [];
+    return chunks.reduce(function (p, chunk) {
+      return p.then(function () {
+        return enrichContacts(chunk.map(function (l) { return { name: l.name, website: l.website || '' }; })).then(function (er) {
+          Object.keys(er.map).forEach(function (k) { map[k] = er.map[k]; });
+          if (er.note && notes.indexOf(er.note) === -1) notes.push(er.note);
+        });
+      });
+    }, Promise.resolve()).then(function () {
+      need.forEach(function (l) {
+        var c = map[ziKey(l)];
+        if (c) { l.email = c.email; l.contact = c.name || ''; l.title = c.title || ''; l.src = 'zoominfo'; }
+      });
+      return { note: notes.join(' ') };
+    });
+  }
   // Places discovery → dedupe vs the Umbrava list (+ self) → scrape emails.
   function discoverNetNew(wo, miles, umbravaItems) {
     var umbNames = {}, umbDomains = {};
@@ -192,7 +237,10 @@
       var urls = leads.map(function (l) { return l.website; }).filter(Boolean);
       return scrapeEmails(urls).then(function (sr) {
         leads.forEach(function (l) { if (l.website && sr.map[l.website]) l.email = sr.map[l.website]; });
-        return { leads: leads, scrapeSkipped: sr.skipped, scrapeErr: sr.err };
+        // ZoomInfo fallback for the leads the scrape couldn't email (site publishes none).
+        return ziFallback(leads).then(function (zr) {
+          return { leads: leads, scrapeSkipped: sr.skipped, scrapeErr: sr.err, ziNote: zr.note };
+        });
       });
     });
   }
@@ -541,10 +589,15 @@
           var b0 = box.querySelector('#bwn-bo-body'); if (b0) b0.textContent = 'Finding emails for the selected net-new vendors…';
           var urls = seed.map(function (l) { return l.website; }).filter(Boolean);
           return scrapeEmails(urls).then(function (sr) {
-            openState.netNew = seed.map(function (l) { return { name: l.name, phone: l.phone || '', website: l.website || '', rating: l.rating, ratingCount: l.ratingCount, mi: l.mi, email: (l.website && sr.map[l.website]) || l.email || '' }; });
-            openState.seedLeads = null;
-            openState.step = 2;   // land on Select Vendors with the seeded net-new pre-picked
-            renderPanel(box, wo, res, close);
+            var seeded = seed.map(function (l) { return { name: l.name, phone: l.phone || '', website: l.website || '', rating: l.rating, ratingCount: l.ratingCount, mi: l.mi, email: (l.website && sr.map[l.website]) || l.email || '' }; });
+            // Same ZoomInfo fallback as the wizard's own Find - seeded leads must not behave worse.
+            return ziFallback(seeded).then(function (zr) {
+              openState.netNew = seeded;
+              if (zr.note) openState.netNewMsg = zr.note;
+              openState.seedLeads = null;
+              openState.step = 2;   // land on Select Vendors with the seeded net-new pre-picked
+              renderPanel(box, wo, res, close);
+            });
           });
         }
         renderPanel(box, wo, res, close);
@@ -765,7 +818,7 @@
               '<span class="nm">' + esc(l.name) + '</span>' +
               (l.rating ? '<span class="mi">★ ' + (+l.rating).toFixed(1) + '</span>' : '') +
               '<span class="mi">' + (l.mi != null ? l.mi.toFixed(1) + ' mi' : '') + '</span>' +
-              (he ? '<span class="em">' + esc(l.email) + '</span>'
+              (he ? '<span class="em">' + esc(l.email) + (l.src === 'zoominfo' ? ' <span class="mi" title="Named contact from Broadway\'s ZoomInfo">' + esc((l.contact || '') + (l.title ? ' · ' + l.title : '')) + (l.contact || l.title ? ' · ' : '') + 'ZoomInfo</span>' : '') + '</span>'
                 : (l.website ? '<a class="noem" href="' + esc(l.website) + '" target="_blank" rel="noopener">open site ↗</a>' : '<span class="noem">no site/email</span>')) +
               '</div>';
           }).join('') + '</div>' + head;
@@ -818,6 +871,7 @@
           openState.netNew = out.leads || [];
           openState.netNewMsg = out.scrapeSkipped ? 'Emails skipped - set the SWA ingest key (menu) to auto-fill them. Leads show website/phone for now.'
             : (out.scrapeErr ? ('Email lookup issue (' + out.scrapeErr + ') - leads shown; you can still open sites for emails.') : '');
+          if (out.ziNote) openState.netNewMsg = (openState.netNewMsg ? openState.netNewMsg + ' ' : '') + out.ziNote;
           renderNetNew(); refreshCount();
         }).catch(function (e) {
           openState.netNew = [];
