@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         BWN WO Intake (Broadway National)
 // @namespace    broadwaynational.bwn
-// @version      0.5.0
+// @version      0.6.0
 // @downloadURL  https://raw.githubusercontent.com/Intermu/userscripts/main/bwn-wo-intake.user.js
 // @updateURL    https://raw.githubusercontent.com/Intermu/userscripts/main/bwn-wo-intake.user.js
 // @description  Drop a client PO email (.msg or .eml) onto the Create Work Order modal and it prefills the fields from the email body - Scope (the Description), Source PO #, then selects Client, Location (PFJ store #, zero-padded), Trade (from the asset) and Priority by clicking the real dropdown option, and fills Client DNE (the PO NTE) once the client unlocks it. Then, after you Create the WO, it hands the email to BWN Drop Upload to attach it to the new WO's Documents and draft the email note. Reads the email entirely in the browser via a built-in Outlook .msg reader; nothing is uploaded to any server. Best-effort: review every field before you click Create.
@@ -13,7 +13,7 @@
 
 (function () {
   'use strict';
-  var VER = '0.5.0';
+  var VER = '0.6.0';
   var FONT = "-apple-system,BlinkMacSystemFont,'Segoe UI','Helvetica Neue',Arial,sans-serif";
   console.info('[BWN WO INTAKE] v' + VER + ' - drop a PO email (.msg/.eml) on Create Work Order to prefill + auto-attach to the new WO Documents (via Drop Upload); reads locally, nothing leaves the browser');
 
@@ -35,8 +35,9 @@
 
   // ---- Outlook .msg reader (OLE2/CFBF, local) -----------------------------
   // A .msg is a compound binary file; the body/subject/sender live in named streams (some in
-  // scattered mini-FAT sectors, so string-scraping only gets fragments). This minimal reader
-  // follows the FAT / mini-FAT chains to reassemble the streams we need. All in-browser.
+  // scattered mini-FAT sectors, so string-scraping only gets fragments) and each embedded
+  // attachment is its own `__attach_version1.0_#N` STORAGE with child streams. This reader follows
+  // the FAT / mini-FAT chains AND walks the directory red-black tree so we can pull both. In-browser.
   function parseCFBF(u8) {
     var dv = new DataView(u8.buffer, u8.byteOffset, u8.byteLength);
     if (dv.getUint32(0, false) !== 0xD0CF11E0) return null;   // not a compound file
@@ -50,23 +51,57 @@
     function chain(start, arr) { var o = [], s = start, gg = 0; while (s !== 0xFFFFFFFE && s !== 0xFFFFFFFF && gg++ < 1e6) { o.push(s); s = arr[s]; if (s == null) break; } return o; }
     function readFAT(start) { var secs = chain(start, fat), out = new Uint8Array(secs.length * secSz); secs.forEach(function (s, i) { out.set(u8.subarray(secOff(s), secOff(s) + secSz), i * secSz); }); return out; }
     var dir = readFAT(dirStart), entries = [];
+    // Keep EVERY 128-byte slot so entries[did] is addressable by directory-id - the tree's
+    // left/right/child pointers are DIDs, so skipping empty slots would shift every index.
     for (var o2 = 0; o2 + 128 <= dir.length; o2 += 128) {
-      var nameLen = dir[o2 + 64] | (dir[o2 + 65] << 8); if (!nameLen) continue;
-      var name = ''; for (var q = 0; q < nameLen - 2; q += 2) { var c = dir[o2 + q] | (dir[o2 + q + 1] << 8); if (c) name += String.fromCharCode(c); }
-      entries.push({ name: name, type: dir[o2 + 66], startSec: dir[o2 + 116] | (dir[o2 + 117] << 8) | (dir[o2 + 118] << 16) | (dir[o2 + 119] * 16777216), size: (dir[o2 + 120] | (dir[o2 + 121] << 8) | (dir[o2 + 122] << 16) | (dir[o2 + 123] * 16777216)) });
+      var nameLen = dir[o2 + 64] | (dir[o2 + 65] << 8);
+      var name = ''; for (var q = 0; q < Math.max(0, nameLen - 2); q += 2) { var c = dir[o2 + q] | (dir[o2 + q + 1] << 8); if (c) name += String.fromCharCode(c); }
+      entries.push({
+        did: entries.length, name: name, type: dir[o2 + 66],
+        left: dir[o2 + 68] | (dir[o2 + 69] << 8) | (dir[o2 + 70] << 16) | (dir[o2 + 71] * 16777216),
+        right: dir[o2 + 72] | (dir[o2 + 73] << 8) | (dir[o2 + 74] << 16) | (dir[o2 + 75] * 16777216),
+        child: dir[o2 + 76] | (dir[o2 + 77] << 8) | (dir[o2 + 78] << 16) | (dir[o2 + 79] * 16777216),
+        startSec: dir[o2 + 116] | (dir[o2 + 117] << 8) | (dir[o2 + 118] << 16) | (dir[o2 + 119] * 16777216),
+        size: (dir[o2 + 120] | (dir[o2 + 121] << 8) | (dir[o2 + 122] << 16) | (dir[o2 + 123] * 16777216))
+      });
     }
     var root = entries.filter(function (e) { return e.type === 5; })[0];
     var mini = root ? readFAT(root.startSec).subarray(0, root.size) : new Uint8Array(0);
     var mfBuf = miniFatStart === 0xFFFFFFFE ? new Uint8Array(0) : readFAT(miniFatStart), miniFat = [];
-    for (var m = 0; m + 4 <= mfBuf.length; m += 4) miniFat.push(mfBuf[m] | (mfBuf[m + 1] << 8) | (mfBuf[m + 2] << 16) | (mfBuf[m + 3] * 16777216));
+    for (var mm = 0; mm + 4 <= mfBuf.length; mm += 4) miniFat.push(mfBuf[mm] | (mfBuf[mm + 1] << 8) | (mfBuf[mm + 2] << 16) | (mfBuf[mm + 3] * 16777216));
     function readStream(e) {
       if (e.size >= miniCut) return readFAT(e.startSec).subarray(0, e.size);
       var secs = chain(e.startSec, miniFat), out = new Uint8Array(secs.length * miniSz);
       secs.forEach(function (s, i) { out.set(mini.subarray(s * miniSz, s * miniSz + miniSz), i * miniSz); });
       return out.subarray(0, e.size);
     }
-    var byName = {}; entries.forEach(function (e) { byName[e.name] = e; });
-    return { get: function (tag) { var e = byName['__substg1.0_' + tag]; return e ? readStream(e) : null; } };
+    var NIL = 0xFFFFFFFF;
+    function childrenOf(did) {   // in-order walk of the red-black tree hanging off entries[did].child
+      var out = [], e = entries[did]; if (!e || e.child === NIL) return out;
+      (function walk(d) { if (d === NIL || d == null) return; var n = entries[d]; if (!n) return; walk(n.left); out.push(n); walk(n.right); })(e.child);
+      return out;
+    }
+    var topByName = {}; if (root) childrenOf(root.did).forEach(function (e) { topByName[e.name] = e; });
+    return {
+      // message-level property streams live directly under the root storage
+      get: function (tag) { var e = topByName['__substg1.0_' + tag]; return e ? readStream(e) : null; },
+      // each embedded attachment is a `__attach_version1.0_#N` storage under the root; pull its
+      // filename (3707 long / 3704 short) + mime (370E) + data (37010102 = PR_ATTACH_DATA_BIN)
+      attachments: function () {
+        if (!root) return [];
+        var out = [];
+        childrenOf(root.did).forEach(function (e) {
+          if (e.type !== 1 || !/^__attach_version1\.0_/i.test(e.name)) return;
+          var byName = {}; childrenOf(e.did).forEach(function (k) { byName[k.name] = k; });
+          function s(tag) { var x = byName['__substg1.0_' + tag]; return x ? readStream(x) : null; }
+          var nm = utf16(s('3707001F')) || latin1(s('3707001E')) || utf16(s('3704001F')) || latin1(s('3704001E')) || '';
+          var mime = utf16(s('370E001F')) || latin1(s('370E001E')) || '';
+          var data = s('37010102');
+          if (data && data.length) out.push({ name: (nm || ('attachment' + (out.length + 1))).replace(/[\r\n\/\\]/g, '_').trim(), mime: mime, bytes: data });
+        });
+        return out;
+      }
+    };
   }
   function utf16(b) { if (!b) return ''; var s = ''; for (var i = 0; i + 1 < b.length; i += 2) { var c = b[i] | (b[i + 1] << 8); if (c) s += String.fromCharCode(c); } return s; }
   function latin1(b) { if (!b) return ''; var s = ''; for (var i = 0; i < b.length; i++) s += String.fromCharCode(b[i]); return s; }
@@ -74,13 +109,14 @@
 
   function parseMsg(u8) {
     var m = parseCFBF(u8);
-    if (!m) return { subject: '', body: '', senderEmail: '' };
+    if (!m) return { subject: '', body: '', senderEmail: '', attachments: [] };
     var subject = utf16(m.get('0037001F'));
     var body = utf16(m.get('1000001F'));
     if (!body) { var html = m.get('10130102'); if (html) body = stripHtml(latin1(html)); }
     var sender = utf16(m.get('0C1F001F')) || utf16(m.get('0065001F'));
     if (!/@/.test(sender)) { var em = String(sender).match(/[A-Za-z0-9._%+\-]+@[A-Za-z0-9.\-]+\.[A-Za-z]{2,}/); sender = em ? em[0] : (String(latin1(m.get('0C1F001F') || new Uint8Array(0))).match(/[A-Za-z0-9._%+\-]+@[A-Za-z0-9.\-]+\.[A-Za-z]{2,}/) || [''])[0]; }
-    return { subject: subject, body: body, senderEmail: (sender || '').toLowerCase() };
+    var attachments = []; try { attachments = m.attachments(); } catch (e) { }
+    return { subject: subject, body: body, senderEmail: (sender || '').toLowerCase(), attachments: attachments };
   }
   function parseEml(text) {
     var he = text.search(/\r?\n\r?\n/);
@@ -91,7 +127,7 @@
     var body = he >= 0 ? text.slice(he) : '';
     if (/<[a-z!]/i.test(body)) body = stripHtml(body);
     body = body.replace(/=\r?\n/g, '').replace(/=3D/g, '=');
-    return { subject: h('Subject'), body: body, senderEmail: em };
+    return { subject: h('Subject'), body: body, senderEmail: em, attachments: [] };   // .eml MIME-part attachments not yet extracted
   }
 
   // ---- Email -> Work Order field mapping ----------------------------------
@@ -217,7 +253,7 @@
     setV('textarea#scopeOfWork', wo.scope, 'Scope');
     setV('input#sourcePurchaseOrderNumber', wo.po, 'Source PO #');
     setV('input#sourceJobNumber', wo.sourceJob, 'Source Job #');
-    try { PENDING = wo._file ? { file: wo._file, po: wo.po, client: wo.client } : null; } catch (e) { }
+    try { PENDING = wo._file ? { files: [wo._file].concat(wo._attachments || []), po: wo.po, client: wo.client } : null; } catch (e) { }
 
     // The dropdowns cascade, so select in order and wait for each dependent field to appear/enable:
     // Client -> (Location unlocks + Client DNE appears) -> Location -> Trade -> Priority.
@@ -252,6 +288,8 @@
       if (done.length) parts.push('Filled ' + done.join(', '));
       if (picked.length) parts.push('selected ' + picked.join(' / '));
       if (hint.length) parts.push('check: ' + hint.join(' · '));
+      var nAtt = (wo._attachments || []).length;
+      if (nAtt) parts.push('the email + ' + nAtt + ' attachment' + (nAtt === 1 ? '' : 's') + ' will attach to Documents after Create');
       parts.push('review before Create');
       toast('From the PO email - ' + parts.join(' · '), 15000);
     })();
@@ -261,7 +299,7 @@
   // On Create, stash the file(s) in IndexedDB (survives the create->WO-page hop, SPA nav OR a
   // reload). On the new WO page, hand them to BWN Drop Upload via bwn:cmd - it uploads them to
   // Documents AND drafts the email as a WO note (its existing flow). All local; no egress.
-  var PENDING = null;   // { file, po, client } - set on a successful drop
+  var PENDING = null;   // { files:[emailFile, ...attachmentFiles], po, client } - set on a successful drop
   function idbReq(mode, fn) {
     return new Promise(function (res, rej) {
       var o = indexedDB.open('bwn-wo-intake', 1);
@@ -283,11 +321,11 @@
   // fromPath lets the new page tell a real create-navigation from a validation failure (modal
   // stays -> same path -> we don't consume). Scoped to the modal's own Create button.
   document.addEventListener('click', function (e) {
-    if (!PENDING || !PENDING.file) return;
+    if (!PENDING || !PENDING.files || !PENDING.files.length) return;
     var btn = e.target && e.target.closest ? e.target.closest('button') : null;
     if (!btn || !/^create\b/i.test((btn.textContent || '').trim())) return;
     var m = woModal(); if (!m || !m.contains(btn)) return;
-    idbPut('current', { ts: Date.now(), fromPath: location.pathname, files: [PENDING.file], po: PENDING.po || '', client: PENDING.client || '' }).catch(function () { });
+    idbPut('current', { ts: Date.now(), fromPath: location.pathname, files: PENDING.files, po: PENDING.po || '', client: PENDING.client || '' }).catch(function () { });
   }, true);
 
   function waitWoReady(timeoutMs) {
@@ -331,6 +369,12 @@
       else parsed = parseMsg(new Uint8Array(await file.arrayBuffer()));
       if (!parsed.subject && !parsed.body && !parsed.senderEmail) { toast('Could not read that email. Save it as a .msg or .eml file and drop the file (dragging straight from Outlook often gives the browser nothing).', 12000); return; }
       var wo = extractWo(parsed.subject, parsed.body, parsed.senderEmail); wo._file = file;
+      // Turn the email's embedded attachments into File objects so they carry to the new WO's
+      // Documents alongside the email (Increment 2 Part B).
+      wo._attachments = [];
+      (parsed.attachments || []).forEach(function (a) {
+        try { wo._attachments.push(new File([a.bytes], a.name, { type: a.mime || 'application/octet-stream' })); } catch (e) { }
+      });
       fillWo(root, wo);
     } catch (e) { toast('Could not read the email: ' + ((e && e.message) || e), 10000); }
   }
