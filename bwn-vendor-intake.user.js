@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         BWN Vendor Intake (Broadway National)
 // @namespace    broadwaynational.bwn
-// @version      0.6.0
+// @version      0.7.0
 // @downloadURL  https://raw.githubusercontent.com/Intermu/userscripts/main/bwn-vendor-intake.user.js
 // @updateURL    https://raw.githubusercontent.com/Intermu/userscripts/main/bwn-vendor-intake.user.js
 // @description  Prefills Umbrava's Create Vendor form (and the detail-page Tax ID) from a Prospect Set-Up Form or a W-9. Fillable PDFs are read straight from their form fields; SCANNED W-9s are read by on-device OCR (Tesseract + pdf.js, fetched once at install, run entirely in the browser). The document and its tax ID never leave your machine. Adds a "Prefill from document" button; every extracted field is a suggestion to review before saving - the TIN especially, since OCR can misread digits.
@@ -21,7 +21,7 @@
 (function () {
   'use strict';
 
-  var VER = '0.6.0';
+  var VER = '0.7.0';
   // v0.4.0 - real IRS fillable W-9 support: map by FIELD NAME (UTF-16BE-decoded f1_/c1_1 names)
   // after inflating compressed object streams, since the IRS form carries no /TU tooltips; the
   // tooltip mapping stays as a fallback for other fillable forms. Also fixed stream inflation to
@@ -643,14 +643,28 @@
     toast(notes.join(' · '), 13000);
   }
 
+  // Short list of the fields a parsed doc contributes - shown in the drop-zone's held-files list.
+  function w9Fields(w9) {
+    var f = [];
+    if (w9.name) f.push('Company'); if (w9.dba) f.push('DBA'); if (w9.entity) f.push('Entity');
+    if (w9.street || w9.city || w9.zip) f.push('Address'); if (w9.tin) f.push('Tax ID (local)');
+    return f;
+  }
+  function prospectFields(p) {
+    var f = [];
+    if (p.company_name) f.push('Company'); if (firstName(p.contact_names)) f.push('Contact'); if (firstEmail(p.email)) f.push('Email');
+    if (p.phone) f.push('Phone'); if (firstTrade(p.trades)) f.push('Trade'); if (p.mailing_addr) f.push('Address');
+    return f;
+  }
+
+  // Read ONE dropped/picked file, fill the form, and RETURN a summary for the held-files list.
   async function handleFile(file) {
     try {
-      toast('Reading ' + file.name + ' ...', 4000);
       var doc = await readDoc(file);
       var root = modalRoot();
-      if (!root) { toast('Open the Create Vendor form first, then use Prefill.', 8000); return; }
-      if (doc.kind === 'w9') return fillFromW9(root, doc.w9);
-      if (doc.kind === 'prospect') return fillFromProspect(root, doc.prospect);
+      if (!root) { toast('Open the Create Vendor form first, then drop the document.', 8000); return { ok: false, msg: 'open Create Vendor first' }; }
+      if (doc.kind === 'w9') { fillFromW9(root, doc.w9); return { ok: true, label: 'W-9', fields: w9Fields(doc.w9) }; }
+      if (doc.kind === 'prospect') { fillFromProspect(root, doc.prospect); return { ok: true, label: 'Prospect Form', fields: prospectFields(doc.prospect) }; }
       if (doc.kind === 'scan') {
         toast('Scanned W-9 - running on-device OCR (~10-30s; the file stays in your browser)...', 45000);
         var text = await ocrPdf(file);
@@ -658,37 +672,67 @@
         if (w9.name || w9.tin || w9.dba || w9.street) {
           fillFromW9(root, w9);
           toast('OCR done - REVIEW every field before saving, the Tax ID especially (OCR can misread digits).', 15000);
-        } else {
-          toast('OCR ran but could not confidently read the W-9 fields - enter them manually.', 12000);
+          return { ok: true, label: 'Scanned W-9 (OCR)', fields: w9Fields(w9) };
         }
-        return;
+        toast('OCR ran but could not confidently read the W-9 fields - enter them manually.', 12000);
+        return { ok: false, msg: 'OCR could not read the fields' };
       }
       toast('Could not read fields from that PDF. Use the filled Prospect Set-Up Form, a fillable IRS W-9, or a scanned W-9.', 12000);
-    } catch (e) { toast('Prefill failed: ' + ((e && e.message) || e), 10000); }
+      return { ok: false, msg: 'unrecognized PDF' };
+    } catch (e) { toast('Prefill failed: ' + ((e && e.message) || e), 10000); return { ok: false, msg: (e && e.message) || 'read failed' }; }
+  }
+
+  // Add a dropped/picked file to the drop-zone's held list, fill from it, then show what it gave.
+  function addVIFile(file) {
+    var list = document.getElementById('bwn-vi-files'); if (!list) return;
+    var rowEl = document.createElement('div');
+    rowEl.style.cssText = 'display:flex;align-items:baseline;gap:8px;padding:5px 6px;border-top:1px solid #eef2f0;font:400 12px ' + FONT + ';';
+    var icon = document.createElement('span'); icon.textContent = '⏳';
+    var nm = document.createElement('span'); nm.textContent = file.name; nm.title = file.name; nm.style.cssText = 'font-weight:600;color:#0d3d26;max-width:40%;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;';
+    var sum = document.createElement('span'); sum.textContent = 'reading...'; sum.style.cssText = 'color:#5a6b62;flex:1;';
+    rowEl.appendChild(icon); rowEl.appendChild(nm); rowEl.appendChild(sum); list.appendChild(rowEl);
+    Promise.resolve(handleFile(file)).then(function (res) {
+      if (res && res.ok) {
+        icon.textContent = '✓';
+        sum.textContent = res.label + (res.fields && res.fields.length ? ' · ' + res.fields.join(', ') : ' · read');
+        sum.style.color = '#166534';
+      } else { icon.textContent = '⚠'; sum.textContent = (res && res.msg) || 'could not read fields'; sum.style.color = '#b45309'; }
+    }).catch(function (e) { icon.textContent = '⚠'; sum.textContent = (e && e.message) || 'read failed'; sum.style.color = '#b45309'; });
   }
 
   // ---- Inject the button into the Create Vendor modal ---------------------
+  // Drop zone at the top of the Create Vendor modal: drag or click to add one or more documents
+  // (Prospect Form / fillable W-9 / scanned W-9). Each file fills the form and is HELD in a list
+  // below the zone showing what it contributed, so several docs can prefill one vendor together.
   function injectButton() {
     var company = document.querySelector('input[name="details.companyName"]');
     if (!company) return;
     var modal = company.closest('.MuiPaper-root') || company.closest('.MuiDialog-container, [role="dialog"]');
     if (!modal || modal.querySelector('#bwn-vi-bar')) return;
-    var bar = document.createElement('div'); bar.id = 'bwn-vi-bar';
-    bar.style.cssText = 'display:flex;align-items:center;gap:10px;margin:0 0 10px;';
-    var btn = document.createElement('button'); btn.id = 'bwn-vi-btn'; btn.type = 'button';
-    btn.textContent = '📄 Prefill from document';
-    btn.style.cssText = 'background:#1a5f3e;color:#fff;border:none;border-radius:8px;padding:8px 14px;font:500 14px ' + FONT + ';cursor:pointer;';
-    var hint = document.createElement('span');
-    hint.textContent = 'Prospect Form or fillable W-9 (PDF)';
-    hint.style.cssText = 'font:400 12px ' + FONT + ';color:#5a6b62;';
-    var file = document.createElement('input'); file.type = 'file'; file.accept = 'application/pdf,.pdf'; file.style.display = 'none';
-    btn.addEventListener('click', function () { file.value = ''; file.click(); });
-    file.addEventListener('change', function () { if (file.files && file.files[0]) handleFile(file.files[0]); });
-    bar.appendChild(btn); bar.appendChild(hint); bar.appendChild(file);
-    // Put it just above the first field row.
+    var wrap = document.createElement('div'); wrap.id = 'bwn-vi-bar';
+    wrap.style.cssText = 'margin:0 0 12px;border:1px solid #cfe0d8;border-radius:10px;overflow:hidden;background:#fff;';
+    var drop = document.createElement('div');
+    drop.style.cssText = 'margin:8px;padding:14px 16px;border:2px dashed #1a5f3e;border-radius:8px;background:#f3f7f5;color:#0d3d26;text-align:center;cursor:pointer;line-height:1.5;transition:background .15s;';
+    drop.innerHTML = '📄 <b style="font:600 14px ' + FONT + ';">Drop a Prospect Form or W-9 here to prefill</b>' +
+      '<div style="font:400 12px ' + FONT + ';color:#5a6b62;margin-top:3px;">PDF - drag files or click. Read on your device; the Tax ID never leaves your browser.</div>';
+    var file = document.createElement('input'); file.type = 'file'; file.accept = 'application/pdf,.pdf'; file.multiple = true; file.style.display = 'none';
+    var list = document.createElement('div'); list.id = 'bwn-vi-files'; list.style.cssText = 'padding:0 8px 6px;';
+    drop.addEventListener('click', function (e) { if (e.target !== file) { file.value = ''; file.click(); } });
+    file.addEventListener('change', function () { if (file.files) [].slice.call(file.files).forEach(addVIFile); });
+    function stop(e) { e.preventDefault(); e.stopPropagation(); }
+    drop.addEventListener('dragover', function (e) { stop(e); drop.style.background = '#e2efe9'; });
+    drop.addEventListener('dragleave', function (e) { stop(e); drop.style.background = '#f3f7f5'; });
+    drop.addEventListener('drop', function (e) {
+      stop(e); drop.style.background = '#f3f7f5';
+      var fs = e.dataTransfer && e.dataTransfer.files;
+      if (fs && fs.length) [].slice.call(fs).forEach(addVIFile);
+      else toast('No file came through - save the document as a PDF and drop that file (or click the box to pick it).', 10000);
+    });
+    wrap.appendChild(drop); wrap.appendChild(list); wrap.appendChild(file);
+    // Top of the modal body, just above the first field row.
     var row = company.closest('.MuiGrid-container') || company.closest('form') || company.parentElement;
-    if (row && row.parentElement) row.parentElement.insertBefore(bar, row);
-    else modal.insertBefore(bar, modal.firstChild);
+    if (row && row.parentElement) row.parentElement.insertBefore(wrap, row);
+    else modal.insertBefore(wrap, modal.firstChild);
   }
 
   // For an EXISTING vendor: the detail-page "Edit Billing" dialog has input[name="taxId"]
