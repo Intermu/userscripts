@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         BWN Suite - Core (Broadway National)
 // @namespace    broadwaynational.bwn
-// @version      1.50.0
+// @version      1.51.0
 // @downloadURL  https://raw.githubusercontent.com/Intermu/userscripts/main/bwn-suite-core.user.js
 // @updateURL    https://raw.githubusercontent.com/Intermu/userscripts/main/bwn-suite-core.user.js
 // @description  Runs several Umbrava helpers for BWN coordinators, all in the browser with no network access. Includes: PO Approval + ETA Builder; WO Assist (GP/ETA, a stall watchdog, DNE calculator, and a next-action playbook); Email Leak Guard (checks recipients against vendor names, PO amounts, and client budget references before an outbound email sends); WO List Heat (a triage overlay + My Day strip on the work-order list); and the BWN Launcher (opens the Azure Static Web App tools with the current WO's context). Modules share state through sessionStorage/localStorage. No network calls, no privileged grants. Toggle modules in BWN_MODULES below.
@@ -44,7 +44,7 @@
   try { localStorage.setItem('bwn:status:core', JSON.stringify({ ver: BWN_VER, ts: Date.now() })); } catch (e) { /* best-effort */ }
 
   console.info('[BWN SUITE CORE] v' + BWN_VER + ' |',
-    'Shared Core 7 \u00b7 PO Approval 1.12 \u00b7 WO Assist 2.50 \u00b7 Leak Guard 2.0 \u00b7 List Heat 3.14 \u00b7 Launcher 2.0 \u00b7 Views 1.0 \u00b7 Palette 1.1 \u00b7 Visit 1.2 \u00b7 Reminders 1.1 \u00b7 Timeline 1.1 \u00b7 TripCal 1.3 \u00b7 Connector 1.2 |',
+    'Shared Core 7 \u00b7 PO Approval 1.13 \u00b7 WO Assist 2.50 \u00b7 Leak Guard 2.0 \u00b7 List Heat 3.14 \u00b7 Launcher 2.0 \u00b7 Views 1.0 \u00b7 Palette 1.1 \u00b7 Visit 1.2 \u00b7 Reminders 1.1 \u00b7 Timeline 1.1 \u00b7 TripCal 1.3 \u00b7 Connector 1.2 |',
     'enabled:', Object.keys(BWN_MODULES).filter(function (k) { return BWN_MODULES[k]; }).join(', '));
 
   // ===== BWN SHARED CORE v7 - KEEP IN SYNC across both suite scripts =====
@@ -2405,6 +2405,21 @@
     function poOvKey() { return 'bwn:po:ov:' + (currentWOId() || location.pathname); }
     function poOverrides() { return BWN.lsGetJSON(poOvKey(), {}) || {}; }
     function poSetOverride(num, cls) { var o = poOverrides(); o[num] = cls; BWN.lsSetJSON(poOvKey(), o); }
+    // A STABLE per-PO identity for the override key. The POAccordion-<n> testid is a RENDER INDEX
+    // that re-sequences when a PO is added/cancelled, so keying the Vendor/Supplier override by it
+    // made the classification "revert" (or jump to the wrong PO) after the PO list changed. Umbrava's
+    // assigned line number (the "001" <h6> label) is stable per PO, so key by that; fall back to the
+    // vendor GUID (per-vendor, stable), then the render index (legacy last resort).
+    function poKeyOf(row) {
+      var hs = row.querySelectorAll('h6');
+      for (var i = 0; i < hs.length; i++) { var t = (hs[i].textContent || '').trim(); if (/^\d{2,4}$/.test(t)) return 'ln' + t; }
+      var all = row.querySelectorAll('*');
+      for (var j = 0; j < all.length; j++) { if (!all[j].children.length) { var tt = (all[j].textContent || '').trim(); if (/^\d{2,4}$/.test(tt)) return 'ln' + tt; } }
+      var a = row.querySelector('a[href*="/vendors/"]');
+      var m = a && (a.getAttribute('href') || '').match(/vendors\/([0-9a-f\-]{8,})/i);
+      if (m) return 'v' + m[1];
+      return 'ix' + ((row.getAttribute('data-testid') || '').replace('POAccordion-', ''));
+    }
     function poIsSupplier(vendor, num) {
       var ov = poOverrides();
       if (ov[num] === 'S') return true;
@@ -2471,7 +2486,7 @@
       var items = [];
       document.querySelectorAll('[data-testid^="POAccordion-"]').forEach(function (row) {
         var unit = poUnitOf(row, container); if (!unit) return;
-        var num = (row.getAttribute('data-testid') || '').replace('POAccordion-', '');
+        var num = poKeyOf(row);   // stable per-PO key (line number) - survives PO add/cancel reorder
         items.push({ row: row, unit: unit, num: num, sup: poIsSupplier(vendorOf(row), num) });
       });
       var vN = items.filter(function (x) { return !x.sup; }).length, sN = items.length - vN;

@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         BWN Suite - AI (Broadway National)
 // @namespace    broadwaynational.bwn
-// @version      1.29.0
+// @version      1.30.0
 // @downloadURL  https://raw.githubusercontent.com/Intermu/userscripts/main/bwn-suite-ai.user.js
 // @updateURL    https://raw.githubusercontent.com/Intermu/userscripts/main/bwn-suite-ai.user.js
 // @description  The Umbrava tools that call outside APIs, kept separate from the zero-egress Core script. Client Update and WO Audit drafts (Anthropic Claude; draft-only, scrubbed before sending, you review before posting); Find Techs / Find Suppliers (Google Places; vendor leads near a WO); and Job View (opens the Ops-Dashboard job card on the WO page - WO details from Umbrava plus the authored case file and next actions, read-only). Network access is limited by the browser to the declared API hosts and the BWN Static Web App. API keys are stored in Tampermonkey's storage via the menu commands and never enter the page. Toggle modules in BWN_MODULES below.
@@ -1321,13 +1321,14 @@
     };
 
     var NEXTSTEPS_MODE = {
-      name: 'Next Steps',
+      name: 'Next Actions',                 // matches the dashboard "Next Actions Required" callout
       keepAll: true,                        // internal: read all note labels to judge true current state
       keepLabels: [],
       scrub: false,                         // internal: keep full detail
       system: SYSTEM_PROMPT_NEXTSTEPS,
       maxTokens: 1200,                      // short action list; headroom for a few flagged gaps
-      prefix: function (basis) { return 'Next steps - from ' + basis + '. Review, then paste into the WO note.\n\n'; }
+      noteType: 'Action',                   // enables the "Add as Action note" button in the result modal
+      prefix: function (basis) { return 'Next actions - from ' + basis + '. Review, then add to the WO note (or paste).\n\n'; }
     };
 
     var RECENT_MODE = {
@@ -2305,7 +2306,7 @@
         { label: 'Client Update', desc: 'Client-safe draft', fn: function () { run(CLIENT_MODE); } },
         { label: 'WO Audit', desc: 'Internal \u00b7 full case file', fn: function () { run(AUDIT_MODE); } },
         { label: 'Recent Update', desc: 'Internal \u00b7 recent window', fn: function () { run(RECENT_MODE); } },
-        { label: 'Next Steps', desc: 'Internal \u00b7 action list', fn: function () { run(NEXTSTEPS_MODE); } },
+        { label: 'Next Actions', desc: 'Action \u00b7 next actions', fn: function () { run(NEXTSTEPS_MODE); } },
         { label: 'Over 30', desc: 'Internal \u00b7 one-line', fn: function () { run(OVER30_MODE); } }
       ]));
 
