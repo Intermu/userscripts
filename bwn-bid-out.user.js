@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         BWN Bid-Out (Broadway National)
 // @namespace    broadwaynational.bwn
-// @version      0.16.0
+// @version      0.17.0
 // @downloadURL  https://raw.githubusercontent.com/Intermu/userscripts/main/bwn-bid-out.user.js
 // @updateURL    https://raw.githubusercontent.com/Intermu/userscripts/main/bwn-bid-out.user.js
 // @description  Email RFP to outside / net-new vendors, launched from a caret on Umbrava's own "See Who Is Available" button (network-vendor bidding stays native - no separate Bid-Out button). The caret menu opens the tracked email RFP wizard: finds net-new vendors nearby through Google Places, looks up their emails via the BWN scrape-contacts function, takes pasted outside addresses, and can still include assignable Umbrava vendors in the same email. You pick who's included, then review the exact recipient list and the rendered email before anything sends. Send from your own mailbox via the SWA send-bid function (Microsoft Graph), or open a plain Outlook draft. Vendors are BCC'd; nothing sends until you click Send. Network access is limited to Umbrava (same-origin), Google Places, and your SWA host.
@@ -19,7 +19,7 @@
 (function () {
   'use strict';
 
-  var VER = '0.16.0';
+  var VER = '0.17.0';
   console.info('[BWN BID-OUT] v' + VER + ' - 3-step Build Requests wizard (WO details -> select vendors -> review) · Umbrava vendors + Places net-new discovery + email scrape · one-click Graph send via SWA (Outlook-draft fallback)');
 
   var COMPANY_ADDR = 'Broadway National Group, 100 Davids Dr, Hauppauge, NY 11788';
@@ -28,6 +28,7 @@
   var PLACES_URL = 'https://places.googleapis.com/v1/places:searchText';
   var SCRAPE_URL = 'https://green-stone-0717dab0f.7.azurestaticapps.net/api/scrape-contacts';
   var ENRICH_URL = 'https://green-stone-0717dab0f.7.azurestaticapps.net/api/enrich-contacts';
+  var PROSPECTS_URL = 'https://green-stone-0717dab0f.7.azurestaticapps.net/api/vendor-prospects';
   var SEND_URL = 'https://green-stone-0717dab0f.7.azurestaticapps.net/api/send-bid';
   var STATUS_URL = 'https://green-stone-0717dab0f.7.azurestaticapps.net/api/bid-status';
   var LOGO_SRC = 'https://green-stone-0717dab0f.7.azurestaticapps.net/assets/bwn-logo.png';
@@ -215,6 +216,53 @@
       return { note: notes.join(' ') };
     });
   }
+  // ---- BWN vendor-prospect PIPELINE (shared with Find Techs / Find Suppliers) --------------
+  // Every paid discovery is SAVED (upsert) and every search READS the pipeline first - a
+  // prospect found once is never paid for again, and outcome history (declined / joined /
+  // do-not-contact, with the WO and note) follows the prospect into future searches.
+  function pipelineFetch(wo, miles) {
+    var key = GM_getValue('ingest_key', '');
+    if (!key || !wo.address || typeof wo.address.latitude !== 'number') return Promise.resolve([]);
+    var url = PROSPECTS_URL + '?near=' + wo.address.latitude + ',' + wo.address.longitude + '&mi=' + (miles || 50) + '&kind=contractor';
+    return gmGet(url, { 'x-bwn-key': key }, 30000).then(function (r) {
+      if (r.status < 200 || r.status >= 300 || !r.json || !r.json.ok) return [];
+      return (r.json.prospects || []).map(function (p) {
+        return { name: p.name, phone: p.phone || '', website: p.website || '', rating: p.rating, ratingCount: p.ratingCount,
+                 mi: p.miles, email: p.email || '', contact: p.contactName || '', title: p.contactTitle || '',
+                 src: 'pipeline', key: p.key, lastOutcome: p.lastOutcome || null,
+                 dnc: !!(p.lastOutcome && p.lastOutcome.status === 'do-not-contact') };
+      });
+    }).catch(function () { return []; });
+  }
+  function prospectsUpsert(leads, wo) {
+    var key = GM_getValue('ingest_key', '');
+    if (!key || !leads.length) return Promise.resolve();
+    var trade = (wo.trades && wo.trades[0] && wo.trades[0].name) || '';
+    var recs = leads.filter(function (l) { return l.name && l.src !== 'pipeline'; }).map(function (l) {
+      return { name: l.name, website: l.website || '', phone: l.phone || '', email: l.email || '',
+               contactName: l.contact || '', contactTitle: l.title || '', emailSrc: l.src === 'zoominfo' ? 'zoominfo' : (l.email ? 'scrape' : ''),
+               addr: l.addr || '', lat: l.lat, lng: l.lng, rating: l.rating, ratingCount: l.ratingCount,
+               kind: 'contractor', trades: trade ? [trade] : [], source: 'bidout' };
+    });
+    var chunks = []; for (var i = 0; i < recs.length; i += 40) chunks.push(recs.slice(i, i + 40));
+    return chunks.reduce(function (p, chunk) {
+      return p.then(function () { return gmPost(PROSPECTS_URL, { 'Content-Type': 'application/json', 'x-bwn-key': key }, { upsert: chunk }, 30000).catch(function () { }); });
+    }, Promise.resolve());
+  }
+  function prospectsOutcomes(list) {   // [{key, status, wo, note}] - fire-and-forget, batched
+    var key = GM_getValue('ingest_key', '');
+    if (!key || !list.length) return Promise.resolve();
+    var me = actor();
+    var outs = list.slice(0, 60).map(function (o) { return { key: o.key, status: o.status, wo: o.wo || '', note: o.note || '', by: me.email || me.name || '' }; });
+    return gmPost(PROSPECTS_URL, { 'Content-Type': 'application/json', 'x-bwn-key': key }, { outcomes: outs }, 30000).catch(function () { });
+  }
+  function outcomeBadge(l) {
+    var o = l.lastOutcome; if (!o) return '';
+    var d = new Date(o.ts || 0); var when = isNaN(d.getTime()) ? '' : ((d.getMonth() + 1) + '/' + d.getDate());
+    var lbl = o.status + (when ? ' ' + when : '') + (o.wo ? ' · WO ' + o.wo : '');
+    var col = o.status === 'joined' ? '#166534' : (o.status === 'do-not-contact' || o.status === 'declined') ? '#b91c1c' : '#92400e';
+    return '<span class="mi" style="color:' + col + ';font-weight:600;" title="' + esc((o.note || '') + (o.by ? ' - ' + o.by : '')) + '">' + esc(lbl) + '</span>';
+  }
   // Places discovery → dedupe vs the Umbrava list (+ self) → scrape emails.
   function discoverNetNew(wo, miles, umbravaItems) {
     var umbNames = {}, umbDomains = {};
@@ -232,13 +280,16 @@
         if (umbNames[nn] || (dom && umbDomains[dom])) return;   // already in Umbrava → omit redundant
         var key = dom || nn; if (seen[key]) return; seen[key] = 1; // dedupe Places against itself
         var mi = p.location ? haversineMi(wo.address.latitude, wo.address.longitude, p.location.latitude, p.location.longitude) : null;
-        leads.push({ name: name, phone: p.nationalPhoneNumber || '', website: web, rating: p.rating, ratingCount: p.userRatingCount, mi: mi, email: '' });
+        leads.push({ name: name, phone: p.nationalPhoneNumber || '', website: web, rating: p.rating, ratingCount: p.userRatingCount, mi: mi, email: '', addr: p.formattedAddress || '', lat: p.location ? p.location.latitude : null, lng: p.location ? p.location.longitude : null });
       });
       var urls = leads.map(function (l) { return l.website; }).filter(Boolean);
       return scrapeEmails(urls).then(function (sr) {
         leads.forEach(function (l) { if (l.website && sr.map[l.website]) l.email = sr.map[l.website]; });
         // ZoomInfo fallback for the leads the scrape couldn't email (site publishes none).
         return ziFallback(leads).then(function (zr) {
+          // Save the paid discovery to the shared pipeline. Keep the promise so outcome POSTs
+          // (bid-sent / declined / DNC) can wait for the records to exist server-side first.
+          openState.upsertP = prospectsUpsert(leads, wo);
           return { leads: leads, scrapeSkipped: sr.skipped, scrapeErr: sr.err, ziNote: zr.note };
         });
       });
@@ -673,7 +724,9 @@
       var recips = [], seen = {};
       function add(email) { if (!email) return; var k = email.toLowerCase(); if (!seen[k]) { seen[k] = 1; recips.push({ email: email }); } }
       (openState.rowVendors || []).forEach(function (v) { if (v.email && isPicked(v.email)) add(v.email); });
-      (openState.netNew || []).forEach(function (l) { if (l.email && isPicked(l.email)) add(l.email); });
+      // HARD RULE: a do-not-contact prospect is NEVER a recipient (isPicked defaults true, and the
+      // DNC checkbox renders disabled so its change handler can never write picked=false).
+      (openState.netNew || []).forEach(function (l) { if (l.email && !l.dnc && isPicked(l.email)) add(l.email); });
       parseEmails(openState.inviteText || '').forEach(add);
       return recips;
     }
@@ -787,8 +840,8 @@
         '<div class="bwn-bo-row"><label>Our vendors near this WO</label>' +
         '<button id="bo-all" style="border:none;background:transparent;color:#1b4d3e;font:600 12px system-ui;cursor:pointer;">Select all with email</button></div>' +
         '<div class="bwn-bo-list">' + vendorRows() + '</div>' +
-        '<div class="bwn-bo-row"><label>Net-new vendors near here (Google Places)</label>' +
-        '<button id="bo-find" class="bwn-bo-mini">🔎 Find area vendors</button></div>' +
+        '<div class="bwn-bo-row"><label>Net-new vendors near here (pipeline first, then Google Places)</label>' +
+        '<button id="bo-find" class="bwn-bo-mini">' + (openState.pipelineChecked ? '🔎 Search Google for more' : '🔎 Find area vendors') + '</button></div>' +
         '<div id="bo-netnew"></div>' +
         '<div class="bwn-bo-row"><label>Invite others - paste emails</label></div>' +
         '<textarea id="bo-invite" rows="2" placeholder="Add any outside vendor emails - one per line or comma-separated: name &lt;email@co.com&gt; or just email@co.com">' + esc(openState.inviteText) + '</textarea>' +
@@ -810,16 +863,22 @@
         var head = openState.netNewMsg ? '<div class="bwn-bo-note">' + esc(openState.netNewMsg) + '</div>' : '';
         if (!leads.length) { c.innerHTML = head; return; }
         var withEmail = leads.filter(function (l) { return l.email; }).length;
-        c.innerHTML = '<div class="bwn-bo-note">' + leads.length + ' net-new found · ' + withEmail + ' with email (rest are website/phone - grab their email into the box below).</div>' +
+        c.innerHTML = '<div class="bwn-bo-note">' + leads.length + ' prospect(s) · ' + withEmail + ' with email (rest are website/phone - grab their email into the box below).</div>' +
           '<div class="bwn-bo-list">' + leads.map(function (l, i) {
             var he = !!l.email;
-            return '<div class="bwn-bo-v">' +
-              '<input type="checkbox" data-nn="' + i + '"' + (he ? (isPicked(l.email) ? ' checked' : '') : ' disabled') + '>' +
+            var srcTag = l.src === 'zoominfo' ? 'ZoomInfo' : (l.src === 'pipeline' ? 'pipeline' : '');
+            return '<div class="bwn-bo-v"' + (l.dnc ? ' style="opacity:.55;"' : '') + '>' +
+              '<input type="checkbox" data-nn="' + i + '"' + ((!he || l.dnc) ? ' disabled' : (isPicked(l.email) ? ' checked' : '')) + '>' +
               '<span class="nm">' + esc(l.name) + '</span>' +
+              (l.src === 'pipeline' ? '<span class="mi" title="From the BWN prospect pipeline - no API cost">📇</span>' : '') +
               (l.rating ? '<span class="mi">★ ' + (+l.rating).toFixed(1) + '</span>' : '') +
-              '<span class="mi">' + (l.mi != null ? l.mi.toFixed(1) + ' mi' : '') + '</span>' +
-              (he ? '<span class="em">' + esc(l.email) + (l.src === 'zoominfo' ? ' <span class="mi" title="Named contact from Broadway\'s ZoomInfo">' + esc((l.contact || '') + (l.title ? ' · ' + l.title : '')) + (l.contact || l.title ? ' · ' : '') + 'ZoomInfo</span>' : '') + '</span>'
-                : (l.website ? '<a class="noem" href="' + esc(l.website) + '" target="_blank" rel="noopener">open site ↗</a>' : '<span class="noem">no site/email</span>')) +
+              '<span class="mi">' + (l.mi != null ? (+l.mi).toFixed(1) + ' mi' : '') + '</span>' +
+              outcomeBadge(l) +
+              (he ? '<span class="em">' + esc(l.email) + ((l.contact || l.title || srcTag) ? ' <span class="mi" title="Named contact">' + esc((l.contact || '') + (l.title ? ' · ' + l.title : '')) + ((l.contact || l.title) && srcTag ? ' · ' : '') + esc(srcTag) + '</span>' : '') + '</span>'
+                : (l.website && /^https?:\/\//i.test(l.website) ? '<a class="noem" href="' + esc(l.website) + '" target="_blank" rel="noopener">open site ↗</a>' : '<span class="noem">no site/email</span>')) +
+              '<select data-oc="' + i + '" title="Record an outcome for this prospect (saved to the shared pipeline)" style="margin-left:auto;font:400 11px ' + FONT + ';color:#5a6b62;border:1px solid #dde6e1;border-radius:6px;padding:2px 4px;background:#fff;max-width:110px;">' +
+                '<option value="">outcome…</option><option value="declined">Declined</option><option value="no-response">No response</option><option value="joined">Joined network</option><option value="do-not-contact">Do not contact</option>' +
+              '</select>' +
               '</div>';
           }).join('') + '</div>' + head;
         c.querySelectorAll('input[data-nn]').forEach(function (cb) {
@@ -827,6 +886,22 @@
             var v = openState.netNew[+cb.getAttribute('data-nn')];
             if (v && v.email) openState.picked[v.email.toLowerCase()] = cb.checked;
             refreshCount();
+          });
+        });
+        c.querySelectorAll('select[data-oc]').forEach(function (sel) {
+          sel.addEventListener('change', function () {
+            var l = openState.netNew[+sel.getAttribute('data-oc')];
+            var status = sel.value;
+            if (!l || !status) return;
+            var note = prompt('Optional note for "' + l.name + '" (' + status + ') - e.g. why they declined:', '');
+            if (note === null) { sel.value = ''; return; }   // Cancel = abort (outcome appends have no undo)
+            note = note || '';
+            (openState.upsertP || Promise.resolve()).then(function () {   // after the upsert lands, so the key exists server-side
+              return prospectsOutcomes([{ key: l.key || ziKey(l), status: status, wo: String(woNumber() || ''), note: note }]);
+            });
+            l.lastOutcome = { status: status, ts: Date.now(), wo: String(woNumber() || ''), note: note };
+            if (status === 'do-not-contact') { l.dnc = true; if (l.email) openState.picked[l.email.toLowerCase()] = false; }
+            renderNetNew(); refreshCount();
           });
         });
       }
@@ -859,15 +934,27 @@
       });
       document.getElementById('bo-reload').addEventListener('click', function () {
         capture(); var m = parseInt(val('bo-miles'), 10); if (m > 0) openState.miles = m;
+        openState.pipelineChecked = false;   // a changed radius gets a fresh FREE pipeline read first
         draw();
       });
-      document.getElementById('bo-find').addEventListener('click', function () {
-        capture();
+      function runPlacesDiscovery() {
         if (!GM_getValue('places_key', '')) { openState.netNewMsg = 'Set your Google Places API key: Tampermonkey menu → "Set Google Places API key", then try again.'; renderNetNew(); return; }
         var btn = document.getElementById('bo-find'); if (btn) { btn.disabled = true; btn.textContent = 'Searching…'; }
         openState.netNewMsg = 'Searching Google Places + looking up emails… (up to ~1 min)';
         renderNetNew();
         discoverNetNew(wo, openState.miles, res.items).then(function (out) {
+          // Keep ALL existing rows (pipeline rows carry outcome history; SR-seeded rows are the
+          // coordinator's explicit picks); add only genuinely new discoveries. When a fresh row
+          // collides with an email-less existing row, graft the freshly-paid-for email onto it.
+          var byKey = {}; (openState.netNew || []).forEach(function (l) { byKey[ziKey(l)] = l; });
+          var existing = (openState.netNew || []).slice();
+          var fresh = [];
+          (out.leads || []).forEach(function (f) {
+            var hit = byKey[ziKey(f)];
+            if (!hit) { fresh.push(f); return; }
+            ['email', 'contact', 'title', 'website', 'src'].forEach(function (k) { if (!hit[k] && f[k]) hit[k] = f[k]; });
+          });
+          out.leads = existing.concat(fresh);
           openState.netNew = out.leads || [];
           openState.netNewMsg = out.scrapeSkipped ? 'Emails skipped - set the SWA ingest key (menu) to auto-fill them. Leads show website/phone for now.'
             : (out.scrapeErr ? ('Email lookup issue (' + out.scrapeErr + ') - leads shown; you can still open sites for emails.') : '');
@@ -877,7 +964,35 @@
           openState.netNew = [];
           openState.netNewMsg = e && e.message === 'NO_PLACES_KEY' ? 'Set your Google Places API key via the Tampermonkey menu, then try again.' : ('Search failed: ' + (e && e.message));
           renderNetNew();
-        }).then(function () { var b = document.getElementById('bo-find'); if (b) { b.disabled = false; b.textContent = '🔎 Find area vendors'; } });
+        }).then(function () { var b = document.getElementById('bo-find'); if (b) { b.disabled = false; b.textContent = '🔎 Search Google for more'; } });
+      }
+      document.getElementById('bo-find').addEventListener('click', function () {
+        capture();
+        // FIRST click: read the FREE shared prospect pipeline (saved by every earlier Bid-Out /
+        // Find Techs / Find Suppliers search) before spending Places / scrape / ZoomInfo money.
+        if (!openState.pipelineChecked) {
+          openState.pipelineChecked = true;
+          var btn = document.getElementById('bo-find'); if (btn) { btn.disabled = true; btn.textContent = 'Checking the BWN pipeline…'; }
+          pipelineFetch(wo, openState.miles).then(function (known) {
+            if (known.length) {
+              // Merge with anything already listed (e.g. SR-seeded picks) - never replace it.
+              var kk = {}; known.forEach(function (l) { kk[ziKey(l)] = 1; });
+              openState.netNew = known.concat((openState.netNew || []).filter(function (l) { return !kk[ziKey(l)]; }));
+              known.forEach(function (l) { if (l.dnc && l.email) openState.picked[l.email.toLowerCase()] = false; });   // belt+suspenders vs the default-true pick
+              var dec = known.filter(function (l) { return l.lastOutcome && l.lastOutcome.status === 'declined'; }).length;
+              var dnc = known.filter(function (l) { return l.dnc; }).length;
+              openState.netNewMsg = known.length + ' known prospect(s) from the BWN pipeline - no API cost' +
+                (dec ? ' · ' + dec + ' previously declined' : '') + (dnc ? ' · ' + dnc + ' do-not-contact' : '') +
+                '. "Search Google for more" runs a fresh paid search.';
+              var b2 = document.getElementById('bo-find'); if (b2) { b2.disabled = false; b2.textContent = '🔎 Search Google for more'; }
+              renderNetNew(); refreshCount();
+            } else {
+              runPlacesDiscovery();   // nothing known near here yet - go straight to the paid search
+            }
+          }).catch(function () { runPlacesDiscovery(); });
+          return;
+        }
+        runPlacesDiscovery();
       });
       ft.querySelector('#bo-back').addEventListener('click', function () { capture(); openState.step = 1; draw(); });
       ft.querySelector('#bo-next').addEventListener('click', function () {
@@ -996,6 +1111,14 @@
           if (r.ok) {
             GM_setValue('send_from', from);
             if (r.duplicate) { toast('This bid was already submitted - not re-sent. Use the "📊 Who opened" menu item to check status.'); close(); return; }
+            // Record "bid-sent" in the shared prospect pipeline for every net-new recipient, so a
+            // future search near here shows who was already asked (and their reply outcome).
+            try {
+              var sentSet = {}; (mail.bcc || []).forEach(function (e2) { sentSet[String(e2).toLowerCase()] = 1; });
+              var outs = (openState.netNew || []).filter(function (l) { return l.email && sentSet[l.email.toLowerCase()]; })
+                .map(function (l) { return { key: l.key || ziKey(l), status: 'bid-sent', wo: String(woNumber() || '') }; });
+              (openState.upsertP || Promise.resolve()).then(function () { return prospectsOutcomes(outs); });   // after the upsert lands
+            } catch (e3) { }
             var failNote = (r.failed > 0) ? (' (' + r.failed + ' could not be sent)') : '';
             var trackNote = r.tracked ? ' Per-vendor open tracking is on - use the "📊 Who opened" menu item to see who has viewed it.' : '';
             toast('✅ Sent to ' + r.sent + ' vendor' + (r.sent === 1 ? '' : 's') + failNote + ' from ' + from + '. Replies come to your inbox; the email is in your Sent Items.' + trackNote);

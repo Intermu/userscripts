@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         BWN Suite - AI (Broadway National)
 // @namespace    broadwaynational.bwn
-// @version      1.30.0
+// @version      1.31.0
 // @downloadURL  https://raw.githubusercontent.com/Intermu/userscripts/main/bwn-suite-ai.user.js
 // @updateURL    https://raw.githubusercontent.com/Intermu/userscripts/main/bwn-suite-ai.user.js
 // @description  The Umbrava tools that call outside APIs, kept separate from the zero-egress Core script. Client Update and WO Audit drafts (Anthropic Claude; draft-only, scrubbed before sending, you review before posting); Find Techs / Find Suppliers (Google Places; vendor leads near a WO); and Job View (opens the Ops-Dashboard job card on the WO page - WO details from Umbrava plus the authored case file and next actions, read-only). Network access is limited by the browser to the declared API hosts and the BWN Static Web App. API keys are stored in Tampermonkey's storage via the menu commands and never enter the page. Toggle modules in BWN_MODULES below.
@@ -60,7 +60,7 @@
   publishAiStatus();
 
   console.info('[BWN SUITE AI] v' + BWN_VER + ' |',
-    'Shared Core 7 \u00b7 Client Update 1.47 \u00b7 Find Techs 2.13 \u00b7 Connector 1.4 |',
+    'Shared Core 7 \u00b7 Client Update 1.47 \u00b7 Find Techs 2.14 \u00b7 Connector 1.4 |',
     'enabled:', Object.keys(BWN_MODULES).filter(function (k) { return BWN_MODULES[k]; }).join(', '));
 
   // ===== BWN SHARED CORE v7 - KEEP IN SYNC across both suite scripts =====
@@ -4449,6 +4449,8 @@ if (BWN_MODULES.jobView) BWN.safeModule('jobView', function () {
                 rating: rt,
                 reviews: rv,
                 miles: dist,
+                lat: p.location ? p.location.latitude : null,            // kept for the shared prospect pipeline
+                lng: p.location ? p.location.longitude : null,
                 score: vendorScore(rt, rv, dist)
               };
             });
@@ -4576,6 +4578,8 @@ if (BWN_MODULES.jobView) BWN.safeModule('jobView', function () {
       var fullList = [];      // all results
       var radiusMi = ftLoadRadius();   // persisted across opens
       var fetchedRadius = 0;  // largest radius we've actually fetched for
+      var pipeKnown = [];     // pipeline prospects fetched for this site (outcome history source)
+      var pipeSeeded = false; // fullList currently holds FREE pipeline rows, not paid results
 
       var wrap = document.createElement('div');
       wrap.id = 'bwn-ft-panel';
@@ -4628,7 +4632,9 @@ if (BWN_MODULES.jobView) BWN.safeModule('jobView', function () {
         var b = document.createElement('button'); b.type = 'button'; b.textContent = mi + ' mi';
         b.addEventListener('click', function () {
           radiusMi = mi; ftSaveRadius(mi); setRadiusUI();
-          if (fullList.length && mi <= fetchedRadius) render();
+          // Pipeline-seeded rows are radius-agnostic (miles unknown): re-render, never silently
+          // fire a PAID search from a radius click - Search is the only paid trigger.
+          if (fullList.length && (mi <= fetchedRadius || pipeSeeded)) render();
           else if (fullList.length) doSearch();
         });
         radBtns[mi] = b; seg.appendChild(b);
@@ -4698,7 +4704,7 @@ if (BWN_MODULES.jobView) BWN.safeModule('jobView', function () {
         var shown = visible();
         if (!shown.length) return;
         var tsv = shown.map(function (r) {
-          return [r.name, r.miles.toFixed(1) + ' mi', r.phone, r.site, r.addr].join('\t');
+          return [r.name, (r.pipe && !(r.miles > 0)) ? 'pipeline' : (r.miles.toFixed(1) + ' mi'), r.phone, r.site, r.addr].join('\t');
         }).join('\n');
         GM_setClipboard('Name\tDistance\tPhone\tWebsite\tAddress\n' + tsv);
         copyAllBtn.textContent = 'Copied \u2713'; setTimeout(function () { copyAllBtn.textContent = 'Copy list'; }, 1500);
@@ -4720,14 +4726,17 @@ if (BWN_MODULES.jobView) BWN.safeModule('jobView', function () {
         var shown = sortShown(visible());
         clearEl(results);
         status.textContent = fullList.length
-          ? shown.length + ' ' + mode.noun + '(s) within ' + radiusMi + ' mi (of ' + fullList.length + ' found)'
-          : status.textContent;
+          ? (pipeSeeded
+            ? shown.length + ' known ' + mode.noun + '(s) from the BWN pipeline (free) - Search runs a fresh paid lookup'
+            : shown.length + ' ' + mode.noun + '(s) within ' + radiusMi + ' mi (of ' + fullList.length + ' found)')
+          : '0 ' + mode.noun + '(s) found - widen the radius or adjust the trade';
         shown.forEach(function (r) {
           var row = document.createElement('div'); row.className = 'bwn-ft-row';
           var main = document.createElement('div'); main.className = 'vn-main';
           var rhead = document.createElement('div'); rhead.className = 'vn-head';
           var name = document.createElement('span'); name.className = 'bwn-ft-name'; name.textContent = r.name;
-          var dist = document.createElement('span'); dist.className = 'bwn-ft-dist'; dist.textContent = r.miles.toFixed(1) + ' mi';
+          var dist = document.createElement('span'); dist.className = 'bwn-ft-dist';
+          dist.textContent = (r.pipe && !(r.miles > 0)) ? '📇 pipeline' : (r.miles.toFixed(1) + ' mi');   // city-matched pipeline rows carry no distance
           rhead.appendChild(name); rhead.appendChild(dist);
           if (r.rating != null) {
             var rt = document.createElement('span'); rt.className = 'bwn-ft-rating';
@@ -4737,6 +4746,14 @@ if (BWN_MODULES.jobView) BWN.safeModule('jobView', function () {
           if (r.rating == null || r.reviews < 5) {          // thin Google footprint: flag for human vetting, don't hide
             var unv = document.createElement('span'); unv.className = 'bwn-ft-unv'; unv.textContent = 'UNVETTED';
             rhead.appendChild(unv);
+          }
+          if (r.outcome && r.outcome.status) {              // pipeline outcome history (recorded via Bid-Out)
+            var oc = document.createElement('span'); oc.className = 'bwn-ft-unv';
+            oc.textContent = r.outcome.status.toUpperCase();
+            oc.title = (r.outcome.note || '') + (r.outcome.wo ? ' - WO ' + r.outcome.wo : '');
+            if (r.outcome.status === 'joined') oc.style.cssText = 'color:#166534;border-color:#166534;';
+            else if (r.outcome.status === 'declined' || r.outcome.status === 'do-not-contact') oc.style.cssText = 'color:#b91c1c;border-color:#b91c1c;';
+            rhead.appendChild(oc);
           }
           main.appendChild(rhead);
           if (r.addr) { var ad = document.createElement('div'); ad.className = 'bwn-ft-addr'; ad.textContent = r.addr; main.appendChild(ad); }
@@ -4770,13 +4787,17 @@ if (BWN_MODULES.jobView) BWN.safeModule('jobView', function () {
 
       function doSearch() {
         clearEl(results); status.textContent = 'Searching\u2026';
+        pipeSeeded = false;   // paid results replace the free pipeline seed
         searchBtn.disabled = true;
         setProg(0.03);
         runSearch(tradeF.input.value, addrF.input.value, mode, radiusMi, status, function (err, list) {
           searchBtn.disabled = false;
           hideProg();
           if (err) { status.textContent = '\u26a0 ' + err.message; return; }
-          fullList = list || []; fetchedRadius = radiusMi; render();
+          fullList = list || []; fetchedRadius = radiusMi;
+          vpAnnotate(fullList, pipeKnown);   // outcome history must FOLLOW the prospect into fresh paid results
+          render();
+          vpUpsert(fullList, mode, tradeF.input.value);   // save the paid discovery to the shared prospect pipeline
         }, function (frac) { setProg(frac); });
       }
       searchBtn.addEventListener('click', doSearch);
@@ -4785,6 +4806,30 @@ if (BWN_MODULES.jobView) BWN.safeModule('jobView', function () {
       wrap.appendChild(card);
       document.body.appendChild(wrap);
       releaseA11y = bwnA11yDialog(card, { label: mode.title, modal: true, initial: searchBtn });
+
+      // FREE first look: show what the shared BWN pipeline already knows near this site
+      // (saved by earlier Bid-Out / Find Techs / Find Suppliers runs) before any paid search.
+      var cs = vpCityState(address);
+      if (cs) vpFetchCity(cs, mode.kind, function (known) {
+        if (!known.length || !document.body.contains(card)) return;
+        pipeKnown = known;   // kept for outcome annotation of any later paid search
+        if (searchBtn.disabled) return;   // a search is already running - don't seed/clobber it
+        var dec = known.filter(function (p) { return p.lastOutcome && p.lastOutcome.status === 'declined'; }).length;
+        var dnc = known.filter(function (p) { return p.lastOutcome && p.lastOutcome.status === 'do-not-contact'; }).length;
+        if (!fullList.length) {
+          fullList = known.map(function (p) {
+            return { name: p.name, addr: p.addr || '', phone: p.phone || '', site: p.website || '',
+                     rating: p.rating, reviews: p.ratingCount || 0, miles: p.miles != null ? p.miles : 0,
+                     lat: p.lat, lng: p.lng, score: 0, pipe: true, outcome: p.lastOutcome || null };
+          });
+          fetchedRadius = radiusMi;
+          pipeSeeded = true;
+          render();
+          // After render() so it isn't overwritten by the results count line.
+          status.textContent = '📇 ' + known.length + ' known ' + mode.noun + '(s) already in the BWN pipeline for ' + cs.city + ', ' + cs.state +
+            (dec ? ' · ' + dec + ' declined' : '') + (dnc ? ' · ' + dnc + ' do-not-contact' : '') + ' - free; Search runs a fresh paid lookup.';
+        }
+      });
     }
 
     // ---- Mount the button next to "Purchase Orders" ----------------------
@@ -4799,6 +4844,57 @@ if (BWN_MODULES.jobView) BWN.safeModule('jobView', function () {
     // ---- Modes ------------------------------------------------------------
     var CONTRACTOR_MODE = { kind: 'contractor', title: 'Find Techs - net-new contractors near this WO', noun: 'contractor', blurb: 'Sourcing leads - verify before recruiting.' };
     var SUPPLIER_MODE = { kind: 'supplier', title: 'Find Suppliers - trade supply houses near this WO', noun: 'supplier', blurb: 'Nearby supply houses.' };
+
+    // ---- BWN vendor-prospect PIPELINE (shared with Bid-Out) --------------------
+    // Every paid Places search is SAVED to the shared prospect store, and the panel shows what
+    // is already KNOWN near the site (free) before any paid search - including outcome history
+    // (declined / joined / do-not-contact) recorded from Bid-Out. Key-gated; degrades silently.
+    var PROSPECTS_URL = 'https://green-stone-0717dab0f.7.azurestaticapps.net/api/vendor-prospects';
+    function vpKey() { try { return GM_getValue('ingest_key', ''); } catch (e) { return ''; } }
+    function vpCityState(address) {
+      var m = String(address || '').match(/,\s*([^,]+?),\s*([A-Z]{2})\b/);
+      return m ? { city: m[1].trim(), state: m[2] } : null;
+    }
+    function vpFetchCity(cs, kind, cb) {
+      var k = vpKey(); if (!k || !cs) { cb([]); return; }
+      GM_xmlhttpRequest({
+        method: 'GET', timeout: 25000,
+        url: PROSPECTS_URL + '?city=' + encodeURIComponent(cs.city) + '&state=' + encodeURIComponent(cs.state) + '&kind=' + kind,
+        headers: { 'x-bwn-key': k },
+        onload: function (r) { var j = null; try { j = JSON.parse(r.responseText); } catch (e) { } cb((j && j.ok && j.prospects) || []); },
+        onerror: function () { cb([]); }, ontimeout: function () { cb([]); }
+      });
+    }
+    function vpDomain(u) { try { return new URL(String(u || '')).hostname.toLowerCase().replace(/^www\./, ''); } catch (e) { return ''; } }
+    // Carry pipeline outcome history (declined / do-not-contact / joined) onto freshly-searched
+    // rows for the same company, so a paid re-discovery never renders a flagged vendor "clean".
+    function vpAnnotate(rows, known) {
+      if (!rows || !rows.length || !known || !known.length) return;
+      var byDom = {}, byName = {};
+      known.forEach(function (p) { var d = vpDomain(p.website); if (d) byDom[d] = p; var n = alphaOnly(p.name || ''); if (n) byName[n] = p; });
+      rows.forEach(function (r) {
+        var p = (vpDomain(r.site) && byDom[vpDomain(r.site)]) || byName[alphaOnly(r.name || '')];
+        if (p && p.lastOutcome) r.outcome = p.lastOutcome;
+      });
+    }
+    function vpUpsert(list, mode, trade) {
+      var k = vpKey(); if (!k || !list || !list.length) return;
+      var recs = list.slice(0, 120).map(function (r) {
+        return { name: r.name, website: r.site || '', phone: r.phone || '', addr: r.addr || '',
+                 lat: r.lat, lng: r.lng, rating: r.rating, ratingCount: r.reviews,
+                 kind: mode.kind, trades: trade ? [String(trade).split(',')[0].trim()] : [],
+                 source: mode.kind === 'supplier' ? 'findsuppliers' : 'findtechs' };
+      });
+      (function send(i) {
+        if (i >= recs.length) return;
+        GM_xmlhttpRequest({
+          method: 'POST', timeout: 30000, url: PROSPECTS_URL,
+          headers: { 'Content-Type': 'application/json', 'x-bwn-key': k },
+          data: JSON.stringify({ upsert: recs.slice(i, i + 40) }),
+          onload: function () { send(i + 40); }, onerror: function () { }, ontimeout: function () { }
+        });
+      })(0);
+    }
 
     function makeBtn(label, fn) {
       var b = document.createElement('button');
