@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         BWN Vendor Intake (Broadway National)
 // @namespace    broadwaynational.bwn
-// @version      0.7.0
+// @version      0.8.0
 // @downloadURL  https://raw.githubusercontent.com/Intermu/userscripts/main/bwn-vendor-intake.user.js
 // @updateURL    https://raw.githubusercontent.com/Intermu/userscripts/main/bwn-vendor-intake.user.js
 // @description  Prefills Umbrava's Create Vendor form (and the detail-page Tax ID) from a Prospect Set-Up Form or a W-9. Fillable PDFs are read straight from their form fields; SCANNED W-9s are read by on-device OCR (Tesseract + pdf.js, fetched once at install, run entirely in the browser). The document and its tax ID never leave your machine. Adds a "Prefill from document" button; every extracted field is a suggestion to review before saving - the TIN especially, since OCR can misread digits.
@@ -504,29 +504,42 @@
       })();
     });
   }
-  // Type is a MUI multi-select: open, click the option, close with Escape (never
-  // click the backdrop - that can close the whole dialog).
+  // Type is a MUI multi-select. Open on MOUSEDOWN (a plain .click() never opens the menu), click the
+  // option, close with Escape, then VERIFY the hidden value actually took and RETRY up to 3x. A real
+  // Create Vendor modal renders slower than a test one, so a single open can miss - the menu may not
+  // be mounted yet, or the Trade listbox portal can collide with it and eat the click. Waits for the
+  // menu to UNMOUNT before returning so the caller can open the Trade list without a collision.
+  // Never clicks the backdrop (that can close the whole dialog). Returns Promise<bool> = committed.
   function setType(label) {
-    try {
-      var trig = document.getElementById('mui-component-select-details.vendorTypes');
-      if (!trig || new RegExp(label, 'i').test(trig.textContent || '')) return;
-      // A MUI Select opens on MOUSEDOWN, not click - a plain .click() never opens the menu (so the
-      // old trig.click() silently no-opped and Type never got set). Open, poll for the option, then
-      // click it (the options are multi-select checkbox items), and close with Escape.
-      trig.dispatchEvent(new MouseEvent('mousedown', { bubbles: true, cancelable: true, view: window }));
-      var want = new RegExp('^\\s*' + label + '\\s*$', 'i'), n = 0;
-      (function pick() {
-        var menu = document.querySelector('ul[role="listbox"], .MuiMenu-list');
-        var opt = menu ? [...menu.querySelectorAll('[role="option"],li,.MuiMenuItem-root')].find(function (o) { return want.test((o.textContent || '').trim()); }) : null;
-        if (opt) {
-          ['pointerdown', 'mousedown', 'mouseup', 'click'].forEach(function (t) { opt.dispatchEvent(new MouseEvent(t, { bubbles: true, cancelable: true, view: window })); });
-          (menu || document.body).dispatchEvent(new KeyboardEvent('keydown', { key: 'Escape', code: 'Escape', keyCode: 27, which: 27, bubbles: true }));
-          return;
-        }
-        if (++n < 12) setTimeout(pick, 70);
-        else document.body.dispatchEvent(new KeyboardEvent('keydown', { key: 'Escape', code: 'Escape', keyCode: 27, which: 27, bubbles: true }));
-      })();
-    } catch (e) { /* Type stays for manual pick */ }
+    var want = new RegExp('^\\s*' + label + '\\s*$', 'i');
+    function hidden() { return document.querySelector('input[name="details.vendorTypes"]'); }
+    function committed() { var h = hidden(); return !!(h && new RegExp(label, 'i').test(h.value || '')); }
+    return (async function () {
+      for (var attempt = 0; attempt < 3; attempt++) {
+        if (committed()) return true;
+        var trig = document.getElementById('mui-component-select-details.vendorTypes'), w = 0;
+        while (!trig && w++ < 20) { await delay(60); trig = document.getElementById('mui-component-select-details.vendorTypes'); }
+        if (!trig) return false;
+        try {
+          trig.dispatchEvent(new MouseEvent('mousedown', { bubbles: true, cancelable: true, view: window }));
+          var opt = null, n = 0;
+          while (n++ < 20 && !opt) {
+            var menu = document.querySelector('ul[role="listbox"], .MuiMenu-list');
+            opt = menu ? [].slice.call(menu.querySelectorAll('[role="option"],li,.MuiMenuItem-root')).find(function (o) { return want.test((o.textContent || '').trim()); }) : null;
+            if (!opt) await delay(70);
+          }
+          if (opt) {
+            ['pointerdown', 'mousedown', 'mouseup', 'click'].forEach(function (t) { opt.dispatchEvent(new MouseEvent(t, { bubbles: true, cancelable: true, view: window })); });
+            await delay(120);
+            (document.activeElement || document.body).dispatchEvent(new KeyboardEvent('keydown', { key: 'Escape', code: 'Escape', keyCode: 27, which: 27, bubbles: true }));
+            var u = 0; while (document.querySelector('ul[role="listbox"], .MuiMenu-list') && u++ < 15) await delay(60);
+          }
+        } catch (e) { /* retry */ }
+        await delay(120);
+        if (committed()) return true;
+      }
+      return committed();
+    })();
   }
   // Trade(s) is a custom autocomplete with a nested taxonomy. Actually SELECT it by clicking the
   // matching option (typing alone never registers the pick). Returns 'selected'|'typed'|'disabled'|'skip'.
@@ -545,39 +558,50 @@
     set('details.contactEmail', firstEmail(f.email), 'Email');
     var tel = root.querySelector('input[type="tel"]');
     if (tel && f.phone) { setNativeValue(tel, digits(f.phone)); done.push('Phone'); }
-    setType('Contractor');
-    return done;
+    return done;   // Type is set (and awaited) by the caller, so a slow/failed Type can't stop it
   }
 
-  // Step 2 (Address) renders after Next. Watch for its fields, fill once.
+  // Step 2 (Address) renders after Next. Watch for its fields, then fill ONCE they appear.
   function watchStep2(addr) {
     if (!addr.street && !addr.city && !addr.zip) return;
     var filled = false;
     var obs = new MutationObserver(function () {
       if (filled) return;
       var root = document.querySelector('.MuiDialog-container, [role="dialog"]');
-      if (!root) return;
-      var street = fieldByLabel(root, /^Street/);
-      if (!street) return;
+      if (!root || !fieldByLabel(root, /^Street/)) return;
       filled = true; obs.disconnect();
-      var setL = function (re, v) { var el = fieldByLabel(root, re); if (el && v) { if (el.tagName === 'SELECT') setSelectByText(el, v); else setNativeValue(el, v); } };
-      setL(/^Street/, addr.street);
-      setL(/^City/, addr.city);
-      setL(/^Postal Code|^Zip/, addr.zip);
-      // State/Province is a custom autocomplete whose options are the 2-letter code (typing "PA"
-      // -> option "PA"; a full name matches nothing) - so CLICK the option, not just type. Both the
-      // W-9 and prospect extractors already give a 2-letter code. Handle a native <select> too.
-      var st = fieldByLabel(root, /^State\/Province|^State/);
-      if (st && addr.state) {
-        if (st.tagName === 'SELECT') setSelectByText(st, addr.state);
-        else if (st.getAttribute('aria-autocomplete') === 'list') selectAC(st, addr.state, addr.state);
-        else setNativeValue(st, addr.state);
-      }
-      var nm = fieldByLabel(root, /^Name/); if (nm && !nm.value) setNativeValue(nm, 'Business');
-      toast('Filled the address on step 2 (State selected). Set Country, then Validate.', 9000);
+      fillAddress(addr);
     });
     obs.observe(document.body, { childList: true, subtree: true });
     setTimeout(function () { obs.disconnect(); }, 300000);
+  }
+  // Fill the step-2 address. Wait for the step to finish mounting FIRST: React re-renders the
+  // freshly-mounted controlled inputs right after they appear and would clobber an instant fill
+  // (this was the #1 reason the address looked "not filled" even though the fields exist). Then
+  // fill, and re-check + re-fill once in case React still reset a value.
+  async function fillAddress(addr) {
+    await delay(350);
+    var root = document.querySelector('.MuiDialog-container, [role="dialog"]');
+    if (!root) return;
+    var setL = function (re, v) { var el = fieldByLabel(root, re); if (el && v) { if (el.tagName === 'SELECT') setSelectByText(el, v); else setNativeValue(el, v); } };
+    setL(/^Street/, addr.street);
+    setL(/^City/, addr.city);
+    setL(/^Postal Code|^Zip/, addr.zip);
+    // State/Province is a custom autocomplete whose options are the 2-letter code (typing "PA"
+    // -> option "PA"; a full name matches nothing) - so CLICK the option, not just type. Both the
+    // W-9 and prospect extractors already give a 2-letter code. Handle a native <select> too.
+    var st = fieldByLabel(root, /^State\/Province|^State/);
+    if (st && addr.state) {
+      if (st.tagName === 'SELECT') setSelectByText(st, addr.state);
+      else if (st.getAttribute('aria-autocomplete') === 'list') await selectAC(st, addr.state, addr.state);
+      else setNativeValue(st, addr.state);
+    }
+    var nm = fieldByLabel(root, /^Name/); if (nm && !nm.value) setNativeValue(nm, 'Business');
+    // Verify the text fields stuck; a too-early fill can be reset by React - re-fill once if so.
+    await delay(200);
+    var chk = fieldByLabel(root, /^Street/);
+    if (chk && addr.street && chk.value !== addr.street) { setL(/^Street/, addr.street); setL(/^City/, addr.city); setL(/^Postal Code|^Zip/, addr.zip); }
+    toast('Filled the address on step 2 (State selected). Set Country, then Validate.', 9000);
   }
 
   // Umbrava shows its own "Vendor may already exist" banner; surface it so a dup
@@ -608,18 +632,24 @@
 
   async function fillFromProspect(root, f) {
     var addr = splitAddr(f.mailing_addr);
-    var done = fillStep1(root, f);          // this also fires setType('Contractor') on a 200ms timer
-    var trade = firstTrade(f.trades);
-    // Let the Type MUI menu finish opening/clicking/closing before we open the Trade listbox,
-    // so the two portaled option lists do not collide.
-    var tradeRes = 'skip';
-    if (trade) { await delay(450); tradeRes = await selectTrade(root, trade); }
+    var done = fillStep1(root, f);          // text fields only (Type is awaited below)
+    // Arm the step-2 watcher and dup-check BEFORE the fragile dropdowns, so a Type/Trade hiccup can
+    // never stop the address from filling when the user reaches step 2.
     watchStep2(addr);
     surfaceDup(root);
+    // Type first, fully awaited (its menu portal is closed before we open the Trade list, so the two
+    // portaled option lists cannot collide). Then Trade, guarded so a failure can't abort anything.
+    var typeOk = false;
+    try { typeOk = await setType('Contractor'); } catch (e) { }
+    var trade = firstTrade(f.trades);
+    var tradeRes = 'skip';
+    if (trade) { try { tradeRes = await selectTrade(root, trade); } catch (e) { tradeRes = 'typed'; } }
     var notes = [];
-    if (done.length) notes.push('Filled ' + done.join(', ') + ', Type=Contractor');
+    if (done.length) notes.push('Filled ' + done.join(', '));
+    notes.push(typeOk ? 'Type=Contractor' : 'set Type yourself');
     if (tradeRes === 'selected') notes.push('selected Trade(s) "' + trade + '"');
     else if (tradeRes === 'typed') notes.push('typed Trade(s) "' + trade + '" - pick it from the list');
+    else if (trade) notes.push('set Trade(s) "' + trade + '" yourself');
     notes.push('set Entity yourself (C vs S corp)');
     if (addr.street) notes.push('address fills on step 2');
     toast(notes.join(' · '), 12000);
