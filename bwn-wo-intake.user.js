@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         BWN WO Intake (Broadway National)
 // @namespace    broadwaynational.bwn
-// @version      0.4.0
+// @version      0.5.0
 // @downloadURL  https://raw.githubusercontent.com/Intermu/userscripts/main/bwn-wo-intake.user.js
 // @updateURL    https://raw.githubusercontent.com/Intermu/userscripts/main/bwn-wo-intake.user.js
 // @description  Drop a client PO email (.msg or .eml) onto the Create Work Order modal and it prefills the fields from the email body - Scope (the Description), Source PO #, then selects Client, Location (PFJ store #, zero-padded), Trade (from the asset) and Priority by clicking the real dropdown option, and fills Client DNE (the PO NTE) once the client unlocks it. Then, after you Create the WO, it hands the email to BWN Drop Upload to attach it to the new WO's Documents and draft the email note. Reads the email entirely in the browser via a built-in Outlook .msg reader; nothing is uploaded to any server. Best-effort: review every field before you click Create.
@@ -13,7 +13,7 @@
 
 (function () {
   'use strict';
-  var VER = '0.4.0';
+  var VER = '0.5.0';
   var FONT = "-apple-system,BlinkMacSystemFont,'Segoe UI','Helvetica Neue',Arial,sans-serif";
   console.info('[BWN WO INTAKE] v' + VER + ' - drop a PO email (.msg/.eml) on Create Work Order to prefill + auto-attach to the new WO Documents (via Drop Upload); reads locally, nothing leaves the browser');
 
@@ -135,7 +135,6 @@
     var s = document.querySelector('textarea#scopeOfWork') || document.querySelector('input#client-dropdown');
     return s ? (s.closest('.MuiDialog-container, [role="dialog"], .MuiPaper-root') || null) : null;
   }
-  function delay(ms) { return new Promise(function (r) { setTimeout(r, ms); }); }
   function normText(s) { return String(s || '').replace(/\s+/g, ' ').trim(); }
   // Find an input by its field label - for fields with a dynamic id (Priority) or no id (Client DNE).
   function inputByLabel(root, re) {
@@ -156,14 +155,16 @@
       })();
     });
   }
-  function waitOptions(timeoutMs) {
+  // Poll until getter() returns a truthy element (or timeout). Used to wait for a field that only
+  // renders after a cascade (e.g. Client DNE appears once a client is selected).
+  function waitForEl(getter, timeoutMs) {
     return new Promise(function (res) {
       var t0 = Date.now();
       (function poll() {
-        var opts = [].slice.call(document.querySelectorAll('[role="option"]'));
-        if (opts.length) return res(opts);
-        if (Date.now() - t0 > (timeoutMs || 1800)) return res([]);
-        setTimeout(poll, 80);
+        var el = getter();
+        if (el) return res(el);
+        if (Date.now() - t0 > (timeoutMs || 2500)) return res(null);
+        setTimeout(poll, 100);
       })();
     });
   }
@@ -187,7 +188,10 @@
   // Umbrava's Client / Location / Trade / Priority are custom autocompletes (aria-autocomplete=
   // "list"): pre-typing does NOT select - you must click an option in the listbox, and that click
   // is what cascades (Client unlocks Location + reveals Client DNE; Location unlocks Asset). Open,
-  // filter by searchTerm, then click the best match. Returns 'selected'|'typed'|'disabled'|'skip'.
+  // filter by searchTerm, then POLL until the MATCHING option renders and click it. The Client list
+  // is network-fetched and can take >1.5s, and a stray/transient option may flash first - so we must
+  // wait for a real match, not resolve on the first option that appears. Returns
+  // 'selected' | 'typed' | 'disabled' | 'skip'.
   function selectAC(el, searchTerm, matchTarget) {
     return new Promise(function (resolve) {
       if (!el) return resolve('skip');
@@ -195,14 +199,16 @@
       el.focus();
       el.dispatchEvent(new MouseEvent('mousedown', { bubbles: true, cancelable: true, view: window }));
       if (searchTerm) acType(el, searchTerm);
-      waitOptions(1800).then(function (opts) {
-        var pick = bestOption(opts, matchTarget || searchTerm);
+      var target = matchTarget || searchTerm, t0 = Date.now();
+      (function poll() {
+        var pick = bestOption([].slice.call(document.querySelectorAll('[role="option"]')), target);
         if (pick) {
           ['pointerdown', 'mousedown', 'mouseup', 'click'].forEach(function (t) { pick.dispatchEvent(new MouseEvent(t, { bubbles: true, cancelable: true, view: window })); });
           return resolve('selected');
         }
-        resolve(searchTerm ? 'typed' : 'skip');
-      });
+        if (Date.now() - t0 > 2500) return resolve(searchTerm ? 'typed' : 'skip');
+        setTimeout(poll, 70);
+      })();
     });
   }
   function fillWo(root, wo) {
@@ -218,18 +224,18 @@
     (async function () {
       if (wo.client) {
         var rc = await selectAC(root.querySelector('input#client-dropdown'), wo.client, wo.client);
-        if (rc === 'selected') { picked.push('Client "' + wo.client + '"'); await delay(650); }   // let Location unlock + Client DNE render
+        if (rc === 'selected') picked.push('Client "' + wo.client + '"');
         else hint.push('Client: pick "' + wo.client + '"');
       }
-      // Client DNE = the PO NTE (the CLIENT ceiling, never the vendor NTE). The field only exists
-      // once a client is selected - that is why it never populated before.
+      // Client DNE = the PO NTE (the CLIENT ceiling, never the vendor NTE). The field only EXISTS
+      // once a client is selected (that is why it was blank before), so WAIT for it to render.
       if (wo.clientDne) {
-        var dne = inputByLabel(root, /^client dne/i);
+        var dne = await waitForEl(function () { return inputByLabel(root, /^client dne/i); }, 2500);
         if (dne) { setNativeValue(dne, wo.clientDne); done.push('Client DNE $' + wo.clientDne); }
         else hint.push('Client DNE: $' + wo.clientDne);
       }
       if (wo.location) {
-        await waitEnabled(root, 'input#location-dropdown', 2500);
+        await waitEnabled(root, 'input#location-dropdown', 3000);
         var store = wo.location.replace(/\D/g, '') || wo.location;   // search by the store number, match the "PFJ ####" option
         var rl = await selectAC(root.querySelector('input#location-dropdown'), store, wo.location);
         if (rl === 'selected') picked.push('Location "' + wo.location + '"'); else hint.push('Location: pick ' + wo.location);

@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         BWN Vendor Intake (Broadway National)
 // @namespace    broadwaynational.bwn
-// @version      0.5.0
+// @version      0.6.0
 // @downloadURL  https://raw.githubusercontent.com/Intermu/userscripts/main/bwn-vendor-intake.user.js
 // @updateURL    https://raw.githubusercontent.com/Intermu/userscripts/main/bwn-vendor-intake.user.js
 // @description  Prefills Umbrava's Create Vendor form (and the detail-page Tax ID) from a Prospect Set-Up Form or a W-9. Fillable PDFs are read straight from their form fields; SCANNED W-9s are read by on-device OCR (Tesseract + pdf.js, fetched once at install, run entirely in the browser). The document and its tax ID never leave your machine. Adds a "Prefill from document" button; every extracted field is a suggestion to review before saving - the TIN especially, since OCR can misread digits.
@@ -21,7 +21,7 @@
 (function () {
   'use strict';
 
-  var VER = '0.5.0';
+  var VER = '0.6.0';
   // v0.4.0 - real IRS fillable W-9 support: map by FIELD NAME (UTF-16BE-decoded f1_/c1_1 names)
   // after inflating compressed object streams, since the IRS form carries no /TU tooltips; the
   // tooltip mapping stays as a fallback for other fillable forms. Also fixed stream inflation to
@@ -463,17 +463,6 @@
   // NOT select - you must CLICK an option. This is the same engine used in BWN WO Intake.
   function normText(s) { return String(s || '').replace(/\s+/g, ' ').trim(); }
   function delay(ms) { return new Promise(function (r) { setTimeout(r, ms); }); }
-  function waitOptions(timeoutMs) {
-    return new Promise(function (res) {
-      var t0 = Date.now();
-      (function poll() {
-        var opts = [].slice.call(document.querySelectorAll('[role="option"]'));
-        if (opts.length) return res(opts);
-        if (Date.now() - t0 > (timeoutMs || 1800)) return res([]);
-        setTimeout(poll, 80);
-      })();
-    });
-  }
   // Best option for a target string: exact, then starts-with, then contains (case-insensitive).
   // Contains handles the grouped Trade text (option label = group + subtrade, e.g. "LightingExterior Lighting").
   function bestOption(opts, target) {
@@ -492,7 +481,10 @@
     el.dispatchEvent(new Event('input', { bubbles: true }));
     el.dispatchEvent(new KeyboardEvent('keyup', { bubbles: true }));
   }
-  // Open, filter by searchTerm, then click the best-matching option. Returns 'selected'|'typed'|'disabled'|'skip'.
+  // Open, filter by searchTerm, then POLL until the MATCHING option renders and click it. Umbrava's
+  // option lists can be network-fetched (>1s) and a stray/transient option may flash first, so we
+  // must wait for a real match rather than resolve on the first option that appears. Returns
+  // 'selected' | 'typed' | 'disabled' | 'skip'.
   function selectAC(el, searchTerm, matchTarget) {
     return new Promise(function (resolve) {
       if (!el) return resolve('skip');
@@ -500,14 +492,16 @@
       el.focus();
       el.dispatchEvent(new MouseEvent('mousedown', { bubbles: true, cancelable: true, view: window }));
       if (searchTerm) acType(el, searchTerm);
-      waitOptions(1800).then(function (opts) {
-        var pick = bestOption(opts, matchTarget || searchTerm);
+      var target = matchTarget || searchTerm, t0 = Date.now();
+      (function poll() {
+        var pick = bestOption([].slice.call(document.querySelectorAll('[role="option"]')), target);
         if (pick) {
           ['pointerdown', 'mousedown', 'mouseup', 'click'].forEach(function (t) { pick.dispatchEvent(new MouseEvent(t, { bubbles: true, cancelable: true, view: window })); });
           return resolve('selected');
         }
-        resolve(searchTerm ? 'typed' : 'skip');
-      });
+        if (Date.now() - t0 > 2500) return resolve(searchTerm ? 'typed' : 'skip');
+        setTimeout(poll, 70);
+      })();
     });
   }
   // Type is a MUI multi-select: open, click the option, close with Escape (never
