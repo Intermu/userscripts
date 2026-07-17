@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         BWN Suite - AI (Broadway National)
 // @namespace    broadwaynational.bwn
-// @version      1.32.0
+// @version      1.33.0
 // @downloadURL  https://raw.githubusercontent.com/Intermu/userscripts/main/bwn-suite-ai.user.js
 // @updateURL    https://raw.githubusercontent.com/Intermu/userscripts/main/bwn-suite-ai.user.js
 // @description  The Umbrava tools that call outside APIs, kept separate from the zero-egress Core script. Client Update and WO Audit drafts (Anthropic Claude; draft-only, scrubbed before sending, you review before posting); Find Techs / Find Suppliers (Google Places; vendor leads near a WO); and Job View (opens the Ops-Dashboard job card on the WO page - WO details from Umbrava plus the authored case file and next actions, read-only). Network access is limited by the browser to the declared API hosts and the BWN Static Web App. API keys are stored in Tampermonkey's storage via the menu commands and never enter the page. Toggle modules in BWN_MODULES below.
@@ -2730,9 +2730,9 @@ if (BWN_MODULES.jobView) BWN.safeModule('jobView', function () {
   function fetchUserRole(force, cb) {
     var sub = authSub();
     if (_bwnRole && !force && _bwnRole.sub === sub) { if (cb) cb(_bwnRole); return; }
-    if (!connectorEnabled()) { if (cb) cb(null); return; }
-    var key = GM_getValue('ingest_key', ''); if (!key) { if (cb) cb(null); return; }
-    var tok = authToken(); if (!tok) { if (cb) cb(null); return; }
+    if (!connectorEnabled()) { if (cb) cb(null, 'connector is off (Ops Suite toggle)'); return; }
+    var key = GM_getValue('ingest_key', ''); if (!key) { if (cb) cb(null, 'SWA ingest key not set (Tampermonkey menu)'); return; }
+    var tok = authToken(); if (!tok) { if (cb) cb(null, 'not signed into Umbrava (no token found)'); return; }
     if (!force) {
       try { var c = JSON.parse(GM_getValue('bwn_role_cache', 'null')); if (c && c.ts && (Date.now() - c.ts) < ROLE_TTL_MS && c.sub && c.sub === sub) { announceRole(c); if (cb) cb(c); return; } } catch (e) { }   // same-user + fresh
     }
@@ -2746,15 +2746,16 @@ if (BWN_MODULES.jobView) BWN.safeModule('jobView', function () {
           var rc = { email: j.email || '', sub: j.sub || '', role: j.role || null, tenantId: j.tenantId || '', roleQuery: j.roleQuery || null, ts: Date.now() };
           try { if (rc.role) GM_setValue('bwn_role_cache', JSON.stringify(rc)); } catch (e) { }   // persist only a RESOLVED role (never the token); a null role re-fetches next load
           announceRole(rc); if (cb) cb(rc);
-        } else { if (cb) cb(null); }
+        } else { if (cb) cb(null, 'HTTP ' + r.status + ((j && (j.code || j.error)) ? ': ' + (j.code || j.error) : '')); }
       },
-      onerror: function () { if (cb) cb(null); }, ontimeout: function () { if (cb) cb(null); }
+      onerror: function () { if (cb) cb(null, 'network error reaching the SWA'); }, ontimeout: function () { if (cb) cb(null, 'timed out reaching the SWA'); }
     });
   }
   GM_registerMenuCommand('BWN: Check my Umbrava role', function () {
-    fetchUserRole(true, function (rc) {
-      if (rc) alert('Umbrava role: ' + (rc.role || '(none)') + '\nResolved via: ' + (rc.roleQuery || '?') + '\nUser: ' + (rc.email || '') + '\nTenant: ' + (rc.tenantId || ''));
-      else alert('Could not fetch your Umbrava role.\nCheck: the SWA ingest key is set, the connector is on, and you are signed into Umbrava.');
+    fetchUserRole(true, function (rc, err) {
+      if (rc && rc.role) alert('Umbrava role: ' + rc.role + '\nResolved via: ' + (rc.roleQuery || '?') + '\nUser: ' + (rc.email || '') + '\nTenant: ' + (rc.tenantId || ''));
+      else if (rc) alert('Signed in and verified, but Umbrava returned no role.\nResolved via: ' + (rc.roleQuery || '(no query matched)') + '\nUser: ' + (rc.email || ''));
+      else alert('Could not fetch your Umbrava role.\nReason: ' + (err || 'unknown') + '\n\nChecklist: SWA ingest key set, connector on, signed into Umbrava.');
     });
   });
   // Fire once per session shortly after load so the SWA resolves the role + logs/returns the
