@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         BWN Bid-Out (Broadway National)
 // @namespace    broadwaynational.bwn
-// @version      0.20.0
+// @version      0.21.0
 // @downloadURL  https://raw.githubusercontent.com/Intermu/userscripts/main/bwn-bid-out.user.js
 // @updateURL    https://raw.githubusercontent.com/Intermu/userscripts/main/bwn-bid-out.user.js
 // @description  Email RFP to outside / net-new vendors, launched from a caret on Umbrava's own "See Who Is Available" button (network-vendor bidding stays native - no separate Bid-Out button). The caret menu opens the tracked email RFP wizard: finds net-new vendors nearby through Google Places, looks up their emails via the BWN scrape-contacts function, takes pasted outside addresses, and can still include assignable Umbrava vendors in the same email. You pick who's included, then review the exact recipient list and the rendered email before anything sends. Send from your own mailbox via the SWA send-bid function (Microsoft Graph), or open a plain Outlook draft. Vendors are BCC'd; nothing sends until you click Send. Network access is limited to Umbrava (same-origin), Google Places, and your SWA host.
@@ -20,7 +20,7 @@
 (function () {
   'use strict';
 
-  var VER = '0.20.0';
+  var VER = '0.21.0';
   console.info('[BWN BID-OUT] v' + VER + ' - 3-step Build Requests wizard (WO details -> select vendors -> review) · Umbrava vendors + Places net-new discovery + email scrape · one-click Graph send via SWA (Outlook-draft fallback)');
 
   var COMPANY_ADDR = 'Broadway National Group, 100 Davids Dr, Hauppauge, NY 11788';
@@ -496,6 +496,38 @@
     return [{ name: base + '.csv', contentType: 'text/csv', contentBase64: cb64 }];
   }
 
+  // ==== Coordinator-curated attachments =======================================
+  // Files the coordinator manually picks (a clean spec sheet, a site photo THEY exported) to
+  // ride along on the send. Deliberately NOT sourced from the Umbrava WO document store - those
+  // are internal .msg threads carrying client name / address / our pricing. Extension+MIME are
+  // constrained to match the server allowlist (send-bid ATTACH_ALLOW); city/state-only is the
+  // coordinator's responsibility (a visible warning sits on the picker).
+  var MANUAL_ATTACH_MIME = { pdf: 'application/pdf', jpg: 'image/jpeg', jpeg: 'image/jpeg', png: 'image/png', heic: 'image/heic' };
+  var MANUAL_MAX_FILES = 5;             // server MAX_ATTACH is 6; reserve 1 for the HVAC schedule
+  var MANUAL_MAX_BYTES = 10000000;      // ~10MB total curated (server total cap is 12MB)
+  function attachExtOf(name) { var m = /\.([A-Za-z0-9]{1,8})$/.exec(String(name || '')); return m ? m[1].toLowerCase() : ''; }
+  function attachSafeName(name) {
+    var ext = attachExtOf(name);
+    var base = String(name || '').replace(/\.[A-Za-z0-9]{1,8}$/, '').replace(/[^A-Za-z0-9 ._()\-]/g, '_').replace(/\s+/g, ' ').trim() || 'attachment';
+    return base + '.' + ext;
+  }
+  function attachHumanSize(n) { n = +n || 0; return n >= 1000000 ? (Math.round(n / 100000) / 10 + ' MB') : (Math.max(1, Math.round(n / 1000)) + ' KB'); }
+  function attachReadFile(file) {
+    return new Promise(function (resolve, reject) {
+      var ext = attachExtOf(file.name);
+      if (!MANUAL_ATTACH_MIME[ext]) { reject(new Error(file.name + ': type not allowed (PDF/JPG/PNG/HEIC only)')); return; }
+      if (file.size > MANUAL_MAX_BYTES) { reject(new Error(file.name + ': over the ' + Math.round(MANUAL_MAX_BYTES / 1000000) + 'MB limit')); return; }   // reject BEFORE reading the whole file into memory
+      var fr = new FileReader();
+      fr.onload = function () {
+        var s = String(fr.result || ''), i = s.indexOf('base64,');
+        if (i === -1) { reject(new Error('could not read ' + file.name)); return; }
+        resolve({ name: attachSafeName(file.name), contentType: MANUAL_ATTACH_MIME[ext], contentBase64: s.slice(i + 7), size: file.size });
+      };
+      fr.onerror = function () { reject(new Error('could not read ' + file.name)); };
+      fr.readAsDataURL(file);
+    });
+  }
+
   // Plain-text fallback body (Outlook draft). Mirrors the HTML: honors the include toggles
   // + additional info, city/state only (NO client name or street address - hard rule).
   function buildBidEmail(wo, recipients, req) {
@@ -905,6 +937,7 @@
     if (openState.netNewMsg == null) openState.netNewMsg = '';
     if (openState.include == null) openState.include = { priority: true, trades: true, location: true, service: hasService, reference: true, respond: true, arrive: true, nte: true, techs: true, travel: true, rate: true };
     if (openState.addl == null) openState.addl = '';
+    if (openState.attachments == null) openState.attachments = [];   // coordinator-curated files [{name,contentType,contentBase64,size}]
     if (openState.asset == null) openState.asset = '';       // PM/project: asset + equipment (make/model/spec, e.g. R34 vs R41)
     if (openState.history == null) openState.history = '';   // PM/project: site / prior-service context
     if (openState.picked == null) openState.picked = {};   // email(lc) -> bool; absent = default checked
@@ -1077,6 +1110,58 @@
         // Once per page load, pull the team-shared index (it wins over a stale local copy).
         if (!_hvacTeamTried) { _hvacTeamTried = true; hvacFetchTeamIndex().then(function (ix) { if (ix) draw(); }); }
       }
+      // Coordinator-curated attachments: a per-file picker with a city/state-only warning.
+      function attachListHtml() {
+        var list = openState.attachments || [];
+        if (!list.length) return '';
+        return '<div style="margin:4px 0 2px;">' + list.map(function (a, i) {
+          return '<div style="display:flex;align-items:center;gap:8px;font-size:12px;color:#1f2a24;padding:2px 0;">' +
+            '<span style="flex:1;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;">' + esc(a.name) + '</span>' +
+            '<span style="color:#93a29a;">' + esc(attachHumanSize(a.size)) + '</span>' +
+            '<a href="#" class="bo-attach-rm" data-ai="' + i + '" style="color:#b91c1c;">remove</a></div>';
+        }).join('') + '</div>';
+      }
+      function attachBarHtml() {
+        var n = (openState.attachments || []).length;
+        var s = '<div class="bwn-bo-row" style="margin-bottom:2px;"><label>Attachments for vendors (optional)</label></div>' +
+          '<div style="color:#92400e;font-size:11px;font-weight:500;line-height:1.4;margin:0 0 4px;">Goes to every vendor - city/state only. Do NOT attach anything that names the client or the site address.</div>' +
+          '<div id="bo-attach-bar" style="padding:8px 10px;background:#f3f7f5;border:1px dashed #cfd9d3;border-radius:8px;font-size:12px;">' +
+          attachListHtml() +
+          '<button type="button" id="bo-attach-add" class="bwn-bo-mini">Attach files</button> ' +
+          '<span style="color:#93a29a;">PDF / JPG / PNG / HEIC - up to ' + MANUAL_MAX_FILES + ', or drop here</span>' +
+          '<input type="file" id="bo-attach-file" accept=".pdf,.jpg,.jpeg,.png,.heic" multiple style="display:none;"></div>';
+        return s;
+      }
+      function attachWire() {
+        var bar = body.querySelector('#bo-attach-bar'); if (!bar) return;
+        var fileInput = body.querySelector('#bo-attach-file');
+        function addFiles(fileList) {
+          var files = Array.prototype.slice.call(fileList || []); if (!files.length) return;
+          var slots = MANUAL_MAX_FILES - (openState.attachments || []).length;
+          if (slots <= 0) { toast('Up to ' + MANUAL_MAX_FILES + ' files.'); return; }
+          if (files.length > slots) { toast('Only ' + slots + ' more file(s) can be added.'); files = files.slice(0, slots); }
+          capture();   // preserve typed text across the re-render
+          var chain = Promise.resolve();
+          files.forEach(function (f) {
+            chain = chain.then(function () {
+              return attachReadFile(f).then(function (rec) {
+                var total = (openState.attachments || []).reduce(function (s, a) { return s + (a.size || 0); }, 0) + rec.size;
+                if (total > MANUAL_MAX_BYTES) { toast(f.name + ': over the ' + Math.round(MANUAL_MAX_BYTES / 1000000) + 'MB total limit - skipped.'); return; }
+                openState.attachments.push(rec);
+              }).catch(function (e) { toast((e && e.message) || 'could not add file'); });
+            });
+          });
+          chain.then(function () { draw(); });
+        }
+        var addBtn = body.querySelector('#bo-attach-add'); if (addBtn) addBtn.addEventListener('click', function () { fileInput.click(); });
+        if (fileInput) fileInput.addEventListener('change', function () { addFiles(fileInput.files); });
+        bar.addEventListener('dragover', function (e) { e.preventDefault(); bar.style.background = '#e8f3ed'; });
+        bar.addEventListener('dragleave', function () { bar.style.background = '#f3f7f5'; });
+        bar.addEventListener('drop', function (e) { e.preventDefault(); bar.style.background = '#f3f7f5'; addFiles(e.dataTransfer && e.dataTransfer.files); });
+        body.querySelectorAll('.bo-attach-rm').forEach(function (a) {
+          a.addEventListener('click', function (e) { e.preventDefault(); capture(); openState.attachments.splice(+a.getAttribute('data-ai'), 1); draw(); });
+        });
+      }
       var svcChk = hasService
         ? '<label class="bwn-bo-chk" style="margin-left:auto;"><input type="checkbox" id="bo-inc-service"' + (openState.include.service !== false ? ' checked' : '') + '> Include Service Instructions</label>'
         : '';
@@ -1109,6 +1194,7 @@
         hvacBarHtml() +
         '<div class="bwn-bo-row"><label>Additional information (optional)</label></div>' +
         '<textarea id="bo-addl" rows="2" placeholder="Anything pertinent to include: access hours, # of units, parking, on-site contact, equipment make/model, etc.">' + esc(openState.addl) + '</textarea>' +
+        attachBarHtml() +
         '<div class="bwn-bo-row"><label>Include in request</label></div>' +
         // Core WO fields always offered; the entered bid fields appear as toggles once they have
         // a value. Location is city/state only - there is deliberately NO client-name/address toggle.
@@ -1128,6 +1214,7 @@
           '<div class="bwn-bo-fld"><label>Phone</label><input id="bo-cphone" type="text" value="' + esc(openState.contactPhone) + '" placeholder="' + esc(COMPANY_PHONE) + '"></div>' +
         '</div>';
       hvacWire();
+      attachWire();
       var ft = footer('<span class="sp"></span><button id="bo-cancel">Cancel</button><button class="pri" id="bo-next">Next →</button>');
       ft.querySelector('#bo-cancel').addEventListener('click', close);
       ft.querySelector('#bo-next').addEventListener('click', function () {
@@ -1361,6 +1448,14 @@
         sfld('Contact Name', req.contactName || me.name || 'Broadway National Group') +
         sfld('Contact Email', fromDefault) +
         sfld('Contact Phone', req.contactPhone || GM_getValue('sender_phone', '') || COMPANY_PHONE) +
+        (function () {
+          var names = (req.benchmark && req.benchmark.list && req.benchmark.list.length) ? [hvacBaseName(req.benchmark) + (hvacXlsxAvailable() ? '.xlsx' : '.csv')] : [];
+          names = names.concat((openState.attachments || []).map(function (a) { return a.name; }));
+          return names.length
+            ? '<div class="bwn-bo-sumfld"><div class="k">Attachments</div><div class="v">' + esc(names.join(', ')) +
+              '<div style="color:#92400e;font-size:11px;font-weight:500;margin-top:2px;">These files go to every vendor - confirm none names the client or the site address.</div></div></div>'
+            : '';
+        })() +
         '</div>';
 
       body.innerHTML =
@@ -1396,8 +1491,10 @@
       });
       pft.querySelector('#bo-draft').addEventListener('click', function () {
         syncSubject();
+        var nAtt = (openState.attachments || []).length + (req.benchmark && req.benchmark.list && req.benchmark.list.length ? 1 : 0);
         openDraft(mail);
-        toast('Draft opened for ' + mail.bcc.length + ' recipient' + (mail.bcc.length === 1 ? '' : 's') + ' (BCC). Review + send in your mail client. Body also copied to clipboard.');
+        toast('Draft opened for ' + mail.bcc.length + ' recipient' + (mail.bcc.length === 1 ? '' : 's') + ' (BCC). Review + send in your mail client. Body also copied to clipboard.' +
+          (nAtt ? ' Note: attachments (' + nAtt + ') are NOT carried into an Outlook draft - use one-click Send for those, or attach them manually.' : ''));
         close();
       });
       pft.querySelector('#bo-send').addEventListener('click', function () {
@@ -1416,13 +1513,16 @@
         // before sending) - otherwise "Vendor@Co.com" vs "vendor@co.com" would miss dedup.
         var idemFrom = from.toLowerCase();
         var idemBcc = (mail.bcc || []).map(function (e) { return String(e || '').trim().toLowerCase(); }).sort().join(',');
-        var idem = 'b' + cyrb53([idemFrom, idemBcc, mail.subject || '', html].join('|'));
+        // Attachments: the HVAC per-location schedule + any coordinator-curated files.
+        var manualAttach = (openState.attachments || []).map(function (a) { return { name: a.name, contentType: a.contentType, contentBase64: a.contentBase64 }; });
+        var allAttach = hvacAttachments(req.benchmark).concat(manualAttach);
+        // Fold an attachment fingerprint into the idem key so adding/removing a file counts as an
+        // edited bid (otherwise a resend with different files would dedup against the prior send).
+        var attachFp = allAttach.map(function (a) { var b = a.contentBase64 || ''; return a.name + ':' + b.length + ':' + b.slice(0, 24); }).join(',');
+        var idem = 'b' + cyrb53([idemFrom, idemBcc, mail.subject || '', html, attachFp].join('|'));
         var btn = document.getElementById('bo-send');
         btn.disabled = true; btn.textContent = 'Sending…';
-        // Full equipment list rides along as a per-location Excel workbook (Graph send only).
-        // The html body that feeds `idem` already reflects the benchmark (price + unit count +
-        // "attached" note), so the attachment needs no separate dedup input.
-        sendBid(from, mail, html, idem, hvacAttachments(req.benchmark)).then(function (r) {
+        sendBid(from, mail, html, idem, allAttach).then(function (r) {
           if (r.ok) {
             GM_setValue('send_from', from);
             if (r.duplicate) { toast('This bid was already submitted - not re-sent. Use the "📊 Who opened" menu item to check status.'); close(); return; }
