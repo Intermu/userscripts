@@ -4841,12 +4841,37 @@ if (BWN_MODULES.jobView) BWN.safeModule('jobView', function () {
           bbb.target = '_blank'; bbb.rel = 'noopener noreferrer';
           bbb.textContent = 'BBB \u2197';
           bbb.className = 'bwn-ft-link bbb'; right.appendChild(bbb);
+          // Outcome dropdown: record that we reached out / they declined / do-not-contact / etc.
+          // Saved to the shared pipeline (same store Bid-Out writes), so the history follows this
+          // vendor into every future search near here.
+          (function (rr) {
+            var oc = document.createElement('select');
+            oc.className = 'bwn-ft-oc';
+            oc.title = 'Record an outcome for this ' + mode.noun + ' (saved to the shared BWN pipeline)';
+            oc.style.cssText = 'margin-top:4px;font:400 11px -apple-system,BlinkMacSystemFont,"Segoe UI",Arial,sans-serif;color:#5a6b62;border:1px solid #dde6e1;border-radius:6px;padding:2px 4px;background:#fff;max-width:130px;';
+            var opts = [['', 'outcome…'], ['contacted', 'Reached out'], ['declined', 'Declined'], ['no-response', 'No response'], ['joined', 'Joined network'], ['do-not-contact', 'Do not contact']];
+            opts.forEach(function (o) { var op = document.createElement('option'); op.value = o[0]; op.textContent = o[1]; oc.appendChild(op); });
+            oc.addEventListener('change', function () {
+              var st = oc.value; if (!st) return;
+              var lbl = { contacted: 'reached out', declined: 'declined', 'no-response': 'no response', joined: 'joined network', 'do-not-contact': 'do not contact' }[st];
+              var note = prompt('Optional note for "' + rr.name + '" (' + lbl + ') - e.g. why:', '');
+              if (note === null) { oc.value = ''; return; }   // Cancel = abort (outcome appends have no undo)
+              oc.disabled = true; status.textContent = 'Saving outcome for ' + rr.name + '…';
+              var ftWo = (location.pathname.match(/\/work-orders\/(\d+)/) || [])[1] || '';
+              vpRecordOutcome(rr, mode, tradeF.input.value, st, note, ftWo, function (err) {
+                if (err) { oc.disabled = false; oc.value = ''; status.textContent = '⚠ Could not save outcome: ' + err.message; return; }
+                rr.outcome = { status: st, note: note, wo: ftWo }; rr.dnc = (st === 'do-not-contact');
+                render();   // rebuild so the badge reflects the new outcome
+              });
+            });
+            right.appendChild(oc);
+          })(r);
           row.appendChild(main); row.appendChild(right);
           results.appendChild(row);
         });
         if (!shown.length && fullList.length) {
           var empty = document.createElement('div'); empty.className = 'bwn-ft-empty';
-          empty.textContent = 'Nothing within ' + radiusMi + ' mi \u2014 widen the radius.';
+          empty.textContent = 'Nothing within ' + radiusMi + ' mi - widen the radius.';
           results.appendChild(empty);
         }
       }
@@ -4932,15 +4957,23 @@ if (BWN_MODULES.jobView) BWN.safeModule('jobView', function () {
       });
     }
     function vpDomain(u) { try { return new URL(String(u || '')).hostname.toLowerCase().replace(/^www\./, ''); } catch (e) { return ''; } }
-    // Carry pipeline outcome history (declined / do-not-contact / joined) onto freshly-searched
-    // rows for the same company, so a paid re-discovery never renders a flagged vendor "clean".
+    // Prospect key: MUST mirror the server keyOf (api/vendor-prospects) so an outcome we POST
+    // lands on the SAME record a discovery upserts - domain(website) || normalized-name || name.
+    function vpNormName(s2) { return String(s2 || '').toLowerCase().replace(/&/g, ' and ').replace(/\b(inc|llc|corp|co|company|ltd|the|and|of)\b/g, ' ').replace(/[^a-z0-9]+/g, ''); }
+    function vpKeyOf(r) { return r.pkey || vpDomain(r.site) || vpNormName(r.name) || String(r.name || '').toLowerCase().replace(/\s+/g, ' ').trim(); }
+    // Carry pipeline outcome history (declined / do-not-contact / joined) + the server's own key
+    // onto freshly-searched rows for the same company, so a paid re-discovery never renders a
+    // flagged vendor "clean" and an outcome recorded here targets the exact right record.
     function vpAnnotate(rows, known) {
       if (!rows || !rows.length || !known || !known.length) return;
       var byDom = {}, byName = {};
       known.forEach(function (p) { var d = vpDomain(p.website); if (d) byDom[d] = p; var n = alphaOnly(p.name || ''); if (n) byName[n] = p; });
       rows.forEach(function (r) {
         var p = (vpDomain(r.site) && byDom[vpDomain(r.site)]) || byName[alphaOnly(r.name || '')];
-        if (p && p.lastOutcome) r.outcome = p.lastOutcome;
+        if (p) {
+          if (p.key) r.pkey = p.key;
+          if (p.lastOutcome) { r.outcome = p.lastOutcome; r.dnc = (p.lastOutcome.status === 'do-not-contact'); }
+        }
       });
     }
     function vpUpsert(list, mode, trade) {
@@ -4960,6 +4993,33 @@ if (BWN_MODULES.jobView) BWN.safeModule('jobView', function () {
           onload: function () { send(i + 40); }, onerror: function () { }, ontimeout: function () { }
         });
       })(0);
+    }
+    // Record an outcome (reached-out / declined / no-response / joined / do-not-contact) for one
+    // prospect, saved to the SHARED pipeline so every future Find Techs / Bid-Out search near
+    // that area shows the history. The server only appends to an EXISTING record, so we upsert
+    // the row first (idempotent) - then the outcome lands on the same key we compute here.
+    function vpRecordOutcome(row, mode, trade, status, note, wo, cb) {
+      var k = vpKey(); if (!k) { if (cb) cb(new Error('No SWA key set (Tampermonkey menu -> "Set SWA ingest key").')); return; }
+      var key = vpKeyOf(row);
+      var rec = { name: row.name, website: row.site || '', phone: row.phone || '', addr: row.addr || '',
+                  lat: row.lat, lng: row.lng, rating: row.rating, ratingCount: row.reviews,
+                  kind: mode.kind, trades: trade ? [String(trade).split(',')[0].trim()] : [],
+                  source: mode.kind === 'supplier' ? 'findsuppliers' : 'findtechs' };
+      function postOutcome() {
+        GM_xmlhttpRequest({
+          method: 'POST', timeout: 30000, url: PROSPECTS_URL,
+          headers: { 'Content-Type': 'application/json', 'x-bwn-key': k },
+          data: JSON.stringify({ outcomes: [{ key: key, status: status, wo: wo || '', note: note || '' }] }),
+          onload: function (r) { var j = null; try { j = JSON.parse(r.responseText); } catch (e) { } if (j && j.ok && j.applied) { if (cb) cb(null, key); } else { if (cb) cb(new Error((j && j.error) || ('HTTP ' + r.status))); } },
+          onerror: function () { if (cb) cb(new Error('network error')); }, ontimeout: function () { if (cb) cb(new Error('timed out')); }
+        });
+      }
+      GM_xmlhttpRequest({   // ensure the record exists (idempotent) BEFORE appending the outcome
+        method: 'POST', timeout: 30000, url: PROSPECTS_URL,
+        headers: { 'Content-Type': 'application/json', 'x-bwn-key': k },
+        data: JSON.stringify({ upsert: [rec] }),
+        onload: postOutcome, onerror: postOutcome, ontimeout: postOutcome
+      });
     }
 
     function makeBtn(label, fn) {
