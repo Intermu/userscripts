@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         BWN Bid-Out (Broadway National)
 // @namespace    broadwaynational.bwn
-// @version      0.18.1
+// @version      0.18.2
 // @downloadURL  https://raw.githubusercontent.com/Intermu/userscripts/main/bwn-bid-out.user.js
 // @updateURL    https://raw.githubusercontent.com/Intermu/userscripts/main/bwn-bid-out.user.js
 // @description  Email RFP to outside / net-new vendors, launched from a caret on Umbrava's own "See Who Is Available" button (network-vendor bidding stays native - no separate Bid-Out button). The caret menu opens the tracked email RFP wizard: finds net-new vendors nearby through Google Places, looks up their emails via the BWN scrape-contacts function, takes pasted outside addresses, and can still include assignable Umbrava vendors in the same email. You pick who's included, then review the exact recipient list and the rendered email before anything sends. Send from your own mailbox via the SWA send-bid function (Microsoft Graph), or open a plain Outlook draft. Vendors are BCC'd; nothing sends until you click Send. Network access is limited to Umbrava (same-origin), Google Places, and your SWA host.
@@ -406,20 +406,61 @@
     });
     return L.join('\n');
   }
-  // Full per-unit list as a CSV attachment (Graph send). The plaintext/draft path keeps the
-  // inline list (hvacFullListText) since mailto cannot attach.
+  // The full per-unit list rides along as a freshly-built, per-LOCATION Excel workbook (Graph
+  // send). This is NOT the uploaded master workbook - it is a clean equipment schedule scoped
+  // to this one site (city/state header + this site's units only, NO pricing, NO other sites,
+  // NO zip/address - hard rule: city/state only). The plaintext/draft path keeps the inline
+  // list (hvacFullListText) since mailto cannot attach.
+  var HVAC_XLSX_MIME = 'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet';
+  var HVAC_XLSX_COLS = [
+    { wch: 4 }, { wch: 26 }, { wch: 20 }, { wch: 7 }, { wch: 13 }, { wch: 16 }, { wch: 16 }, { wch: 13 }
+  ];
+  function hvacFullListAoa(b) {
+    var aoa = [
+      ['HVAC Preventive Maintenance - Equipment Schedule'],
+      ['Location', (b.city || '') + ', ' + (b.st || '')],
+      ['Units on this schedule', b.list.length],
+      [],
+      ['#', 'Equipment Type', 'Manufacturer', 'Year', 'Cooling Tons', 'Voltage / Phase', 'Factory Heat', 'Mounting']
+    ];
+    b.list.forEach(function (u, i) {
+      aoa.push([i + 1, hvacTitle(u.type), hvacTitle(u.mfr), u.year || '', u.tons || '', u.voltage || '', hvacTitle(u.heat), hvacTitle(u.loc)]);
+    });
+    return aoa;
+  }
+  // CSV fallback (only used if the XLSX writer is unavailable / throws) so a send never loses
+  // the list. Same columns, minus the metadata header rows.
   function hvacCsvCell(v) { v = String(v == null ? '' : v); return /[",\n\r]/.test(v) ? '"' + v.replace(/"/g, '""') + '"' : v; }
   function hvacFullListCsv(b) {
     if (!b || !b.list || !b.list.length) return '';
-    var lines = [['Type', 'Manufacturer', 'Year', 'Cooling Tons', 'Voltage/Phase', 'Factory Heat', 'Location'].join(',')];
-    b.list.forEach(function (u) { lines.push([hvacTitle(u.type), hvacTitle(u.mfr), u.year, u.tons, u.voltage, hvacTitle(u.heat), hvacTitle(u.loc)].map(hvacCsvCell).join(',')); });
+    var lines = [['#', 'Equipment Type', 'Manufacturer', 'Year', 'Cooling Tons', 'Voltage/Phase', 'Factory Heat', 'Mounting'].join(',')];
+    b.list.forEach(function (u, i) { lines.push([i + 1, hvacTitle(u.type), hvacTitle(u.mfr), u.year, u.tons, u.voltage, hvacTitle(u.heat), hvacTitle(u.loc)].map(hvacCsvCell).join(',')); });
     return lines.join('\r\n');
   }
+  function hvacBaseName(b) {
+    return ('HVAC PM Equipment - ' + (b.city || '') + ' ' + (b.st || '')).replace(/[^A-Za-z0-9 ._()\-]/g, '').replace(/\s+/g, ' ').trim() || 'HVAC PM Equipment';
+  }
+  // True when the in-page SheetJS writer is usable - drives BOTH the produced attachment format
+  // and the body copy, so the "attached as ..." note always matches the file that ships.
+  function hvacXlsxAvailable() { return typeof XLSX !== 'undefined' && !!(XLSX.utils && XLSX.write); }
   function hvacAttachments(b) {
+    if (!b || !b.list || !b.list.length) return [];
+    var base = hvacBaseName(b);
+    // Preferred: a real .xlsx built in-page by SheetJS (already @require'd). base64 direct from
+    // XLSX.write - binary-safe, no btoa round-trip.
+    try {
+      if (hvacXlsxAvailable()) {
+        var ws = XLSX.utils.aoa_to_sheet(hvacFullListAoa(b));
+        ws['!cols'] = HVAC_XLSX_COLS;
+        var wb = XLSX.utils.book_new();
+        XLSX.utils.book_append_sheet(wb, ws, 'Equipment');
+        var xb64 = XLSX.write(wb, { bookType: 'xlsx', type: 'base64' });
+        if (xb64) return [{ name: base + '.xlsx', contentType: HVAC_XLSX_MIME, contentBase64: xb64 }];
+      }
+    } catch (e) { /* fall through to CSV */ }
     var csv = hvacFullListCsv(b); if (!csv) return [];
-    var name = ('HVAC PM Equipment - ' + (b.city || '') + ' ' + (b.st || '')).replace(/[^A-Za-z0-9 ._()\-]/g, '').replace(/\s+/g, ' ').trim() + '.csv';
-    var b64; try { b64 = btoa(unescape(encodeURIComponent(csv))); } catch (e) { return []; }
-    return [{ name: name, contentType: 'text/csv', contentBase64: b64 }];
+    var cb64; try { cb64 = btoa(unescape(encodeURIComponent(csv))); } catch (e2) { return []; }
+    return [{ name: base + '.csv', contentType: 'text/csv', contentBase64: cb64 }];
   }
 
   // Plain-text fallback body (Outlook draft). Mirrors the HTML: honors the include toggles
@@ -611,10 +652,10 @@
         (bm.perUnit ? ' <span style="color:#5a6b62;">(about $' + esc(hvacMoney(bm.perUnit)) + ' per unit)</span>' : '') +
         '<br>Please confirm you can meet this price, or reply with your counter.</td></tr></table></td></tr>'
       : '';
-    // The full per-unit list rides along as a CSV attachment on the Graph send (built in the
-    // send handler). In the HTML body we only note it - no giant inline table.
+    // The full per-unit list rides along as a per-location Excel workbook on the Graph send
+    // (built in the send handler). In the HTML body we only note it - no giant inline table.
     var fullListBlock = (bm && bm.list && bm.list.length)
-      ? '<tr><td style="padding:14px 24px 0;"><div style="color:#5a6b62;font-size:12px;font-weight:400;line-height:1.5;">Full equipment list (' + bm.list.length + ' unit' + (bm.list.length === 1 ? '' : 's') + ') attached as a CSV.</div></td></tr>'
+      ? '<tr><td style="padding:14px 24px 0;"><div style="color:#5a6b62;font-size:12px;font-weight:400;line-height:1.5;">Equipment schedule for this location (' + bm.list.length + ' unit' + (bm.list.length === 1 ? '' : 's') + ') attached as ' + (hvacXlsxAvailable() ? 'an Excel workbook.' : 'a CSV.') + '</div></td></tr>'
       : '';
     // FUNCTION replacers throughout - a literal `$` in user text (e.g. a scope dollar amount)
     // would otherwise be mangled by String.replace's `$&`/`$1` substitution rules.
@@ -1323,9 +1364,9 @@
         var idem = 'b' + cyrb53([idemFrom, idemBcc, mail.subject || '', html].join('|'));
         var btn = document.getElementById('bo-send');
         btn.disabled = true; btn.textContent = 'Sending…';
-        // Full equipment list rides along as a CSV attachment (Graph send only). The html body
-        // that feeds `idem` already reflects the benchmark (price + unit count + "attached"
-        // note), so the attachment needs no separate dedup input.
+        // Full equipment list rides along as a per-location Excel workbook (Graph send only).
+        // The html body that feeds `idem` already reflects the benchmark (price + unit count +
+        // "attached" note), so the attachment needs no separate dedup input.
         sendBid(from, mail, html, idem, hvacAttachments(req.benchmark)).then(function (r) {
           if (r.ok) {
             GM_setValue('send_from', from);
