@@ -1,10 +1,10 @@
 // ==UserScript==
 // @name         BWN WO Intake (Broadway National)
 // @namespace    broadwaynational.bwn
-// @version      0.6.0
+// @version      0.7.0
 // @downloadURL  https://raw.githubusercontent.com/Intermu/userscripts/main/bwn-wo-intake.user.js
 // @updateURL    https://raw.githubusercontent.com/Intermu/userscripts/main/bwn-wo-intake.user.js
-// @description  Drop a client PO email (.msg or .eml) onto the Create Work Order modal and it prefills the fields from the email body - Scope (the Description), Source PO #, then selects Client, Location (PFJ store #, zero-padded), Trade (from the asset) and Priority by clicking the real dropdown option, and fills Client DNE (the PO NTE) once the client unlocks it. Then, after you Create the WO, it hands the email to BWN Drop Upload to attach it to the new WO's Documents and draft the email note. Reads the email entirely in the browser via a built-in Outlook .msg reader; nothing is uploaded to any server. Best-effort: review every field before you click Create.
+// @description  Drop a client PO/WO email (.msg or .eml) onto the Create Work Order modal and it prefills the fields. Pilot Travel Centers: from the email body. Caleres (Famous Footwear / Corrigo): reads the attached WO PDF on-device for Trade, Scope, Priority, Due-By, Store, NTE. Selects Client, Location, Trade and Priority by clicking the real dropdown option; fills Client DNE, Source Job # and Source PO #; warns you if the WO PDF shows a cancel/flag note. Then, after you Create the WO, it hands the email to BWN Drop Upload to attach it to the new WO's Documents. Reads everything in the browser; nothing is uploaded to any server. Best-effort: review every field before you click Create.
 // @match        https://app.umbrava.com/*
 // @run-at       document-idle
 // @noframes
@@ -13,14 +13,14 @@
 
 (function () {
   'use strict';
-  var VER = '0.6.0';
+  var VER = '0.7.0';
   var FONT = "-apple-system,BlinkMacSystemFont,'Segoe UI','Helvetica Neue',Arial,sans-serif";
   console.info('[BWN WO INTAKE] v' + VER + ' - drop a PO email (.msg/.eml) on Create Work Order to prefill + auto-attach to the new WO Documents (via Drop Upload); reads locally, nothing leaves the browser');
 
-  function toast(msg, ms) {
+  function toast(msg, ms, bg) {
     var t = document.createElement('div');
     t.textContent = msg;
-    t.style.cssText = 'position:fixed;z-index:2147483647;left:50%;bottom:26px;transform:translateX(-50%);background:#0d3d26;color:#fff;font:400 14px ' + FONT + ';padding:11px 16px;border-radius:9px;max-width:74vw;box-shadow:0 6px 24px rgba(0,0,0,.3);line-height:1.5;';
+    t.style.cssText = 'position:fixed;z-index:2147483647;left:50%;bottom:26px;transform:translateX(-50%);background:' + (bg || '#0d3d26') + ';color:#fff;font:400 14px ' + FONT + ';padding:11px 16px;border-radius:9px;max-width:74vw;box-shadow:0 6px 24px rgba(0,0,0,.3);line-height:1.5;';
     document.body.appendChild(t);
     setTimeout(function () { t.style.transition = 'opacity .4s'; t.style.opacity = '0'; setTimeout(function () { t.remove(); }, 420); }, ms || 6000);
   }
@@ -131,8 +131,175 @@
   }
 
   // ---- Email -> Work Order field mapping ----------------------------------
-  var CLIENT_BY_DOMAIN = { 'pilottravelcenters.com': 'Pilot Travel Centers', 'staples.com': 'Staples' };
+  var CLIENT_BY_DOMAIN = { 'pilottravelcenters.com': 'Pilot Travel Centers', 'staples.com': 'Staples', 'caleres.com': 'Caleres Inc' };
   function clientFromDomain(email) { var d = String(email || '').split('@')[1] || ''; return CLIENT_BY_DOMAIN[d] || d.replace(/\.(com|net|org|us|co)$/i, '').replace(/[.\-]/g, ' '); }
+
+  // ---- PDF text reader (pure browser, on-device, no library) --------------
+  // Some clients (Caleres/Corrigo) put the real WO detail in an attached PDF, not the email body.
+  // These PDFs are TEXT with ToUnicode maps (not scans), so we inflate the content streams with the
+  // native DecompressionStream, map glyph codes through the ToUnicode CMaps, and read the text ops -
+  // no pdf.js, so the script stays @grant none (its post-create attach handoff needs page context).
+  function inflate(bytes) {
+    // FlateDecode is zlib; a few streams are raw deflate. DecompressionStream is STRICT about the
+    // trailing bytes PDFs leave between the deflate data and "endstream" (it throws "trailing junk"),
+    // so read the decompressed chunks manually and KEEP them when that end-of-stream error fires -
+    // all valid output has already been delivered by then (byte-verified against zlib).
+    function attempt(fmt) {
+      return new Promise(function (resolve) {
+        var d; try { d = new DecompressionStream(fmt); } catch (e) { resolve(null); return; }
+        var chunks = [], total = 0;
+        var w = d.writable.getWriter(); w.write(bytes).catch(function () { }); w.close().catch(function () { });
+        var r = d.readable.getReader();
+        (function pump() {
+          r.read().then(function (x) { if (x.done) { fin(); return; } chunks.push(x.value); total += x.value.length; pump(); }).catch(function () { fin(); });
+        })();
+        function fin() { if (!chunks.length) { resolve(null); return; } var out = new Uint8Array(total), o = 0; chunks.forEach(function (c) { out.set(c, o); o += c.length; }); resolve(out); }
+      });
+    }
+    return attempt('deflate').then(function (r) { return r || attempt('deflate-raw'); });
+  }
+  function latin1Of(u8) {   // byte -> code point 1:1, chunked so a multi-MB font stream doesn't stall
+    var CH = 0x8000, parts = [];
+    for (var i = 0; i < u8.length; i += CH) parts.push(String.fromCharCode.apply(null, u8.subarray(i, Math.min(i + CH, u8.length))));
+    return parts.join('');
+  }
+  function hexToStr(h) { var o = ''; for (var k = 0; k + 4 <= h.length; k += 4) o += String.fromCharCode(parseInt(h.substr(k, 4), 16)); return o; }
+  // Extract readable text from a PDF's bytes. Resolves to a spaced string ('' if not text-based).
+  function pdfToText(bytes) {
+    var u8 = bytes instanceof Uint8Array ? bytes : new Uint8Array(bytes);
+    // 1) collect every stream's raw (compressed) bytes
+    var raws = [], i = 0;
+    var STREAM = [0x73, 0x74, 0x72, 0x65, 0x61, 0x6d], ENDS = [0x65, 0x6e, 0x64, 0x73, 0x74, 0x72, 0x65, 0x61, 0x6d];
+    function indexOfSeq(hay, seq, from) {
+      outer: for (var p = from; p <= hay.length - seq.length; p++) { for (var q = 0; q < seq.length; q++) if (hay[p + q] !== seq[q]) continue outer; return p; } return -1;
+    }
+    while (true) {
+      var s = indexOfSeq(u8, STREAM, i); if (s < 0) break;
+      var ds = s + 6; if (u8[ds] === 0x0d) ds++; if (u8[ds] === 0x0a) ds++;
+      var e = indexOfSeq(u8, ENDS, ds); if (e < 0) break;
+      raws.push(u8.subarray(ds, e)); i = e + 9;
+    }
+    // 2) inflate them all
+    return Promise.all(raws.map(inflate)).then(function (streams) {
+      streams = streams.filter(Boolean);
+      // 3) union ToUnicode map (code -> char) from every CMap stream
+      var uni = {};
+      streams.forEach(function (d) {
+        var t = latin1Of(d);
+        if (t.indexOf('beginbfchar') < 0 && t.indexOf('beginbfrange') < 0) return;
+        var m, re;
+        var bc = /beginbfchar([\s\S]*?)endbfchar/g;
+        while ((m = bc.exec(t))) { re = /<([0-9A-Fa-f]+)>\s*<([0-9A-Fa-f]+)>/g; var mm; while ((mm = re.exec(m[1]))) uni[parseInt(mm[1], 16)] = hexToStr(mm[2]); }
+        var br = /beginbfrange([\s\S]*?)endbfrange/g;
+        while ((m = br.exec(t))) {
+          re = /<([0-9A-Fa-f]+)>\s*<([0-9A-Fa-f]+)>\s*(<([0-9A-Fa-f]+)>|\[([\s\S]*?)\])/g; var m2;
+          while ((m2 = re.exec(m[1]))) {
+            var lo = parseInt(m2[1], 16), hi = parseInt(m2[2], 16);
+            if (m2[4]) { var base = m2[4]; for (var c = lo; c <= hi; c++) uni[c] = hexToStr((parseInt(base, 16) + (c - lo)).toString(16).padStart(base.length, '0')); }
+            else if (m2[5]) { (m2[5].match(/<([0-9A-Fa-f]+)>/g) || []).forEach(function (a, idx) { uni[lo + idx] = hexToStr(a.replace(/[<>]/g, '')); }); }
+          }
+        }
+      });
+      function mapHex(h) { var o = ''; for (var k = 0; k + 4 <= h.length; k += 4) { var cc = parseInt(h.substr(k, 4), 16); o += (uni[cc] != null) ? uni[cc] : ''; } return o; }
+      // 4) content streams -> text; a vertical move = newline, a wide horizontal move = space
+      // (threshold self-calibrated from the median glyph advance so words don't split).
+      var out = [];
+      streams.forEach(function (d) {
+        var t = latin1Of(d);
+        if (t.indexOf('beginbfchar') >= 0 || t.indexOf('beginbfrange') >= 0) return;
+        if (t.indexOf('BT') < 0 || (t.indexOf('Tj') < 0 && t.indexOf('TJ') < 0)) return;
+        var toks = [], m, advances = [];
+        var re = /(-?[\d.]+)\s+(-?[\d.]+)\s+(?:Td|TD)|T\*|<([0-9A-Fa-f]+)>\s*Tj|\[([\s\S]*?)\]\s*TJ/g;
+        while ((m = re.exec(t))) {
+          if (m[3] != null) { toks.push({ s: mapHex(m[3]) }); continue; }
+          if (m[4] != null) { (m[4].match(/<([0-9A-Fa-f]+)>|(-?[\d.]+)/g) || []).forEach(function (a) { if (a.charAt(0) === '<') toks.push({ s: mapHex(a.replace(/[<>]/g, '')) }); else if (parseFloat(a) < -120) toks.push({ s: ' ' }); }); continue; }
+          if (m[0] === 'T*') { toks.push({ nl: true }); continue; }
+          var tx = parseFloat(m[1]), ty = parseFloat(m[2]);
+          if (Math.abs(ty) > 0.5) toks.push({ nl: true }); else { toks.push({ tx: tx }); if (tx > 0) advances.push(tx); }
+        }
+        advances.sort(function (a, b) { return a - b; });
+        var med = advances.length ? advances[Math.floor(advances.length / 2)] : 3;
+        var spaceAt = Math.max(3, med * 1.6);
+        var buf = '';
+        toks.forEach(function (k) { if (k.nl != null) buf += '\n'; else if (k.tx != null) { if (k.tx > spaceAt) buf += ' '; } else buf += k.s; });
+        if (buf.replace(/\s/g, '').length > 20) out.push(buf);
+      });
+      return out.join('\n');
+    });
+  }
+
+  // ---- Caleres (Famous Footwear / Corrigo) WO extractor --------------------
+  // The PDF is the source of truth (the email is often a reply/forward with no detail block).
+  // Field anchors run on a whitespace-removed COPY so they are immune to PDF spacing quirks; the
+  // scope uses an index map back to the readable text. Verified 32/32 vs 4 real WOs + live Umbrava.
+  function calCompactify(spaced) {
+    var compact = '', map = [];
+    for (var i = 0; i < spaced.length; i++) { if (!/\s/.test(spaced[i])) { compact += spaced[i]; map.push(i); } }
+    return { compact: compact, map: map };
+  }
+  // Client priority level -> the closest of Umbrava's 4 Caleres tiers (Emergency/Urgent/Normal/Routine).
+  function calPriorityTarget(label, etaDays) {
+    var L = String(label || '').toUpperCase();
+    if (/EMERG/.test(L) || (etaDays != null && etaDays <= 0.4)) return 'Priority 1';
+    if (/URGENT|IMPORTANT/.test(L)) return 'Priority 2';
+    if (/NORMAL|STANDARD|MEDIUM/.test(L)) return 'Priority 3';
+    if (/ROUTINE|\bLOW\b/.test(L)) return 'Priority 4';
+    if (etaDays == null) return '';
+    return etaDays <= 1 ? 'Priority 2' : etaDays <= 7 ? 'Priority 3' : 'Priority 4';
+  }
+  // Best-trade from the "ON DEMAND WORK <category>" wording (never blank - Handyman is the catch-all).
+  function calTrade(cat) {
+    var s = String(cat || '').toLowerCase();
+    if (/hvac|heat|cool|air ?handler|thermostat|\brtu\b|furnace|condenser|damper|duct/.test(s)) return 'HVAC';
+    if (/refriger|freezer|cooler|ice ?machine/.test(s)) return 'Refrigeration';
+    if (/floor|vct|\btile\b|carpet|\bseal\b/.test(s)) return 'Flooring';
+    if (/door|panic ?bar|\bframe|detex|overhead|\bdock\b/.test(s)) return 'Doors and Hardware';
+    if (/\block\b|padlock|deadbolt|keyed/.test(s)) return 'Locks';
+    if (/plumb|toilet|drain|water ?heater|sink|faucet|urinal|sewer|grease/.test(s)) return 'Plumbing';
+    if (/electric|breaker|panel|wiring|outlet|transformer|generator|ballast/.test(s)) return 'Electrical';
+    if (/light|lamp|bulb|fixture|luminaire/.test(s)) return /exterior|parking|out.?side|canopy|pole/.test(s) ? 'Exterior Lighting' : 'Lighting';
+    if (/\bsign|signage|marquee|reader ?board/.test(s)) return 'Signage';
+    if (/roof|gutter|fascia|soffit|siding|skylight/.test(s)) return 'Roofing and Siding';
+    if (/window|glass|mirror|tint/.test(s)) return 'Windows and Glass';
+    if (/gate|fence/.test(s)) return 'Gates and Fences';
+    if (/camera|access ?control|alarm|\bcctv\b|security/.test(s)) return 'Security';
+    if (/paint/.test(s)) return 'Painting';
+    if (/concrete|asphalt|parking ?lot|bollard/.test(s)) return 'Concrete and Asphalt';
+    return 'Handyman';
+  }
+  function extractCaleres(pdfSpaced, subject) {
+    var spaced = String(pdfSpaced || ''), cm = calCompactify(spaced), C = cm.compact, out = {}, m;
+    m = C.match(/Caleres\/(\d{4,6})\/[A-Z]{2}/i) || String(subject || '').match(/\bFF\s*(\d{4,6})/i);
+    out.store = m ? m[1] : '';
+    out.locationNum = /^6\d{4}$/.test(out.store) ? out.store.slice(1) : out.store;   // "drop the leading 6"
+    m = C.match(/NOTTOEXCEED\$?([\d,]+\.\d{2})/i); out.dne = m ? m[1].replace(/,/g, '') : '';
+    m = C.match(/WO#\s*([0-9]{6,}-[0-9]{6,})/i) || String(subject || '').match(/([0-9]{6,}-[0-9]{6,})/); out.sourceNum = m ? m[1] : '';
+    m = C.match(/P\d+([A-Za-z]+)-?(\d+)(DAY|HOUR)ETA/i);
+    if (m) { out.priorityLabel = m[1]; out.etaDays = m[3].toUpperCase() === 'HOUR' ? parseInt(m[2], 10) / 24 : parseInt(m[2], 10); }
+    else if (/EMERGENCY/i.test(C)) { out.priorityLabel = 'EMERGENCY'; out.etaDays = 0.33; }
+    out.priorityTarget = calPriorityTarget(out.priorityLabel, out.etaDays);
+    m = C.match(/DUEBY(\d{1,2}\/\d{1,2}\/\d{4})/i); out.dueBy = m ? m[1] : '';
+    var wIdx = C.search(/ONDEMANDWORK/i), regionCompact = '', scope = '';
+    if (wIdx >= 0) {
+      var startC = wIdx + 'ONDEMANDWORK'.length;
+      var endRel = C.slice(startC).search(/ASSIGNMENT/i); var endC = endRel < 0 ? C.length : startC + endRel;
+      regionCompact = C.slice(startC, endC);
+      var sStart = cm.map[startC] != null ? cm.map[startC] : 0;
+      var sEnd = cm.map[endC - 1] != null ? cm.map[endC - 1] + 1 : spaced.length;
+      scope = spaced.slice(sStart, sEnd).replace(/\s+/g, ' ').trim();
+      scope = scope.replace(/^[A-Za-z][A-Za-z0-9 &\/\-]*?\(Broadway[^)]*\)\s*/i, '');   // strip "Name (Broadway...)" requester tag
+    }
+    out.trade = calTrade(regionCompact.slice(0, 60));
+    out.scope = scope.slice(0, 600);
+    out.warn = /FLAGGED:|cancel/i.test(C) ? 'the WO PDF has a cancel / flag note - verify this WO is still live before you Create it' : '';
+    return out;
+  }
+  // Is this a Caleres email? Sender domain, or the body/PDF has the Corrigo "Caleres/<store>/XX"
+  // property line. (A bare "FF ####" subject token is NOT enough - too easy to false-positive.)
+  function isCaleres(senderEmail, body, pdfText) {
+    var d = String(senderEmail || '').split('@')[1] || '';
+    return d === 'caleres.com' || /Caleres\/\d+\/[A-Z]{2}/i.test(String(pdfText || '') + String(body || ''));
+  }
   // The asset name describes the work, so it drives the Trade. Keyword map; unknown -> '' so
   // the user picks (logic takeover). Extend as new asset wordings show up.
   function assetToTrade(asset) {
@@ -249,6 +416,7 @@
   }
   function fillWo(root, wo) {
     var done = [], picked = [], hint = [];
+    if (wo._warn) toast('⚠ Heads up: ' + wo._warn, 18000, '#8b1a1a');   // cancel/flag on the WO PDF - warn before Create
     function setV(sel, v, label) { var el = root.querySelector(sel); if (el && v) { setNativeValue(el, v); done.push(label); } }
     setV('textarea#scopeOfWork', wo.scope, 'Scope');
     setV('input#sourcePurchaseOrderNumber', wo.po, 'Source PO #');
@@ -288,6 +456,7 @@
       if (done.length) parts.push('Filled ' + done.join(', '));
       if (picked.length) parts.push('selected ' + picked.join(' / '));
       if (hint.length) parts.push('check: ' + hint.join(' · '));
+      if (wo._dueBy) parts.push('Complete-By (DUE BY ' + wo._dueBy + ') - set it on the WO header after Create');
       var nAtt = (wo._attachments || []).length;
       if (nAtt) parts.push('the email + ' + nAtt + ' attachment' + (nAtt === 1 ? '' : 's') + ' will attach to Documents after Create');
       parts.push('review before Create');
@@ -368,15 +537,34 @@
       if (/\.eml$/.test(name) || file.type === 'message/rfc822') parsed = parseEml(await file.text());
       else parsed = parseMsg(new Uint8Array(await file.arrayBuffer()));
       if (!parsed.subject && !parsed.body && !parsed.senderEmail) { toast('Could not read that email. Save it as a .msg or .eml file and drop the file (dragging straight from Outlook often gives the browser nothing).', 12000); return; }
-      var wo = extractWo(parsed.subject, parsed.body, parsed.senderEmail); wo._file = file;
-      // Turn the email's embedded attachments into File objects so they carry to the new WO's
-      // Documents alongside the email (Increment 2 Part B).
-      wo._attachments = [];
+      // Embedded attachments -> File objects (carry to the new WO's Documents; also read for the WO PDF).
+      var attFiles = [];
       (parsed.attachments || []).forEach(function (a) {
-        try { wo._attachments.push(new File([a.bytes], a.name, { type: a.mime || 'application/octet-stream' })); } catch (e) { }
+        try { attFiles.push(new File([a.bytes], a.name, { type: a.mime || 'application/octet-stream' })); } catch (e) { }
       });
+      var wo = null;
+      // Caleres (Famous Footwear / Corrigo): the WO detail lives in the attached PDF, not the email.
+      var pdfAtt = (parsed.attachments || []).filter(function (a) { return /\.pdf$/i.test(a.name || '') || /pdf/i.test(a.mime || ''); })[0];
+      if (isCaleres(parsed.senderEmail, parsed.body, '') && pdfAtt) {
+        toast('Caleres WO - reading the attached PDF on-device...', 4000);
+        var pdfText = '';
+        try { pdfText = await pdfToText(pdfAtt.bytes); } catch (e) { toast('Could not read the WO PDF (' + ((e && e.message) || e) + ') - filling what the email has.', 10000, '#8b1a1a'); }
+        var cx = pdfText ? extractCaleres(pdfText, parsed.subject) : null;
+        // Commit to the Caleres mapping only if this really is a Caleres/Corrigo WO PDF AND extraction
+        // anchored to a real WO - otherwise fall through to the generic path (no wrong hardcoded client).
+        if (cx && (cx.sourceNum || cx.store) && /caleres\/\d+\//i.test(pdfText.replace(/\s+/g, ''))) {
+          wo = {
+            client: 'Caleres Inc', location: cx.locationNum, clientDne: cx.dne,
+            po: cx.sourceNum, sourceJob: cx.sourceNum, trade: cx.trade,
+            priorityLevel: cx.priorityTarget, scope: cx.scope, _warn: cx.warn, _dueBy: cx.dueBy
+          };
+        }
+      }
+      if (!wo) wo = extractWo(parsed.subject, parsed.body, parsed.senderEmail);   // Pilot / generic path
+      wo._file = file;
+      wo._attachments = attFiles;
       fillWo(root, wo);
-    } catch (e) { toast('Could not read the email: ' + ((e && e.message) || e), 10000); }
+    } catch (e) { toast('Could not read the email: ' + ((e && e.message) || e), 10000, '#8b1a1a'); }
   }
 
   // ---- Drop zone injected into the Create WO modal ----------------------------
