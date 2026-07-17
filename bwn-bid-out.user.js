@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         BWN Bid-Out (Broadway National)
 // @namespace    broadwaynational.bwn
-// @version      0.17.0
+// @version      0.18.0
 // @downloadURL  https://raw.githubusercontent.com/Intermu/userscripts/main/bwn-bid-out.user.js
 // @updateURL    https://raw.githubusercontent.com/Intermu/userscripts/main/bwn-bid-out.user.js
 // @description  Email RFP to outside / net-new vendors, launched from a caret on Umbrava's own "See Who Is Available" button (network-vendor bidding stays native - no separate Bid-Out button). The caret menu opens the tracked email RFP wizard: finds net-new vendors nearby through Google Places, looks up their emails via the BWN scrape-contacts function, takes pasted outside addresses, and can still include assignable Umbrava vendors in the same email. You pick who's included, then review the exact recipient list and the rendered email before anything sends. Send from your own mailbox via the SWA send-bid function (Microsoft Graph), or open a plain Outlook draft. Vendors are BCC'd; nothing sends until you click Send. Network access is limited to Umbrava (same-origin), Google Places, and your SWA host.
@@ -14,12 +14,13 @@
 // @grant        GM_registerMenuCommand
 // @connect      places.googleapis.com
 // @connect      green-stone-0717dab0f.7.azurestaticapps.net
+// @require       https://cdnjs.cloudflare.com/ajax/libs/xlsx/0.18.5/xlsx.full.min.js
 // ==/UserScript==
 
 (function () {
   'use strict';
 
-  var VER = '0.17.0';
+  var VER = '0.18.0';
   console.info('[BWN BID-OUT] v' + VER + ' - 3-step Build Requests wizard (WO details -> select vendors -> review) · Umbrava vendors + Places net-new discovery + email scrape · one-click Graph send via SWA (Outlook-draft fallback)');
 
   var COMPANY_ADDR = 'Broadway National Group, 100 Davids Dr, Hauppauge, NY 11788';
@@ -297,6 +298,126 @@
   }
 
   // ---- Email assembly (BCC blast - recipients must not see each other) --------
+  // ==== HVAC PM benchmark ====================================================
+  // Drop a "HVAC PM Price Benchmarking" workbook once (parsed with SheetJS, stored in GM).
+  // Two sheets: a pivot summary (State/City/Equipment/Count/Target Annual Contract Price) and a
+  // per-unit asset detail (City/State/Zip/Equipment/Manufacturer/Year/...). Indexed by CITY|STATE
+  // (verified 49/50 sites unique; Tempe AZ is the lone 2-zip city, disambiguated by the WO zip).
+  // On a bid whose WO city/state matches, we prefill the editable Asset field with the equipment
+  // summary and attach the site's target annual price + full per-unit list to the RFP.
+  var HVAC_GM_KEY = 'bwn:hvacpm';
+  var _hvacIndex;   // module cache
+  function hvacNormKey(city, st) { return String(st || '').trim().toUpperCase() + '|' + String(city || '').trim().toUpperCase(); }
+  function hvacTitle(s) { return String(s || '').toLowerCase().replace(/\b\w/g, function (c) { return c.toUpperCase(); }); }
+  function hvacMoney(n) { var x = Math.round((+n || 0) * 100) / 100; var s = x.toFixed(2).replace(/\B(?=(\d{3})+(?!\d))/g, ','); return s.replace(/\.00$/, ''); }
+  function hvacBuildIndex(rows6, rows1) {
+    var price = {}, curState = '';
+    for (var i = 1; i < rows6.length; i++) {
+      var r = rows6[i]; if (!r) continue;
+      var a = (r[0] == null ? '' : String(r[0])).trim();
+      var b = (r[1] == null ? '' : String(r[1])).trim();
+      if (a && !/ Total$/.test(a) && a.length === 2) curState = a;                 // state header e.g. "AZ"
+      if (b && / Total$/.test(b)) {                                                 // "<City> Total" row carries the price
+        var city = b.replace(/ Total$/, ''), cnt = +r[3] || 0, pr = +r[4] || 0;
+        if (pr > 0) price[hvacNormKey(city, curState)] = { units: cnt, annual: pr, perUnit: cnt ? pr / cnt : 0, city: city, st: curState };
+      }
+    }
+    var assets = {};
+    for (var j = 1; j < rows1.length; j++) {
+      var d = rows1[j]; if (!d || !d[0]) continue;
+      var c2 = String(d[0]).trim(), s2 = String(d[1] || '').trim(), zip = String(d[2] || '').split('-')[0].trim();
+      var k = hvacNormKey(c2, s2);
+      var rec = assets[k] || (assets[k] = { city: c2, st: s2, zips: {}, units: [] });
+      rec.zips[zip] = true;
+      rec.units.push({ type: String(d[3] || '').trim(), mfr: String(d[4] || '').trim(), year: d[5] || '', loc: String(d[6] || '').trim(), voltage: String(d[7] || '').trim(), tons: d[8] || '', heat: String(d[9] || '').trim(), fan: d[10] || '', zip: zip });
+    }
+    return { price: price, assets: assets };
+  }
+  function hvacMatch(index, wo) {
+    if (!index || !wo || !wo.address) return null;
+    var k = hvacNormKey(wo.address.city, wo.address.state);
+    var a = index.assets[k], p = index.price[k];
+    if (!a && !p) return null;
+    var units = (a && a.units) || [], zips = a ? Object.keys(a.zips) : [], multiZip = zips.length > 1;
+    var woZip = String((wo.address && wo.address.postalCode) || '').split('-')[0].trim();
+    var list = units, filtered = false;
+    if (multiZip && woZip && units.some(function (u) { return u.zip === woZip; })) { list = units.filter(function (u) { return u.zip === woZip; }); filtered = true; }
+    var counts = {};
+    list.forEach(function (u) { if (u.type) counts[u.type] = (counts[u.type] || 0) + 1; });
+    // The pivot carries price only at the CITY level (no per-zip price). For a multi-store city
+    // narrowed to one store, the city-total annual would OVERSTATE this store - pro-rate it from
+    // the city per-unit rate and flag it estimated. Single-store cities keep the exact total.
+    var annual = p ? p.annual : null, perUnit = p ? p.perUnit : null, estimated = false;
+    if (p && filtered && list.length !== p.units) { annual = (perUnit != null) ? Math.round(perUnit * list.length) : null; estimated = true; }
+    return {
+      city: (a && a.city) || (p && p.city) || (wo.address && wo.address.city) || '', st: (a && a.st) || (p && p.st) || (wo.address && wo.address.state) || '',
+      annual: annual, perUnit: perUnit, estimated: estimated, cityUnits: p ? p.units : null, cityAnnual: p ? p.annual : null,
+      counts: Object.keys(counts).map(function (t) { return { type: t, n: counts[t] }; }).sort(function (x, y) { return y.n - x.n; }),
+      list: list, siteUnits: list.length, multiZip: multiZip, zipUsed: (multiZip && woZip) ? woZip : null, allZips: zips
+    };
+  }
+  function hvacSummaryLine(m) {
+    var parts = m.counts.map(function (c) { return c.n + 'x ' + hvacTitle(c.type); });
+    return m.siteUnits + ' unit' + (m.siteUnits === 1 ? '' : 's') + ': ' + parts.join(', ');
+  }
+  // Detect the two sheets by header content (don't hardcode sheet names).
+  function hvacParseAndStore(arrayBuffer) {
+    if (typeof XLSX === 'undefined') throw new Error('spreadsheet library not loaded - reload the page');
+    var wb = XLSX.read(new Uint8Array(arrayBuffer), { type: 'array' });
+    var rows6 = null, rows1 = null;
+    wb.SheetNames.forEach(function (nm) {
+      var rows = XLSX.utils.sheet_to_json(wb.Sheets[nm], { header: 1, raw: true, blankrows: false });
+      var hdr = (rows[0] || []).map(function (x) { return String(x || '').toLowerCase(); }).join('|');
+      if (/target annual contract price/.test(hdr)) rows6 = rows;
+      else if (/manufacturer/.test(hdr) && /equipment type/.test(hdr)) rows1 = rows;
+    });
+    if (!rows6 || !rows1) throw new Error('workbook missing the expected summary + asset sheets');
+    var index = hvacBuildIndex(rows6, rows1);
+    var meta = { sites: Object.keys(index.price).length, units: Object.keys(index.assets).reduce(function (s, k) { return s + index.assets[k].units.length; }, 0), loadedAt: Date.now() };
+    var payload = { v: 1, price: index.price, assets: index.assets, meta: meta };
+    GM_setValue(HVAC_GM_KEY, JSON.stringify(payload));
+    _hvacIndex = payload;
+    return meta;
+  }
+  function hvacLoadIndex() {
+    if (_hvacIndex !== undefined) return _hvacIndex;
+    try { var raw = GM_getValue(HVAC_GM_KEY, ''); _hvacIndex = raw ? JSON.parse(raw) : null; } catch (e) { _hvacIndex = null; }
+    return _hvacIndex;
+  }
+  // RFP renderings of the target price + full per-unit appendix (city/state only - no zip/address in vendor copy).
+  function hvacPriceLineText(b) {
+    if (!b || b.annual == null) return '';
+    var est = b.estimated ? ' (estimated for this location from the area per-unit rate)' : '';
+    return 'Proposed annual PM price for this site' + est + ': $' + hvacMoney(b.annual) + (b.perUnit ? ' (about $' + hvacMoney(b.perUnit) + ' per unit)' : '') +
+      ' - please confirm you can meet this price, or reply with your counter.';
+  }
+  function hvacFullListText(b) {
+    if (!b || !b.list || !b.list.length) return '';
+    var L = ['Full equipment list (' + b.list.length + ' units):'];
+    b.list.forEach(function (u, i) {
+      var bits = [hvacTitle(u.type)];
+      if (u.mfr) bits.push(hvacTitle(u.mfr));
+      if (u.year) bits.push(String(u.year));
+      if (u.tons) bits.push(u.tons + ' ton');
+      if (u.voltage) bits.push(String(u.voltage));
+      if (u.heat) bits.push(hvacTitle(u.heat));
+      if (u.loc) bits.push(hvacTitle(u.loc));
+      L.push('  ' + (i + 1) + '. ' + bits.join(' | '));
+    });
+    return L.join('\n');
+  }
+  function hvacFullListHtml(b) {
+    if (!b || !b.list || !b.list.length) return '';
+    var th = function (t) { return '<td style="padding:4px 8px;border-bottom:1px solid #dde6e1;color:#66786e;font-size:11px;font-weight:600;text-align:left;">' + esc(t) + '</td>'; };
+    var td = function (t) { return '<td style="padding:4px 8px;border-bottom:1px solid #eef3f0;color:#1f2a24;font-size:12px;">' + esc(t) + '</td>'; };
+    var rows = b.list.map(function (u) {
+      return '<tr>' + td(hvacTitle(u.type)) + td(hvacTitle(u.mfr)) + td(u.year ? String(u.year) : '') + td(u.tons ? (u.tons + ' ton') : '') + td(String(u.voltage || '')) + td(hvacTitle(u.heat)) + td(hvacTitle(u.loc)) + '</tr>';
+    }).join('');
+    return '<tr><td style="padding:14px 24px 0;"><div style="color:#0d3d26;font-size:12px;font-weight:500;margin-bottom:6px;">Full Equipment List (' + b.list.length + ' units)</div>' +
+      '<table role="presentation" width="100%" cellpadding="0" cellspacing="0" style="border-collapse:collapse;">' +
+      '<tr>' + th('Type') + th('Manufacturer') + th('Year') + th('Tons') + th('Voltage/Ph') + th('Heat') + th('Location') + '</tr>' + rows + '</table></td></tr>';
+  }
+
   // Plain-text fallback body (Outlook draft). Mirrors the HTML: honors the include toggles
   // + additional info, city/state only (NO client name or street address - hard rule).
   function buildBidEmail(wo, recipients, req) {
@@ -322,10 +443,12 @@
     if (inc.reference !== false) L.push('Reference: Tracking #' + (wo.trackingNumber || ''));
     L.push('Scope: ' + (req.scope || wo.scopeOfWork || ''));
     if ((req.asset || '').trim()) { L.push(''); L.push('Asset / equipment: ' + req.asset.trim()); }
+    if (req.benchmark && req.benchmark.annual != null) { L.push(''); L.push(hvacPriceLineText(req.benchmark)); }
     if ((req.history || '').trim()) { L.push(''); L.push('Site / service history: ' + req.history.trim()); }
     var addl = (req.addl || '').trim();
     if (addl) { L.push(''); L.push('Additional information: ' + addl); }
     if (inc.service !== false && (wo.serviceInstructions || '').trim()) { L.push(''); L.push('Service instructions: ' + wo.serviceInstructions.trim()); }
+    if (req.benchmark && req.benchmark.list && req.benchmark.list.length) { L.push(''); L.push(hvacFullListText(req.benchmark)); }
     if (req.rateOffer) { L.push(''); L.push('Please include your current rate offer (labor + trip rates).'); }
     L.push('');
     L.push('Please reply to this email with your quote - labor rate, trip charge, and any material/parts costs. Thank you.');
@@ -367,12 +490,14 @@
     '<tr><td style="padding:16px 24px 0;"><div style="color:#0d3d26;font-size:12px;font-weight:500;">Scope</div>' +
     '<div style="color:#1f2a24;font-size:16px;font-weight:400;margin-top:4px;line-height:1.55;">{{SCOPE}}</div></td></tr>' +
     '{{ASSET_BLOCK}}' +
+    '{{BENCHMARK_BLOCK}}' +
     '{{HISTORY_BLOCK}}' +
     '<tr><td style="padding:18px 24px;"><table role="presentation" width="100%" cellpadding="0" cellspacing="0"><tr>' +
     '<td bgcolor="#1a5f3e" style="background:#1a5f3e;border-radius:8px;padding:13px 16px;text-align:center;color:#ffffff;font-size:14px;font-weight:500;line-height:1.5;">' +
     'Interested? Reply to this email with your quote -<br>labor rate, trip charge, and any material/parts costs.</td></tr></table></td></tr>' +
     '{{ADDL_BLOCK}}' +
     '{{SERVICE_BLOCK}}' +
+    '{{FULLLIST_BLOCK}}' +
     '<tr><td style="padding:14px 24px 0;"><hr style="border:0;border-top:1px solid #dde6e1;margin:0;"></td></tr>' +
     '<tr><td style="padding:14px 24px 0;"><div style="color:#0d3d26;font-size:14px;font-weight:500;margin-bottom:6px;">Broadway National Contact</div>' +
     '<table role="presentation" width="100%" cellpadding="0" cellspacing="0"><tr>' +
@@ -473,6 +598,16 @@
       ? '<tr><td style="padding:16px 24px 0;"><div style="color:#0d3d26;font-size:12px;font-weight:500;">Site / Service History</div>' +
         '<div style="color:#1f2a24;font-size:14px;font-weight:400;margin-top:4px;line-height:1.55;">' + nl2br(hist) + '</div></td></tr>'
       : '';
+    // HVAC PM benchmark (from the dropped workbook): the target annual price callout + full per-unit list.
+    var bm = req.benchmark;
+    var benchmarkBlock = (bm && bm.annual != null)
+      ? '<tr><td style="padding:16px 24px 0;"><table role="presentation" width="100%" cellpadding="0" cellspacing="0"><tr>' +
+        '<td bgcolor="#e8f3ed" style="background:#e8f3ed;border:1px solid #cfe6da;border-radius:8px;padding:12px 14px;color:#0d3d26;font-size:14px;font-weight:400;line-height:1.5;">' +
+        '<span style="font-weight:600;">Proposed annual PM price for this site' + (bm.estimated ? ' (estimated for this location)' : '') + ': $' + esc(hvacMoney(bm.annual)) + '</span>' +
+        (bm.perUnit ? ' <span style="color:#5a6b62;">(about $' + esc(hvacMoney(bm.perUnit)) + ' per unit)</span>' : '') +
+        '<br>Please confirm you can meet this price, or reply with your counter.</td></tr></table></td></tr>'
+      : '';
+    var fullListBlock = (bm && bm.list && bm.list.length) ? hvacFullListHtml(bm) : '';
     // FUNCTION replacers throughout - a literal `$` in user text (e.g. a scope dollar amount)
     // would otherwise be mangled by String.replace's `$&`/`$1` substitution rules.
     return BID_TEMPLATE
@@ -481,6 +616,8 @@
       .replace(/\{\{DETAILS\}\}/g, function () { return details; })
       .replace(/\{\{SCOPE\}\}/g, function () { return nl2br(req.scope || wo.scopeOfWork || '') || '-'; })
       .replace(/\{\{ASSET_BLOCK\}\}/g, function () { return assetBlock; })
+      .replace(/\{\{BENCHMARK_BLOCK\}\}/g, function () { return benchmarkBlock; })
+      .replace(/\{\{FULLLIST_BLOCK\}\}/g, function () { return fullListBlock; })
       .replace(/\{\{HISTORY_BLOCK\}\}/g, function () { return historyBlock; })
       .replace(/\{\{ADDL_BLOCK\}\}/g, function () { return addlBlock + rateOfferBlock; })
       .replace(/\{\{SERVICE_BLOCK\}\}/g, function () { return svcBlock; })
@@ -783,6 +920,72 @@
 
     // ---- Step 1: Work Order Details (all optional except Scope) -----------------
     function drawDetails() {
+      // HVAC PM benchmark bar: drop/load the workbook, and (on a city/state match) apply the
+      // site's assets + target price to this bid.
+      function hvacBarHtml() {
+        var idx = hvacLoadIndex();
+        var m = idx ? hvacMatch(idx, wo) : null;
+        var applied = !!openState.benchmark;
+        var s = '<div id="bo-hvac-bar" style="display:flex;flex-wrap:wrap;gap:8px;align-items:center;padding:8px 10px;margin:2px 0 8px;background:#f3f7f5;border:1px dashed #cfd9d3;border-radius:8px;font-size:12px;">';
+        if (!idx) {
+          s += '<span style="color:#5a6b62;font-weight:500;">HVAC PM benchmark - no workbook loaded.</span>' +
+            '<button type="button" id="bo-hvac-load" class="bwn-bo-mini">Load workbook</button>' +
+            '<span style="color:#93a29a;">or drop an .xlsx here</span>';
+        } else if (m) {
+          var cs = esc(m.city + ', ' + m.st);
+          var priceTxt = (m.annual != null) ? ('$' + hvacMoney(m.annual) + '/yr' + (m.estimated ? ' est.' : '') + (m.perUnit ? (' (~$' + hvacMoney(m.perUnit) + '/unit)') : '')) : 'no price on file';
+          var note = m.multiZip ? (' · multi-store city' + (m.zipUsed ? (' - zip ' + esc(m.zipUsed)) : '')) : '';
+          s += '<span style="color:#0d3d26;font-weight:600;">HVAC PM benchmark - ' + cs + '</span>' +
+            '<span style="color:#5a6b62;">' + m.siteUnits + ' unit(s) · ' + priceTxt + note + '</span>' +
+            (applied
+              ? '<span style="color:#166534;font-weight:600;">Applied &#10003;</span><button type="button" id="bo-hvac-remove" class="bwn-bo-mini">Remove</button>'
+              : '<button type="button" id="bo-hvac-apply" class="bwn-bo-mini">Apply to this bid</button>') +
+            '<a href="#" id="bo-hvac-load" style="color:#5a6b62;">replace</a>';
+        } else {
+          s += '<span style="color:#92400e;font-weight:500;">HVAC PM benchmark loaded (' + idx.meta.sites + ' sites) - no entry for ' + esc(((wo.address && wo.address.city) || '?') + ', ' + ((wo.address && wo.address.state) || '')) + '.</span>' +
+            '<a href="#" id="bo-hvac-load" style="color:#5a6b62;">replace</a>';
+        }
+        s += '<input type="file" id="bo-hvac-file" accept=".xlsx" style="display:none;"></div>';
+        return s;
+      }
+      function hvacWire() {
+        var bar = body.querySelector('#bo-hvac-bar'); if (!bar) return;
+        var fileInput = body.querySelector('#bo-hvac-file');
+        // Remove a previously auto-inserted summary line from the Asset field (so re-Apply,
+        // Remove, or a workbook replace never stacks or strands it). Run after capture().
+        function hvacStripSummary() {
+          var s = openState._hvacSummary;
+          if (s && openState.asset && openState.asset.indexOf(s) === 0) openState.asset = openState.asset.slice(s.length).replace(/^\n/, '');
+          openState._hvacSummary = null;
+        }
+        function handleFile(file) {
+          if (!file) return;
+          file.arrayBuffer().then(function (buf) {
+            var meta;
+            try { meta = hvacParseAndStore(buf); } catch (e) { toast('Could not read workbook: ' + (e && e.message || e)); return; }
+            toast('HVAC PM benchmark loaded: ' + meta.sites + ' sites, ' + meta.units + ' assets.');
+            capture(); hvacStripSummary(); openState.benchmark = null; draw();   // a replaced workbook forces a fresh Apply
+          }).catch(function (e) { toast('Could not read file: ' + (e && e.message || e)); });
+        }
+        var loadLink = body.querySelector('#bo-hvac-load'); if (loadLink) loadLink.addEventListener('click', function (e) { e.preventDefault(); fileInput.click(); });
+        if (fileInput) fileInput.addEventListener('change', function () { handleFile(fileInput.files && fileInput.files[0]); });
+        bar.addEventListener('dragover', function (e) { e.preventDefault(); bar.style.background = '#e8f3ed'; });
+        bar.addEventListener('dragleave', function () { bar.style.background = '#f3f7f5'; });
+        bar.addEventListener('drop', function (e) { e.preventDefault(); bar.style.background = '#f3f7f5'; handleFile(e.dataTransfer && e.dataTransfer.files && e.dataTransfer.files[0]); });
+        var applyBtn = body.querySelector('#bo-hvac-apply');
+        if (applyBtn) applyBtn.addEventListener('click', function () {
+          var idx = hvacLoadIndex(); var m = idx ? hvacMatch(idx, wo) : null; if (!m) { toast('No benchmark entry for this site.'); return; }
+          capture();
+          hvacStripSummary();   // drop any prior auto-summary so re-Apply/replace can't stack it
+          var summary = hvacSummaryLine(m);
+          openState.asset = (openState.asset && openState.asset.trim()) ? (summary + '\n' + openState.asset.trim()) : summary;
+          openState._hvacSummary = summary;
+          openState.benchmark = { annual: m.annual, perUnit: m.perUnit, estimated: m.estimated, cityUnits: m.cityUnits, siteUnits: m.siteUnits, multiZip: m.multiZip, zipUsed: m.zipUsed, city: m.city, st: m.st, counts: m.counts, list: m.list };
+          toast('Applied HVAC PM benchmark to this bid.'); draw();
+        });
+        var rmBtn = body.querySelector('#bo-hvac-remove');
+        if (rmBtn) rmBtn.addEventListener('click', function () { capture(); hvacStripSummary(); openState.benchmark = null; toast('Removed benchmark from this bid.'); draw(); });
+      }
       var svcChk = hasService
         ? '<label class="bwn-bo-chk" style="margin-left:auto;"><input type="checkbox" id="bo-inc-service"' + (openState.include.service !== false ? ' checked' : '') + '> Include Service Instructions</label>'
         : '';
@@ -808,6 +1011,7 @@
         '<label class="bwn-bo-chk" style="margin:2px 0 8px;"><input type="checkbox" id="bo-rateoffer"' + (openState.rateOffer ? ' checked' : '') + '> Receive Rate Offer</label>' +
         '<div class="bwn-bo-row"><label>Additional information (optional)</label></div>' +
         '<textarea id="bo-addl" rows="2" placeholder="Anything pertinent to include: access hours, # of units, parking, on-site contact, equipment make/model, etc.">' + esc(openState.addl) + '</textarea>' +
+        hvacBarHtml() +
         '<div class="bwn-bo-row"><label>Asset / equipment (optional)</label></div>' +
         '<textarea id="bo-asset" rows="2" placeholder="Make, model, and spec vendors need to bid accurately - e.g. Bohn condenser, refrigerant R448A (not R22), 3-ton RTU, panel amperage.">' + esc(openState.asset) + '</textarea>' +
         '<div class="bwn-bo-row"><label>Site / service history (optional)</label></div>' +
@@ -820,6 +1024,7 @@
           '<div class="bwn-bo-fld"><label>Email</label><input id="bo-cemail" type="email" value="' + esc(openState.contactEmail) + '"></div>' +
           '<div class="bwn-bo-fld"><label>Phone</label><input id="bo-cphone" type="text" value="' + esc(openState.contactPhone) + '" placeholder="' + esc(COMPANY_PHONE) + '"></div>' +
         '</div>';
+      hvacWire();
       var ft = footer('<span class="sp"></span><button id="bo-cancel">Cancel</button><button class="pri" id="bo-next">Next →</button>');
       ft.querySelector('#bo-cancel').addEventListener('click', close);
       ft.querySelector('#bo-next').addEventListener('click', function () {
@@ -1021,6 +1226,9 @@
         rateOffer: openState.rateOffer,
         include: openState.include,
         addl: (openState.addl || '').trim(),
+        asset: (openState.asset || '').trim(),
+        history: (openState.history || '').trim(),
+        benchmark: openState.benchmark || null,
         contactName: openState.contactName,
         contactEmail: openState.contactEmail,
         contactPhone: openState.contactPhone
