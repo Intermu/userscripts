@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         BWN Suite - AI (Broadway National)
 // @namespace    broadwaynational.bwn
-// @version      1.31.0
+// @version      1.32.0
 // @downloadURL  https://raw.githubusercontent.com/Intermu/userscripts/main/bwn-suite-ai.user.js
 // @updateURL    https://raw.githubusercontent.com/Intermu/userscripts/main/bwn-suite-ai.user.js
 // @description  The Umbrava tools that call outside APIs, kept separate from the zero-egress Core script. Client Update and WO Audit drafts (Anthropic Claude; draft-only, scrubbed before sending, you review before posting); Find Techs / Find Suppliers (Google Places; vendor leads near a WO); and Job View (opens the Ops-Dashboard job card on the WO page - WO details from Umbrava plus the authored case file and next actions, read-only). Network access is limited by the browser to the declared API hosts and the BWN Static Web App. API keys are stored in Tampermonkey's storage via the menu commands and never enter the page. Toggle modules in BWN_MODULES below.
@@ -60,7 +60,7 @@
   publishAiStatus();
 
   console.info('[BWN SUITE AI] v' + BWN_VER + ' |',
-    'Shared Core 7 \u00b7 Client Update 1.47 \u00b7 Find Techs 2.14 \u00b7 Connector 1.4 |',
+    'Shared Core 7 \u00b7 Client Update 1.47 \u00b7 Find Techs 2.14 \u00b7 Connector 1.5 |',
     'enabled:', Object.keys(BWN_MODULES).filter(function (k) { return BWN_MODULES[k]; }).join(', '));
 
   // ===== BWN SHARED CORE v7 - KEEP IN SYNC across both suite scripts =====
@@ -2706,6 +2706,60 @@ if (BWN_MODULES.jobView) BWN.safeModule('jobView', function () {
       return (body && body.access_token) || '';
     } catch (e) { return ''; }
   }
+
+  // ---- Umbrava role sender ------------------------------------------------------
+  // Sends the Auth0 access token to the SWA, which VERIFIES it against Umbrava's JWKS (RS256)
+  // and returns the caller's Umbrava role. This is the client half of server-enforced role
+  // access levels; UX show/hide comes later. The token goes ONLY to the declared SWA @connect
+  // host, is never logged or cached (only the resulting role/email is). Dormant until the SWA
+  // key is set + connector enabled; throttled to ~6h via a GM cache so it's ~once/session.
+  var ROLE_URL = 'https://green-stone-0717dab0f.7.azurestaticapps.net/api/user-role';
+  var ROLE_TTL_MS = 6 * 3600 * 1000;
+  var _bwnRole = null;   // { email, sub, role, tenantId, roleQuery, ts }
+  function bwnUserRole() { return _bwnRole; }   // getter for future UX gating
+  // Current signed-in identity (the access token's sub) - so a cached role is only reused for
+  // the SAME user (shared workstation / in-tab re-login must not inherit another user's role).
+  function authSub() {
+    try { var p = authToken().split('.')[1]; return p ? (JSON.parse(atob(p.replace(/-/g, '+').replace(/_/g, '/'))).sub || '') : ''; } catch (e) { return ''; }
+  }
+  function announceRole(rc) {
+    _bwnRole = rc;
+    try { console.info('[BWN] Umbrava role:', (rc && rc.role) || '(none)', (rc && rc.roleQuery) ? ('· via ' + rc.roleQuery) : '', '· ' + ((rc && rc.email) || '')); } catch (e) { }
+    try { document.dispatchEvent(new CustomEvent('bwn:evt', { detail: { id: 'bwn:role', role: (rc && rc.role) || null, email: (rc && rc.email) || '', roleQuery: (rc && rc.roleQuery) || null } })); } catch (e) { }
+  }
+  function fetchUserRole(force, cb) {
+    var sub = authSub();
+    if (_bwnRole && !force && _bwnRole.sub === sub) { if (cb) cb(_bwnRole); return; }
+    if (!connectorEnabled()) { if (cb) cb(null); return; }
+    var key = GM_getValue('ingest_key', ''); if (!key) { if (cb) cb(null); return; }
+    var tok = authToken(); if (!tok) { if (cb) cb(null); return; }
+    if (!force) {
+      try { var c = JSON.parse(GM_getValue('bwn_role_cache', 'null')); if (c && c.ts && (Date.now() - c.ts) < ROLE_TTL_MS && c.sub && c.sub === sub) { announceRole(c); if (cb) cb(c); return; } } catch (e) { }   // same-user + fresh
+    }
+    GM_xmlhttpRequest({
+      method: 'POST', url: ROLE_URL, timeout: 15000,
+      headers: { 'Content-Type': 'application/json', 'x-bwn-key': key, 'Authorization': 'Bearer ' + tok },
+      data: '{}',
+      onload: function (r) {
+        var j = null; try { j = JSON.parse(r.responseText); } catch (e) { }
+        if (r.status >= 200 && r.status < 300 && j && j.ok) {
+          var rc = { email: j.email || '', sub: j.sub || '', role: j.role || null, tenantId: j.tenantId || '', roleQuery: j.roleQuery || null, ts: Date.now() };
+          try { if (rc.role) GM_setValue('bwn_role_cache', JSON.stringify(rc)); } catch (e) { }   // persist only a RESOLVED role (never the token); a null role re-fetches next load
+          announceRole(rc); if (cb) cb(rc);
+        } else { if (cb) cb(null); }
+      },
+      onerror: function () { if (cb) cb(null); }, ontimeout: function () { if (cb) cb(null); }
+    });
+  }
+  GM_registerMenuCommand('BWN: Check my Umbrava role', function () {
+    fetchUserRole(true, function (rc) {
+      if (rc) alert('Umbrava role: ' + (rc.role || '(none)') + '\nResolved via: ' + (rc.roleQuery || '?') + '\nUser: ' + (rc.email || '') + '\nTenant: ' + (rc.tenantId || ''));
+      else alert('Could not fetch your Umbrava role.\nCheck: the SWA ingest key is set, the connector is on, and you are signed into Umbrava.');
+    });
+  });
+  // Fire once per session shortly after load so the SWA resolves the role + logs/returns the
+  // query field it used (roleQuery) - this is what confirms the current-user field in prod.
+  setTimeout(function () { try { fetchUserRole(false); } catch (e) { } }, 4000);
 
   // Same-origin GraphQL POST → resolves to `data`, throws on errors[].
   function gql(query, variables) {
