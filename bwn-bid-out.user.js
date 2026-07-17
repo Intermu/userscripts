@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         BWN Bid-Out (Broadway National)
 // @namespace    broadwaynational.bwn
-// @version      0.18.2
+// @version      0.19.0
 // @downloadURL  https://raw.githubusercontent.com/Intermu/userscripts/main/bwn-bid-out.user.js
 // @updateURL    https://raw.githubusercontent.com/Intermu/userscripts/main/bwn-bid-out.user.js
 // @description  Email RFP to outside / net-new vendors, launched from a caret on Umbrava's own "See Who Is Available" button (network-vendor bidding stays native - no separate Bid-Out button). The caret menu opens the tracked email RFP wizard: finds net-new vendors nearby through Google Places, looks up their emails via the BWN scrape-contacts function, takes pasted outside addresses, and can still include assignable Umbrava vendors in the same email. You pick who's included, then review the exact recipient list and the rendered email before anything sends. Send from your own mailbox via the SWA send-bid function (Microsoft Graph), or open a plain Outlook draft. Vendors are BCC'd; nothing sends until you click Send. Network access is limited to Umbrava (same-origin), Google Places, and your SWA host.
@@ -20,7 +20,7 @@
 (function () {
   'use strict';
 
-  var VER = '0.18.1';
+  var VER = '0.19.0';
   console.info('[BWN BID-OUT] v' + VER + ' - 3-step Build Requests wizard (WO details -> select vendors -> review) · Umbrava vendors + Places net-new discovery + email scrape · one-click Graph send via SWA (Outlook-draft fallback)');
 
   var COMPANY_ADDR = 'Broadway National Group, 100 Davids Dr, Hauppauge, NY 11788';
@@ -32,6 +32,7 @@
   var PROSPECTS_URL = 'https://green-stone-0717dab0f.7.azurestaticapps.net/api/vendor-prospects';
   var SEND_URL = 'https://green-stone-0717dab0f.7.azurestaticapps.net/api/send-bid';
   var STATUS_URL = 'https://green-stone-0717dab0f.7.azurestaticapps.net/api/bid-status';
+  var HVAC_BENCH_URL = 'https://green-stone-0717dab0f.7.azurestaticapps.net/api/hvac-benchmark';
   var LOGO_SRC = 'https://green-stone-0717dab0f.7.azurestaticapps.net/assets/bwn-logo.png';
   var COMPANY_PHONE = '1.631.737.3140';
 
@@ -307,6 +308,9 @@
   // summary and attach the site's target annual price + full per-unit list to the RFP.
   var HVAC_GM_KEY = 'bwn:hvacpm';
   var _hvacIndex;   // module cache
+  var _hvacScope = null;    // 'team' | 'private' | null (unknown) - from the SWA on share/fetch
+  var _hvacTeamId = null;
+  var _hvacTeamTried = false;   // fetch the team-shared index at most once per page load
   function hvacNormKey(city, st) { return String(st || '').trim().toUpperCase() + '|' + String(city || '').trim().toUpperCase(); }
   function hvacTitle(s) { return String(s || '').toLowerCase().replace(/\b\w/g, function (c) { return c.toUpperCase(); }); }
   function hvacMoney(n) { var x = Math.round((+n || 0) * 100) / 100; var s = x.toFixed(2).replace(/\B(?=(\d{3})+(?!\d))/g, ','); return s.replace(/\.00$/, ''); }
@@ -383,6 +387,35 @@
     if (_hvacIndex !== undefined) return _hvacIndex;
     try { var raw = GM_getValue(HVAC_GM_KEY, ''); _hvacIndex = raw ? JSON.parse(raw) : null; } catch (e) { _hvacIndex = null; }
     return _hvacIndex;
+  }
+  // Shared-via-SWA layer (Phase A of team isolation). The server resolves the caller's TEAM from
+  // their VERIFIED Umbrava token (never client-supplied) and stores the index under that team;
+  // teammates read the same copy, other teams cannot. Degrades to LOCAL GM when the key/token is
+  // absent or the tab is offline/throttled - the tool never depends on the network to function.
+  function hvacBenchAuth() {
+    var key = GM_getValue('ingest_key', ''); var tok = authToken();
+    if (!key || !tok) return null;
+    return { 'Content-Type': 'application/json', 'x-bwn-key': key, 'Authorization': 'Bearer ' + tok };
+  }
+  function hvacShareIndex(payload) {
+    var h = hvacBenchAuth(); if (!h || !payload) return Promise.resolve({ shared: false, reason: 'no-auth' });
+    return gmPost(HVAC_BENCH_URL, h, { index: payload }, 30000).then(function (r) {
+      if (r.status >= 200 && r.status < 300 && r.json && r.json.ok) { _hvacScope = r.json.scope; _hvacTeamId = r.json.teamId; return { shared: true, scope: r.json.scope, teamId: r.json.teamId }; }
+      return { shared: false, reason: (r.json && r.json.error) || ('HTTP ' + r.status) };
+    }).catch(function (e) { return { shared: false, reason: (e && e.message) || 'network' }; });
+  }
+  function hvacFetchTeamIndex() {
+    var h = hvacBenchAuth(); if (!h) return Promise.resolve(null);
+    return gmGet(HVAC_BENCH_URL, h, 30000).then(function (r) {
+      if (r.status < 200 || r.status >= 300 || !r.json || !r.json.ok) return null;
+      _hvacScope = r.json.scope; _hvacTeamId = r.json.teamId;
+      var ix = r.json.index;
+      if (ix && ix.price && ix.assets) {
+        if (!ix.meta) ix.meta = { sites: Object.keys(ix.price).length, units: Object.keys(ix.assets).reduce(function (s, k) { return s + ((ix.assets[k] && ix.assets[k].units) ? ix.assets[k].units.length : 0); }, 0) };
+        GM_setValue(HVAC_GM_KEY, JSON.stringify(ix)); _hvacIndex = ix; return ix;
+      }
+      return null;
+    }).catch(function () { return null; });
   }
   // RFP renderings of the target price + full per-unit appendix (city/state only - no zip/address in vendor copy).
   function hvacPriceLineText(b) {
@@ -975,6 +1008,7 @@
         var idx = hvacLoadIndex();
         var m = idx ? hvacMatch(idx, wo) : null;
         var applied = !!openState.benchmark;
+        var srcNote = (_hvacScope === 'team') ? ' · shared with your team' : ((_hvacScope === 'private') ? ' · local to you' : '');
         var s = '<div id="bo-hvac-bar" style="display:flex;flex-wrap:wrap;gap:8px;align-items:center;padding:8px 10px;margin:2px 0 8px;background:#f3f7f5;border:1px dashed #cfd9d3;border-radius:8px;font-size:12px;">';
         if (!idx) {
           s += '<span style="color:#5a6b62;font-weight:500;">HVAC PM benchmark - no workbook loaded.</span>' +
@@ -985,13 +1019,13 @@
           var priceTxt = (m.annual != null) ? ('$' + hvacMoney(m.annual) + '/yr' + (m.estimated ? ' est.' : '') + (m.perUnit ? (' (~$' + hvacMoney(m.perUnit) + '/unit)') : '')) : 'no price on file';
           var note = m.multiZip ? (' · multi-store city' + (m.zipUsed ? (' - zip ' + esc(m.zipUsed)) : '')) : '';
           s += '<span style="color:#0d3d26;font-weight:600;">HVAC PM benchmark - ' + cs + '</span>' +
-            '<span style="color:#5a6b62;">' + m.siteUnits + ' unit(s) · ' + priceTxt + note + '</span>' +
+            '<span style="color:#5a6b62;">' + m.siteUnits + ' unit(s) · ' + priceTxt + note + srcNote + '</span>' +
             (applied
               ? '<span style="color:#166534;font-weight:600;">Applied &#10003;</span><button type="button" id="bo-hvac-remove" class="bwn-bo-mini">Remove</button>'
               : '<button type="button" id="bo-hvac-apply" class="bwn-bo-mini">Apply to this bid</button>') +
             '<a href="#" id="bo-hvac-load" style="color:#5a6b62;">replace</a>';
         } else {
-          s += '<span style="color:#92400e;font-weight:500;">HVAC PM benchmark loaded (' + idx.meta.sites + ' sites) - no entry for ' + esc(((wo.address && wo.address.city) || '?') + ', ' + ((wo.address && wo.address.state) || '')) + '.</span>' +
+          s += '<span style="color:#92400e;font-weight:500;">HVAC PM benchmark loaded (' + (((idx.meta && idx.meta.sites) != null) ? idx.meta.sites : Object.keys(idx.price || {}).length) + ' sites) - no entry for ' + esc(((wo.address && wo.address.city) || '?') + ', ' + ((wo.address && wo.address.state) || '')) + '.</span>' +
             '<a href="#" id="bo-hvac-load" style="color:#5a6b62;">replace</a>';
         }
         s += '<input type="file" id="bo-hvac-file" accept=".xlsx" style="display:none;"></div>';
@@ -1014,6 +1048,12 @@
             try { meta = hvacParseAndStore(buf); } catch (e) { toast('Could not read workbook: ' + (e && e.message || e)); return; }
             toast('HVAC PM benchmark loaded: ' + meta.sites + ' sites, ' + meta.units + ' assets.');
             capture(); hvacStripSummary(); openState.benchmark = null; draw();   // a replaced workbook forces a fresh Apply
+            // Share to the team (best-effort). Server derives the team from the verified token.
+            hvacShareIndex(hvacLoadIndex()).then(function (res) {
+              if (res.shared && res.scope === 'team') toast('Shared with your team' + (res.teamId ? ' (' + res.teamId + ')' : '') + '.');
+              else if (res.shared) toast('Saved to your account (not on a team roster yet).');
+              draw();   // reflect the resolved scope in the bar
+            });
           }).catch(function (e) { toast('Could not read file: ' + (e && e.message || e)); });
         }
         var loadLink = body.querySelector('#bo-hvac-load'); if (loadLink) loadLink.addEventListener('click', function (e) { e.preventDefault(); fileInput.click(); });
@@ -1034,6 +1074,8 @@
         });
         var rmBtn = body.querySelector('#bo-hvac-remove');
         if (rmBtn) rmBtn.addEventListener('click', function () { capture(); hvacStripSummary(); openState.benchmark = null; toast('Removed benchmark from this bid.'); draw(); });
+        // Once per page load, pull the team-shared index (it wins over a stale local copy).
+        if (!_hvacTeamTried) { _hvacTeamTried = true; hvacFetchTeamIndex().then(function (ix) { if (ix) draw(); }); }
       }
       var svcChk = hasService
         ? '<label class="bwn-bo-chk" style="margin-left:auto;"><input type="checkbox" id="bo-inc-service"' + (openState.include.service !== false ? ' checked' : '') + '> Include Service Instructions</label>'
@@ -1058,13 +1100,15 @@
           '<div class="bwn-bo-fld"><label>Rate $ /hr</label><input id="bo-rate" type="number" min="0" step="1" value="' + esc(openState.rate) + '"></div>' +
         '</div>' +
         '<label class="bwn-bo-chk" style="margin:2px 0 8px;"><input type="checkbox" id="bo-rateoffer"' + (openState.rateOffer ? ' checked' : '') + '> Receive Rate Offer</label>' +
-        '<div class="bwn-bo-row"><label>Additional information (optional)</label></div>' +
-        '<textarea id="bo-addl" rows="2" placeholder="Anything pertinent to include: access hours, # of units, parking, on-site contact, equipment make/model, etc.">' + esc(openState.addl) + '</textarea>' +
-        hvacBarHtml() +
-        '<div class="bwn-bo-row"><label>Asset / equipment (optional)</label></div>' +
-        '<textarea id="bo-asset" rows="2" placeholder="Make, model, and spec vendors need to bid accurately - e.g. Bohn condenser, refrigerant R448A (not R22), 3-ton RTU, panel amperage.">' + esc(openState.asset) + '</textarea>' +
+        // Section order (per request): Site/service history, then Asset (with the benchmark drop
+        // zone directly under the Asset field), then Additional information.
         '<div class="bwn-bo-row"><label>Site / service history (optional)</label></div>' +
         '<textarea id="bo-history" rows="2" placeholder="Prior work or recurring issues at this site: last PM date, open deficiencies, warranty status, what a previous vendor found.">' + esc(openState.history) + '</textarea>' +
+        '<div class="bwn-bo-row"><label>Asset / equipment (optional)</label></div>' +
+        '<textarea id="bo-asset" rows="2" placeholder="Make, model, and spec vendors need to bid accurately - e.g. Bohn condenser, refrigerant R448A (not R22), 3-ton RTU, panel amperage.">' + esc(openState.asset) + '</textarea>' +
+        hvacBarHtml() +
+        '<div class="bwn-bo-row"><label>Additional information (optional)</label></div>' +
+        '<textarea id="bo-addl" rows="2" placeholder="Anything pertinent to include: access hours, # of units, parking, on-site contact, equipment make/model, etc.">' + esc(openState.addl) + '</textarea>' +
         '<div class="bwn-bo-row"><label>Include in request</label></div>' +
         '<div class="bwn-bo-inc">' + incChk('priority', 'Priority') + incChk('location', 'Location (city/state)') + incChk('reference', 'Reference #') + '</div>' +
         '<div class="bwn-bo-row"><label>Your contact details (shown in the request)</label></div>' +
