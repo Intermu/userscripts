@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         BWN Suite - AI (Broadway National)
 // @namespace    broadwaynational.bwn
-// @version      1.35.0
+// @version      1.36.0
 // @downloadURL  https://raw.githubusercontent.com/Intermu/userscripts/main/bwn-suite-ai.user.js
 // @updateURL    https://raw.githubusercontent.com/Intermu/userscripts/main/bwn-suite-ai.user.js
 // @description  The Umbrava tools that call outside APIs, kept separate from the zero-egress Core script. Client Update and WO Audit drafts (Anthropic Claude; draft-only, scrubbed before sending, you review before posting); Find Techs / Find Suppliers (Google Places; vendor leads near a WO); and Job View (opens the Ops-Dashboard job card on the WO page - WO details from Umbrava plus the authored case file and next actions, read-only). Network access is limited by the browser to the declared API hosts and the BWN Static Web App. API keys are stored in Tampermonkey's storage via the menu commands and never enter the page. Toggle modules in BWN_MODULES below.
@@ -1632,7 +1632,7 @@
         '.bwn-cu-ol li::marker{color:var(--bwn-green);font-weight:500;}' +
         '.nd-title{font:500 21px/1.2 -apple-system,BlinkMacSystemFont,"Segoe UI","Helvetica Neue",Arial,sans-serif;color:var(--bwn-green-dk);letter-spacing:-.02em;margin:0 0 3px;}' +
         '.nd-sub{font:500 12px ui-monospace,"Segoe UI Mono","SF Mono",monospace;color:var(--bwn-text-faint);letter-spacing:.2px;margin:0 0 16px;}' +
-        '.nd-h{display:flex;align-items:center;gap:10px;margin:26px 0 12px;font:500 12px ui-monospace,"Segoe UI Mono","SF Mono",monospace;color:var(--bwn-green);text-transform:uppercase;letter-spacing:.12em;}' +
+        '.nd-h{display:flex;align-items:center;gap:10px;margin:26px 0 12px;font:500 12px ui-monospace,"Segoe UI Mono","SF Mono",monospace;color:var(--bwn-green);text-transform:none;letter-spacing:normal;}' +
         '.nd-h::after{content:"";flex:1;height:1px;background:linear-gradient(90deg,var(--bwn-tint),transparent);}' +
         '.bwn-cu-doc>.nd-h:first-child{margin-top:0;}' +
         '.bwn-cu-doc>.nd-title:first-child{margin-top:0;}' +
@@ -1670,7 +1670,7 @@
         '.nd-ul li{position:relative;margin:5px 0;padding-left:18px;line-height:1.5;}' +
         '.nd-ul li::before{content:"";position:absolute;left:3px;top:9px;width:5px;height:5px;border-radius:50%;background:var(--bwn-accent);}' +
         '.nd-table{width:100%;border-collapse:collapse;margin:8px 0 12px;font-size:11px;}' +
-        '.nd-table th{text-align:left;background:var(--bwn-surface-3);color:var(--bwn-green);font:500 9.5px ui-monospace,"Segoe UI Mono","SF Mono",monospace;text-transform:uppercase;letter-spacing:.4px;padding:6px 9px;border:1px solid var(--bwn-tint);}' +
+        '.nd-table th{text-align:left;background:var(--bwn-surface-3);color:var(--bwn-green);font:500 9.5px ui-monospace,"Segoe UI Mono","SF Mono",monospace;text-transform:none;letter-spacing:normal;padding:6px 9px;border:1px solid var(--bwn-tint);}' +
         '.nd-table td{padding:6px 9px;border:1px solid var(--bwn-tint);vertical-align:top;}' +
         '.nd-table tr:nth-child(even) td{background:var(--bwn-surface-2);}' +
         '@media (prefers-reduced-motion: reduce){#bwn-cu-overlay,#bwn-cu-card{animation:none;}.bwn-cu-spin{animation-duration:1.2s;}.bwn-cu-btn:active{transform:none;}}';
@@ -3706,7 +3706,7 @@ if (BWN_MODULES.jobView) BWN.safeModule('jobView', function () {
   --green-darker:#0d3d26;--amber-text:#7d5a00;--red-text:#8b1a1a;--card:#ffffff;--card2:#f6faf7;}
 #bwn-jv-overlay *,#bwn-jv-overlay *::before,#bwn-jv-overlay *::after{box-sizing:border-box;}
 #bwn-jv-card{background:var(--color-surface);border:1px solid var(--border);border-radius:10px;max-width:1100px;width:100%;max-height:calc(100vh - 80px);display:flex;flex-direction:column;box-shadow:0 12px 40px rgba(0,0,0,0.25);font-family:-apple-system,BlinkMacSystemFont,'Segoe UI','Helvetica Neue',Arial,sans-serif;overflow:hidden;color:var(--text);}
-#bwn-jv-overlay .badge{display:inline-block;font-size:9px;font-weight:500;padding:2px 7px;border-radius:99px;letter-spacing:.3px;text-transform:uppercase;}
+#bwn-jv-overlay .badge{display:inline-block;font-size:9px;font-weight:500;padding:2px 7px;border-radius:99px;letter-spacing:normal;text-transform:none;}
 #bwn-jv-overlay .badge.b-red{background:var(--color-danger-bg-alt);color:var(--color-danger-text);}
 #bwn-jv-overlay .badge.b-amber{background:var(--color-warning-bg);color:var(--color-warning-text);}
 #bwn-jv-overlay .badge.b-green{background:var(--color-success-bg);color:var(--color-brand-ink);}
@@ -3725,7 +3725,7 @@ if (BWN_MODULES.jobView) BWN.safeModule('jobView', function () {
 #bwn-jv-overlay .job-modal-body{padding:16px 18px;flex:1 1 auto;min-height:0;overflow:hidden;display:flex;flex-direction:column;}
 #bwn-jv-overlay .jm-holdup{background:var(--color-surface-alt);border:1px solid var(--border);border-left:3px solid var(--green-dk);border-radius:8px;padding:10px 12px;margin-bottom:14px;font-size:12.5px;line-height:1.5;color:var(--text);}
 #bwn-jv-overlay .jm-grid{display:grid;grid-template-columns:1fr 1fr;gap:9px 18px;font-size:12px;margin-bottom:14px;}
-#bwn-jv-overlay .jm-grid .jm-k{color:var(--muted);font-size:9px;text-transform:uppercase;letter-spacing:0.4px;display:block;margin-bottom:1px;}
+#bwn-jv-overlay .jm-grid .jm-k{color:var(--muted);font-size:9px;text-transform:none;letter-spacing:normal;display:block;margin-bottom:1px;}
 #bwn-jv-overlay .jm-grid .jm-v{color:var(--text);font-weight:500;}
 #bwn-jv-overlay .jm-pills{display:flex;flex-wrap:wrap;gap:6px;margin:0 0 12px;}
 #bwn-jv-overlay .jm-pill{font:500 11px ui-monospace,'Segoe UI Mono','SF Mono',monospace;padding:4px 10px;border-radius:99px;border:1px solid var(--border);background:var(--color-surface-alt);color:var(--text);cursor:pointer;white-space:nowrap;line-height:1.3;}
@@ -3738,13 +3738,13 @@ if (BWN_MODULES.jobView) BWN.safeModule('jobView', function () {
 #bwn-jv-overlay .jm-pill.p-gray{background:var(--color-surface-sunken);color:var(--color-text-soft);}
 #bwn-jv-overlay .jm-pill-detail{background:var(--color-surface-alt);border:1px solid var(--border);border-left:3px solid var(--green-dk);border-radius:8px;padding:10px 12px;margin-bottom:8px;}
 #bwn-jv-overlay .jm-step-lbl{font-weight:500;font-size:12.5px;color:var(--text);margin-bottom:3px;}
-#bwn-jv-overlay .jm-step-done{font-size:9px;font-weight:500;text-transform:uppercase;letter-spacing:.4px;color:var(--color-brand-ink);background:var(--color-success-bg);padding:1px 6px;border-radius:99px;margin-left:6px;}
+#bwn-jv-overlay .jm-step-done{font-size:9px;font-weight:500;text-transform:none;letter-spacing:normal;color:var(--color-brand-ink);background:var(--color-success-bg);padding:1px 6px;border-radius:99px;margin-left:6px;}
 #bwn-jv-overlay .jm-step-why{font-size:11px;color:var(--muted);line-height:1.5;margin-bottom:6px;}
 #bwn-jv-overlay .jm-step-msg{font-size:11.5px;color:var(--text);line-height:1.5;background:var(--color-surface);border:1px solid var(--border);border-radius:6px;padding:8px 10px;white-space:pre-wrap;margin-bottom:8px;}
 #bwn-jv-overlay .jm-step-acts{display:flex;flex-wrap:wrap;gap:6px;}
 #bwn-jv-overlay .jm-step-btn{font:500 10.5px -apple-system,BlinkMacSystemFont,'Segoe UI',Arial,sans-serif;padding:4px 10px;border-radius:6px;border:1px solid var(--border);background:var(--color-surface);color:var(--green-dk);cursor:pointer;}
 #bwn-jv-overlay .jm-step-btn.primary{background:var(--green-dk);color:#fff;border-color:transparent;}
-#bwn-jv-overlay .jm-section-label{font-size:10px;text-transform:uppercase;letter-spacing:0.5px;color:var(--muted);font-weight:500;margin:0 0 5px;}
+#bwn-jv-overlay .jm-section-label{font-size:10px;text-transform:none;letter-spacing:normal;color:var(--muted);font-weight:500;margin:0 0 5px;}
 #bwn-jv-overlay .jm-notes{font-size:12px;color:var(--text);line-height:1.55;white-space:pre-wrap;background:var(--color-surface-alt);border:1px solid var(--border);border-radius:8px;padding:10px 12px;max-height:260px;overflow-y:auto;}
 #bwn-jv-overlay .jm-holdup .holdup-row{display:flex;align-items:flex-start;gap:10px;justify-content:space-between;}
 #bwn-jv-overlay .holdup-ai-btn{flex:none;font-size:9.5px;font-weight:500;padding:3px 8px;border-radius:6px;border:1px solid var(--border);background:var(--color-surface);color:var(--green-dk);cursor:pointer;font-family:-apple-system,BlinkMacSystemFont,'Segoe UI','Helvetica Neue',Arial,sans-serif;white-space:nowrap;}
@@ -3756,16 +3756,16 @@ if (BWN_MODULES.jobView) BWN.safeModule('jobView', function () {
 #bwn-jv-overlay .jm-timing{display:grid;grid-template-columns:repeat(3,1fr);gap:8px;margin:0 0 14px;}
 #bwn-jv-overlay .jt{background:var(--color-surface-alt);border:1px solid var(--border);border-radius:8px;padding:8px 10px;text-align:center;}
 #bwn-jv-overlay .jt-n{font:500 17px -apple-system,BlinkMacSystemFont,'Segoe UI','Helvetica Neue',Arial,sans-serif;color:#0d3d26;line-height:1.1;}
-#bwn-jv-overlay .jt-l{font-size:8.5px;font-weight:500;text-transform:uppercase;letter-spacing:0.4px;color:var(--muted);margin-top:3px;}
+#bwn-jv-overlay .jt-l{font-size:8.5px;font-weight:500;text-transform:none;letter-spacing:normal;color:var(--muted);margin-top:3px;}
 #bwn-jv-overlay .jm-na{background:linear-gradient(135deg,#f1f9f4,#eaf5ef);border:1px solid #d3e8dc;border-radius:8px;padding:11px 14px 6px;margin-bottom:14px;}
-#bwn-jv-overlay .jm-na-h{display:flex;align-items:center;justify-content:space-between;gap:8px;font:500 10.5px ui-monospace,'Segoe UI Mono','SF Mono',monospace;color:#0d3d26;text-transform:uppercase;letter-spacing:.1em;margin-bottom:5px;}
+#bwn-jv-overlay .jm-na-h{display:flex;align-items:center;justify-content:space-between;gap:8px;font:500 10.5px ui-monospace,'Segoe UI Mono','SF Mono',monospace;color:#0d3d26;text-transform:none;letter-spacing:normal;margin-bottom:5px;}
 #bwn-jv-overlay .jm-na-copy{flex:none;font:500 9.5px ui-monospace,'Segoe UI Mono','SF Mono',monospace;text-transform:none;letter-spacing:0;color:#1a5f3e;background:#fff;border:1px solid #cfe3d7;border-radius:6px;padding:3px 8px;cursor:pointer;transition:background .12s,border-color .12s;}
 #bwn-jv-overlay .jm-na-copy:hover{background:#f0fdf4;border-color:#86efac;}
 #bwn-jv-overlay .jm-na-copy:active{transform:translateY(1px);}
 #bwn-jv-overlay .jm-na .nd-ol{margin:2px 0 4px;}
 #bwn-jv-overlay .jm-na .nd-ol li{font-size:12.5px;border-bottom-color:#d8e8de;}
 #bwn-jv-overlay .jm-na-hist{margin-top:8px;border-top:1px dashed #cfe3d7;padding-top:6px;}
-#bwn-jv-overlay .jm-na-hist>summary{font:500 9.5px ui-monospace,'Segoe UI Mono','SF Mono',monospace;color:#3f6b54;text-transform:uppercase;letter-spacing:.08em;cursor:pointer;list-style:none;outline:none;}
+#bwn-jv-overlay .jm-na-hist>summary{font:500 9.5px ui-monospace,'Segoe UI Mono','SF Mono',monospace;color:#3f6b54;text-transform:none;letter-spacing:normal;cursor:pointer;list-style:none;outline:none;}
 #bwn-jv-overlay .jm-na-hist>summary::-webkit-details-marker{display:none;}
 #bwn-jv-overlay .jm-na-hist>summary::before{content:'▸ ';color:#7aa890;}
 #bwn-jv-overlay .jm-na-hist[open]>summary::before{content:'▾ ';}
@@ -3801,7 +3801,7 @@ if (BWN_MODULES.jobView) BWN.safeModule('jobView', function () {
 #bwn-jv-overlay .nd-doc>.nd-h:first-child,#bwn-jv-overlay .nd-doc>.nd-title:first-child{margin-top:0;}
 #bwn-jv-overlay .nd-title{font:500 19px/1.2 -apple-system,BlinkMacSystemFont,'Segoe UI','Helvetica Neue',Arial,sans-serif;color:#0d3d26;letter-spacing:-.02em;margin:0 0 3px;}
 #bwn-jv-overlay .nd-sub{font:500 11px ui-monospace,'Segoe UI Mono','SF Mono',monospace;color:#7c8c83;letter-spacing:.2px;margin:0 0 14px;}
-#bwn-jv-overlay .nd-h{display:flex;align-items:center;gap:10px;margin:22px 0 11px;font:500 11px ui-monospace,'Segoe UI Mono','SF Mono',monospace;color:#1a5f3e;text-transform:uppercase;letter-spacing:.12em;}
+#bwn-jv-overlay .nd-h{display:flex;align-items:center;gap:10px;margin:22px 0 11px;font:500 11px ui-monospace,'Segoe UI Mono','SF Mono',monospace;color:#1a5f3e;text-transform:none;letter-spacing:normal;}
 #bwn-jv-overlay .nd-h::after{content:"";flex:1;height:1px;background:linear-gradient(90deg,#d6e6dd,transparent);}
 #bwn-jv-overlay .nd-p{margin:5px 0;}
 #bwn-jv-overlay .nd-p strong{color:#0d3d26;}
@@ -3825,7 +3825,7 @@ if (BWN_MODULES.jobView) BWN.safeModule('jobView', function () {
 #bwn-jv-overlay .nd-vend .vn-amt{font:500 12.5px ui-monospace,'Segoe UI Mono','SF Mono',monospace;color:#1a5f3e;white-space:nowrap;}
 #bwn-jv-overlay .nd-vend .vn-amt.none{color:#c2ccc6;font-weight:500;}
 #bwn-jv-overlay .nd-table{width:100%;border-collapse:collapse;margin:8px 0 12px;font-size:11px;}
-#bwn-jv-overlay .nd-table th{text-align:left;background:var(--color-surface-alt);color:var(--green-dk);font-weight:500;font-size:9.5px;text-transform:uppercase;letter-spacing:0.4px;padding:6px 9px;border:1px solid var(--border);}
+#bwn-jv-overlay .nd-table th{text-align:left;background:var(--color-surface-alt);color:var(--green-dk);font-weight:500;font-size:9.5px;text-transform:none;letter-spacing:normal;padding:6px 9px;border:1px solid var(--border);}
 #bwn-jv-overlay .nd-table td{padding:6px 9px;border:1px solid var(--border);vertical-align:top;}
 #bwn-jv-overlay .nd-table tr:nth-child(even) td{background:rgba(15,61,38,0.025);}
 #bwn-jv-overlay .nd-tl{display:flex;flex-direction:column;margin:8px 0 14px;border:1px solid #e7eee9;border-radius:11px;overflow:hidden;}
@@ -3843,11 +3843,11 @@ if (BWN_MODULES.jobView) BWN.safeModule('jobView', function () {
 #bwn-jv-overlay .nd-ul{margin:6px 0 14px;padding-left:4px;list-style:none;}
 #bwn-jv-overlay .nd-ul li{position:relative;margin:5px 0;padding-left:18px;line-height:1.5;}
 #bwn-jv-overlay .nd-ul li::before{content:"";position:absolute;left:3px;top:9px;width:5px;height:5px;border-radius:50%;background:#2ECC71;}
-#bwn-jv-overlay .nd-kind{display:inline-block;margin-left:6px;font-size:8.5px;font-weight:500;text-transform:uppercase;letter-spacing:0.4px;padding:1px 5px;border-radius:4px;vertical-align:middle;}
+#bwn-jv-overlay .nd-kind{display:inline-block;margin-left:6px;font-size:8.5px;font-weight:500;text-transform:none;letter-spacing:normal;padding:1px 5px;border-radius:4px;vertical-align:middle;}
 #bwn-jv-overlay .nd-sup{background:#fdf3e0;color:#9a6a12;border:1px solid #e8cfa0;}
 #bwn-jv-overlay .vnd-sep{margin:0 5px;color:var(--muted);}
 #bwn-jv-overlay .nd-shist{margin:8px 0 4px;}
-#bwn-jv-overlay .nd-shist>summary{font:500 9.5px ui-monospace,'Segoe UI Mono','SF Mono',monospace;color:#3f6b54;text-transform:uppercase;letter-spacing:.08em;cursor:pointer;list-style:none;outline:none;}
+#bwn-jv-overlay .nd-shist>summary{font:500 9.5px ui-monospace,'Segoe UI Mono','SF Mono',monospace;color:#3f6b54;text-transform:none;letter-spacing:normal;cursor:pointer;list-style:none;outline:none;}
 #bwn-jv-overlay .nd-shist>summary::-webkit-details-marker{display:none;}
 #bwn-jv-overlay .nd-shist>summary::before{content:'▸ ';color:#7aa890;}
 #bwn-jv-overlay .nd-shist[open]>summary::before{content:'▾ ';}
@@ -3855,7 +3855,7 @@ if (BWN_MODULES.jobView) BWN.safeModule('jobView', function () {
 #bwn-jv-overlay .nd-shist-dt{font:500 9.5px ui-monospace,'Segoe UI Mono','SF Mono',monospace;color:#7a8b82;margin-bottom:3px;}
 #bwn-jv-overlay .nd-shist-tx{font:400 11.5px ui-monospace,'Segoe UI Mono','SF Mono',monospace;color:var(--color-text);line-height:1.5;white-space:pre-wrap;}
 #bwn-jv-overlay .lc-head{display:flex;align-items:center;gap:10px;margin:2px 0 10px;}
-#bwn-jv-overlay .lc-title{font:500 11px ui-monospace,'Segoe UI Mono','SF Mono',monospace;color:#1a5f3e;text-transform:uppercase;letter-spacing:.12em;}
+#bwn-jv-overlay .lc-title{font:500 11px ui-monospace,'Segoe UI Mono','SF Mono',monospace;color:#1a5f3e;text-transform:none;letter-spacing:normal;}
 #bwn-jv-overlay .lc-badge{font-size:9.5px;font-weight:500;border-radius:99px;padding:2px 9px;letter-spacing:.2px;}
 #bwn-jv-overlay .lc-badge.ok{background:#eaf5ef;color:#1a5f3e;border:1px solid #cfe7d8;}
 #bwn-jv-overlay .lc-badge.late{background:#fdece9;color:#c0392b;border:1px solid #f1cabf;}
@@ -3871,7 +3871,7 @@ if (BWN_MODULES.jobView) BWN.safeModule('jobView', function () {
 #bwn-jv-overlay .lc-date{font:500 11px ui-monospace,'Segoe UI Mono','SF Mono',monospace;color:var(--text);line-height:1.2;}
 #bwn-jv-overlay .lc-node.future .lc-date,#bwn-jv-overlay .lc-node.empty .lc-date{color:var(--muted);}
 #bwn-jv-overlay .lc-node.miss .lc-date{color:#c0392b;}
-#bwn-jv-overlay .lc-lbl{font-size:8.5px;font-weight:500;text-transform:uppercase;letter-spacing:.3px;color:var(--muted);margin-top:2px;}
+#bwn-jv-overlay .lc-lbl{font-size:8.5px;font-weight:500;text-transform:none;letter-spacing:normal;color:var(--muted);margin-top:2px;}
 #bwn-jv-overlay .eq-chip{display:inline-block;font-size:10px;font-weight:500;line-height:1.5;padding:1px 7px;border-radius:10px;margin:1px 3px 1px 0;border:1px solid transparent;white-space:nowrap;}
 #bwn-jv-overlay .eq-proj{background:transparent;color:var(--muted);border:1px dashed var(--border)!important;}
 #bwn-jv-overlay .eq-r-never-updated,#bwn-jv-overlay .eq-r-mgmt-assist,#bwn-jv-overlay .eq-r-past-eta{background:#fef2f2;color:#991b1b;border-color:#fecaca;}
@@ -5314,7 +5314,7 @@ if (BWN_MODULES.jobView) BWN.safeModule('jobView', function () {
       sec.style.cssText = 'margin:10px 2px 4px;padding:10px 12px;border:1px dashed #1a5f3e;border-radius:8px;background:#f7fbf9;font-family:-apple-system,BlinkMacSystemFont,"Segoe UI",Arial,sans-serif;';
       sec.innerHTML =
         '<div style="display:flex;align-items:center;gap:8px;margin-bottom:6px;">' +
-        '<span style="font:600 11px ui-monospace,\'Segoe UI Mono\',monospace;letter-spacing:.06em;text-transform:uppercase;color:#0d3d26;">Net-new vendors (outside the network)</span>' +
+        '<span style="font:600 11px ui-monospace,\'Segoe UI Mono\',monospace;letter-spacing:normal;text-transform:none;color:#0d3d26;">Net-new vendors (outside the network)</span>' +
         '<button type="button" data-sr-find style="margin-left:auto;font:500 11px -apple-system,BlinkMacSystemFont,\'Segoe UI\',Arial,sans-serif;padding:4px 10px;border:1px solid #1a5f3e;border-radius:6px;background:#fff;color:#0d3d26;cursor:pointer;">🔎 Find nearby</button>' +
         '</div>' +
         '<div data-sr-status style="font-size:11px;color:#64748b;margin-bottom:4px;">Google-sourced, de-duped against the vendors above. They go out via our review-before-send email (Umbrava can\'t dispatch them).</div>' +

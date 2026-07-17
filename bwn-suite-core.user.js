@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         BWN Suite - Core (Broadway National)
 // @namespace    broadwaynational.bwn
-// @version      1.52.0
+// @version      1.53.0
 // @downloadURL  https://raw.githubusercontent.com/Intermu/userscripts/main/bwn-suite-core.user.js
 // @updateURL    https://raw.githubusercontent.com/Intermu/userscripts/main/bwn-suite-core.user.js
 // @description  Runs several Umbrava helpers for BWN coordinators, all in the browser with no network access. Includes: PO Approval + ETA Builder; WO Assist (GP/ETA, a stall watchdog, DNE calculator, and a next-action playbook); Email Leak Guard (checks recipients against vendor names, PO amounts, and client budget references before an outbound email sends); WO List Heat (a triage overlay + My Day strip on the work-order list); and the BWN Launcher (opens the Azure Static Web App tools with the current WO's context). Modules share state through sessionStorage/localStorage. No network calls, no privileged grants. Toggle modules in BWN_MODULES below.
@@ -1653,7 +1653,7 @@
         '.bwn-wa-tag{margin-left:auto;padding:4px 11px;border-radius:12px;font:500 10px ui-monospace,"Segoe UI Mono","SF Mono",monospace;letter-spacing:.6px;white-space:nowrap;background:rgba(255,255,255,.18);color:#fff;}' +
         '.bwn-wa-tag.bad{background:var(--bwn-bad);}' +
         '.bwn-wa-body{padding:12px 16px;max-height:62vh;overflow:auto;}' +
-        '.bwn-wa-sec{font:500 10px ui-monospace,"Segoe UI Mono","SF Mono",monospace;color:var(--bwn-green);text-transform:uppercase;letter-spacing:.7px;margin:10px 2px 4px;}' +
+        '.bwn-wa-sec{font:500 10px ui-monospace,"Segoe UI Mono","SF Mono",monospace;color:var(--bwn-green);text-transform:none;letter-spacing:normal;margin:10px 2px 4px;}' +
         '.bwn-wa-sec:first-child{margin-top:0;}' +
         '.bwn-wa-group{border:1px solid var(--bwn-border-2);border-radius:10px;padding:2px 12px;background:var(--bwn-surface-2);}' +
         '.bwn-wa-line{display:flex;justify-content:space-between;gap:16px;padding:7px 0;border-bottom:1px solid var(--bwn-surface-3);font-size:13px;}' +
@@ -4409,7 +4409,7 @@
         '#bwn-heat-panel .cols{display:grid;grid-template-columns:1fr 1fr 1fr;gap:0;border-bottom:1px solid var(--bwn-border-2);}' +
         '#bwn-heat-panel .col{padding:10px 14px;border-right:1px solid var(--bwn-border-2);min-width:0;}' +
         '#bwn-heat-panel .col:last-child{border-right:none;}' +
-        '#bwn-heat-panel .col h4{margin:0 0 6px;font:500 10px ui-monospace,"Segoe UI Mono","SF Mono",monospace;color:var(--bwn-green);text-transform:uppercase;letter-spacing:.6px;}' +
+        '#bwn-heat-panel .col h4{margin:0 0 6px;font:500 10px ui-monospace,"Segoe UI Mono","SF Mono",monospace;color:var(--bwn-green);text-transform:none;letter-spacing:normal;}' +
         '#bwn-heat-panel .kv{display:flex;justify-content:space-between;gap:10px;font-size:12px;padding:3px 0;color:var(--bwn-text-muted);}' +
         '#bwn-heat-panel .kv .k{min-width:0;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;}' +
         '#bwn-heat-panel .kv .v{font:500 11px ui-monospace,"Segoe UI Mono","SF Mono",monospace;white-space:nowrap;}' +
@@ -4418,7 +4418,7 @@
         '#bwn-heat-panel .kv.click:hover{background:var(--bwn-tint);}' +
         '#bwn-heat-panel .kv.on{background:var(--bwn-tint);box-shadow:inset 2px 0 0 var(--bwn-accent);}' +
         '#bwn-heat-panel .off{padding:8px 14px 12px;}' +
-        '#bwn-heat-panel .off h4{margin:2px 0 6px;font:500 10px ui-monospace,"Segoe UI Mono","SF Mono",monospace;color:var(--bwn-green);text-transform:uppercase;letter-spacing:.6px;}' +
+        '#bwn-heat-panel .off h4{margin:2px 0 6px;font:500 10px ui-monospace,"Segoe UI Mono","SF Mono",monospace;color:var(--bwn-green);text-transform:none;letter-spacing:normal;}' +
         '#bwn-heat-panel .orow{display:flex;gap:10px;align-items:baseline;padding:5px 0;border-bottom:1px solid var(--bwn-surface-3);font-size:12px;}' +
         '#bwn-heat-panel .orow a{font:500 12px -apple-system,BlinkMacSystemFont,"Segoe UI","Helvetica Neue",Arial,sans-serif;color:var(--bwn-green);text-decoration:none;white-space:nowrap;}' +
         '#bwn-heat-panel .orow .cl{color:var(--bwn-text-muted);white-space:nowrap;}' +
@@ -6074,7 +6074,7 @@
         '.bwn-ops-hd .t{font:500 16px -apple-system,BlinkMacSystemFont,"Segoe UI","Helvetica Neue",Arial,sans-serif;}' +
         '.bwn-ops-hd .s{font:500 11px ui-monospace,"Segoe UI Mono","SF Mono",monospace;color:rgba(255,255,255,.7);margin-top:3px;}' +
         '.bwn-ops-body{padding:14px 18px;overflow:auto;flex:1;}' +
-        '.bwn-ops-sec{font:500 10px ui-monospace,"Segoe UI Mono","SF Mono",monospace;color:var(--bwn-green);text-transform:uppercase;letter-spacing:.7px;margin:16px 2px 7px;}' +
+        '.bwn-ops-sec{font:500 10px ui-monospace,"Segoe UI Mono","SF Mono",monospace;color:var(--bwn-green);text-transform:none;letter-spacing:normal;margin:16px 2px 7px;}' +
         '.bwn-ops-sec:first-child{margin-top:2px;}' +
         '.bwn-ops-sec .d{display:block;font:500 10px ui-monospace,"Segoe UI Mono","SF Mono",monospace;color:var(--bwn-text-faint);text-transform:none;letter-spacing:0;margin-top:2px;}' +
         '.bwn-ops-row{display:flex;align-items:center;gap:10px;padding:8px 10px;border:1px solid var(--bwn-border-2);border-radius:9px;margin:5px 0;background:var(--bwn-surface-2);}' +
@@ -6535,7 +6535,7 @@
 
       var title = document.createElement('div');
       title.textContent = 'Apply a view';
-      title.style.cssText = 'font-size:11px;font-weight:500;letter-spacing:.04em;text-transform:uppercase;color:var(--bwn-text-muted);padding:2px 4px 4px;';
+      title.style.cssText = 'font-size:11px;font-weight:500;letter-spacing:normal;text-transform:none;color:var(--bwn-text-muted);padding:2px 4px 4px;';
       menu.appendChild(title);
 
       loadViews().forEach(function (v) {
@@ -6949,7 +6949,7 @@
       st.textContent =
         '.bwn-watch{display:flex;flex-wrap:wrap;align-items:center;gap:8px;margin:0 0 10px;padding:8px 12px;border:1px solid var(--bwn-border);border-left:3px solid var(--bwn-accent);border-radius:9px;background:var(--bwn-surface);font-family:-apple-system,BlinkMacSystemFont,"Segoe UI","Helvetica Neue",Arial,sans-serif;}' +
         '.bwn-watch.quiet{border-left-color:var(--bwn-border-2);}' +
-        '.bwn-watch-lab{font:500 10px ui-monospace,"Segoe UI Mono","SF Mono",monospace;letter-spacing:.03em;text-transform:uppercase;color:var(--bwn-text-faint);}' +
+        '.bwn-watch-lab{font:500 10px ui-monospace,"Segoe UI Mono","SF Mono",monospace;letter-spacing:normal;text-transform:none;color:var(--bwn-text-faint);}' +
         '.bwn-watch-chip{font:500 12px -apple-system,BlinkMacSystemFont,"Segoe UI","Helvetica Neue",Arial,sans-serif;color:var(--bwn-green);background:var(--bwn-tint);border-radius:20px;padding:3px 10px;}' +
         '.bwn-watch-none{font:500 12px ui-monospace,"Segoe UI Mono","SF Mono",monospace;color:var(--bwn-text-faint);}' +
         '.bwn-hist{position:fixed;z-index:100001;max-width:340px;background:var(--bwn-surface);border:1px solid var(--bwn-border);border-radius:10px;box-shadow:0 10px 34px rgba(0,0,0,.28);font-family:-apple-system,BlinkMacSystemFont,"Segoe UI","Helvetica Neue",Arial,sans-serif;overflow:hidden;}' +
@@ -7316,7 +7316,7 @@
         '.bwn-rem button{border:1px solid var(--bwn-border);background:var(--bwn-surface-2);color:var(--bwn-text);border-radius:8px;padding:6px 12px;font:500 12px -apple-system,BlinkMacSystemFont,"Segoe UI","Helvetica Neue",Arial,sans-serif;cursor:pointer;}' +
         '.bwn-rem button.pri{background:var(--bwn-green);border-color:var(--bwn-green);color:#fff;}' +
         '.bwn-rem-pend{margin-top:8px;border-top:1px solid var(--bwn-border-2);padding-top:8px;}' +
-        '.bwn-rem-pend-h{font:500 10px ui-monospace,"Segoe UI Mono","SF Mono",monospace;text-transform:uppercase;letter-spacing:.04em;color:var(--bwn-text-faint);margin-bottom:6px;}' +
+        '.bwn-rem-pend-h{font:500 10px ui-monospace,"Segoe UI Mono","SF Mono",monospace;text-transform:none;letter-spacing:normal;color:var(--bwn-text-faint);margin-bottom:6px;}' +
         '.bwn-rem-row{display:flex;align-items:center;gap:8px;padding:5px 0;}' +
         '.bwn-rem-row .tx{flex:1;font:500 12px ui-monospace,"Segoe UI Mono","SF Mono",monospace;color:var(--bwn-text);}' +
         '.bwn-rem-ft{display:flex;gap:8px;align-items:center;padding:12px 16px;border-top:1px solid var(--bwn-border-2);background:var(--bwn-surface-2);}' +
@@ -7467,12 +7467,12 @@
         '.bwn-tl-hd .tl-t{font:500 15px -apple-system,BlinkMacSystemFont,"Segoe UI","Helvetica Neue",Arial,sans-serif;}' +
         '.bwn-tl-hd .tl-s{font:500 11px ui-monospace,"Segoe UI Mono","SF Mono",monospace;color:rgba(255,255,255,.72);margin-top:3px;}' +
         '.bwn-tl-body{flex:1;overflow:auto;padding:10px 16px;}' +
-        '.bwn-tl-day{font:500 10px ui-monospace,"Segoe UI Mono","SF Mono",monospace;text-transform:uppercase;letter-spacing:.05em;color:var(--bwn-green);margin:12px 0 6px;padding-bottom:3px;border-bottom:1px solid var(--bwn-border-2);}' +
+        '.bwn-tl-day{font:500 10px ui-monospace,"Segoe UI Mono","SF Mono",monospace;text-transform:none;letter-spacing:normal;color:var(--bwn-green);margin:12px 0 6px;padding-bottom:3px;border-bottom:1px solid var(--bwn-border-2);}' +
         '.bwn-tl-gap{font:500 10px ui-monospace,"Segoe UI Mono","SF Mono",monospace;color:var(--bwn-warn);text-align:center;margin:8px 0;}' +
         '.bwn-tl-row{padding:6px 0 8px;border-bottom:1px solid var(--bwn-surface-3);}' +
         '.bwn-tl-row .tl-meta{display:flex;gap:8px;align-items:center;margin-bottom:2px;}' +
         '.bwn-tl-row .tl-time{font:500 11px ui-monospace,"Segoe UI Mono","SF Mono",monospace;color:var(--bwn-text-faint);}' +
-        '.bwn-tl-row .tl-label{font:500 9px ui-monospace,"Segoe UI Mono","SF Mono",monospace;text-transform:uppercase;letter-spacing:.04em;color:var(--bwn-green);background:var(--bwn-tint);border-radius:10px;padding:1px 7px;}' +
+        '.bwn-tl-row .tl-label{font:500 9px ui-monospace,"Segoe UI Mono","SF Mono",monospace;text-transform:none;letter-spacing:normal;color:var(--bwn-green);background:var(--bwn-tint);border-radius:10px;padding:1px 7px;}' +
         '.bwn-tl-row .tl-body{font:500 12.5px -apple-system,BlinkMacSystemFont,"Segoe UI","Helvetica Neue",Arial,sans-serif;color:var(--bwn-text);line-height:1.5;}' +
         '.bwn-tl-empty{padding:16px;font:500 12px ui-monospace,"Segoe UI Mono","SF Mono",monospace;color:var(--bwn-text-faint);}' +
         '.bwn-tl-ft{display:flex;gap:8px;align-items:center;padding:12px 16px;border-top:1px solid var(--bwn-border-2);background:var(--bwn-surface-2);}' +
