@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         BWN Suite - Core (Broadway National)
 // @namespace    broadwaynational.bwn
-// @version      1.51.1
+// @version      1.51.2
 // @downloadURL  https://raw.githubusercontent.com/Intermu/userscripts/main/bwn-suite-core.user.js
 // @updateURL    https://raw.githubusercontent.com/Intermu/userscripts/main/bwn-suite-core.user.js
 // @description  Runs several Umbrava helpers for BWN coordinators, all in the browser with no network access. Includes: PO Approval + ETA Builder; WO Assist (GP/ETA, a stall watchdog, DNE calculator, and a next-action playbook); Email Leak Guard (checks recipients against vendor names, PO amounts, and client budget references before an outbound email sends); WO List Heat (a triage overlay + My Day strip on the work-order list); and the BWN Launcher (opens the Azure Static Web App tools with the current WO's context). Modules share state through sessionStorage/localStorage. No network calls, no privileged grants. Toggle modules in BWN_MODULES below.
@@ -29,7 +29,7 @@
     tripCal: true        // export a WO's scheduled trips to .ics (Trips tab)
   };
 
-  var BWN_VER = '1.51.1';
+  var BWN_VER = (typeof GM_info !== 'undefined' && GM_info.script && GM_info.script.version) || '1.51.2';
 
   // Module overrides set by the Ops Suite panel; reload to apply. Both scripts
   // read the shared bwn:modules blob and honor only their own keys.
