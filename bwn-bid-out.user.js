@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         BWN Bid-Out (Broadway National)
 // @namespace    broadwaynational.bwn
-// @version      0.19.0
+// @version      0.20.0
 // @downloadURL  https://raw.githubusercontent.com/Intermu/userscripts/main/bwn-bid-out.user.js
 // @updateURL    https://raw.githubusercontent.com/Intermu/userscripts/main/bwn-bid-out.user.js
 // @description  Email RFP to outside / net-new vendors, launched from a caret on Umbrava's own "See Who Is Available" button (network-vendor bidding stays native - no separate Bid-Out button). The caret menu opens the tracked email RFP wizard: finds net-new vendors nearby through Google Places, looks up their emails via the BWN scrape-contacts function, takes pasted outside addresses, and can still include assignable Umbrava vendors in the same email. You pick who's included, then review the exact recipient list and the rendered email before anything sends. Send from your own mailbox via the SWA send-bid function (Microsoft Graph), or open a plain Outlook draft. Vendors are BCC'd; nothing sends until you click Send. Network access is limited to Umbrava (same-origin), Google Places, and your SWA host.
@@ -20,7 +20,7 @@
 (function () {
   'use strict';
 
-  var VER = '0.19.0';
+  var VER = '0.20.0';
   console.info('[BWN BID-OUT] v' + VER + ' - 3-step Build Requests wizard (WO details -> select vendors -> review) · Umbrava vendors + Places net-new discovery + email scrape · one-click Graph send via SWA (Outlook-draft fallback)');
 
   var COMPANY_ADDR = 'Broadway National Group, 100 Davids Dr, Hauppauge, NY 11788';
@@ -512,12 +512,12 @@
     if (inc.priority !== false && wo.priority && wo.priority.label) L.push('Priority: ' + wo.priority.label);
     if (inc.trades !== false) L.push('Trade(s): ' + tradeLbl);
     if (inc.location !== false && cityState) L.push('Location: ' + cityState);
-    if (req.respondBy) L.push('Please respond by: ' + fmtRespondBy(req.respondBy));
-    if (req.arrive) L.push('Arrive by: ' + fmtRespondBy(req.arrive));
-    if (req.nte) L.push('NTE (not-to-exceed): $' + req.nte);
-    if (req.techs) L.push('# of Techs: ' + req.techs);
-    if (req.travelRate) L.push('Travel Rate: $' + req.travelRate + ' / hr');
-    if (req.rate) L.push('Rate: $' + req.rate + ' / hr');
+    if (inc.respond !== false && req.respondBy) L.push('Please respond by: ' + fmtRespondBy(req.respondBy));
+    if (inc.arrive !== false && req.arrive) L.push('Arrive by: ' + fmtRespondBy(req.arrive));
+    if (inc.nte !== false && req.nte) L.push('NTE (not-to-exceed): $' + req.nte);
+    if (inc.techs !== false && req.techs) L.push('# of Techs: ' + req.techs);
+    if (inc.travel !== false && req.travelRate) L.push('Travel Rate: $' + req.travelRate + ' / hr');
+    if (inc.rate !== false && req.rate) L.push('Rate: $' + req.rate + ' / hr');
     if (inc.reference !== false) L.push('Reference: Tracking #' + (wo.trackingNumber || ''));
     L.push('Scope: ' + (req.scope || wo.scopeOfWork || ''));
     if ((req.asset || '').trim()) { L.push(''); L.push('Asset / equipment: ' + req.asset.trim()); }
@@ -640,12 +640,12 @@
     var cityState = wo.address ? ((wo.address.city || '') + (wo.address.state ? ', ' + wo.address.state : '')) : '';
     var pairs = [];
     if (inc.priority !== false && wo.priority && wo.priority.label) pairs.push({ label: 'Priority', value: wo.priority.label });
-    if (req.respondBy) pairs.push({ label: 'Respond By', value: fmtRespondBy(req.respondBy) });
-    if (req.arrive) pairs.push({ label: 'Arrive By', value: fmtRespondBy(req.arrive) });
-    if (req.nte) pairs.push({ label: 'NTE', value: '$' + req.nte });
-    if (req.techs) pairs.push({ label: '# of Techs', value: req.techs });
-    if (req.travelRate) pairs.push({ label: 'Travel Rate', value: '$' + req.travelRate + ' / hr' });
-    if (req.rate) pairs.push({ label: 'Rate', value: '$' + req.rate + ' / hr' });
+    if (inc.respond !== false && req.respondBy) pairs.push({ label: 'Respond By', value: fmtRespondBy(req.respondBy) });
+    if (inc.arrive !== false && req.arrive) pairs.push({ label: 'Arrive By', value: fmtRespondBy(req.arrive) });
+    if (inc.nte !== false && req.nte) pairs.push({ label: 'NTE', value: '$' + req.nte });
+    if (inc.techs !== false && req.techs) pairs.push({ label: '# of Techs', value: req.techs });
+    if (inc.travel !== false && req.travelRate) pairs.push({ label: 'Travel Rate', value: '$' + req.travelRate + ' / hr' });
+    if (inc.rate !== false && req.rate) pairs.push({ label: 'Rate', value: '$' + req.rate + ' / hr' });
     if (inc.trades !== false) pairs.push({ label: 'Trade(s)', value: tradeLbl });
     if (inc.location !== false && cityState) pairs.push({ label: 'Location', value: cityState });
     if (inc.reference !== false) pairs.push({ label: 'Reference', value: 'Tracking #' + (wo.trackingNumber || '') });
@@ -903,7 +903,7 @@
     if (openState.inviteText == null) openState.inviteText = '';
     if (openState.netNew == null) openState.netNew = [];
     if (openState.netNewMsg == null) openState.netNewMsg = '';
-    if (openState.include == null) openState.include = { priority: true, trades: true, location: true, service: hasService, reference: true };
+    if (openState.include == null) openState.include = { priority: true, trades: true, location: true, service: hasService, reference: true, respond: true, arrive: true, nte: true, techs: true, travel: true, rate: true };
     if (openState.addl == null) openState.addl = '';
     if (openState.asset == null) openState.asset = '';       // PM/project: asset + equipment (make/model/spec, e.g. R34 vs R41)
     if (openState.history == null) openState.history = '';   // PM/project: site / prior-service context
@@ -1110,7 +1110,17 @@
         '<div class="bwn-bo-row"><label>Additional information (optional)</label></div>' +
         '<textarea id="bo-addl" rows="2" placeholder="Anything pertinent to include: access hours, # of units, parking, on-site contact, equipment make/model, etc.">' + esc(openState.addl) + '</textarea>' +
         '<div class="bwn-bo-row"><label>Include in request</label></div>' +
-        '<div class="bwn-bo-inc">' + incChk('priority', 'Priority') + incChk('location', 'Location (city/state)') + incChk('reference', 'Reference #') + '</div>' +
+        // Core WO fields always offered; the entered bid fields appear as toggles once they have
+        // a value. Location is city/state only - there is deliberately NO client-name/address toggle.
+        '<div class="bwn-bo-inc">' +
+          incChk('priority', 'Priority') + incChk('trades', 'Trade(s)') + incChk('location', 'Location (city/state)') + incChk('reference', 'Reference #') +
+          (openState.respond ? incChk('respond', 'Respond by') : '') +
+          (openState.arrive ? incChk('arrive', 'Arrive by') : '') +
+          (openState.nte ? incChk('nte', 'NTE') : '') +
+          (openState.techs ? incChk('techs', '# of Techs') : '') +
+          (openState.travelRate ? incChk('travel', 'Travel rate') : '') +
+          (openState.rate ? incChk('rate', 'Rate') : '') +
+        '</div>' +
         '<div class="bwn-bo-row"><label>Your contact details (shown in the request)</label></div>' +
         '<div class="bwn-bo-grid2">' +
           '<div class="bwn-bo-fld"><label>Name</label><input id="bo-cname" type="text" value="' + esc(openState.contactName) + '"></div>' +
@@ -1334,18 +1344,19 @@
 
       function sfld(k, v) { return '<div class="bwn-bo-sumfld"><div class="k">' + esc(k) + '</div><div class="v">' + esc(v) + '</div></div>'; }
       var n = recips.length;
+      var rinc = req.include || {};
       var sum = '<div class="bwn-bo-sum"><div class="bwn-bo-sumhd">Request summary</div>' +
-        sfld('Respond By', fmtRespondBy(req.respondBy)) +
+        ((rinc.respond !== false && req.respondBy) ? sfld('Respond By', fmtRespondBy(req.respondBy)) : '') +
         sfld('Send to', n + ' vendor' + (n === 1 ? '' : 's')) +
-        (priorityLbl ? sfld('Priority', priorityLbl) : '') +
-        (req.arrive ? sfld('Arrive By', fmtRespondBy(req.arrive)) : '') +
-        '<div class="bwn-bo-sumfld"><div class="k">Trade(s)</div><div class="v"><div class="bwn-bo-chips">' + tradeChipsHtml() + '</div></div></div>' +
+        ((rinc.priority !== false && priorityLbl) ? sfld('Priority', priorityLbl) : '') +
+        ((rinc.arrive !== false && req.arrive) ? sfld('Arrive By', fmtRespondBy(req.arrive)) : '') +
+        (rinc.trades !== false ? '<div class="bwn-bo-sumfld"><div class="k">Trade(s)</div><div class="v"><div class="bwn-bo-chips">' + tradeChipsHtml() + '</div></div></div>' : '') +
         '<div class="bwn-bo-sumfld"><div class="k">Scope</div><div class="v">' + esc(req.scope || '-') + '</div></div>' +
         ((openState.include.service !== false && hasService) ? '<div class="bwn-bo-sumnote">Service Instructions Included</div>' : '') +
-        (req.nte ? sfld('NTE', '$' + req.nte) : '') +
-        (req.techs ? sfld('# of Techs', req.techs) : '') +
-        (req.travelRate ? sfld('Travel Rate', '$' + req.travelRate + ' / hr') : '') +
-        (req.rate ? sfld('Rate', '$' + req.rate + ' / hr') : '') +
+        ((rinc.nte !== false && req.nte) ? sfld('NTE', '$' + req.nte) : '') +
+        ((rinc.techs !== false && req.techs) ? sfld('# of Techs', req.techs) : '') +
+        ((rinc.travel !== false && req.travelRate) ? sfld('Travel Rate', '$' + req.travelRate + ' / hr') : '') +
+        ((rinc.rate !== false && req.rate) ? sfld('Rate', '$' + req.rate + ' / hr') : '') +
         (req.rateOffer ? sfld('Rate Offer', 'Requested') : '') +
         sfld('Contact Name', req.contactName || me.name || 'Broadway National Group') +
         sfld('Contact Email', fromDefault) +
