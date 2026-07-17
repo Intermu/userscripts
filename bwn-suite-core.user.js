@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         BWN Suite - Core (Broadway National)
 // @namespace    broadwaynational.bwn
-// @version      1.51.2
+// @version      1.52.0
 // @downloadURL  https://raw.githubusercontent.com/Intermu/userscripts/main/bwn-suite-core.user.js
 // @updateURL    https://raw.githubusercontent.com/Intermu/userscripts/main/bwn-suite-core.user.js
 // @description  Runs several Umbrava helpers for BWN coordinators, all in the browser with no network access. Includes: PO Approval + ETA Builder; WO Assist (GP/ETA, a stall watchdog, DNE calculator, and a next-action playbook); Email Leak Guard (checks recipients against vendor names, PO amounts, and client budget references before an outbound email sends); WO List Heat (a triage overlay + My Day strip on the work-order list); and the BWN Launcher (opens the Azure Static Web App tools with the current WO's context). Modules share state through sessionStorage/localStorage. No network calls, no privileged grants. Toggle modules in BWN_MODULES below.
@@ -2317,6 +2317,23 @@
     // attribution is the audit record. Fallback: clipboard + tell the user. When
     // `noteType` is passed (the ECD flow passes "Internal"), the composer's note-type
     // control is set to it once the composer opens.
+    // Insert multi-line text into Umbrava's rich Add Note editor (TipTap / ProseMirror) so line
+    // breaks + blank lines become real paragraphs - a plain textContent set collapses them into
+    // one jumbled run. A synthetic paste (text/html) drives the editor's own paste handler,
+    // exactly like a manual Ctrl+V. Verified live on the composer. Falls back to execCommand /
+    // textContent only if the ClipboardEvent APIs are unavailable (the caller also copies to the
+    // clipboard, so a manual Ctrl+V is always the final recovery).
+    function pasteRichEditor(ed, text) {
+      function esc(s) { return String(s).replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;'); }
+      var html = String(text).replace(/\r\n/g, '\n').split(/\n{2,}/).map(function (p) { return '<p>' + esc(p).replace(/\n/g, '<br>') + '</p>'; }).join('');
+      try { ed.focus(); var sel = window.getSelection(); var rg = document.createRange(); rg.selectNodeContents(ed); sel.removeAllRanges(); sel.addRange(rg); } catch (e) { }
+      try {
+        var dt = new DataTransfer(); dt.setData('text/html', html); dt.setData('text/plain', String(text));
+        ed.dispatchEvent(new ClipboardEvent('paste', { clipboardData: dt, bubbles: true, cancelable: true }));
+      } catch (e2) {
+        try { document.execCommand('insertHTML', false, html); } catch (e3) { try { ed.textContent = String(text); ed.dispatchEvent(new Event('input', { bubbles: true })); } catch (e4) { } }
+      }
+    }
     function insertWONote(text, cb, noteType) {
       var btn = findAddNoteBtn();
       if (!btn) { noteFallback(text); if (cb) cb(false); return; }
@@ -2329,7 +2346,7 @@
         for (var i = 0; i < all.length; i++) { if (beforeEls.indexOf(all[i]) === -1) { fresh = all[i]; break; } }
         if (fresh) {
           if (fresh.tagName === 'TEXTAREA') BWN.setNativeValue(fresh, text);
-          else { fresh.textContent = text; fresh.dispatchEvent(new Event('input', { bubbles: true })); }
+          else pasteRichEditor(fresh, text);
           try { fresh.focus(); fresh.scrollIntoView({ block: 'center' }); } catch (e) { }
           if (noteType) { try { var comp = (fresh.closest && fresh.closest('[role="dialog"],.MuiDialog-root,form,.MuiPaper-root')) || document; setTimeout(function () { setNoteType(noteType, comp); }, 60); } catch (e) { } }
           if (cb) cb(true); return;

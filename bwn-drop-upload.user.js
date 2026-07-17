@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         BWN Drop Upload (Broadway National)
 // @namespace    broadwaynational.bwn
-// @version      1.3.8
+// @version      1.4.0
 // @downloadURL  https://raw.githubusercontent.com/Intermu/userscripts/main/bwn-drop-upload.user.js
 // @updateURL    https://raw.githubusercontent.com/Intermu/userscripts/main/bwn-drop-upload.user.js
 // @description  Drop files anywhere on an Umbrava work order to upload them. Opens the Documents tab and upload dialog, hands over the files, and builds each file's description from its contents. Emails are parsed locally (.msg via an OLE/MAPI reader, .eml via RFC822) into an Outlook-style block - From/Sent/To/Cc/Subject and the body - that becomes the WO note. Umbrava's Description field is a locked react-aria combobox that rejects programmatic fills, so the description goes on your clipboard for a one-tap Ctrl+V. You review and Save everything. Runs in the browser only: no network access, no grants.
@@ -15,7 +15,7 @@
 (function () {
   'use strict';
 
-  var VER = '1.3.8';
+  var VER = '1.4.0';
   console.info('[BWN DROP UPLOAD] v' + VER + ' · Email→note: real .msg (OLE/MAPI) + .eml parsing · Description: clipboard-paste assist · bwn:cmd dropupload:files bridge (WO Intake auto-attach)');
 
   // Active only on WO pages; checked at drag time so SPA navigation needs no watcher.
@@ -318,6 +318,16 @@
     }
     return lines.join('\n').split('\n').map(function (l) { return l.replace(/\s+$/, ''); }).join('\n').replace(/\n{3,}/g, '\n\n').trim();
   }
+  // Generated lead line for a client WO-request email: "<Sender> sent in WO Request for <problem>".
+  // The problem text is the email's Description: section (the real scope). Added only when BOTH a
+  // sender name and a Description are present, so ordinary emails never get a misfit summary line.
+  function woSummary(m) {
+    var name = (m.fromName || smtpAddr(m.fromEmail) || '').trim();
+    var dm = String(m.body || '').match(/Description\s*:?\s*([\s\S]*?)(?:\n\s*(?:Dispatcher|Vendor|Model\s*:|Serial|Parts Warranty|Labor Warranty)\b|$)/i);
+    var desc = dm ? dm[1].replace(/\s+/g, ' ').trim() : '';
+    if (!name || !desc) return '';
+    return name + ' sent in WO Request for ' + desc;
+  }
   function formatEmailBlock(m) {
     var L = [];
     var from = fmtAddr({ name: m.fromName, email: m.fromEmail }); if (from) L.push('From: ' + from);
@@ -326,7 +336,9 @@
     if (m.cc && m.cc.length) L.push('Cc: ' + m.cc.map(fmtAddr).join('; '));
     if (m.subject) L.push('Subject: ' + m.subject);
     var body = tidyBody(m.body);
-    return L.join('\n') + (body ? '\n\n' + body : '');
+    var block = L.join('\n') + (body ? '\n\n' + body : '');
+    var sum = woSummary(m);
+    return sum ? (sum + '\n\n' + block) : block;
   }
 
   // Short one-liner for the Description field / clipboard (emails add from+sent).
@@ -624,12 +636,22 @@
       return Promise.resolve(!!(ed.value || '').trim());
     }
     var lines = String(text).split('\n');
-    var html = String(text).replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;').replace(/\n/g, '<br>');
+    function esc(s) { return String(s).replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;'); }
+    // Paragraph-structured HTML: a blank line starts a new <p>; a single newline is a <br> inside
+    // the paragraph. This is what makes the note read like the original email (matches Ctrl+V).
+    var blockHtml = String(text).replace(/\r\n/g, '\n').split(/\n{2,}/).map(function (p) { return '<p>' + esc(p).replace(/\n/g, '<br>') + '</p>'; }).join('');
     var tail = '';
     for (var k = lines.length - 1; k >= 0; k--) { if (lines[k].trim()) { tail = lines[k].trim(); break; } }
     function stuck() { var t = ed.textContent || ''; return tail ? t.indexOf(tail.slice(0, 40)) !== -1 : !!t.trim(); }
     function clear() { try { ed.focus(); document.execCommand('selectAll', false, null); } catch (e) { } }
-    function tryHtml() { clear(); try { document.execCommand('insertHTML', false, html); } catch (e) { } }
+    function selectAllRange() { try { ed.focus(); var sel = window.getSelection(); var rg = document.createRange(); rg.selectNodeContents(ed); sel.removeAllRanges(); sel.addRange(rg); } catch (e) { } }
+    // Preferred: a synthetic paste so the editor's OWN handler (Umbrava's Add Note is TipTap /
+    // ProseMirror) builds real paragraphs - exactly what a manual Ctrl+V does. Verified live.
+    function tryPaste() {
+      selectAllRange();
+      try { var dt = new DataTransfer(); dt.setData('text/html', blockHtml); dt.setData('text/plain', String(text)); ed.dispatchEvent(new ClipboardEvent('paste', { clipboardData: dt, bubbles: true, cancelable: true })); } catch (e) { }
+    }
+    function tryHtml() { clear(); try { document.execCommand('insertHTML', false, blockHtml); } catch (e) { } }
     function trySoftLines() {
       clear();
       try {
@@ -640,9 +662,9 @@
       } catch (e) { }
     }
     function tryText() { clear(); try { document.execCommand('insertText', false, text); } catch (e) { } }
-    function tryInner() { try { ed.innerHTML = html; ed.dispatchEvent(new Event('input', { bubbles: true })); } catch (e) { } }
+    function tryInner() { try { ed.innerHTML = blockHtml; ed.dispatchEvent(new Event('input', { bubbles: true })); } catch (e) { } }
     function settle() { return new Promise(function (r) { setTimeout(function () { r(stuck()); }, 250); }); }
-    var steps = [tryHtml, trySoftLines, tryText, tryInner];
+    var steps = [tryPaste, tryHtml, trySoftLines, tryText, tryInner];
     function run(i) {
       if (i >= steps.length) return Promise.resolve(stuck());
       steps[i]();
@@ -713,6 +735,59 @@
     });
   }
 
+  // Best-effort: set the Add Note composer's note-type control to `label` (e.g. "Client").
+  // Ported from Core's DOM-verified setNoteType. Umbrava's CURRENT control is a custom
+  // autocomplete (input[aria-autocomplete="list"] labelled "Type") - typing does NOT select it,
+  // you must CLICK the option (branch 0). Legacy branches kept as fallbacks, gated on a note-type
+  // vocabulary so they never touch an unrelated dropdown. No-ops safely if not found.
+  var NOTE_TYPE_VOCAB = /^(internal|vendor|client|billing|general|public|private|customer|recap)$/i;
+  function setNoteType(label, scope) {
+    if (!label) return false;
+    scope = scope || document;
+    var esc2 = String(label).replace(/[.*+?^${}()|[\]\\]/g, function (m) { return '\\' + m; });
+    var want = new RegExp('^\\s*' + esc2 + '\\s*$', 'i');
+    var flabs = scope.querySelectorAll('label'), acInput = null;
+    for (var a = 0; a < flabs.length; a++) {
+      if (!/^\s*type\b/i.test((flabs[a].textContent || '').trim())) continue;
+      var afc = flabs[a].closest('.MuiFormControl-root') || flabs[a].parentElement;
+      var ai = afc ? afc.querySelector('input[aria-autocomplete="list"]') : null;
+      if (ai) { acInput = ai; break; }
+    }
+    if (acInput) {
+      try {
+        acInput.focus();
+        acInput.dispatchEvent(new MouseEvent('mousedown', { bubbles: true, cancelable: true, view: window }));
+        var vset = Object.getOwnPropertyDescriptor(window.HTMLInputElement.prototype, 'value').set;
+        vset.call(acInput, label); acInput.dispatchEvent(new Event('input', { bubbles: true })); acInput.dispatchEvent(new KeyboardEvent('keyup', { bubbles: true }));
+        var contain = new RegExp(esc2, 'i'), nn = 0;
+        (function pickAC() {
+          var os = document.querySelectorAll('[role="option"]'), exact = null, part = null;
+          for (var q = 0; q < os.length; q++) {
+            var tx = (os[q].textContent || '').replace(/\s+/g, ' ').trim();
+            if (want.test(tx)) { exact = os[q]; break; }
+            if (!part && contain.test(tx)) part = os[q];
+          }
+          var opt = exact || part;
+          if (opt) { ['pointerdown', 'mousedown', 'mouseup', 'click'].forEach(function (t) { opt.dispatchEvent(new MouseEvent(t, { bubbles: true, cancelable: true, view: window })); }); return; }
+          if (++nn < 12) setTimeout(pickAC, 70);
+        })();
+      } catch (e) { }
+      return true;
+    }
+    var sels = scope.querySelectorAll('select');
+    for (var i = 0; i < sels.length; i++) {
+      var opts = Array.prototype.slice.call(sels[i].options);
+      if (!opts.some(function (o) { return NOTE_TYPE_VOCAB.test((o.textContent || '').trim()); })) continue;
+      var m1 = opts.filter(function (o) { return want.test((o.textContent || '').trim()); })[0];
+      if (m1) { try { setNativeValue(sels[i], m1.value); } catch (e) { } return true; }
+    }
+    var direct = scope.querySelectorAll('[role="tab"],[role="radio"],[role="option"],button,.MuiChip-root,label');
+    for (var j = 0; j < direct.length; j++) {
+      if (want.test((direct[j].textContent || '').trim()) && direct[j].offsetParent) { try { direct[j].click(); } catch (e) { } return true; }
+    }
+    return false;
+  }
+
   function insertNote(text, originTab) {
     // Clipboard backup first - rich editors can swallow programmatic text, and the
     // paste is then the instant recovery. Track whether it actually landed so the
@@ -730,8 +805,11 @@
       }, 5000).then(function (ed) {
         if (!ed) { copied.then(function (ok) { toast(ok ? 'Upload note copied to clipboard - the note composer didn’t open.' : 'The note composer didn’t open.'); }); return; }
         setEditorValue(ed, text).then(function (filled) {
+          // Client email notes are always Type "Client" (per ops). Scope to the just-opened
+          // composer so we never touch an unrelated dropdown. Best-effort; the note still posts.
+          try { var comp = (ed.closest && ed.closest('[role="dialog"],.MuiDialog-root,form,.MuiPaper-root')) || document; setTimeout(function () { setNoteType('Client', comp); }, 80); } catch (e) { }
           copied.then(function (ok) {
-            if (filled) toast('Upload note drafted - review and Save.' + (ok ? ' (Also on your clipboard.)' : ''));
+            if (filled) toast('Upload note drafted (Type: Client) - review and Save.' + (ok ? ' (Also on your clipboard.)' : ''));
             else toast(ok ? 'Note composer opened but it blocked auto-fill - press Ctrl+V to paste the note.' : 'Note composer opened but auto-fill was blocked.');
           });
         });
