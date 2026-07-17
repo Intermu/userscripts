@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         BWN Bid-Out (Broadway National)
 // @namespace    broadwaynational.bwn
-// @version      0.21.0
+// @version      0.21.1
 // @downloadURL  https://raw.githubusercontent.com/Intermu/userscripts/main/bwn-bid-out.user.js
 // @updateURL    https://raw.githubusercontent.com/Intermu/userscripts/main/bwn-bid-out.user.js
 // @description  Email RFP to outside / net-new vendors, launched from a caret on Umbrava's own "See Who Is Available" button (network-vendor bidding stays native - no separate Bid-Out button). The caret menu opens the tracked email RFP wizard: finds net-new vendors nearby through Google Places, looks up their emails via the BWN scrape-contacts function, takes pasted outside addresses, and can still include assignable Umbrava vendors in the same email. You pick who's included, then review the exact recipient list and the rendered email before anything sends. Send from your own mailbox via the SWA send-bid function (Microsoft Graph), or open a plain Outlook draft. Vendors are BCC'd; nothing sends until you click Send. Network access is limited to Umbrava (same-origin), Google Places, and your SWA host.
@@ -20,7 +20,7 @@
 (function () {
   'use strict';
 
-  var VER = '0.21.0';
+  var VER = '0.21.1';
   console.info('[BWN BID-OUT] v' + VER + ' - 3-step Build Requests wizard (WO details -> select vendors -> review) · Umbrava vendors + Places net-new discovery + email scrape · one-click Graph send via SWA (Outlook-draft fallback)');
 
   var COMPANY_ADDR = 'Broadway National Group, 100 Davids Dr, Hauppauge, NY 11788';
@@ -846,7 +846,7 @@
       '.bwn-bo-fld input{border:1px solid #dde6e1;border-radius:8px;padding:7px 9px;font:400 14px ' + FONT + ';color:#1f2a24;box-sizing:border-box;width:100%;}' +
       '.bwn-bo-ro{font:400 14px ' + FONT + ';color:#1f2a24;padding:7px 0;}' +
       '.bwn-bo-chips{display:flex;gap:6px;flex-wrap:wrap;}' +
-      '.bwn-bo-chip{display:inline-block;background:#e8f3ed;color:#0d3d26;border:1px solid #cfe6da;border-radius:999px;padding:4px 11px;font:500 12px ' + FONT + ';}' +
+      '.bwn-bo-chip{display:inline-block;background:#e8f3ed;color:#0d3d26;border:1px solid #cfe6da;border-radius:999px;padding:4px 11px;font:600 12px ' + FONT + ';}' +
       '.bwn-bo-sum{border:1px solid #dde6e1;border-radius:10px;background:#f7faf8;padding:12px 14px;margin:2px 0 12px;}' +
       '.bwn-bo-sumhd{font:500 14px ' + FONT + ';color:#0d3d26;margin-bottom:8px;}' +
       '.bwn-bo-sumfld{display:flex;gap:12px;padding:6px 0;border-top:1px solid #eef2f4;}' +
