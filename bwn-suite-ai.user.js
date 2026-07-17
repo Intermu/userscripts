@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         BWN Suite - AI (Broadway National)
 // @namespace    broadwaynational.bwn
-// @version      1.33.0
+// @version      1.34.0
 // @downloadURL  https://raw.githubusercontent.com/Intermu/userscripts/main/bwn-suite-ai.user.js
 // @updateURL    https://raw.githubusercontent.com/Intermu/userscripts/main/bwn-suite-ai.user.js
 // @description  The Umbrava tools that call outside APIs, kept separate from the zero-egress Core script. Client Update and WO Audit drafts (Anthropic Claude; draft-only, scrubbed before sending, you review before posting); Find Techs / Find Suppliers (Google Places; vendor leads near a WO); and Job View (opens the Ops-Dashboard job card on the WO page - WO details from Umbrava plus the authored case file and next actions, read-only). Network access is limited by the browser to the declared API hosts and the BWN Static Web App. API keys are stored in Tampermonkey's storage via the menu commands and never enter the page. Toggle modules in BWN_MODULES below.
@@ -2756,6 +2756,17 @@ if (BWN_MODULES.jobView) BWN.safeModule('jobView', function () {
       if (rc && rc.role) alert('Umbrava role: ' + rc.role + '\nResolved via: ' + (rc.roleQuery || '?') + '\nUser: ' + (rc.email || '') + '\nTenant: ' + (rc.tenantId || ''));
       else if (rc) alert('Signed in and verified, but Umbrava returned no role.\nResolved via: ' + (rc.roleQuery || '(no query matched)') + '\nUser: ' + (rc.email || ''));
       else alert('Could not fetch your Umbrava role.\nReason: ' + (err || 'unknown') + '\n\nChecklist: SWA ingest key set, connector on, signed into Umbrava.');
+    });
+  });
+  // TEMP diagnostic: shows what the SWA actually receives (alg/kid only). Remove once role auth is confirmed.
+  GM_registerMenuCommand('BWN: role debug (diagnostic)', function () {
+    var key = GM_getValue('ingest_key', ''); var tok = authToken();
+    if (!key || !tok) { alert('debug: missing ' + (!key ? 'ingest key' : 'Umbrava token')); return; }
+    GM_xmlhttpRequest({
+      method: 'POST', url: ROLE_URL + '?debug=1', timeout: 15000,
+      headers: { 'Content-Type': 'application/json', 'x-bwn-key': key, 'Authorization': 'Bearer ' + tok }, data: '{}',
+      onload: function (r) { alert('SWA received (status ' + r.status + '):\n' + (r.responseText || '').slice(0, 600)); },
+      onerror: function () { alert('debug: network error reaching the SWA'); }, ontimeout: function () { alert('debug: timed out'); }
     });
   });
   // Fire once per session shortly after load so the SWA resolves the role + logs/returns the
