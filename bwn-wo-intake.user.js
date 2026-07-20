@@ -1,10 +1,10 @@
 // ==UserScript==
 // @name         BWN WO Intake (Broadway National)
 // @namespace    broadwaynational.bwn
-// @version      0.7.0
+// @version      0.9.0
 // @downloadURL  https://raw.githubusercontent.com/Intermu/userscripts/main/bwn-wo-intake.user.js
 // @updateURL    https://raw.githubusercontent.com/Intermu/userscripts/main/bwn-wo-intake.user.js
-// @description  Drop a client PO/WO email (.msg or .eml) onto the Create Work Order modal and it prefills the fields. Pilot Travel Centers: from the email body. Caleres (Famous Footwear / Corrigo): reads the attached WO PDF on-device for Trade, Scope, Priority, Due-By, Store, NTE. Selects Client, Location, Trade and Priority by clicking the real dropdown option; fills Client DNE, Source Job # and Source PO #; warns you if the WO PDF shows a cancel/flag note. Then, after you Create the WO, it hands the email to BWN Drop Upload to attach it to the new WO's Documents. Reads everything in the browser; nothing is uploaded to any server. Best-effort: review every field before you click Create.
+// @description  Drop a client PO/WO email (.msg or .eml) onto the Create Work Order modal and it prefills the fields. Pilot Travel Centers: from the email body. Caleres (Famous Footwear / Corrigo): reads the attached WO PDF on-device for Trade, Scope, Priority, Due-By, Store, NTE. If a Caleres request has no WO PDF (image-only), it reads Store, City/State and Trade from the subject and the scope from the body (NTE + Priority stay manual - they live only in the images). Selects Client, Location (address-verified), Trade and Priority by clicking the real dropdown option; fills Client DNE, Source Job # and Source PO #; warns you if the WO PDF shows a cancel/flag note. Then, after you Create the WO, it hands the email to BWN Drop Upload to attach it to the new WO's Documents. Reads everything in the browser; nothing is uploaded to any server. Best-effort: review every field before you click Create.
 // @match        https://app.umbrava.com/*
 // @run-at       document-idle
 // @noframes
@@ -13,7 +13,7 @@
 
 (function () {
   'use strict';
-  var VER = '0.7.0';
+  var VER = '0.9.0';
   var FONT = "-apple-system,BlinkMacSystemFont,'Segoe UI','Helvetica Neue',Arial,sans-serif";
   console.info('[BWN WO INTAKE] v' + VER + ' - drop a PO email (.msg/.eml) on Create Work Order to prefill + auto-attach to the new WO Documents (via Drop Upload); reads locally, nothing leaves the browser');
 
@@ -292,6 +292,19 @@
     out.trade = calTrade(regionCompact.slice(0, 60));
     out.scope = scope.slice(0, 600);
     out.warn = /FLAGGED:|cancel/i.test(C) ? 'the WO PDF has a cancel / flag note - verify this WO is still live before you Create it' : '';
+    // Site ADDRESS - used to DISAMBIGUATE the Location dropdown. Searching the bare store number
+    // ("3699") also substring-hits stores whose STREET begins with those digits (e.g. "3699 South
+    // Highway 95", Bullhead City AZ; "3699 McKinney Avenue", Dallas TX), so the number alone is not
+    // unique and the wrong one can render first. Street#, state and ZIP are unambiguous tokens the
+    // Location option also shows, so selectLocation() cross-checks them.
+    var maddr = spaced.match(/,\s*([A-Z]{2})\s+(\d{5})(?:-\d{4})?/);
+    var mstreet = spaced.match(/Caleres\/\d+\/[A-Z]{2}\s*-\s*(\d{1,6})\b[^\r\n]*/i);
+    out.addr = {
+      streetNum: mstreet ? mstreet[1] : '',
+      street: mstreet ? mstreet[0].replace(/^Caleres\/\d+\/[A-Z]{2}\s*-\s*/i, '').trim() : '',
+      state: maddr ? maddr[1] : '',
+      zip: maddr ? maddr[2] : ''
+    };
     return out;
   }
   // Is this a Caleres email? Sender domain, or the body/PDF has the Corrigo "Caleres/<store>/XX"
@@ -331,6 +344,30 @@
     if (!out.scope) out.scope = subject.replace(/purchase order\s*:?\s*\d+/i, '').replace(/\s{2,}/g, ' ').trim().slice(0, 300);
     out.client = clientFromDomain(senderEmail);
     return out;
+  }
+  // Image-based Caleres/Corrigo request: NO WO PDF - the detail is in the email SUBJECT + body
+  // (e.g. subject "39089 Birmingham, MI - Allen Edmonds Lighting", body "...has 8 lights out").
+  // Parse the subject for store / city / state / trade and the body for the scope. NTE, Priority and
+  // any exact street address live only inside the attached IMAGES (not machine-readable here), so
+  // those stay manual. Store number is enough to pin the Location (it is unique in the dropdown);
+  // city + state corroborate it (see selectLocation).
+  function firstBodyScope(body) {
+    var b = String(body || '').replace(/\r/g, '');
+    var cut = b.search(/\n\s*(From:|Sent:|On .+wrote:|-----Original|________|Get Outlook|Sent from|Thanks|Regards|Best[, ]|Sincerely)/i);
+    if (cut > 0) b = b.slice(0, cut);
+    return b.replace(/\s+/g, ' ').trim().slice(0, 600);
+  }
+  function extractCaleresSubject(subject, body) {
+    var s = String(subject || '').replace(/\s+/g, ' ').trim();
+    // "<store> <City>, <ST> - <Brand + Trade>"
+    var m = s.match(/^(\d{4,6})\s+(.+?),\s*([A-Z]{2})\s*[-–—]\s*(.+)$/);
+    if (!m) return null;
+    var tail = m[4].trim();
+    return {
+      store: m[1], city: m[2].trim(), state: m[3], trade: assetToTrade(tail),
+      scope: firstBodyScope(body) || tail,
+      addr: { streetNum: '', street: '', city: m[2].trim(), state: m[3], zip: '' }
+    };
   }
 
   // ---- Create WO modal --------------------------------------------------------
@@ -414,6 +451,53 @@
       })();
     });
   }
+  // Location picker for feeds that carry the site ADDRESS (Caleres). The bare store number is NOT
+  // unique in the Location list - it substring-hits stores whose street begins with the same digits
+  // (e.g. searching "3699" also returns "3699 South Highway 95", Bullhead City AZ) - and options
+  // stream in over the network, so the wrong one can render first and get clicked. So: keep polling,
+  // score every rendered option by store number + address tokens (street #, state, ZIP), and click
+  // only once an option corroborates the WO address. If none does within the window, resolve
+  // 'ambiguous' so the caller leaves it for a manual pick instead of guessing a wrong-state store.
+  function selectLocation(el, storeNum, addr) {
+    return new Promise(function (resolve) {
+      if (!el) return resolve('skip');
+      if (el.disabled || el.getAttribute('aria-disabled') === 'true') return resolve('disabled');
+      el.focus();
+      el.dispatchEvent(new MouseEvent('mousedown', { bubbles: true, cancelable: true, view: window }));
+      var num = String(storeNum || '').replace(/\D/g, '');
+      if (num) acType(el, num);
+      var reNum = num ? new RegExp('\\b' + num + '\\b') : null;
+      var streetNum = addr && addr.streetNum ? String(addr.streetNum) : '';
+      var city = addr && addr.city ? String(addr.city).toLowerCase() : '';
+      var state = addr && addr.state ? String(addr.state) : '';
+      var zip = addr && addr.zip ? String(addr.zip) : '';
+      function addrScore(txt) {
+        var s = 0, lo = txt.toLowerCase();
+        if (streetNum && new RegExp('\\b' + streetNum + '\\b').test(txt)) s++;
+        if (city && lo.indexOf(city) >= 0) s++;
+        if (state && new RegExp(',\\s*' + state + '\\b', 'i').test(txt)) s++;
+        if (zip && txt.indexOf(zip) >= 0) s++;
+        return s;
+      }
+      var t0 = Date.now();
+      (function poll() {
+        var opts = [].slice.call(document.querySelectorAll('[role="option"]'));
+        var best = null, bestScore = 0;
+        for (var i = 0; i < opts.length; i++) {
+          var txt = normText(opts[i].textContent);
+          if (reNum && !reNum.test(txt)) continue;          // option must show the store number
+          var sc = addrScore(txt);
+          if (sc > bestScore) { bestScore = sc; best = opts[i]; }
+        }
+        if (best && bestScore >= 2) {                        // store # + >=2 address tokens agree
+          ['pointerdown', 'mousedown', 'mouseup', 'click'].forEach(function (t) { best.dispatchEvent(new MouseEvent(t, { bubbles: true, cancelable: true, view: window })); });
+          return resolve('selected');
+        }
+        if (Date.now() - t0 > 3500) return resolve('ambiguous');
+        setTimeout(poll, 70);
+      })();
+    });
+  }
   function fillWo(root, wo) {
     var done = [], picked = [], hint = [];
     if (wo._warn) toast('⚠ Heads up: ' + wo._warn, 18000, '#8b1a1a');   // cancel/flag on the WO PDF - warn before Create
@@ -440,9 +524,22 @@
       }
       if (wo.location) {
         await waitEnabled(root, 'input#location-dropdown', 3000);
-        var store = wo.location.replace(/\D/g, '') || wo.location;   // search by the store number, match the "PFJ ####" option
-        var rl = await selectAC(root.querySelector('input#location-dropdown'), store, wo.location);
-        if (rl === 'selected') picked.push('Location "' + wo.location + '"'); else hint.push('Location: pick ' + wo.location);
+        var store = wo.location.replace(/\D/g, '') || wo.location;   // search by the store number
+        var locEl = root.querySelector('input#location-dropdown');
+        var addrHas = wo._addr && (wo._addr.streetNum || wo._addr.city || wo._addr.state || wo._addr.zip);
+        // Address-verified pick when the feed carries the site address (Caleres); the bare store
+        // number is not unique. Pilot / generic keep the simple "match the option" behaviour.
+        var rl = addrHas
+          ? await selectLocation(locEl, store, wo._addr)
+          : await selectAC(locEl, store, wo.location);
+        if (rl === 'selected') {
+          picked.push('Location ' + store + (addrHas ? ' (' + [wo._addr.streetNum, wo._addr.city, wo._addr.state, wo._addr.zip].filter(Boolean).join(' ') + ')' : ''));
+        } else if (rl === 'ambiguous') {
+          var where = wo._addr ? [wo._addr.street || wo._addr.streetNum, wo._addr.city, wo._addr.state, wo._addr.zip].filter(Boolean).join(' ') : '';
+          hint.push('Location: store ' + store + ' has multiple matches - pick the one at ' + where + ' manually');
+        } else {
+          hint.push('Location: pick ' + (wo.location || store));
+        }
       }
       if (wo.trade) {
         var rt = await selectAC(root.querySelector('input#trades'), wo.trade, wo.trade);
@@ -457,6 +554,7 @@
       if (picked.length) parts.push('selected ' + picked.join(' / '));
       if (hint.length) parts.push('check: ' + hint.join(' · '));
       if (wo._dueBy) parts.push('Complete-By (DUE BY ' + wo._dueBy + ') - set it on the WO header after Create');
+      if (wo._note) parts.push(wo._note);
       var nAtt = (wo._attachments || []).length;
       if (nAtt) parts.push('the email + ' + nAtt + ' attachment' + (nAtt === 1 ? '' : 's') + ' will attach to Documents after Create');
       parts.push('review before Create');
@@ -556,7 +654,18 @@
           wo = {
             client: 'Caleres Inc', location: cx.locationNum, clientDne: cx.dne,
             po: cx.sourceNum, sourceJob: cx.sourceNum, trade: cx.trade,
-            priorityLevel: cx.priorityTarget, scope: cx.scope, _warn: cx.warn, _dueBy: cx.dueBy
+            priorityLevel: cx.priorityTarget, scope: cx.scope, _warn: cx.warn, _dueBy: cx.dueBy,
+            _addr: cx.addr
+          };
+        }
+      }
+      // Image-based Caleres request (no WO PDF): the detail is in the subject + body, not an attachment.
+      if (!wo && isCaleres(parsed.senderEmail, parsed.body, '') && !pdfAtt) {
+        var cs = extractCaleresSubject(parsed.subject, parsed.body);
+        if (cs && cs.store) {
+          wo = {
+            client: 'Caleres Inc', location: cs.store, trade: cs.trade, scope: cs.scope, _addr: cs.addr,
+            _note: 'image WO - NTE + Priority are in the attached image(s), enter them manually'
           };
         }
       }
