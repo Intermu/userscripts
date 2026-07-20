@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         BWN Drop Upload (Broadway National)
 // @namespace    broadwaynational.bwn
-// @version      1.6.0
+// @version      1.7.0
 // @downloadURL  https://raw.githubusercontent.com/Intermu/userscripts/main/bwn-drop-upload.user.js
 // @updateURL    https://raw.githubusercontent.com/Intermu/userscripts/main/bwn-drop-upload.user.js
 // @description  Drop files anywhere on an Umbrava work order to upload them. Opens the Documents tab and upload dialog, hands over the files, and builds each file's description from its contents. Emails are parsed locally (.msg via an OLE/MAPI reader, .eml via RFC822) into an Outlook-style block - From/Sent/To/Cc/Subject and the body - that becomes the WO note, led by a one-line plain-text summary built by extracting the WO fields (store, city/state, priority, PO, NTE, problem, requester) from the email - no AI, no cost, no network. That same summary fills each file's Description. The WO note's Type is chosen from the sender's domain (client domain -> Client, Broadway-internal -> Internal, else Vendor). Umbrava's Description field is a locked react-aria combobox that rejects programmatic fills, so the description goes on your clipboard for a one-tap Ctrl+V. When WO Intake hands off a just-created WO's request email, each uploaded file's Label (document type) is set to "Work Order Request". You review and Save everything. Runs in the browser only: no network access, no grants.
@@ -15,8 +15,8 @@
 (function () {
   'use strict';
 
-  var VER = '1.6.0';
-  console.info('[BWN DROP UPLOAD] v' + VER + ' · Email→note: real .msg (OLE/MAPI) + .eml parsing · local field-extracted one-line summary (no AI/no egress) leads the note + fills Description · note Type from sender domain · WO Intake handoff sets Label=Work Order Request · bwn:cmd dropupload:files bridge');
+  var VER = '1.7.0';
+  console.info('[BWN DROP UPLOAD] v' + VER + ' · Email→note: real .msg (OLE/MAPI) + .eml parsing · local field-extracted one-line summary (no AI/no egress) leads the note + fills Description · note Type from sender domain · document Label + note Type selectors both target their stable testids · WO Intake handoff sets Label=Work Order Request · bwn:cmd dropupload:files bridge');
 
   // Active only on WO pages; checked at drag time so SPA navigation needs no watcher.
   function onWorkOrder() {
@@ -942,23 +942,37 @@
   }
 
   // Best-effort: set the Add Note composer's note-type control to `label` (e.g. "Client").
-  // Ported from Core's DOM-verified setNoteType. Umbrava's CURRENT control is a custom
-  // autocomplete (input[aria-autocomplete="list"] labelled "Type") - typing does NOT select it,
-  // you must CLICK the option (branch 0). Legacy branches kept as fallbacks, gated on a note-type
-  // vocabulary so they never touch an unrelated dropdown. No-ops safely if not found.
+  // Umbrava's control is a react-aria combobox (input[aria-autocomplete="list"]) - typing does
+  // NOT select, you must CLICK the option. noteTypeInput() finds it by its STABLE testid first
+  // (the composer's Type field is `add-wo-note-modal-type-field-input`, live-verified 2026-07-20)
+  // - the SAME testid-first strategy documentLabelFields() uses for the upload Label - then falls
+  // back to the "Type" field-label heuristic. Legacy <select> / clickable branches remain as a
+  // last resort, gated on a note-type vocabulary so they never touch an unrelated dropdown.
+  // No-ops safely if not found.
   var NOTE_TYPE_VOCAB = /^(internal|vendor|client|billing|general|public|private|customer|recap)$/i;
+  function noteTypeInput(scope) {
+    // 1) stable testid - the note composer's Type field (…-type-field-input / …-type-field).
+    //    The upload Label testid ends "-label-select-input" and Share With "-autocomplete-input",
+    //    so neither is matched here.
+    var byId = scope.querySelector('[data-testid$="type-field-input"] input') ||
+               scope.querySelector('[data-testid$="type-field"] input');
+    if (byId) return byId;
+    // 2) fallback: a "Type" field label wrapping a react-aria combobox.
+    var flabs = scope.querySelectorAll('label');
+    for (var a = 0; a < flabs.length; a++) {
+      if (!/^\s*type\b/i.test((flabs[a].textContent || '').trim())) continue;
+      var afc = flabs[a].closest('.MuiFormControl-root') || flabs[a].parentElement;
+      var ai = afc ? afc.querySelector('input[aria-autocomplete="list"]') : null;
+      if (ai) return ai;
+    }
+    return null;
+  }
   function setNoteType(label, scope) {
     if (!label) return false;
     scope = scope || document;
     var esc2 = String(label).replace(/[.*+?^${}()|[\]\\]/g, function (m) { return '\\' + m; });
     var want = new RegExp('^\\s*' + esc2 + '\\s*$', 'i');
-    var flabs = scope.querySelectorAll('label'), acInput = null;
-    for (var a = 0; a < flabs.length; a++) {
-      if (!/^\s*type\b/i.test((flabs[a].textContent || '').trim())) continue;
-      var afc = flabs[a].closest('.MuiFormControl-root') || flabs[a].parentElement;
-      var ai = afc ? afc.querySelector('input[aria-autocomplete="list"]') : null;
-      if (ai) { acInput = ai; break; }
-    }
+    var acInput = noteTypeInput(scope);
     if (acInput) {
       try {
         acInput.focus();
