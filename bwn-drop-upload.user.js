@@ -1,10 +1,10 @@
 // ==UserScript==
 // @name         BWN Drop Upload (Broadway National)
 // @namespace    broadwaynational.bwn
-// @version      1.4.0
+// @version      1.5.0
 // @downloadURL  https://raw.githubusercontent.com/Intermu/userscripts/main/bwn-drop-upload.user.js
 // @updateURL    https://raw.githubusercontent.com/Intermu/userscripts/main/bwn-drop-upload.user.js
-// @description  Drop files anywhere on an Umbrava work order to upload them. Opens the Documents tab and upload dialog, hands over the files, and builds each file's description from its contents. Emails are parsed locally (.msg via an OLE/MAPI reader, .eml via RFC822) into an Outlook-style block - From/Sent/To/Cc/Subject and the body - that becomes the WO note. Umbrava's Description field is a locked react-aria combobox that rejects programmatic fills, so the description goes on your clipboard for a one-tap Ctrl+V. You review and Save everything. Runs in the browser only: no network access, no grants.
+// @description  Drop files anywhere on an Umbrava work order to upload them. Opens the Documents tab and upload dialog, hands over the files, and builds each file's description from its contents. Emails are parsed locally (.msg via an OLE/MAPI reader, .eml via RFC822) into an Outlook-style block - From/Sent/To/Cc/Subject and the body - that becomes the WO note. Umbrava's Description field is a locked react-aria combobox that rejects programmatic fills, so the description goes on your clipboard for a one-tap Ctrl+V. When WO Intake hands off a just-created WO's request email, each uploaded file's Label (document type) is set to "Work Order Request". You review and Save everything. Runs in the browser only: no network access, no grants.
 // @match        https://app.umbrava.com/*
 // @match        https://*.umbrava.com/*
 // @run-at       document-idle
@@ -15,8 +15,8 @@
 (function () {
   'use strict';
 
-  var VER = '1.4.0';
-  console.info('[BWN DROP UPLOAD] v' + VER + ' · Email→note: real .msg (OLE/MAPI) + .eml parsing · Description: clipboard-paste assist · bwn:cmd dropupload:files bridge (WO Intake auto-attach)');
+  var VER = '1.5.0';
+  console.info('[BWN DROP UPLOAD] v' + VER + ' · Email→note: real .msg (OLE/MAPI) + .eml parsing · Description: clipboard-paste assist · WO Intake handoff sets Label=Work Order Request · bwn:cmd dropupload:files bridge (WO Intake auto-attach)');
 
   // Active only on WO pages; checked at drag time so SPA navigation needs no watcher.
   function onWorkOrder() {
@@ -519,6 +519,92 @@
     return out;
   }
 
+  // The upload dialog renders a per-file "Label" (document type) control next to PO#/Description.
+  // It's Umbrava's react-aria combobox - the SAME component as the note Type control setNoteType
+  // drives: input[aria-autocomplete="list"], typing filters but you must CLICK the option (portal
+  // listbox). Each row's FormControl carries a stable testid `document[N]-upload-label-select-input`
+  // (live-verified 2026-07-20), so prefer that; fall back to the label-text heuristic (PO# is also
+  // a combobox, so gate on the "Label" field text to exclude it). Returns the per-file Label inputs
+  // in row order.
+  function documentLabelFields() {
+    var dlg = dialogEl();
+    if (!dlg) return [];
+    var byTestid = dlg.querySelectorAll('[data-testid$="-upload-label-select-input"] input');
+    if (byTestid.length) return [].slice.call(byTestid).filter(function (el) { return el.offsetWidth > 0; });
+    var out = [];
+    var acs = dlg.querySelectorAll('input[aria-autocomplete="list"]');
+    Array.prototype.forEach.call(acs, function (el) {
+      if (el.offsetWidth === 0) return;
+      var hay = ((el.getAttribute('placeholder') || '') + ' ' + (el.getAttribute('name') || '') + ' ' +
+        (el.getAttribute('aria-label') || '') + ' ' + labelTextFor(el)).toLowerCase();
+      if (/\blabel\b|document type|doc type|category/.test(hay)) out.push(el);
+    });
+    return out;
+  }
+
+  // Select `want` in one Label combobox: focus, type to filter, then CLICK the matching
+  // portal option (exact first, then contains). Programmatic value-set never selects it -
+  // only the click cascades the react-aria state. Resolves 'selected' | 'notfound' | 'skip'.
+  function selectDocLabel(inputEl, want) {
+    return new Promise(function (resolve) {
+      if (!inputEl) return resolve('skip');
+      if (inputEl.disabled || inputEl.getAttribute('aria-disabled') === 'true') return resolve('skip');
+      var esc = String(want).replace(/[.*+?^${}()|[\]\\]/g, function (m) { return '\\' + m; });
+      var wantRe = new RegExp('^\\s*' + esc + '\\s*$', 'i'), partRe = new RegExp(esc, 'i');
+      try {
+        inputEl.focus();
+        inputEl.dispatchEvent(new MouseEvent('mousedown', { bubbles: true, cancelable: true, view: window }));
+        var vset = Object.getOwnPropertyDescriptor(window.HTMLInputElement.prototype, 'value').set;
+        vset.call(inputEl, want);
+        inputEl.dispatchEvent(new Event('input', { bubbles: true }));
+        inputEl.dispatchEvent(new KeyboardEvent('keyup', { bubbles: true }));
+      } catch (e) { }
+      var t0 = Date.now();
+      (function poll() {
+        var os = document.querySelectorAll('[role="option"]'), exact = null, part = null;
+        for (var i = 0; i < os.length; i++) {
+          var tx = (os[i].textContent || '').replace(/\s+/g, ' ').trim();
+          if (wantRe.test(tx)) { exact = os[i]; break; }
+          if (!part && partRe.test(tx)) part = os[i];
+        }
+        var opt = exact || part;
+        if (opt) { ['pointerdown', 'mousedown', 'mouseup', 'click'].forEach(function (t) { opt.dispatchEvent(new MouseEvent(t, { bubbles: true, cancelable: true, view: window })); }); return resolve('selected'); }
+        if (Date.now() - t0 > 2500) return resolve('notfound');
+        setTimeout(poll, 70);
+      })();
+    });
+  }
+
+  // WO Intake handoff only: the incoming client email (+ its attachments) IS the work order
+  // request, so set each uploaded file's Label to `label` ("Work Order Request"). THIS drop's
+  // files map to the LAST N label fields (new rows append - same mapping fillDescriptions uses).
+  // Sequential: each combobox opens its own portal listbox, so a second focus would close the
+  // first. No-ops safely with a diagnostic toast if the field/option isn't found, so an Umbrava
+  // markup change never blocks the upload. Returns a Promise that resolves when done.
+  function applyDocLabels(files, label) {
+    if (!label) return Promise.resolve();
+    return waitFor(function () {
+      var ls = documentLabelFields();
+      return ls.length >= files.length ? ls : null;
+    }, 7000).then(function (ls) {
+      if (!ls) ls = documentLabelFields();                 // timeout - set what exists
+      if (!ls.length) { toast('Couldn’t find the document Label field - set it to “' + label + '” manually before Upload.'); return; }
+      var tail = ls.slice(-files.length), set = 0, missed = 0;
+      return (function next(i) {
+        if (i >= tail.length) {
+          if (set) toast('Document Label set to “' + label + '”' + (set > 1 ? ' on ' + set + ' files' : '') + ' - review, then Upload.');
+          else if (missed) toast('Couldn’t auto-set the Label to “' + label + '” - pick it manually before Upload.');
+          return;
+        }
+        if ((tail[i].value || '').trim()) return next(i + 1);   // already set - leave it
+        return selectDocLabel(tail[i], label).then(function (r) {
+          if (r === 'selected') set++; else if (r === 'notfound') missed++;
+          return next(i + 1);
+        });
+      })(0);
+    });
+  }
+
   // Prepare each file's Description ONCE files have landed in the dialog. Only EMPTY
   // fields are touched - anything the coordinator typed always wins. THIS drop's files
   // map to the LAST N description fields: new rows append, so an index-from-zero
@@ -574,7 +660,8 @@
 
   // ctx.aborted: a failed open must disarm THIS drop's note staging (a note claiming
   // "Uploaded…" for files that never reached the dialog is a false record - review).
-  function handleDrop(dt, described, ctx) {
+  function handleDrop(dt, described, ctx, opts) {
+    opts = opts || {};
     var input = dialogFileInput();
     var opened = Promise.resolve(input);
 
@@ -597,7 +684,13 @@
     opened.then(function (inp) {
       if (!inp) { if (!ctx.aborted) { ctx.aborted = true; toast('Upload dialog didn’t open - try the Upload button manually.'); } return; }
       forwardToZone(inp, dt);
-      described.then(function (files) { if (!ctx.aborted) fillDescriptions(files); });
+      described.then(function (files) {
+        if (ctx.aborted) return;
+        // Set the Label combobox first (it focuses fields / opens listboxes), THEN fill
+        // descriptions (which steals no focus) - avoids the two racing over the same rows.
+        if (opts.docLabel) applyDocLabels(files, opts.docLabel).then(function () { fillDescriptions(files); });
+        else fillDescriptions(files);
+      });
     });
   }
 
@@ -959,7 +1052,9 @@
       var origin = (fresh && pending.originTab) ? pending.originTab : originTab;
       pending = { ts: Date.now(), files: merged, noteText: buildNoteText(merged), originTab: origin };
     });
-    handleDrop(dt, described, ctx);
+    // WO Intake handoff = a just-created WO's client request email, so label the uploaded
+    // document(s) "Work Order Request". Manual drops (the overlay path) keep the default Label.
+    handleDrop(dt, described, ctx, { docLabel: 'Work Order Request' });
   }, false);
 
   // ---- Toast -----------------------------------------------------------------
