@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         BWN Suite - AI (Broadway National)
 // @namespace    broadwaynational.bwn
-// @version      1.38.0
+// @version      1.37.0
 // @downloadURL  https://raw.githubusercontent.com/Intermu/userscripts/main/bwn-suite-ai.user.js
 // @updateURL    https://raw.githubusercontent.com/Intermu/userscripts/main/bwn-suite-ai.user.js
 // @description  The Umbrava tools that call outside APIs, kept separate from the zero-egress Core script. Client Update and WO Audit drafts (Anthropic Claude; draft-only, scrubbed before sending, you review before posting); Find Techs / Find Suppliers (Google Places; vendor leads near a WO); and Job View (opens the Ops-Dashboard job card on the WO page - WO details from Umbrava plus the authored case file and next actions, read-only). Network access is limited by the browser to the declared API hosts and the BWN Static Web App. API keys are stored in Tampermonkey's storage via the menu commands and never enter the page. Toggle modules in BWN_MODULES below.
@@ -2357,41 +2357,6 @@
       }
       run(PAL_MODES[d.id]);
     }, 'clientUpdate:cmd'));
-
-    // ---- Cross-script AI summarizer bridge ------------------------------------
-    // Any BWN module can request a one-line summary of arbitrary text WITHOUT its own
-    // Anthropic egress (Drop Upload uses this to summarize an uploaded email for its
-    // document Description + WO note). Request/response over the DOM bus:
-    //   bwn:cmd  { id:'ai:summarize', reqId, kind, text }
-    //   bwn:evt  { id:'ai:summarized', reqId, text, error }
-    // Lives INSIDE the module so the AI kill switch + key gating cover it too. Buffered
-    // (one short reply), capped small. On no-key/empty/error it replies with `error` set
-    // so the caller falls back to its own mechanical description - never blocks the upload.
-    var SUMMARY_SYS = {
-      'email-wo': [
-        'You summarize a facilities-maintenance work-order request email into ONE tight line for a Broadway National coordinator to scan. Internal use.',
-        'Include, only when actually present in the email: client/brand + store number, city + state, the REAL problem in plain words, priority, PO number, NTE dollar amount, and who is asking for what (e.g. requesting an ETA).',
-        'IGNORE boilerplate: kiosk check-in/out, NTE-increase protocol, detailed-report requests, emergency-line footers, warranty/legal notices, signatures.',
-        'Format like this example: "Pilot #7976 (Troutman, NC) — bottom unit of stacked dryer not fully heating, towels coming out damp. P2/24-hr, PO 170101420934, NTE $800; Tonia Paz is requesting an ETA."',
-        'Output ONLY that single line: no preamble, no label, no surrounding quotes, no markdown, no trailing newline. Never invent facts that are not in the email.'
-      ].join('\n')
-    };
-    document.addEventListener('bwn:cmd', BWN.guard(function (e) {
-      var d = e && e.detail;
-      if (!d || d.id !== 'ai:summarize' || !d.reqId) return;
-      function reply(text, error) {
-        try { document.dispatchEvent(new CustomEvent('bwn:evt', { detail: { id: 'ai:summarized', reqId: d.reqId, text: text || '', error: error || '' } })); } catch (x) { }
-      }
-      if (!GM_getValue('anthropic_key', '')) { reply('', 'no-key'); return; }
-      var content = String(d.text || '').slice(0, 12000);
-      if (!content.trim()) { reply('', 'empty'); return; }
-      try {
-        generate(SUMMARY_SYS[d.kind] || SUMMARY_SYS['email-wo'], content, 320, function (err, text) {
-          if (err) reply('', (err && err.message) || 'error');
-          else reply(String(text || '').replace(/^\s*["']|["']\s*$/g, '').trim(), '');
-        });
-      } catch (x) { reply('', 'exception'); }
-    }, 'aiSummarize:cmd'));
 
     // ---- Batch Over-30 lines (list-level; staged by List Heat via bwn:cmd) ----
     // Option A of the batch design: one "OVER 30 -" line per aged open job, drafted

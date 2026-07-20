@@ -4,7 +4,7 @@
 // @version      1.6.0
 // @downloadURL  https://raw.githubusercontent.com/Intermu/userscripts/main/bwn-drop-upload.user.js
 // @updateURL    https://raw.githubusercontent.com/Intermu/userscripts/main/bwn-drop-upload.user.js
-// @description  Drop files anywhere on an Umbrava work order to upload them. Opens the Documents tab and upload dialog, hands over the files, and builds each file's description from its contents. Emails are parsed locally (.msg via an OLE/MAPI reader, .eml via RFC822) into an Outlook-style block - From/Sent/To/Cc/Subject and the body - that becomes the WO note, led by a one-line AI summary (requested from the BWN AI script over the in-page bus; falls back to a mechanical description if AI is off). That same summary fills each file's Description. The WO note's Type is chosen from the sender's domain (client domain -> Client, Broadway-internal -> Internal, else Vendor). Umbrava's Description field is a locked react-aria combobox that rejects programmatic fills, so the description goes on your clipboard for a one-tap Ctrl+V. When WO Intake hands off a just-created WO's request email, each uploaded file's Label (document type) is set to "Work Order Request". You review and Save everything. This script itself makes no network calls (no grants); the AI summary is produced by the AI script, which egresses to the declared Anthropic host.
+// @description  Drop files anywhere on an Umbrava work order to upload them. Opens the Documents tab and upload dialog, hands over the files, and builds each file's description from its contents. Emails are parsed locally (.msg via an OLE/MAPI reader, .eml via RFC822) into an Outlook-style block - From/Sent/To/Cc/Subject and the body - that becomes the WO note, led by a one-line plain-text summary built by extracting the WO fields (store, city/state, priority, PO, NTE, problem, requester) from the email - no AI, no cost, no network. That same summary fills each file's Description. The WO note's Type is chosen from the sender's domain (client domain -> Client, Broadway-internal -> Internal, else Vendor). Umbrava's Description field is a locked react-aria combobox that rejects programmatic fills, so the description goes on your clipboard for a one-tap Ctrl+V. When WO Intake hands off a just-created WO's request email, each uploaded file's Label (document type) is set to "Work Order Request". You review and Save everything. Runs in the browser only: no network access, no grants.
 // @match        https://app.umbrava.com/*
 // @match        https://*.umbrava.com/*
 // @run-at       document-idle
@@ -16,7 +16,7 @@
   'use strict';
 
   var VER = '1.6.0';
-  console.info('[BWN DROP UPLOAD] v' + VER + ' · Email→note: real .msg (OLE/MAPI) + .eml parsing · AI one-line summary (via AI script bus) leads the note + fills Description · note Type from sender domain · WO Intake handoff sets Label=Work Order Request · bwn:cmd dropupload:files bridge');
+  console.info('[BWN DROP UPLOAD] v' + VER + ' · Email→note: real .msg (OLE/MAPI) + .eml parsing · local field-extracted one-line summary (no AI/no egress) leads the note + fills Description · note Type from sender domain · WO Intake handoff sets Label=Work Order Request · bwn:cmd dropupload:files bridge');
 
   // Active only on WO pages; checked at drag time so SPA navigation needs no watcher.
   function onWorkOrder() {
@@ -353,33 +353,88 @@
     return (m.subject || name.replace(/\.(eml|msg)$/i, '')) + (meta.length ? ' (' + meta.join(', ') + ')' : '');
   }
 
-  // ---- AI one-line summary (produced by the BWN AI script, not here) ----------
-  // This script is @grant none / zero egress. The AI script owns the Anthropic key and
-  // the @connect host, so we ask IT for the summary over the in-page bus and await a
-  // reply. If the AI script is absent, its module is off, or no key is set, no reply
-  // comes and we resolve '' on a short timeout - the caller then falls back to the
-  // mechanical description, so an unconfigured machine still works exactly as before.
-  var _aiSeq = 0;
-  function summaryPayload(m) {
-    return [
-      m.subject ? 'Subject: ' + m.subject : '',
-      (m.fromName || smtpAddr(m.fromEmail)) ? ('From: ' + [m.fromName, smtpAddr(m.fromEmail)].filter(Boolean).join(' ')) : '',
-      '',
-      String(m.body || '').slice(0, 8000)
-    ].filter(function (x) { return x !== ''; }).join('\n');
+  // ---- Local one-line summary (no AI, no cost, no network) --------------------
+  // Client WO-request emails (Pilot, Caleres/Corrigo, and the generic template) carry the
+  // work-order facts as labeled fields, so we EXTRACT them and template a single scan-line
+  // for the coordinator - no LLM, no egress, instant. Returns '' when too little is found,
+  // and the caller falls back to the mechanical emailDesc. Example output:
+  //   "Pilot #7976 (Troutman, NC) - Bottom dryer still leaving towels little bit damp not
+  //    fully heating. P2/24-hr, PO 170101420934, NTE $800; Tonia Paz is requesting an ETA."
+  var US_STATES = {
+    'alabama': 'AL', 'alaska': 'AK', 'arizona': 'AZ', 'arkansas': 'AR', 'california': 'CA',
+    'colorado': 'CO', 'connecticut': 'CT', 'delaware': 'DE', 'florida': 'FL', 'georgia': 'GA',
+    'hawaii': 'HI', 'idaho': 'ID', 'illinois': 'IL', 'indiana': 'IN', 'iowa': 'IA',
+    'kansas': 'KS', 'kentucky': 'KY', 'louisiana': 'LA', 'maine': 'ME', 'maryland': 'MD',
+    'massachusetts': 'MA', 'michigan': 'MI', 'minnesota': 'MN', 'mississippi': 'MS', 'missouri': 'MO',
+    'montana': 'MT', 'nebraska': 'NE', 'nevada': 'NV', 'new hampshire': 'NH', 'new jersey': 'NJ',
+    'new mexico': 'NM', 'new york': 'NY', 'north carolina': 'NC', 'north dakota': 'ND', 'ohio': 'OH',
+    'oklahoma': 'OK', 'oregon': 'OR', 'pennsylvania': 'PA', 'rhode island': 'RI', 'south carolina': 'SC',
+    'south dakota': 'SD', 'tennessee': 'TN', 'texas': 'TX', 'utah': 'UT', 'vermont': 'VT',
+    'virginia': 'VA', 'washington': 'WA', 'west virginia': 'WV', 'wisconsin': 'WI', 'wyoming': 'WY',
+    'district of columbia': 'DC'
+  };
+  function stAbbrev(s) {
+    s = String(s || '').trim();
+    if (/^[A-Za-z]{2}$/.test(s)) return s.toUpperCase();
+    return US_STATES[s.toLowerCase()] || s;
   }
-  function aiSummarize(payload, kind) {
-    return new Promise(function (resolve) {
-      if (!payload) return resolve('');
-      var reqId = 'du' + (++_aiSeq) + '_' + Date.now();
-      var settled = false;
-      function done(v) { if (settled) return; settled = true; try { document.removeEventListener('bwn:evt', onEvt, false); } catch (e) { } resolve(v || ''); }
-      function onEvt(e) { var d = e && e.detail; if (d && d.id === 'ai:summarized' && d.reqId === reqId) done(d && !d.error ? d.text : ''); }
-      document.addEventListener('bwn:evt', onEvt, false);
-      try { document.dispatchEvent(new CustomEvent('bwn:cmd', { detail: { id: 'ai:summarize', reqId: reqId, kind: kind || 'email-wo', text: payload } })); }
-      catch (e) { return done(''); }
-      setTimeout(function () { done(''); }, 8000);   // AI off / unkeyed / slow -> no summary; caller falls back
-    });
+  var BRAND_BY_DOMAIN = { 'pilottravelcenters.com': 'Pilot', 'caleres.com': 'Caleres', 'staples.com': 'Staples' };
+  function localSummary(m) {
+    var subject = String(m.subject || ''), body = String(m.body || ''), hay = subject + '\n' + body;
+
+    // Brand: from the sender domain, else a "#### <Brand>" token in the body (e.g. "PFJ#: 7976 Pilot").
+    var dom = (String(m.fromEmail || '').split('@')[1] || '').toLowerCase();
+    var brand = BRAND_BY_DOMAIN[dom] || '';
+    if (!brand) { var mb = body.match(/PFJ#?\s*:?\s*\d+\s+([A-Za-z][A-Za-z ]{1,20})/); if (mb) brand = mb[1].trim(); }
+
+    // Store number: Pilot "PFJ#: 7976" / "Store: 7976" / subject "7976 ..."; Caleres "Caleres/3699/".
+    var ms = body.match(/PFJ#?\s*:?\s*(\d{1,6})/i) || hay.match(/\bStore\s*:?\s*#?\s*(\d{2,6})/i) ||
+             hay.match(/Caleres\/(\d{3,6})\//i) || subject.match(/^\s*(\d{3,6})\b/);
+    var store = ms ? ms[1] : '';
+
+    // City, State: an address line "Troutman, North Carolina 28166" or subject "Troutman, North Carolina".
+    var city = '', state = '';
+    var mcs = body.match(/\n\s*([A-Za-z][A-Za-z .'\-]+),\s*([A-Za-z][A-Za-z ]+?)\s+\d{5}(?:-\d{4})?/) ||
+              hay.match(/([A-Za-z][A-Za-z .'\-]+),\s*([A-Z]{2})\b/);
+    if (mcs) { city = mcs[1].replace(/\s+/g, ' ').trim(); state = stAbbrev(mcs[2]); }
+
+    // Priority: "P2 - Normal (24 hrs)" -> "P2/24-hr"; else bare "P2".
+    var prio = '';
+    var mp = hay.match(/\b(P\d)\b[^\n(]*\((\d+)\s*(hr|hour|day)/i);
+    if (mp) prio = mp[1].toUpperCase() + '/' + mp[2] + '-' + (/day/i.test(mp[3]) ? 'day' : 'hr');
+    else { var mp2 = hay.match(/\b(P\d)\b/); if (mp2) prio = mp2[1].toUpperCase(); }
+
+    // PO number and NTE dollar amount.
+    var mpo = hay.match(/\bPO\s*#?\s*:?\s*(\d{6,})/i) || subject.match(/\b(\d{9,})\b/);
+    var po = mpo ? mpo[1] : '';
+    var mnte = body.match(/NTE\s*:?\s*\$?\s*([\d,]+(?:\.\d{2})?)/i);
+    var nte = mnte ? mnte[1].replace(/,/g, '').replace(/\.00$/, '') : '';
+
+    // Problem: the Description: field (the real scope), stopped at the next labeled block.
+    var md = body.match(/Description\s*:?\s*([\s\S]*?)(?:\n\s*(?:Dispatcher|Vendor|Model\s*:|Serial|Parts Warranty|Labor Warranty|Kiosk|NTE Increase)\b|\*\*|$)/i);
+    var problem = md ? md[1].replace(/\s+/g, ' ').trim() : '';
+    if (problem.length > 240) problem = problem.slice(0, 237).replace(/\s+\S*$/, '') + '...';
+
+    // Requester + the ask (ETA is the common one for these WO requests).
+    var who = (m.fromName || '').trim();
+    var wantsEta = /\bETA\b/i.test(hay);
+
+    // Assemble - include only the parts we actually found.
+    var head = brand ? (brand + (store ? ' #' + store : '')) : (store ? 'Store #' + store : '');
+    var place = (city && state) ? (city + ', ' + state) : (city || state || '');
+    if (place) head += (head ? ' ' : '') + '(' + place + ')';
+    var tail = [];
+    if (prio) tail.push(prio);
+    if (po) tail.push('PO ' + po);
+    if (nte) tail.push('NTE $' + nte);
+    var line = head;
+    if (problem) line += (line ? ' - ' : '') + problem;
+    if (tail.length) line += (/[.?!]$/.test(line) ? ' ' : '. ') + tail.join(', ');
+    if (who) line += '; ' + who + (wantsEta ? ' is requesting an ETA' : ' sent this request');
+    line = line.replace(/\s+/g, ' ').trim();
+    // Require enough signal to be useful: a store OR (a problem plus any of PO/NTE/priority).
+    if (!store && !(problem && (po || nte || prio))) return '';
+    return line.slice(0, 300);
   }
 
   // ---- Note Type from the sender's email domain ------------------------------
@@ -406,8 +461,8 @@
 
   // Build per file: {kind, name, size, desc (short - Description field/clipboard),
   // noteLine (one-line WO-note fallback), and for emails isEmail + email model +
-  // aiSummary + noteBlock (the full Outlook-style block, led by the AI summary)}.
-  // Email parsing is async (FileReader), then the AI summary is awaited over the bus.
+  // summary + noteBlock (the full Outlook-style block, led by the extracted summary)}.
+  // Email parsing is async (FileReader); the summary is built locally, no network.
   function describeFile(f) {
     var kind = fileKind(f);
     var base = { kind: kind, name: f.name || '(unnamed)', size: humanSize(f.size) };
@@ -427,31 +482,24 @@
         base.noteLine = '• ' + base.name + ' - Email' + (extra || '');
         finish(base);
       }
-      // Belt-and-suspenders timeout guards ONLY the FileReader (network-share / OneDrive-
-      // placeholder reads can stall). Once the file is read we hand off to aiSummarize(),
-      // which has its own short timeout, so we clear this belt on load/error to avoid a
-      // double-fire race with the AI wait.
-      var belt = setTimeout(function () { fallback(''); }, 10000);
+      // Belt-and-suspenders timeout (network-share / OneDrive-placeholder reads can
+      // stall) - the upload flow must never wait on a description.
+      setTimeout(function () { fallback(''); }, 10000);
       var rd = new FileReader();
-      rd.onerror = function () { clearTimeout(belt); fallback(' (could not read contents)'); };
+      rd.onerror = function () { fallback(' (could not read contents)'); };
       rd.onload = function () {
-        clearTimeout(belt);
-        var m;
-        try { m = isMsg ? parseMsg(rd.result) : emlToModel(parseEml(String(rd.result || ''))); }
-        catch (e) { return fallback(''); }
-        // Ask the AI script (over the bus) for a one-line summary; '' when AI is off/slow.
-        aiSummarize(summaryPayload(m), 'email-wo').then(function (summary) {
-          try {
-            base.aiSummary = (summary || '').trim();
-            var block = formatEmailBlock(m, base.aiSummary);
-            if (!block) return fallback('');
-            base.isEmail = true; base.email = m; base.noteBlock = block;
-            // The AI summary is the best Description; else the mechanical one-liner.
-            base.desc = base.aiSummary ? base.aiSummary.slice(0, 300) : emailDesc(m, base.name);
-            base.noteLine = '• ' + (base.aiSummary || m.subject || base.name) + ' - Email';
-          } catch (e) { return fallback(''); }
-          finish(base);
-        });
+        try {
+          var m = isMsg ? parseMsg(rd.result) : emlToModel(parseEml(String(rd.result || '')));
+          var summary = localSummary(m);   // local field extraction; '' when too little is found
+          var block = formatEmailBlock(m, summary);
+          if (!block) return fallback('');
+          base.isEmail = true; base.email = m; base.summary = summary;
+          base.noteBlock = block;
+          // The extracted summary is the best Description; else the mechanical one-liner.
+          base.desc = summary ? summary.slice(0, 300) : emailDesc(m, base.name);
+          base.noteLine = '• ' + (summary || m.subject || base.name) + ' - Email';
+        } catch (e) { return fallback(''); }
+        finish(base);
       };
       if (isMsg) rd.readAsArrayBuffer(f); else rd.readAsText(f);
     });
