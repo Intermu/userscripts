@@ -1,10 +1,10 @@
 // ==UserScript==
 // @name         BWN Drop Upload (Broadway National)
 // @namespace    broadwaynational.bwn
-// @version      1.5.0
+// @version      1.6.0
 // @downloadURL  https://raw.githubusercontent.com/Intermu/userscripts/main/bwn-drop-upload.user.js
 // @updateURL    https://raw.githubusercontent.com/Intermu/userscripts/main/bwn-drop-upload.user.js
-// @description  Drop files anywhere on an Umbrava work order to upload them. Opens the Documents tab and upload dialog, hands over the files, and builds each file's description from its contents. Emails are parsed locally (.msg via an OLE/MAPI reader, .eml via RFC822) into an Outlook-style block - From/Sent/To/Cc/Subject and the body - that becomes the WO note. Umbrava's Description field is a locked react-aria combobox that rejects programmatic fills, so the description goes on your clipboard for a one-tap Ctrl+V. When WO Intake hands off a just-created WO's request email, each uploaded file's Label (document type) is set to "Work Order Request". You review and Save everything. Runs in the browser only: no network access, no grants.
+// @description  Drop files anywhere on an Umbrava work order to upload them. Opens the Documents tab and upload dialog, hands over the files, and builds each file's description from its contents. Emails are parsed locally (.msg via an OLE/MAPI reader, .eml via RFC822) into an Outlook-style block - From/Sent/To/Cc/Subject and the body - that becomes the WO note, led by a one-line AI summary (requested from the BWN AI script over the in-page bus; falls back to a mechanical description if AI is off). That same summary fills each file's Description. The WO note's Type is chosen from the sender's domain (client domain -> Client, Broadway-internal -> Internal, else Vendor). Umbrava's Description field is a locked react-aria combobox that rejects programmatic fills, so the description goes on your clipboard for a one-tap Ctrl+V. When WO Intake hands off a just-created WO's request email, each uploaded file's Label (document type) is set to "Work Order Request". You review and Save everything. This script itself makes no network calls (no grants); the AI summary is produced by the AI script, which egresses to the declared Anthropic host.
 // @match        https://app.umbrava.com/*
 // @match        https://*.umbrava.com/*
 // @run-at       document-idle
@@ -15,8 +15,8 @@
 (function () {
   'use strict';
 
-  var VER = '1.5.0';
-  console.info('[BWN DROP UPLOAD] v' + VER + ' · Email→note: real .msg (OLE/MAPI) + .eml parsing · Description: clipboard-paste assist · WO Intake handoff sets Label=Work Order Request · bwn:cmd dropupload:files bridge (WO Intake auto-attach)');
+  var VER = '1.6.0';
+  console.info('[BWN DROP UPLOAD] v' + VER + ' · Email→note: real .msg (OLE/MAPI) + .eml parsing · AI one-line summary (via AI script bus) leads the note + fills Description · note Type from sender domain · WO Intake handoff sets Label=Work Order Request · bwn:cmd dropupload:files bridge');
 
   // Active only on WO pages; checked at drag time so SPA navigation needs no watcher.
   function onWorkOrder() {
@@ -328,7 +328,10 @@
     if (!name || !desc) return '';
     return name + ' sent in WO Request for ' + desc;
   }
-  function formatEmailBlock(m) {
+  // `lead` (optional) overrides the note's opening summary line - Drop Upload passes the
+  // AI one-line summary here. When absent/empty it falls back to the mechanical woSummary,
+  // so the block still leads sensibly if AI is off.
+  function formatEmailBlock(m, lead) {
     var L = [];
     var from = fmtAddr({ name: m.fromName, email: m.fromEmail }); if (from) L.push('From: ' + from);
     var sent = m.sent ? formatSent(m.sent) : (m.sentRaw || ''); if (sent) L.push('Sent: ' + sent);
@@ -337,7 +340,7 @@
     if (m.subject) L.push('Subject: ' + m.subject);
     var body = tidyBody(m.body);
     var block = L.join('\n') + (body ? '\n\n' + body : '');
-    var sum = woSummary(m);
+    var sum = (lead != null && String(lead).trim()) ? String(lead).trim() : woSummary(m);
     return sum ? (sum + '\n\n' + block) : block;
   }
 
@@ -350,9 +353,61 @@
     return (m.subject || name.replace(/\.(eml|msg)$/i, '')) + (meta.length ? ' (' + meta.join(', ') + ')' : '');
   }
 
+  // ---- AI one-line summary (produced by the BWN AI script, not here) ----------
+  // This script is @grant none / zero egress. The AI script owns the Anthropic key and
+  // the @connect host, so we ask IT for the summary over the in-page bus and await a
+  // reply. If the AI script is absent, its module is off, or no key is set, no reply
+  // comes and we resolve '' on a short timeout - the caller then falls back to the
+  // mechanical description, so an unconfigured machine still works exactly as before.
+  var _aiSeq = 0;
+  function summaryPayload(m) {
+    return [
+      m.subject ? 'Subject: ' + m.subject : '',
+      (m.fromName || smtpAddr(m.fromEmail)) ? ('From: ' + [m.fromName, smtpAddr(m.fromEmail)].filter(Boolean).join(' ')) : '',
+      '',
+      String(m.body || '').slice(0, 8000)
+    ].filter(function (x) { return x !== ''; }).join('\n');
+  }
+  function aiSummarize(payload, kind) {
+    return new Promise(function (resolve) {
+      if (!payload) return resolve('');
+      var reqId = 'du' + (++_aiSeq) + '_' + Date.now();
+      var settled = false;
+      function done(v) { if (settled) return; settled = true; try { document.removeEventListener('bwn:evt', onEvt, false); } catch (e) { } resolve(v || ''); }
+      function onEvt(e) { var d = e && e.detail; if (d && d.id === 'ai:summarized' && d.reqId === reqId) done(d && !d.error ? d.text : ''); }
+      document.addEventListener('bwn:evt', onEvt, false);
+      try { document.dispatchEvent(new CustomEvent('bwn:cmd', { detail: { id: 'ai:summarize', reqId: reqId, kind: kind || 'email-wo', text: payload } })); }
+      catch (e) { return done(''); }
+      setTimeout(function () { done(''); }, 8000);   // AI off / unkeyed / slow -> no summary; caller falls back
+    });
+  }
+
+  // ---- Note Type from the sender's email domain ------------------------------
+  // Per ops: a client domain -> "Client", Broadway-internal -> "Internal", any other
+  // external sender -> "Vendor". Extend CLIENT_DOMAINS as new clients onboard. Falls
+  // back to "Client" when no sender domain is available (preserves the prior always-
+  // Client behavior of the WO-intake handoff).
+  var CLIENT_DOMAINS = { 'pilottravelcenters.com': 1, 'caleres.com': 1, 'staples.com': 1 };
+  var INTERNAL_DOMAIN = 'broadwaynational.com';
+  function noteTypeForDomain(email) {
+    var dom = (String(email || '').split('@')[1] || '').toLowerCase().trim();
+    if (!dom) return 'Client';
+    if (CLIENT_DOMAINS[dom]) return 'Client';
+    if (dom === INTERNAL_DOMAIN) return 'Internal';
+    return 'Vendor';
+  }
+  function noteTypeForFiles(files) {
+    for (var i = 0; i < files.length; i++) {
+      var f = files[i];
+      if (f && f.isEmail && f.email && f.email.fromEmail) return noteTypeForDomain(f.email.fromEmail);
+    }
+    return 'Client';
+  }
+
   // Build per file: {kind, name, size, desc (short - Description field/clipboard),
   // noteLine (one-line WO-note fallback), and for emails isEmail + email model +
-  // noteBlock (the full Outlook-style block)}. Email parsing is async (FileReader).
+  // aiSummary + noteBlock (the full Outlook-style block, led by the AI summary)}.
+  // Email parsing is async (FileReader), then the AI summary is awaited over the bus.
   function describeFile(f) {
     var kind = fileKind(f);
     var base = { kind: kind, name: f.name || '(unnamed)', size: humanSize(f.size) };
@@ -372,21 +427,31 @@
         base.noteLine = '• ' + base.name + ' - Email' + (extra || '');
         finish(base);
       }
-      // Belt-and-suspenders timeout (network-share / OneDrive-placeholder reads can
-      // stall) - the upload flow must never wait on a description.
-      setTimeout(function () { fallback(''); }, 10000);
+      // Belt-and-suspenders timeout guards ONLY the FileReader (network-share / OneDrive-
+      // placeholder reads can stall). Once the file is read we hand off to aiSummarize(),
+      // which has its own short timeout, so we clear this belt on load/error to avoid a
+      // double-fire race with the AI wait.
+      var belt = setTimeout(function () { fallback(''); }, 10000);
       var rd = new FileReader();
-      rd.onerror = function () { fallback(' (could not read contents)'); };
+      rd.onerror = function () { clearTimeout(belt); fallback(' (could not read contents)'); };
       rd.onload = function () {
-        try {
-          var m = isMsg ? parseMsg(rd.result) : emlToModel(parseEml(String(rd.result || '')));
-          var block = formatEmailBlock(m);
-          if (!block) return fallback('');
-          base.isEmail = true; base.email = m; base.noteBlock = block;
-          base.desc = emailDesc(m, base.name);
-          base.noteLine = '• ' + (m.subject || base.name) + ' - Email';
-        } catch (e) { return fallback(''); }
-        finish(base);
+        clearTimeout(belt);
+        var m;
+        try { m = isMsg ? parseMsg(rd.result) : emlToModel(parseEml(String(rd.result || ''))); }
+        catch (e) { return fallback(''); }
+        // Ask the AI script (over the bus) for a one-line summary; '' when AI is off/slow.
+        aiSummarize(summaryPayload(m), 'email-wo').then(function (summary) {
+          try {
+            base.aiSummary = (summary || '').trim();
+            var block = formatEmailBlock(m, base.aiSummary);
+            if (!block) return fallback('');
+            base.isEmail = true; base.email = m; base.noteBlock = block;
+            // The AI summary is the best Description; else the mechanical one-liner.
+            base.desc = base.aiSummary ? base.aiSummary.slice(0, 300) : emailDesc(m, base.name);
+            base.noteLine = '• ' + (base.aiSummary || m.subject || base.name) + ' - Email';
+          } catch (e) { return fallback(''); }
+          finish(base);
+        });
       };
       if (isMsg) rd.readAsArrayBuffer(f); else rd.readAsText(f);
     });
@@ -881,7 +946,8 @@
     return false;
   }
 
-  function insertNote(text, originTab) {
+  function insertNote(text, originTab, noteType) {
+    noteType = noteType || 'Client';
     // Clipboard backup first - rich editors can swallow programmatic text, and the
     // paste is then the instant recovery. Track whether it actually landed so the
     // toast wording doesn't over-promise a paste target.
@@ -898,11 +964,11 @@
       }, 5000).then(function (ed) {
         if (!ed) { copied.then(function (ok) { toast(ok ? 'Upload note copied to clipboard - the note composer didn’t open.' : 'The note composer didn’t open.'); }); return; }
         setEditorValue(ed, text).then(function (filled) {
-          // Client email notes are always Type "Client" (per ops). Scope to the just-opened
-          // composer so we never touch an unrelated dropdown. Best-effort; the note still posts.
-          try { var comp = (ed.closest && ed.closest('[role="dialog"],.MuiDialog-root,form,.MuiPaper-root')) || document; setTimeout(function () { setNoteType('Client', comp); }, 80); } catch (e) { }
+          // Note Type is chosen from the sender's domain (noteTypeForFiles). Scope to the
+          // just-opened composer so we never touch an unrelated dropdown. Best-effort; posts regardless.
+          try { var comp = (ed.closest && ed.closest('[role="dialog"],.MuiDialog-root,form,.MuiPaper-root')) || document; setTimeout(function () { setNoteType(noteType, comp); }, 80); } catch (e) { }
           copied.then(function (ok) {
-            if (filled) toast('Upload note drafted (Type: Client) - review and Save.' + (ok ? ' (Also on your clipboard.)' : ''));
+            if (filled) toast('Upload note drafted (Type: ' + noteType + ') - review and Save.' + (ok ? ' (Also on your clipboard.)' : ''));
             else toast(ok ? 'Note composer opened but it blocked auto-fill - press Ctrl+V to paste the note.' : 'Note composer opened but auto-fill was blocked.');
           });
         });
@@ -924,10 +990,10 @@
     var dlgText = dlg.textContent || '';
     var seen = pending.files.some(function (f) { return f.name && dlgText.indexOf(String(f.name).slice(0, 12)) !== -1; });
     if (!seen) return;
-    var note = pending.noteText, originTab = pending.originTab || '';
+    var note = pending.noteText, originTab = pending.originTab || '', noteType = pending.noteType || 'Client';
     pending = null;
     // Let the dialog close and the upload kick off before touching the notes pane.
-    setTimeout(function () { insertNote(note, originTab); }, 1400);
+    setTimeout(function () { insertNote(note, originTab, noteType); }, 1400);
   }, true);
 
   // ---- Drop overlay ----------------------------------------------------------
@@ -984,7 +1050,7 @@
         // On a merge, keep the FIRST drop's origin view - later drops fire after the script
         // has already switched to Documents, so their origin would just be "Documents".
         var origin = (fresh && pending.originTab) ? pending.originTab : originTab;
-        pending = { ts: Date.now(), files: merged, noteText: buildNoteText(merged), originTab: origin };
+        pending = { ts: Date.now(), files: merged, noteText: buildNoteText(merged), originTab: origin, noteType: noteTypeForFiles(merged) };
       });
       handleDrop(dt, described, ctx);
     });
@@ -1050,7 +1116,7 @@
       var fresh = pending && (Date.now() - pending.ts < PENDING_TTL);
       var merged = fresh ? pending.files.concat(files) : files;
       var origin = (fresh && pending.originTab) ? pending.originTab : originTab;
-      pending = { ts: Date.now(), files: merged, noteText: buildNoteText(merged), originTab: origin };
+      pending = { ts: Date.now(), files: merged, noteText: buildNoteText(merged), originTab: origin, noteType: noteTypeForFiles(merged) };
     });
     // WO Intake handoff = a just-created WO's client request email, so label the uploaded
     // document(s) "Work Order Request". Manual drops (the overlay path) keep the default Label.
