@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         BWN Suite - AI (Broadway National)
 // @namespace    broadwaynational.bwn
-// @version      1.37.3
+// @version      1.37.4
 // @downloadURL  https://raw.githubusercontent.com/Intermu/userscripts/main/bwn-suite-ai.user.js
 // @updateURL    https://raw.githubusercontent.com/Intermu/userscripts/main/bwn-suite-ai.user.js
 // @description  The Umbrava tools that call outside APIs, kept separate from the zero-egress Core script. Client Update and WO Audit drafts (Anthropic Claude; draft-only, scrubbed before sending, you review before posting); Find Techs / Find Suppliers (Google Places; vendor leads near a WO); and Job View (opens the Ops-Dashboard job card on the WO page - WO details from Umbrava plus the authored case file and next actions, read-only). Network access is limited by the browser to the declared API hosts and the BWN Static Web App. API keys are stored in Tampermonkey's storage via the menu commands and never enter the page. Toggle modules in BWN_MODULES below.
@@ -2778,8 +2778,10 @@ if (BWN_MODULES.jobView) BWN.safeModule('jobView', function () {
     }
     GM_xmlhttpRequest({
       method: 'POST', url: ROLE_URL, timeout: 15000,
-      headers: { 'Content-Type': 'application/json', 'x-bwn-key': key, 'Authorization': 'Bearer ' + tok },
-      data: '{}',
+      // Token rides in the BODY: the SWA edge overwrites the Authorization header with its own
+      // platform token when proxying /api/* (root cause of every bad-iss/bad-alg since v1.34).
+      headers: { 'Content-Type': 'application/json', 'x-bwn-key': key },
+      data: JSON.stringify({ token: tok }),
       onload: function (r) {
         var j = null; try { j = JSON.parse(r.responseText); } catch (e) { }
         if (r.status >= 200 && r.status < 300 && j && j.ok) {
@@ -2811,7 +2813,7 @@ if (BWN_MODULES.jobView) BWN.safeModule('jobView', function () {
     if (!key || !tok) { alert('debug: missing ' + (!key ? 'ingest key' : 'Umbrava token')); return; }
     GM_xmlhttpRequest({
       method: 'POST', url: ROLE_URL + '?debug=1', timeout: 15000,
-      headers: { 'Content-Type': 'application/json', 'x-bwn-key': key, 'Authorization': 'Bearer ' + tok }, data: '{}',
+      headers: { 'Content-Type': 'application/json', 'x-bwn-key': key }, data: JSON.stringify({ token: tok }),
       onload: function (r) { alert('AI v' + BWN_VER + ' - SWA received (status ' + r.status + '):\n' + (r.responseText || '').slice(0, 1200)); },
       onerror: function () { alert('debug: network error reaching the SWA'); }, ontimeout: function () { alert('debug: timed out'); }
     });
