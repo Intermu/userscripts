@@ -1,10 +1,10 @@
 // ==UserScript==
 // @name         BWN CC Purchase (Broadway National)
 // @namespace    broadwaynational.bwn
-// @version      0.2.0
+// @version      0.3.0
 // @downloadURL  https://raw.githubusercontent.com/Intermu/userscripts/main/bwn-cc-purchase.user.js
 // @updateURL    https://raw.githubusercontent.com/Intermu/userscripts/main/bwn-cc-purchase.user.js
-// @description  Replaces the "Log Credit Card Purchase Request" Microsoft Form with an in-page modal. Fill 10 fields (Date, Card User, Card Used, Supplier, Subtotal, Tax, Total, Description, Purchase Link, Work Order #) and submit; it POSTs to the broadway-internal-ops SWA proxy (x-bwn-key gated) which forwards to the HTTP-triggered Power Automate flow - logging a row to Credit Card Tracker.xlsx and emailing Mike, identically to the old Form. Opened on a work order, it prefills the Work Order # and drops the client/location into the description, and offers the WO's vendors as Supplier suggestions (read from the BWN Ops Suite bus). Card Used is a pick-list you maintain. The flow's secret URL stays server-side; nothing sensitive lives in this script. Open it from the floating button or the Tampermonkey menu. Receipt upload is deferred to v2.
+// @description  Replaces the "Log Credit Card Purchase Request" Microsoft Form with an in-page modal. Fill 10 fields (Date, Card User, Card Used, Supplier, Subtotal, Tax, Total, Description, Purchase Link, Work Order #) and submit; it POSTs to the broadway-internal-ops SWA proxy (x-bwn-key gated) which forwards to the HTTP-triggered Power Automate flow - logging a row to Credit Card Tracker.xlsx and emailing Mike, identically to the old Form. Opened on a work order, it prefills the Work Order # and drops the client/location into the description, and defaults Supplier to whichever PO line you flipped to "Supplier" in the BWN Ops Suite (falling back to the WO's vendors as suggestions). Card Used is a pick-list you maintain. The flow's secret URL stays server-side; nothing sensitive lives in this script. Open it from the floating button or the Tampermonkey menu. Receipt upload is deferred to v2.
 // @match        https://app.umbrava.com/*
 // @run-at       document-idle
 // @noframes
@@ -18,10 +18,10 @@
 (function () {
   'use strict';
 
-  var VER = '0.2.0';
+  var VER = '0.3.0';
   var FONT = "-apple-system,BlinkMacSystemFont,'Segoe UI','Helvetica Neue',Arial,sans-serif";
   var PROXY_URL = 'https://green-stone-0717dab0f.7.azurestaticapps.net/api/cc-purchase';
-  console.info('[BWN CC PURCHASE] v' + VER + ' - modal -> SWA proxy -> Power Automate flow -> Credit Card Tracker.xlsx + email; job prefill + card pick-list; flow URL stays server-side');
+  console.info('[BWN CC PURCHASE] v' + VER + ' - modal -> SWA proxy -> Power Automate flow -> Credit Card Tracker.xlsx + email; job prefill + supplier auto-default + card pick-list; flow URL stays server-side');
 
   // ---- BWN Ops Suite bus (read-only consumer of the suite data contract v1) ----
   // bwn-suite-core (WO Assist) PUBLISHES the current WO's facts to sessionStorage
@@ -41,6 +41,18 @@
       if (d.v !== 1 || (maxAgeMs && Date.now() - d.ts > maxAgeMs)) return null;
       return d;
     } catch (e) { return null; }
+  }
+  // Per-WO Vendor/Supplier classification published by bwn-suite-core's PO grouping
+  // (localStorage `bwn:po:cls:{id}` = {items:[{vendor,sup}]}). Lets us default the
+  // Supplier field to the line the user flipped to "Supplier". Absent -> [].
+  function poCls(id) {
+    if (!id) return [];
+    try {
+      var raw = localStorage.getItem('bwn:po:cls:' + id);
+      if (!raw) return [];
+      var d = JSON.parse(raw);
+      return Array.isArray(d.items) ? d.items : [];
+    } catch (e) { return []; }
   }
 
   // ---- Saved cards (the "Card Used" pick-list the user maintains) ------------
@@ -143,9 +155,20 @@
     // Current WO context from the suite bus (may be null - degrade gracefully).
     var woId = woIdFromUrl();
     var bus = busGet(woId, 12 * 3600000);
-    var woVendors = (bus && Array.isArray(bus.pos))
-      ? bus.pos.map(function (p) { return (p && p.vendor) ? String(p.vendor).trim() : ''; }).filter(function (v, i, a) { return v && a.indexOf(v) === i; })
+    var cls = poCls(woId);   // [{vendor, sup}] from Core's PO grouping (if the user opened the PO list)
+
+    // Supplier suggestion order: lines flipped to "Supplier" first, then the WO's other
+    // vendors. Merge the classification list (authoritative on S/V) with the bus pos names.
+    var busVendorNames = (bus && Array.isArray(bus.pos))
+      ? bus.pos.map(function (p) { return (p && p.vendor) ? String(p.vendor).trim() : ''; }).filter(Boolean)
       : [];
+    var suppliers = cls.filter(function (c) { return c && c.sup && c.vendor; }).map(function (c) { return c.vendor; });
+    var nonSuppliers = cls.filter(function (c) { return c && !c.sup && c.vendor; }).map(function (c) { return c.vendor; });
+    var woVendors = [];
+    suppliers.concat(nonSuppliers).concat(busVendorNames).forEach(function (v) { if (v && woVendors.indexOf(v) === -1) woVendors.push(v); });
+    // Auto-default Supplier to the (single) flipped-to-supplier line; if several, leave
+    // blank so the coordinator picks (they're all in the suggestion list, suppliers first).
+    var flippedSupplier = (suppliers.length === 1) ? suppliers[0] : '';
 
     var back = document.createElement('div');
     back.style.cssText = 'position:fixed;inset:0;z-index:2147483646;background:rgba(0,0,0,.45);display:flex;align-items:flex-start;justify-content:center;overflow:auto;padding:40px 16px;';
@@ -213,6 +236,7 @@
       // Sensible defaults / job prefill
       if (f.key === 'Date') el.value = todayISO();
       if (f.key === 'CardUser') el.value = me.name || '';
+      if (f.key === 'SupplierName' && flippedSupplier) el.value = flippedSupplier;   // the PO line flipped to "Supplier"
       if (f.key === 'WorkOrderNumber' && woId) el.value = woId;   // digits from the URL = the W-###### the flow links to
       if (f.key === 'LineItemDescription' && (bus && (bus.client || bus.location))) {
         var ctx = 'For W-' + (woId || (bus.wo || '').replace(/^W-?/i, ''));

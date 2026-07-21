@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         BWN Suite - Core (Broadway National)
 // @namespace    broadwaynational.bwn
-// @version      1.54.0
+// @version      1.55.0
 // @downloadURL  https://raw.githubusercontent.com/Intermu/userscripts/main/bwn-suite-core.user.js
 // @updateURL    https://raw.githubusercontent.com/Intermu/userscripts/main/bwn-suite-core.user.js
 // @description  Runs several Umbrava helpers for BWN coordinators, all in the browser with no network access. Includes: PO Approval + ETA Builder; WO Assist (GP/ETA, a stall watchdog, DNE calculator, and a next-action playbook); Email Leak Guard (checks recipients against vendor names, PO amounts, and client budget references before an outbound email sends); WO List Heat (a triage overlay + My Day strip on the work-order list); and the BWN Launcher (opens the Azure Static Web App tools with the current WO's context). Modules share state through sessionStorage/localStorage. No network calls, no privileged grants. Toggle modules in BWN_MODULES below.
@@ -44,7 +44,7 @@
   try { localStorage.setItem('bwn:status:core', JSON.stringify({ ver: BWN_VER, ts: Date.now() })); } catch (e) { /* best-effort */ }
 
   console.info('[BWN SUITE CORE] v' + BWN_VER + ' |',
-    'Shared Core 7 \u00b7 PO Approval 1.13 \u00b7 WO Assist 2.50 \u00b7 Leak Guard 2.0 \u00b7 List Heat 3.14 \u00b7 Launcher 2.0 \u00b7 Views 1.0 \u00b7 Palette 1.1 \u00b7 Visit 1.2 \u00b7 Reminders 1.1 \u00b7 Timeline 1.1 \u00b7 TripCal 1.3 \u00b7 Connector 1.2 |',
+    'Shared Core 7 \u00b7 PO Approval 1.13 \u00b7 WO Assist 2.51 \u00b7 Leak Guard 2.0 \u00b7 List Heat 3.14 \u00b7 Launcher 2.0 \u00b7 Views 1.0 \u00b7 Palette 1.1 \u00b7 Visit 1.2 \u00b7 Reminders 1.1 \u00b7 Timeline 1.1 \u00b7 TripCal 1.3 \u00b7 Connector 1.2 |',
     'enabled:', Object.keys(BWN_MODULES).filter(function (k) { return BWN_MODULES[k]; }).join(', '));
 
   // ===== BWN SHARED CORE v7 - KEEP IN SYNC across both suite scripts =====
@@ -2504,8 +2504,27 @@
       document.querySelectorAll('[data-testid^="POAccordion-"]').forEach(function (row) {
         var unit = poUnitOf(row, container); if (!unit) return;
         var num = poKeyOf(row);   // stable per-PO key (line number) - survives PO add/cancel reorder
-        items.push({ row: row, unit: unit, num: num, sup: poIsSupplier(vendorOf(row), num) });
+        var vend = vendorOf(row);
+        items.push({ row: row, unit: unit, num: num, vendor: vend, sup: poIsSupplier(vend, num) });
       });
+      // Publish the resolved Vendor/Supplier classification per vendor to a decoupled
+      // per-WO key so OTHER suite scripts (e.g. bwn-cc-purchase) can default the
+      // "Supplier" field to whatever line the user flipped to Supplier - WITHOUT the PO
+      // `num` (which the bus `pos` drops). Write-on-change to avoid storage churn.
+      try {
+        var woIdC = currentWOId();
+        if (woIdC) {
+          var cls = items
+            .map(function (x) { return { vendor: String(x.vendor || '').trim(), sup: !!x.sup }; })
+            .filter(function (c) { return c.vendor && c.vendor !== '(vendor n/a)'; });
+          var clsKey = 'bwn:po:cls:' + woIdC;
+          var prevRaw = localStorage.getItem(clsKey);
+          var prevItems = null; try { prevItems = prevRaw ? (JSON.parse(prevRaw).items || null) : null; } catch (e) { prevItems = null; }
+          if (JSON.stringify(prevItems) !== JSON.stringify(cls)) {
+            localStorage.setItem(clsKey, JSON.stringify({ v: 1, ts: Date.now(), items: cls }));
+          }
+        }
+      } catch (e) { /* best-effort; classification publish is non-critical */ }
       var vN = items.filter(function (x) { return !x.sup; }).length, sN = items.length - vN;
       var vi = 0, si = 0;
       items.forEach(function (x) {
