@@ -1,10 +1,10 @@
 // ==UserScript==
 // @name         BWN CC Purchase (Broadway National)
 // @namespace    broadwaynational.bwn
-// @version      0.3.0
+// @version      0.4.0
 // @downloadURL  https://raw.githubusercontent.com/Intermu/userscripts/main/bwn-cc-purchase.user.js
 // @updateURL    https://raw.githubusercontent.com/Intermu/userscripts/main/bwn-cc-purchase.user.js
-// @description  Replaces the "Log Credit Card Purchase Request" Microsoft Form with an in-page modal. Fill 10 fields (Date, Card User, Card Used, Supplier, Subtotal, Tax, Total, Description, Purchase Link, Work Order #) and submit; it POSTs to the broadway-internal-ops SWA proxy (x-bwn-key gated) which forwards to the HTTP-triggered Power Automate flow - logging a row to Credit Card Tracker.xlsx and emailing Mike, identically to the old Form. Opened on a work order, it prefills the Work Order # and drops the client/location into the description, and defaults Supplier to whichever PO line you flipped to "Supplier" in the BWN Ops Suite (falling back to the WO's vendors as suggestions). Card Used is a pick-list you maintain. The flow's secret URL stays server-side; nothing sensitive lives in this script. Open it from the floating button or the Tampermonkey menu. Receipt upload is deferred to v2.
+// @description  Replaces the "Log Credit Card Purchase Request" Microsoft Form with an in-page modal. Fill the fields and submit; it POSTs to the broadway-internal-ops SWA proxy (x-bwn-key gated) which forwards to the HTTP-triggered Power Automate flow - logging a row to Credit Card Tracker.xlsx and emailing Mike, identically to the old Form. Opened on a work order, it prefills the Work Order # and drops the client/location into the description, and defaults Supplier to whichever PO line you flipped to "Supplier" in the BWN Ops Suite (falling back to the WO's vendors as suggestions). Card Used is a pick-list you maintain. An optional Receipt is uploaded (via /api/cc-receipt -> Graph) to the shared SharePoint folder and linked in the tracker. The flow's secret URL stays server-side; nothing sensitive lives in this script. Open it from the floating button or the Tampermonkey menu.
 // @match        https://app.umbrava.com/*
 // @run-at       document-idle
 // @noframes
@@ -18,10 +18,27 @@
 (function () {
   'use strict';
 
-  var VER = '0.3.0';
+  var VER = '0.4.0';
   var FONT = "-apple-system,BlinkMacSystemFont,'Segoe UI','Helvetica Neue',Arial,sans-serif";
-  var PROXY_URL = 'https://green-stone-0717dab0f.7.azurestaticapps.net/api/cc-purchase';
-  console.info('[BWN CC PURCHASE] v' + VER + ' - modal -> SWA proxy -> Power Automate flow -> Credit Card Tracker.xlsx + email; job prefill + supplier auto-default + card pick-list; flow URL stays server-side');
+  var SWA_BASE = 'https://green-stone-0717dab0f.7.azurestaticapps.net';
+  var PROXY_URL = SWA_BASE + '/api/cc-purchase';
+  var RECEIPT_URL = SWA_BASE + '/api/cc-receipt';
+  var MAX_RECEIPT = 10 * 1024 * 1024;   // 10 MB - keep in sync with api/cc-receipt
+  console.info('[BWN CC PURCHASE] v' + VER + ' - modal -> SWA proxy -> Power Automate flow -> Credit Card Tracker.xlsx + email; job prefill + supplier auto-default + card pick-list + receipt upload; flow URL stays server-side');
+
+  // Read a File as base64 (payload for the /api/cc-receipt Graph upload).
+  function readFileB64(file) {
+    return new Promise(function (resolve, reject) {
+      var r = new FileReader();
+      r.onload = function () {
+        var s = String(r.result || '');
+        var i = s.indexOf(',');   // strip the "data:...;base64," prefix
+        resolve({ dataB64: i >= 0 ? s.slice(i + 1) : s, contentType: file.type || 'application/octet-stream', filename: file.name || 'receipt' });
+      };
+      r.onerror = function () { reject(new Error('could not read the file')); };
+      r.readAsDataURL(file);
+    });
+  }
 
   // ---- BWN Ops Suite bus (read-only consumer of the suite data contract v1) ----
   // bwn-suite-core (WO Assist) PUBLISHES the current WO's facts to sessionStorage
@@ -263,6 +280,22 @@
     inputs.Subtotal.addEventListener('input', recalcTotal);
     inputs.TaxAmount.addEventListener('input', recalcTotal);
 
+    // Receipt (v2): optional file, uploaded to /api/cc-receipt on submit -> a link that the
+    // flow writes into the Receipt HYPERLINK cell. Not one of the flow's 10 text props.
+    var rWrap = document.createElement('div');
+    rWrap.style.cssText = 'margin-bottom:13px;';
+    var rLbl = document.createElement('label');
+    rLbl.style.cssText = lblCss;
+    rLbl.textContent = 'Receipt (optional)';
+    var receiptInput = document.createElement('input');
+    receiptInput.type = 'file';
+    receiptInput.accept = 'image/*,application/pdf';
+    receiptInput.id = 'ccp_Receipt';
+    receiptInput.style.cssText = 'width:100%;box-sizing:border-box;font:400 13px ' + FONT + ';color:#12241b;';
+    rLbl.setAttribute('for', 'ccp_Receipt');
+    rWrap.appendChild(rLbl); rWrap.appendChild(receiptInput);
+    form.appendChild(rWrap);
+
     var msg = document.createElement('div');
     msg.style.cssText = 'min-height:18px;color:#b4231f;font-size:12.5px;margin:2px 0 10px;';
 
@@ -303,27 +336,44 @@
         msg.textContent = 'Purchase Link must start with http:// or https:// (or leave it blank).'; return;
       }
 
-      submit.disabled = true; submit.textContent = 'Submitting…';
-      gmPost(PROXY_URL, { 'Content-Type': 'application/json', 'x-bwn-key': key }, payload, 30000)
-        .then(function (r) {
-          if (r.status >= 200 && r.status < 300 && r.json && r.json.ok) {
-            closeModal();
-            toast('Credit card purchase logged ✓  (' + (payload.SupplierName || '') + ' - $' + (payload.TotalAmount || '0') + ')', 6000);
-          } else if (r.status === 403) {
-            submit.disabled = false; submit.textContent = 'Submit purchase';
-            msg.textContent = 'Rejected (403): the SWA ingest key is missing or wrong. Re-set it via the Tampermonkey menu.';
-          } else if (r.status === 429) {
-            submit.disabled = false; submit.textContent = 'Submit purchase';
-            msg.textContent = 'Too many submissions in a row - wait a moment and try again.';
-          } else {
-            submit.disabled = false; submit.textContent = 'Submit purchase';
-            msg.textContent = 'Submit failed (' + r.status + ')' + (r.json && r.json.error ? ': ' + r.json.error : '') + '.';
-          }
-        })
-        .catch(function (err) {
-          submit.disabled = false; submit.textContent = 'Submit purchase';
-          msg.textContent = 'Network error: ' + (err && err.message ? err.message : 'could not reach the proxy') + '.';
+      var reenable = function () { submit.disabled = false; submit.textContent = 'Submit purchase'; };
+      submit.disabled = true;
+
+      // Optional receipt: upload it FIRST (so a failure blocks the log + tells the user),
+      // then include the returned link in the purchase POST.
+      var file = receiptInput.files && receiptInput.files[0];
+      if (file && file.size > MAX_RECEIPT) { reenable(); msg.textContent = 'Receipt is larger than 10 MB - use a smaller file or skip it.'; return; }
+      var getReceiptLink = Promise.resolve('');
+      if (file) {
+        submit.textContent = 'Uploading receipt…';
+        getReceiptLink = readFileB64(file).then(function (f) {
+          return gmPost(RECEIPT_URL, { 'Content-Type': 'application/json', 'x-bwn-key': key },
+            { actor: payload.actor, filename: f.filename, contentType: f.contentType, dataB64: f.dataB64, woNumber: payload.WorkOrderNumber }, 60000)
+            .then(function (r) {
+              if (r.status >= 200 && r.status < 300 && r.json && r.json.ok && r.json.link) return r.json.link;
+              throw new Error('Receipt upload failed (' + r.status + ')' + (r.json && r.json.error ? ': ' + r.json.error : ''));
+            });
         });
+      }
+
+      getReceiptLink.then(function (link) {
+        if (link) payload.ReceiptLink = link;
+        submit.textContent = 'Submitting…';
+        return gmPost(PROXY_URL, { 'Content-Type': 'application/json', 'x-bwn-key': key }, payload, 30000);
+      }).then(function (r) {
+        if (r.status >= 200 && r.status < 300 && r.json && r.json.ok) {
+          closeModal();
+          toast('Credit card purchase logged ✓  (' + (payload.SupplierName || '') + ' - $' + (payload.TotalAmount || '0') + ')', 6000);
+        } else if (r.status === 403) {
+          reenable(); msg.textContent = 'Rejected (403): the SWA ingest key is missing or wrong. Re-set it via the Tampermonkey menu.';
+        } else if (r.status === 429) {
+          reenable(); msg.textContent = 'Too many submissions in a row - wait a moment and try again.';
+        } else {
+          reenable(); msg.textContent = 'Submit failed (' + r.status + ')' + (r.json && r.json.error ? ': ' + r.json.error : '') + '.';
+        }
+      }).catch(function (err) {
+        reenable(); msg.textContent = (err && err.message ? err.message : 'could not reach the proxy') + '.';
+      });
     });
 
     card.appendChild(head); card.appendChild(form);
