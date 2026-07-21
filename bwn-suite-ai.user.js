@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         BWN Suite - AI (Broadway National)
 // @namespace    broadwaynational.bwn
-// @version      1.37.0
+// @version      1.37.1
 // @downloadURL  https://raw.githubusercontent.com/Intermu/userscripts/main/bwn-suite-ai.user.js
 // @updateURL    https://raw.githubusercontent.com/Intermu/userscripts/main/bwn-suite-ai.user.js
 // @description  The Umbrava tools that call outside APIs, kept separate from the zero-egress Core script. Client Update and WO Audit drafts (Anthropic Claude; draft-only, scrubbed before sending, you review before posting); Find Techs / Find Suppliers (Google Places; vendor leads near a WO); and Job View (opens the Ops-Dashboard job card on the WO page - WO details from Umbrava plus the authored case file and next actions, read-only). Network access is limited by the browser to the declared API hosts and the BWN Static Web App. API keys are stored in Tampermonkey's storage via the menu commands and never enter the page. Toggle modules in BWN_MODULES below.
@@ -2708,11 +2708,13 @@ if (BWN_MODULES.jobView) BWN.safeModule('jobView', function () {
   }
 
   // ---- Umbrava role sender ------------------------------------------------------
-  // Sends the Auth0 access token to the SWA, which VERIFIES it against Umbrava's JWKS (RS256)
-  // and returns the caller's Umbrava role. This is the client half of server-enforced role
-  // access levels; UX show/hide comes later. The token goes ONLY to the declared SWA @connect
-  // host, is never logged or cached (only the resulting role/email is). Dormant until the SWA
-  // key is set + connector enabled; throttled to ~6h via a GM cache so it's ~once/session.
+  // Sends the Auth0 access token to the SWA, which PROVES it via Umbrava's own GraphQL
+  // current-user query (a vouch - the SWA never verifies the signature locally; Umbrava
+  // rotates its signing alg) and returns the caller's Umbrava role. This is the client half
+  // of server-enforced role access levels; UX show/hide comes later. The token goes ONLY to
+  // the declared SWA @connect host, is never logged or cached (only the resulting role/email
+  // is). Dormant until the SWA key is set + connector enabled; throttled to ~6h via a GM
+  // cache so it's ~once/session.
   var ROLE_URL = 'https://green-stone-0717dab0f.7.azurestaticapps.net/api/user-role';
   var ROLE_TTL_MS = 6 * 3600 * 1000;
   var _bwnRole = null;   // { email, sub, role, tenantId, roleQuery, ts }
@@ -2746,7 +2748,7 @@ if (BWN_MODULES.jobView) BWN.safeModule('jobView', function () {
           var rc = { email: j.email || '', sub: j.sub || '', role: j.role || null, tenantId: j.tenantId || '', roleQuery: j.roleQuery || null, ts: Date.now() };
           try { if (rc.role) GM_setValue('bwn_role_cache', JSON.stringify(rc)); } catch (e) { }   // persist only a RESOLVED role (never the token); a null role re-fetches next load
           announceRole(rc); if (cb) cb(rc);
-        } else { if (cb) cb(null, 'HTTP ' + r.status + ((j && (j.code || j.error)) ? ': ' + (j.code || j.error) : '')); }
+        } else { if (cb) cb(null, 'HTTP ' + r.status + ((j && (j.code || j.error)) ? ': ' + (j.code || j.error) : '') + ((j && j.detail) ? ('\n' + JSON.stringify(j.detail)) : '')); }
       },
       onerror: function () { if (cb) cb(null, 'network error reaching the SWA'); }, ontimeout: function () { if (cb) cb(null, 'timed out reaching the SWA'); }
     });
@@ -2758,14 +2760,16 @@ if (BWN_MODULES.jobView) BWN.safeModule('jobView', function () {
       else alert('Could not fetch your Umbrava role.\nReason: ' + (err || 'unknown') + '\n\nChecklist: SWA ingest key set, connector on, signed into Umbrava.');
     });
   });
-  // TEMP diagnostic: shows what the SWA actually receives (alg/kid only). Remove once role auth is confirmed.
+  // TEMP diagnostic: shows what the SWA actually receives (header alg/kid/typ + claims
+  // iss/aud/exp vs the SWA's expected values, incl. issMatch/audMatch - never the signature).
+  // Remove once role auth is confirmed.
   GM_registerMenuCommand('BWN: role debug (diagnostic)', function () {
     var key = GM_getValue('ingest_key', ''); var tok = authToken();
     if (!key || !tok) { alert('debug: missing ' + (!key ? 'ingest key' : 'Umbrava token')); return; }
     GM_xmlhttpRequest({
       method: 'POST', url: ROLE_URL + '?debug=1', timeout: 15000,
       headers: { 'Content-Type': 'application/json', 'x-bwn-key': key, 'Authorization': 'Bearer ' + tok }, data: '{}',
-      onload: function (r) { alert('SWA received (status ' + r.status + '):\n' + (r.responseText || '').slice(0, 600)); },
+      onload: function (r) { alert('SWA received (status ' + r.status + '):\n' + (r.responseText || '').slice(0, 1200)); },
       onerror: function () { alert('debug: network error reaching the SWA'); }, ontimeout: function () { alert('debug: timed out'); }
     });
   });
