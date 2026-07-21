@@ -1,10 +1,10 @@
 // ==UserScript==
 // @name         BWN Drop Upload (Broadway National)
 // @namespace    broadwaynational.bwn
-// @version      1.7.0
+// @version      1.8.0
 // @downloadURL  https://raw.githubusercontent.com/Intermu/userscripts/main/bwn-drop-upload.user.js
 // @updateURL    https://raw.githubusercontent.com/Intermu/userscripts/main/bwn-drop-upload.user.js
-// @description  Drop files anywhere on an Umbrava work order to upload them. Opens the Documents tab and upload dialog, hands over the files, and builds each file's description from its contents. Emails are parsed locally (.msg via an OLE/MAPI reader, .eml via RFC822) into an Outlook-style block - From/Sent/To/Cc/Subject and the body - that becomes the WO note, led by a one-line plain-text summary built by extracting the WO fields (store, city/state, priority, PO, NTE, problem, requester) from the email - no AI, no cost, no network. That same summary fills each file's Description. The WO note's Type is chosen from the sender's domain (client domain -> Client, Broadway-internal -> Internal, else Vendor). Umbrava's Description field is a locked react-aria combobox that rejects programmatic fills, so the description goes on your clipboard for a one-tap Ctrl+V. When WO Intake hands off a just-created WO's request email, each uploaded file's Label (document type) is set to "Work Order Request". You review and Save everything. Runs in the browser only: no network access, no grants.
+// @description  Drop files anywhere on an Umbrava work order to upload them. Opens the Documents tab and upload dialog, hands over the files, and builds each file's description from its contents. Emails are parsed locally (.msg via an OLE/MAPI reader, .eml via RFC822) into an Outlook-style block - From/Sent/To/Cc/Subject and the body - that becomes the WO note, led by a one-line summary from Chrome's on-device built-in AI (zero cost, zero egress, nothing leaves the browser), falling back to local WO-field extraction (store, city/state, priority, PO, NTE, problem, requester) when the on-device model is unavailable. That same summary fills each file's Description. The WO note's Type is chosen from the email's parties: inbound is typed by the sender (client -> Client, else Vendor); outbound from Broadway is typed by the recipients (a client recipient -> Client, any vendor recipient -> Vendor, all-internal -> Internal). Umbrava's Description field is a locked react-aria combobox that rejects programmatic fills, so the description goes on your clipboard for a one-tap Ctrl+V. When WO Intake hands off a just-created WO's request email, each uploaded file's Label (document type) is set to "Work Order Request". You review and Save everything. Runs in the browser only: no network access, no grants.
 // @match        https://app.umbrava.com/*
 // @match        https://*.umbrava.com/*
 // @run-at       document-idle
@@ -15,8 +15,8 @@
 (function () {
   'use strict';
 
-  var VER = '1.7.0';
-  console.info('[BWN DROP UPLOAD] v' + VER + ' · Email→note: real .msg (OLE/MAPI) + .eml parsing · local field-extracted one-line summary (no AI/no egress) leads the note + fills Description · note Type from sender domain · document Label + note Type selectors both target their stable testids · WO Intake handoff sets Label=Work Order Request · bwn:cmd dropupload:files bridge');
+  var VER = '1.8.0';
+  console.info('[BWN DROP UPLOAD] v' + VER + ' · Email→note: real .msg (OLE/MAPI) + .eml parsing · on-device AI one-line summary (Chrome built-in, zero egress) leads the note + fills Description, local field-extraction fallback · note Type by parties (inbound=sender, outbound=recipient) · document Label + note Type selectors both target their stable testids · WO Intake handoff sets Label=Work Order Request · bwn:cmd dropupload:files bridge');
 
   // Active only on WO pages; checked at drag time so SPA navigation needs no watcher.
   function onWorkOrder() {
@@ -437,32 +437,114 @@
     return line.slice(0, 300);
   }
 
-  // ---- Note Type from the sender's email domain ------------------------------
-  // Per ops: a client domain -> "Client", Broadway-internal -> "Internal", any other
-  // external sender -> "Vendor". Extend CLIENT_DOMAINS as new clients onboard. Falls
-  // back to "Client" when no sender domain is available (preserves the prior always-
-  // Client behavior of the WO-intake handoff).
+  // ---- Note Type from the email's parties ------------------------------------
+  // classifyDomain: a client domain -> "Client", Broadway-internal -> "Internal", any
+  // other external domain -> "Vendor", unknown -> ''. Extend CLIENT_DOMAINS as clients
+  // onboard.
   var CLIENT_DOMAINS = { 'pilottravelcenters.com': 1, 'caleres.com': 1, 'staples.com': 1 };
   var INTERNAL_DOMAIN = 'broadwaynational.com';
-  function noteTypeForDomain(email) {
+  function classifyDomain(email) {
     var dom = (String(email || '').split('@')[1] || '').toLowerCase().trim();
-    if (!dom) return 'Client';
+    if (!dom) return '';
     if (CLIENT_DOMAINS[dom]) return 'Client';
     if (dom === INTERNAL_DOMAIN) return 'Internal';
     return 'Vendor';
   }
+  // Per ops: type the note by the OTHER party, not just the sender.
+  // - Inbound (external sender): classify the sender - client -> Client, else Vendor.
+  // - Outbound (Broadway-internal sender): classify the recipients - a client recipient
+  //   -> Client, any external/vendor recipient -> Vendor (so outbound-to-vendor is
+  //   "Vendor", not "Internal"), all-internal (or no recipient signal) -> Internal.
+  // - Unknown sender with no useful recipients -> "Client" (prior default; keeps the
+  //   WO-intake handoff's always-Client behavior when nothing is parseable).
+  function noteTypeForEmail(m) {
+    if (!m) return 'Client';
+    var from = classifyDomain(m.fromEmail);
+    if (from && from !== 'Internal') return from;          // inbound from a client or vendor
+    var recips = [].concat(m.to || [], m.cc || []), sawVendor = false;
+    for (var i = 0; i < recips.length; i++) {
+      var c = classifyDomain(recips[i] && recips[i].email);
+      if (c === 'Client') return 'Client';                 // a client recipient wins
+      if (c === 'Vendor') sawVendor = true;
+    }
+    if (sawVendor) return 'Vendor';                        // outbound to a vendor
+    if (from === 'Internal') return 'Internal';            // internal->internal, or no recip signal
+    return 'Client';                                       // truly unknown -> prior default
+  }
   function noteTypeForFiles(files) {
     for (var i = 0; i < files.length; i++) {
       var f = files[i];
-      if (f && f.isEmail && f.email && f.email.fromEmail) return noteTypeForDomain(f.email.fromEmail);
+      if (f && f.isEmail && f.email) return noteTypeForEmail(f.email);
     }
     return 'Client';
   }
 
+  // ---- Optional on-device AI summary (Chrome built-in AI) --------------------
+  // Uses Chrome's Prompt API entirely ON-DEVICE - no key, no network, nothing leaves
+  // the browser (keeps drop-upload @grant none / zero egress). Summarizes the NEW
+  // message (thread already trimmed by tidyBody) into one scan-line for the note.
+  // Returns '' whenever the API is missing, the model isn't downloaded yet, or anything
+  // throws - the caller then falls back to the mechanical localSummary/emailDesc. Bounded
+  // by a timeout so a slow (or first, pre-download) inference never stalls the upload.
+  function aiLangModel() {
+    // The Prompt API surface has shifted across Chrome versions; probe the known globals.
+    var g = (typeof self !== 'undefined') ? self : (typeof window !== 'undefined' ? window : null);
+    if (typeof LanguageModel !== 'undefined' && LanguageModel) return LanguageModel;
+    if (g && g.LanguageModel) return g.LanguageModel;
+    if (g && g.ai && g.ai.languageModel) return g.ai.languageModel;   // older window.ai shape
+    return null;
+  }
+  function aiReady(api) {
+    // Newer: availability() -> 'available'|'downloadable'|'downloading'|'unavailable'.
+    // Older: capabilities() -> {available:'readily'|'after-download'|'no'}. Only 'available'/
+    // 'readily' means we can infer NOW without waiting on a multi-GB model download.
+    try {
+      if (typeof api.availability === 'function') return Promise.resolve(api.availability()).then(function (s) { return s === 'available'; }, function () { return false; });
+      if (typeof api.capabilities === 'function') return Promise.resolve(api.capabilities()).then(function (c) { return !!c && c.available === 'readily'; }, function () { return false; });
+    } catch (e) {}
+    return Promise.resolve(false);
+  }
+  var AI_SYSTEM = 'You summarize ONE work-order email into a single plain-text line (<=200 chars) for a facilities coordinator scanning a work order. Name who sent it and what they are asking for or reporting. No greeting, no sign-off, no preamble, no quotes - output only the one line.';
+  var AI_SESSION = null;   // reuse one session across drops; recreated if it errors
+  function aiCreateSession(api) {
+    if (AI_SESSION) return Promise.resolve(AI_SESSION);
+    function keep(hasSystem) { return function (s) { try { s._bwnSystem = hasSystem; } catch (e) {} AI_SESSION = s; return s; }; }
+    // Prefer the system-prompt option; fall back to a bare session (older/newer variants)
+    // where the instruction is prepended to the user prompt instead (_bwnSystem = false).
+    return Promise.resolve(api.create({ initialPrompts: [{ role: 'system', content: AI_SYSTEM }] }))
+      .then(keep(true), function () { return Promise.resolve(api.create()).then(keep(false)); });
+  }
+  function withTimeout(p, ms) {
+    return new Promise(function (resolve) {
+      var t = setTimeout(function () { resolve(undefined); }, ms);
+      Promise.resolve(p).then(function (v) { clearTimeout(t); resolve(v); }, function () { clearTimeout(t); resolve(undefined); });
+    });
+  }
+  function aiSummary(m) {
+    var api = aiLangModel();
+    if (!api || typeof api.create !== 'function') return Promise.resolve('');
+    var run = aiReady(api).then(function (ok) {
+      if (!ok) return '';
+      return aiCreateSession(api).then(function (s) {
+        var from = (m.fromName || smtpAddr(m.fromEmail) || '').trim();
+        var to = (m.to || []).map(function (r) { return r.name || smtpAddr(r.email); }).filter(Boolean).join(', ');
+        var body = tidyBody(m.body).slice(0, 4000);   // the NEW message only - thread cut
+        var usedSystem = !!(s && s._bwnSystem !== false);   // best-effort; harmless if unknown
+        var prompt = (usedSystem ? '' : AI_SYSTEM + '\n\n') +
+          'From: ' + from + '\nTo: ' + to + '\nSubject: ' + String(m.subject || '') + '\n\n' + body;
+        return s.prompt(prompt);
+      }).then(function (out) {
+        return String(out || '').replace(/\s+/g, ' ').replace(/^["']+|["']+$/g, '').trim().slice(0, 300);
+      });
+    }).catch(function () { AI_SESSION = null; return ''; });   // drop a bad cached session
+    return withTimeout(run, 8000).then(function (v) { return v || ''; });
+  }
+
   // Build per file: {kind, name, size, desc (short - Description field/clipboard),
   // noteLine (one-line WO-note fallback), and for emails isEmail + email model +
-  // summary + noteBlock (the full Outlook-style block, led by the extracted summary)}.
-  // Email parsing is async (FileReader); the summary is built locally, no network.
+  // summary + noteBlock (the full Outlook-style block, led by the summary)}.
+  // Email parsing is async (FileReader). The summary is the on-device AI line when
+  // available, else the local field-extraction - either way, nothing leaves the browser.
   function describeFile(f) {
     var kind = fileKind(f);
     var base = { kind: kind, name: f.name || '(unnamed)', size: humanSize(f.size) };
@@ -488,18 +570,29 @@
       var rd = new FileReader();
       rd.onerror = function () { fallback(' (could not read contents)'); };
       rd.onload = function () {
+        var m;
         try {
-          var m = isMsg ? parseMsg(rd.result) : emlToModel(parseEml(String(rd.result || '')));
-          var summary = localSummary(m);   // local field extraction; '' when too little is found
-          var block = formatEmailBlock(m, summary);
-          if (!block) return fallback('');
-          base.isEmail = true; base.email = m; base.summary = summary;
-          base.noteBlock = block;
-          // The extracted summary is the best Description; else the mechanical one-liner.
-          base.desc = summary ? summary.slice(0, 300) : emailDesc(m, base.name);
-          base.noteLine = '• ' + (summary || m.subject || base.name) + ' - Email';
+          m = isMsg ? parseMsg(rd.result) : emlToModel(parseEml(String(rd.result || '')));
         } catch (e) { return fallback(''); }
-        finish(base);
+        var mech = '';
+        try { mech = localSummary(m); } catch (e2) { mech = ''; }   // local field extraction; '' when too little is found
+        // On-device AI line for every email; '' (falls back to mech, then emailDesc) when
+        // the built-in model is unavailable. aiSummary is self-bounded, but the outer 10s
+        // timeout may already have fired - re-check `done` before using the result.
+        aiSummary(m).then(function (ai) {
+          if (done) return;
+          try {
+            var summary = ai || mech;
+            var block = formatEmailBlock(m, summary);
+            if (!block) return fallback('');
+            base.isEmail = true; base.email = m; base.summary = summary; base.aiUsed = !!ai;
+            base.noteBlock = block;
+            // The summary is the best Description; else the mechanical one-liner.
+            base.desc = summary ? summary.slice(0, 300) : emailDesc(m, base.name);
+            base.noteLine = '• ' + (summary || m.subject || base.name) + ' - Email';
+            finish(base);
+          } catch (e3) { fallback(''); }
+        });
       };
       if (isMsg) rd.readAsArrayBuffer(f); else rd.readAsText(f);
     });
@@ -1026,8 +1119,9 @@
       }, 5000).then(function (ed) {
         if (!ed) { copied.then(function (ok) { toast(ok ? 'Upload note copied to clipboard - the note composer didn’t open.' : 'The note composer didn’t open.'); }); return; }
         setEditorValue(ed, text).then(function (filled) {
-          // Note Type is chosen from the sender's domain (noteTypeForFiles). Scope to the
-          // just-opened composer so we never touch an unrelated dropdown. Best-effort; posts regardless.
+          // Note Type is chosen from the email's parties (noteTypeForFiles -> noteTypeForEmail:
+          // inbound by sender, outbound by recipient). Scope to the just-opened composer so we
+          // never touch an unrelated dropdown. Best-effort; posts regardless.
           try { var comp = (ed.closest && ed.closest('[role="dialog"],.MuiDialog-root,form,.MuiPaper-root')) || document; setTimeout(function () { setNoteType(noteType, comp); }, 80); } catch (e) { }
           copied.then(function (ok) {
             if (filled) toast('Upload note drafted (Type: ' + noteType + ') - review and Save.' + (ok ? ' (Also on your clipboard.)' : ''));
