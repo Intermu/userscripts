@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         BWN Suite - AI (Broadway National)
 // @namespace    broadwaynational.bwn
-// @version      1.38.0
+// @version      1.39.0
 // @downloadURL  https://raw.githubusercontent.com/Intermu/userscripts/main/bwn-suite-ai.user.js
 // @updateURL    https://raw.githubusercontent.com/Intermu/userscripts/main/bwn-suite-ai.user.js
 // @description  The Umbrava tools that call outside APIs, kept separate from the zero-egress Core script. Client Update and WO Audit drafts (Anthropic Claude; draft-only, scrubbed before sending, you review before posting); Find Techs / Find Suppliers (Google Places; vendor leads near a WO); and Job View (opens the Ops-Dashboard job card on the WO page - WO details from Umbrava plus the authored case file and next actions, read-only). Network access is limited by the browser to the declared API hosts and the BWN Static Web App. API keys are stored in Tampermonkey's storage via the menu commands and never enter the page. Toggle modules in BWN_MODULES below.
@@ -2735,12 +2735,17 @@ if (BWN_MODULES.jobView) BWN.safeModule('jobView', function () {
 
   // ---- Umbrava role sender ------------------------------------------------------
   // Sends the Auth0 access token to the SWA, which PROVES it via Umbrava's own GraphQL
-  // current-user query (a vouch - the SWA never verifies the signature locally; Umbrava
-  // rotates its signing alg) and returns the caller's Umbrava role. This is the client half
-  // of server-enforced role access levels; UX show/hide comes later. The token goes ONLY to
-  // the declared SWA @connect host, is never logged or cached (only the resulting role/email
-  // is). Dormant until the SWA key is set + connector enabled; throttled to ~6h via a GM
-  // cache so it's ~once/session.
+  // current-user query (a vouch - the SWA never verifies the signature locally) and returns
+  // the caller's Umbrava role PLUS the server-computed ladder position `rank` (1 staff ..
+  // 5 director) and `tier` name. The rank is what the role-gated UX keys on - it is the
+  // SAME number the enforcing endpoints (cc-purchase etc.) check, computed by the same
+  // server module, so client show/hide and server enforcement can never disagree about
+  // what a free-text role name means. rank/tier ride the bwn:role bus event AND the
+  // localStorage 'bwn:role:last' record so sibling suite scripts (e.g. bwn-cc-purchase)
+  // can gate their UI without re-fetching. The token goes ONLY to the declared SWA
+  // @connect host, is never logged or cached (only the resulting role/email is). Dormant
+  // until the SWA key is set + connector enabled; throttled to ~6h via a GM cache so it's
+  // ~once/session.
   var ROLE_URL = 'https://green-stone-0717dab0f.7.azurestaticapps.net/api/user-role';
   var ROLE_TTL_MS = 6 * 3600 * 1000;
   var _bwnRole = null;   // { email, sub, role, tenantId, roleQuery, ts }
@@ -2757,9 +2762,9 @@ if (BWN_MODULES.jobView) BWN.safeModule('jobView', function () {
   }
   function announceRole(rc) {
     _bwnRole = rc;
-    recordRole({ ok: true, role: (rc && rc.role) || null, email: (rc && rc.email) || '', roleQuery: (rc && rc.roleQuery) || null });
-    try { console.info('[BWN] Umbrava role:', (rc && rc.role) || '(none)', (rc && rc.roleQuery) ? ('· via ' + rc.roleQuery) : '', '· ' + ((rc && rc.email) || '')); } catch (e) { }
-    try { document.dispatchEvent(new CustomEvent('bwn:evt', { detail: { id: 'bwn:role', role: (rc && rc.role) || null, email: (rc && rc.email) || '', roleQuery: (rc && rc.roleQuery) || null } })); } catch (e) { }
+    recordRole({ ok: true, role: (rc && rc.role) || null, rank: (rc && typeof rc.rank === 'number') ? rc.rank : null, tier: (rc && rc.tier) || null, email: (rc && rc.email) || '', roleQuery: (rc && rc.roleQuery) || null });
+    try { console.info('[BWN] Umbrava role:', (rc && rc.role) || '(none)', (rc && rc.tier) ? ('· ' + rc.tier + ' tier (rank ' + rc.rank + ')') : '', '· ' + ((rc && rc.email) || '')); } catch (e) { }
+    try { document.dispatchEvent(new CustomEvent('bwn:evt', { detail: { id: 'bwn:role', role: (rc && rc.role) || null, rank: (rc && typeof rc.rank === 'number') ? rc.rank : null, tier: (rc && rc.tier) || null, email: (rc && rc.email) || '', roleQuery: (rc && rc.roleQuery) || null } })); } catch (e) { }
   }
   function fetchUserRole(force, cb) {
     var sub = authSub();
@@ -2774,7 +2779,9 @@ if (BWN_MODULES.jobView) BWN.safeModule('jobView', function () {
       return;
     }
     if (!force) {
-      try { var c = JSON.parse(GM_getValue('bwn_role_cache', 'null')); if (c && c.ts && (Date.now() - c.ts) < ROLE_TTL_MS && c.sub && c.sub === sub) { announceRole(c); if (cb) cb(c); return; } } catch (e) { }   // same-user + fresh
+      // same-user + fresh + carries a rank (a pre-1.39.0 cache has no rank - refetch once so
+      // the role-gated UX gets the server-computed ladder position, then it caches normally)
+      try { var c = JSON.parse(GM_getValue('bwn_role_cache', 'null')); if (c && c.ts && (Date.now() - c.ts) < ROLE_TTL_MS && c.sub && c.sub === sub && typeof c.rank === 'number') { announceRole(c); if (cb) cb(c); return; } } catch (e) { }
     }
     GM_xmlhttpRequest({
       method: 'POST', url: ROLE_URL, timeout: 15000,
@@ -2785,7 +2792,7 @@ if (BWN_MODULES.jobView) BWN.safeModule('jobView', function () {
       onload: function (r) {
         var j = null; try { j = JSON.parse(r.responseText); } catch (e) { }
         if (r.status >= 200 && r.status < 300 && j && j.ok) {
-          var rc = { email: j.email || '', sub: j.sub || '', role: j.role || null, tenantId: j.tenantId || '', roleQuery: j.roleQuery || null, ts: Date.now() };
+          var rc = { email: j.email || '', sub: j.sub || '', role: j.role || null, rank: (typeof j.rank === 'number') ? j.rank : null, tier: j.tier || null, tenantId: j.tenantId || '', roleQuery: j.roleQuery || null, ts: Date.now() };
           try { if (rc.role) GM_setValue('bwn_role_cache', JSON.stringify(rc)); } catch (e) { }   // persist only a RESOLVED role (never the token); a null role re-fetches next load
           announceRole(rc); if (cb) cb(rc);
         } else {
@@ -2800,7 +2807,7 @@ if (BWN_MODULES.jobView) BWN.safeModule('jobView', function () {
   }
   GM_registerMenuCommand('BWN: Check my Umbrava role', function () {
     fetchUserRole(true, function (rc, err) {
-      if (rc && rc.role) alert('Umbrava role: ' + rc.role + '\nResolved via: ' + (rc.roleQuery || '?') + '\nUser: ' + (rc.email || '') + '\nTenant: ' + (rc.tenantId || '') + '\n\n(AI v' + BWN_VER + ')');
+      if (rc && rc.role) alert('Umbrava role: ' + rc.role + (rc.tier ? '\nAccess tier: ' + rc.tier + ' (rank ' + rc.rank + ' of 5)' : '') + '\nResolved via: ' + (rc.roleQuery || '?') + '\nUser: ' + (rc.email || '') + '\nTenant: ' + (rc.tenantId || '') + '\n\n(AI v' + BWN_VER + ')');
       else if (rc) alert('Signed in and verified, but Umbrava returned no role.\nResolved via: ' + (rc.roleQuery || '(no query matched)') + '\nUser: ' + (rc.email || '') + '\n\n(AI v' + BWN_VER + ')');
       else alert('Could not fetch your Umbrava role.\nReason: ' + (err || 'unknown') + '\n\nChecklist: SWA ingest key set, connector on, signed into Umbrava.\n(AI v' + BWN_VER + ')');
     });

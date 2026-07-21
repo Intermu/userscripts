@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         BWN Bid-Out (Broadway National)
 // @namespace    broadwaynational.bwn
-// @version      0.21.2
+// @version      0.22.0
 // @downloadURL  https://raw.githubusercontent.com/Intermu/userscripts/main/bwn-bid-out.user.js
 // @updateURL    https://raw.githubusercontent.com/Intermu/userscripts/main/bwn-bid-out.user.js
 // @description  Email RFP to outside / net-new vendors, launched from a caret on Umbrava's own "See Who Is Available" button (network-vendor bidding stays native - no separate Bid-Out button). The caret menu opens the tracked email RFP wizard: finds net-new vendors nearby through Google Places, looks up their emails via the BWN scrape-contacts function, takes pasted outside addresses, and can still include assignable Umbrava vendors in the same email. You pick who's included, then review the exact recipient list and the rendered email before anything sends. Send from your own mailbox via the SWA send-bid function (Microsoft Graph), or open a plain Outlook draft. Vendors are BCC'd; nothing sends until you click Send. Network access is limited to Umbrava (same-origin), Google Places, and your SWA host.
@@ -20,7 +20,7 @@
 (function () {
   'use strict';
 
-  var VER = '0.21.1';
+  var VER = '0.22.0';
   console.info('[BWN BID-OUT] v' + VER + ' - 3-step Build Requests wizard (WO details -> select vendors -> review) · Umbrava vendors + Places net-new discovery + email scrape · one-click Graph send via SWA (Outlook-draft fallback)');
 
   var COMPANY_ADDR = 'Broadway National Group, 100 Davids Dr, Hauppauge, NY 11788';
@@ -407,21 +407,25 @@
   // their VERIFIED Umbrava token (never client-supplied) and stores the index under that team;
   // teammates read the same copy, other teams cannot. Degrades to LOCAL GM when the key/token is
   // absent or the tab is offline/throttled - the tool never depends on the network to function.
+  // The token rides in the JSON BODY, not the Authorization header: the SWA edge REPLACES
+  // Authorization with its own platform token on every proxied /api/* request (proven
+  // 2026-07-21 - it is why team resolution never worked), so reads are POSTs too
+  // (?action=read) - a GET cannot carry the body token.
   function hvacBenchAuth() {
     var key = GM_getValue('ingest_key', ''); var tok = authToken();
     if (!key || !tok) return null;
-    return { 'Content-Type': 'application/json', 'x-bwn-key': key, 'Authorization': 'Bearer ' + tok };
+    return { headers: { 'Content-Type': 'application/json', 'x-bwn-key': key }, token: tok };
   }
   function hvacShareIndex(payload) {
-    var h = hvacBenchAuth(); if (!h || !payload) return Promise.resolve({ shared: false, reason: 'no-auth' });
-    return gmPost(HVAC_BENCH_URL, h, { index: payload }, 30000).then(function (r) {
+    var a = hvacBenchAuth(); if (!a || !payload) return Promise.resolve({ shared: false, reason: 'no-auth' });
+    return gmPost(HVAC_BENCH_URL, a.headers, { token: a.token, index: payload }, 30000).then(function (r) {
       if (r.status >= 200 && r.status < 300 && r.json && r.json.ok) { _hvacScope = r.json.scope; _hvacTeamId = r.json.teamId; return { shared: true, scope: r.json.scope, teamId: r.json.teamId }; }
       return { shared: false, reason: (r.json && r.json.error) || ('HTTP ' + r.status) };
     }).catch(function (e) { return { shared: false, reason: (e && e.message) || 'network' }; });
   }
   function hvacFetchTeamIndex() {
-    var h = hvacBenchAuth(); if (!h) return Promise.resolve(null);
-    return gmGet(HVAC_BENCH_URL, h, 30000).then(function (r) {
+    var a = hvacBenchAuth(); if (!a) return Promise.resolve(null);
+    return gmPost(HVAC_BENCH_URL + '?action=read', a.headers, { token: a.token }, 30000).then(function (r) {
       if (r.status < 200 || r.status >= 300 || !r.json || !r.json.ok) return null;
       _hvacScope = r.json.scope; _hvacTeamId = r.json.teamId;
       var ix = r.json.index;
@@ -756,8 +760,12 @@
   }
 
   // One-click send via the SWA send-bid function (Microsoft Graph, from the coordinator's
-  // own mailbox). Same x-bwn-key gate as scrape-contacts. The server independently
-  // enforces the from-allowlist, BCC cap, and a daily recipient ceiling.
+  // own mailbox). Same x-bwn-key gate as scrape-contacts, PLUS the sender's Umbrava access
+  // token as `userToken` in the BODY (the SWA edge overwrites the Authorization header) -
+  // since 2026-07-21 the server vouches the token with Umbrava's own current-user API and
+  // refuses to send without a real, named Broadway identity (the shared key alone no longer
+  // sends email). The server independently enforces the from-allowlist, BCC cap, and a
+  // daily recipient ceiling.
   // idem = a STABLE per-attempt key (see the send handler). The server dedupes on it, so a
   // retry after a client timeout can NEVER double-send. Timeout is generous (180s) because
   // the per-vendor server path sends one email per vendor; a socket that closes early does
@@ -765,8 +773,10 @@
   function sendBid(fromEmail, mail, html, idem, attachments) {
     var key = GM_getValue('ingest_key', '');
     if (!key) return Promise.resolve({ ok: false, code: 'NO_KEY' });
+    var tok = authToken();
+    if (!tok) return Promise.resolve({ ok: false, code: 'NO_TOKEN', msg: 'No usable Umbrava session token - reload the tab and retry.' });
     return gmPost(SEND_URL, { 'Content-Type': 'application/json', 'x-bwn-key': key },
-      { from: fromEmail, bcc: mail.bcc, subject: mail.subject, html: html, tracking: mail.tracking || null, idem: idem || null, attachments: attachments || [] }, 180000)
+      { userToken: tok, from: fromEmail, bcc: mail.bcc, subject: mail.subject, html: html, tracking: mail.tracking || null, idem: idem || null, attachments: attachments || [] }, 180000)
       .then(function (r) {
         if (r.status === 200 && r.json && r.json.ok) {
           // tracked/sendId/failed present only in per-vendor mode (server TRACK_BASE_URL set).
@@ -1556,6 +1566,7 @@
           }
           btn.disabled = false; btn.textContent = '⚡ Send now (' + mail.bcc.length + ')';
           if (r.code === 'NO_KEY') { toast('Set the SWA ingest key first (Tampermonkey menu).'); return; }
+          if (r.code === 'NO_TOKEN' || r.code === 401) { toast('Umbrava could not verify your session' + (r.msg ? ' - ' + r.msg : '') + '. Reload the tab and retry; the send did not go out.'); return; }
           // "Maybe sent" outcomes: the request may have reached Graph and delivered some/all
           // emails (timeout, still-in-flight, or a 5xx AFTER a possible send). We must NOT nudge
           // the user to the Outlook draft - a mailto to every recipient with no dedup - so we
