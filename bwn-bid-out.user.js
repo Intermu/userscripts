@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         BWN Bid-Out (Broadway National)
 // @namespace    broadwaynational.bwn
-// @version      0.21.1
+// @version      0.21.2
 // @downloadURL  https://raw.githubusercontent.com/Intermu/userscripts/main/bwn-bid-out.user.js
 // @updateURL    https://raw.githubusercontent.com/Intermu/userscripts/main/bwn-bid-out.user.js
 // @description  Email RFP to outside / net-new vendors, launched from a caret on Umbrava's own "See Who Is Available" button (network-vendor bidding stays native - no separate Bid-Out button). The caret menu opens the tracked email RFP wizard: finds net-new vendors nearby through Google Places, looks up their emails via the BWN scrape-contacts function, takes pasted outside addresses, and can still include assignable Umbrava vendors in the same email. You pick who's included, then review the exact recipient list and the rendered email before anything sends. Send from your own mailbox via the SWA send-bid function (Microsoft Graph), or open a plain Outlook draft. Vendors are BCC'd; nothing sends until you click Send. Network access is limited to Umbrava (same-origin), Google Places, and your SWA host.
@@ -37,12 +37,27 @@
   var COMPANY_PHONE = '1.631.737.3140';
 
   // ---- Umbrava in-page GraphQL (same-origin, Auth0 bearer) -------------------
+  // Token picked by CONTENT, not just key: the audience-keyed Auth0 cache slot transiently
+  // holds NON-Umbrava tokens (seen live 2026-07-21: an Azure Functions/SCM runtime token,
+  // iss *.scm.azurewebsites.net, HS256), which Umbrava's GraphQL rejects as UNAUTHENTICATED.
+  // Only an unexpired token with an Umbrava issuer is usable; otherwise report signed-out.
+  function isUmbravaToken(tok) {
+    try {
+      var p = JSON.parse(atob(String(tok).split('.')[1].replace(/-/g, '+').replace(/_/g, '/')));
+      var iss = String(p.iss || '').replace(/\/+$/, '');
+      if (iss !== 'https://login.umbrava.com' && iss !== 'https://umbrava.us.auth0.com') return false;
+      return !(typeof p.exp === 'number' && (Date.now() / 1000) > p.exp);
+    } catch (e) { return false; }
+  }
   function authToken() {
     try {
-      var k = Object.keys(localStorage).find(function (x) { return /@@auth0spajs@@::.*::https:\/\/app\.umbrava\.com\/api::/.test(x); });
-      if (!k) return null;
-      var v = JSON.parse(localStorage.getItem(k));
-      return (v && v.body && v.body.access_token) || null;
+      var keys = Object.keys(localStorage).filter(function (x) { return /@@auth0spajs@@::.*::https:\/\/app\.umbrava\.com\/api::/.test(x); });
+      for (var i = 0; i < keys.length; i++) {
+        var v = JSON.parse(localStorage.getItem(keys[i]));
+        var tok = (v && v.body && v.body.access_token) || null;
+        if (tok && isUmbravaToken(tok)) return tok;
+      }
+      return null;
     } catch (e) { return null; }
   }
   function actor() {

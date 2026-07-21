@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         BWN Suite - AI (Broadway National)
 // @namespace    broadwaynational.bwn
-// @version      1.37.1
+// @version      1.37.2
 // @downloadURL  https://raw.githubusercontent.com/Intermu/userscripts/main/bwn-suite-ai.user.js
 // @updateURL    https://raw.githubusercontent.com/Intermu/userscripts/main/bwn-suite-ai.user.js
 // @description  The Umbrava tools that call outside APIs, kept separate from the zero-egress Core script. Client Update and WO Audit drafts (Anthropic Claude; draft-only, scrubbed before sending, you review before posting); Find Techs / Find Suppliers (Google Places; vendor leads near a WO); and Job View (opens the Ops-Dashboard job card on the WO page - WO details from Umbrava plus the authored case file and next actions, read-only). Network access is limited by the browser to the declared API hosts and the BWN Static Web App. API keys are stored in Tampermonkey's storage via the menu commands and never enter the page. Toggle modules in BWN_MODULES below.
@@ -2695,8 +2695,21 @@ if (BWN_MODULES.jobView) BWN.safeModule('jobView', function () {
   // DATA LAYER (local)
   // ====================================================================
 
-  // Auth0 access token - same key pattern the Bid-Out tool uses.
-  function authToken() {
+  // Auth0 access token - same key pattern the Bid-Out tool uses. Picked by CONTENT, not just
+  // key: the audience-keyed cache slot transiently holds NON-Umbrava tokens (seen live
+  // 2026-07-21: an Azure Functions/SCM runtime token, iss *.scm.azurewebsites.net, HS256 -
+  // this is what the 07/19 "HS256" role-debug sighting actually was). Only an unexpired token
+  // whose iss is an Umbrava issuer is usable; anything else = treat as signed-out and retry.
+  function isUmbravaToken(tok) {
+    try {
+      var p = JSON.parse(atob(String(tok).split('.')[1].replace(/-/g, '+').replace(/_/g, '/')));
+      var iss = String(p.iss || '').replace(/\/+$/, '');
+      if (iss !== 'https://login.umbrava.com' && iss !== 'https://umbrava.us.auth0.com') return false;
+      return !(typeof p.exp === 'number' && (Date.now() / 1000) > p.exp);
+    } catch (e) { return false; }
+  }
+  // Raw first-match read (diagnostics only - shows whatever is in the slot right now).
+  function rawAuthToken() {
     try {
       var k = Object.keys(localStorage).filter(function (x) {
         return /@@auth0spajs@@::.*::https:\/\/app\.umbrava\.com\/api::/.test(x);
@@ -2704,6 +2717,19 @@ if (BWN_MODULES.jobView) BWN.safeModule('jobView', function () {
       if (!k) return '';
       var body = (JSON.parse(localStorage.getItem(k)) || {}).body;
       return (body && body.access_token) || '';
+    } catch (e) { return ''; }
+  }
+  function authToken() {
+    try {
+      var keys = Object.keys(localStorage).filter(function (x) {
+        return /@@auth0spajs@@::.*::https:\/\/app\.umbrava\.com\/api::/.test(x);
+      });
+      for (var i = 0; i < keys.length; i++) {
+        var body = (JSON.parse(localStorage.getItem(keys[i])) || {}).body;
+        var tok = (body && body.access_token) || '';
+        if (tok && isUmbravaToken(tok)) return tok;
+      }
+      return '';
     } catch (e) { return ''; }
   }
 
@@ -2734,7 +2760,11 @@ if (BWN_MODULES.jobView) BWN.safeModule('jobView', function () {
     if (_bwnRole && !force && _bwnRole.sub === sub) { if (cb) cb(_bwnRole); return; }
     if (!connectorEnabled()) { if (cb) cb(null, 'connector is off (Ops Suite toggle)'); return; }
     var key = GM_getValue('ingest_key', ''); if (!key) { if (cb) cb(null, 'SWA ingest key not set (Tampermonkey menu)'); return; }
-    var tok = authToken(); if (!tok) { if (cb) cb(null, 'not signed into Umbrava (no token found)'); return; }
+    var tok = authToken();
+    if (!tok) {
+      if (cb) cb(null, rawAuthToken() ? 'no usable Umbrava token yet (the auth cache holds a non-Umbrava token right now) - wait a few seconds or reload the tab, then retry' : 'not signed into Umbrava (no token found)');
+      return;
+    }
     if (!force) {
       try { var c = JSON.parse(GM_getValue('bwn_role_cache', 'null')); if (c && c.ts && (Date.now() - c.ts) < ROLE_TTL_MS && c.sub && c.sub === sub) { announceRole(c); if (cb) cb(c); return; } } catch (e) { }   // same-user + fresh
     }
@@ -2764,7 +2794,7 @@ if (BWN_MODULES.jobView) BWN.safeModule('jobView', function () {
   // iss/aud/exp vs the SWA's expected values, incl. issMatch/audMatch - never the signature).
   // Remove once role auth is confirmed.
   GM_registerMenuCommand('BWN: role debug (diagnostic)', function () {
-    var key = GM_getValue('ingest_key', ''); var tok = authToken();
+    var key = GM_getValue('ingest_key', ''); var tok = rawAuthToken();   // raw: echo whatever the slot holds
     if (!key || !tok) { alert('debug: missing ' + (!key ? 'ingest key' : 'Umbrava token')); return; }
     GM_xmlhttpRequest({
       method: 'POST', url: ROLE_URL + '?debug=1', timeout: 15000,
