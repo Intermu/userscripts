@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         BWN Suite - AI (Broadway National)
 // @namespace    broadwaynational.bwn
-// @version      1.37.4
+// @version      1.38.0
 // @downloadURL  https://raw.githubusercontent.com/Intermu/userscripts/main/bwn-suite-ai.user.js
 // @updateURL    https://raw.githubusercontent.com/Intermu/userscripts/main/bwn-suite-ai.user.js
 // @description  The Umbrava tools that call outside APIs, kept separate from the zero-egress Core script. Client Update and WO Audit drafts (Anthropic Claude; draft-only, scrubbed before sending, you review before posting); Find Techs / Find Suppliers (Google Places; vendor leads near a WO); and Job View (opens the Ops-Dashboard job card on the WO page - WO details from Umbrava plus the authored case file and next actions, read-only). Network access is limited by the browser to the declared API hosts and the BWN Static Web App. API keys are stored in Tampermonkey's storage via the menu commands and never enter the page. Toggle modules in BWN_MODULES below.
@@ -2805,19 +2805,8 @@ if (BWN_MODULES.jobView) BWN.safeModule('jobView', function () {
       else alert('Could not fetch your Umbrava role.\nReason: ' + (err || 'unknown') + '\n\nChecklist: SWA ingest key set, connector on, signed into Umbrava.\n(AI v' + BWN_VER + ')');
     });
   });
-  // TEMP diagnostic: shows what the SWA actually receives (header alg/kid/typ + claims
-  // iss/aud/exp vs the SWA's expected values, incl. issMatch/audMatch - never the signature).
-  // Remove once role auth is confirmed.
-  GM_registerMenuCommand('BWN: role debug (diagnostic)', function () {
-    var key = GM_getValue('ingest_key', ''); var tok = rawAuthToken();   // raw: echo whatever the slot holds
-    if (!key || !tok) { alert('debug: missing ' + (!key ? 'ingest key' : 'Umbrava token')); return; }
-    GM_xmlhttpRequest({
-      method: 'POST', url: ROLE_URL + '?debug=1', timeout: 15000,
-      headers: { 'Content-Type': 'application/json', 'x-bwn-key': key }, data: JSON.stringify({ token: tok }),
-      onload: function (r) { alert('AI v' + BWN_VER + ' - SWA received (status ' + r.status + '):\n' + (r.responseText || '').slice(0, 1200)); },
-      onerror: function () { alert('debug: network error reaching the SWA'); }, ontimeout: function () { alert('debug: timed out'); }
-    });
-  });
+  // (The temp "BWN: role debug" menu was removed in v1.38.0 - role auth confirmed working
+  // 2026-07-21. The SWA's ?debug=1 echo remains server-side for future curl diagnostics.)
   // Fire once per session shortly after load so the SWA resolves the role + logs/returns the
   // query field it used (roleQuery) - this is what confirms the current-user field in prod.
   setTimeout(function () { try { fetchUserRole(false); } catch (e) { } }, 4000);
