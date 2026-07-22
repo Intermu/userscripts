@@ -1,10 +1,10 @@
 // ==UserScript==
 // @name         BWN Suite - Core (Broadway National)
 // @namespace    broadwaynational.bwn
-// @version      1.55.0
+// @version      1.56.0
 // @downloadURL  https://raw.githubusercontent.com/Intermu/userscripts/main/bwn-suite-core.user.js
 // @updateURL    https://raw.githubusercontent.com/Intermu/userscripts/main/bwn-suite-core.user.js
-// @description  Runs several Umbrava helpers for BWN coordinators, all in the browser with no network access. Includes: PO Approval + ETA Builder; WO Assist (GP/ETA, a stall watchdog, DNE calculator, and a next-action playbook); Email Leak Guard (checks recipients against vendor names, PO amounts, and client budget references before an outbound email sends); WO List Heat (a triage overlay + My Day strip on the work-order list); and the BWN Launcher (opens the Azure Static Web App tools with the current WO's context). Modules share state through sessionStorage/localStorage. No network calls, no privileged grants. Toggle modules in BWN_MODULES below.
+// @description  Runs several Umbrava helpers for BWN coordinators, in the browser with no privileged grants. Includes: PO Approval + ETA Builder; WO Assist (GP/ETA, a stall watchdog, DNE calculator, and a next-action playbook); Email Leak Guard (checks recipients against vendor names, PO amounts, and client budget references before an outbound email sends); WO List Heat (a triage overlay + My Day strip on the work-order list, with an optional same-origin Umbrava API scan for deterministic full-board coverage); and the BWN Launcher (opens the Azure Static Web App tools with the current WO's context). Modules share state through sessionStorage/localStorage. The only network call is List Heat's same-origin GraphQL scan (app.umbrava.com/api/graphql, the app's own session); everything else is offline. Toggle modules in BWN_MODULES below.
 // @match        https://app.umbrava.com/*
 // @match        https://*.umbrava.com/*
 // @run-at       document-idle
@@ -44,7 +44,7 @@
   try { localStorage.setItem('bwn:status:core', JSON.stringify({ ver: BWN_VER, ts: Date.now() })); } catch (e) { /* best-effort */ }
 
   console.info('[BWN SUITE CORE] v' + BWN_VER + ' |',
-    'Shared Core 7 \u00b7 PO Approval 1.13 \u00b7 WO Assist 2.51 \u00b7 Leak Guard 2.0 \u00b7 List Heat 3.14 \u00b7 Launcher 2.0 \u00b7 Views 1.0 \u00b7 Palette 1.1 \u00b7 Visit 1.2 \u00b7 Reminders 1.1 \u00b7 Timeline 1.1 \u00b7 TripCal 1.3 \u00b7 Connector 1.2 |',
+    'Shared Core 7 \u00b7 PO Approval 1.13 \u00b7 WO Assist 2.51 \u00b7 Leak Guard 2.0 \u00b7 List Heat 3.15 \u00b7 Launcher 2.0 \u00b7 Views 1.0 \u00b7 Palette 1.1 \u00b7 Visit 1.2 \u00b7 Reminders 1.1 \u00b7 Timeline 1.1 \u00b7 TripCal 1.3 \u00b7 Connector 1.2 |',
     'enabled:', Object.keys(BWN_MODULES).filter(function (k) { return BWN_MODULES[k]; }).join(', '));
 
   // ===== BWN SHARED CORE v7 - KEEP IN SYNC across both suite scripts =====
@@ -4349,7 +4349,7 @@
   });
 
   // ==========================================================================
-  // MODULE: WO List Heat v3.13
+  // MODULE: WO List Heat v3.15
   // ==========================================================================
   if (BWN_MODULES.listHeat) BWN.safeModule('listHeat', function () {
     'use strict';
@@ -4360,7 +4360,7 @@
     }
     window.__bwnWoHeat = true;
 
-    console.info('[BWN HEAT] v3.13 loaded on', location.href);
+    console.info('[BWN HEAT] v3.15 loaded on', location.href);
 
     // ---- Config (edit here) ----------------------------------------------
     // Advanced knobs (edit in code): status-class regexes and priority multipliers.
@@ -4379,6 +4379,220 @@
     var SUM_ID = 'bwn-heat-sum';
     var PANEL_ID = 'bwn-heat-panel';
     var STYLE_ID = 'bwn-heat-style';
+
+    // ==========================================================================
+    // Umbrava API data layer + list-query CAPTURE (v3.15)
+    // ==========================================================================
+    // The scroll-based Scan All (below) is timing-heuristic and breaks whenever
+    // Umbrava's virtualizer changes. This layer gives a DETERMINISTIC full-board
+    // read instead: the SPA already fires exactly the right list GraphQL query, so
+    // we PASSIVELY CAPTURE it off the wire (fetch + XHR hook) and REPLAY it with an
+    // enlarged page size / cursor walk. We never hardcode Umbrava's schema - we
+    // send back whatever the app sent, so schema drift is inherited for free.
+    //   - Core is @grant none: a plain SAME-ORIGIN fetch to /api/graphql carries the
+    //     app's own Auth0 bearer + cookies, so no new @grant / @connect is needed.
+    //   - Everything degrades to the scroll Scan All: no capture, a throw, a wrong
+    //     total, or a low-confidence row map all fall back and warn - never a silent
+    //     partial board.
+    var apiList = null;   // captured shape: { query, variables, path[], conn, ts, sample }
+    var apiCapTs = 0;
+    var heatReplaying = false;   // true during our own API scan - so the hook never captures our replay pages as a "new" query
+
+    function heatIsUmbravaToken(tok) {
+      try {
+        var p = JSON.parse(atob(String(tok).split('.')[1].replace(/-/g, '+').replace(/_/g, '/')));
+        var iss = String(p.iss || '').replace(/\/+$/, '');
+        if (iss !== 'https://login.umbrava.com' && iss !== 'https://umbrava.us.auth0.com') return false;
+        return !(typeof p.exp === 'number' && (Date.now() / 1000) > p.exp);
+      } catch (e) { return false; }
+    }
+    // Auth0 access token from the SPA's own cache - picked by CONTENT (the audience
+    // slot transiently holds non-Umbrava tokens), same rule the AI script's gql() uses.
+    function heatAuthToken() {
+      try {
+        var keys = Object.keys(localStorage).filter(function (x) {
+          return /@@auth0spajs@@::.*::https:\/\/app\.umbrava\.com\/api::/.test(x);
+        });
+        for (var i = 0; i < keys.length; i++) {
+          var body = (JSON.parse(localStorage.getItem(keys[i])) || {}).body;
+          var tok = (body && body.access_token) || '';
+          if (tok && heatIsUmbravaToken(tok)) return tok;
+        }
+      } catch (e) { }
+      return '';
+    }
+    // Same-origin GraphQL POST → resolves to `data`, throws on errors[].
+    function heatGql(query, variables) {
+      var tok = heatAuthToken();
+      return fetch('/api/graphql', {
+        method: 'POST',
+        headers: { 'Authorization': 'Bearer ' + tok, 'Content-Type': 'application/json' },
+        body: JSON.stringify({ query: query, variables: variables || {} })
+      }).then(function (r) { return r.json(); }).then(function (j) {
+        if (j && j.errors && j.errors.length) throw new Error(j.errors[0].message || 'GraphQL error');
+        return j && j.data;
+      });
+    }
+
+    // A row "looks like a WO" if it carries a numeric WO number key.
+    function heatLooksLikeWO(o) {
+      if (!o || typeof o !== 'object') return false;
+      var ks = Object.keys(o);
+      for (var i = 0; i < ks.length; i++) {
+        if (/(^|_)number$|workordernumber/i.test(ks[i]) && (typeof o[ks[i]] === 'number' || /^\d{3,}$/.test(String(o[ks[i]])))) return true;
+      }
+      return false;
+    }
+    // Locate the biggest WO-row array (plain array OR relay connection) inside a
+    // GraphQL `data` object. Returns { path[], conn:false|'nodes'|'edges', rows[], container }.
+    function heatFindWOList(data) {
+      var best = null;
+      (function walk(node, path, depth) {
+        if (!node || typeof node !== 'object' || depth > 5) return;
+        if (Array.isArray(node)) {
+          var hits = 0; for (var i = 0; i < node.length; i++) if (heatLooksLikeWO(node[i])) hits++;
+          if (hits >= 1 && (!best || node.length > best.rows.length)) best = { path: path.slice(), conn: false, rows: node, container: null };
+          return;
+        }
+        if (Array.isArray(node.nodes) && node.nodes.some(heatLooksLikeWO)) {
+          if (!best || node.nodes.length > best.rows.length) best = { path: path.concat('nodes'), conn: 'nodes', rows: node.nodes, container: node };
+        } else if (Array.isArray(node.edges)) {
+          var ns = node.edges.map(function (e) { return e && e.node; });
+          if (ns.some(heatLooksLikeWO) && (!best || ns.length > best.rows.length)) best = { path: path.concat('edges'), conn: 'edges', rows: ns, container: node };
+        }
+        Object.keys(node).forEach(function (k) { walk(node[k], path.concat(k), depth + 1); });
+      })(data, [], 0);
+      return best;
+    }
+    // Re-walk a fresh response to the SAME list path so a replay page reads the same slot.
+    function heatRowsAtPath(data, found) {
+      var node = data;
+      for (var i = 0; i < found.path.length; i++) { if (!node) return []; node = node[found.path[i]]; }
+      if (!node) return [];
+      if (found.conn === 'edges') return node.map(function (e) { return e && e.node; }).filter(Boolean);
+      return Array.isArray(node) ? node : [];
+    }
+    // Container (the connection object) at the path's parent - carries pageInfo/totalCount.
+    function heatContainerAtPath(data, found) {
+      var node = data;
+      for (var i = 0; i < found.path.length - 1; i++) { if (!node) return null; node = node[found.path[i]]; }
+      return node || null;
+    }
+
+    // Flatten a row one level (nested objects/arrays → dotted scalar keys) then pull
+    // the fields the heat model needs by key-name regex, tolerant of list-vs-detail
+    // naming differences. Dates → M/D/YYYY strings so BWN.parseUSDate reads them; the
+    // rest → the same string shape the DOM path stores, so every downstream consumer
+    // (audit, TSV, over-30, snapshot) is unchanged.
+    function heatFlatten(row) {
+      var flat = {};
+      Object.keys(row || {}).forEach(function (k) {
+        var val = row[k];
+        if (val && typeof val === 'object' && !Array.isArray(val)) {
+          Object.keys(val).forEach(function (k2) { if (val[k2] == null || typeof val[k2] !== 'object') flat[k + '.' + k2] = val[k2]; });
+        } else if (Array.isArray(val)) {
+          if (val.length && val[0] && typeof val[0] === 'object' && 'name' in val[0]) flat[k + '.name'] = val.map(function (x) { return x && x.name; }).filter(Boolean).join(', ');
+        } else { flat[k] = val; }
+      });
+      return flat;
+    }
+    function heatDateStr(v) {
+      if (v == null || v === '') return '';
+      if (/^\d{1,2}\/\d{1,2}\/\d{2,4}$/.test(String(v))) return String(v);
+      var d = new Date(v); if (isNaN(+d)) return '';
+      return (d.getMonth() + 1) + '/' + d.getDate() + '/' + d.getFullYear();
+    }
+    function heatApiRowToEntry(row) {
+      var flat = heatFlatten(row);
+      var keys = Object.keys(flat);
+      function g(re) { for (var i = 0; i < keys.length; i++) if (re.test(keys[i])) { var v = flat[keys[i]]; if (v != null && v !== '') return v; } return ''; }
+      var numRaw = g(/(^|\.)(workordernumber|number)$/i);
+      var num = String(numRaw).replace(/\D/g, '');
+      if (!num) return null;
+      var status = String(g(/statusname|(^|\.)status(\.(name|label))?$|workorderstatus/i) || '');
+      var prio = String(g(/priority.*(label|name)|(^|\.)priority$/i) || '');
+      var client = String(g(/(^|\.)(clientname|customername|client|customer)(\.(name))?$|accountname/i) || g(/locationname/i) || '');
+      var assignee = String(g(/assigned.*(to|user|name)|assignee|coordinator|owner.*name/i) || '');
+      var dne = g(/donotexceed.*amount|(^|\.)dne$|(^|\.)nte$|notexceed/i);
+      var hrs = g(/timeinstatus|hoursinstatus|hrsinstatus|statushours|statushrs/i);
+      var days = g(/(^|\.)(age|days|daysopen|daysold|numberofdays)$|agedays/i);
+      var created = g(/workorderdate|creationdate|createddate|datecreated|createdon/i);
+      var exp = g(/expectedcompletion|completeby|completiondate/i);
+      var sched = g(/scheduleddate|scheduledate|nextonsite|firsttripdate|scheduledstart/i);
+      var lastNote = g(/lastnote.*date|lastnotedate|lastactivity|lastnoteon/i);
+      var ageStr = '';
+      if (days !== '' && !isNaN(parseFloat(String(days).replace(/,/g, '')))) ageStr = String(Math.round(parseFloat(String(days).replace(/,/g, ''))));
+      else if (created) { var ct = BWN.parseUSDate(heatDateStr(created)); if (ct !== null) ageStr = String(dSince(ct)); }
+      return {
+        href: '/work-orders/' + num,
+        entry: {
+          id: num, wo: String(numRaw), tracking: String(g(/trackingnumber|(^|\.)tracking$/i) || '').replace(/\D+/g, ''),
+          status: status, prio: prio, client: client, assignee: cleanName(assignee),
+          hrs: (hrs === '' ? '' : String(hrs)), days: ageStr,
+          dne: (dne === '' ? '' : (typeof dne === 'number' ? BWN.money(dne) : String(dne))),
+          sched: heatDateStr(sched), lastNote: heatDateStr(lastNote), exp: heatDateStr(exp)
+        }
+      };
+    }
+
+    // Record a captured list query, but only if it beats what we already have
+    // (more rows = more likely the real board query, not a sidebar widget).
+    function heatRecordCapture(reqBody, data) {
+      if (heatReplaying) return;   // don't re-capture our own enlarged replay pages
+      try {
+        var found = heatFindWOList(data);
+        if (!found || !found.rows.length) return;
+        if (apiList && found.rows.length < (apiList._rows || 0) && (Date.now() - apiCapTs) < 60000) return;
+        var body = (typeof reqBody === 'string') ? JSON.parse(reqBody) : reqBody;
+        if (!body || !body.query) return;
+        // Only accept an operation whose rows genuinely map to WOs (a real WO number).
+        var probe = heatApiRowToEntry(found.rows[0]);
+        if (!probe) return;
+        apiList = { query: body.query, variables: body.variables || {}, path: found.path, conn: found.conn, _rows: found.rows.length, sample: probe.entry };
+        apiCapTs = Date.now();
+        console.info('[BWN HEAT] captured list query (' + found.rows.length + ' rows, path ' + found.path.join('.') + (found.conn ? '/' + found.conn : '') + ') - API scan available. Sample:', probe.entry);
+      } catch (e) { /* capture is best-effort */ }
+    }
+
+    // Install the fetch + XHR hooks ONCE per page (survives SPA route changes).
+    (function installNetHook() {
+      if (window.__bwnHeatNetHook) return;
+      window.__bwnHeatNetHook = true;
+      function isGqlUrl(u) { return typeof u === 'string' && /\/api\/graphql\b/.test(u); }
+      try {
+        var of = window.fetch;
+        if (typeof of === 'function') {
+          window.fetch = function (input, init) {
+            var url = (typeof input === 'string') ? input : (input && input.url) || '';
+            var body = (init && init.body) || (input && input.body) || null;
+            var p = of.apply(this, arguments);
+            if (isGqlUrl(url) && body) {
+              try {
+                p.then(function (res) {
+                  try { res.clone().json().then(function (j) { if (j && j.data) heatRecordCapture(body, j.data); }, function () { }); } catch (e) { }
+                  return res;
+                }, function () { });
+              } catch (e) { }
+            }
+            return p;
+          };
+        }
+      } catch (e) { }
+      try {
+        var oOpen = XMLHttpRequest.prototype.open, oSend = XMLHttpRequest.prototype.send;
+        XMLHttpRequest.prototype.open = function (m, u) { this.__bwnUrl = u; return oOpen.apply(this, arguments); };
+        XMLHttpRequest.prototype.send = function (body) {
+          var xhr = this;
+          if (isGqlUrl(xhr.__bwnUrl) && body) {
+            xhr.addEventListener('load', function () {
+              try { var j = JSON.parse(xhr.responseText); if (j && j.data) heatRecordCapture(body, j.data); } catch (e) { }
+            });
+          }
+          return oSend.apply(this, arguments);
+        };
+      } catch (e) { }
+      console.info('[BWN HEAT] network hook installed - waiting to capture the WO-list query.');
+    })();
 
     // ---- Helpers ------------------------------------------------------------
     function todayMid() { var d = new Date(); d.setHours(0, 0, 0, 0); return d.getTime(); }
@@ -4695,6 +4909,46 @@
       return { warn: C.hrsWarn * mult, bad: C.hrsBad * mult };
     }
 
+    // ---- Per-row verdict: ONE source of truth (v3.15) ------------------------------
+    // Pure fn - facts in, verdict out - so the DOM tinting pass, the API scan, and the
+    // My Day counts can never disagree about what makes a row red/amber. facts:
+    //   { status, prio, ageDays (number|NaN), hrs (number|NaN),
+    //     expTs, schedTs, lastNoteTs (epoch ms | null) }
+    // Returns { sev 0|1|2, reasons[], kinds[], over30, limitBad, limitWatch, stale,
+    //           noteAge (days | null) }. A done/closed status is always sev 0.
+    function computeVerdict(f, C) {
+      var reasons = [], kinds = [], sev = 0;
+      var v = { sev: 0, reasons: reasons, kinds: kinds, over30: false, limitBad: false, limitWatch: false, stale: false, noteAge: null };
+      function bump(level, msg, kind) {
+        if (level > sev) sev = level;
+        reasons.push(msg);
+        if (kind && kinds.indexOf(kind) === -1) kinds.push(kind);
+      }
+      if (/complete|invoiced|closed|cancel/i.test(f.status || '')) return v;
+      v.over30 = !isNaN(f.ageDays) && f.ageDays > 30;
+      var th = thresholdsFor(f.status, f.prio, C);
+      if (!isNaN(f.hrs)) {
+        if (f.hrs >= th.bad) { bump(2, Math.round(f.hrs) + 'h in "' + (f.status || '?') + '" (limit ' + Math.round(th.bad) + 'h)', 'limitbad'); v.limitBad = true; }
+        else if (f.hrs >= th.warn) { bump(1, Math.round(f.hrs) + 'h in "' + (f.status || '?') + '" (watch from ' + Math.round(th.warn) + 'h)', 'limitwatch'); v.limitWatch = true; }
+      }
+      if (f.expTs !== null && f.expTs !== undefined) {
+        var dd = dUntil(f.expTs);
+        if (dd < 0) bump(2, 'complete-by overdue ' + Math.abs(dd) + 'd', 'overdue');
+        else if (dd <= C.dueWarnDays) bump(1, 'due in ' + dd + 'd', 'duesoon');
+      }
+      if (f.schedTs !== null && f.schedTs !== undefined) {
+        var over = dSince(f.schedTs);
+        if (over > C.schedGraceDays) bump(2, 'sched date passed ' + over + 'd', 'schedpassed');
+      }
+      if (f.lastNoteTs !== null && f.lastNoteTs !== undefined) {
+        var quiet = dSince(f.lastNoteTs);
+        v.noteAge = quiet;
+        if (quiet > C.noteStaleDays) { bump(1, 'last note ' + quiet + 'd ago', 'stale'); v.stale = true; }
+      }
+      v.sev = sev;
+      return v;
+    }
+
     // ---- Heat pass ----------------------------------------------------------------
     var heatStore = null;     // { href: {sev, reasons[], wo, client, status, assignee, prio, hrs, days, dne, sched, lastNote, exp} }
     var heatScanning = false;
@@ -4752,52 +5006,33 @@
         var rowId = idm ? idm[1] : null;
         var status = cellText(tr, H.status);
         var prio = cellText(tr, H.prio);
-        var reasons = [], kinds = [], sev = 0;
-        function bump(level, msg, kind) {
-          if (level > sev) sev = level;
-          reasons.push(msg);
-          if (kind && kinds.indexOf(kind) === -1) kinds.push(kind);
-        }
-
-        var rOver30 = false, rLimitBad = false, rLimitWatch = false, rStale = false;
         var ageDays = parseFloat(cellText(tr, H.days).replace(/,/g, ''));
         if (isNaN(ageDays) && H.created >= 0) {   // no "# Days" column - derive age from the WO Date column instead
           var crd = parseUSDate(cellText(tr, H.created));
           if (crd !== null) ageDays = dSince(crd);
         }
-        if (!/complete|invoiced|closed|cancel/i.test(status)) {
-          rOver30 = !isNaN(ageDays) && ageDays > 30;
-          var th = thresholdsFor(status, prio, C);
-          var hrs = parseFloat(cellText(tr, H.hrs).replace(/,/g, ''));
-          if (!isNaN(hrs)) {
-            if (hrs >= th.bad) { bump(2, Math.round(hrs) + 'h in "' + (status || '?') + '" (limit ' + Math.round(th.bad) + 'h)', 'limitbad'); rLimitBad = true; }
-            else if (hrs >= th.warn) { bump(1, Math.round(hrs) + 'h in "' + (status || '?') + '" (watch from ' + Math.round(th.warn) + 'h)', 'limitwatch'); rLimitWatch = true; }
-          }
-          var exp = parseUSDate(cellText(tr, H.exp));
-          if (exp !== null) {
-            var dd = dUntil(exp);
-            if (dd < 0) bump(2, 'complete-by overdue ' + Math.abs(dd) + 'd', 'overdue');
-            else if (dd <= C.dueWarnDays) bump(1, 'due in ' + dd + 'd', 'duesoon');
-          }
-          var sched = parseUSDate(cellText(tr, H.sched));
-          if (sched !== null) {
-            var over = dSince(sched);
-            if (over > C.schedGraceDays) bump(2, 'sched date passed ' + over + 'd', 'schedpassed');
-          }
-          var lnCell = (H.lastNote >= 0 && tr.cells) ? tr.cells[H.lastNote] : null;
-          var ln = parseUSDate(cellText(tr, H.lastNote));
-          if (ln !== null) {
-            var quiet = dSince(ln);
-            if (quiet > C.noteStaleDays) { bump(1, 'last note ' + quiet + 'd ago', 'stale'); rStale = true; }
-            if (lnCell) {
-              // Age rendered via CSS ::after from a data attr - attribute-only so it
-              // neither trips the childList observer nor gets clobbered by the virtualizer.
-              if (lnCell.getAttribute('data-bwn-age') !== String(quiet)) lnCell.setAttribute('data-bwn-age', quiet);
-              if (!lnCell.classList.contains('bwn-note-age')) lnCell.classList.add('bwn-note-age');
-              if (quiet > C.noteStaleDays) { if (!lnCell.classList.contains('bwn-note-stale')) lnCell.classList.add('bwn-note-stale'); }
-              else if (lnCell.classList.contains('bwn-note-stale')) lnCell.classList.remove('bwn-note-stale');
-            }
-          } else if (lnCell && lnCell.classList.contains('bwn-note-age')) {
+        // Verdict via the shared computeVerdict (same fn the API scan + My Day use),
+        // so row tint, audit counts, and My Day can never disagree.
+        var vf = computeVerdict({
+          status: status, prio: prio, ageDays: ageDays,
+          hrs: parseFloat(cellText(tr, H.hrs).replace(/,/g, '')),
+          expTs: parseUSDate(cellText(tr, H.exp)),
+          schedTs: parseUSDate(cellText(tr, H.sched)),
+          lastNoteTs: parseUSDate(cellText(tr, H.lastNote))
+        }, C);
+        var sev = vf.sev;
+        var reasons = vf.reasons.slice(), kinds = vf.kinds.slice();
+        var rOver30 = vf.over30, rLimitBad = vf.limitBad, rLimitWatch = vf.limitWatch, rStale = vf.stale;
+        // Last-note age badge (DOM-only decoration; ::after via a data attr so it
+        // neither trips the childList observer nor gets clobbered by the virtualizer).
+        var lnCell = (H.lastNote >= 0 && tr.cells) ? tr.cells[H.lastNote] : null;
+        if (lnCell) {
+          if (vf.noteAge !== null) {
+            if (lnCell.getAttribute('data-bwn-age') !== String(vf.noteAge)) lnCell.setAttribute('data-bwn-age', vf.noteAge);
+            if (!lnCell.classList.contains('bwn-note-age')) lnCell.classList.add('bwn-note-age');
+            if (vf.noteAge > C.noteStaleDays) { if (!lnCell.classList.contains('bwn-note-stale')) lnCell.classList.add('bwn-note-stale'); }
+            else if (lnCell.classList.contains('bwn-note-stale')) lnCell.classList.remove('bwn-note-stale');
+          } else if (lnCell.classList.contains('bwn-note-age')) {
             lnCell.classList.remove('bwn-note-age', 'bwn-note-stale');
             lnCell.removeAttribute('data-bwn-age');
           }
@@ -4893,8 +5128,8 @@
         sum.appendChild(auditBtn);
         var scanBtn = document.createElement('button');
         scanBtn.type = 'button'; scanBtn.textContent = 'Scan All';
-        scanBtn.title = 'Scrolls the list in converging passes so every WO is counted.';
-        scanBtn.addEventListener('click', function () { scanAll(scanBtn); });
+        scanBtn.title = 'Reads the whole board. Uses the Umbrava API when available (instant, exact); otherwise scrolls the list in converging passes.';
+        scanBtn.addEventListener('click', function () { runScan(scanBtn); });
         sum.appendChild(scanBtn);
         // Batch Over-30 lines - only when the AI script ran this session with its
         // Client Update module enabled (otherwise the handoff would go nowhere).
@@ -5269,7 +5504,139 @@
       woListHeat();
     }, 'listHeat:config'));
 
-    // ---- Scan All -------------------------------------------------------------------
+    // ---- Scan dispatcher: API first, scroll as the safety net ----------------------
+    // The button calls this. If a list query was captured off the wire, do the exact
+    // API scan; anything short of a clean, high-confidence full board falls through to
+    // the proven scroll sweep so the user is never left with a silent partial.
+    function runScan(btn) {
+      if (heatScanning) return;
+      if (apiList && heatAuthToken()) {
+        apiScanAll(btn).then(function (ok) {
+          if (!ok) { console.info('[BWN HEAT] API scan unavailable/low-confidence - falling back to scroll scan.'); scanAll(btn); }
+        }, function (err) {
+          console.warn('[BWN HEAT] API scan errored - falling back to scroll scan:', err && err.message || err);
+          heatScanning = false; btn.disabled = false; scanAll(btn);
+        });
+      } else {
+        scanAll(btn);
+      }
+    }
+
+    // ---- API scan: replay the captured list query across the whole board ------------
+    // Deterministic and virtualizer-free. Resolves true on a clean, confident full
+    // board (heatStore filled, snapshot written); false to hand off to the scroll scan.
+    function apiScanAll(btn) {
+      if (!apiList || !apiList.query) return Promise.resolve(false);
+      heatScanning = true; heatScanClean = false; heatStore = {}; heatReplaying = true;
+      btn.disabled = true; btn.textContent = 'Scanning (API)…';
+      var progEl = document.getElementById('bwn-heat-prog');
+      var target = umbravaTotal();
+      if (progEl) { progEl.style.display = 'block'; progEl.classList.add('indet'); }
+
+      // Discover the size / advance argument names from the captured variables.
+      var vars0 = apiList.variables || {};
+      function pickKey(names) {
+        var vk = Object.keys(vars0);
+        for (var i = 0; i < names.length; i++) for (var j = 0; j < vk.length; j++) if (vk[j].toLowerCase() === names[i]) return vk[j];
+        return null;
+      }
+      var sizeKey = pickKey(['first', 'limit', 'pagesize', 'take', 'perpage', 'pagelength', 'count']);
+      var cursorKey = pickKey(['after', 'cursor']);
+      var offsetKey = pickKey(['skip', 'offset', 'start']);
+      var pageKey = pickKey(['page', 'pagenumber', 'pageindex']);
+      var PAGE = 200, CAP = 60;
+      var origSize = sizeKey ? Number(vars0[sizeKey]) || 0 : 0;
+      if (sizeKey && origSize && origSize > PAGE) PAGE = Math.min(origSize, 500);
+
+      var seen = {}, pages = 0, badRows = 0, totalRows = 0;
+      var vars = JSON.parse(JSON.stringify(vars0));
+      if (sizeKey) vars[sizeKey] = PAGE;
+      if (cursorKey) vars[cursorKey] = null;
+      if (offsetKey) vars[offsetKey] = 0;
+      if (pageKey) vars[pageKey] = (typeof vars0[pageKey] === 'number' && vars0[pageKey] === 0) ? 0 : 1;
+
+      function absorb(rows) {
+        for (var i = 0; i < rows.length; i++) {
+          var mapped = heatApiRowToEntry(rows[i]);
+          totalRows++;
+          if (!mapped) { badRows++; continue; }
+          if (seen[mapped.href]) continue;
+          seen[mapped.href] = 1;
+          // Compute the verdict now so heatStore carries sev/reasons/kinds like the DOM path.
+          var C = bwnConfig();
+          var e = mapped.entry;
+          var vf = computeVerdict({
+            status: e.status, prio: e.prio,
+            ageDays: parseFloat(String(e.days || '').replace(/,/g, '')),
+            hrs: parseFloat(String(e.hrs || '').replace(/,/g, '')),
+            expTs: BWN.parseUSDate(e.exp), schedTs: BWN.parseUSDate(e.sched), lastNoteTs: BWN.parseUSDate(e.lastNote)
+          }, C);
+          var acked = vf.sev > 0 ? ackGet(e.id, vf.kinds) : false;
+          heatStore[mapped.href] = {
+            id: e.id, kinds: vf.kinds.slice(), acked: acked, sev: vf.sev, reasons: vf.reasons.slice(),
+            wo: e.wo, tracking: e.tracking, status: e.status, prio: e.prio, client: e.client,
+            assignee: e.assignee, hrs: e.hrs, days: e.days, dne: e.dne, sched: e.sched, lastNote: e.lastNote, exp: e.exp
+          };
+        }
+      }
+
+      function finishApi(clean, note) {
+        heatScanning = false; heatReplaying = false; btn.disabled = false; btn.textContent = 'Rescan All';
+        if (progEl) { progEl.style.display = 'none'; progEl.classList.remove('indet'); progEl.firstChild.style.width = '0'; }
+        heatScanClean = !!clean; heatScanNote = note || null;
+        var n = Object.keys(heatStore).length;
+        console.info('[BWN HEAT] API scan ' + (clean ? 'complete' : 'incomplete') + ':', n, 'WOs in', pages, 'page(s)' + (note ? ' | ' + note : '') + (target != null ? ' | badge total ' + target : ''));
+        woListHeat();
+        if (clean) heatSnapshot();
+        var pn = document.getElementById(PANEL_ID); if (pn) { pn.remove(); toggleAuditPanel(); }
+      }
+
+      function step() {
+        return heatGql(apiList.query, vars).then(function (data) {
+          pages++;
+          var found = heatFindWOList(data) || { path: apiList.path, conn: apiList.conn };
+          var rows = heatRowsAtPath(data, found.path ? found : apiList);
+          if (!rows.length && pages === 1) { finishApi(false, 'first API page returned no rows'); return false; }
+          absorb(rows);
+          var have = Object.keys(heatStore).length;
+          btn.textContent = 'Scanning (API)… ' + have + (target ? '/' + target : '');
+          if (progEl && target) { progEl.classList.remove('indet'); progEl.firstChild.style.width = Math.min(100, Math.round(have / target * 100)) + '%'; }
+
+          // Advance. Cursor > offset > page; else single-shot.
+          var container = heatContainerAtPath(data, found.path ? found : apiList);
+          var pageInfo = container && container.pageInfo;
+          if (cursorKey && pageInfo) {
+            if (pageInfo.hasNextPage && pageInfo.endCursor && pages < CAP) { vars[cursorKey] = pageInfo.endCursor; return step(); }
+            return doneCheck();
+          }
+          if (offsetKey) {
+            if (rows.length >= PAGE && (target == null || have < target) && pages < CAP) { vars[offsetKey] = (Number(vars[offsetKey]) || 0) + PAGE; return step(); }
+            return doneCheck();
+          }
+          if (pageKey) {
+            if (rows.length >= PAGE && (target == null || have < target) && pages < CAP) { vars[pageKey] = (Number(vars[pageKey]) || 0) + 1; return step(); }
+            return doneCheck();
+          }
+          // No pagination arg we recognize: the enlarged single call is all we get.
+          return doneCheck();
+        });
+      }
+
+      function doneCheck() {
+        var have = Object.keys(heatStore).length;
+        // Confidence gate: if too many rows failed to map to a real WO, the captured
+        // query is the wrong shape for the heat model - hand back to the scroll scan.
+        if (totalRows > 0 && badRows / totalRows > 0.5) { finishApi(false, 'row mapping low-confidence (' + badRows + '/' + totalRows + ' unmapped)'); return false; }
+        // Honesty about coverage vs Umbrava's own badge total (same rule the scroll scan uses).
+        if (target != null && have < target * 0.9) { finishApi(false, 'API returned ' + have + ' of ' + target + ' (badge) - likely a filtered/paginated query'); return false; }
+        finishApi(true, target != null && have < target ? 'below badge total ' + target + ' - filtered view accepted as clean' : null);
+        return true;
+      }
+
+      return step();
+    }
+
+    // ---- Scan All (scroll fallback) -------------------------------------------------
     function listScroller() {
       var table = findBodyTable();
       var anchor = table ? rowWOLink(table) : null;
@@ -5504,16 +5871,15 @@
         total++;
         if (done(o.status)) return;
         open++;
-        var age = parseFloat(String(o.days || '').replace(/,/g, ''));
-        if (!isNaN(age) && age > 30) over30++;
-        var hrs = parseFloat(String(o.hrs || '').replace(/,/g, ''));
-        if (!isNaN(hrs)) {
-          var th = thresholdsFor(o.status, o.prio, C);
-          if (hrs >= th.bad) limitBad++;
-          else if (hrs >= th.warn) limitWatch++;
-        }
-        var ln = parseUSDate(o.lastNote);
-        if (ln !== null && dSince(ln) > C.noteStaleDays) stale++;
+        var vf = computeVerdict({
+          status: o.status, prio: o.prio,
+          ageDays: parseFloat(String(o.days || '').replace(/,/g, '')),
+          hrs: parseFloat(String(o.hrs || '').replace(/,/g, '')),
+          expTs: parseUSDate(o.exp), schedTs: parseUSDate(o.sched), lastNoteTs: parseUSDate(o.lastNote)
+        }, C);
+        if (vf.over30) over30++;
+        if (vf.limitBad) limitBad++; else if (vf.limitWatch) limitWatch++;
+        if (vf.stale) stale++;
       }
       if (heatStore) {
         Object.keys(heatStore).forEach(function (k) { tally(heatStore[k]); });
