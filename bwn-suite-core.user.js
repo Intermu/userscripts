@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         BWN Suite - Core (Broadway National)
 // @namespace    broadwaynational.bwn
-// @version      1.56.0
+// @version      1.58.0
 // @downloadURL  https://raw.githubusercontent.com/Intermu/userscripts/main/bwn-suite-core.user.js
 // @updateURL    https://raw.githubusercontent.com/Intermu/userscripts/main/bwn-suite-core.user.js
 // @description  Runs several Umbrava helpers for BWN coordinators, in the browser with no privileged grants. Includes: PO Approval + ETA Builder; WO Assist (GP/ETA, a stall watchdog, DNE calculator, and a next-action playbook); Email Leak Guard (checks recipients against vendor names, PO amounts, and client budget references before an outbound email sends); WO List Heat (a triage overlay + My Day strip on the work-order list, with an optional same-origin Umbrava API scan for deterministic full-board coverage); and the BWN Launcher (opens the Azure Static Web App tools with the current WO's context). Modules share state through sessionStorage/localStorage. The only network call is List Heat's same-origin GraphQL scan (app.umbrava.com/api/graphql, the app's own session); everything else is offline. Toggle modules in BWN_MODULES below.
@@ -44,7 +44,7 @@
   try { localStorage.setItem('bwn:status:core', JSON.stringify({ ver: BWN_VER, ts: Date.now() })); } catch (e) { /* best-effort */ }
 
   console.info('[BWN SUITE CORE] v' + BWN_VER + ' |',
-    'Shared Core 7 \u00b7 PO Approval 1.13 \u00b7 WO Assist 2.51 \u00b7 Leak Guard 2.0 \u00b7 List Heat 3.15 \u00b7 Launcher 2.0 \u00b7 Views 1.0 \u00b7 Palette 1.1 \u00b7 Visit 1.2 \u00b7 Reminders 1.1 \u00b7 Timeline 1.1 \u00b7 TripCal 1.3 \u00b7 Connector 1.2 |',
+    'Shared Core 7 \u00b7 PO Approval 1.13 \u00b7 WO Assist 2.53 \u00b7 Leak Guard 2.0 \u00b7 List Heat 3.15 \u00b7 Launcher 2.0 \u00b7 Views 1.0 \u00b7 Palette 1.1 \u00b7 Visit 1.2 \u00b7 Reminders 1.1 \u00b7 Timeline 1.1 \u00b7 TripCal 1.3 \u00b7 Connector 1.2 |',
     'enabled:', Object.keys(BWN_MODULES).filter(function (k) { return BWN_MODULES[k]; }).join(', '));
 
   // ===== BWN SHARED CORE v7 - KEEP IN SYNC across both suite scripts =====
@@ -691,6 +691,35 @@
   BWN.announceCore('core');
   // ===== END BWN SHARED CORE =====
 
+  // ---- Shared status-clock engine (single source of truth) -------------------
+  // ONE priority-scaled per-status time budget, used by BOTH List Heat (row
+  // verdicts + offender ranking) AND WO Assist (stuck / escalate judgement) so the
+  // two engines can never disagree about when a WO is "past its limit". Deliberately
+  // NOT in the BWN shared-core block above (that must stay byte-identical across the
+  // suite scripts); this is file-local to bwn-suite-core, where both modules live in
+  // the same outer IIFE. Formula is unchanged from List Heat's original thresholdsFor
+  // - only its home moved, so the mature/live-tested behavior is preserved.
+  //   bwnThresholdsFor(status, prioText, C) -> { warn, bad } hours. Status class
+  //   (active/blocked) and priority (P1..P4) scale the base hrsWarn/hrsBad from config.
+  //   Unknown class/priority -> neutral 1.0 (never harsher by guessing).
+  var BWN_HEAT_CFG = {
+    ACTIVE_RE: /scheduled|in progress|dispatch|on[\s-]?site/i,
+    BLOCKED_RE: /pending materials|awaiting 3rd|third party|client action|awaiting proposal|awaiting po|on hold/i,
+    BLOCKED_MULT: 1.0,
+    PRIO_MULT: { 1: 0.25, 2: 0.5, 3: 1.0, 4: 1.5 }
+  };
+  function bwnPrioNum(prioText) { var m = String(prioText || '').match(/p\s*([1-4])/i); return m ? +m[1] : null; }
+  function bwnPrioMult(prioText) { var pn = bwnPrioNum(prioText); return (pn && BWN_HEAT_CFG.PRIO_MULT[pn]) || 1; }
+  function bwnThresholdsFor(status, prioText, C) {
+    C = C || BWN.cfg();
+    var mult = 1.0;
+    if (BWN_HEAT_CFG.ACTIVE_RE.test(status)) mult *= C.activeMult;
+    else if (BWN_HEAT_CFG.BLOCKED_RE.test(status)) mult *= BWN_HEAT_CFG.BLOCKED_MULT;
+    var pn = bwnPrioNum(prioText);
+    if (pn && BWN_HEAT_CFG.PRIO_MULT[pn]) mult *= BWN_HEAT_CFG.PRIO_MULT[pn];
+    return { warn: C.hrsWarn * mult, bad: C.hrsBad * mult };
+  }
+
   // ---- Core-local shared helpers (PO Approval + Leak Guard) --------------------
   // Distinctive-token vendor matching: "does this recipient text belong to this
   // vendor?" Raw LCS overlap mis-identified vendors through shared trade words -
@@ -1023,7 +1052,7 @@
   });
 
   // ==========================================================================
-  // MODULE: WO Assist: GP + ETA Watchdog + Playbook v2.49 (Connector 1.2)
+  // MODULE: WO Assist: GP + ETA Watchdog + Playbook v2.53 (Connector 1.2)
   // ==========================================================================
   if (BWN_MODULES.woAssist) BWN.safeModule('woAssist', function () {
     'use strict';
@@ -1053,7 +1082,7 @@
     var PANEL_ID = 'bwn-gp-panel';
     var GREEN = BWN.GREEN;
 
-    console.info('[BWN GP] WO Assist v2.49 loaded on', location.href);
+    console.info('[BWN GP] WO Assist v2.53 loaded on', location.href);
 
     // ---- Parsing helpers (shared via BWN core) -----------------------------
     var parseMoney = BWN.parseMoney;
@@ -1369,6 +1398,45 @@
       return keys.length;
     }
 
+    // ---- Documents read (Phase 2, PROVISIONAL) --------------------------------
+    // The Documents-section DOM is NOT yet pinned live (Drop Upload only knows the
+    // split-view buttons, not the doc rows/types). readDocs() therefore returns a
+    // count ONLY when it can read one CONFIDENTLY (a "Documents (N)" header or clear
+    // document-row testids); otherwise null = "unknown". The closure gate treats null
+    // as unknown and does NOT fire - a false zero would nag, and a false "N present"
+    // must never be allowed to auto-complete the WO. Run __bwnDocsRecon() in the
+    // console on a real WO to capture the real testids, then tighten the selectors.
+    function readDocs() {
+      try {
+        var els = document.querySelectorAll('h1,h2,h3,h4,h5,h6,div,span,p,button');
+        for (var i = 0; i < els.length; i++) {
+          var tx = (els[i].textContent || '').replace(/\s+/g, ' ').trim();
+          var m = tx.match(/^documents\s*\((\d+)\)$/i);
+          if (m && els[i].querySelectorAll('*').length <= 3) return { count: parseInt(m[1], 10) };
+        }
+        var rows = document.querySelectorAll('[data-testid^="document-row" i],[data-testid*="document-list-item" i]');
+        if (rows.length) return { count: rows.length };
+        return null;   // cannot tell - do NOT guess zero
+      } catch (e) { return null; }
+    }
+    // Console recon: dump document/attachment testids + any "Documents" header so the
+    // real selectors can be pinned (mirrors tripsRecon). Exposed on window for manual
+    // use; no automatic behavior depends on it.
+    function docsRecon() {
+      var seen = {};
+      document.querySelectorAll('[data-testid*="document" i],[data-testid*="attach" i],[data-testid*="file" i]').forEach(function (el) {
+        var t = el.getAttribute('data-testid'); if (t) seen[t] = (el.textContent || '').replace(/\s+/g, ' ').slice(0, 60);
+      });
+      var hdrs = [];
+      document.querySelectorAll('h1,h2,h3,h4,h5,h6,div,span').forEach(function (el) {
+        var tx = (el.textContent || '').replace(/\s+/g, ' ').trim();
+        if (/^documents\b/i.test(tx) && tx.length < 30 && el.querySelectorAll('*').length <= 3) hdrs.push(tx);
+      });
+      console.info('[BWN GP] docs recon - testids:', JSON.stringify(seen, null, 1), '| headers:', hdrs);
+      return { testids: Object.keys(seen).length, headers: hdrs };
+    }
+    try { window.__bwnDocsRecon = docsRecon; } catch (e) { }
+
     // ---- Signals --------------------------------------------------------------
     // Tolerant (shared, v5): absolute, relative ("2 hours ago"), or Date.parse-able -
     // relative timestamps previously read as "no date" and hid stale-note ages.
@@ -1462,7 +1530,17 @@
         addr: siteAddr(),
         coordinator: fieldByLabel(/^assigned to$/i),
         sourceJob: fieldByLabel(/^source job\s*#/i),
-        sourcePo: fieldByLabel(/^source po\s*#/i)
+        sourcePo: fieldByLabel(/^source po\s*#/i),
+        // Priority drives the shared status-clock (bwnThresholdsFor): P1..P4 scale how
+        // fast a status is "past its limit". Read the WO-header Priority field; the
+        // raw text (e.g. "P2 - Normal (24 hrs)") is passed through - bwnPrioNum pulls
+        // the P#. Empty -> neutral 1.0 multiplier (never guesses a harsher clock).
+        priority: fieldByLabel(/^priority\b/i),
+        // Intake actionability fields (Phase 2). Empty '' when the field is unset OR
+        // not present as a labeled field - the intake gate treats '' as "verify", not
+        // a hard assertion, so a mis-read only over-surfaces (the safe direction).
+        trade: fieldByLabel(/^trades?\b/i),
+        scope: fieldByLabel(/scope of work|^scope\b/i)
       };
     }
 
@@ -1572,6 +1650,7 @@
         pos: pos, vendorTotal: vendorTotal, nte: nte, gp: gp, gpPct: gpPct,
         eta: pos.length ? etaStatus(pos, notes, stall) : null,
         stall: stall, status: woStatus(), hrs: hrsInStatus(),
+        priority: (function () { try { return headerInfo().priority || ''; } catch (e) { return ''; } })(),
         due: dueStatus(C),
         staleDays: staleness(notes), noteCount: notes.length, lastNote: lastNoteTs ? new Date(lastNoteTs).toISOString() : null, deep: !!deepNotes, notesSrc: lastNotesSrc,
         noShow: (function () { try { var tb = BWN.ssGetJSON('bwn:trips:' + (currentWOId() || ''), null); return (tb && tb.noShow && (Date.now() - (tb.ts || 0)) < 12 * 3600000) ? tb.noShow : null; } catch (e) { return null; } })(),   // 12h TTL bounds a stale phantom in a long-lived tab
@@ -1810,8 +1889,19 @@
     function woActionForStatus(state, ref, phase) {
       if (!phase || phase === 'terminal') return null;
       var status = (state.status || '').trim();
-      var hb = state.hrs !== null ? ' (' + Math.round(state.hrs) + 'h in status)' : '';
-      var stale720 = state.hrs !== null && state.hrs > 720;
+      // Priority-scaled status budget (shared engine). When the WO is past its limit,
+      // the "h in status" note carries the ratio so the coordinator sees WHY it is
+      // hot (a P1 3x over its limit reads very differently from a P4 just past warn).
+      var th = bwnThresholdsFor(status, state.priority, state.cfg || bwnConfig());
+      var pn = bwnPrioNum(state.priority);
+      var overRatio = (state.hrs !== null && th.bad > 0) ? state.hrs / th.bad : 0;
+      var hb = state.hrs !== null
+        ? ' (' + Math.round(state.hrs) + 'h in status' + (overRatio >= 1 ? ', ' + overRatio.toFixed(1) + 'x the ' + Math.round(th.bad) + 'h limit' + (pn ? ' for P' + pn : '') : '') + ')'
+        : '';
+      // "Way past its clock" - replaces the old flat 720h. 3x the priority-scaled bad
+      // limit reproduces the original 720h at P3 (240h base) and now scales with
+      // priority (P1 escalates far sooner, P4 later).
+      var stale720 = overRatio >= 3;
       var A = {
         intake: ['Dispatch or scope this WO', 'Status "' + status + '" - not yet assigned', 'Re: ' + ref + '. New work order - assign a vendor (or scope it) and get it moving today.', null],
         schedule: ['Recruit / dispatch a vendor and get a date', 'Status "' + status + '"' + hb + ' - no vendor scheduled', 'Hi - re: ' + ref + '. We need coverage on this. Please confirm you can take it with a scheduled date + on-site tech, or tell me today so I can reassign.', 'quote'],
@@ -1847,7 +1937,10 @@
       // deliberately) - high, descending by index, above every generated step.
       if (a.authored) return 1000 - (a.ord || 0);
       var p = a.key.split(':')[0];
-      var base = { noshow: 100, stall: 96, escalate: 94, task: 88, dne: 82, ecd: 78, pocost: 72, poacc: 68, pomat: 66, poconf: 64, eta: 60, phase: 50, note: 44, anchor: 12 };
+      // Phase 2: docs (missing completion package at closure) sorts just under escalate
+      // - closing without the signed ticket/photos is a hard block. intake (unactionable
+      // WO at inception) sorts above the generic phase chase so "fix the WO" leads.
+      var base = { noshow: 100, stall: 96, escalate: 94, docs: 92, intake: 90, task: 88, dne: 82, ecd: 78, pocost: 72, poacc: 68, pomat: 66, poconf: 64, eta: 60, phase: 50, note: 44, anchor: 12 };
       var s = base[p]; if (s === undefined) s = 50;
       var cap = function (n) { return Math.max(0, Math.min(30, n || 0)); };
       if (p === 'noshow' && state.noShow) s += cap(Math.round((Date.now() - state.noShow.ms) / 86400000));
@@ -2005,13 +2098,22 @@
       // Surface a distinct, high-priority "Escalate to management" step so it reads as an
       // escalation, not business-as-usual. (Billing-owned phases - work complete /
       // invoiced / paid - are already terminal, so the coordinator gets no actions there.)
-      var daysInStatus = state.hrs !== null ? state.hrs / 24 : 0;
       var waitOnClient = (woPhase === 'client' || woPhase === 'materials-client' || woPhase === 'proposal-sent' || woPhase === 'onhold');
+      // Escalation is now PRIORITY-SCALED off the shared status-clock, not a flat 14d.
+      //  - Vendor miss (stall): escalate after ESCALATE_DAYS scaled by priority - a P1
+      //    emergency escalates in ~4d, a P3 at the old 14d, a P4 at ~21d (floor 2d).
+      //  - Waiting on an outside party: escalate once the status is 2x past its own
+      //    priority-scaled hours limit (follow-ups demonstrably have not moved it),
+      //    instead of a flat 14 calendar days regardless of status class or priority.
+      var escTh = bwnThresholdsFor(state.status, state.priority, state.cfg || bwnConfig());
+      var escPn = bwnPrioNum(state.priority);
+      var escDays = Math.max(2, Math.round(ESCALATE_DAYS * bwnPrioMult(state.priority)));
+      var overLimit = (state.hrs !== null && escTh.bad > 0 && state.hrs >= 2 * escTh.bad);
       var escReason = null;
-      if (state.stall && state.stall.days > ESCALATE_DAYS)
-        escReason = state.stall.vendor + ' still unresolved ' + state.stall.days + 'd after the scheduled visit - chasing has not worked';
-      else if (waitOnClient && daysInStatus > ESCALATE_DAYS)
-        escReason = 'Status "' + (state.status || '') + '" for ' + Math.round(daysInStatus) + 'd - waiting on an outside party and follow-ups have not moved it';
+      if (state.stall && state.stall.days > escDays)
+        escReason = state.stall.vendor + ' still unresolved ' + state.stall.days + 'd after the scheduled visit' + (escPn ? ' (P' + escPn + ' escalates at ' + escDays + 'd)' : '') + ' - chasing has not worked';
+      else if (waitOnClient && overLimit)
+        escReason = 'Status "' + (state.status || '') + '" ' + Math.round(state.hrs) + 'h - ' + (state.hrs / escTh.bad).toFixed(1) + 'x its ' + Math.round(escTh.bad) + 'h limit' + (escPn ? ' for P' + escPn : '') + '; waiting on an outside party and follow-ups have not moved it';
       else if (state.gpPct !== null && state.gpPct < 0 && state.nte)
         escReason = 'GP is underwater (' + state.gpPct.toFixed(1) + '%) - a price concession / write-down is a management decision';
       if (escReason) {
@@ -2022,6 +2124,33 @@
           text: 'Re: ' + ref + '. Escalating to management: ' + escReason + '. Routine follow-up has not resolved this - need a decision on next steps (extend / re-source / price / close).',
           owner: 'management'
         });
+      }
+
+      // ---- Intake actionability gate (Phase 2) -----------------------------------
+      // A WO created without the fields it needs to be worked will stall downstream
+      // (unassignable, mis-scheduled, wrong vendor). At the earliest phases, surface
+      // exactly what is missing so it gets fixed before it is dispatched, not after.
+      // Only fires pre-dispatch (intake / schedule / accept); a job already in flight
+      // is not re-litigated. RELIABLE fields (NTE, priority, site) drive the trigger;
+      // trade/scope are advisory (the label read can be absent even when set), so an
+      // empty read only ADDS a "verify" item - it never blocks or false-completes.
+      if (woPhase === 'intake' || woPhase === 'schedule' || woPhase === 'accept') {
+        var miss = [], softMiss = [];
+        if (!(state.nte && state.nte.amount > 0)) miss.push('NTE / client budget');
+        if (!bwnPrioNum(state.priority)) miss.push('priority (P1-P4)');
+        if (!(hd.location || hd.addr)) miss.push('site / location');
+        if (!String(hd.trade || '').trim()) softMiss.push('trade');
+        if (!String(hd.scope || '').trim()) softMiss.push('scope of work');
+        var allMiss = miss.concat(softMiss);
+        if (allMiss.length) {
+          acts.push({
+            key: 'intake:' + allMiss.join(','),   // reopens if a different field goes missing; self-clears when all are set
+            label: 'Complete the WO intake - missing: ' + allMiss.join(', '),
+            why: (miss.length ? 'Required field(s) not set (' + miss.join(', ') + ') - the WO cannot be dispatched cleanly. ' : '') +
+              (softMiss.length ? 'Verify: ' + softMiss.join(', ') + '. ' : '') + 'Fix at intake so it does not stall downstream.',
+            text: 'Re: ' + ref + '. Before this WO is dispatched, please confirm the missing details: ' + allMiss.join(', ') + '. Complete these so the job can be scoped, priced, and assigned to the right vendor.'
+          });
+        }
       }
 
       if (state.stall) {
@@ -2104,6 +2233,27 @@
             text: 'Hi - re: ' + ref + '. Before we close out PO ' + p.num + ', please confirm your final cost is ' + fmt(p.amount) + ' (or send the corrected final total) so billing matches the work performed.'
           });
         });
+      }
+
+      // ---- Closure gate: completion package present? (Phase 2) -------------------
+      // A WO must not be marked Work Complete without its completion package (signed
+      // ticket, sign-in/out, before/after photos). At confirm-complete / cost-review,
+      // if we can read the Documents section and it is CONFIDENTLY empty, surface a
+      // blocking step. readDocs() returns null when it cannot tell (Documents DOM not
+      // yet pinned - see readDocs) and we do NOT fire on null: a false zero would nag,
+      // and we never auto-complete on a "docs present" read. A "docs uploaded" note
+      // converges it via ACT_SIGNALS.stall (same signal the confirm steps use).
+      if (woPhase === 'confirmcomplete' || woPhase === 'costreview') {
+        var docs = readDocs();
+        if (docs && docs.count === 0) {
+          acts.push({
+            key: 'docs:none',
+            label: 'Collect the completion package before closing - no documents on file',
+            why: 'The Documents section is empty - the WO cannot be verified complete or invoiced without the signed ticket, sign-in/out, and before/after photos',
+            text: 'Hi - re: ' + ref + '. This WO shows the work done but no completion documents are attached. Please upload the completion package (signed work ticket, sign-in/out times, before/after photos) so we can confirm complete and invoice.',
+            resolve: ACT_SIGNALS.stall
+          });
+        }
       }
 
       var noSched = state.pos.filter(function (p) { return !p.done && p.amount > 0 && !p.schedDate && !p.poStatus; });
@@ -4363,13 +4513,11 @@
     console.info('[BWN HEAT] v3.15 loaded on', location.href);
 
     // ---- Config (edit here) ----------------------------------------------
-    // Advanced knobs (edit in code): status-class regexes and priority multipliers.
-    var HEAT_CFG = {
-      ACTIVE_RE: /scheduled|in progress|dispatch|on[\s-]?site/i,
-      BLOCKED_RE: /pending materials|awaiting 3rd|third party|client action|awaiting proposal|awaiting po|on hold/i,
-      BLOCKED_MULT: 1.0,
-      PRIO_MULT: { 1: 0.25, 2: 0.5, 3: 1.0, 4: 1.5 }
-    };
+    // Advanced knobs (status-class regexes + priority multipliers) now live in the
+    // file-shared BWN_HEAT_CFG / bwnThresholdsFor engine above, so List Heat and WO
+    // Assist judge "past its limit" identically. Aliased here so call sites below are
+    // unchanged; edit the knobs in the shared block, not here.
+    var HEAT_CFG = BWN_HEAT_CFG;
 
     // ---- BWN suite config (Phase 3): one blob, tuned once, honored everywhere.
     // Defaults + read/save now live in the BWN core (single source of truth);
@@ -4900,14 +5048,8 @@
     }
 
     // ---- Threshold model -----------------------------------------------------------
-    function thresholdsFor(status, prioText, C) {
-      var mult = 1.0;
-      if (HEAT_CFG.ACTIVE_RE.test(status)) mult *= C.activeMult;
-      else if (HEAT_CFG.BLOCKED_RE.test(status)) mult *= HEAT_CFG.BLOCKED_MULT;
-      var pm = (prioText || '').match(/p\s*([1-4])/i);
-      if (pm && HEAT_CFG.PRIO_MULT[+pm[1]]) mult *= HEAT_CFG.PRIO_MULT[+pm[1]];
-      return { warn: C.hrsWarn * mult, bad: C.hrsBad * mult };
-    }
+    // Delegates to the file-shared engine (single source of truth with WO Assist).
+    function thresholdsFor(status, prioText, C) { return bwnThresholdsFor(status, prioText, C); }
 
     // ---- Per-row verdict: ONE source of truth (v3.15) ------------------------------
     // Pure fn - facts in, verdict out - so the DOM tinting pass, the API scan, and the
