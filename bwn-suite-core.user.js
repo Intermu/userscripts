@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         BWN Suite - Core (Broadway National)
 // @namespace    broadwaynational.bwn
-// @version      1.58.0
+// @version      1.59.0
 // @downloadURL  https://raw.githubusercontent.com/Intermu/userscripts/main/bwn-suite-core.user.js
 // @updateURL    https://raw.githubusercontent.com/Intermu/userscripts/main/bwn-suite-core.user.js
 // @description  Runs several Umbrava helpers for BWN coordinators, in the browser with no privileged grants. Includes: PO Approval + ETA Builder; WO Assist (GP/ETA, a stall watchdog, DNE calculator, and a next-action playbook); Email Leak Guard (checks recipients against vendor names, PO amounts, and client budget references before an outbound email sends); WO List Heat (a triage overlay + My Day strip on the work-order list, with an optional same-origin Umbrava API scan for deterministic full-board coverage); and the BWN Launcher (opens the Azure Static Web App tools with the current WO's context). Modules share state through sessionStorage/localStorage. The only network call is List Heat's same-origin GraphQL scan (app.umbrava.com/api/graphql, the app's own session); everything else is offline. Toggle modules in BWN_MODULES below.
@@ -44,7 +44,7 @@
   try { localStorage.setItem('bwn:status:core', JSON.stringify({ ver: BWN_VER, ts: Date.now() })); } catch (e) { /* best-effort */ }
 
   console.info('[BWN SUITE CORE] v' + BWN_VER + ' |',
-    'Shared Core 7 \u00b7 PO Approval 1.13 \u00b7 WO Assist 2.53 \u00b7 Leak Guard 2.0 \u00b7 List Heat 3.15 \u00b7 Launcher 2.0 \u00b7 Views 1.0 \u00b7 Palette 1.1 \u00b7 Visit 1.2 \u00b7 Reminders 1.1 \u00b7 Timeline 1.1 \u00b7 TripCal 1.3 \u00b7 Connector 1.2 |',
+    'Shared Core 7 \u00b7 PO Approval 1.13 \u00b7 WO Assist 2.54 \u00b7 Leak Guard 2.0 \u00b7 List Heat 3.15 \u00b7 Launcher 2.0 \u00b7 Views 1.0 \u00b7 Palette 1.1 \u00b7 Visit 1.2 \u00b7 Reminders 1.1 \u00b7 Timeline 1.1 \u00b7 TripCal 1.3 \u00b7 Connector 1.2 |',
     'enabled:', Object.keys(BWN_MODULES).filter(function (k) { return BWN_MODULES[k]; }).join(', '));
 
   // ===== BWN SHARED CORE v7 - KEEP IN SYNC across both suite scripts =====
@@ -1052,7 +1052,7 @@
   });
 
   // ==========================================================================
-  // MODULE: WO Assist: GP + ETA Watchdog + Playbook v2.53 (Connector 1.2)
+  // MODULE: WO Assist: GP + ETA Watchdog + Playbook v2.54 (Connector 1.2)
   // ==========================================================================
   if (BWN_MODULES.woAssist) BWN.safeModule('woAssist', function () {
     'use strict';
@@ -1082,7 +1082,7 @@
     var PANEL_ID = 'bwn-gp-panel';
     var GREEN = BWN.GREEN;
 
-    console.info('[BWN GP] WO Assist v2.53 loaded on', location.href);
+    console.info('[BWN GP] WO Assist v2.54 loaded on', location.href);
 
     // ---- Parsing helpers (shared via BWN core) -----------------------------
     var parseMoney = BWN.parseMoney;
@@ -1640,10 +1640,16 @@
       // "Latest update" / "Since last note" (GraphQL's notes selector is a guess and usually
       // comes back empty). Prefer the precomputed epoch (tsAbs); fall back to a loose parse.
       var lastNoteTs = 0;
+      // Newest CLIENT-facing note (its type chip reads Client/Customer) - a STRUCTURED
+      // signal (the real note-type field, not note wording) that drives the client-update
+      // cadence step, distinct from generic note staleness (which counts ANY note, incl.
+      // internal/vendor). A client-typed note posted later self-clears the cadence step.
+      var lastClientTs = 0;
       (notes || []).forEach(function (n) {
         var t = (n && n.tsAbs) || 0;
         if (!t && n && n.ts) { try { var dd = BWN.parseNoteDateLoose(n.ts); if (dd) t = +dd; } catch (e) { } }
         if (t > lastNoteTs) lastNoteTs = t;
+        if (t && n && /\b(client|customer)\b/i.test(n.label || '') && t > lastClientTs) lastClientTs = t;
       });
       var stall = stalled(pos, C);
       return {
@@ -1653,6 +1659,7 @@
         priority: (function () { try { return headerInfo().priority || ''; } catch (e) { return ''; } })(),
         due: dueStatus(C),
         staleDays: staleness(notes), noteCount: notes.length, lastNote: lastNoteTs ? new Date(lastNoteTs).toISOString() : null, deep: !!deepNotes, notesSrc: lastNotesSrc,
+        lastClientNoteDays: lastClientTs ? Math.floor((Date.now() - lastClientTs) / 86400000) : null,   // null = no client-labeled note among the loaded notes
         noShow: (function () { try { var tb = BWN.ssGetJSON('bwn:trips:' + (currentWOId() || ''), null); return (tb && tb.noShow && (Date.now() - (tb.ts || 0)) < 12 * 3600000) ? tb.noShow : null; } catch (e) { return null; } })(),   // 12h TTL bounds a stale phantom in a long-lived tab
         openTasks: readOpenTasks(),
         cfg: C
@@ -1940,7 +1947,7 @@
       // Phase 2: docs (missing completion package at closure) sorts just under escalate
       // - closing without the signed ticket/photos is a hard block. intake (unactionable
       // WO at inception) sorts above the generic phase chase so "fix the WO" leads.
-      var base = { noshow: 100, stall: 96, escalate: 94, docs: 92, intake: 90, task: 88, dne: 82, ecd: 78, pocost: 72, poacc: 68, pomat: 66, poconf: 64, eta: 60, phase: 50, note: 44, anchor: 12 };
+      var base = { noshow: 100, stall: 96, escalate: 94, docs: 92, intake: 90, task: 88, dne: 82, ecd: 78, pocost: 72, poacc: 68, pomat: 66, poconf: 64, eta: 60, phase: 50, clientcad: 46, note: 44, anchor: 12 };
       var s = base[p]; if (s === undefined) s = 50;
       var cap = function (n) { return Math.max(0, Math.min(30, n || 0)); };
       if (p === 'noshow' && state.noShow) s += cap(Math.round((Date.now() - state.noShow.ms) / 86400000));
@@ -1948,6 +1955,7 @@
       else if (p === 'ecd') { if (a.key === 'ecd:none') s = 58; else if (state.due && state.due.label) s += cap(parseInt((state.due.label.match(/\d+/) || [0])[0], 10)); }
       else if (p === 'dne' && state.gpPct !== null) s += cap(Math.round(state.cfg.gpBad - state.gpPct));
       else if (p === 'note') s += cap(state.staleDays);
+      else if (p === 'clientcad' && state.lastClientNoteDays !== null) s += cap(state.lastClientNoteDays);   // older client silence sorts higher; capped so it never outranks a real chase
       else if (p === 'task' && /overdue/i.test(a.why || '')) s += 10;   // capped so an overdue task (→98) stays just under a no-show (100) - a client-visible vendor miss outranks an internal to-do
       else if (p === 'phase') s += ({ client: 30, accept: 22, onhold: 20, 'materials-client': 18, 'proposal-approved': 12, 'proposal-sent': 10, schedule: 8 }[a.key.split(':')[1]] || 0);
       // Nudge boost (Increment B): habitually-dismissed types sort HIGHER - but capped
@@ -2052,6 +2060,58 @@
       return best;
     }
 
+    // ---- Role rank (read-only, for tiered escalation wording) ------------------
+    // The suite gates escalation WORDING (never access) on the SERVER-computed rank
+    // from [[umbrava-role-auth]] (bwn-suite-ai: 1 staff .. 5 director), published on
+    // the `bwn:role` bus event + the `bwn:role:last` localStorage slot. Core is
+    // @grant none, so it CANNOT fetch /api/user-role itself (that is a cross-origin
+    // SWA call needing GM_*/@connect) - it only CONSUMES what the AI script already
+    // resolved. A live bus event is trusted directly (it was fetched for THIS user,
+    // this session); the localStorage slot is the cross-refresh fallback, trusted
+    // only when marked ok + fresh. Unknown rank -> the generic pre-Phase-3
+    // "Escalate to management" wording, so nothing regresses when the AI script is
+    // absent or has not resolved yet. This is UX phrasing only; no access boundary.
+    var _bwnEscRank = null;   // number when known this session, else null
+    var BWN_ROLE_TTL_MS = 6 * 3600 * 1000;
+    function bwnEscRank() {
+      if (typeof _bwnEscRank === 'number') return _bwnEscRank;
+      try {
+        var r = JSON.parse(localStorage.getItem('bwn:role:last') || 'null');
+        if (r && r.ok && typeof r.rank === 'number' && r.ts && (Date.now() - r.ts) < BWN_ROLE_TTL_MS) return r.rank;
+      } catch (e) { }
+      return null;
+    }
+    document.addEventListener('bwn:evt', function (e) {
+      var d = e && e.detail;
+      if (d && d.id === 'bwn:role' && typeof d.rank === 'number') _bwnEscRank = d.rank;
+    });
+
+    // Tiered, role-aware escalation target. Two independent inputs:
+    //  - SEVERITY (sev >= 1 when past the escalate clock; higher = further past) and
+    //    PRIORITY decide the TIER: level 2 (supervisor) for a fresh escalation,
+    //    level 3 (management decision) once it is >=2x past the clock or a P1 emergency
+    //    or GP underwater (caller forces sev high).
+    //  - The reader's own RANK decides the RECIPIENT: a coordinator (rank <=2 or
+    //    unknown) escalates UP to a supervisor then management; a supervisor (3-4) has
+    //    no supervisor above, so both levels route to management; a director (>=5) owns
+    //    the call - there is nobody to escalate to, so the row becomes "make the call".
+    // The routine chase steps (stall/no-show/PO) ARE the pre-escalation "chase" tier;
+    // this row only ever escalates OWNERSHIP beyond the coordinator.
+    function bwnEscalationTier(sev, prioNum, rank) {
+      var level = (sev >= 2 || prioNum === 1) ? 3 : 2;
+      var owner, label, lead;
+      if (rank !== null && rank >= 5) {
+        owner = 'director'; label = 'Own the call - decide next steps'; lead = 'This one is yours to decide: ';
+      } else if (rank !== null && rank >= 3) {
+        owner = 'management'; label = 'Escalate to management'; lead = 'Escalating to management: ';
+      } else if (level >= 3) {
+        owner = 'management'; label = 'Escalate to management'; lead = 'Escalating to management: ';
+      } else {
+        owner = 'supervisor'; label = 'Escalate to your supervisor'; lead = 'Flagging to my supervisor: ';
+      }
+      return { tier: level, owner: owner, label: label, lead: lead, tierName: (owner === 'director' ? 'decision' : owner) };
+    }
+
     function nextActions(state) {
       var hd = headerInfo();
       var ref = (hd.tracking ? 'Tracking #' + hd.tracking : hd.wo) + (hd.location ? ' \u2014 ' + hd.location : '');
@@ -2109,20 +2169,29 @@
       var escPn = bwnPrioNum(state.priority);
       var escDays = Math.max(2, Math.round(ESCALATE_DAYS * bwnPrioMult(state.priority)));
       var overLimit = (state.hrs !== null && escTh.bad > 0 && state.hrs >= 2 * escTh.bad);
-      var escReason = null;
-      if (state.stall && state.stall.days > escDays)
+      var escReason = null, escSev = 0;   // escSev: how far past the escalate threshold (>=1 at fire) - drives the tier
+      if (state.stall && state.stall.days > escDays) {
         escReason = state.stall.vendor + ' still unresolved ' + state.stall.days + 'd after the scheduled visit' + (escPn ? ' (P' + escPn + ' escalates at ' + escDays + 'd)' : '') + ' - chasing has not worked';
-      else if (waitOnClient && overLimit)
+        escSev = state.stall.days / escDays;
+      } else if (waitOnClient && overLimit) {
         escReason = 'Status "' + (state.status || '') + '" ' + Math.round(state.hrs) + 'h - ' + (state.hrs / escTh.bad).toFixed(1) + 'x its ' + Math.round(escTh.bad) + 'h limit' + (escPn ? ' for P' + escPn : '') + '; waiting on an outside party and follow-ups have not moved it';
-      else if (state.gpPct !== null && state.gpPct < 0 && state.nte)
+        escSev = state.hrs / (2 * escTh.bad);   // fires at 2x the limit, so sev=1 at fire
+      } else if (state.gpPct !== null && state.gpPct < 0 && state.nte) {
         escReason = 'GP is underwater (' + state.gpPct.toFixed(1) + '%) - a price concession / write-down is a management decision';
+        escSev = 3;   // a money write-down is a management call regardless of clock -> top tier
+      }
       if (escReason) {
+        // Phase 3: tiered + role-aware. Tier scales with how far past the clock AND
+        // priority; the recipient is relative to the reader's own rank (see
+        // bwnEscalationTier). Key carries the tier so a heavier escalation re-opens a
+        // step that was checked at a lighter tier (reopening early is the safe direction).
+        var esc = bwnEscalationTier(escSev, escPn, bwnEscRank());
         acts.push({
-          key: 'escalate:' + woPhase,
-          label: 'Escalate to management',
-          why: escReason,
-          text: 'Re: ' + ref + '. Escalating to management: ' + escReason + '. Routine follow-up has not resolved this - need a decision on next steps (extend / re-source / price / close).',
-          owner: 'management'
+          key: 'escalate:' + woPhase + ':' + esc.tier,
+          label: esc.label,
+          why: escReason + ' · ' + esc.tierName + ' tier',
+          text: 'Re: ' + ref + '. ' + esc.lead + escReason + '. Routine follow-up has not resolved this - need a decision on next steps (extend / re-source / price / close).',
+          owner: esc.owner
         });
       }
 
@@ -2313,6 +2382,28 @@
           why: 'Newest note is ' + state.staleDays + 'd old \u2014 the WO reads as unworked',
           text: null
         });
+      }
+
+      // Client-facing cadence (Phase 3): distinct from vendor chasing and from the
+      // generic note-staleness step above (which resets on ANY note, incl. internal /
+      // vendor). On an ACTIVE job (live vendor work in flight) the client is owed a
+      // proactive status update on a cadence, priority-scaled off the shared clock:
+      // P1 ~2d, P3 7d, P4 ~11d. Skipped when we are already WAITING ON the client for
+      // direction (that phase has its own client-contact step). Self-converges: a
+      // client-typed note resets state.lastClientNoteDays, dropping this on next
+      // refresh - a structured field signal, not note-wording matching. Fires only
+      // when notes are actually loaded (noteCount > 0) so an unscanned WO is not nagged.
+      if (!waitOnClient && state.noteCount > 0 && state.pos.some(function (p) { return p.amount > 0 && !p.done; })) {
+        var cad = Math.max(2, Math.round(7 * bwnPrioMult(state.priority)));
+        var ccd = state.lastClientNoteDays;
+        if (ccd === null || ccd > cad) {
+          acts.push({
+            key: 'clientcad:' + (ccd === null ? 'none' : new Date(Date.now() - ccd * 86400000).toISOString().slice(0, 10)),
+            label: 'Send the client a proactive status update',
+            why: (ccd === null ? 'No client-facing note on file' : 'Last client update ' + ccd + 'd ago') + ' - cadence for an active job is ' + cad + 'd' + (escPn ? ' (P' + escPn + ')' : ''),
+            text: 'Re: ' + ref + '. Proactive status update: current stage, what is happening next, and the expected completion date. (No action needed on your end - keeping you posted.)'
+          });
+        }
       }
 
       // No ECD at all + active work = an audit gap → a settable step. (The overdue
@@ -3083,7 +3174,10 @@
             // state and swallow programmatic text - paste is then the instant recovery.
             try { navigator.clipboard.writeText(noteText).catch(function () { }); } catch (e) { }
             // ECD-related actions log an internal audit note - default the type to Internal.
-            var actNoteType = (a.openEcd || /^ecd/.test(a.key || '')) ? 'Internal' : undefined;
+            // The client-cadence step IS a client-facing update - default it to Client so the
+            // posted note both reads correctly AND resets lastClientNoteDays (self-converges).
+            var actNoteType = (a.openEcd || /^ecd/.test(a.key || '')) ? 'Internal'
+              : /^clientcad/.test(a.key || '') ? 'Client' : undefined;
             insertWONote(noteText, function () { /* posted manually by the coordinator */ }, actNoteType);
           });
           btns.appendChild(ab);
@@ -3849,7 +3943,8 @@
           actsMarkDone(a, (d.note || '').trim());
           var noteText = a.label + ((d.note || '').trim() ? ' - ' + d.note.trim() : '');
           try { navigator.clipboard.writeText(noteText).catch(function () { }); } catch (e2) { }
-          var nt = (a.openEcd || /^ecd/.test(a.key || '')) ? 'Internal' : undefined;
+          var nt = (a.openEcd || /^ecd/.test(a.key || '')) ? 'Internal'
+            : /^clientcad/.test(a.key || '') ? 'Client' : undefined;
           insertWONote(noteText, function () { /* posted manually by the coordinator */ }, nt);
         } catch (e3) { }
         return;
