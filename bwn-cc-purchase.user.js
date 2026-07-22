@@ -1,10 +1,10 @@
 // ==UserScript==
 // @name         BWN CC Purchase (Broadway National)
 // @namespace    broadwaynational.bwn
-// @version      0.5.0
+// @version      0.6.0
 // @downloadURL  https://raw.githubusercontent.com/Intermu/userscripts/main/bwn-cc-purchase.user.js
 // @updateURL    https://raw.githubusercontent.com/Intermu/userscripts/main/bwn-cc-purchase.user.js
-// @description  Replaces the "Log Credit Card Purchase Request" Microsoft Form with an in-page modal. Logging a purchase is a SUPERVISOR+ action (coordinators request via the CC Authorization form instead): the floating button only appears when your verified Umbrava role ranks supervisor or above, and the server re-checks the same rank on every submit - your Umbrava session token rides in the request body and the SWA proves it with Umbrava's own current-user API before forwarding. Fill the fields and submit; it POSTs to the broadway-internal-ops SWA proxy (x-bwn-key gated) which forwards to the HTTP-triggered Power Automate flow - logging a row to Credit Card Tracker.xlsx and emailing Mike, identically to the old Form. Opened on a work order, it prefills the Work Order # and drops the client/location into the description, and defaults Supplier to whichever PO line you flipped to "Supplier" in the BWN Ops Suite (falling back to the WO's vendors as suggestions). Card Used is a pick-list you maintain. An optional Receipt is uploaded (via /api/cc-receipt -> Graph) to the shared SharePoint folder and linked in the tracker. The flow's secret URL stays server-side; nothing sensitive lives in this script. Open it from the floating button or the Tampermonkey menu.
+// @description  Replaces the "Log Credit Card Purchase Request" Microsoft Form with an in-page modal. Logging a purchase is a SUPERVISOR+ action (coordinators request via the CC Request form instead), and the server re-checks that rank on every submit - your Umbrava session token rides in the request body and the SWA proves it with Umbrava's own current-user API before forwarding. This script no longer draws its own floating button: the single Credit Card launcher is owned by bwn-cc-request, which shows a dropdown for supervisors+ and opens this modal over the bwn:evt bus (so there is only ever one button, never a stack). Fill the fields and submit; it POSTs to the broadway-internal-ops SWA proxy (x-bwn-key gated) which forwards to the HTTP-triggered Power Automate flow - logging a row to Credit Card Tracker.xlsx and emailing Mike, identically to the old Form. Opened on a work order, it prefills the Work Order # and drops the client/location into the description, and defaults Supplier to whichever PO line you flipped to "Supplier" in the BWN Ops Suite (falling back to the WO's vendors as suggestions). Card Used is a pick-list you maintain. An optional Receipt is uploaded (via /api/cc-receipt -> Graph) to the shared SharePoint folder and linked in the tracker. The flow's secret URL stays server-side; nothing sensitive lives in this script. Open it from the CC Request dropdown or the Tampermonkey menu.
 // @match        https://app.umbrava.com/*
 // @run-at       document-idle
 // @noframes
@@ -18,15 +18,13 @@
 (function () {
   'use strict';
 
-  var VER = '0.5.0';
+  var VER = '0.6.0';
   var FONT = "-apple-system,BlinkMacSystemFont,'Segoe UI','Helvetica Neue',Arial,sans-serif";
   var SWA_BASE = 'https://green-stone-0717dab0f.7.azurestaticapps.net';
   var PROXY_URL = SWA_BASE + '/api/cc-purchase';
   var RECEIPT_URL = SWA_BASE + '/api/cc-receipt';
-  var ROLE_URL = SWA_BASE + '/api/user-role';
   var MAX_RECEIPT = 10 * 1024 * 1024;   // 10 MB - keep in sync with api/cc-receipt
-  var MIN_RANK = 3;                     // supervisor - matches api/shared/umbrava-auth.js RANK.SUPERVISOR
-  console.info('[BWN CC PURCHASE] v' + VER + ' - Supervisor+ role-gated modal -> SWA proxy (server re-checks the role) -> Power Automate flow -> Credit Card Tracker.xlsx + email; job prefill + supplier auto-default + card pick-list + receipt upload; flow URL stays server-side');
+  console.info('[BWN CC PURCHASE] v' + VER + ' - Supervisor+ modal (server re-checks the role) -> SWA proxy -> Power Automate flow -> Credit Card Tracker.xlsx + email; job prefill + supplier auto-default + card pick-list + receipt upload. No own button: opened from the CC Request dropdown over the bwn:evt bus');
 
   // Read a File as base64 (payload for the /api/cc-receipt Graph upload).
   function readFileB64(file) {
@@ -152,72 +150,23 @@
     } catch (e) { return ''; }
   }
 
-  // ---- Role gate (Supervisor+, per Mike's scope call 2026-07-21) ------------
-  // This is UX show/hide ONLY - the server re-enforces the same rank on every submit, so
-  // hiding here is a courtesy, not the boundary. The rank is SERVER-computed (api/user-role
-  // returns rank 1 staff .. 5 director from the same module the enforcing endpoints use);
-  // this script never maps free-text role names itself. Rank sources, cheapest first:
-  //   1. live `bwn:evt` {id:'bwn:role'} bus events from bwn-suite-ai (v1.39.0+),
-  //   2. the localStorage 'bwn:role:last' record bwn-suite-ai persists (same-user + fresh),
-  //   3. our own GM cache, then one direct /api/user-role fetch as a fallback so the gate
-  //      also works when the AI script is not installed.
-  // Unknown rank = launcher hidden but the Tampermonkey menu still opens the modal (a
-  // supervisor with a broken role fetch stays functional; the server decides the truth).
-  var ROLE_TTL_MS = 6 * 3600 * 1000;
-  var _rank = null;          // number when known, null while unknown
-  function meEmail() { return String((actor().email || '')).toLowerCase(); }
-  function sharedRoleRank() {
-    // bwn-suite-ai's persisted verdict - only trusted for the SAME signed-in user (both
-    // emails must be known AND equal: on a shared workstation a previous user's record
-    // must not reveal the launcher; when identity is unclear we fall through to our own
-    // token-based fetch instead) and fresh.
-    try {
-      var r = JSON.parse(localStorage.getItem('bwn:role:last') || 'null');
-      if (r && r.ok && typeof r.rank === 'number' && r.ts && (Date.now() - r.ts) < ROLE_TTL_MS) {
-        var em = meEmail();
-        if (em && r.email && String(r.email).toLowerCase() === em) return r.rank;
-      }
-    } catch (e) { }
-    return null;
+  // ---- Cross-script launcher wiring (bwn-cc-request owns the single button) --
+  // This script no longer draws its own floating button (that caused a second stacked pill and
+  // duplicated the role fetch). bwn-cc-request owns the one Credit Card launcher: it resolves
+  // the rank and, for supervisors+, shows a dropdown whose "Log CC Purchase" item asks US to
+  // open via bwn:evt {id:'bwn:cc:open', tool:'purchase'}. We ANNOUNCE our presence with
+  // {id:'bwn:cc:register', tool:'purchase'} on load and in reply to its {id:'bwn:cc:ping'} so
+  // the handshake works regardless of load order. Role enforcement is UNCHANGED - the server
+  // re-checks supervisor+ on every submit, so opening the modal from a below-bar dropdown that
+  // should never show it still fails safely with ROLE_REQUIRED.
+  function announcePurchase() {
+    try { document.dispatchEvent(new CustomEvent('bwn:evt', { detail: { id: 'bwn:cc:register', tool: 'purchase' } })); } catch (e) { }
   }
-  function cachedRank() {
-    try {
-      var c = JSON.parse(GM_getValue('ccp_role_cache', 'null'));
-      if (c && typeof c.rank === 'number' && c.ts && (Date.now() - c.ts) < ROLE_TTL_MS &&
-          c.email && c.email === meEmail()) return c.rank;
-    } catch (e) { }
-    return null;
-  }
-  function fetchRank(cb) {
-    var key = GM_getValue('ingest_key', '');
-    var t = authToken();
-    if (!key || !t) { cb(null); return; }
-    gmPost(ROLE_URL, { 'Content-Type': 'application/json', 'x-bwn-key': key }, { token: t }, 15000)
-      .then(function (r) {
-        if (r.status >= 200 && r.status < 300 && r.json && r.json.ok && typeof r.json.rank === 'number') {
-          try { GM_setValue('ccp_role_cache', JSON.stringify({ rank: r.json.rank, tier: r.json.tier || null, role: r.json.role || null, email: String(r.json.email || '').toLowerCase(), ts: Date.now() })); } catch (e) { }
-          cb(r.json.rank);
-        } else cb(null);
-      })
-      .catch(function () { cb(null); });
-  }
-  function applyRank(rank) {
-    if (typeof rank !== 'number') return;
-    _rank = rank;
-    if (rank >= MIN_RANK) addLauncher();
-    else { var b = document.getElementById('bwn-ccp-launch'); if (b) b.remove(); }
-  }
-  // Live updates from the AI script's role fetches (covers sign-in changes mid-session).
   document.addEventListener('bwn:evt', function (e) {
-    var d = e && e.detail;
-    if (d && d.id === 'bwn:role' && typeof d.rank === 'number') applyRank(d.rank);
+    var d = e && e.detail; if (!d) return;
+    if (d.id === 'bwn:cc:ping') announcePurchase();
+    if (d.id === 'bwn:cc:open' && d.tool === 'purchase') buildModal();
   });
-  function resolveRank() {
-    var r = sharedRoleRank();
-    if (r == null) r = cachedRank();
-    if (r != null) { applyRank(r); return; }
-    fetchRank(function (fr) { if (fr != null) applyRank(fr); });
-  }
 
   // ---- SWA POST (GM_xmlhttpRequest bypasses same-origin; @connect authorizes) ----
   function gmPost(url, headers, bodyObj, timeoutMs) {
@@ -467,8 +416,7 @@
           closeModal();
           toast('Credit card purchase logged ✓  (' + (payload.SupplierName || '') + ' - $' + (payload.TotalAmount || '0') + ')', 6000);
         } else if (r.status === 403 && code === 'ROLE_REQUIRED') {
-          reenable(); msg.textContent = 'Logging CC purchases requires ' + (r.json.required || 'supervisor') + ' level or above. Your Umbrava role: ' + (r.json.role || 'unknown') + '. Coordinators: use the CC Authorization form to request a purchase.';
-          applyRank(0);   // the server just told us we are below the bar - hide the launcher too
+          reenable(); msg.textContent = 'Logging CC purchases requires ' + (r.json.required || 'supervisor') + ' level or above. Your Umbrava role: ' + (r.json.role || 'unknown') + '. Coordinators: use CC Request to request a purchase.';
         } else if (r.status === 401) {
           reenable(); msg.textContent = 'Umbrava could not verify your session (' + (code || '401') + ') - reload the tab and try again.';
         } else if (r.status === 403) {
@@ -492,40 +440,20 @@
     if (first) setTimeout(function () { first.focus(); }, 30);
   }
 
-  // ---- Floating launcher button -------------------------------------------
-  function addLauncher() {
-    if (document.getElementById('bwn-ccp-launch')) return;
-    var b = document.createElement('button');
-    b.id = 'bwn-ccp-launch';
-    b.title = 'Log a credit card purchase';
-    b.textContent = '💳 CC Purchase';
-    b.style.cssText = 'position:fixed;z-index:2147483645;right:18px;bottom:18px;background:#0d3d26;color:#fff;border:none;border-radius:24px;padding:11px 16px;font:600 13px ' + FONT + ';cursor:pointer;box-shadow:0 6px 20px rgba(13,38,26,.35);';
-    b.addEventListener('click', buildModal);
-    document.body.appendChild(b);
-  }
-
   // ---- Tampermonkey menu --------------------------------------------------
+  // The menu is always available: the SERVER is the boundary and rejects a below-supervisor
+  // submit with a clear ROLE_REQUIRED message. It is the fallback opener when the CC Request
+  // dropdown is unavailable (that script not installed / rank unresolved).
   try {
-    // The menu stays registered regardless of rank: a supervisor whose role fetch failed
-    // (AI script absent, key unset) can still open the modal - the SERVER is the boundary
-    // and rejects a below-supervisor submit with a clear message. A KNOWN-insufficient
-    // rank short-circuits with the explanation instead of a modal that can only fail.
-    GM_registerMenuCommand('Log a Credit Card Purchase', function () {
-      if (typeof _rank === 'number' && _rank < MIN_RANK) {
-        toast('Logging CC purchases requires supervisor level or above - coordinators request one via the CC Authorization form.', 8000, '#7a2e2b');
-        return;
-      }
-      buildModal();
-    });
+    GM_registerMenuCommand('Log a Credit Card Purchase', buildModal);
     GM_registerMenuCommand('Manage saved cards', manageCards);
     GM_registerMenuCommand('Set SWA ingest key', function () {
       var v = prompt('SWA ingest key (same value as the connector WO_INGEST_KEY - used across the BWN Ops Suite):', GM_getValue('ingest_key', '') || '');
-      if (v !== null) { GM_setValue('ingest_key', v.trim()); toast(v.trim() ? 'Ingest key saved.' : 'Ingest key cleared.'); resolveRank(); }
+      if (v !== null) { GM_setValue('ingest_key', v.trim()); toast(v.trim() ? 'Ingest key saved.' : 'Ingest key cleared.'); }
     });
-  } catch (e) { /* menu API absent - launcher button still works */ }
+  } catch (e) { /* menu API absent - the CC Request dropdown still opens this modal */ }
 
-  // Role-gated launcher: the floating button only appears once the verified rank is known
-  // AND supervisor+. Delayed a beat so the Auth0 cache / bwn:role:last are settled on a
-  // fresh load; a later bwn:role bus event from the AI script re-applies live either way.
-  setTimeout(resolveRank, 2500);
+  // Announce to bwn-cc-request that we're here so it can add "Log CC Purchase" to its dropdown
+  // for supervisors+. It also pings on its load; we reply to that above. Belt-and-suspenders.
+  announcePurchase();
 })();

@@ -1,10 +1,10 @@
 // ==UserScript==
-// @name         BWN CC Authorization (Broadway National)
+// @name         BWN CC Request (Broadway National)
 // @namespace    broadwaynational.bwn
-// @version      0.1.0
+// @version      0.2.0
 // @downloadURL  https://raw.githubusercontent.com/Intermu/userscripts/main/bwn-cc-auth.user.js
 // @updateURL    https://raw.githubusercontent.com/Intermu/userscripts/main/bwn-cc-auth.user.js
-// @description  Replaces the "CC Authorization Form" Microsoft Form with an in-page modal for COORDINATORS. Requesting a card purchase is a coordinator action (any vouched Broadway Umbrava user): fill the fields and submit; it POSTs to the broadway-internal-ops SWA proxy (x-bwn-key gated) which proves your Umbrava session token with Umbrava's own current-user API, injects your verified email as the Requester, and forwards to the HTTP-triggered Power Automate flow "CC Authorization (HTTP)". That flow starts an approval (mnajarro@, GKohlmann@, LPorzelt@) and, on approve, emails you back that the order will be placed. Logging a purchase that was actually MADE is a separate Supervisor+ tool (BWN CC Purchase). Opened on a work order, this prefills the Tracking # and drops the client/location into the description, and defaults Supplier to whichever PO line you flipped to "Supplier" in the BWN Ops Suite (falling back to the WO's vendors as suggestions). The flow's secret URL stays server-side; nothing sensitive lives in this script. Open it from the floating button or the Tampermonkey menu.
+// @description  Replaces the "CC Authorization Form" Microsoft Form with an in-page CC Request modal. Requesting a card purchase is a coordinator action (any vouched Broadway Umbrava user): fill the fields and submit; it POSTs to the broadway-internal-ops SWA proxy (x-bwn-key gated) which proves your Umbrava session token with Umbrava's own current-user API, injects your verified email as the Requester, and forwards to the HTTP-triggered Power Automate flow "CC Authorization (HTTP)". That flow starts an approval (mnajarro@, GKohlmann@, LPorzelt@) and, on approve, emails you back that the order will be placed. This script OWNS the single floating Credit Card launcher: coordinators and leads see just "CC Request"; supervisors and above get a dropdown that also opens the Supervisor-only "Log CC Purchase" modal (provided by bwn-cc-purchase, driven over the bwn:evt bus so there is only ever one button). Opened on a work order it prefills the Tracking # and drops the client/location into the description, and defaults Supplier to whichever PO line you flipped to "Supplier" in the BWN Ops Suite. The flow's secret URL stays server-side; nothing sensitive lives in this script.
 // @match        https://app.umbrava.com/*
 // @run-at       document-idle
 // @noframes
@@ -18,14 +18,14 @@
 (function () {
   'use strict';
 
-  var VER = '0.1.0';
+  var VER = '0.2.0';
   var FONT = "-apple-system,BlinkMacSystemFont,'Segoe UI','Helvetica Neue',Arial,sans-serif";
   var SWA_BASE = 'https://green-stone-0717dab0f.7.azurestaticapps.net';
   var PROXY_URL = SWA_BASE + '/api/cc-auth';
-  // Distinct blue accent so this REQUEST modal reads differently from the green CC Purchase
-  // (log) modal a supervisor may also see.
-  var ACCENT = '#1f3f77';
-  console.info('[BWN CC AUTH] v' + VER + ' - coordinator CC Authorization request modal -> SWA proxy (server vouches you + injects your email) -> Power Automate approval flow');
+  var ROLE_URL = SWA_BASE + '/api/user-role';
+  var GREEN = '#0d3d26';          // BWN Ops Suite brand green - one launcher, matches CC Purchase
+  var MIN_SUPER = 3;              // supervisor - matches api/shared/umbrava-auth.js RANK.SUPERVISOR
+  console.info('[BWN CC REQUEST] v' + VER + ' - coordinator CC Request modal -> SWA proxy (server vouches you + injects your email) -> Power Automate approval flow; owns the single Credit Card launcher (dropdown adds Log CC Purchase for supervisors+)');
 
   // ---- BWN Ops Suite bus (read-only consumer of the suite data contract v1) ----
   // bwn-suite-core (WO Assist) PUBLISHES the current WO's facts to sessionStorage
@@ -60,7 +60,7 @@
   function toast(msg, ms, bg) {
     var t = document.createElement('div');
     t.textContent = msg;
-    t.style.cssText = 'position:fixed;z-index:2147483647;left:50%;bottom:26px;transform:translateX(-50%);background:' + (bg || ACCENT) + ';color:#fff;font:400 14px ' + FONT + ';padding:11px 16px;border-radius:9px;max-width:74vw;box-shadow:0 6px 24px rgba(0,0,0,.3);line-height:1.5;';
+    t.style.cssText = 'position:fixed;z-index:2147483647;left:50%;bottom:26px;transform:translateX(-50%);background:' + (bg || GREEN) + ';color:#fff;font:400 14px ' + FONT + ';padding:11px 16px;border-radius:9px;max-width:74vw;box-shadow:0 6px 24px rgba(0,0,0,.3);line-height:1.5;';
     document.body.appendChild(t);
     setTimeout(function () { t.style.transition = 'opacity .4s'; t.style.opacity = '0'; setTimeout(function () { t.remove(); }, 420); }, ms || 6000);
   }
@@ -115,9 +115,76 @@
     });
   }
 
+  // ---- Role rank (drives dropdown-vs-single ONLY; the server is the boundary) ----
+  // The launcher shows CC Request to EVERYONE (any vouched user may request). The rank only
+  // decides whether the supervisor-only "Log CC Purchase" item is added to a dropdown. This is
+  // UX show/hide; api/cc-purchase re-enforces supervisor+ on submit. Rank is SERVER-computed
+  // (api/user-role returns rank 1 staff..5 director from the same module the endpoints use).
+  // Sources, cheapest first: the live bwn:role bus event + persisted bwn:role:last record from
+  // bwn-suite-ai, our own GM cache, then one direct /api/user-role fetch.
+  var ROLE_TTL_MS = 6 * 3600 * 1000;
+  var _rank = null;                 // number when known, null while unknown (-> single button)
+  var _ccPurchaseAvail = false;     // set true when bwn-cc-purchase announces over the bus
+  function meEmail() { return String((actor().email || '')).toLowerCase(); }
+  function sharedRoleRank() {
+    // bwn-suite-ai's persisted verdict - trusted only for the SAME signed-in user + fresh.
+    try {
+      var r = JSON.parse(localStorage.getItem('bwn:role:last') || 'null');
+      if (r && r.ok && typeof r.rank === 'number' && r.ts && (Date.now() - r.ts) < ROLE_TTL_MS) {
+        var em = meEmail();
+        if (em && r.email && String(r.email).toLowerCase() === em) return r.rank;
+      }
+    } catch (e) { }
+    return null;
+  }
+  function cachedRank() {
+    try {
+      var c = JSON.parse(GM_getValue('cca_role_cache', 'null'));
+      if (c && typeof c.rank === 'number' && c.ts && (Date.now() - c.ts) < ROLE_TTL_MS &&
+          c.email && c.email === meEmail()) return c.rank;
+    } catch (e) { }
+    return null;
+  }
+  function fetchRank(cb) {
+    var key = GM_getValue('ingest_key', '');
+    var t = authToken();
+    if (!key || !t) { cb(null); return; }
+    gmPost(ROLE_URL, { 'Content-Type': 'application/json', 'x-bwn-key': key }, { token: t }, 15000)
+      .then(function (r) {
+        if (r.status >= 200 && r.status < 300 && r.json && r.json.ok && typeof r.json.rank === 'number') {
+          try { GM_setValue('cca_role_cache', JSON.stringify({ rank: r.json.rank, tier: r.json.tier || null, role: r.json.role || null, email: String(r.json.email || '').toLowerCase(), ts: Date.now() })); } catch (e) { }
+          cb(r.json.rank);
+        } else cb(null);
+      })
+      .catch(function () { cb(null); });
+  }
+  function applyRank(rank) {
+    if (typeof rank !== 'number') return;
+    _rank = rank;
+    renderLauncher();
+  }
+  function resolveRank() {
+    var r = sharedRoleRank();
+    if (r == null) r = cachedRank();
+    if (r != null) { applyRank(r); return; }
+    fetchRank(function (fr) { if (fr != null) applyRank(fr); });
+  }
+
+  // ---- Cross-script bus: own the single launcher, drive CC Purchase --------
+  // bwn-cc-purchase no longer renders its own button. It ANNOUNCES itself with
+  // bwn:evt {id:'bwn:cc:register', tool:'purchase'} (on its load and in reply to our ping) and
+  // opens its modal on bwn:evt {id:'bwn:cc:open', tool:'purchase'}. We ping on load + at the
+  // first render so the handshake works regardless of which script loads first.
+  document.addEventListener('bwn:evt', function (e) {
+    var d = e && e.detail; if (!d) return;
+    if (d.id === 'bwn:cc:register' && d.tool === 'purchase') { _ccPurchaseAvail = true; renderLauncher(); }
+    if (d.id === 'bwn:role' && typeof d.rank === 'number') applyRank(d.rank);   // live sign-in changes
+  });
+  function pingCcPurchase() { try { document.dispatchEvent(new CustomEvent('bwn:evt', { detail: { id: 'bwn:cc:ping' } })); } catch (e) { } }
+  function openCcPurchase() { try { document.dispatchEvent(new CustomEvent('bwn:evt', { detail: { id: 'bwn:cc:open', tool: 'purchase' } })); } catch (e) { } }
+
   // ---- Field spec (order = modal layout). Mirrors the flow's body ----------
-  // key      = the JSON prop the flow / proxy expect (RequesterEmail is injected server-side).
-  // required = enforced client-side (the proxy re-checks the same minimum).
+  // key = the JSON prop the flow / proxy expect (RequesterEmail is injected server-side).
   var FIELDS = [
     { key: 'Date', label: 'Date Ordered / Requested', type: 'date', required: true },
     { key: 'Tracking', label: 'Work Order / Tracking #', type: 'text', required: true, ph: 'digits only, e.g. 371126' },
@@ -166,8 +233,8 @@
     card.style.cssText = 'background:#fff;color:#12241b;font:400 14px ' + FONT + ';width:520px;max-width:100%;border-radius:14px;box-shadow:0 18px 60px rgba(0,0,0,.35);overflow:hidden;';
 
     var head = document.createElement('div');
-    head.style.cssText = 'background:' + ACCENT + ';color:#fff;padding:16px 20px;font-weight:600;font-size:16px;display:flex;justify-content:space-between;align-items:center;';
-    head.innerHTML = '<span>Request CC Authorization</span>';
+    head.style.cssText = 'background:' + GREEN + ';color:#fff;padding:16px 20px;font-weight:600;font-size:16px;display:flex;justify-content:space-between;align-items:center;';
+    head.innerHTML = '<span>New CC Request</span>';
     var x = document.createElement('button');
     x.textContent = '×';
     x.style.cssText = 'background:none;border:none;color:#fff;font-size:24px;line-height:1;cursor:pointer;padding:0 4px;';
@@ -180,7 +247,7 @@
 
     // Who the approval reply goes to = the verified account (server derives it; we only show it).
     var who = document.createElement('div');
-    who.style.cssText = 'font-size:12.5px;color:#33473d;background:#eef2f8;border:1px solid #d3ddec;border-radius:8px;padding:8px 11px;margin-bottom:14px;line-height:1.45;';
+    who.style.cssText = 'font-size:12.5px;color:#33473d;background:#eef4f0;border:1px solid #cfe0d7;border-radius:8px;padding:8px 11px;margin-bottom:14px;line-height:1.45;';
     who.textContent = me.email
       ? ('Requesting as ' + me.email + '. The approval reply is sent to this account.')
       : 'The approval reply is sent to your signed-in Umbrava account.';
@@ -243,7 +310,7 @@
     cancel.addEventListener('click', closeModal);
     var submit = document.createElement('button');
     submit.type = 'submit'; submit.textContent = 'Submit request';
-    submit.style.cssText = 'padding:9px 18px;border:none;background:' + ACCENT + ';color:#fff;border-radius:8px;font:600 13px ' + FONT + ';cursor:pointer;';
+    submit.style.cssText = 'padding:9px 18px;border:none;background:' + GREEN + ';color:#fff;border-radius:8px;font:600 13px ' + FONT + ';cursor:pointer;';
     foot.appendChild(cancel); foot.appendChild(submit);
 
     form.appendChild(msg);
@@ -283,7 +350,7 @@
           var code = (r.json && r.json.code) || '';
           if (r.status >= 200 && r.status < 300 && r.json && r.json.ok) {
             closeModal();
-            toast('CC Authorization requested ✓  (' + (payload.SupplierName || '') + ' - $' + (payload.TotalCost || '0') + ') - watch your email for the approval.', 7000);
+            toast('CC Request submitted ✓  (' + (payload.SupplierName || '') + ' - $' + (payload.TotalCost || '0') + ') - watch your email for the approval.', 7000);
           } else if (r.status === 401) {
             reenable(); msg.textContent = 'Umbrava could not verify your session (' + (code || '401') + ') - reload the tab and try again.';
           } else if (r.status === 403 && code === 'WRONG_TENANT') {
@@ -310,29 +377,71 @@
     if (first) setTimeout(function () { first.focus(); }, 30);
   }
 
-  // ---- Floating launcher button -------------------------------------------
-  // No role gate: any coordinator may request. Placed above the CC Purchase launcher
-  // (bottom:18px) so a supervisor who sees both buttons gets two distinct controls.
-  function addLauncher() {
-    if (document.getElementById('bwn-cca-launch')) return;
-    var b = document.createElement('button');
-    b.id = 'bwn-cca-launch';
-    b.title = 'Request a credit card authorization';
-    b.textContent = '🧾 CC Authorization';
-    b.style.cssText = 'position:fixed;z-index:2147483645;right:18px;bottom:66px;background:' + ACCENT + ';color:#fff;border:none;border-radius:24px;padding:11px 16px;font:600 13px ' + FONT + ';cursor:pointer;box-shadow:0 6px 20px rgba(31,63,119,.35);';
-    b.addEventListener('click', buildModal);
-    document.body.appendChild(b);
+  // ---- The single floating launcher (this script owns it) ------------------
+  // Everyone gets CC Request. Supervisors+ with bwn-cc-purchase present get a dropdown that also
+  // opens Log CC Purchase. Re-rendered whenever the rank or CC-Purchase availability changes.
+  var _menuEl = null;
+  function closeMenu() { if (_menuEl) { _menuEl.remove(); _menuEl = null; document.removeEventListener('click', onDocClick, true); } }
+  function onDocClick(e) {
+    var wrap = document.getElementById('bwn-cc-launch');
+    if (_menuEl && wrap && !wrap.contains(e.target) && !_menuEl.contains(e.target)) closeMenu();
+  }
+  function removeLauncher() { closeMenu(); var b = document.getElementById('bwn-cc-launch'); if (b) b.remove(); }
+
+  function pillCss() {
+    return 'background:' + GREEN + ';color:#fff;border:none;border-radius:24px;padding:11px 16px;font:600 13px ' + FONT + ';cursor:pointer;box-shadow:0 6px 20px rgba(13,38,26,.35);';
+  }
+  function renderLauncher() {
+    removeLauncher();
+    var wrap = document.createElement('div');
+    wrap.id = 'bwn-cc-launch';
+    wrap.style.cssText = 'position:fixed;z-index:2147483645;right:18px;bottom:18px;';
+    var showDropdown = (typeof _rank === 'number' && _rank >= MIN_SUPER && _ccPurchaseAvail);
+
+    var btn = document.createElement('button');
+    btn.style.cssText = pillCss();
+    if (showDropdown) {
+      btn.textContent = '💳 Credit Card ▾';
+      btn.title = 'Credit card actions';
+      btn.addEventListener('click', function (ev) {
+        ev.stopPropagation();
+        if (_menuEl) { closeMenu(); return; }
+        _menuEl = document.createElement('div');
+        _menuEl.style.cssText = 'position:absolute;right:0;bottom:52px;background:#fff;border:1px solid #cfe0d7;border-radius:10px;box-shadow:0 10px 30px rgba(0,0,0,.28);overflow:hidden;min-width:200px;';
+        [
+          { label: '🧾  New CC Request', fn: function () { closeMenu(); buildModal(); } },
+          { label: '💳  Log CC Purchase', fn: function () { closeMenu(); openCcPurchase(); } }
+        ].forEach(function (it, i) {
+          var mi = document.createElement('button');
+          mi.textContent = it.label;
+          mi.style.cssText = 'display:block;width:100%;text-align:left;background:#fff;border:none;' + (i ? 'border-top:1px solid #eef2ef;' : '') + 'padding:12px 16px;font:600 13px ' + FONT + ';color:#12241b;cursor:pointer;';
+          mi.addEventListener('mouseenter', function () { mi.style.background = '#f2f7f4'; });
+          mi.addEventListener('mouseleave', function () { mi.style.background = '#fff'; });
+          mi.addEventListener('click', it.fn);
+          _menuEl.appendChild(mi);
+        });
+        wrap.appendChild(_menuEl);
+        setTimeout(function () { document.addEventListener('click', onDocClick, true); }, 0);
+      });
+    } else {
+      btn.textContent = '🧾 CC Request';
+      btn.title = 'Request a credit card purchase';
+      btn.addEventListener('click', buildModal);
+    }
+    wrap.appendChild(btn);
+    document.body.appendChild(wrap);
   }
 
   // ---- Tampermonkey menu --------------------------------------------------
   try {
-    GM_registerMenuCommand('Request a CC Authorization', buildModal);
+    GM_registerMenuCommand('New CC Request', buildModal);
     GM_registerMenuCommand('Set SWA ingest key', function () {
       var v = prompt('SWA ingest key (same value as the connector WO_INGEST_KEY - used across the BWN Ops Suite):', GM_getValue('ingest_key', '') || '');
-      if (v !== null) { GM_setValue('ingest_key', v.trim()); toast(v.trim() ? 'Ingest key saved.' : 'Ingest key cleared.'); }
+      if (v !== null) { GM_setValue('ingest_key', v.trim()); toast(v.trim() ? 'Ingest key saved.' : 'Ingest key cleared.'); resolveRank(); }
     });
   } catch (e) { /* menu API absent - launcher button still works */ }
 
-  // Show the launcher shortly after load (a beat so the page shell is up).
-  setTimeout(addLauncher, 1500);
+  // Render the launcher shortly after load (single "CC Request" until rank/CC-Purchase resolve),
+  // ping CC Purchase to announce itself, then resolve rank (may upgrade the button to a dropdown).
+  setTimeout(function () { renderLauncher(); pingCcPurchase(); resolveRank(); }, 1500);
 })();
