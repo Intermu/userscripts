@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         BWN Suite - Core (Broadway National)
 // @namespace    broadwaynational.bwn
-// @version      1.59.0
+// @version      1.60.0
 // @downloadURL  https://raw.githubusercontent.com/Intermu/userscripts/main/bwn-suite-core.user.js
 // @updateURL    https://raw.githubusercontent.com/Intermu/userscripts/main/bwn-suite-core.user.js
 // @description  Runs several Umbrava helpers for BWN coordinators, in the browser with no privileged grants. Includes: PO Approval + ETA Builder; WO Assist (GP/ETA, a stall watchdog, DNE calculator, and a next-action playbook); Email Leak Guard (checks recipients against vendor names, PO amounts, and client budget references before an outbound email sends); WO List Heat (a triage overlay + My Day strip on the work-order list, with an optional same-origin Umbrava API scan for deterministic full-board coverage); and the BWN Launcher (opens the Azure Static Web App tools with the current WO's context). Modules share state through sessionStorage/localStorage. The only network call is List Heat's same-origin GraphQL scan (app.umbrava.com/api/graphql, the app's own session); everything else is offline. Toggle modules in BWN_MODULES below.
@@ -44,7 +44,7 @@
   try { localStorage.setItem('bwn:status:core', JSON.stringify({ ver: BWN_VER, ts: Date.now() })); } catch (e) { /* best-effort */ }
 
   console.info('[BWN SUITE CORE] v' + BWN_VER + ' |',
-    'Shared Core 7 \u00b7 PO Approval 1.13 \u00b7 WO Assist 2.54 \u00b7 Leak Guard 2.0 \u00b7 List Heat 3.15 \u00b7 Launcher 2.0 \u00b7 Views 1.0 \u00b7 Palette 1.1 \u00b7 Visit 1.2 \u00b7 Reminders 1.1 \u00b7 Timeline 1.1 \u00b7 TripCal 1.3 \u00b7 Connector 1.2 |',
+    'Shared Core 7 \u00b7 PO Approval 1.13 \u00b7 WO Assist 2.55 \u00b7 Leak Guard 2.0 \u00b7 List Heat 3.15 \u00b7 Launcher 2.0 \u00b7 Views 1.0 \u00b7 Palette 1.1 \u00b7 Visit 1.2 \u00b7 Reminders 1.1 \u00b7 Timeline 1.1 \u00b7 TripCal 1.3 \u00b7 Connector 1.2 |',
     'enabled:', Object.keys(BWN_MODULES).filter(function (k) { return BWN_MODULES[k]; }).join(', '));
 
   // ===== BWN SHARED CORE v7 - KEEP IN SYNC across both suite scripts =====
@@ -1052,7 +1052,7 @@
   });
 
   // ==========================================================================
-  // MODULE: WO Assist: GP + ETA Watchdog + Playbook v2.54 (Connector 1.2)
+  // MODULE: WO Assist: GP + ETA Watchdog + Playbook v2.55 (Connector 1.2)
   // ==========================================================================
   if (BWN_MODULES.woAssist) BWN.safeModule('woAssist', function () {
     'use strict';
@@ -1082,7 +1082,7 @@
     var PANEL_ID = 'bwn-gp-panel';
     var GREEN = BWN.GREEN;
 
-    console.info('[BWN GP] WO Assist v2.54 loaded on', location.href);
+    console.info('[BWN GP] WO Assist v2.55 loaded on', location.href);
 
     // ---- Parsing helpers (shared via BWN core) -----------------------------
     var parseMoney = BWN.parseMoney;
@@ -1627,6 +1627,10 @@
 
     function compute() {
       var C = bwnConfig();
+      // Header read ONCE per compute (was an inline IIFE just for priority) - reused for
+      // priority AND published on state.hd so the pure computeNextActions engine reads the
+      // WO's identity/intake fields (tracking/location/trade/scope) from STATE, not the DOM.
+      var hd = (function () { try { return headerInfo(); } catch (e) { return {}; } })();
       var pos = readPOs();
       var vendorTotal = pos.reduce(function (a, p) { return a + (p.amount > 0 ? p.amount : 0); }, 0);
       var nte = detectNTE();
@@ -1656,12 +1660,20 @@
         pos: pos, vendorTotal: vendorTotal, nte: nte, gp: gp, gpPct: gpPct,
         eta: pos.length ? etaStatus(pos, notes, stall) : null,
         stall: stall, status: woStatus(), hrs: hrsInStatus(),
-        priority: (function () { try { return headerInfo().priority || ''; } catch (e) { return ''; } })(),
+        priority: hd.priority || '',
         due: dueStatus(C),
         staleDays: staleness(notes), noteCount: notes.length, lastNote: lastNoteTs ? new Date(lastNoteTs).toISOString() : null, deep: !!deepNotes, notesSrc: lastNotesSrc,
         lastClientNoteDays: lastClientTs ? Math.floor((Date.now() - lastClientTs) / 86400000) : null,   // null = no client-labeled note among the loaded notes
         noShow: (function () { try { var tb = BWN.ssGetJSON('bwn:trips:' + (currentWOId() || ''), null); return (tb && tb.noShow && (Date.now() - (tb.ts || 0)) < 12 * 3600000) ? tb.noShow : null; } catch (e) { return null; } })(),   // 12h TTL bounds a stale phantom in a long-lived tab
         openTasks: readOpenTasks(),
+        // Phase 4: the DOM/store inputs the pure computeNextActions engine needs, assembled
+        // HERE so state fully determines the playbook (mirrors the computeVerdict refactor -
+        // facts in, verdict out). Each is fail-safe so compute() never throws.
+        hd: hd,
+        authoredPlan: (function () { try { return readAuthoredPlan(); } catch (e) { return null; } })(),
+        docs: (function () { try { return readDocs(); } catch (e) { return null; } })(),
+        escRank: (function () { try { return bwnEscRank(); } catch (e) { return null; } })(),
+        nudges: (function () { try { return nudgedPrefixes(); } catch (e) { return {}; } })(),
         cfg: C
       };
     }
@@ -2112,8 +2124,34 @@
       return { tier: level, owner: owner, label: label, lead: lead, tierName: (owner === 'director' ? 'decision' : owner) };
     }
 
+    // Impure wrapper: assembles the DOM/store inputs the PURE engine needs (when a caller
+    // passes a bare state, not one from compute()), performs the ONE side effect - staging a
+    // note-authored plan to the dashboard - then delegates. Kept thin so the checklist, the
+    // WO Assist top-3, the bus nextSteps, and any My Day surface all run the SAME pure engine
+    // and cannot drift (mirrors thresholdsFor -> computeVerdict).
     function nextActions(state) {
-      var hd = headerInfo();
+      if (state.hd === undefined) { try { state.hd = headerInfo(); } catch (e) { state.hd = {}; } }
+      if (state.authoredPlan === undefined) { try { state.authoredPlan = readAuthoredPlan(); } catch (e) { state.authoredPlan = null; } }
+      if (state.docs === undefined) { try { state.docs = readDocs(); } catch (e) { state.docs = null; } }
+      if (state.escRank === undefined) { try { state.escRank = bwnEscRank(); } catch (e) { state.escRank = null; } }
+      if (state.nudges === undefined) { try { state.nudges = nudgedPrefixes(); } catch (e) { state.nudges = {}; } }
+      // Round-trip a NOTE-authored plan to the dashboard (side effect kept OUT of the pure
+      // engine). Skip plan.dash - that plan already lives on the dashboard, so pushing it
+      // back would echo. Zero-egress here: Core only queues to localStorage; the AI script
+      // drains + POSTs it. Deduped by content, so unchanged plans do not re-enqueue.
+      var plan = state.authoredPlan;
+      if (plan && plan.items && plan.items.length && !plan.dash) {
+        try { stagePlanPush((state.hd || {}).tracking, plan.items, 'note'); } catch (e) { }
+      }
+      return computeNextActions(state, state.cfg || bwnConfig());
+    }
+
+    // PURE engine: (state, C) in -> ranked action list out. No DOM reads, no store writes,
+    // no side effects - deterministic given `state` (its DOM/store inputs were assembled in
+    // compute()/the wrapper above) and `C`. This is the single source of truth the spec
+    // asked for so the on-page checklist, the top-3, and My Day cannot disagree.
+    function computeNextActions(state, C) {
+      var hd = state.hd || {};
       var ref = (hd.tracking ? 'Tracking #' + hd.tracking : hd.wo) + (hd.location ? ' \u2014 ' + hd.location : '');
       var acts = [];
 
@@ -2130,15 +2168,10 @@
       // generic nags on top). Zero-egress - we only READ the note. Items keep their
       // authored order; the completion anchor is still appended so the list can't read
       // "all done" until the status is terminal.
-      var plan = readAuthoredPlan();
+      var plan = state.authoredPlan;
       if (plan && plan.items.length) {
-        // Round-trip (job → dashboard): a plan the coordinator typed into an Umbrava NOTE
-        // drives this checklist but otherwise never reaches the dashboard. Stage it so the
-        // dashboard mirrors it. SKIP plan.dash - that plan already lives on the dashboard
-        // (pushing it back would echo). Zero-egress here: Core only queues to localStorage;
-        // the AI script drains + POSTs it (key-gated). Deduped by content, so unchanged
-        // plans don't re-enqueue on every refresh.
-        if (!plan.dash) stagePlanPush(hd.tracking, plan.items, 'note');
+        // (The round-trip stage-to-dashboard side effect now lives in the nextActions
+        // wrapper - the pure engine only READS the plan to build the checklist.)
         var pd = null;
         if (plan.dash) { pd = plan.when || null; }   // the winning block's own date stamp
         else { try { pd = BWN.parseNoteDateLoose(plan.ts); } catch (e) { } }
@@ -2165,7 +2198,7 @@
       //  - Waiting on an outside party: escalate once the status is 2x past its own
       //    priority-scaled hours limit (follow-ups demonstrably have not moved it),
       //    instead of a flat 14 calendar days regardless of status class or priority.
-      var escTh = bwnThresholdsFor(state.status, state.priority, state.cfg || bwnConfig());
+      var escTh = bwnThresholdsFor(state.status, state.priority, C);
       var escPn = bwnPrioNum(state.priority);
       var escDays = Math.max(2, Math.round(ESCALATE_DAYS * bwnPrioMult(state.priority)));
       var overLimit = (state.hrs !== null && escTh.bad > 0 && state.hrs >= 2 * escTh.bad);
@@ -2185,7 +2218,7 @@
         // priority; the recipient is relative to the reader's own rank (see
         // bwnEscalationTier). Key carries the tier so a heavier escalation re-opens a
         // step that was checked at a lighter tier (reopening early is the safe direction).
-        var esc = bwnEscalationTier(escSev, escPn, bwnEscRank());
+        var esc = bwnEscalationTier(escSev, escPn, state.escRank);
         acts.push({
           key: 'escalate:' + woPhase + ':' + esc.tier,
           label: esc.label,
@@ -2313,7 +2346,7 @@
       // and we never auto-complete on a "docs present" read. A "docs uploaded" note
       // converges it via ACT_SIGNALS.stall (same signal the confirm steps use).
       if (woPhase === 'confirmcomplete' || woPhase === 'costreview') {
-        var docs = readDocs();
+        var docs = state.docs;
         if (docs && docs.count === 0) {
           acts.push({
             key: 'docs:none',
@@ -2442,7 +2475,7 @@
       // gets flagged HARDER - marker, why suffix, urgency boost. Pressure only; nothing
       // is ever hidden or demoted by habit.
       try {
-        var nd = nudgedPrefixes();
+        var nd = state.nudges || {};
         acts.forEach(function (a) {
           var sp = statPrefix(a);
           if (sp && nd[sp]) { a.nudge = nd[sp]; a.why += ' · ⚠ dismissed on ' + nd[sp] + ' recent jobs - needs real action, not another dismissal'; }
@@ -3001,7 +3034,38 @@
       }
       return null;
     }
-    function autoDetectActioned(acts) {
+    // ---- Structured convergence (Phase 4) --------------------------------------
+    // A step converges on a REAL STATE FIELD, not note wording, when state proves it
+    // handled. Checked BEFORE the brittle note-regex pass below, so the text match is only
+    // a fallback. Only UNAMBIGUOUS facts converge here - a PO's OWN `done` / status field.
+    // Ambiguous reads deliberately do NOT converge (honoring "never false-check an open
+    // step"): a bare Documents COUNT can be intake docs rather than the completion package
+    // (see readDocs / Phase 2), so docs-present never auto-completes a step. Most steps
+    // already converge structurally by NON-GENERATION (their key encodes the resolving
+    // field, so the step stops being produced when that field moves); this handles the
+    // note-only remainder the spec named - materials/completion tied to a PO, and the trip
+    // no-show, which is fed by the trips cache INDEPENDENT of PO state (so a PO that
+    // completed with no per-PO status would otherwise keep nagging until a note matched).
+    function poByNum(state, num) {
+      var ps = (state && state.pos) || [];
+      for (var i = 0; i < ps.length; i++) if (String(ps[i].num) === String(num)) return ps[i];
+      return null;
+    }
+    function structConvergeReason(a, state) {
+      if (!a || !state) return null;
+      var parts = (a.key || '').split(':'), pfx = parts[0];
+      if (pfx === 'pomat' || pfx === 'poconf') {          // materials / completion, per PO
+        var p = poByNum(state, parts[1]);
+        if (p && p.done) return 'PO ' + parts[1] + ' is marked done';
+        if (pfx === 'pomat' && p && p.poStatus && p.poStatus !== 'materials') return 'PO ' + parts[1] + ' is no longer awaiting materials';
+      }
+      if (pfx === 'noshow' && state.noShow) {              // trips-cache no-show vs. the real PO ledger
+        var nv = nvVendor(state.noShow.vendor);
+        if ((state.pos || []).some(function (p2) { return p2.done && nvVendor(p2.vendor) === nv; })) return state.noShow.vendor + ' has a completed PO on this WO';
+      }
+      return null;
+    }
+    function autoDetectActioned(acts, state) {
       var store = actsLoad(), dirty = false;
       var notes = getNotes();
       var recent = recentConvergeNotes(notes);
@@ -3011,9 +3075,11 @@
         // fake-complete "recruit a vendor" and let the list read "all done" on an open WO.
         if (a.anchor || a.key.indexOf('phase:') === 0) return;
         if (store[a.key]) return;   // any existing record - done OR dismissed tombstone - is a decision; never overwrite
-        var reason = a.authored
-          ? authoredResolveReason(a, authoredNewerNotes(a, notes), recent)   // newer-than-plan only (self-check guard)
-          : noteConvergeReason(a, notes, recent);
+        // Structured state field (real, unambiguous) wins over the note-regex fallback.
+        var reason = structConvergeReason(a, state)
+          || (a.authored
+            ? authoredResolveReason(a, authoredNewerNotes(a, notes), recent)   // newer-than-plan only (self-check guard)
+            : noteConvergeReason(a, notes, recent));
         // auto:1 → unchecking this is a frictionless correction, not a skip. NO statRecord:
         // machine convergence is not a coordinator habit signal - counting it let passive
         // WO viewing dilute an earned nudge, and a corrected wrong auto-check would have
@@ -3030,7 +3096,7 @@
       var row = poAnchorBlock();
       if (!acts.length || !row) { if (card) card.remove(); return; }
       ensureWAStyle();
-      autoDetectActioned(acts);
+      autoDetectActioned(acts, state);
       var store = actsLoad();
       // Open steps first (already worst-first from nextActions), done steps sink to the
       // bottom - a stable partition, so the urgency order is preserved within each group.
@@ -3873,7 +3939,7 @@
       // Keep the acts store honest whether or not the dock renders: auto-detect actioned
       // steps from posted notes (idempotent - renderActsInline re-runs it when the dock shows).
       var waActs = []; try { waActs = nextActions(st); } catch (e) { }
-      try { if (waActs.length) autoDetectActioned(waActs); } catch (e) { }
+      try { if (waActs.length) autoDetectActioned(waActs, st); } catch (e) { }
       // NEXT ACTIONS list is restored to its original on-page location (the checklist card
       // above the PO block). The Job View pills (fed by the bus publish below) stay too, so the
       // same next-steps show in BOTH places, in unison. Only the floating GP/ETA pill + the
