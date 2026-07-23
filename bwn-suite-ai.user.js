@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         BWN Suite - AI (Broadway National)
 // @namespace    broadwaynational.bwn
-// @version      1.39.1
+// @version      1.41.0
 // @downloadURL  https://raw.githubusercontent.com/Intermu/userscripts/main/bwn-suite-ai.user.js
 // @updateURL    https://raw.githubusercontent.com/Intermu/userscripts/main/bwn-suite-ai.user.js
 // @description  The Umbrava tools that call outside APIs, kept separate from the zero-egress Core script. Client Update and WO Audit drafts (Anthropic Claude; draft-only, scrubbed before sending, you review before posting); Find Techs / Find Suppliers (Google Places; vendor leads near a WO); and Job View (opens the Ops-Dashboard job card on the WO page - WO details from Umbrava plus the authored case file and next actions, read-only). Network access is limited by the browser to the declared API hosts and the BWN Static Web App. API keys are stored in Tampermonkey's storage via the menu commands and never enter the page. Toggle modules in BWN_MODULES below.
@@ -12,7 +12,6 @@
 // @grant        GM_setValue
 // @grant        GM_registerMenuCommand
 // @grant        GM_setClipboard
-// @connect      api.anthropic.com
 // @connect      places.googleapis.com
 // @connect      green-stone-0717dab0f.7.azurestaticapps.net
 // ==/UserScript==
@@ -46,7 +45,10 @@
     try {
       localStorage.setItem('bwn:status:ai', JSON.stringify({
         ver: BWN_VER,
-        anthropic: !!GM_getValue('anthropic_key', ''),
+        // The per-user Anthropic key was retired (TASK-014); drafting rides the shared
+        // SWA connector now. Report advanced-AI reachability off the connector ingest key
+        // so Core's Ops panel status line stays meaningful without a per-user key.
+        anthropic: !!GM_getValue('ingest_key', ''),
         places: !!GM_getValue('places_key', ''),
         ingest: !!GM_getValue('ingest_key', ''),
         // ts is the LOAD time, never refreshed: Core's "loaded this session" handshake
@@ -941,6 +943,435 @@
     if (v !== null) { GM_setValue('ingest_key', v.trim()); publishAiStatus(); alert(v.trim() ? 'Saved.' : 'Cleared.'); }
   });
 
+  // ===== BWN AI TRANSPORT (Phase 2 - unified bwnAI transport) =========================
+  // The grant-holder half of the unified AI transport ([[bwn-ai-transport]] GOAL-002).
+  // This file owns the network grant + the SWA connector, so it wires the REAL proxy tier
+  // into the shared bwnAI router: the cross-origin sender to POST /api/ai AND the same-origin
+  // tool executor. @grant none modules (Drop Upload) only carry the bwnAI block and never
+  // reach the paid tier - it misses and falls through.
+  //
+  // Layout (top to bottom):
+  //   1. bwnAI block  - PASTE-IDENTICAL across the suite (PAT-002). DO NOT edit its internals;
+  //                     the transport differs ONLY by the injected sender, wired via setProxy.
+  //   2. tool registry (TASK-007) - same-origin GraphQL reads the model may call.
+  //   3. same-origin bearer read + gql - the operator bearer NEVER leaves the browser (SEC-001).
+  //   4. driver (TASK-008) - runs the stateless client<->server tool loop to a final answer.
+  //   5. proxy sender (TASK-009) - bwnAI.setProxy(...) with the GM_xmlhttpRequest transport.
+  // ===== bwnAI v1 - shared suite-wide AI router - KEEP IN SYNC across suite scripts =====
+  // Single tiered helper (spec: [[bwn-ai-tiering]]). Generalizes this module's original
+  // on-device aiSummary into a router every module can call the same way. Three tiers:
+  //   local    - a module-supplied mechanical fn (no model). Always-available floor.
+  //   ondevice - Chrome's built-in Prompt API (Gemini Nano). Free, zero-egress, no key,
+  //              @grant none. Everyone. Good for summaries/labels/short classification.
+  //   proxy    - one SERVER key behind the bwn-ai SWA (Claude/Haiku). Rank-gated to
+  //              managers+ (BWN_AI_ADVANCED_MIN_RANK, default 4). The network transport
+  //              is INJECTED by a grant-holding script via bwnAI.setProxy(fn); modules
+  //              that are @grant none (this one) never attempt it - proxy simply misses
+  //              and the router falls through to on-device / local.
+  // Contract: async, self-bounded by timeoutMs, ALWAYS resolves (never throws), returns
+  // '' (or the local result) on any miss. Paste this block verbatim into any module that
+  // needs AI; only put the block here, never a key. This is UX/cost routing - the SERVER
+  // re-enforces the rank on the proxy tier (403 ROLE_REQUIRED, treated here as a miss).
+  var bwnAI = (function () {
+    var TASK_TIER = { summarize: 'ondevice', classify: 'ondevice', draft: 'proxy', render: 'proxy' };
+    var TASK_ONELINE = { summarize: true, classify: true };
+    var TASK_SYSTEM = {
+      summarize: 'Summarize the input into a single plain-text line (<=200 chars). No greeting, no sign-off, no preamble, no quotes - output only the one line.',
+      classify: 'Classify the input. Respond with ONLY a short label of a few words - no explanation, no punctuation beyond the label.',
+      draft: 'Draft a short, professional message for a facilities coordinator. Clear and courteous. Output only the message body - no preamble.',
+      render: 'Synthesize the provided work-order details into a clear, well-structured plain-text brief for a facilities coordinator. Output only the brief.'
+    };
+    var ROLE_TTL_MS = 6 * 3600 * 1000;   // trust the cross-refresh role slot this long
+
+    // ---- Rank read (client, cost/UX only - the server is the real gate) ----------
+    // @grant-none-safe: the AI script resolves the SERVER-computed rank once per session
+    // ([[umbrava-role-auth]]) and publishes it on the `bwn:role` bus event + the
+    // localStorage `bwn:role:last` slot. A live bus event is trusted directly; the slot
+    // is the cross-refresh fallback, trusted only when marked ok + fresh. Never re-fetches.
+    var _liveRank = null;
+    try {
+      document.addEventListener('bwn:evt', function (e) {
+        var d = e && e.detail;
+        if (d && d.id === 'bwn:role' && typeof d.rank === 'number') _liveRank = d.rank;
+      });
+    } catch (e) { /* no document (worker) - rank stays unknown -> on-device */ }
+    function rank() {
+      if (typeof _liveRank === 'number') return _liveRank;
+      try {
+        var r = JSON.parse(localStorage.getItem('bwn:role:last') || 'null');
+        if (r && r.ok && typeof r.rank === 'number' && r.ts && (Date.now() - r.ts) < ROLE_TTL_MS) return r.rank;
+      } catch (e2) { }
+      return null;
+    }
+
+    // ---- On-device (Chrome built-in Prompt API) -----------------------------------
+    function langModel() {
+      // The Prompt API surface has shifted across Chrome versions; probe the globals.
+      var g = (typeof self !== 'undefined') ? self : (typeof window !== 'undefined' ? window : null);
+      if (typeof LanguageModel !== 'undefined' && LanguageModel) return LanguageModel;
+      if (g && g.LanguageModel) return g.LanguageModel;
+      if (g && g.ai && g.ai.languageModel) return g.ai.languageModel;   // older window.ai shape
+      return null;
+    }
+    function ready(api) {
+      // Newer: availability() -> 'available'|'downloadable'|'downloading'|'unavailable'.
+      // Older: capabilities() -> {available:'readily'|'after-download'|'no'}. Only
+      // 'available'/'readily' means we can infer NOW without a multi-GB model download.
+      try {
+        if (typeof api.availability === 'function') return Promise.resolve(api.availability()).then(function (s) { return s === 'available'; }, function () { return false; });
+        if (typeof api.capabilities === 'function') return Promise.resolve(api.capabilities()).then(function (c) { return !!c && c.available === 'readily'; }, function () { return false; });
+      } catch (e) { }
+      return Promise.resolve(false);
+    }
+    // Reuse one session PER system prompt (a new task/system gets its own; recreated on error).
+    var SESSIONS = {};
+    function session(api, sys) {
+      var cached = SESSIONS[sys];
+      if (cached) return Promise.resolve(cached);
+      function keep(hasSystem) { return function (s) { try { s._bwnSystem = hasSystem; } catch (e) { } SESSIONS[sys] = s; return s; }; }
+      // Prefer the system-prompt option; fall back to a bare session (older/newer variants)
+      // where the instruction is prepended to the user prompt instead (_bwnSystem = false).
+      return Promise.resolve(api.create({ initialPrompts: [{ role: 'system', content: sys }] }))
+        .then(keep(true), function () { return Promise.resolve(api.create()).then(keep(false)); });
+    }
+    function onDevice(sys, content) {
+      var api = langModel();
+      if (!api || typeof api.create !== 'function') return Promise.resolve('');
+      return ready(api).then(function (ok) {
+        if (!ok) return '';
+        return session(api, sys).then(function (s) {
+          var usedSystem = !!(s && s._bwnSystem !== false);   // best-effort; harmless if unknown
+          return s.prompt((usedSystem ? '' : sys + '\n\n') + content);
+        });
+      }).catch(function () { SESSIONS[sys] = null; return ''; });   // drop a bad cached session
+    }
+
+    // ---- Proxy (server key, injected transport) -----------------------------------
+    // A grant-holding script installs the real cross-origin sender:
+    //   bwnAI.setProxy(function (payload) { ... return Promise<string text>; })
+    // payload = {task, system, prompt, maxTokens, minRank, rank}. The sender owns auth
+    // (token in the JSON BODY, never Authorization - the SWA edge overwrites it) and must
+    // RESOLVE '' / REJECT on any miss (403 ROLE_REQUIRED, network, empty) so we fall through.
+    var _proxySend = null;
+    function proxy(payload, send) {
+      var fn = send || _proxySend;
+      if (typeof fn !== 'function') return Promise.resolve('');   // no transport -> miss
+      return Promise.resolve().then(function () { return fn(payload); })
+        .then(function (t) { return String(t || ''); }, function () { return ''; });
+    }
+
+    function withTimeout(p, ms) {
+      return new Promise(function (resolve) {
+        var t = setTimeout(function () { resolve(undefined); }, ms);
+        Promise.resolve(p).then(function (v) { clearTimeout(t); resolve(v); }, function () { clearTimeout(t); resolve(undefined); });
+      });
+    }
+    function clean(text, oneLine, maxChars) {
+      var s = String(text || '');
+      if (oneLine) s = s.replace(/\s+/g, ' ').replace(/^["']+|["']+$/g, '');
+      return s.trim().slice(0, maxChars);
+    }
+
+    // ---- Router -------------------------------------------------------------------
+    function bwnAI(opts) {
+      opts = opts || {};
+      var task = opts.task || 'summarize';
+      var oneLine = (opts.oneLine !== undefined) ? !!opts.oneLine : !!TASK_ONELINE[task];
+      var maxChars = opts.maxChars || (oneLine ? 300 : 4000);
+      var sys = opts.system || TASK_SYSTEM[task] || TASK_SYSTEM.summarize;
+      var content = (opts.prompt != null) ? String(opts.prompt)
+        : (typeof opts.input === 'string' ? opts.input : (opts.input != null ? JSON.stringify(opts.input) : ''));
+      var localFn = (typeof opts.local === 'function') ? opts.local : null;
+      var floor = function () { try { return localFn ? clean(localFn(), oneLine, maxChars) : ''; } catch (e) { return ''; } };
+
+      // Ordered tier list: desired ceiling first (task default, unless tier overrides),
+      // then the fallback chain. Deduped, capped at proxy when tier says 'ondevice'.
+      var desired = (opts.tier && opts.tier !== 'auto') ? opts.tier : (TASK_TIER[task] || 'ondevice');
+      var order = [desired].concat(opts.fallback || ['ondevice', 'local']);
+      var seen = {}, tiers = [];
+      order.forEach(function (t) { if (t && !seen[t]) { seen[t] = 1; tiers.push(t); } });
+
+      var minRank = (typeof opts.minRank === 'number') ? opts.minRank : 4;
+      var r = rank();
+
+      function step(i) {
+        if (i >= tiers.length) return Promise.resolve('');
+        var t = tiers[i], next = function () { return step(i + 1); };
+        if (t === 'local') { return Promise.resolve(floor()); }   // terminal floor
+        if (t === 'proxy') {
+          // Fail CLOSED: unknown/under-rank quietly skips the paid tier (no 403 flash, no
+          // wasted key) and drops to on-device. The server still backstops if we do send.
+          if (r == null || r < minRank) return next();
+          return proxy({ task: task, system: sys, prompt: content, maxTokens: opts.maxTokens, minRank: minRank, rank: r }, opts.proxySend)
+            .then(function (out) { out = clean(out, oneLine, maxChars); return out || next(); });
+        }
+        if (t === 'ondevice') {
+          return onDevice(sys, content).then(function (out) { out = clean(out, oneLine, maxChars); return out || next(); });
+        }
+        return next();
+      }
+
+      var run = step(0).then(function (out) { return out || floor(); });
+      return withTimeout(run, opts.timeoutMs || 8000).then(function (v) { return v || floor() || ''; });
+    }
+    bwnAI.setProxy = function (fn) { _proxySend = (typeof fn === 'function') ? fn : null; };
+    bwnAI.rank = rank;   // exposed for debug / gating UI
+    return bwnAI;
+  })();
+  // ===== END bwnAI =====
+
+  // ---- Tool registry (TASK-007) --------------------------------------------------------
+  // Each tool is function(input) -> Promise<{ok, content}>, executed IN-PAGE against
+  // /api/graphql with the operator's own Auth0 bearer (SEC-001: the bearer never leaves the
+  // browser). CONFIRMED selectors only - no guessed Umbrava fields (repo Hard Rule 6). A tool
+  // NEVER throws into the driver loop: it resolves {ok:false, content:'<reason>'} on any fault
+  // so the loop always terminates. `content` is JSON-serializable; the driver stringifies it.
+  var AI_WO_Q =
+    'query($n:Int!){ workOrder(workOrderNumber:$n){ ' +
+    '  number statusName locationId locationName ' +
+    '  scopeOfWork serviceInstructions ' +
+    '  priority{ label } trades{ id name } doNotExceed{ amount } ' +
+    '} }';
+  // Umbrava's REAL notes query, captured off the wire 2026-07-23 (confirmed WONoteFields
+  // subset), matching bwn-wo-audit NOTES_Q byte-for-byte.
+  var AI_NOTES_Q =
+    'query($n:Int!){ jobNotes(workOrderNumber:$n, includeDeleted:false){ ' +
+    '  id type content contentHtml createdDate isPinned isCompletion workOrderNoteSource ' +
+    '  createdBy { firstName lastName } } }';
+
+  function aiWoNum(v) {
+    var n = parseInt(String(v == null ? '' : v).replace(/^W-?/i, '').replace(/[^0-9]/g, ''), 10);
+    return (!n || isNaN(n)) ? null : n;
+  }
+  function aiDate(v) { if (!v) return null; var d = new Date(v); return isNaN(+d) ? null : d; }
+  function aiStripHtml(s) { return String(s || '').replace(/<[^>]*>/g, ' ').replace(/\s+/g, ' ').trim(); }
+
+  var AI_TOOLS = {
+    getWorkOrder: function (input) {
+      var n = aiWoNum(input && input.workOrderNumber);
+      if (!n) return Promise.resolve({ ok: false, content: 'invalid or missing workOrderNumber' });
+      return aiGql(AI_WO_Q, { n: n }).then(function (d) {
+        var wo = d && d.workOrder;
+        if (!wo) return { ok: false, content: 'work order ' + n + ' not found' };
+        return { ok: true, content: {
+          number: wo.number, statusName: wo.statusName || '',
+          locationId: wo.locationId || null, locationName: wo.locationName || '',
+          scopeOfWork: wo.scopeOfWork || '', serviceInstructions: wo.serviceInstructions || '',
+          priority: (wo.priority && wo.priority.label) || '',
+          trades: (wo.trades || []).map(function (t) { return t && t.name; }).filter(Boolean),
+          nte: (wo.doNotExceed && wo.doNotExceed.amount != null) ? wo.doNotExceed.amount : null
+        } };
+      }, function (e) { return { ok: false, content: 'work order read failed: ' + ((e && e.message) || e) }; });
+    },
+    getJobNotes: function (input) {
+      var n = aiWoNum(input && input.workOrderNumber);
+      if (!n) return Promise.resolve({ ok: false, content: 'invalid or missing workOrderNumber' });
+      var limit = (input && typeof input.limit === 'number' && input.limit > 0) ? Math.min(input.limit, 50) : 20;
+      return aiGql(AI_NOTES_Q, { n: n }).then(function (d) {
+        var notes = ((d && d.jobNotes) || []).slice().sort(function (x, y) {
+          return (aiDate(y && y.createdDate) || 0) - (aiDate(x && x.createdDate) || 0);
+        }).slice(0, limit).map(function (x) {
+          x = x || {};
+          var who = x.createdBy ? [x.createdBy.firstName, x.createdBy.lastName].filter(Boolean).join(' ') : '';
+          return {
+            content: (x.content && String(x.content).trim()) || aiStripHtml(x.contentHtml),
+            createdDate: x.createdDate || '', type: x.type || '',
+            isPinned: !!x.isPinned, isCompletion: !!x.isCompletion,
+            by: who, source: x.workOrderNoteSource || ''
+          };
+        });
+        return { ok: true, content: { workOrderNumber: n, count: notes.length, notes: notes } };
+      }, function (e) { return { ok: false, content: 'job notes read failed: ' + ((e && e.message) || e) }; });
+    },
+    // RISK-004: the location -> work-orders selector is NOT pinned. Per repo Hard Rule 6 we do
+    // NOT guess a GraphQL field. Return a clear, terminating tool_result so Ask stays WO-scoped
+    // and the loop still ends. TODO capture/replay the live query, then wire the confirmed
+    // selector here (see [[bwn-ai-transport]] RISK-004 / [[bwn-ask-copilot]]).
+    getLocationWorkOrders: function (input) {
+      return Promise.resolve({ ok: false, content:
+        'getLocationWorkOrders is not yet wired - the location-to-work-orders selector is ' +
+        'unconfirmed and will not be guessed. Ask the coordinator for a specific work-order ' +
+        'number and use getWorkOrder / getJobNotes instead.' });
+    }
+  };
+
+  // Anthropic tool DEFINITIONS sent as `tools` in the /api/ai request (the server passes them
+  // to the model; it does NOT execute them - REQ-006). Names match AI_TOOLS keys exactly.
+  var AI_TOOL_DEFS = [
+    { name: 'getWorkOrder',
+      description: 'Look up a single Umbrava work order by its number. Returns status, location, scope of work, service instructions, priority, trades, and the not-to-exceed amount.',
+      input_schema: { type: 'object', properties: {
+        workOrderNumber: { type: 'string', description: 'The work order number, digits only or W-prefixed, e.g. "375038" or "W-375038".' }
+      }, required: ['workOrderNumber'] } },
+    { name: 'getJobNotes',
+      description: 'Read the job notes for a work order, newest first. Returns each note text, author, date, type, and pinned/completion flags.',
+      input_schema: { type: 'object', properties: {
+        workOrderNumber: { type: 'string', description: 'The work order number, digits only or W-prefixed.' },
+        limit: { type: 'number', description: 'Max notes to return (default 20, cap 50).' }
+      }, required: ['workOrderNumber'] } },
+    { name: 'getLocationWorkOrders',
+      description: 'List the work orders at a location. NOTE: not yet available - the selector is unconfirmed and this returns an unavailable notice. Prefer getWorkOrder with a specific work-order number.',
+      input_schema: { type: 'object', properties: {
+        locationId: { type: 'string', description: 'The Umbrava location id.' }
+      }, required: ['locationId'] } }
+  ];
+
+  // ---- Same-origin bearer read + GraphQL -----------------------------------------------
+  // Mirrors the proven jobView data layer (isUmbravaToken / authToken / gql, [[umbrava-role-auth]]).
+  // Kept self-contained here because those copies are trapped in the jobView module scope and
+  // the transport must work even when Job View is toggled off. The bearer is picked by CONTENT
+  // (the auth cache slot transiently holds a non-Umbrava SCM token) and read FRESH each round
+  // (RISK-001: it is short-lived). It rides only same-origin /api/graphql (SEC-001); the copy
+  // sent to the SWA goes in the JSON BODY (SEC-002), never the Authorization header.
+  function aiIsUmbravaToken(tok) {
+    try {
+      var p = JSON.parse(atob(String(tok).split('.')[1].replace(/-/g, '+').replace(/_/g, '/')));
+      var iss = String(p.iss || '').replace(/\/+$/, '');
+      if (iss !== 'https://login.umbrava.com' && iss !== 'https://umbrava.us.auth0.com') return false;
+      return !(typeof p.exp === 'number' && (Date.now() / 1000) > p.exp);
+    } catch (e) { return false; }
+  }
+  function aiUserToken() {
+    try {
+      var keys = Object.keys(localStorage).filter(function (x) {
+        return /@@auth0spajs@@::.*::https:\/\/app\.umbrava\.com\/api::/.test(x);
+      });
+      for (var i = 0; i < keys.length; i++) {
+        var body = (JSON.parse(localStorage.getItem(keys[i])) || {}).body;
+        var tok = (body && body.access_token) || '';
+        if (tok && aiIsUmbravaToken(tok)) return tok;
+      }
+      return '';
+    } catch (e) { return ''; }
+  }
+  function aiGql(query, variables) {
+    var tok = aiUserToken();
+    return fetch('/api/graphql', {
+      method: 'POST',
+      headers: { 'Authorization': 'Bearer ' + tok, 'Content-Type': 'application/json' },
+      body: JSON.stringify({ query: query, variables: variables || {} })
+    }).then(function (r) { return r.json(); })
+      .then(function (j) {
+        if (j && j.errors && j.errors.length) throw new Error(j.errors[0].message || 'GraphQL error');
+        return j && j.data;
+      });
+  }
+
+  // ---- Driver + POST transport (TASK-008) ----------------------------------------------
+  var AI_URL = 'https://green-stone-0717dab0f.7.azurestaticapps.net/api/ai';
+  var AI_MAX_TOOL_ROUNDS = 6;        // match the server default (BWN_AI_MAX_TOOL_ITERS)
+  var AI_MAX_CALLS_PER_ROUND = 8;    // backstop on a single over-eager assistant turn
+  var AI_REQ_TIMEOUT_MS = 60000;     // per round-trip; the loop count bounds total time
+
+  // One POST to /api/ai over GM_xmlhttpRequest (the SWA is a declared @connect host). Reads the
+  // ingest key FRESH so a mid-session save/clear is honored. Resolves the parsed JSON on 2xx,
+  // else null - a 403 ROLE_REQUIRED / network error / timeout / disabled connector is a MISS,
+  // never a throw, so bwnAI falls through to on-device (backgrounded-tab rule: never hang).
+  function aiPost(body) {
+    return new Promise(function (resolve) {
+      if (!connectorEnabled()) { resolve(null); return; }        // kill-switch
+      var key = GM_getValue('ingest_key', '');
+      if (!key) { resolve(null); return; }                       // key not set -> miss
+      try {
+        GM_xmlhttpRequest({
+          method: 'POST', url: AI_URL, timeout: AI_REQ_TIMEOUT_MS,
+          headers: { 'Content-Type': 'application/json', 'x-bwn-key': key },
+          data: JSON.stringify(body),
+          onload: function (r) {
+            var j = null; try { j = JSON.parse(r.responseText); } catch (e) { }
+            if (r.status >= 200 && r.status < 300 && j) resolve(j);
+            else resolve(null);
+          },
+          onerror: function () { resolve(null); },
+          ontimeout: function () { resolve(null); }
+        });
+      } catch (e) { resolve(null); }
+    });
+  }
+
+  // Execute one server-issued tool call same-origin. Returns a toolResults[] entry
+  // {tool_use_id, content, is_error?}; never throws (a thrown/failed tool becomes is_error).
+  function aiExecTool(call) {
+    var id = (call && call.id) || '';
+    var name = call && call.name;
+    var input = (call && call.input) || {};
+    var fn = AI_TOOLS[name];
+    if (typeof fn !== 'function') {
+      return Promise.resolve({ tool_use_id: id, content: JSON.stringify({ ok: false, content: 'unknown tool: ' + name }), is_error: true });
+    }
+    return Promise.resolve().then(function () { return fn(input); }).then(function (res) {
+      res = res || { ok: false, content: 'tool returned nothing' };
+      var tr = { tool_use_id: id, content: JSON.stringify(res) };
+      if (res.ok === false) tr.is_error = true;
+      return tr;
+    }, function (e) {
+      return { tool_use_id: id, content: JSON.stringify({ ok: false, content: 'tool threw: ' + ((e && e.message) || e) }), is_error: true };
+    });
+  }
+
+  // Drive the stateless server loop to a final answer. `post` is injectable for tests (defaults
+  // to aiPost). Given the initial request body: POST; while the server answers
+  // status:'tool_calls', execute each call same-origin, then re-POST the RETURNED messages +
+  // toolResults + tools + a FRESH userToken (RISK-001). The client round cap backstops the
+  // server cap (which forces a final first). Resolves the final text, or '' on any miss/cap so
+  // bwnAI falls through. Never throws, never hangs.
+  function aiDriveLoop(initialBody, post) {
+    post = post || aiPost;
+    var tools = initialBody.tools;
+    function step(body, posts) {
+      if (posts > AI_MAX_TOOL_ROUNDS + 1) return Promise.resolve('');   // backstop; server finalizes at its own cap first
+      return post(body).then(function (resp) {
+        if (!resp || resp.ok !== true) return '';                       // miss / handled failure -> fall through
+        if (resp.status === 'final') return String(resp.text || '');
+        if (resp.status === 'tool_calls' && Array.isArray(resp.toolCalls) && resp.toolCalls.length && Array.isArray(resp.messages)) {
+          var calls = resp.toolCalls.slice(0, AI_MAX_CALLS_PER_ROUND);
+          return Promise.all(calls.map(aiExecTool)).then(function (toolResults) {
+            var next = { task: body.task, messages: resp.messages, toolResults: toolResults, tools: tools, userToken: aiUserToken() };
+            if (body.model) next.model = body.model;
+            if (body.client) next.client = body.client;
+            return step(next, posts + 1);
+          });
+        }
+        return '';                                                      // unknown status -> fall through
+      }, function () { return ''; });
+    }
+    return step(initialBody, 1);
+  }
+
+  // ---- Injected proxy sender (TASK-009) ------------------------------------------------
+  // bwnAI's proxy tier calls this with {task, system, prompt, maxTokens, minRank, rank}. It
+  // builds the initial /api/ai request (tools + userToken in the BODY, SEC-002) and runs the
+  // tool loop to a final answer. HONORS the connector guards (kill-switch / ingest-key-not-set)
+  // exactly like the other SWA calls: on any guard miss or no usable bearer it resolves '' so
+  // the router falls through to on-device / local, never errors ([[bwn-ai-tiering]] proxy-miss).
+  function aiProxySend(payload) {
+    payload = payload || {};
+    if (!connectorEnabled()) return Promise.resolve('');
+    if (!GM_getValue('ingest_key', '')) return Promise.resolve('');
+    var userToken = aiUserToken();
+    if (!userToken) return Promise.resolve('');                         // advanced tasks need a vouch; no bearer -> miss
+    var body = {
+      task: payload.task || 'ask',
+      prompt: (payload.prompt != null) ? String(payload.prompt) : '',
+      userToken: userToken
+    };
+    // Only tool-using tasks (ask) get the tool registry. draft/render carry every fact
+    // inline in the prompt; attaching tools would let the model fan out extra Umbrava
+    // reads (latency/cost) and, on a client-facing scrubbed draft, pull back the very
+    // notes the caller scrubbed out. Keep non-ask tasks single round-trip, tool-free.
+    if (body.task === 'ask') body.tools = AI_TOOL_DEFS;
+    if (payload.system) body.system = payload.system;                   // server ignores this for 'ask' (grounding cannot be spoofed)
+    if (payload.client) body.client = payload.client;
+    return Promise.resolve().then(function () { return aiDriveLoop(body); })
+      .then(function (t) { return String(t || ''); }, function () { return ''; });
+  }
+
+  // Wire the real transport into the shared router. The bwnAI block above stays paste-identical
+  // across the suite; ONLY this injection differs (PAT-002 / [[bwn-ai-tiering]] injected-sender).
+  bwnAI.setProxy(aiProxySend);
+  // ===== END BWN AI TRANSPORT =========================================================
+
+
 
   // ==========================================================================
   // MODULE: Client Update / WO Audit Drafts v1.46
@@ -1002,12 +1433,8 @@
 
     console.info('[BWN CU] client-update userscript loaded on', location.href);
 
-    // Set / change the API key from the Tampermonkey menu.
-    GM_registerMenuCommand('Set Anthropic API key', function () {
-      var cur = GM_getValue('anthropic_key', '');
-      var v = prompt('Paste your Anthropic API key (stored locally in Tampermonkey, not in the page):', cur || '');
-      if (v !== null) { GM_setValue('anthropic_key', v.trim()); publishAiStatus(); alert('Saved.'); }
-    });
+    // The per-user Anthropic key was retired in TASK-014 - drafting now rides the shared
+    // bwnAI transport (SWA connector + one server key). No "Set Anthropic API key" menu.
 
     // ---- Reading the work order ------------------------------------------
     function txt(testid) {
@@ -1381,171 +1808,35 @@
       return lines.join('\n');
     }
 
-    // ---- Claude API call --------------------------------------------------
-    function generateOnce(systemPrompt, userContent, maxTokens, cb, onStream) {
-      var key = GM_getValue('anthropic_key', '');
-      if (!key) { cb(new Error('No API key set. Tampermonkey menu → "Set Anthropic API key".')); return; }
-      var acc = '', sseBuf = '', parsedLen = 0, doneCalled = false, streamEngaged = false, idleTimer = 0;
-      var usage = { input: 0, output: 0 };   // captured from SSE events / the buffered JSON
-      function clearIdle() { if (idleTimer) { clearTimeout(idleTimer); idleTimer = 0; } }
-      function armIdle() { clearIdle(); idleTimer = setTimeout(function () { finalize(null); }, 45000); }
-      function finishOnce(err, text) {
-        if (doneCalled) return;
-        doneCalled = true; clearIdle();
-        if (!err) { lastUsage = { input: usage.input, output: usage.output }; recordUsage(usage); }
-        cb(err, text);
-      }
-      function processLine(line) {
-        if (line.indexOf('data:') !== 0) return;
-        var payload = line.slice(5).trim();
-        if (!payload || payload === '[DONE]') return;
-        try {
-          var ev = JSON.parse(payload);
-          if (ev.type === 'content_block_delta' && ev.delta && ev.delta.type === 'text_delta' && ev.delta.text) {
-            acc += ev.delta.text;
-          } else if (ev.type === 'message_start' && ev.message && ev.message.usage) {
-            usage.input = ev.message.usage.input_tokens || 0;
-            usage.output = ev.message.usage.output_tokens || 0;
-          } else if (ev.type === 'message_delta' && ev.usage) {
-            usage.output = ev.usage.output_tokens || usage.output;
-          } else if (ev.type === 'message_stop') {
-            finalize(null);
-          } else if (ev.type === 'error' && ev.error) {
-            finishOnce(new Error(ev.error.message || 'API stream error'));
-          }
-        } catch (e) { /* partial JSON line; completed in a later chunk */ }
-      }
-      function drainLines() {
-        var nl;
-        while ((nl = sseBuf.indexOf('\n')) !== -1) {
-          processLine(sseBuf.slice(0, nl));
-          sseBuf = sseBuf.slice(nl + 1);
-        }
-        if (onStream && acc) { try { onStream(acc); } catch (e) {} }
-      }
-      function feedChunk(str) {           // incremental chunk - true streaming path
-        if (!str) return;
-        var before = acc.length;
-        sseBuf += str;
-        drainLines();
-        if (acc.length > before) armIdle();   // reset idle timer only on real token progress (pings can't hold it open)
-      }
-      function feed(responseText) {       // cumulative responseText - buffered fallback
-        if (typeof responseText !== 'string' || responseText.length <= parsedLen) return;
-        sseBuf += responseText.slice(parsedLen);
-        parsedLen = responseText.length;
-        drainLines();
-      }
-      function finalize(res) {
-        if (sseBuf.length) { processLine(sseBuf); sseBuf = ''; }
-        var text = acc.trim();
-        if (!text && res) {
-          try {
-            var data = JSON.parse(res.responseText);
-            if (data && data.error) { finishOnce(new Error(data.error.message || 'API error')); return; }
-            if (data && data.content) {
-              text = (data.content || []).filter(function (b) { return b.type === 'text'; })
-                .map(function (b) { return b.text; }).join('\n').trim();
-            }
-            if (data && data.usage) {
-              usage.input = data.usage.input_tokens || usage.input;
-              usage.output = data.usage.output_tokens || usage.output;
-            }
-          } catch (e) {}
-        }
-        if (!text) { finishOnce(new Error('Empty response from the API.')); return; }
-        finishOnce(null, text);
-      }
-      GM_xmlhttpRequest({
-        method: 'POST',
-        url: 'https://api.anthropic.com/v1/messages',
-        responseType: CFG.STREAM ? 'stream' : 'text',
-        headers: {
-          'content-type': 'application/json',
-          'x-api-key': key,
-          'anthropic-version': '2023-06-01',
-          'anthropic-dangerous-direct-browser-access': 'true'
-        },
-        data: JSON.stringify({
-          model: aiCfg().model,
-          max_tokens: maxTokens || CFG.MAX_TOKENS,
-          stream: !!CFG.STREAM,
-          system: systemPrompt,
-          messages: [{ role: 'user', content: userContent }]
-        }),
-        onloadstart: function (res) {
-          try {
-            if (res && res.status && (res.status < 200 || res.status >= 300)) return; // let onload surface the error
-            var body = res && res.response;
-            if (!body || typeof body.getReader !== 'function') return;                // engine lacks stream support → fallback
-            streamEngaged = true;
-            console.info('[BWN CU] streaming engaged');
-            armIdle();
-            var reader = body.getReader(), dec = new TextDecoder();
-            (function pump() {
-              reader.read().then(function (r) {
-                if (r.done) { feedChunk(dec.decode()); finalize(null); return; }
-                feedChunk(dec.decode(r.value, { stream: true }));
-                pump();
-              }).catch(function () { finalize(null); });
-            })();
-          } catch (e) { /* fall through to onprogress/onload */ }
-        },
-        onprogress: function (res) { if (!streamEngaged) { try { feed(res.responseText); } catch (e) {} } },
-        onload: function (res) {
-          if (res.status && (res.status < 200 || res.status >= 300)) {
-            var emsg = 'API error (HTTP ' + res.status + ')';
-            try { var ed = JSON.parse(res.responseText); if (ed.error && ed.error.message) emsg = ed.error.message; } catch (e) {}
-            finishOnce(new Error(emsg)); return;
-          }
-          if (!streamEngaged) feed(res.responseText || '');   // stream path already accumulated via the reader
-          finalize(res);                                       // onload is the reliable completion backstop, even mid-stream
-        },
-        onerror: function () { finishOnce(new Error('Network error calling the API.')); }
-      });
-    }
-
-    // Exact input-token count before spending anything: POST /v1/messages/count_tokens
-    // is a FREE endpoint on the same already-allowed host (api.anthropic.com).
-    // cb(null) on any failure - callers fall back to a character estimate.
-    function countTokens(systemPrompt, userContent, cb) {
-      var key = GM_getValue('anthropic_key', '');
-      if (!key) { cb(null); return; }
-      GM_xmlhttpRequest({
-        method: 'POST',
-        url: 'https://api.anthropic.com/v1/messages/count_tokens',
-        timeout: 10000,
-        headers: {
-          'content-type': 'application/json',
-          'x-api-key': key,
-          'anthropic-version': '2023-06-01',
-          'anthropic-dangerous-direct-browser-access': 'true'
-        },
-        data: JSON.stringify({ model: aiCfg().model, system: systemPrompt, messages: [{ role: 'user', content: userContent }] }),
-        onload: function (res) {
-          try { var d = JSON.parse(res.responseText || '{}'); cb(typeof d.input_tokens === 'number' ? d.input_tokens : null); }
-          catch (e) { cb(null); }
-        },
-        ontimeout: function () { cb(null); },
-        onerror: function () { cb(null); }
-      });
-    }
-
-    // Retry wrapper: one automatic retry on transient API failures (rate limit,
-    // overloaded, 5xx, network) after a short backoff; anything else surfaces as-is.
+    // ---- Draft generation via the shared bwnAI transport (TASK-013) --------
+    // Routes task:'draft' through the suite-wide bwnAI router. Managers+ hit the SWA
+    // proxy (one server key; no per-user Anthropic key), everyone else degrades to the
+    // on-device model and then to a miss - the tiering policy in [[bwn-ai-tiering]]. No
+    // direct Anthropic API call. The signature is preserved so the Client Update /
+    // WO Audit / Recent / Next Steps / Over-30 call sites are unchanged. The proxy path
+    // is buffered (single round-trip), so onStream is accepted for compatibility but not
+    // driven; the modal's own progress estimate animates the wait. A total miss (no
+    // manager rank AND no on-device model) surfaces as an error so callers show it
+    // instead of a blank draft - the same contract the old direct path presented.
     function generate(systemPrompt, userContent, maxTokens, cb, onStream) {
-      var attempts = 0;
-      (function attempt() {
-        attempts++;
-        generateOnce(systemPrompt, userContent, maxTokens, function (err, text) {
-          if (err && attempts < 2 && /HTTP (429|5\d\d)|overloaded|rate.?limit|network error/i.test(err.message || '')) {
-            console.info('[BWN CU] transient API error ("' + err.message + '") - retrying once in 2.5s');
-            setTimeout(attempt, 2500);
-            return;
-          }
-          cb(err, text);
-        }, onStream);
-      })();
+      var cap = maxTokens || CFG.MAX_TOKENS;
+      Promise.resolve().then(function () {
+        return bwnAI({
+          task: 'draft',
+          system: systemPrompt,
+          prompt: userContent,
+          maxTokens: cap,
+          oneLine: false,
+          maxChars: Math.max(8000, cap * 8),   // never truncate a long draft
+          timeoutMs: 60000                      // drafts via the proxy can exceed the 8s default
+        });
+      }).then(function (text) {
+        text = String(text || '').trim();
+        if (text) { cb(null, text); return; }
+        cb(new Error('No draft was produced. Drafting rides the shared AI connector (manager tier), then the on-device model. Check the SWA ingest key or try again.'));
+      }, function () {
+        cb(new Error('No draft was produced. Try again.'));
+      });
     }
 
     // ---- Review modal (BWN house style) ------------------------------------
@@ -1961,9 +2252,8 @@
               (allOn && exact !== null ? exact + ' input tokens (exact)' : '~' + est + ' input tokens');
           }
           updateEst();
-          countTokens(mode2.system, buildContent(keepNotes), function (n3) {
-            if (n3 !== null && document.getElementById('bwn-cu-overlay')) { exact = n3; updateEst(); }
-          });
+          // The exact input-token count (a free count_tokens call) was retired with the
+          // direct Anthropic key path (TASK-014); the preflight shows the char estimate.
           foot.appendChild(btn('Cancel', false, close));
           foot.appendChild(btn('Generate', true, function () {
             // An empty selection is a valid generation (the prompt states "no
