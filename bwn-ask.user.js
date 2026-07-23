@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         BWN Ask (Coordinator Copilot)
 // @namespace    https://broadwaynational.com/bwn
-// @version      0.1.0
+// @version      0.1.1
 // @description  Ask questions about the location/WO you're viewing. Answers are grounded in the live Umbrava records the page already loaded (client card + work-order / site-visit history) plus the team knowledge doc, via the Broadway AI proxy. Phase 1 = page-scoped (Path A); no data leaves the trusted Broadway path.
 // @match        https://app.umbrava.com/*
 // @run-at       document-idle
@@ -273,7 +273,7 @@
   function buildPanel() {
     if (panelEl) { panelEl.style.display = 'flex'; inputEl && inputEl.focus(); return; }
     panelEl = document.createElement('div');
-    panelEl.style.cssText = 'position:fixed;right:18px;bottom:70px;z-index:2147483645;width:390px;max-width:calc(100vw - 36px);' +
+    panelEl.style.cssText = 'position:fixed;left:18px;bottom:120px;z-index:2147483646;width:390px;max-width:calc(100vw - 36px);' +
       'height:540px;max-height:calc(100vh - 110px);background:#fff;border:1px solid #d5ddd8;border-radius:14px;' +
       'box-shadow:0 8px 30px rgba(0,0,0,.28);display:flex;flex-direction:column;overflow:hidden;';
 
@@ -323,7 +323,9 @@
     if (document.getElementById('bwn-ask-launch')) return;
     var wrap = document.createElement('div');
     wrap.id = 'bwn-ask-launch';
-    wrap.style.cssText = 'position:fixed;right:18px;bottom:18px;z-index:2147483645;';
+    // Left column, above the WO Audit button. The right corner (bottom:18/66) is the CC
+    // Purchase / CC Request stack - Ask BWN sat exactly on top of CC and was hidden behind it.
+    wrap.style.cssText = 'position:fixed;left:18px;bottom:70px;z-index:2147483646;';
     var btn = document.createElement('button');
     btn.style.cssText = pillCss();
     btn.innerHTML = '💬 Ask BWN';
@@ -343,6 +345,10 @@
   } catch (e) { }
 
   // ---- Boot -----------------------------------------------------------------
-  // Delay so the SPA has mounted its body / fired its first queries.
-  setTimeout(renderLauncher, 1500);
+  // Render as soon as the body is ready, then re-check on an interval: Umbrava's SPA can
+  // remount its root and wipe the launcher, so a one-shot render isn't enough. renderLauncher
+  // is a no-op when the button already exists, so the interval is cheap and self-healing.
+  function ensureLauncher() { try { renderLauncher(); } catch (e) { } }
+  setTimeout(ensureLauncher, 1200);
+  setInterval(ensureLauncher, 2500);
 })();
