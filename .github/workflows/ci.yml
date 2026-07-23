@@ -1,0 +1,63 @@
+name: CI
+
+# Gate for the BWN userscripts repo. This is a NO-BUILD, NO-npm project: the
+# userscripts pull their runtime deps via Tampermonkey @require/@resource from CDNs,
+# so there is no package.json, lockfile, or `npm ci`/`npm run build` step to run.
+# CI runs the bespoke node harnesses in scripts/ plus a `node --check` syntax gate.
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+    branches: [main]
+
+jobs:
+  test:
+    name: Test
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v7
+        # Default checkout does NOT fetch submodules, so the browser-use submodule
+        # stays absent here (it is unrelated Python and not part of this gate).
+
+      - name: Setup Node.js
+        uses: actions/setup-node@v6
+        with:
+          node-version: '22'
+          # No `cache: npm` — there is no lockfile to key the cache on.
+
+      - name: Syntax check userscripts (node --check)
+        run: |
+          for f in *.user.js; do
+            echo "node --check $f"
+            node --check "$f"
+          done
+
+      - name: AI client transport harness (TEST-003)
+        run: node scripts/test-bwn-ai-client.js
+
+      - name: AI Phase 3 consumer-migration harness (PAT-002 SHA gate)
+        # Enforces PAT-002: the bwnAI TRANSPORT block must be SHA-identical across
+        # bwn-drop-upload / bwn-suite-ai / bwn-wo-audit. Makes that a real gate.
+        run: node scripts/test-bwn-ai-phase3.js
+
+  lint:
+    name: Lint (advisory)
+    runs-on: ubuntu-latest
+    # Non-blocking for now: the injected userscripts reference host/app globals
+    # (framework singletons, jQuery, unsafeWindow-exposed objects) that are not yet
+    # fully enumerated in eslint.config.mjs, so no-undef may report until that list is
+    # confirmed. Flip continue-on-error off to promote lint to a hard gate.
+    continue-on-error: true
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v7
+
+      - name: Setup Node.js
+        uses: actions/setup-node@v6
+        with:
+          node-version: '22'
+
+      - name: ESLint (flat config; npx fetches eslint, no install needed)
+        run: npx --yes eslint@9 "*.user.js" "scripts/**/*.js"
