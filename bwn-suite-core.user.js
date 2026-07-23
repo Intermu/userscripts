@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         BWN Suite - Core (Broadway National)
 // @namespace    broadwaynational.bwn
-// @version      1.60.0
+// @version      1.61.0
 // @downloadURL  https://raw.githubusercontent.com/Intermu/userscripts/main/bwn-suite-core.user.js
 // @updateURL    https://raw.githubusercontent.com/Intermu/userscripts/main/bwn-suite-core.user.js
 // @description  Runs several Umbrava helpers for BWN coordinators, in the browser with no privileged grants. Includes: PO Approval + ETA Builder; WO Assist (GP/ETA, a stall watchdog, DNE calculator, and a next-action playbook); Email Leak Guard (checks recipients against vendor names, PO amounts, and client budget references before an outbound email sends); WO List Heat (a triage overlay + My Day strip on the work-order list, with an optional same-origin Umbrava API scan for deterministic full-board coverage); and the BWN Launcher (opens the Azure Static Web App tools with the current WO's context). Modules share state through sessionStorage/localStorage. The only network call is List Heat's same-origin GraphQL scan (app.umbrava.com/api/graphql, the app's own session); everything else is offline. Toggle modules in BWN_MODULES below.
@@ -44,7 +44,7 @@
   try { localStorage.setItem('bwn:status:core', JSON.stringify({ ver: BWN_VER, ts: Date.now() })); } catch (e) { /* best-effort */ }
 
   console.info('[BWN SUITE CORE] v' + BWN_VER + ' |',
-    'Shared Core 7 \u00b7 PO Approval 1.13 \u00b7 WO Assist 2.55 \u00b7 Leak Guard 2.0 \u00b7 List Heat 3.15 \u00b7 Launcher 2.0 \u00b7 Views 1.0 \u00b7 Palette 1.1 \u00b7 Visit 1.2 \u00b7 Reminders 1.1 \u00b7 Timeline 1.1 \u00b7 TripCal 1.3 \u00b7 Connector 1.2 |',
+    'Shared Core 7 \u00b7 PO Approval 1.13 \u00b7 WO Assist 2.55 \u00b7 Leak Guard 2.0 \u00b7 List Heat 3.16 \u00b7 Launcher 2.0 \u00b7 Views 1.0 \u00b7 Palette 1.1 \u00b7 Visit 1.2 \u00b7 Reminders 1.1 \u00b7 Timeline 1.1 \u00b7 TripCal 1.3 \u00b7 Connector 1.2 |',
     'enabled:', Object.keys(BWN_MODULES).filter(function (k) { return BWN_MODULES[k]; }).join(', '));
 
   // ===== BWN SHARED CORE v7 - KEEP IN SYNC across both suite scripts =====
@@ -4660,7 +4660,7 @@
   });
 
   // ==========================================================================
-  // MODULE: WO List Heat v3.15
+  // MODULE: WO List Heat v3.16
   // ==========================================================================
   if (BWN_MODULES.listHeat) BWN.safeModule('listHeat', function () {
     'use strict';
@@ -4671,7 +4671,7 @@
     }
     window.__bwnWoHeat = true;
 
-    console.info('[BWN HEAT] v3.15 loaded on', location.href);
+    console.info('[BWN HEAT] v3.16 loaded on', location.href);
 
     // ---- Config (edit here) ----------------------------------------------
     // Advanced knobs (status-class regexes + priority multipliers) now live in the
@@ -4848,15 +4848,25 @@
     // (more rows = more likely the real board query, not a sidebar widget).
     function heatRecordCapture(reqBody, data) {
       if (heatReplaying) return;   // don't re-capture our own enlarged replay pages
+      // (v3.16) The board query only fires on the WO-list route. A WO-details page fires
+      // reads like purchaseOrders(workOrderNumber) whose PO rows carry a numeric `number`
+      // and so masquerade as WO rows; gate to the list route so a details read can never
+      // latch (real board content is also required below).
+      if (!isListPage()) return;
       try {
         var found = heatFindWOList(data);
         if (!found || !found.rows.length) return;
         if (apiList && found.rows.length < (apiList._rows || 0) && (Date.now() - apiCapTs) < 60000) return;
         var body = (typeof reqBody === 'string') ? JSON.parse(reqBody) : reqBody;
         if (!body || !body.query) return;
-        // Only accept an operation whose rows genuinely map to WOs (a real WO number).
+        // Only accept an operation whose rows genuinely map to WOs: a real WO number
+        // AND at least one substantive board field (status/prio/client/assignee/age/hrs/
+        // dne/dates). A details-page purchaseOrders read maps its PO `number` into the WO
+        // slot but leaves every board field blank - reject it so it never mis-latches.
         var probe = heatApiRowToEntry(found.rows[0]);
         if (!probe) return;
+        var pe = probe.entry;
+        if (!(pe.status || pe.prio || pe.client || pe.assignee || pe.days || pe.hrs || pe.dne || pe.sched || pe.lastNote || pe.exp)) return;
         apiList = { query: body.query, variables: body.variables || {}, path: found.path, conn: found.conn, _rows: found.rows.length, sample: probe.entry };
         apiCapTs = Date.now();
         console.info('[BWN HEAT] captured list query (' + found.rows.length + ' rows, path ' + found.path.join('.') + (found.conn ? '/' + found.conn : '') + ') - API scan available. Sample:', probe.entry);
