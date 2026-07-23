@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         BWN Ask (Coordinator Copilot)
 // @namespace    https://broadwaynational.com/bwn
-// @version      0.2.0
+// @version      0.3.0
 // @description  Ask questions about the work order you're viewing. Reads the WO live from Umbrava via same-origin GraphQL (details + full note / site-visit history) plus the team knowledge doc, and answers through the Broadway AI proxy with dates and note references. Phase 1 = page-scoped (Path A); no data leaves the trusted Broadway path.
 // @match        https://app.umbrava.com/*
 // @run-at       document-idle
@@ -97,44 +97,59 @@
   }
   function ts(d) { var n = Date.parse(d); return isNaN(n) ? 0 : n; }
   function fmtDate(d) { var n = Date.parse(d); if (isNaN(n)) return String(d || ''); try { return new Date(n).toLocaleString(); } catch (e) { return String(d); } }
-  function woNumberFromUrl() { var m = location.pathname.match(/work-orders\/(\d+)/); return m ? parseInt(m[1], 10) : null; }
+  // Anchored to a path segment so a substring route (e.g. /client-work-orders/<id> or a
+  // nested /work-orders/<year>/<n>) can't capture the wrong number.
+  function woNumberFromUrl() { var m = location.pathname.match(/(?:^|\/)work-orders\/(\d+)(?:\/|$|\?|#)/); return m ? parseInt(m[1], 10) : null; }
 
   // Proven selectors. CORE + notes are CONFIRMED against live Umbrava (bwn-wo-audit
   // v0.3.0 / bwn-suite-ai woToJob). Notes come from the ROOT jobNotes(workOrderNumber)
-  // field - the older workOrderNotes(workOrderId) does NOT exist. Each augment group is
-  // isolated so an unproven selector nulls only its own group, never the whole read.
+  // field - the older workOrderNotes(workOrderId) does NOT exist. Each group is its OWN
+  // query so one drifted/unproven selector nulls only that group (GraphQL fails the WHOLE
+  // operation on any bad selection). statusName is isolated from the unproven priority-date
+  // fields ON PURPOSE - it is the most load-bearing field for a "what next" answer, so a
+  // drifted date selector must not be able to take it down with it.
   var CORE_Q =
     'query($n:Int!){ workOrder(workOrderNumber:$n){ ' +
-    '  number trackingNumber scopeOfWork serviceInstructions locationId locationName workOrderTypeId ' +
+    '  number trackingNumber scopeOfWork serviceInstructions locationId locationName ' +
     '  address{ addressLine1 city state postalCode } trades{ id name } priority{ label } doNotExceed{ amount } ' +
     '} }';
-  var AUG_Q =
-    'query($n:Int!){ workOrder(workOrderNumber:$n){ statusName creationDate workOrderDate priority{ expectedCompletionDate firstTripDate } } }';
-  var COORD_Q =
-    'query($n:Int!){ workOrder(workOrderNumber:$n){ assignedToMemberName vendorNames } }';
+  var STATUS_Q = 'query($n:Int!){ workOrder(workOrderNumber:$n){ statusName } }';
+  var DATES_Q = 'query($n:Int!){ workOrder(workOrderNumber:$n){ creationDate workOrderDate priority{ expectedCompletionDate firstTripDate } } }';
+  var COORD_Q = 'query($n:Int!){ workOrder(workOrderNumber:$n){ assignedToMemberName vendorNames } }';
   var NOTES_Q =
     'query($n:Int!){ jobNotes(workOrderNumber:$n, includeDeleted:false){ id type content contentHtml createdDate isPinned isCompletion workOrderNoteSource createdBy { firstName lastName } } }';
 
+  // Run a query and DISTINGUISH failure from empty: { ok:true, wo } or { ok:false }.
+  // A silent []/{} on error is how the copilot could turn a fetch failure into a confident
+  // "this WO has no history" - the worst failure mode for a grounded tool, so never do it.
+  function qWO(query, n) {
+    return gql(query, { n: n }).then(function (d) { return { ok: true, wo: (d && d.workOrder) || null }; }, function () { return { ok: false }; });
+  }
+  function qNotes(n) {
+    return gql(NOTES_Q, { n: n }).then(function (d) { return { ok: true, notes: (d && d.jobNotes) || [] }; }, function () { return { ok: false }; });
+  }
+
   // Gather the RECORDS block by ACTIVELY querying the WO in view. Returns
-  // { text, records, error? }. records = note count (0 = nothing found / not a WO page).
+  // { text, records, shown, omitted, wo, degraded, notesFailed, error? }.
   function gatherContext() {
     var n = woNumberFromUrl();
     if (!n) return Promise.resolve({ text: '', records: 0, error: 'Open a specific work order (a /work-orders/<number> page) so I can read it, then ask.' });
 
-    var coreP = gql(CORE_Q, { n: n }).then(function (d) { return (d && d.workOrder) || null; }).catch(function () { return null; });
-    var augP = gql(AUG_Q, { n: n }).then(function (d) { return (d && d.workOrder) || {}; }).catch(function () { return {}; });
-    var coordP = gql(COORD_Q, { n: n }).then(function (d) { return (d && d.workOrder) || {}; }).catch(function () { return {}; });
-    var notesP = gql(NOTES_Q, { n: n }).then(function (d) { return (d && d.jobNotes) || []; }).catch(function () { return []; });
+    return Promise.all([qWO(CORE_Q, n), qWO(STATUS_Q, n), qWO(DATES_Q, n), qWO(COORD_Q, n), qNotes(n)]).then(function (res) {
+      var coreR = res[0], statusR = res[1], datesR = res[2], coordR = res[3], notesR = res[4];
+      var wo = coreR.ok ? (coreR.wo || {}) : {};
+      var stat = (statusR.ok && statusR.wo) ? statusR.wo : {};
+      var dts = (datesR.ok && datesR.wo) ? datesR.wo : {};
+      var coord = (coordR.ok && coordR.wo) ? coordR.wo : {};
 
-    return Promise.all([coreP, augP, coordP, notesP]).then(function (res) {
-      var wo = res[0], aug = res[1] || {}, coord = res[2] || {}, notes = res[3] || [];
-      if (!wo && !notes.length) return { text: '', records: 0, error: 'I could not read work order ' + n + ' from Umbrava (the query returned nothing). Reload the page and try again.' };
-      wo = wo || {};
+      // Hard failures: don't answer blind.
+      if (!coreR.ok && !notesR.ok) return { text: '', records: 0, error: 'I could not read work order ' + n + ' from Umbrava (the queries failed). Reload the page and try again.' };
+      if (coreR.ok && !coreR.wo && !notesR.ok) return { text: '', records: 0, error: 'Work order ' + n + ' was not found in Umbrava. Check the number and try again.' };
 
+      var degraded = [];
       var L = [];
       L.push('WORK ORDER #' + (wo.number || n) + (wo.trackingNumber ? ' (Tracking #' + wo.trackingNumber + ')' : ''));
-      if (aug.statusName) L.push('Status: ' + aug.statusName);
-      var wtype = wo.workOrderTypeId != null ? String(wo.workOrderTypeId) : '';
+      if (stat.statusName) L.push('Status: ' + stat.statusName); else if (!statusR.ok) degraded.push('status');
       if (wo.locationName || wo.locationId != null) L.push('Location: ' + (wo.locationName || '') + (wo.locationId != null ? ' (id ' + wo.locationId + ')' : ''));
       var addr = wo.address || null;
       if (addr) L.push('Address: ' + [addr.addressLine1, [addr.city, addr.state].filter(Boolean).join(', '), addr.postalCode].filter(Boolean).join(' '));
@@ -143,18 +158,29 @@
       if (wo.doNotExceed && wo.doNotExceed.amount != null) L.push('NTE: $' + wo.doNotExceed.amount);
       if (coord.assignedToMemberName) L.push('Coordinator: ' + coord.assignedToMemberName);
       if (coord.vendorNames && coord.vendorNames.length) L.push('Vendor(s): ' + coord.vendorNames.join(', '));
-      if (aug.workOrderDate || aug.creationDate) L.push('Created: ' + fmtDate(aug.workOrderDate || aug.creationDate));
-      var pr = aug.priority || {};
+      if (dts.workOrderDate || dts.creationDate) L.push('Created: ' + fmtDate(dts.workOrderDate || dts.creationDate));
+      var pr = dts.priority || {};
       if (pr.firstTripDate) L.push('First trip: ' + fmtDate(pr.firstTripDate));
       if (pr.expectedCompletionDate) L.push('Expected completion: ' + fmtDate(pr.expectedCompletionDate));
       if (wo.scopeOfWork) L.push('Scope of work: ' + stripHtml(wo.scopeOfWork));
       if (wo.serviceInstructions) L.push('Service instructions: ' + stripHtml(wo.serviceInstructions));
 
-      var head = L.join('\n');
-      var parts = [head, '', 'NOTES / SITE-VISIT HISTORY (newest first, ' + notes.length + ' total):'];
+      // Explicit scope line so the model cannot pass a single-WO read off as "site history".
+      var parts = ['SCOPE: This is ONE work order (#' + (wo.number || n) + ')' + (wo.locationName ? ' at ' + wo.locationName : '') + '. Other work orders at this location are NOT loaded - do not describe location/site-wide history or claim completeness across the site.', ''];
+      if (!coreR.ok) { parts.push('(WORK ORDER DETAILS UNAVAILABLE - the details query failed; only note history was read.)'); degraded.push('details'); }
+      parts.push(L.join('\n'), '');
+
+      // Notes query FAILED (not merely empty): tell the model so it never denies history.
+      if (!notesR.ok) {
+        parts.push('NOTE / SITE-VISIT HISTORY: UNAVAILABLE - the notes query failed. Do NOT state whether this work order has notes or history; tell the user the history could not be read and to retry.');
+        degraded.push('notes');
+        return { text: parts.join('\n'), records: 0, shown: 0, omitted: 0, wo: wo.number || n, degraded: degraded, notesFailed: true };
+      }
+
+      var notes = notesR.notes || [];
       var sorted = notes.slice().sort(function (a, b) { return ts(b && b.createdDate) - ts(a && a.createdDate); });
+      var noteLines = [], shown = 0, omitted = 0;
       var used = parts.join('\n').length;
-      var shown = 0;
       for (var i = 0; i < sorted.length; i++) {
         var nt = sorted[i];
         var body = stripHtml(nt.content || nt.contentHtml || '');
@@ -162,13 +188,14 @@
         var who = nt.createdBy ? [nt.createdBy.firstName, nt.createdBy.lastName].filter(Boolean).join(' ') : '';
         var tags = [nt.type, nt.workOrderNoteSource, nt.isPinned ? 'pinned' : '', nt.isCompletion ? 'completion' : ''].filter(Boolean).join(', ');
         var block = '\n[' + fmtDate(nt.createdDate) + ']' + (who ? ' ' + who : '') + (tags ? ' (' + tags + ')' : '') + '\n' + body + '\n';
-        if (used + block.length > CTX_TOTAL_MAX) { parts.push('\n(...older notes omitted to stay within size limits...)'); break; }
-        parts.push(block);
-        used += block.length;
-        shown++;
+        if (used + block.length > CTX_TOTAL_MAX) { omitted = sorted.length - i; break; }
+        noteLines.push(block); used += block.length; shown++;
       }
+      parts.push('NOTES for THIS work order (newest first, ' + notes.length + ' total' +
+        (omitted ? '; ' + shown + ' shown, ' + omitted + ' OLDEST omitted for size - say so if asked for the complete history' : '') + '):');
       if (!notes.length) parts.push('\n(no notes on this work order)');
-      return { text: parts.join('\n'), records: notes.length, shown: shown, wo: wo.number || n };
+      else parts = parts.concat(noteLines);
+      return { text: parts.join('\n'), records: notes.length, shown: shown, omitted: omitted, wo: wo.number || n, degraded: degraded };
     });
   }
 
@@ -186,16 +213,17 @@
     });
   }
 
-  function askServer(question, model) {
+  function askServer(question, model, history) {
     var key = GM_getValue('ingest_key', '');
     if (!key) return Promise.resolve({ clientError: 'Set the SWA ingest key first (Tampermonkey menu -> "BWN Ask: set ingest key"). Same key as the rest of the suite.' });
     var userToken = authToken();
     if (!userToken) return Promise.resolve({ clientError: 'No usable Umbrava session token right now. Reload the Umbrava page and try again.' });
     return gatherContext().then(function (ctx) {
-      if (ctx.error && !ctx.records) return { clientError: ctx.error };
+      if (ctx.error) return { clientError: ctx.error };   // hard failure (no WO / not found / all queries down)
       var payload = { userToken: userToken, question: question, context: ctx.text, model: model || 'claude-haiku-4-5' };
+      if (history && history.length) payload.history = history;   // bounded last-few-turns, so follow-ups referencing the prior answer resolve
       return gmPost(ASK_URL, { 'Content-Type': 'application/json', 'x-bwn-key': key }, payload, 60000)
-        .then(function (r) { r._records = ctx.records; r._wo = ctx.wo; return r; });
+        .then(function (r) { r._records = ctx.records; r._shown = ctx.shown; r._omitted = ctx.omitted; r._wo = ctx.wo; r._degraded = ctx.degraded; r._notesFailed = ctx.notesFailed; return r; });
     });
   }
 
@@ -228,10 +256,15 @@
     var wrap = document.createElement('div');
     wrap.style.cssText = 'margin:8px 0;display:flex;' + (role === 'user' ? 'justify-content:flex-end;' : 'justify-content:flex-start;');
     var b = document.createElement('div');
-    b.style.cssText = 'max-width:85%;padding:8px 11px;border-radius:12px;font:13px/1.45 -apple-system,Segoe UI,Roboto,sans-serif;white-space:pre-wrap;word-wrap:break-word;' +
-      (role === 'user' ? 'background:#1A5F3E;color:#fff;border-bottom-right-radius:3px;'
-        : role === 'error' ? 'background:#fdecea;color:#8a1c12;border:1px solid #f5c2bd;'
-          : 'background:#eef2f0;color:#1c2b24;border-bottom-left-radius:3px;');
+    if (role === 'meta') {
+      wrap.style.cssText = 'margin:2px 0 8px;display:flex;justify-content:center;';
+      b.style.cssText = 'font:11px -apple-system,Segoe UI,Roboto,sans-serif;color:#8a9a92;text-align:center;';
+    } else {
+      b.style.cssText = 'max-width:85%;padding:8px 11px;border-radius:12px;font:13px/1.45 -apple-system,Segoe UI,Roboto,sans-serif;white-space:pre-wrap;word-wrap:break-word;' +
+        (role === 'user' ? 'background:#1A5F3E;color:#fff;border-bottom-right-radius:3px;'
+          : role === 'error' ? 'background:#fdecea;color:#8a1c12;border:1px solid #f5c2bd;'
+            : 'background:#eef2f0;color:#1c2b24;border-bottom-left-radius:3px;');
+    }
     b.innerHTML = esc(text);
     wrap.appendChild(b);
     msgsEl.appendChild(wrap);
@@ -239,6 +272,7 @@
     return b;
   }
 
+  var convo = [];   // {q,a} of recent exchanges, so answer-referential follow-ups resolve
   function doAsk() {
     if (busy) return;
     var q = (inputEl.value || '').trim();
@@ -247,13 +281,21 @@
     inputEl.value = '';
     busy = true; sendBtn.disabled = true; sendBtn.textContent = '...';
     var thinking = addMsg('assistant', 'Thinking...');
-    askServer(q, modelSel ? modelSel.value : 'claude-haiku-4-5').then(function (r) {
+    var hist = convo.slice(-3).map(function (t) { return { q: t.q, a: (t.a || '').slice(0, 1500) }; });
+    askServer(q, modelSel ? modelSel.value : 'claude-haiku-4-5', hist).then(function (r) {
       var err = errorFor(r);
       if (thinking && thinking.parentNode) thinking.parentNode.remove();
-      if (err) { addMsg('error', err); }
-      else {
-        var ans = (r.json && r.json.answer) || '(no answer returned)';
-        addMsg('assistant', ans);
+      if (err) { addMsg('error', err); return; }
+      var ans = (r.json && r.json.answer) || '(no answer returned)';
+      addMsg('assistant', ans);
+      convo.push({ q: q, a: ans });
+      if (r._notesFailed) {
+        addMsg('error', 'Heads up: I could not read this WO\'s note history, so that answer is from the WO details only. Reload and retry for the full history.');
+      } else {
+        var foot = 'Grounded on WO #' + (r._wo || '?') + ' - ' + (r._records || 0) + ' note' + (r._records === 1 ? '' : 's');
+        if (r._omitted) foot += ' (' + r._shown + ' shown, ' + r._omitted + ' oldest omitted)';
+        if (r._degraded && r._degraded.length) foot += '; unavailable: ' + r._degraded.join(', ');
+        addMsg('meta', foot);
       }
     }).catch(function (e) {
       if (thinking && thinking.parentNode) thinking.parentNode.remove();
@@ -296,7 +338,7 @@
     foot.style.cssText = 'border-top:1px solid #e3e9e6;padding:8px;display:flex;gap:6px;align-items:flex-end;background:#fff;';
     inputEl = document.createElement('textarea');
     inputEl.rows = 2;
-    inputEl.placeholder = 'Ask about the location/WO you\'re viewing...';
+    inputEl.placeholder = 'Ask about the work order you\'re viewing...';
     inputEl.style.cssText = 'flex:1;resize:none;font:13px -apple-system,Segoe UI,Roboto,sans-serif;padding:7px 9px;border:1px solid #cdd6d1;border-radius:9px;outline:none;';
     inputEl.addEventListener('keydown', function (e) { if (e.key === 'Enter' && !e.shiftKey) { e.preventDefault(); doAsk(); } });
     sendBtn = document.createElement('button');
@@ -323,7 +365,7 @@
     var btn = document.createElement('button');
     btn.style.cssText = pillCss();
     btn.innerHTML = '💬 Ask BWN';
-    btn.title = 'Ask about the location/WO you are viewing';
+    btn.title = 'Ask about the work order you are viewing';
     btn.addEventListener('click', buildPanel);
     wrap.appendChild(btn);
     document.body.appendChild(wrap);
