@@ -107,14 +107,9 @@ function loadTransport(opts) {
   );
 }
 
-// ---- tiny assert harness --------------------------------------------------------------
-var pass = 0, fail = 0, cases = 0;
-function ok(name, cond, detail) {
-  cases++;
-  if (cond) { pass++; console.log('  ok  - ' + name); }
-  else { fail++; console.log('  FAIL- ' + name + (detail ? ('  [' + detail + ']') : '')); }
-}
-function eq(name, got, want) { ok(name, JSON.stringify(got) === JSON.stringify(want), 'got ' + JSON.stringify(got) + ' want ' + JSON.stringify(want)); }
+// ---- assert harness (shared: scripts/assert.js) ---------------------------------------
+var assert = require('./assert.js');
+var ok = assert.ok, eq = assert.eq;
 
 // ---- run ------------------------------------------------------------------------------
 function run() {
@@ -389,8 +384,7 @@ function run() {
 
 console.log('BWN AI client transport harness (TEST-003)\n');
 run().then(function () {
-  console.log('\n' + pass + '/' + cases + ' assertions passed' + (fail ? (', ' + fail + ' FAILED') : ''));
-  process.exit(fail ? 1 : 0);
+  assert.finish();
 }).catch(function (e) {
   console.error('\nHARNESS ERROR:', e && e.stack || e);
   process.exit(2);
