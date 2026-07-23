@@ -1,8 +1,8 @@
 // ==UserScript==
 // @name         BWN Ask (Coordinator Copilot)
 // @namespace    https://broadwaynational.com/bwn
-// @version      0.3.0
-// @description  Ask questions about the work order you're viewing. Reads the WO live from Umbrava via same-origin GraphQL (details + full note / site-visit history) plus the team knowledge doc, and answers through the Broadway AI proxy with dates and note references. Phase 1 = page-scoped (Path A); no data leaves the trusted Broadway path.
+// @version      0.4.0
+// @description  Ask questions about the work order you're viewing. Reads the WO live from Umbrava via same-origin GraphQL (details + full note / site-visit history) AND a summary roster of the other work orders at the same location, plus the team knowledge doc, and answers through the Broadway AI proxy with dates and references. Phase 1.5 = page-scoped + location roster (Path A); no data leaves the trusted Broadway path.
 // @match        https://app.umbrava.com/*
 // @run-at       document-idle
 // @grant        GM_xmlhttpRequest
@@ -119,6 +119,68 @@
   var NOTES_Q =
     'query($n:Int!){ jobNotes(workOrderNumber:$n, includeDeleted:false){ id type content contentHtml createdDate isPinned isCompletion workOrderNoteSource createdBy { firstName lastName } } }';
 
+  // ---- Location-wide WO roster (Phase 1.5) ----------------------------------
+  // Umbrava's SPA has a "work orders at a location" query, but its field/arg NAME is not
+  // known from source (the WO-list query is captured opaque). Rather than guess arg names,
+  // DISCOVER the schema via GraphQL introspection: find the root field that returns work
+  // orders AND takes a location arg, resolve its return shape (list vs relay connection),
+  // then fetch a compact roster of the location's OTHER work orders. Everything here is
+  // best-effort and isolated - any miss (introspection disabled, no matching field, query
+  // error) leaves the per-WO answer intact and the roster simply marked unavailable, never
+  // fabricated. Discovery + roster are cached for the session so it runs at most once/location.
+  var _locField;             // undefined=unqueried, null=none found, else {field,locArg,argType,container}
+  var _locRoster = {};       // locationId -> { ok, wos:[...] } | { ok:false }
+  var ROSTER_MAX = 40, ROSTER_SEL = 'number statusName priority{ label } trades{ name } workOrderDate creationDate';
+
+  function unwrapType(t) { var isList = false, cur = t; while (cur && cur.ofType) { if (cur.kind === 'LIST') isList = true; cur = cur.ofType; } return { name: cur && cur.name, kind: cur && cur.kind, isList: isList }; }
+
+  function discoverLocField() {
+    if (_locField !== undefined) return Promise.resolve(_locField);
+    var Q = '{ __schema { queryType { fields { name args { name type { kind name ofType { kind name } } } type { kind name ofType { kind name ofType { kind name ofType { kind name } } } } } } } }';
+    return gql(Q, {}).then(function (d) {
+      var fs = (d && d.__schema && d.__schema.queryType && d.__schema.queryType.fields) || [];
+      var pick = null;
+      for (var i = 0; i < fs.length && !pick; i++) {
+        var f = fs[i], nm = String(f.name || '');
+        if (!/work.?orders/i.test(nm)) continue;                 // plural list field, not single workOrder
+        var la = null, at = 'ID';
+        (f.args || []).forEach(function (a) { if (!la && /location.?id|^location$/i.test(a.name)) { la = a.name; var u = unwrapType(a.type || {}); at = u.name || 'ID'; } });
+        if (!la) continue;
+        var ret = unwrapType(f.type || {});
+        pick = { field: nm, locArg: la, argType: at, retName: ret.name, retKind: ret.kind, retIsList: ret.isList };
+      }
+      if (!pick) { _locField = null; return null; }
+      if (pick.retIsList) { pick.container = null; _locField = pick; return pick; }   // field returns [WorkOrder] directly
+      // Connection object: introspect it to find the list container (nodes/items/edges).
+      var TQ = 'query($t:String!){ __type(name:$t){ fields { name type { kind name ofType { kind name ofType { kind name } } } } } }';
+      return gql(TQ, { t: pick.retName }).then(function (td) {
+        var tf = (td && td.__type && td.__type.fields) || [];
+        for (var j = 0; j < tf.length; j++) { var u = unwrapType(tf[j].type || {}); if (u.isList && (u.kind === 'OBJECT' || u.kind === 'INTERFACE')) { pick.container = tf[j].name; break; } }
+        _locField = pick.container ? pick : null;
+        return _locField;
+      }, function () { _locField = null; return null; });
+    }, function () { _locField = null; return null; });
+  }
+
+  function fetchLocationRoster(locationId) {
+    if (locationId == null) return Promise.resolve({ ok: false });
+    var key = String(locationId);
+    if (_locRoster[key]) return Promise.resolve(_locRoster[key]);
+    return discoverLocField().then(function (fld) {
+      if (!fld) { _locRoster[key] = { ok: false }; return _locRoster[key]; }
+      var vtype = /int/i.test(fld.argType) ? 'Int!' : 'ID!';
+      var inner = fld.container === 'edges' ? ('edges{ node{ ' + ROSTER_SEL + ' } }') : (fld.container ? (fld.container + '{ ' + ROSTER_SEL + ' }') : ROSTER_SEL);
+      var Q = 'query($loc:' + vtype + '){ ' + fld.field + '(' + fld.locArg + ':$loc){ ' + inner + ' } }';
+      return gql(Q, { loc: locationId }).then(function (d) {
+        var root = d && d[fld.field];
+        var arr = !fld.container ? root : (fld.container === 'edges' ? (root && root.edges || []).map(function (e) { return e && e.node; }) : (root && root[fld.container]));
+        arr = Array.isArray(arr) ? arr.filter(Boolean) : [];
+        _locRoster[key] = { ok: true, wos: arr };
+        return _locRoster[key];
+      }, function () { _locRoster[key] = { ok: false }; return _locRoster[key]; });
+    });
+  }
+
   // Run a query and DISTINGUISH failure from empty: { ok:true, wo } or { ok:false }.
   // A silent []/{} on error is how the copilot could turn a fetch failure into a confident
   // "this WO has no history" - the worst failure mode for a grounded tool, so never do it.
@@ -165,16 +227,49 @@
       if (wo.scopeOfWork) L.push('Scope of work: ' + stripHtml(wo.scopeOfWork));
       if (wo.serviceInstructions) L.push('Service instructions: ' + stripHtml(wo.serviceInstructions));
 
-      // Explicit scope line so the model cannot pass a single-WO read off as "site history".
-      var parts = ['SCOPE: This is ONE work order (#' + (wo.number || n) + ')' + (wo.locationName ? ' at ' + wo.locationName : '') + '. Other work orders at this location are NOT loaded - do not describe location/site-wide history or claim completeness across the site.', ''];
+      var parts = [];
       if (!coreR.ok) { parts.push('(WORK ORDER DETAILS UNAVAILABLE - the details query failed; only note history was read.)'); degraded.push('details'); }
       parts.push(L.join('\n'), '');
 
+      // Fetch the location roster, prepend a roster-aware SCOPE line so the model knows
+      // exactly what it has (full notes for THIS WO + a summary of sibling WOs, or single-WO
+      // only when the roster is unavailable), append the "other WOs at this location" block,
+      // and return. Roster is best-effort - a miss just marks the site read unavailable.
+      function finalize(extra) {
+        return fetchLocationRoster(wo.locationId).then(function (roster) {
+          var body = parts.slice();
+          var siteWOs = 0;
+          if (roster && roster.ok) {
+            var cur = String(wo.number || n);
+            var list = (roster.wos || []).filter(function (w) { return w && String(w.number) !== cur; })
+              .sort(function (a, b) { return ts(b && (b.workOrderDate || b.creationDate)) - ts(a && (a.workOrderDate || a.creationDate)); });
+            siteWOs = list.length;
+            if (!siteWOs) { body.push('', 'OTHER WORK ORDERS AT THIS LOCATION: none - this appears to be the only work order at this location.'); }
+            else {
+              var cap = Math.min(siteWOs, ROSTER_MAX);
+              body.push('', 'OTHER WORK ORDERS AT THIS LOCATION (' + siteWOs + (siteWOs > ROSTER_MAX ? ', showing ' + ROSTER_MAX + ' most recent' : '') + ') - summary rows only, NOT full notes; open a WO for its notes:');
+              for (var i = 0; i < cap; i++) {
+                var w = list[i], tr = (w.trades || []).map(function (t) { return t && t.name; }).filter(Boolean).join('/');
+                body.push('- WO #' + (w.number || '?') + ' | ' + (w.statusName || '?') + (w.priority && w.priority.label ? ' | ' + w.priority.label : '') + (tr ? ' | ' + tr : '') + ((w.workOrderDate || w.creationDate) ? ' | ' + fmtDate(w.workOrderDate || w.creationDate) : ''));
+              }
+            }
+          } else {
+            body.push('', 'OTHER WORK ORDERS AT THIS LOCATION: could not be read. Answer only about WO #' + (wo.number || n) + ' and say other work orders at the site could not be loaded.');
+            degraded.push('site-roster');
+          }
+          var scope = (roster && roster.ok && siteWOs)
+            ? 'SCOPE: You have the FULL notes/history for WO #' + (wo.number || n) + (wo.locationName ? ' at ' + wo.locationName : '') + ', PLUS a summary roster of ' + siteWOs + ' other work order(s) at this location (roster = status/trade/date only, NOT their notes). For detail on another WO the coordinator must open it. Do not invent notes for roster WOs.'
+            : 'SCOPE: This is ONE work order (#' + (wo.number || n) + ')' + (wo.locationName ? ' at ' + wo.locationName : '') + '. ' + ((roster && roster.ok) ? 'It is the only work order at this location.' : 'Other work orders at this location could NOT be loaded - do not claim completeness across the site.');
+          var text = scope + '\n\n' + body.join('\n');
+          return Object.assign({ text: text, wo: wo.number || n, degraded: degraded, siteWOs: siteWOs, siteOk: !!(roster && roster.ok) }, extra);
+        });
+      }
+
       // Notes query FAILED (not merely empty): tell the model so it never denies history.
       if (!notesR.ok) {
-        parts.push('NOTE / SITE-VISIT HISTORY: UNAVAILABLE - the notes query failed. Do NOT state whether this work order has notes or history; tell the user the history could not be read and to retry.');
+        parts.push('NOTE / SITE-VISIT HISTORY for this WO: UNAVAILABLE - the notes query failed. Do NOT state whether this work order has notes or history; tell the user the history could not be read and to retry.');
         degraded.push('notes');
-        return { text: parts.join('\n'), records: 0, shown: 0, omitted: 0, wo: wo.number || n, degraded: degraded, notesFailed: true };
+        return finalize({ records: 0, shown: 0, omitted: 0, notesFailed: true });
       }
 
       var notes = notesR.notes || [];
@@ -183,11 +278,11 @@
       var used = parts.join('\n').length;
       for (var i = 0; i < sorted.length; i++) {
         var nt = sorted[i];
-        var body = stripHtml(nt.content || nt.contentHtml || '');
-        if (!body) continue;
+        var nbody = stripHtml(nt.content || nt.contentHtml || '');
+        if (!nbody) continue;
         var who = nt.createdBy ? [nt.createdBy.firstName, nt.createdBy.lastName].filter(Boolean).join(' ') : '';
         var tags = [nt.type, nt.workOrderNoteSource, nt.isPinned ? 'pinned' : '', nt.isCompletion ? 'completion' : ''].filter(Boolean).join(', ');
-        var block = '\n[' + fmtDate(nt.createdDate) + ']' + (who ? ' ' + who : '') + (tags ? ' (' + tags + ')' : '') + '\n' + body + '\n';
+        var block = '\n[' + fmtDate(nt.createdDate) + ']' + (who ? ' ' + who : '') + (tags ? ' (' + tags + ')' : '') + '\n' + nbody + '\n';
         if (used + block.length > CTX_TOTAL_MAX) { omitted = sorted.length - i; break; }
         noteLines.push(block); used += block.length; shown++;
       }
@@ -195,7 +290,7 @@
         (omitted ? '; ' + shown + ' shown, ' + omitted + ' OLDEST omitted for size - say so if asked for the complete history' : '') + '):');
       if (!notes.length) parts.push('\n(no notes on this work order)');
       else parts = parts.concat(noteLines);
-      return { text: parts.join('\n'), records: notes.length, shown: shown, omitted: omitted, wo: wo.number || n, degraded: degraded };
+      return finalize({ records: notes.length, shown: shown, omitted: omitted });
     });
   }
 
@@ -223,7 +318,7 @@
       var payload = { userToken: userToken, question: question, context: ctx.text, model: model || 'claude-haiku-4-5' };
       if (history && history.length) payload.history = history;   // bounded last-few-turns, so follow-ups referencing the prior answer resolve
       return gmPost(ASK_URL, { 'Content-Type': 'application/json', 'x-bwn-key': key }, payload, 60000)
-        .then(function (r) { r._records = ctx.records; r._shown = ctx.shown; r._omitted = ctx.omitted; r._wo = ctx.wo; r._degraded = ctx.degraded; r._notesFailed = ctx.notesFailed; return r; });
+        .then(function (r) { r._records = ctx.records; r._shown = ctx.shown; r._omitted = ctx.omitted; r._wo = ctx.wo; r._degraded = ctx.degraded; r._notesFailed = ctx.notesFailed; r._siteWOs = ctx.siteWOs; r._siteOk = ctx.siteOk; return r; });
     });
   }
 
@@ -294,6 +389,7 @@
       } else {
         var foot = 'Grounded on WO #' + (r._wo || '?') + ' - ' + (r._records || 0) + ' note' + (r._records === 1 ? '' : 's');
         if (r._omitted) foot += ' (' + r._shown + ' shown, ' + r._omitted + ' oldest omitted)';
+        if (r._siteOk && r._siteWOs) foot += ' + ' + r._siteWOs + ' other WO' + (r._siteWOs === 1 ? '' : 's') + ' at this site';
         if (r._degraded && r._degraded.length) foot += '; unavailable: ' + r._degraded.join(', ');
         addMsg('meta', foot);
       }
@@ -350,7 +446,7 @@
     panelEl.appendChild(foot);
 
     document.body.appendChild(panelEl);
-    addMsg('assistant', 'Hi. Open a work order, then ask - I read that WO live from Umbrava (details + full note / site-visit history) plus Broadway\'s knowledge doc, and answer with dates and note references. I never guess; if it\'s not in the record I\'ll say so.');
+    addMsg('assistant', 'Hi. Open a work order, then ask - I read that WO live from Umbrava (details + full note / site-visit history) and a summary of the other work orders at the same location, plus Broadway\'s knowledge doc, and answer with dates and references. I never guess; if it\'s not in the record I\'ll say so.');
     inputEl.focus();
   }
 
