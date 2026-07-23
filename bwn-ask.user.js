@@ -1,8 +1,8 @@
 // ==UserScript==
 // @name         BWN Ask (Coordinator Copilot)
 // @namespace    https://broadwaynational.com/bwn
-// @version      0.1.1
-// @description  Ask questions about the location/WO you're viewing. Answers are grounded in the live Umbrava records the page already loaded (client card + work-order / site-visit history) plus the team knowledge doc, via the Broadway AI proxy. Phase 1 = page-scoped (Path A); no data leaves the trusted Broadway path.
+// @version      0.2.0
+// @description  Ask questions about the work order you're viewing. Reads the WO live from Umbrava via same-origin GraphQL (details + full note / site-visit history) plus the team knowledge doc, and answers through the Broadway AI proxy with dates and note references. Phase 1 = page-scoped (Path A); no data leaves the trusted Broadway path.
 // @match        https://app.umbrava.com/*
 // @run-at       document-idle
 // @grant        GM_xmlhttpRequest
@@ -23,12 +23,9 @@
   var ASK_URL = SWA_BASE + '/api/ask';
   var ROLE_TTL_MS = 6 * 3600 * 1000;
 
-  // Context budget. The server caps at ~120k chars; stay under it so a big page
-  // can't get truncated mid-record. Per-capture cap keeps one chatty query from
-  // crowding out the rest.
+  // Context budget. The server caps at ~120k chars; stay under it so the notes
+  // history can't get truncated mid-record.
   var CTX_TOTAL_MAX = 100000;
-  var CTX_ONE_MAX = 22000;
-  var CTX_KEEP = 16;            // most-recent captures retained
 
   // ---- Umbrava token (content-picked, mirrors bwn-suite-ai authToken) --------
   function isUmbravaToken(tok) {
@@ -72,111 +69,107 @@
     return null;
   }
 
-  // ---- Passive GraphQL capture ----------------------------------------------
-  // Mirrors List Heat's installNetHook: watch /api/graphql and keep the responses
-  // the SPA already fetched. When a coordinator is on a location/WO page, the page
-  // has loaded exactly the records they're asking about, so the copilot sees what
-  // they see - no hardcoded schema, no extra network calls, no new @connect.
-  var captures = [];          // [{ sig, len, text, ts }] newest last
-  var seenSig = Object.create(null);
-
-  // Only keep responses that look like operational records - drop the SPA's
-  // feature-flag / user-pref / telemetry chatter so the budget goes to real data.
-  var RELEVANT = /work\s*order|workorder|"location"|locationName|"client"|clientName|"customer"|customerName|"vendor"|"note"|"trip"|"visit"|schedul|proposal|invoice|"asset"|purchaseOrder|priority|status/i;
-
-  function trimValue(v, cap) {
-    var s;
-    try { s = JSON.stringify(v); } catch (e) { return ''; }
-    if (!s) return '';
-    if (s.length > cap) s = s.slice(0, cap) + ' /*...truncated...*/';
-    return s;
+  // ---- Same-origin GraphQL (mirrors bwn-suite-ai / bwn-wo-audit gql) ----------
+  // The page's own Umbrava bearer, passed explicitly, so this works from the grant
+  // sandbox (a passive fetch/XHR hook does NOT - the sandbox's window.fetch is not the
+  // page's, which is why capture was pulling nothing). app.umbrava.com is same-origin,
+  // so no @connect is needed for these reads.
+  function gql(query, variables) {
+    var tok = authToken();
+    return fetch('/api/graphql', {
+      method: 'POST',
+      headers: { 'Authorization': 'Bearer ' + tok, 'Content-Type': 'application/json' },
+      body: JSON.stringify({ query: query, variables: variables || {} })
+    }).then(function (r) { return r.json(); })
+      .then(function (j) {
+        if (j && j.errors && j.errors.length) throw new Error(j.errors[0].message || 'GraphQL error');
+        return j && j.data;
+      });
   }
 
-  function recordCapture(dataObj) {
-    try {
-      if (!dataObj || typeof dataObj !== 'object') return;
-      var text = trimValue(dataObj, CTX_ONE_MAX);
-      if (!text || text.length < 40) return;
-      if (!RELEVANT.test(text)) return;
-      // Cheap signature = first 120 chars + length, to dedup identical re-fetches.
-      var sig = text.length + ':' + text.slice(0, 120);
-      if (seenSig[sig]) {
-        // Refresh recency without duplicating.
-        for (var k = 0; k < captures.length; k++) { if (captures[k].sig === sig) { captures[k].ts = Date.now(); break; } }
-        return;
-      }
-      seenSig[sig] = 1;
-      captures.push({ sig: sig, len: text.length, text: text, ts: Date.now() });
-      if (captures.length > CTX_KEEP) {
-        var dropped = captures.shift();
-        if (dropped) delete seenSig[dropped.sig];
-      }
-    } catch (e) { /* capture is best-effort */ }
-  }
-
-  (function installNetHook() {
-    if (window.__bwnAskNetHook) return;
-    window.__bwnAskNetHook = true;
-    function isGql(u) { return typeof u === 'string' && /\/api\/graphql\b/.test(u); }
-    try {
-      var of = window.fetch;
-      if (typeof of === 'function') {
-        window.fetch = function (input, init) {
-          var url = (typeof input === 'string') ? input : (input && input.url) || '';
-          var p = of.apply(this, arguments);
-          if (isGql(url)) {
-            try {
-              p.then(function (res) {
-                try { res.clone().json().then(function (j) { if (j && j.data) recordCapture(j.data); }, function () { }); } catch (e) { }
-                return res;
-              }, function () { });
-            } catch (e) { }
-          }
-          return p;
-        };
-      }
-    } catch (e) { }
-    try {
-      var oOpen = XMLHttpRequest.prototype.open, oSend = XMLHttpRequest.prototype.send;
-      XMLHttpRequest.prototype.open = function (m, u) { this.__bwnUrl = u; return oOpen.apply(this, arguments); };
-      XMLHttpRequest.prototype.send = function (body) {
-        var xhr = this;
-        if (isGql(xhr.__bwnUrl)) {
-          xhr.addEventListener('load', function () {
-            try { var j = JSON.parse(xhr.responseText); if (j && j.data) recordCapture(j.data); } catch (e) { }
-          });
-        }
-        return oSend.apply(this, arguments);
-      };
-    } catch (e) { }
-  })();
-
-  // Build the RECORDS context string: page orientation + the captured records,
-  // newest first, up to the total budget.
-  function pageHeading() {
-    try {
-      var h = document.querySelector('h1, [class*="title"], [data-testid*="title"]');
-      var t = (h && h.textContent || '').trim().replace(/\s+/g, ' ');
-      return t.slice(0, 200);
-    } catch (e) { return ''; }
-  }
-  function buildContext() {
-    var parts = [];
-    parts.push('PAGE: ' + location.href);
-    var t = (document.title || '').trim(); if (t) parts.push('TITLE: ' + t);
-    var hd = pageHeading(); if (hd) parts.push('HEADING: ' + hd);
-    parts.push('');
-    var ordered = captures.slice().sort(function (a, b) { return b.ts - a.ts; });
-    var used = parts.join('\n').length;
-    var n = 0;
-    for (var i = 0; i < ordered.length; i++) {
-      var block = 'RECORD ' + (n + 1) + ':\n' + ordered[i].text + '\n';
-      if (used + block.length > CTX_TOTAL_MAX) break;
-      parts.push(block);
-      used += block.length;
-      n++;
+  function stripHtml(s) {
+    var t = String(s == null ? '' : s);
+    if (/[<&]/.test(t)) {
+      t = t.replace(/<br\s*\/?>/gi, '\n').replace(/<\/(p|div|li)>/gi, '\n').replace(/<[^>]+>/g, '');
+      t = t.replace(/&nbsp;/g, ' ').replace(/&amp;/g, '&').replace(/&lt;/g, '<').replace(/&gt;/g, '>').replace(/&#39;/g, "'").replace(/&quot;/g, '"');
     }
-    return { text: parts.join('\n'), records: n };
+    return t.replace(/[ \t]+\n/g, '\n').replace(/\n{3,}/g, '\n\n').trim();
+  }
+  function ts(d) { var n = Date.parse(d); return isNaN(n) ? 0 : n; }
+  function fmtDate(d) { var n = Date.parse(d); if (isNaN(n)) return String(d || ''); try { return new Date(n).toLocaleString(); } catch (e) { return String(d); } }
+  function woNumberFromUrl() { var m = location.pathname.match(/work-orders\/(\d+)/); return m ? parseInt(m[1], 10) : null; }
+
+  // Proven selectors. CORE + notes are CONFIRMED against live Umbrava (bwn-wo-audit
+  // v0.3.0 / bwn-suite-ai woToJob). Notes come from the ROOT jobNotes(workOrderNumber)
+  // field - the older workOrderNotes(workOrderId) does NOT exist. Each augment group is
+  // isolated so an unproven selector nulls only its own group, never the whole read.
+  var CORE_Q =
+    'query($n:Int!){ workOrder(workOrderNumber:$n){ ' +
+    '  number trackingNumber scopeOfWork serviceInstructions locationId locationName workOrderTypeId ' +
+    '  address{ addressLine1 city state postalCode } trades{ id name } priority{ label } doNotExceed{ amount } ' +
+    '} }';
+  var AUG_Q =
+    'query($n:Int!){ workOrder(workOrderNumber:$n){ statusName creationDate workOrderDate priority{ expectedCompletionDate firstTripDate } } }';
+  var COORD_Q =
+    'query($n:Int!){ workOrder(workOrderNumber:$n){ assignedToMemberName vendorNames } }';
+  var NOTES_Q =
+    'query($n:Int!){ jobNotes(workOrderNumber:$n, includeDeleted:false){ id type content contentHtml createdDate isPinned isCompletion workOrderNoteSource createdBy { firstName lastName } } }';
+
+  // Gather the RECORDS block by ACTIVELY querying the WO in view. Returns
+  // { text, records, error? }. records = note count (0 = nothing found / not a WO page).
+  function gatherContext() {
+    var n = woNumberFromUrl();
+    if (!n) return Promise.resolve({ text: '', records: 0, error: 'Open a specific work order (a /work-orders/<number> page) so I can read it, then ask.' });
+
+    var coreP = gql(CORE_Q, { n: n }).then(function (d) { return (d && d.workOrder) || null; }).catch(function () { return null; });
+    var augP = gql(AUG_Q, { n: n }).then(function (d) { return (d && d.workOrder) || {}; }).catch(function () { return {}; });
+    var coordP = gql(COORD_Q, { n: n }).then(function (d) { return (d && d.workOrder) || {}; }).catch(function () { return {}; });
+    var notesP = gql(NOTES_Q, { n: n }).then(function (d) { return (d && d.jobNotes) || []; }).catch(function () { return []; });
+
+    return Promise.all([coreP, augP, coordP, notesP]).then(function (res) {
+      var wo = res[0], aug = res[1] || {}, coord = res[2] || {}, notes = res[3] || [];
+      if (!wo && !notes.length) return { text: '', records: 0, error: 'I could not read work order ' + n + ' from Umbrava (the query returned nothing). Reload the page and try again.' };
+      wo = wo || {};
+
+      var L = [];
+      L.push('WORK ORDER #' + (wo.number || n) + (wo.trackingNumber ? ' (Tracking #' + wo.trackingNumber + ')' : ''));
+      if (aug.statusName) L.push('Status: ' + aug.statusName);
+      var wtype = wo.workOrderTypeId != null ? String(wo.workOrderTypeId) : '';
+      if (wo.locationName || wo.locationId != null) L.push('Location: ' + (wo.locationName || '') + (wo.locationId != null ? ' (id ' + wo.locationId + ')' : ''));
+      var addr = wo.address || null;
+      if (addr) L.push('Address: ' + [addr.addressLine1, [addr.city, addr.state].filter(Boolean).join(', '), addr.postalCode].filter(Boolean).join(' '));
+      if (wo.trades && wo.trades.length) L.push('Trade(s): ' + wo.trades.map(function (t) { return t && t.name; }).filter(Boolean).join(', '));
+      if (wo.priority && wo.priority.label) L.push('Priority: ' + wo.priority.label);
+      if (wo.doNotExceed && wo.doNotExceed.amount != null) L.push('NTE: $' + wo.doNotExceed.amount);
+      if (coord.assignedToMemberName) L.push('Coordinator: ' + coord.assignedToMemberName);
+      if (coord.vendorNames && coord.vendorNames.length) L.push('Vendor(s): ' + coord.vendorNames.join(', '));
+      if (aug.workOrderDate || aug.creationDate) L.push('Created: ' + fmtDate(aug.workOrderDate || aug.creationDate));
+      var pr = aug.priority || {};
+      if (pr.firstTripDate) L.push('First trip: ' + fmtDate(pr.firstTripDate));
+      if (pr.expectedCompletionDate) L.push('Expected completion: ' + fmtDate(pr.expectedCompletionDate));
+      if (wo.scopeOfWork) L.push('Scope of work: ' + stripHtml(wo.scopeOfWork));
+      if (wo.serviceInstructions) L.push('Service instructions: ' + stripHtml(wo.serviceInstructions));
+
+      var head = L.join('\n');
+      var parts = [head, '', 'NOTES / SITE-VISIT HISTORY (newest first, ' + notes.length + ' total):'];
+      var sorted = notes.slice().sort(function (a, b) { return ts(b && b.createdDate) - ts(a && a.createdDate); });
+      var used = parts.join('\n').length;
+      var shown = 0;
+      for (var i = 0; i < sorted.length; i++) {
+        var nt = sorted[i];
+        var body = stripHtml(nt.content || nt.contentHtml || '');
+        if (!body) continue;
+        var who = nt.createdBy ? [nt.createdBy.firstName, nt.createdBy.lastName].filter(Boolean).join(' ') : '';
+        var tags = [nt.type, nt.workOrderNoteSource, nt.isPinned ? 'pinned' : '', nt.isCompletion ? 'completion' : ''].filter(Boolean).join(', ');
+        var block = '\n[' + fmtDate(nt.createdDate) + ']' + (who ? ' ' + who : '') + (tags ? ' (' + tags + ')' : '') + '\n' + body + '\n';
+        if (used + block.length > CTX_TOTAL_MAX) { parts.push('\n(...older notes omitted to stay within size limits...)'); break; }
+        parts.push(block);
+        used += block.length;
+        shown++;
+      }
+      if (!notes.length) parts.push('\n(no notes on this work order)');
+      return { text: parts.join('\n'), records: notes.length, shown: shown, wo: wo.number || n };
+    });
   }
 
   // ---- SWA call (mirrors cc-auth gmPost) ------------------------------------
@@ -198,10 +191,12 @@
     if (!key) return Promise.resolve({ clientError: 'Set the SWA ingest key first (Tampermonkey menu -> "BWN Ask: set ingest key"). Same key as the rest of the suite.' });
     var userToken = authToken();
     if (!userToken) return Promise.resolve({ clientError: 'No usable Umbrava session token right now. Reload the Umbrava page and try again.' });
-    var ctx = buildContext();
-    var payload = { userToken: userToken, question: question, context: ctx.text, model: model || 'claude-haiku-4-5' };
-    return gmPost(ASK_URL, { 'Content-Type': 'application/json', 'x-bwn-key': key }, payload, 60000)
-      .then(function (r) { r._records = ctx.records; return r; });
+    return gatherContext().then(function (ctx) {
+      if (ctx.error && !ctx.records) return { clientError: ctx.error };
+      var payload = { userToken: userToken, question: question, context: ctx.text, model: model || 'claude-haiku-4-5' };
+      return gmPost(ASK_URL, { 'Content-Type': 'application/json', 'x-bwn-key': key }, payload, 60000)
+        .then(function (r) { r._records = ctx.records; r._wo = ctx.wo; return r; });
+    });
   }
 
   function errorFor(r) {
@@ -259,7 +254,6 @@
       else {
         var ans = (r.json && r.json.answer) || '(no answer returned)';
         addMsg('assistant', ans);
-        if (!r._records) addMsg('assistant', 'Note: I did not capture any records from this page. Open a specific location or work order (so its data loads), then ask again.');
       }
     }).catch(function (e) {
       if (thinking && thinking.parentNode) thinking.parentNode.remove();
@@ -314,7 +308,7 @@
     panelEl.appendChild(foot);
 
     document.body.appendChild(panelEl);
-    addMsg('assistant', 'Hi. I answer from the records this page has loaded (client card, work orders, site visits) plus Broadway\'s knowledge doc. I never guess - if it\'s not in the record I\'ll say so. Open a location or work order, then ask.');
+    addMsg('assistant', 'Hi. Open a work order, then ask - I read that WO live from Umbrava (details + full note / site-visit history) plus Broadway\'s knowledge doc, and answer with dates and note references. I never guess; if it\'s not in the record I\'ll say so.');
     inputEl.focus();
   }
 
