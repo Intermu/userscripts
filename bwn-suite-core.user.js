@@ -4,7 +4,7 @@
 // @version      1.62.0
 // @downloadURL  https://raw.githubusercontent.com/Intermu/userscripts/main/bwn-suite-core.user.js
 // @updateURL    https://raw.githubusercontent.com/Intermu/userscripts/main/bwn-suite-core.user.js
-// @description  Runs several Umbrava helpers for BWN coordinators, in the browser with no privileged grants. Includes: PO Approval + ETA Builder; WO Assist (GP/ETA, a stall watchdog, DNE calculator, and a next-action playbook); Email Leak Guard (checks recipients against vendor names, PO amounts, and client budget references before an outbound email sends); WO List Heat (a triage overlay + My Day strip on the work-order list, with an optional same-origin Umbrava API scan for deterministic full-board coverage); and the BWN Launcher (opens the Azure Static Web App tools with the current WO's context). Modules share state through sessionStorage/localStorage. The only network calls are same-origin Umbrava GraphQL reads (app.umbrava.com/api/graphql, the app's own session): List Heat's full-board scan and WO Assist's work-order header read; everything else is offline. Toggle modules in BWN_MODULES below.
+// @description  Runs several Umbrava helpers for BWN coordinators, in the browser with no privileged grants. Includes: PO Approval + ETA Builder; WO Assist (GP/ETA, a stall watchdog, DNE calculator, and a next-action playbook); Email Leak Guard (checks recipients against vendor names, PO amounts, and client budget references before an outbound email sends); WO List Heat (a triage overlay + My Day strip on the work-order list, with an optional same-origin Umbrava API scan for deterministic full-board coverage); and the BWN Launcher (opens the Azure Static Web App tools with the current WO's context). Modules share state through sessionStorage/localStorage. The only network calls are same-origin Umbrava GraphQL reads (app.umbrava.com/api/graphql, the app's own session): List Heat's full-board scan and WO Assist's work-order / trip / clock-in reads; everything else is offline. Toggle modules in BWN_MODULES below.
 // @match        https://app.umbrava.com/*
 // @match        https://*.umbrava.com/*
 // @run-at       document-idle
@@ -1091,7 +1091,7 @@
   });
 
   // ==========================================================================
-  // MODULE: WO Assist: GP + ETA Watchdog + Playbook v2.55 (Connector 1.2)
+  // MODULE: WO Assist: GP + ETA Watchdog + Playbook v2.56 (Connector 1.2)
   // ==========================================================================
   if (BWN_MODULES.woAssist) BWN.safeModule('woAssist', function () {
     'use strict';
@@ -1121,7 +1121,7 @@
     var PANEL_ID = 'bwn-gp-panel';
     var GREEN = BWN.GREEN;
 
-    console.info('[BWN GP] WO Assist v2.55 loaded on', location.href);
+    console.info('[BWN GP] WO Assist v2.56 loaded on', location.href);
 
     // ---- Parsing helpers (shared via BWN core) -----------------------------
     var parseMoney = BWN.parseMoney;
@@ -1504,6 +1504,58 @@
       return null;
     }
 
+    // ---- No-show via purchaseOrderTrips(jobId) + jobIVRs clock-in check --------
+    // The Trip Calendar module writes bwn:trips:<wo> from DOM cards, but only on the
+    // /trips tab - so on the details page (where WO Assist runs) state.noShow is
+    // usually absent. This populates the SAME cache/shape ({ms,vendor,trip}) from the
+    // API using state.jobId (now available via readWO), and REFINES the signal: a trip
+    // is only a no-show if it is Scheduled, its onSiteDate is before today, and there
+    // is NO non-cancelled clock-in (jobIVRs) for its PO - so a vendor who showed but
+    // whose trip status was never updated no longer false-flags. Runs once per WO per
+    // session; only overwrites the cache on a SUCCESSFUL trips read (never nulls out a
+    // DOM-written cache on a failed fetch). status is matched by word (/scheduled/i);
+    // if Umbrava encodes it as an enum int the flag simply won't fire - a safe miss,
+    // not a false no-show (pin the enum from a captured trips response to extend).
+    var TRIPS_DONE = Object.create(null);   // woNum -> 'pending' | true (once per session)
+    var PO_TRIPS_Q = 'query POTripsNoShow($jobId: Int!) { purchaseOrderTrips(jobId: $jobId) { number vendorName trips { number onSiteDate status } } }';
+    var WO_IVRS_Q = 'query WOIVRsNoShow($n: Int) { jobIVRs(workOrderNumber: $n) { purchaseOrderNumber clockInDate startTime isCanceled } }';
+    function fetchTrips(woNum, jobId) {
+      if (!woNum || !jobId || TRIPS_DONE[woNum]) return;
+      TRIPS_DONE[woNum] = 'pending';
+      Promise.all([
+        bwnGql(PO_TRIPS_Q, { jobId: Number(jobId) }).catch(function () { return null; }),
+        bwnGql(WO_IVRS_Q, { n: Number(woNum) }).catch(function () { return null; })
+      ]).then(function (res) {
+        TRIPS_DONE[woNum] = true;
+        var poTrips = res[0] && res[0].purchaseOrderTrips;
+        if (!Array.isArray(poTrips)) return;   // read failed - leave any existing cache intact
+        var ivrs = (res[1] && res[1].jobIVRs) || [];
+        var clockedPO = Object.create(null);
+        ivrs.forEach(function (v) {
+          if (v && !v.isCanceled && (v.clockInDate || v.startTime) && v.purchaseOrderNumber != null) clockedPO[String(v.purchaseOrderNumber)] = true;
+        });
+        var d = new Date(), today = new Date(d.getFullYear(), d.getMonth(), d.getDate()).getTime();
+        var latest = null, noShow = null;
+        poTrips.forEach(function (po) {
+          var poNum = String(po.number == null ? '' : po.number), vendor = po.vendorName || '';
+          (po.trips || []).forEach(function (t) {
+            var ms = t.onSiteDate ? +new Date(t.onSiteDate) : NaN;
+            if (isNaN(ms)) return;
+            var st = String(t.status == null ? '' : t.status);
+            var done = /complete|cancel|progress|route|dispatch/i.test(st);
+            if (!done && ms >= today && (latest === null || ms > latest)) latest = ms;
+            if (/scheduled/i.test(st) && !done && ms < today && !clockedPO[poNum] && vendor && (!noShow || ms < noShow.ms)) {
+              noShow = { ms: ms, vendor: vendor, trip: (t.number != null ? String(t.number) : '') };
+            }
+          });
+        });
+        var payload = { v: 1, ts: Date.now(), src: 'api', latestScheduled: latest };
+        if (noShow) payload.noShow = noShow;
+        try { BWN.ssSetJSON('bwn:trips:' + woNum, payload); } catch (e) { }
+        try { refresh(); } catch (e) { }
+      });
+    }
+
     // ---- Signals --------------------------------------------------------------
     // Tolerant (shared, v5): absolute, relative ("2 hours ago"), or Date.parse-able -
     // relative timestamps previously read as "no date" and hid stale-note ages.
@@ -1699,6 +1751,7 @@
       // WO's identity/intake fields (tracking/location/trade/scope) from STATE, not the DOM.
       var hd = (function () { try { return headerInfo(); } catch (e) { return {}; } })();
       var woApi = readWO(currentWOId());   // async WO-header read (cached); null until it lands
+      try { if (woApi && woApi.id) fetchTrips(currentWOId(), woApi.id); } catch (e) { }   // async: populates bwn:trips no-show from the API (needs jobId)
       var pos = readPOs();
       var vendorTotal = pos.reduce(function (a, p) { return a + (p.amount > 0 ? p.amount : 0); }, 0);
       var nte = detectNTE();
@@ -1738,6 +1791,8 @@
         // HERE so state fully determines the playbook (mirrors the computeVerdict refactor -
         // facts in, verdict out). Each is fail-safe so compute() never throws.
         hd: hd,
+        jobId: (woApi && woApi.id) || null,   // internal job id (the DOM can't give it) - unblocks the trips/no-show route
+        woApi: woApi || null,
         authoredPlan: (function () { try { return readAuthoredPlan(); } catch (e) { return null; } })(),
         docs: (function () { try { return readDocs(); } catch (e) { return null; } })(),
         escRank: (function () { try { return bwnEscRank(); } catch (e) { return null; } })(),
