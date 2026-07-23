@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         BWN Suite - AI (Broadway National)
 // @namespace    broadwaynational.bwn
-// @version      1.39.0
+// @version      1.39.1
 // @downloadURL  https://raw.githubusercontent.com/Intermu/userscripts/main/bwn-suite-ai.user.js
 // @updateURL    https://raw.githubusercontent.com/Intermu/userscripts/main/bwn-suite-ai.user.js
 // @description  The Umbrava tools that call outside APIs, kept separate from the zero-egress Core script. Client Update and WO Audit drafts (Anthropic Claude; draft-only, scrubbed before sending, you review before posting); Find Techs / Find Suppliers (Google Places; vendor leads near a WO); and Job View (opens the Ops-Dashboard job card on the WO page - WO details from Umbrava plus the authored case file and next actions, read-only). Network access is limited by the browser to the declared API hosts and the BWN Static Web App. API keys are stored in Tampermonkey's storage via the menu commands and never enter the page. Toggle modules in BWN_MODULES below.
@@ -2910,15 +2910,16 @@ if (BWN_MODULES.jobView) BWN.safeModule('jobView', function () {
       }
     } catch (e) { /* selectors not on the SPA schema → coordinator/vendors stay null */ }
 
-    // --- NOTES (guessed root query + shape). Isolated. Keyed by internal id.
+    // --- NOTES. Umbrava's REAL query: jobNotes(workOrderNumber) is a ROOT field keyed by
+    // the WO NUMBER (n), NOT the internal id. The older workOrderNotes(workOrderId) field
+    // does not exist and silently returned 0 notes. Confirmed off the wire 2026-07-23
+    // (bwn-wo-audit v0.3.0). Isolated: any drift nulls notes only, never the whole read.
     var notes = [];
-    if (woId != null) {
-      try {
-        var N_Q = 'query($id:Int!){ workOrderNotes(workOrderId:$id){ content contentHtml createdDate isPinned type } }';
-        var nr = await gql(N_Q, { id: woId });
-        notes = (nr && nr.workOrderNotes) || [];
-      } catch (e) { notes = []; }
-    }
+    try {
+      var N_Q = 'query($n:Int!){ jobNotes(workOrderNumber:$n, includeDeleted:false){ id type content contentHtml createdDate isPinned isCompletion workOrderNoteSource createdBy { firstName lastName } } }';
+      var nr = await gql(N_Q, { n: n });
+      notes = (nr && nr.jobNotes) || [];
+    } catch (e) { notes = []; }
     notes = notes.slice().sort(function (a, b) {
       return (_date(b && b.createdDate) || 0) - (_date(a && a.createdDate) || 0);
     });
