@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         BWN Drop Upload (Broadway National)
 // @namespace    broadwaynational.bwn
-// @version      1.8.0
+// @version      1.9.0
 // @downloadURL  https://raw.githubusercontent.com/Intermu/userscripts/main/bwn-drop-upload.user.js
 // @updateURL    https://raw.githubusercontent.com/Intermu/userscripts/main/bwn-drop-upload.user.js
 // @description  Drop files anywhere on an Umbrava work order to upload them. Opens the Documents tab and upload dialog, hands over the files, and builds each file's description from its contents. Emails are parsed locally (.msg via an OLE/MAPI reader, .eml via RFC822) into an Outlook-style block - From/Sent/To/Cc/Subject and the body - that becomes the WO note, led by a one-line summary from Chrome's on-device built-in AI (zero cost, zero egress, nothing leaves the browser), falling back to local WO-field extraction (store, city/state, priority, PO, NTE, problem, requester) when the on-device model is unavailable. That same summary fills each file's Description. The WO note's Type is chosen from the email's parties: inbound is typed by the sender (client -> Client, else Vendor); outbound from Broadway is typed by the recipients (a client recipient -> Client, any vendor recipient -> Vendor, all-internal -> Internal). Umbrava's Description field is a locked react-aria combobox that rejects programmatic fills, so the description goes on your clipboard for a one-tap Ctrl+V. When WO Intake hands off a just-created WO's request email, each uploaded file's Label (document type) is set to "Work Order Request". You review and Save everything. Runs in the browser only: no network access, no grants.
@@ -479,65 +479,187 @@
     return 'Client';
   }
 
-  // ---- Optional on-device AI summary (Chrome built-in AI) --------------------
-  // Uses Chrome's Prompt API entirely ON-DEVICE - no key, no network, nothing leaves
-  // the browser (keeps drop-upload @grant none / zero egress). Summarizes the NEW
-  // message (thread already trimmed by tidyBody) into one scan-line for the note.
-  // Returns '' whenever the API is missing, the model isn't downloaded yet, or anything
-  // throws - the caller then falls back to the mechanical localSummary/emailDesc. Bounded
-  // by a timeout so a slow (or first, pre-download) inference never stalls the upload.
-  function aiLangModel() {
-    // The Prompt API surface has shifted across Chrome versions; probe the known globals.
-    var g = (typeof self !== 'undefined') ? self : (typeof window !== 'undefined' ? window : null);
-    if (typeof LanguageModel !== 'undefined' && LanguageModel) return LanguageModel;
-    if (g && g.LanguageModel) return g.LanguageModel;
-    if (g && g.ai && g.ai.languageModel) return g.ai.languageModel;   // older window.ai shape
-    return null;
-  }
-  function aiReady(api) {
-    // Newer: availability() -> 'available'|'downloadable'|'downloading'|'unavailable'.
-    // Older: capabilities() -> {available:'readily'|'after-download'|'no'}. Only 'available'/
-    // 'readily' means we can infer NOW without waiting on a multi-GB model download.
+  // ===== bwnAI v1 - shared suite-wide AI router - KEEP IN SYNC across suite scripts =====
+  // Single tiered helper (spec: [[bwn-ai-tiering]]). Generalizes this module's original
+  // on-device aiSummary into a router every module can call the same way. Three tiers:
+  //   local    - a module-supplied mechanical fn (no model). Always-available floor.
+  //   ondevice - Chrome's built-in Prompt API (Gemini Nano). Free, zero-egress, no key,
+  //              @grant none. Everyone. Good for summaries/labels/short classification.
+  //   proxy    - one SERVER key behind the bwn-ai SWA (Claude/Haiku). Rank-gated to
+  //              managers+ (BWN_AI_ADVANCED_MIN_RANK, default 4). The network transport
+  //              is INJECTED by a grant-holding script via bwnAI.setProxy(fn); modules
+  //              that are @grant none (this one) never attempt it - proxy simply misses
+  //              and the router falls through to on-device / local.
+  // Contract: async, self-bounded by timeoutMs, ALWAYS resolves (never throws), returns
+  // '' (or the local result) on any miss. Paste this block verbatim into any module that
+  // needs AI; only put the block here, never a key. This is UX/cost routing - the SERVER
+  // re-enforces the rank on the proxy tier (403 ROLE_REQUIRED, treated here as a miss).
+  var bwnAI = (function () {
+    var TASK_TIER = { summarize: 'ondevice', classify: 'ondevice', draft: 'proxy', render: 'proxy' };
+    var TASK_ONELINE = { summarize: true, classify: true };
+    var TASK_SYSTEM = {
+      summarize: 'Summarize the input into a single plain-text line (<=200 chars). No greeting, no sign-off, no preamble, no quotes - output only the one line.',
+      classify: 'Classify the input. Respond with ONLY a short label of a few words - no explanation, no punctuation beyond the label.',
+      draft: 'Draft a short, professional message for a facilities coordinator. Clear and courteous. Output only the message body - no preamble.',
+      render: 'Synthesize the provided work-order details into a clear, well-structured plain-text brief for a facilities coordinator. Output only the brief.'
+    };
+    var ROLE_TTL_MS = 6 * 3600 * 1000;   // trust the cross-refresh role slot this long
+
+    // ---- Rank read (client, cost/UX only - the server is the real gate) ----------
+    // @grant-none-safe: the AI script resolves the SERVER-computed rank once per session
+    // ([[umbrava-role-auth]]) and publishes it on the `bwn:role` bus event + the
+    // localStorage `bwn:role:last` slot. A live bus event is trusted directly; the slot
+    // is the cross-refresh fallback, trusted only when marked ok + fresh. Never re-fetches.
+    var _liveRank = null;
     try {
-      if (typeof api.availability === 'function') return Promise.resolve(api.availability()).then(function (s) { return s === 'available'; }, function () { return false; });
-      if (typeof api.capabilities === 'function') return Promise.resolve(api.capabilities()).then(function (c) { return !!c && c.available === 'readily'; }, function () { return false; });
-    } catch (e) {}
-    return Promise.resolve(false);
-  }
-  var AI_SYSTEM = 'You summarize ONE work-order email into a single plain-text line (<=200 chars) for a facilities coordinator scanning a work order. Name who sent it and what they are asking for or reporting. No greeting, no sign-off, no preamble, no quotes - output only the one line.';
-  var AI_SESSION = null;   // reuse one session across drops; recreated if it errors
-  function aiCreateSession(api) {
-    if (AI_SESSION) return Promise.resolve(AI_SESSION);
-    function keep(hasSystem) { return function (s) { try { s._bwnSystem = hasSystem; } catch (e) {} AI_SESSION = s; return s; }; }
-    // Prefer the system-prompt option; fall back to a bare session (older/newer variants)
-    // where the instruction is prepended to the user prompt instead (_bwnSystem = false).
-    return Promise.resolve(api.create({ initialPrompts: [{ role: 'system', content: AI_SYSTEM }] }))
-      .then(keep(true), function () { return Promise.resolve(api.create()).then(keep(false)); });
-  }
-  function withTimeout(p, ms) {
-    return new Promise(function (resolve) {
-      var t = setTimeout(function () { resolve(undefined); }, ms);
-      Promise.resolve(p).then(function (v) { clearTimeout(t); resolve(v); }, function () { clearTimeout(t); resolve(undefined); });
-    });
-  }
-  function aiSummary(m) {
-    var api = aiLangModel();
-    if (!api || typeof api.create !== 'function') return Promise.resolve('');
-    var run = aiReady(api).then(function (ok) {
-      if (!ok) return '';
-      return aiCreateSession(api).then(function (s) {
-        var from = (m.fromName || smtpAddr(m.fromEmail) || '').trim();
-        var to = (m.to || []).map(function (r) { return r.name || smtpAddr(r.email); }).filter(Boolean).join(', ');
-        var body = tidyBody(m.body).slice(0, 4000);   // the NEW message only - thread cut
-        var usedSystem = !!(s && s._bwnSystem !== false);   // best-effort; harmless if unknown
-        var prompt = (usedSystem ? '' : AI_SYSTEM + '\n\n') +
-          'From: ' + from + '\nTo: ' + to + '\nSubject: ' + String(m.subject || '') + '\n\n' + body;
-        return s.prompt(prompt);
-      }).then(function (out) {
-        return String(out || '').replace(/\s+/g, ' ').replace(/^["']+|["']+$/g, '').trim().slice(0, 300);
+      document.addEventListener('bwn:evt', function (e) {
+        var d = e && e.detail;
+        if (d && d.id === 'bwn:role' && typeof d.rank === 'number') _liveRank = d.rank;
       });
-    }).catch(function () { AI_SESSION = null; return ''; });   // drop a bad cached session
-    return withTimeout(run, 8000).then(function (v) { return v || ''; });
+    } catch (e) { /* no document (worker) - rank stays unknown -> on-device */ }
+    function rank() {
+      if (typeof _liveRank === 'number') return _liveRank;
+      try {
+        var r = JSON.parse(localStorage.getItem('bwn:role:last') || 'null');
+        if (r && r.ok && typeof r.rank === 'number' && r.ts && (Date.now() - r.ts) < ROLE_TTL_MS) return r.rank;
+      } catch (e2) { }
+      return null;
+    }
+
+    // ---- On-device (Chrome built-in Prompt API) -----------------------------------
+    function langModel() {
+      // The Prompt API surface has shifted across Chrome versions; probe the globals.
+      var g = (typeof self !== 'undefined') ? self : (typeof window !== 'undefined' ? window : null);
+      if (typeof LanguageModel !== 'undefined' && LanguageModel) return LanguageModel;
+      if (g && g.LanguageModel) return g.LanguageModel;
+      if (g && g.ai && g.ai.languageModel) return g.ai.languageModel;   // older window.ai shape
+      return null;
+    }
+    function ready(api) {
+      // Newer: availability() -> 'available'|'downloadable'|'downloading'|'unavailable'.
+      // Older: capabilities() -> {available:'readily'|'after-download'|'no'}. Only
+      // 'available'/'readily' means we can infer NOW without a multi-GB model download.
+      try {
+        if (typeof api.availability === 'function') return Promise.resolve(api.availability()).then(function (s) { return s === 'available'; }, function () { return false; });
+        if (typeof api.capabilities === 'function') return Promise.resolve(api.capabilities()).then(function (c) { return !!c && c.available === 'readily'; }, function () { return false; });
+      } catch (e) { }
+      return Promise.resolve(false);
+    }
+    // Reuse one session PER system prompt (a new task/system gets its own; recreated on error).
+    var SESSIONS = {};
+    function session(api, sys) {
+      var cached = SESSIONS[sys];
+      if (cached) return Promise.resolve(cached);
+      function keep(hasSystem) { return function (s) { try { s._bwnSystem = hasSystem; } catch (e) { } SESSIONS[sys] = s; return s; }; }
+      // Prefer the system-prompt option; fall back to a bare session (older/newer variants)
+      // where the instruction is prepended to the user prompt instead (_bwnSystem = false).
+      return Promise.resolve(api.create({ initialPrompts: [{ role: 'system', content: sys }] }))
+        .then(keep(true), function () { return Promise.resolve(api.create()).then(keep(false)); });
+    }
+    function onDevice(sys, content) {
+      var api = langModel();
+      if (!api || typeof api.create !== 'function') return Promise.resolve('');
+      return ready(api).then(function (ok) {
+        if (!ok) return '';
+        return session(api, sys).then(function (s) {
+          var usedSystem = !!(s && s._bwnSystem !== false);   // best-effort; harmless if unknown
+          return s.prompt((usedSystem ? '' : sys + '\n\n') + content);
+        });
+      }).catch(function () { SESSIONS[sys] = null; return ''; });   // drop a bad cached session
+    }
+
+    // ---- Proxy (server key, injected transport) -----------------------------------
+    // A grant-holding script installs the real cross-origin sender:
+    //   bwnAI.setProxy(function (payload) { ... return Promise<string text>; })
+    // payload = {task, system, prompt, maxTokens, minRank, rank}. The sender owns auth
+    // (token in the JSON BODY, never Authorization - the SWA edge overwrites it) and must
+    // RESOLVE '' / REJECT on any miss (403 ROLE_REQUIRED, network, empty) so we fall through.
+    var _proxySend = null;
+    function proxy(payload, send) {
+      var fn = send || _proxySend;
+      if (typeof fn !== 'function') return Promise.resolve('');   // no transport -> miss
+      return Promise.resolve().then(function () { return fn(payload); })
+        .then(function (t) { return String(t || ''); }, function () { return ''; });
+    }
+
+    function withTimeout(p, ms) {
+      return new Promise(function (resolve) {
+        var t = setTimeout(function () { resolve(undefined); }, ms);
+        Promise.resolve(p).then(function (v) { clearTimeout(t); resolve(v); }, function () { clearTimeout(t); resolve(undefined); });
+      });
+    }
+    function clean(text, oneLine, maxChars) {
+      var s = String(text || '');
+      if (oneLine) s = s.replace(/\s+/g, ' ').replace(/^["']+|["']+$/g, '');
+      return s.trim().slice(0, maxChars);
+    }
+
+    // ---- Router -------------------------------------------------------------------
+    function bwnAI(opts) {
+      opts = opts || {};
+      var task = opts.task || 'summarize';
+      var oneLine = (opts.oneLine !== undefined) ? !!opts.oneLine : !!TASK_ONELINE[task];
+      var maxChars = opts.maxChars || (oneLine ? 300 : 4000);
+      var sys = opts.system || TASK_SYSTEM[task] || TASK_SYSTEM.summarize;
+      var content = (opts.prompt != null) ? String(opts.prompt)
+        : (typeof opts.input === 'string' ? opts.input : (opts.input != null ? JSON.stringify(opts.input) : ''));
+      var localFn = (typeof opts.local === 'function') ? opts.local : null;
+      var floor = function () { try { return localFn ? clean(localFn(), oneLine, maxChars) : ''; } catch (e) { return ''; } };
+
+      // Ordered tier list: desired ceiling first (task default, unless tier overrides),
+      // then the fallback chain. Deduped, capped at proxy when tier says 'ondevice'.
+      var desired = (opts.tier && opts.tier !== 'auto') ? opts.tier : (TASK_TIER[task] || 'ondevice');
+      var order = [desired].concat(opts.fallback || ['ondevice', 'local']);
+      var seen = {}, tiers = [];
+      order.forEach(function (t) { if (t && !seen[t]) { seen[t] = 1; tiers.push(t); } });
+
+      var minRank = (typeof opts.minRank === 'number') ? opts.minRank : 4;
+      var r = rank();
+
+      function step(i) {
+        if (i >= tiers.length) return Promise.resolve('');
+        var t = tiers[i], next = function () { return step(i + 1); };
+        if (t === 'local') { return Promise.resolve(floor()); }   // terminal floor
+        if (t === 'proxy') {
+          // Fail CLOSED: unknown/under-rank quietly skips the paid tier (no 403 flash, no
+          // wasted key) and drops to on-device. The server still backstops if we do send.
+          if (r == null || r < minRank) return next();
+          return proxy({ task: task, system: sys, prompt: content, maxTokens: opts.maxTokens, minRank: minRank, rank: r }, opts.proxySend)
+            .then(function (out) { out = clean(out, oneLine, maxChars); return out || next(); });
+        }
+        if (t === 'ondevice') {
+          return onDevice(sys, content).then(function (out) { out = clean(out, oneLine, maxChars); return out || next(); });
+        }
+        return next();
+      }
+
+      var run = step(0).then(function (out) { return out || floor(); });
+      return withTimeout(run, opts.timeoutMs || 8000).then(function (v) { return v || floor() || ''; });
+    }
+    bwnAI.setProxy = function (fn) { _proxySend = (typeof fn === 'function') ? fn : null; };
+    bwnAI.rank = rank;   // exposed for debug / gating UI
+    return bwnAI;
+  })();
+  // ===== END bwnAI =====
+
+  // ---- Optional on-device AI summary (now via the shared bwnAI router) -------
+  // Thin wrapper: summarizes the NEW message (thread already trimmed by tidyBody) into one
+  // scan-line for the note, ON-DEVICE only (drop-upload is @grant none / zero-egress). Passes
+  // this module's email-specific system prompt verbatim so output is unchanged from v1.8.0.
+  // Returns '' on any miss; describeFile then falls back to localSummary/emailDesc.
+  function aiSummary(m) {
+    var from = (m.fromName || smtpAddr(m.fromEmail) || '').trim();
+    var to = (m.to || []).map(function (r) { return r.name || smtpAddr(r.email); }).filter(Boolean).join(', ');
+    var body = tidyBody(m.body).slice(0, 4000);   // the NEW message only - thread cut
+    var content = 'From: ' + from + '\nTo: ' + to + '\nSubject: ' + String(m.subject || '') + '\n\n' + body;
+    return bwnAI({
+      task: 'summarize',
+      tier: 'ondevice',
+      system: 'You summarize ONE work-order email into a single plain-text line (<=200 chars) for a facilities coordinator scanning a work order. Name who sent it and what they are asking for or reporting. No greeting, no sign-off, no preamble, no quotes - output only the one line.',
+      prompt: content,
+      fallback: ['ondevice'],   // local floor handled by describeFile's mech/emailDesc path
+      timeoutMs: 8000
+    });
   }
 
   // Build per file: {kind, name, size, desc (short - Description field/clipboard),
