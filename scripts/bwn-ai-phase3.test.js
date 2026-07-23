@@ -1,4 +1,4 @@
-// test-bwn-ai-phase3.js - node harness for the Phase 3 consumer migration (TASK-011/013/014).
+// bwn-ai-phase3.test.js - Vitest suite for the Phase 3 consumer migration (TASK-011/013/014).
 //
 // Verifies, against the REAL shipped code (sliced out by markers + evaluated with stubs,
 // never rewritten):
@@ -12,23 +12,17 @@
 //   - static (TASK-014): NO api.anthropic.com / anthropic_key anywhere in the suite.
 //   - PAT-002: the bwnAI block SHA matches across drop-upload, suite-ai, wo-audit.
 //
-// Run: "/c/Program Files/Adobe/Adobe Creative Cloud Experience/libs/node.exe" scripts/test-bwn-ai-phase3.js
+// Run: npm test   (or: npx vitest run scripts/bwn-ai-phase3.test.js)
 
-var fs = require('fs');
-var path = require('path');
-var crypto = require('crypto');
+import { describe, test, expect } from 'vitest';
+import fs from 'node:fs';
+import path from 'node:path';
+import crypto from 'node:crypto';
+import { fileURLToPath } from 'node:url';
 
-var DIR = path.join(__dirname, '..');
+const __dirname = path.dirname(fileURLToPath(import.meta.url));
+const DIR = path.join(__dirname, '..');
 function read(f) { return fs.readFileSync(path.join(DIR, f), 'utf8').replace(/\r\n/g, '\n'); }
-
-// ---- tiny assert harness --------------------------------------------------------------
-var pass = 0, fail = 0, cases = 0;
-function ok(name, cond, detail) {
-  cases++;
-  if (cond) { pass++; console.log('  ok  - ' + name); }
-  else { fail++; console.log('  FAIL- ' + name + (detail ? ('  [' + detail + ']') : '')); }
-}
-function eq(name, got, want) { ok(name, JSON.stringify(got) === JSON.stringify(want), 'got ' + JSON.stringify(got) + ' want ' + JSON.stringify(want)); }
 
 // ---- shared stubs ---------------------------------------------------------------------
 function b64url(obj) { return Buffer.from(JSON.stringify(obj)).toString('base64').replace(/=+$/, '').replace(/\+/g, '-').replace(/\//g, '_'); }
@@ -119,124 +113,111 @@ function loadWoAudit(opts) {
   return api;
 }
 
-// ---- run ------------------------------------------------------------------------------
-function run() {
-  var chain = Promise.resolve();
-
-  // === suite-ai: sender tool-gating (TASK-013 safety) =================================
-  chain = chain.then(function () {
+// === suite-ai: sender tool-gating (TASK-013 safety) =================================
+describe('suite-ai sender tool-gating (TASK-013)', () => {
+  test('draft goes tool-free, single round-trip, passes system + userToken', async () => {
     var gm = makeGM([{ ok: true, status: 'final', text: 'drafted body' }]);
     var T = loadSuiteTransport({ GM_xmlhttpRequest: gm.fn });
-    return T.aiProxySend({ task: 'draft', prompt: 'draft a vendor note', system: 'SYS' }).then(function (text) {
-      eq('draft sender reaches final', text, 'drafted body');
-      ok('draft POST carries NO tools (tool-free)', gm.sent[0].tools === undefined, JSON.stringify(gm.sent[0]));
-      ok('draft POST task=draft', gm.sent[0].task === 'draft');
-      ok('draft POST passes caller system through', gm.sent[0].system === 'SYS');
-      ok('draft POST carries userToken in BODY', typeof gm.sent[0].userToken === 'string' && gm.sent[0].userToken.length > 0);
-    });
-  });
-  chain = chain.then(function () {
-    var gm = makeGM([{ ok: true, status: 'final', text: 'answer' }]);
-    var T = loadSuiteTransport({ GM_xmlhttpRequest: gm.fn });
-    return T.aiProxySend({ task: 'ask', prompt: 'what WOs?', system: 'IGNORED' }).then(function () {
-      ok('ask POST DOES carry the tool registry', Array.isArray(gm.sent[0].tools) && gm.sent[0].tools.length === 3);
-    });
+    var text = await T.aiProxySend({ task: 'draft', prompt: 'draft a vendor note', system: 'SYS' });
+    expect(text).toBe('drafted body');
+    expect(gm.sent[0].tools).toBeUndefined();       // draft carries NO tools
+    expect(gm.sent[0].task).toBe('draft');
+    expect(gm.sent[0].system).toBe('SYS');
+    expect(typeof gm.sent[0].userToken).toBe('string');
+    expect(gm.sent[0].userToken.length).toBeGreaterThan(0);
   });
 
-  // === wo-audit: minimal sender + summarize (TASK-011) ================================
-  chain = chain.then(function () {
+  test('ask DOES carry the tool registry', async () => {
+    var gm = makeGM([{ ok: true, status: 'final', text: 'answer' }]);
+    var T = loadSuiteTransport({ GM_xmlhttpRequest: gm.fn });
+    await T.aiProxySend({ task: 'ask', prompt: 'what WOs?', system: 'IGNORED' });
+    expect(Array.isArray(gm.sent[0].tools)).toBe(true);
+    expect(gm.sent[0].tools.length).toBe(3);
+  });
+});
+
+// === wo-audit: minimal sender + summarize (TASK-011) ================================
+describe('wo-audit minimal sender + summarize (TASK-011)', () => {
+  test('summarize returns final text and builds the correct /api/ai POST', async () => {
     var T = loadWoAudit({ seed: roleSlot(), gmScript: [{ ok: true, status: 'final', text: 'WO 375038 is scheduled for Tuesday.' }] });
     var woFacts = { raw: 'W-375038', status: 'Pending Dispatch', city: 'Tampa', state: 'FL', location: 'PFJ #123', days: '12', assignedTo: 'Lisa P' };
     var notes = [{ content: 'Vendor confirmed Tuesday.', createdDate: '2026-07-22', type: 'client' }, { content: 'Parts arrived.', createdDate: '2026-07-21', type: 'internal' }];
-    return T.summarize(woFacts, notes, 'claude-sonnet-5').then(function (note) {
-      eq('wo-audit summarize returns final text', note, 'WO 375038 is scheduled for Tuesday.');
-      var body = T._gsent[0].body;
-      ok('wo-audit POST hits /api/ai', /\/api\/ai$/.test(T._gsent[0].url), T._gsent[0].url);
-      ok('wo-audit POST task=summarize', body.task === 'summarize');
-      ok('wo-audit POST model forwarded', body.model === 'claude-sonnet-5');
-      ok('wo-audit POST carries userToken', body.userToken === 'umbrava-bearer');
-      ok('wo-audit POST system = the audit prompt', body.system === T.WO_AUDIT_SYSTEM);
-      ok('wo-audit POST input carries WO # + notes', /W-375038/.test(body.input) && /Vendor confirmed Tuesday/.test(body.input));
-      ok('wo-audit POST input is x-bwn-key gated', T._gsent[0].headers['x-bwn-key'] === 'test-key');
-      ok('wo-audit POST sends NO tools (summarize)', body.tools === undefined);
-    });
+    var note = await T.summarize(woFacts, notes, 'claude-sonnet-5');
+    expect(note).toBe('WO 375038 is scheduled for Tuesday.');
+    var body = T._gsent[0].body;
+    expect(T._gsent[0].url).toMatch(/\/api\/ai$/);
+    expect(body.task).toBe('summarize');
+    expect(body.model).toBe('claude-sonnet-5');
+    expect(body.userToken).toBe('umbrava-bearer');
+    expect(body.system).toBe(T.WO_AUDIT_SYSTEM);
+    expect(body.input).toMatch(/W-375038/);
+    expect(body.input).toMatch(/Vendor confirmed Tuesday/);
+    expect(T._gsent[0].headers['x-bwn-key']).toBe('test-key');
+    expect(body.tools).toBeUndefined();             // summarize sends NO tools
   });
 
   // proxy miss -> summarize throws (batch pool marks the row / Retry Errors still works).
-  chain = chain.then(function () {
+  test('proxy miss -> summarize throws', async () => {
     var T = loadWoAudit({ seed: roleSlot(), gmScript: [{ status: 500, json: { ok: false } }, { status: 500, json: { ok: false } }, { status: 500, json: { ok: false } }] });
-    return T.summarize({ raw: '1' }, [], 'claude-sonnet-5').then(function () {
-      ok('wo-audit miss should have thrown', false);
-    }, function (e) {
-      ok('wo-audit proxy miss -> summarize throws', /unavailable/i.test((e && e.message) || ''));
-    });
+    await expect(T.summarize({ raw: '1' }, [], 'claude-sonnet-5')).rejects.toThrow(/unavailable/i);
   });
 
   // no ingest key -> sender misses -> summarize throws (never hangs).
-  chain = chain.then(function () {
+  test('no ingest key -> summarize throws, no POST', async () => {
     var T = loadWoAudit({ seed: roleSlot(), key: '', gmScript: [] });
-    return T.summarize({ raw: '1' }, [], 'claude-haiku-4-5').then(function () {
-      ok('wo-audit no-key should have thrown', false);
-    }, function (e) {
-      ok('wo-audit no ingest key -> summarize throws (no POST)', T._gsent.length === 0 && /unavailable/i.test((e && e.message) || ''));
-    });
+    await expect(T.summarize({ raw: '1' }, [], 'claude-haiku-4-5')).rejects.toThrow(/unavailable/i);
+    expect(T._gsent.length).toBe(0);
   });
-
-  return chain;
-}
+});
 
 // === static assertions (source-level; no eval) ========================================
-function staticChecks() {
-  // Each migrated consumer calls bwnAI with the right task + a generous timeoutMs.
-  var ai = read('bwn-suite-ai.user.js');
-  var gi = ai.indexOf('function generate(systemPrompt, userContent, maxTokens, cb, onStream) {');
-  var gseg = ai.slice(gi, gi + 800);
-  ok('suite-ai generate() routes through bwnAI', /bwnAI\(\{/.test(gseg));
-  ok("suite-ai draft uses task:'draft'", /task:\s*'draft'/.test(gseg));
-  ok('suite-ai draft passes timeoutMs 60000', /timeoutMs:\s*60000/.test(gseg));
+describe('static consumer wiring (TASK-011/013/014)', () => {
+  test('suite-ai generate() routes through bwnAI with task:draft + timeoutMs 60000', () => {
+    var ai = read('bwn-suite-ai.user.js');
+    var gi = ai.indexOf('function generate(systemPrompt, userContent, maxTokens, cb, onStream) {');
+    var gseg = ai.slice(gi, gi + 800);
+    expect(gseg).toMatch(/bwnAI\(\{/);
+    expect(gseg).toMatch(/task:\s*'draft'/);
+    expect(gseg).toMatch(/timeoutMs:\s*60000/);
+  });
 
-  var wo = read('bwn-wo-audit.user.js');
-  var si = wo.indexOf('function summarize(woFacts, notes, model) {');
-  var sseg = wo.slice(si, si + 700);
-  ok('wo-audit summarize() routes through bwnAI', /bwnAI\(\{/.test(sseg));
-  ok("wo-audit uses task:'summarize'", /task:\s*'summarize'/.test(sseg));
-  ok("wo-audit forces tier:'proxy'", /tier:\s*'proxy'/.test(sseg));
-  ok('wo-audit passes timeoutMs 60000', /timeoutMs:\s*60000/.test(sseg));
+  test('wo-audit summarize() routes through bwnAI with task:summarize, tier:proxy, timeoutMs 60000', () => {
+    var wo = read('bwn-wo-audit.user.js');
+    var si = wo.indexOf('function summarize(woFacts, notes, model) {');
+    var sseg = wo.slice(si, si + 700);
+    expect(sseg).toMatch(/bwnAI\(\{/);
+    expect(sseg).toMatch(/task:\s*'summarize'/);
+    expect(sseg).toMatch(/tier:\s*'proxy'/);
+    expect(sseg).toMatch(/timeoutMs:\s*60000/);
+  });
 
   // TASK-014: NO direct Anthropic path anywhere in the suite.
-  var scripts = fs.readdirSync(DIR).filter(function (f) { return /\.user\.js$/.test(f); });
-  var badAnthropic = [], badKey = [];
-  scripts.forEach(function (f) {
-    var s = read(f);
-    if (s.indexOf('api.anthropic.com') !== -1) badAnthropic.push(f);
-    if (s.indexOf('anthropic_key') !== -1) badKey.push(f);
+  test('no api.anthropic.com and no anthropic_key anywhere in the suite (TASK-014)', () => {
+    var scripts = fs.readdirSync(DIR).filter(function (f) { return /\.user\.js$/.test(f); });
+    var badAnthropic = [], badKey = [];
+    scripts.forEach(function (f) {
+      var s = read(f);
+      if (s.indexOf('api.anthropic.com') !== -1) badAnthropic.push(f);
+      if (s.indexOf('anthropic_key') !== -1) badKey.push(f);
+    });
+    expect(badAnthropic).toEqual([]);
+    expect(badKey).toEqual([]);
   });
-  ok('no api.anthropic.com anywhere in the suite (TASK-014)', badAnthropic.length === 0, badAnthropic.join(','));
-  ok('no anthropic_key anywhere in the suite (TASK-014)', badKey.length === 0, badKey.join(','));
 
   // PAT-002: byte-identical bwnAI block across the carrying scripts (bid-out carries none - deferred).
-  function blockSha(f) {
-    var s = read(f).replace(/\x00/g, '');
-    var a = s.indexOf('// ===== bwnAI v1');
-    var b = s.indexOf('// ===== END bwnAI =====');
-    if (a === -1 || b === -1) return null;
-    var end = s.indexOf('\n', b);
-    return crypto.createHash('sha256').update(s.slice(a, end), 'utf8').digest('hex');
-  }
-  var carriers = ['bwn-drop-upload.user.js', 'bwn-suite-ai.user.js', 'bwn-wo-audit.user.js'];
-  var shas = carriers.map(blockSha);
-  var allEq = shas.every(function (h) { return h && h === shas[0]; });
-  ok('bwnAI block byte-identical across drop-upload/suite-ai/wo-audit', allEq, carriers.map(function (f, i) { return f + '=' + (shas[i] || 'MISSING'); }).join(' '));
-  console.log('  ... block SHA: ' + shas[0]);
-  ok('bid-out carries NO bwnAI block (migration deferred)', blockSha('bwn-bid-out.user.js') === null);
-}
-
-console.log('BWN AI Phase 3 consumer-migration harness (TASK-011/013/014)\n');
-run().then(function () {
-  staticChecks();
-  console.log('\n' + pass + '/' + cases + ' assertions passed' + (fail ? (', ' + fail + ' FAILED') : ''));
-  process.exit(fail ? 1 : 0);
-}).catch(function (e) {
-  console.error('\nHARNESS ERROR:', e && e.stack || e);
-  process.exit(2);
+  test('PAT-002: bwnAI block byte-identical across drop-upload/suite-ai/wo-audit; bid-out carries none', () => {
+    function blockSha(f) {
+      var s = read(f).replace(/\x00/g, '');
+      var a = s.indexOf('// ===== bwnAI v1');
+      var b = s.indexOf('// ===== END bwnAI =====');
+      if (a === -1 || b === -1) return null;
+      var end = s.indexOf('\n', b);
+      return crypto.createHash('sha256').update(s.slice(a, end), 'utf8').digest('hex');
+    }
+    var carriers = ['bwn-drop-upload.user.js', 'bwn-suite-ai.user.js', 'bwn-wo-audit.user.js'];
+    var shas = carriers.map(blockSha);
+    expect(shas.every(function (h) { return h && h === shas[0]; })).toBe(true);
+    console.log('  ... bwnAI block SHA: ' + shas[0]);
+    expect(blockSha('bwn-bid-out.user.js')).toBe(null);
+  });
 });

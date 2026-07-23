@@ -1,4 +1,4 @@
-// test-bwn-ai-client.js - node harness for the Phase 2 client AI transport (TEST-003).
+// bwn-ai-client.test.js - Vitest suite for the Phase 2 client AI transport (TEST-003).
 //
 // Verifies the CLIENT half of the unified AI transport built into bwn-suite-ai.user.js:
 // the tool registry (TASK-007), the tool-loop driver (TASK-008), and the injected proxy
@@ -8,7 +8,7 @@
 // document injected as params). The code under test is NOT rewritten; only stubs and a
 // trailing `return {...}` (test scaffolding) are added around the extracted bytes.
 //
-// Run: "/c/Program Files/Adobe/Adobe Creative Cloud Experience/libs/node.exe" scripts/test-bwn-ai-client.js
+// Run: npm test   (or: npx vitest run scripts/bwn-ai-client.test.js)
 //
 // Covers: registry happy/edge/error paths, tool DEFS shape, the follow-up POST body
 // (messages + toolResults with matching tool_use_id + tools + userToken), a scripted
@@ -16,10 +16,13 @@
 // server miss (null), the client round cap terminating (never hangs), fresh-token re-read
 // per round (RISK-001), and the sender's connector/key/bearer guards.
 
-var fs = require('fs');
-var path = require('path');
+import { describe, test, expect } from 'vitest';
+import fs from 'node:fs';
+import path from 'node:path';
+import { fileURLToPath } from 'node:url';
 
-var SRC = path.join(__dirname, '..', 'bwn-suite-ai.user.js');
+const __dirname = path.dirname(fileURLToPath(import.meta.url));
+const SRC = path.join(__dirname, '..', 'bwn-suite-ai.user.js');
 
 // ---- load + extract the transport section from the real file --------------------------
 function extractSection() {
@@ -107,93 +110,81 @@ function loadTransport(opts) {
   );
 }
 
-// ---- tiny assert harness --------------------------------------------------------------
-var pass = 0, fail = 0, cases = 0;
-function ok(name, cond, detail) {
-  cases++;
-  if (cond) { pass++; console.log('  ok  - ' + name); }
-  else { fail++; console.log('  FAIL- ' + name + (detail ? ('  [' + detail + ']') : '')); }
-}
-function eq(name, got, want) { ok(name, JSON.stringify(got) === JSON.stringify(want), 'got ' + JSON.stringify(got) + ' want ' + JSON.stringify(want)); }
-
-// ---- run ------------------------------------------------------------------------------
-function run() {
-  var chain = Promise.resolve();
-
-  // === Registry (TASK-007) =============================================================
-  chain = chain.then(function () {
+// === Registry (TASK-007) =============================================================
+describe('registry (TASK-007)', () => {
+  test('getWorkOrder happy path shapes the WO (trades nulls dropped, nte flattened)', async () => {
     var T = loadTransport({ fetch: makeFetch({ data: { workOrder: {
       number: 375038, statusName: 'Pending Dispatch', locationId: 'loc-9', locationName: 'PFJ #123',
       scopeOfWork: 'HVAC unit down', serviceInstructions: 'Call on arrival',
       priority: { label: 'P2' }, trades: [{ id: 't1', name: 'HVAC' }, { id: 't2', name: null }], doNotExceed: { amount: 1500 }
     } } }) });
-    return T.AI_TOOLS.getWorkOrder({ workOrderNumber: 'W-375038' }).then(function (r) {
-      ok('getWorkOrder ok flag', r.ok === true);
-      eq('getWorkOrder number', r.content.number, 375038);
-      eq('getWorkOrder statusName', r.content.statusName, 'Pending Dispatch');
-      eq('getWorkOrder trades (nulls dropped)', r.content.trades, ['HVAC']);
-      eq('getWorkOrder nte', r.content.nte, 1500);
-    });
+    var r = await T.AI_TOOLS.getWorkOrder({ workOrderNumber: 'W-375038' });
+    expect(r.ok).toBe(true);
+    expect(r.content.number).toBe(375038);
+    expect(r.content.statusName).toBe('Pending Dispatch');
+    expect(r.content.trades).toEqual(['HVAC']);
+    expect(r.content.nte).toBe(1500);
   });
 
-  chain = chain.then(function () {
+  test('getWorkOrder not-found -> ok:false', async () => {
     var T = loadTransport({ fetch: makeFetch({ data: { workOrder: null } }) });
-    return T.AI_TOOLS.getWorkOrder({ workOrderNumber: '999' }).then(function (r) {
-      ok('getWorkOrder not-found -> ok:false', r.ok === false && /not found/.test(r.content));
-    });
+    var r = await T.AI_TOOLS.getWorkOrder({ workOrderNumber: '999' });
+    expect(r.ok).toBe(false);
+    expect(r.content).toMatch(/not found/);
   });
 
-  chain = chain.then(function () {
+  test('getWorkOrder bad number -> ok:false', async () => {
     var T = loadTransport();  // default fetch returns {data:{}}
-    return T.AI_TOOLS.getWorkOrder({ workOrderNumber: 'not-a-number' }).then(function (r) {
-      ok('getWorkOrder bad number -> ok:false', r.ok === false && /workOrderNumber/.test(r.content));
-    });
+    var r = await T.AI_TOOLS.getWorkOrder({ workOrderNumber: 'not-a-number' });
+    expect(r.ok).toBe(false);
+    expect(r.content).toMatch(/workOrderNumber/);
   });
 
-  chain = chain.then(function () {
+  test('getWorkOrder gql error -> ok:false (no throw)', async () => {
     var T = loadTransport({ fetch: makeFetch({ errors: [{ message: 'boom' }] }) });
-    return T.AI_TOOLS.getWorkOrder({ workOrderNumber: '375038' }).then(function (r) {
-      ok('getWorkOrder gql error -> ok:false (no throw)', r.ok === false && /boom|read failed/.test(r.content));
-    });
+    var r = await T.AI_TOOLS.getWorkOrder({ workOrderNumber: '375038' });
+    expect(r.ok).toBe(false);
+    expect(r.content).toMatch(/boom|read failed/);
   });
 
-  chain = chain.then(function () {
+  test('getJobNotes: newest first, html stripped, author joined, pinned flag', async () => {
     var notes = [
       { id: 'a', type: 'note', content: 'older', createdDate: '2026-07-20T10:00:00Z', isPinned: false, isCompletion: false, workOrderNoteSource: 'app', createdBy: { firstName: 'Lisa', lastName: 'P' } },
       { id: 'b', type: 'note', content: '', contentHtml: '<p>newer html</p>', createdDate: '2026-07-22T10:00:00Z', isPinned: true, isCompletion: false, workOrderNoteSource: 'email', createdBy: { firstName: 'Erick', lastName: null } }
     ];
     var T = loadTransport({ fetch: makeFetch({ data: { jobNotes: notes } }) });
-    return T.AI_TOOLS.getJobNotes({ workOrderNumber: '375038' }).then(function (r) {
-      ok('getJobNotes ok', r.ok === true && r.content.count === 2);
-      eq('getJobNotes newest first', r.content.notes[0].content, 'newer html');
-      eq('getJobNotes html stripped', r.content.notes[0].content, 'newer html');
-      eq('getJobNotes author joined', r.content.notes[0].by, 'Erick');
-      ok('getJobNotes pinned flag', r.content.notes[0].isPinned === true);
-    });
+    var r = await T.AI_TOOLS.getJobNotes({ workOrderNumber: '375038' });
+    expect(r.ok).toBe(true);
+    expect(r.content.count).toBe(2);
+    expect(r.content.notes[0].content).toBe('newer html');
+    expect(r.content.notes[0].by).toBe('Erick');
+    expect(r.content.notes[0].isPinned).toBe(true);
   });
 
-  chain = chain.then(function () {
+  test('getLocationWorkOrders stub -> ok:false + not-wired notice', async () => {
     var T = loadTransport();
-    return T.AI_TOOLS.getLocationWorkOrders({ locationId: 'loc-9' }).then(function (r) {
-      ok('getLocationWorkOrders stub -> ok:false + not-wired notice', r.ok === false && /not yet wired/.test(r.content));
-    });
+    var r = await T.AI_TOOLS.getLocationWorkOrders({ locationId: 'loc-9' });
+    expect(r.ok).toBe(false);
+    expect(r.content).toMatch(/not yet wired/);
   });
 
-  chain = chain.then(function () {
+  test('AI_TOOL_DEFS shape: 3 defs, names, every def maps to a registry fn with object schema', () => {
     var T = loadTransport();
     var defs = T.AI_TOOL_DEFS;
-    ok('AI_TOOL_DEFS count = 3', defs.length === 3);
+    expect(defs.length).toBe(3);
     var names = defs.map(function (d) { return d.name; }).sort();
-    eq('AI_TOOL_DEFS names', names, ['getJobNotes', 'getLocationWorkOrders', 'getWorkOrder']);
-    ok('every def matches a registry key', defs.every(function (d) { return typeof T.AI_TOOLS[d.name] === 'function'; }));
-    ok('every def has object input_schema + required[]', defs.every(function (d) {
+    expect(names).toEqual(['getJobNotes', 'getLocationWorkOrders', 'getWorkOrder']);
+    expect(defs.every(function (d) { return typeof T.AI_TOOLS[d.name] === 'function'; })).toBe(true);
+    expect(defs.every(function (d) {
       return d.input_schema && d.input_schema.type === 'object' && Array.isArray(d.input_schema.required);
-    }));
+    })).toBe(true);
   });
+});
 
-  // === Driver (TASK-008) ===============================================================
+// === Driver (TASK-008) ===============================================================
+describe('driver (TASK-008)', () => {
   // A single tool round then final. Assert the follow-up POST body is correct.
-  chain = chain.then(function () {
+  test('single tool round -> final; follow-up POST body is correct', async () => {
     var T = loadTransport({ fetch: makeFetch({ data: { workOrder: { number: 375038, statusName: 'Recall' } } }) });
     var serverMessages = [
       { role: 'user', content: 'status of 375038?' },
@@ -203,27 +194,28 @@ function run() {
       { ok: true, status: 'tool_calls', toolCalls: [{ id: 'tu_1', name: 'getWorkOrder', input: { workOrderNumber: '375038' } }], messages: serverMessages, rounds: 1 },
       { ok: true, status: 'final', text: 'WO 375038 is in Recall.', rounds: 1 }
     ];
-    var gm = makeGM(script);
     var TOOLS = T.AI_TOOL_DEFS;
     var initial = { task: 'ask', prompt: 'status of 375038?', tools: TOOLS, userToken: 'tok-A' };
     var posts = [];
     function post(body) { posts.push(body); return Promise.resolve(script[posts.length - 1]); }
-    return T.aiDriveLoop(initial, post).then(function (text) {
-      eq('driver reaches final text', text, 'WO 375038 is in Recall.');
-      ok('driver made 2 posts', posts.length === 2);
-      var f = posts[1];
-      ok('follow-up carries returned messages', f.messages === serverMessages);
-      ok('follow-up carries tools (same ref)', f.tools === TOOLS);
-      ok('follow-up has task', f.task === 'ask');
-      ok('follow-up toolResults tool_use_id matches call', f.toolResults.length === 1 && f.toolResults[0].tool_use_id === 'tu_1');
-      var trContent = JSON.parse(f.toolResults[0].content);
-      ok('follow-up toolResult content is the tool output', trContent.ok === true && trContent.content.statusName === 'Recall');
-      ok('follow-up carries a fresh userToken (RISK-001)', typeof f.userToken === 'string' && f.userToken.length > 0);
-    });
+    var text = await T.aiDriveLoop(initial, post);
+    expect(text).toBe('WO 375038 is in Recall.');
+    expect(posts.length).toBe(2);
+    var f = posts[1];
+    expect(f.messages).toBe(serverMessages);       // follow-up carries returned messages (same ref)
+    expect(f.tools).toBe(TOOLS);                    // follow-up carries tools (same ref)
+    expect(f.task).toBe('ask');
+    expect(f.toolResults.length).toBe(1);
+    expect(f.toolResults[0].tool_use_id).toBe('tu_1');
+    var trContent = JSON.parse(f.toolResults[0].content);
+    expect(trContent.ok).toBe(true);
+    expect(trContent.content.statusName).toBe('Recall');
+    expect(typeof f.userToken).toBe('string');      // fresh userToken (RISK-001)
+    expect(f.userToken.length).toBeGreaterThan(0);
   });
 
   // Scripted 2-tool conversation reaches final (TEST-003 core).
-  chain = chain.then(function () {
+  test('2-tool conversation reaches final', async () => {
     var T = loadTransport({ fetch: makeFetch({ data: { workOrder: { number: 1, statusName: 'Open' }, jobNotes: [{ id: 'n1', content: 'hi', createdDate: '2026-07-22T00:00:00Z', createdBy: { firstName: 'A', lastName: 'B' } }] } }) });
     var m1 = [{ role: 'user', content: 'q' }, { role: 'assistant', content: [{ type: 'tool_use', id: 't1', name: 'getWorkOrder', input: { workOrderNumber: '1' } }] }];
     var m2 = m1.concat([{ role: 'user', content: 'tr1' }, { role: 'assistant', content: [{ type: 'tool_use', id: 't2', name: 'getJobNotes', input: { workOrderNumber: '1' } }] }]);
@@ -234,16 +226,15 @@ function run() {
     ];
     var posts = [];
     function post(body) { posts.push(body); return Promise.resolve(script[posts.length - 1]); }
-    return T.aiDriveLoop({ task: 'ask', prompt: 'q', tools: T.AI_TOOL_DEFS, userToken: 'x' }, post).then(function (text) {
-      eq('2-tool conversation reaches final', text, 'Done after two tools.');
-      ok('2-tool conversation made 3 posts', posts.length === 3);
-      ok('round1 toolResult id t1', posts[1].toolResults[0].tool_use_id === 't1');
-      ok('round2 toolResult id t2', posts[2].toolResults[0].tool_use_id === 't2');
-    });
+    var text = await T.aiDriveLoop({ task: 'ask', prompt: 'q', tools: T.AI_TOOL_DEFS, userToken: 'x' }, post);
+    expect(text).toBe('Done after two tools.');
+    expect(posts.length).toBe(3);
+    expect(posts[1].toolResults[0].tool_use_id).toBe('t1');
+    expect(posts[2].toolResults[0].tool_use_id).toBe('t2');
   });
 
   // is_error propagation: a failing tool -> toolResults entry flagged is_error.
-  chain = chain.then(function () {
+  test('failing tool -> toolResults is_error:true', async () => {
     var T = loadTransport();  // default fetch -> getWorkOrder returns not-found (ok:false)
     var script = [
       { ok: true, status: 'tool_calls', toolCalls: [{ id: 'e1', name: 'getLocationWorkOrders', input: { locationId: 'x' } }], messages: [{ role: 'user', content: 'q' }] },
@@ -251,13 +242,12 @@ function run() {
     ];
     var posts = [];
     function post(body) { posts.push(body); return Promise.resolve(script[posts.length - 1]); }
-    return T.aiDriveLoop({ task: 'ask', prompt: 'q', tools: T.AI_TOOL_DEFS, userToken: 'x' }, post).then(function () {
-      ok('failing tool -> is_error:true', posts[1].toolResults[0].is_error === true);
-    });
+    await T.aiDriveLoop({ task: 'ask', prompt: 'q', tools: T.AI_TOOL_DEFS, userToken: 'x' }, post);
+    expect(posts[1].toolResults[0].is_error).toBe(true);
   });
 
   // unknown tool name from the server -> is_error, never throws.
-  chain = chain.then(function () {
+  test('unknown tool name -> is_error + still reaches final', async () => {
     var T = loadTransport();
     var script = [
       { ok: true, status: 'tool_calls', toolCalls: [{ id: 'u1', name: 'noSuchTool', input: {} }], messages: [{ role: 'user', content: 'q' }] },
@@ -265,36 +255,35 @@ function run() {
     ];
     var posts = [];
     function post(body) { posts.push(body); return Promise.resolve(script[posts.length - 1]); }
-    return T.aiDriveLoop({ task: 'ask', prompt: 'q', tools: T.AI_TOOL_DEFS, userToken: 'x' }, post).then(function (text) {
-      ok('unknown tool -> is_error + content', posts[1].toolResults[0].is_error === true && /unknown tool/.test(JSON.parse(posts[1].toolResults[0].content).content));
-      eq('unknown tool still reaches final', text, 'ok');
-    });
+    var text = await T.aiDriveLoop({ task: 'ask', prompt: 'q', tools: T.AI_TOOL_DEFS, userToken: 'x' }, post);
+    expect(posts[1].toolResults[0].is_error).toBe(true);
+    expect(JSON.parse(posts[1].toolResults[0].content).content).toMatch(/unknown tool/);
+    expect(text).toBe('ok');
   });
 
   // server miss (null) -> resolve '' (fall through).
-  chain = chain.then(function () {
+  test('server miss (null) -> empty (fall through)', async () => {
     var T = loadTransport();
-    return T.aiDriveLoop({ task: 'ask', prompt: 'q', tools: T.AI_TOOL_DEFS, userToken: 'x' }, function () { return Promise.resolve(null); }).then(function (text) {
-      eq('server miss -> empty (fall through)', text, '');
-    });
+    var text = await T.aiDriveLoop({ task: 'ask', prompt: 'q', tools: T.AI_TOOL_DEFS, userToken: 'x' }, function () { return Promise.resolve(null); });
+    expect(text).toBe('');
   });
 
   // client round cap: server never finalizes -> loop terminates, never hangs.
-  chain = chain.then(function () {
+  test('client round cap terminates (never hangs)', async () => {
     var T = loadTransport();
     var posts = 0;
     function post() {
       posts++;
       return Promise.resolve({ ok: true, status: 'tool_calls', toolCalls: [{ id: 'c' + posts, name: 'getLocationWorkOrders', input: { locationId: 'x' } }], messages: [{ role: 'user', content: 'q' }] });
     }
-    return T.aiDriveLoop({ task: 'ask', prompt: 'q', tools: T.AI_TOOL_DEFS, userToken: 'x' }, post).then(function (text) {
-      eq('round cap -> empty', text, '');
-      ok('round cap bounded posts (<= 7)', posts <= 7 && posts >= 6, 'posts=' + posts);
-    });
+    var text = await T.aiDriveLoop({ task: 'ask', prompt: 'q', tools: T.AI_TOOL_DEFS, userToken: 'x' }, post);
+    expect(text).toBe('');
+    expect(posts).toBeLessThanOrEqual(7);
+    expect(posts).toBeGreaterThanOrEqual(6);
   });
 
   // fresh-token re-read each round (RISK-001): rotate the bearer between rounds.
-  chain = chain.then(function () {
+  test('follow-up userToken re-read after bearer rotation (RISK-001)', async () => {
     var ls = makeLocalStorage(makeUmbravaJwt());
     var T = loadTransport({ localStorage: ls });
     var tokRound2 = 'h.' + b64url({ iss: 'https://login.umbrava.com/', exp: Math.floor(Date.now() / 1000) + 7200, sub: 'u1', jti: 'rotated' }) + '.s';
@@ -308,90 +297,78 @@ function run() {
       if (posts.length === 1) ls.__setToken(tokRound2);  // rotate the bearer after the first POST
       return Promise.resolve(script[posts.length - 1]);
     }
-    return T.aiDriveLoop({ task: 'ask', prompt: 'q', tools: T.AI_TOOL_DEFS, userToken: 'initial' }, post).then(function () {
-      ok('follow-up userToken re-read after rotation', posts[1].userToken === tokRound2, 'got ' + posts[1].userToken);
-    });
+    await T.aiDriveLoop({ task: 'ask', prompt: 'q', tools: T.AI_TOOL_DEFS, userToken: 'initial' }, post);
+    expect(posts[1].userToken).toBe(tokRound2);
   });
+});
 
-  // === Sender (TASK-009) end-to-end via the GM_xmlhttpRequest stub ======================
-  chain = chain.then(function () {
+// === Sender (TASK-009) end-to-end via the GM_xmlhttpRequest stub ======================
+describe('sender (TASK-009)', () => {
+  test('sender end-to-end reaches final; bodies carry task/prompt/tools/userToken/toolResults', async () => {
     var serverMessages = [{ role: 'user', content: 'x' }, { role: 'assistant', content: [{ type: 'tool_use', id: 'tu', name: 'getLocationWorkOrders', input: { locationId: 'l' } }] }];
     var gm = makeGM([
       { ok: true, status: 'tool_calls', toolCalls: [{ id: 'tu', name: 'getLocationWorkOrders', input: { locationId: 'l' } }], messages: serverMessages },
       { ok: true, status: 'final', text: 'Final answer from sender.' }
     ]);
     var T = loadTransport({ GM_xmlhttpRequest: gm.fn });
-    return T.aiProxySend({ task: 'ask', prompt: 'what WOs at loc l?', system: 'IGNORED' }).then(function (text) {
-      eq('sender end-to-end reaches final', text, 'Final answer from sender.');
-      ok('sender initial body task', gm.sent[0].task === 'ask');
-      ok('sender initial body prompt', gm.sent[0].prompt === 'what WOs at loc l?');
-      ok('sender initial body carries tools', Array.isArray(gm.sent[0].tools) && gm.sent[0].tools.length === 3);
-      ok('sender initial body carries userToken in BODY (SEC-002)', typeof gm.sent[0].userToken === 'string' && gm.sent[0].userToken.length > 0);
-      ok('sender follow-up carries toolResults', Array.isArray(gm.sent[1].toolResults) && gm.sent[1].toolResults[0].tool_use_id === 'tu');
-    });
+    var text = await T.aiProxySend({ task: 'ask', prompt: 'what WOs at loc l?', system: 'IGNORED' });
+    expect(text).toBe('Final answer from sender.');
+    expect(gm.sent[0].task).toBe('ask');
+    expect(gm.sent[0].prompt).toBe('what WOs at loc l?');
+    expect(Array.isArray(gm.sent[0].tools)).toBe(true);
+    expect(gm.sent[0].tools.length).toBe(3);
+    expect(typeof gm.sent[0].userToken).toBe('string');       // userToken in BODY (SEC-002)
+    expect(gm.sent[0].userToken.length).toBeGreaterThan(0);
+    expect(gm.sent[1].toolResults[0].tool_use_id).toBe('tu');
   });
 
-  chain = chain.then(function () {
+  test('connector-off -> empty miss (never POSTs)', async () => {
     var T = loadTransport({ connectorEnabled: function () { return false; }, GM_xmlhttpRequest: function () { throw new Error('should not POST'); } });
-    return T.aiProxySend({ task: 'ask', prompt: 'q' }).then(function (text) {
-      eq('sender connector-off -> empty miss', text, '');
-    });
+    var text = await T.aiProxySend({ task: 'ask', prompt: 'q' });
+    expect(text).toBe('');
   });
 
-  chain = chain.then(function () {
+  test('no ingest key -> empty miss (never POSTs)', async () => {
     var T = loadTransport({ ingestKey: '', GM_xmlhttpRequest: function () { throw new Error('should not POST'); } });
-    return T.aiProxySend({ task: 'ask', prompt: 'q' }).then(function (text) {
-      eq('sender no-ingest-key -> empty miss', text, '');
-    });
+    var text = await T.aiProxySend({ task: 'ask', prompt: 'q' });
+    expect(text).toBe('');
   });
 
-  chain = chain.then(function () {
+  test('no bearer -> empty miss (never POSTs)', async () => {
     var T = loadTransport({ localStorage: makeLocalStorage(null), GM_xmlhttpRequest: function () { throw new Error('should not POST'); } });
-    return T.aiProxySend({ task: 'ask', prompt: 'q' }).then(function (text) {
-      eq('sender no-bearer -> empty miss', text, '');
-    });
+    var text = await T.aiProxySend({ task: 'ask', prompt: 'q' });
+    expect(text).toBe('');
   });
 
-  chain = chain.then(function () {
+  test('403 ROLE_REQUIRED -> empty miss (fall through)', async () => {
     var gm = makeGM([{ status: 403, json: { ok: false, error: 'ROLE_REQUIRED', code: 'ROLE_REQUIRED' } }]);
     var T = loadTransport({ GM_xmlhttpRequest: gm.fn });
-    return T.aiProxySend({ task: 'draft', prompt: 'q' }).then(function (text) {
-      eq('sender 403 ROLE_REQUIRED -> empty miss (fall through)', text, '');
-    });
+    var text = await T.aiProxySend({ task: 'draft', prompt: 'q' });
+    expect(text).toBe('');
   });
+});
 
-  // === setProxy wiring (TASK-009/010): route through the FROZEN bwnAI block end-to-end ===
+// === setProxy wiring (TASK-009/010): route through the FROZEN bwnAI block end-to-end ===
+describe('setProxy wiring (TASK-009/010)', () => {
   // A rank>=minRank draft call must take the proxy tier -> _proxySend (== our aiProxySend)
   // -> GM stub -> final. Proves bwnAI.setProxy connected the router to the injected sender.
-  chain = chain.then(function () {
+  test('bwnAI proxy tier routes a draft through the injected sender', async () => {
     var roleSlot = JSON.stringify({ ok: true, rank: 4, ts: Date.now() });
     var ls = makeLocalStorage(makeUmbravaJwt(), { 'bwn:role:last': roleSlot });
     var gm = makeGM([{ ok: true, status: 'final', text: 'Draft via router proxy tier.' }]);
     var T = loadTransport({ localStorage: ls, GM_xmlhttpRequest: gm.fn });
-    return T.bwnAI({ task: 'draft', prompt: 'draft a vendor note', minRank: 1, timeoutMs: 60000 }).then(function (text) {
-      eq('bwnAI proxy tier routes through the injected sender', text, 'Draft via router proxy tier.');
-      ok('router POSTed the draft task', gm.sent.length === 1 && gm.sent[0].task === 'draft');
-    });
+    var text = await T.bwnAI({ task: 'draft', prompt: 'draft a vendor note', minRank: 1, timeoutMs: 60000 });
+    expect(text).toBe('Draft via router proxy tier.');
+    expect(gm.sent.length).toBe(1);
+    expect(gm.sent[0].task).toBe('draft');
   });
 
   // Fail-closed: rank unknown -> proxy tier is skipped, sender is never called (no POST).
-  chain = chain.then(function () {
+  test('rank unknown -> proxy skipped, no POST (fail-closed)', async () => {
     var gm = makeGM([{ ok: true, status: 'final', text: 'should not be reached' }]);
     var T = loadTransport({ localStorage: makeLocalStorage(makeUmbravaJwt()), GM_xmlhttpRequest: gm.fn });
-    return T.bwnAI({ task: 'draft', prompt: 'x', timeoutMs: 5000 }).then(function (text) {
-      ok('rank unknown -> proxy skipped, no POST (fail-closed)', gm.sent.length === 0);
-      eq('rank unknown draft -> empty (no on-device in node)', text, '');
-    });
+    var text = await T.bwnAI({ task: 'draft', prompt: 'x', timeoutMs: 5000 });
+    expect(gm.sent.length).toBe(0);
+    expect(text).toBe('');
   });
-
-  return chain;
-}
-
-console.log('BWN AI client transport harness (TEST-003)\n');
-run().then(function () {
-  console.log('\n' + pass + '/' + cases + ' assertions passed' + (fail ? (', ' + fail + ' FAILED') : ''));
-  process.exit(fail ? 1 : 0);
-}).catch(function (e) {
-  console.error('\nHARNESS ERROR:', e && e.stack || e);
-  process.exit(2);
 });
