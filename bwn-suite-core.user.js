@@ -1,10 +1,10 @@
 // ==UserScript==
 // @name         BWN Suite - Core (Broadway National)
 // @namespace    broadwaynational.bwn
-// @version      1.61.0
+// @version      1.62.0
 // @downloadURL  https://raw.githubusercontent.com/Intermu/userscripts/main/bwn-suite-core.user.js
 // @updateURL    https://raw.githubusercontent.com/Intermu/userscripts/main/bwn-suite-core.user.js
-// @description  Runs several Umbrava helpers for BWN coordinators, in the browser with no privileged grants. Includes: PO Approval + ETA Builder; WO Assist (GP/ETA, a stall watchdog, DNE calculator, and a next-action playbook); Email Leak Guard (checks recipients against vendor names, PO amounts, and client budget references before an outbound email sends); WO List Heat (a triage overlay + My Day strip on the work-order list, with an optional same-origin Umbrava API scan for deterministic full-board coverage); and the BWN Launcher (opens the Azure Static Web App tools with the current WO's context). Modules share state through sessionStorage/localStorage. The only network call is List Heat's same-origin GraphQL scan (app.umbrava.com/api/graphql, the app's own session); everything else is offline. Toggle modules in BWN_MODULES below.
+// @description  Runs several Umbrava helpers for BWN coordinators, in the browser with no privileged grants. Includes: PO Approval + ETA Builder; WO Assist (GP/ETA, a stall watchdog, DNE calculator, and a next-action playbook); Email Leak Guard (checks recipients against vendor names, PO amounts, and client budget references before an outbound email sends); WO List Heat (a triage overlay + My Day strip on the work-order list, with an optional same-origin Umbrava API scan for deterministic full-board coverage); and the BWN Launcher (opens the Azure Static Web App tools with the current WO's context). Modules share state through sessionStorage/localStorage. The only network calls are same-origin Umbrava GraphQL reads (app.umbrava.com/api/graphql, the app's own session): List Heat's full-board scan and WO Assist's work-order header read; everything else is offline. Toggle modules in BWN_MODULES below.
 // @match        https://app.umbrava.com/*
 // @match        https://*.umbrava.com/*
 // @run-at       document-idle
@@ -718,6 +718,45 @@
     var pn = bwnPrioNum(prioText);
     if (pn && BWN_HEAT_CFG.PRIO_MULT[pn]) mult *= BWN_HEAT_CFG.PRIO_MULT[pn];
     return { warn: C.hrsWarn * mult, bad: C.hrsBad * mult };
+  }
+
+  // ---- File-level same-origin GraphQL (shared by WO Assist reads + List Heat) --
+  // @grant none: a plain SAME-ORIGIN POST to /api/graphql carries the app's Auth0
+  // bearer; token content-picked from the SPA's @@auth0spajs@@ cache (the audience
+  // slot transiently holds non-Umbrava tokens), the same rule List Heat's heatGql
+  // uses. Resolves to `data`, throws on errors[]. Lifted to file level so the WO
+  // Assist closure can read the WO too (heatGql stays List-Heat-local; converge later).
+  function bwnIsUmbravaToken(tok) {
+    try {
+      var p = JSON.parse(atob(String(tok).split('.')[1].replace(/-/g, '+').replace(/_/g, '/')));
+      var iss = String(p.iss || '').replace(/\/+$/, '');
+      if (iss !== 'https://login.umbrava.com' && iss !== 'https://umbrava.us.auth0.com') return false;
+      return !(typeof p.exp === 'number' && (Date.now() / 1000) > p.exp);
+    } catch (e) { return false; }
+  }
+  function bwnAuthToken() {
+    try {
+      var keys = Object.keys(localStorage).filter(function (x) {
+        return /@@auth0spajs@@::.*::https:\/\/app\.umbrava\.com\/api::/.test(x);
+      });
+      for (var i = 0; i < keys.length; i++) {
+        var body = (JSON.parse(localStorage.getItem(keys[i])) || {}).body;
+        var tok = (body && body.access_token) || '';
+        if (tok && bwnIsUmbravaToken(tok)) return tok;
+      }
+    } catch (e) { }
+    return '';
+  }
+  function bwnGql(query, variables) {
+    var tok = bwnAuthToken();
+    return fetch('/api/graphql', {
+      method: 'POST',
+      headers: { 'Authorization': 'Bearer ' + tok, 'Content-Type': 'application/json' },
+      body: JSON.stringify({ query: query, variables: variables || {} })
+    }).then(function (r) { return r.json(); }).then(function (j) {
+      if (j && j.errors && j.errors.length) throw new Error(j.errors[0].message || 'GraphQL error');
+      return j && j.data;
+    });
   }
 
   // ---- Core-local shared helpers (PO Approval + Leak Guard) --------------------
@@ -1437,6 +1476,34 @@
     }
     try { window.__bwnDocsRecon = docsRecon; } catch (e) { }
 
+    // ---- WO header via workOrder API (enriches headerInfo's DOM scrape) --------
+    // Cache-backed so compute()/the pure engine stay synchronous (mirrors the trips
+    // cache). readWO returns the cached WO object or null (null while pending / on
+    // error / off-WO - never a wrong guess); a cache miss fires the fetch and
+    // re-renders when it lands. Gives the exact priority label (the DOM read can
+    // silently fall back to neutral) and the internal job id (the DOM can't).
+    var WO_CACHE = Object.create(null);   // woNum -> wo | 'pending' | 'error'
+    var WORKORDER_Q = 'query WorkOrderHeader($n: Int!) { workOrder(workOrderNumber: $n) { id number statusName systemStatusName phase priority { label category } doNotExceed { amount currency precision } totalNTE { amount currency precision } grossProfitInfo { estimatedGrossProfitPercent trueGrossProfitPercent } trades { id name } locationNumber locationName } }';
+    function fetchWO(woNum) {
+      if (!woNum) return;
+      var c = WO_CACHE[woNum];
+      if (c === 'pending' || (c && c !== 'error')) return;
+      WO_CACHE[woNum] = 'pending';
+      bwnGql(WORKORDER_Q, { n: Number(woNum) }).then(function (d) {
+        var wo = d && d.workOrder;
+        if (!wo || wo.number == null) { WO_CACHE[woNum] = 'error'; return; }
+        WO_CACHE[woNum] = wo;
+        try { refresh(); } catch (e) { }
+      }).catch(function () { WO_CACHE[woNum] = 'error'; });
+    }
+    function readWO(woNum) {
+      if (!woNum) return null;
+      var c = WO_CACHE[woNum];
+      if (c && c !== 'pending' && c !== 'error') return c;
+      fetchWO(woNum);
+      return null;
+    }
+
     // ---- Signals --------------------------------------------------------------
     // Tolerant (shared, v5): absolute, relative ("2 hours ago"), or Date.parse-able -
     // relative timestamps previously read as "no date" and hid stale-note ages.
@@ -1631,6 +1698,7 @@
       // priority AND published on state.hd so the pure computeNextActions engine reads the
       // WO's identity/intake fields (tracking/location/trade/scope) from STATE, not the DOM.
       var hd = (function () { try { return headerInfo(); } catch (e) { return {}; } })();
+      var woApi = readWO(currentWOId());   // async WO-header read (cached); null until it lands
       var pos = readPOs();
       var vendorTotal = pos.reduce(function (a, p) { return a + (p.amount > 0 ? p.amount : 0); }, 0);
       var nte = detectNTE();
@@ -1660,7 +1728,7 @@
         pos: pos, vendorTotal: vendorTotal, nte: nte, gp: gp, gpPct: gpPct,
         eta: pos.length ? etaStatus(pos, notes, stall) : null,
         stall: stall, status: woStatus(), hrs: hrsInStatus(),
-        priority: hd.priority || '',
+        priority: (woApi && woApi.priority && woApi.priority.label) || hd.priority || '',
         due: dueStatus(C),
         staleDays: staleness(notes), noteCount: notes.length, lastNote: lastNoteTs ? new Date(lastNoteTs).toISOString() : null, deep: !!deepNotes, notesSrc: lastNotesSrc,
         lastClientNoteDays: lastClientTs ? Math.floor((Date.now() - lastClientTs) / 86400000) : null,   // null = no client-labeled note among the loaded notes
