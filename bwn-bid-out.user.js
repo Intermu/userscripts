@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         BWN Bid-Out (Broadway National)
 // @namespace    broadwaynational.bwn
-// @version      0.23.0
+// @version      0.24.0
 // @downloadURL  https://raw.githubusercontent.com/Intermu/userscripts/main/bwn-bid-out.user.js
 // @updateURL    https://raw.githubusercontent.com/Intermu/userscripts/main/bwn-bid-out.user.js
 // @description  Email RFP to outside / net-new vendors, launched from a caret on Umbrava's own "See Who Is Available" button (network-vendor bidding stays native - no separate Bid-Out button). The caret menu opens the tracked email RFP wizard: finds net-new vendors nearby through Google Places, looks up their emails via the BWN scrape-contacts function, takes pasted outside addresses, and can still include assignable Umbrava vendors in the same email. You pick who's included, then review the exact recipient list and the rendered email before anything sends. Send from your own mailbox via the SWA send-bid function (Microsoft Graph), or open a plain Outlook draft. Vendors are BCC'd; nothing sends until you click Send. Network access is limited to Umbrava (same-origin), Google Places, and your SWA host.
@@ -20,7 +20,7 @@
 (function () {
   'use strict';
 
-  var VER = '0.23.0';
+  var VER = '0.24.0';
   console.info('[BWN BID-OUT] v' + VER + ' - 3-step Build Requests wizard (WO details -> select vendors -> review) · Umbrava vendors + Places net-new discovery + email scrape · one-click Graph send via SWA (Outlook-draft fallback)');
 
   var COMPANY_ADDR = 'Broadway National Group, 100 Davids Dr, Hauppauge, NY 11788';
@@ -816,6 +816,9 @@
     var st = document.createElement('style'); st.id = 'bwn-bidout-style';
     st.textContent =
       '#bwn-bidout-fab{position:fixed;right:18px;bottom:76px;z-index:2147483000;background:#1a5f3e;color:#fff;border:none;border-radius:24px;padding:11px 16px;font:500 14px/1 ' + FONT + ';text-transform:none;box-shadow:0 6px 20px rgba(13,38,26,.28);cursor:pointer;}' +
+      // Inline anchor: injected next to the "Service Requests" card heading (no floating).
+      '#bwn-bidout-inline{margin-left:10px;vertical-align:middle;background:#1a5f3e;color:#fff;border:none;border-radius:16px;padding:5px 12px;font:500 12px/1.2 ' + FONT + ';text-transform:none;cursor:pointer;white-space:nowrap;}' +
+      '#bwn-bidout-inline:hover{background:#0d3d26;}' +
       // The caret rides Umbrava's own "See Who Is Available" button as a split-button: the flex
       // row has gap:16px, so a -12px margin pulls the caret to ~4px off the native button; its
       // background + height are copied from the native button at mount so it always matches.
@@ -1703,15 +1706,47 @@
     b.addEventListener('click', function () { launchPanel({ invite: true }); });
     document.body.appendChild(b);
   }
+  // The Service Requests card heading. No testids exist on this section and the MUI/JSS
+  // class names are build-unstable (jss####), so anchor on the user-facing "Service
+  // Requests" heading TEXT and navigate relative to it (verified via __bwnSRRecon on WO
+  // 1242525, 2026-07-23). Returns the heading element or null.
+  function srHeader() {
+    var hs = document.querySelectorAll('h1,h2,h3,h4,h5,h6');
+    for (var i = 0; i < hs.length; i++) {
+      if (/^service requests?$/i.test((hs[i].textContent || '').replace(/\s+/g, ' ').trim())) return hs[i];
+    }
+    return null;
+  }
+  function mountInline(hdr) {
+    if (document.getElementById('bwn-bidout-inline')) return;
+    var b = document.createElement('button'); b.id = 'bwn-bidout-inline'; b.type = 'button';
+    b.textContent = '📤 Email RFP'; b.title = 'Email RFP to outside / net-new vendors (bids for this work order)';
+    b.addEventListener('click', function () { launchPanel({ invite: true }); });
+    hdr.insertAdjacentElement('afterend', b);   // sits right after the "Service Requests" heading
+  }
+  // Launcher cascade (see the bwn-email-rfp-inline-anchor spec): 1) caret on Umbrava's
+  // native "See Who Is Available" button when present; else 2) an inline control on the
+  // Service Requests card; else 3) a floating FAB as a true LAST resort. The FAB no longer
+  // takes over merely because the native button is gone - that was the "reverts to the
+  // corner after send" bug (the SR card is present in exactly that state).
   function mountLauncher() {
     if (!woNumber()) return;
     ensureStyle();
     var nb = seeWhoBtn();
-    if (nb) {
-      var fab = document.getElementById('bwn-bidout-fab'); if (fab) fab.remove();
+    if (nb) {   // tier 1: split-button caret on the native button
+      var f1 = document.getElementById('bwn-bidout-fab'); if (f1) f1.remove();
+      var i1 = document.getElementById('bwn-bidout-inline'); if (i1) i1.remove();
       if (!document.getElementById('bwn-bidout-dd')) nb.parentElement.insertBefore(buildCaret(nb), nb.nextSibling);
+      return;
     }
-    else { mountFloating(); }   // no native button on this layout - keep the floating entry
+    var dd = document.getElementById('bwn-bidout-dd'); if (dd) dd.remove();   // native button gone -> drop its orphaned caret
+    var hdr = srHeader();
+    if (hdr) {   // tier 2: inline on the Service Requests card
+      var f2 = document.getElementById('bwn-bidout-fab'); if (f2) f2.remove();
+      mountInline(hdr);
+      return;
+    }
+    mountFloating();   // tier 3: last resort only when neither anchor exists
   }
 
   // ---- SR recon: console-only probe to pin the Service Requests inline anchor -----
@@ -1786,15 +1821,18 @@
   // because Core is @grant none.)
   try { if (typeof unsafeWindow !== 'undefined' && unsafeWindow) unsafeWindow.__bwnSRRecon = srRecon; } catch (e) { }
 
+  function removeLaunchers() {
+    ['bwn-bidout-dd', 'bwn-bidout-fab', 'bwn-bidout-inline'].forEach(function (id) {
+      var el = document.getElementById(id); if (el) el.remove();
+    });
+  }
   var lastPath = '';
   function tick() {
-    if (location.pathname !== lastPath) {
-      lastPath = location.pathname;
-      var dd = document.getElementById('bwn-bidout-dd'); if (dd) dd.remove();
-      var fab = document.getElementById('bwn-bidout-fab'); if (fab) fab.remove();
-    }
-    if (woNumber()) { if (!document.getElementById('bwn-bidout-dd')) mountLauncher(); }
-    else { var dd2 = document.getElementById('bwn-bidout-dd'); if (dd2) dd2.remove(); var fab2 = document.getElementById('bwn-bidout-fab'); if (fab2) fab2.remove(); }
+    if (location.pathname !== lastPath) { lastPath = location.pathname; removeLaunchers(); }
+    // Idempotent + cheap: re-run every tick so the inline anchor re-injects after Umbrava
+    // repaints the Service Requests card (each mount* checks for its own node first).
+    if (woNumber()) mountLauncher();
+    else removeLaunchers();
   }
   setInterval(tick, 800);
   tick();
