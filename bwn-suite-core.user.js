@@ -1,10 +1,10 @@
 // ==UserScript==
 // @name         BWN Suite - Core (Broadway National)
 // @namespace    broadwaynational.bwn
-// @version      1.60.0
+// @version      1.62.0
 // @downloadURL  https://raw.githubusercontent.com/Intermu/userscripts/main/bwn-suite-core.user.js
 // @updateURL    https://raw.githubusercontent.com/Intermu/userscripts/main/bwn-suite-core.user.js
-// @description  Runs several Umbrava helpers for BWN coordinators, in the browser with no privileged grants. Includes: PO Approval + ETA Builder; WO Assist (GP/ETA, a stall watchdog, DNE calculator, and a next-action playbook); Email Leak Guard (checks recipients against vendor names, PO amounts, and client budget references before an outbound email sends); WO List Heat (a triage overlay + My Day strip on the work-order list, with an optional same-origin Umbrava API scan for deterministic full-board coverage); and the BWN Launcher (opens the Azure Static Web App tools with the current WO's context). Modules share state through sessionStorage/localStorage. The only network call is List Heat's same-origin GraphQL scan (app.umbrava.com/api/graphql, the app's own session); everything else is offline. Toggle modules in BWN_MODULES below.
+// @description  Runs several Umbrava helpers for BWN coordinators, in the browser with no privileged grants. Includes: PO Approval + ETA Builder; WO Assist (GP/ETA, a stall watchdog, DNE calculator, and a next-action playbook); Email Leak Guard (checks recipients against vendor names, PO amounts, and client budget references before an outbound email sends); WO List Heat (a triage overlay + My Day strip on the work-order list, with an optional same-origin Umbrava API scan for deterministic full-board coverage); and the BWN Launcher (opens the Azure Static Web App tools with the current WO's context). Modules share state through sessionStorage/localStorage. The only network calls are same-origin Umbrava GraphQL reads (app.umbrava.com/api/graphql, the app's own session): List Heat's full-board scan and WO Assist's work-order / trip / clock-in reads; everything else is offline. Toggle modules in BWN_MODULES below.
 // @match        https://app.umbrava.com/*
 // @match        https://*.umbrava.com/*
 // @run-at       document-idle
@@ -44,7 +44,7 @@
   try { localStorage.setItem('bwn:status:core', JSON.stringify({ ver: BWN_VER, ts: Date.now() })); } catch (e) { /* best-effort */ }
 
   console.info('[BWN SUITE CORE] v' + BWN_VER + ' |',
-    'Shared Core 7 \u00b7 PO Approval 1.13 \u00b7 WO Assist 2.55 \u00b7 Leak Guard 2.0 \u00b7 List Heat 3.15 \u00b7 Launcher 2.0 \u00b7 Views 1.0 \u00b7 Palette 1.1 \u00b7 Visit 1.2 \u00b7 Reminders 1.1 \u00b7 Timeline 1.1 \u00b7 TripCal 1.3 \u00b7 Connector 1.2 |',
+    'Shared Core 7 \u00b7 PO Approval 1.13 \u00b7 WO Assist 2.55 \u00b7 Leak Guard 2.0 \u00b7 List Heat 3.16 \u00b7 Launcher 2.0 \u00b7 Views 1.0 \u00b7 Palette 1.1 \u00b7 Visit 1.2 \u00b7 Reminders 1.1 \u00b7 Timeline 1.1 \u00b7 TripCal 1.3 \u00b7 Connector 1.2 |',
     'enabled:', Object.keys(BWN_MODULES).filter(function (k) { return BWN_MODULES[k]; }).join(', '));
 
   // ===== BWN SHARED CORE v7 - KEEP IN SYNC across both suite scripts =====
@@ -720,6 +720,45 @@
     return { warn: C.hrsWarn * mult, bad: C.hrsBad * mult };
   }
 
+  // ---- File-level same-origin GraphQL (shared by WO Assist reads + List Heat) --
+  // @grant none: a plain SAME-ORIGIN POST to /api/graphql carries the app's Auth0
+  // bearer; token content-picked from the SPA's @@auth0spajs@@ cache (the audience
+  // slot transiently holds non-Umbrava tokens), the same rule List Heat's heatGql
+  // uses. Resolves to `data`, throws on errors[]. Lifted to file level so the WO
+  // Assist closure can read the WO too (heatGql stays List-Heat-local; converge later).
+  function bwnIsUmbravaToken(tok) {
+    try {
+      var p = JSON.parse(atob(String(tok).split('.')[1].replace(/-/g, '+').replace(/_/g, '/')));
+      var iss = String(p.iss || '').replace(/\/+$/, '');
+      if (iss !== 'https://login.umbrava.com' && iss !== 'https://umbrava.us.auth0.com') return false;
+      return !(typeof p.exp === 'number' && (Date.now() / 1000) > p.exp);
+    } catch (e) { return false; }
+  }
+  function bwnAuthToken() {
+    try {
+      var keys = Object.keys(localStorage).filter(function (x) {
+        return /@@auth0spajs@@::.*::https:\/\/app\.umbrava\.com\/api::/.test(x);
+      });
+      for (var i = 0; i < keys.length; i++) {
+        var body = (JSON.parse(localStorage.getItem(keys[i])) || {}).body;
+        var tok = (body && body.access_token) || '';
+        if (tok && bwnIsUmbravaToken(tok)) return tok;
+      }
+    } catch (e) { }
+    return '';
+  }
+  function bwnGql(query, variables) {
+    var tok = bwnAuthToken();
+    return fetch('/api/graphql', {
+      method: 'POST',
+      headers: { 'Authorization': 'Bearer ' + tok, 'Content-Type': 'application/json' },
+      body: JSON.stringify({ query: query, variables: variables || {} })
+    }).then(function (r) { return r.json(); }).then(function (j) {
+      if (j && j.errors && j.errors.length) throw new Error(j.errors[0].message || 'GraphQL error');
+      return j && j.data;
+    });
+  }
+
   // ---- Core-local shared helpers (PO Approval + Leak Guard) --------------------
   // Distinctive-token vendor matching: "does this recipient text belong to this
   // vendor?" Raw LCS overlap mis-identified vendors through shared trade words -
@@ -1052,7 +1091,7 @@
   });
 
   // ==========================================================================
-  // MODULE: WO Assist: GP + ETA Watchdog + Playbook v2.55 (Connector 1.2)
+  // MODULE: WO Assist: GP + ETA Watchdog + Playbook v2.56 (Connector 1.2)
   // ==========================================================================
   if (BWN_MODULES.woAssist) BWN.safeModule('woAssist', function () {
     'use strict';
@@ -1082,7 +1121,7 @@
     var PANEL_ID = 'bwn-gp-panel';
     var GREEN = BWN.GREEN;
 
-    console.info('[BWN GP] WO Assist v2.55 loaded on', location.href);
+    console.info('[BWN GP] WO Assist v2.56 loaded on', location.href);
 
     // ---- Parsing helpers (shared via BWN core) -----------------------------
     var parseMoney = BWN.parseMoney;
@@ -1437,6 +1476,86 @@
     }
     try { window.__bwnDocsRecon = docsRecon; } catch (e) { }
 
+    // ---- WO header via workOrder API (enriches headerInfo's DOM scrape) --------
+    // Cache-backed so compute()/the pure engine stay synchronous (mirrors the trips
+    // cache). readWO returns the cached WO object or null (null while pending / on
+    // error / off-WO - never a wrong guess); a cache miss fires the fetch and
+    // re-renders when it lands. Gives the exact priority label (the DOM read can
+    // silently fall back to neutral) and the internal job id (the DOM can't).
+    var WO_CACHE = Object.create(null);   // woNum -> wo | 'pending' | 'error'
+    var WORKORDER_Q = 'query WorkOrderHeader($n: Int!) { workOrder(workOrderNumber: $n) { id number statusName systemStatusName phase priority { label category } doNotExceed { amount currency precision } totalNTE { amount currency precision } grossProfitInfo { estimatedGrossProfitPercent trueGrossProfitPercent } trades { id name } locationNumber locationName } }';
+    function fetchWO(woNum) {
+      if (!woNum) return;
+      var c = WO_CACHE[woNum];
+      if (c === 'pending' || (c && c !== 'error')) return;
+      WO_CACHE[woNum] = 'pending';
+      bwnGql(WORKORDER_Q, { n: Number(woNum) }).then(function (d) {
+        var wo = d && d.workOrder;
+        if (!wo || wo.number == null) { WO_CACHE[woNum] = 'error'; return; }
+        WO_CACHE[woNum] = wo;
+        try { refresh(); } catch (e) { }
+      }).catch(function () { WO_CACHE[woNum] = 'error'; });
+    }
+    function readWO(woNum) {
+      if (!woNum) return null;
+      var c = WO_CACHE[woNum];
+      if (c && c !== 'pending' && c !== 'error') return c;
+      fetchWO(woNum);
+      return null;
+    }
+
+    // ---- No-show via purchaseOrderTrips(jobId) + jobIVRs clock-in check --------
+    // The Trip Calendar module writes bwn:trips:<wo> from DOM cards, but only on the
+    // /trips tab - so on the details page (where WO Assist runs) state.noShow is
+    // usually absent. This populates the SAME cache/shape ({ms,vendor,trip}) from the
+    // API using state.jobId (now available via readWO), and REFINES the signal: a trip
+    // is only a no-show if it is Scheduled, its onSiteDate is before today, and there
+    // is NO non-cancelled clock-in (jobIVRs) for its PO - so a vendor who showed but
+    // whose trip status was never updated no longer false-flags. Runs once per WO per
+    // session; only overwrites the cache on a SUCCESSFUL trips read (never nulls out a
+    // DOM-written cache on a failed fetch). status is matched by word (/scheduled/i);
+    // if Umbrava encodes it as an enum int the flag simply won't fire - a safe miss,
+    // not a false no-show (pin the enum from a captured trips response to extend).
+    var TRIPS_DONE = Object.create(null);   // woNum -> 'pending' | true (once per session)
+    var PO_TRIPS_Q = 'query POTripsNoShow($jobId: Int!) { purchaseOrderTrips(jobId: $jobId) { number vendorName trips { number onSiteDate status } } }';
+    var WO_IVRS_Q = 'query WOIVRsNoShow($n: Int) { jobIVRs(workOrderNumber: $n) { purchaseOrderNumber clockInDate startTime isCanceled } }';
+    function fetchTrips(woNum, jobId) {
+      if (!woNum || !jobId || TRIPS_DONE[woNum]) return;
+      TRIPS_DONE[woNum] = 'pending';
+      Promise.all([
+        bwnGql(PO_TRIPS_Q, { jobId: Number(jobId) }).catch(function () { return null; }),
+        bwnGql(WO_IVRS_Q, { n: Number(woNum) }).catch(function () { return null; })
+      ]).then(function (res) {
+        TRIPS_DONE[woNum] = true;
+        var poTrips = res[0] && res[0].purchaseOrderTrips;
+        if (!Array.isArray(poTrips)) return;   // read failed - leave any existing cache intact
+        var ivrs = (res[1] && res[1].jobIVRs) || [];
+        var clockedPO = Object.create(null);
+        ivrs.forEach(function (v) {
+          if (v && !v.isCanceled && (v.clockInDate || v.startTime) && v.purchaseOrderNumber != null) clockedPO[String(v.purchaseOrderNumber)] = true;
+        });
+        var d = new Date(), today = new Date(d.getFullYear(), d.getMonth(), d.getDate()).getTime();
+        var latest = null, noShow = null;
+        poTrips.forEach(function (po) {
+          var poNum = String(po.number == null ? '' : po.number), vendor = po.vendorName || '';
+          (po.trips || []).forEach(function (t) {
+            var ms = t.onSiteDate ? +new Date(t.onSiteDate) : NaN;
+            if (isNaN(ms)) return;
+            var st = String(t.status == null ? '' : t.status);
+            var done = /complete|cancel|progress|route|dispatch/i.test(st);
+            if (!done && ms >= today && (latest === null || ms > latest)) latest = ms;
+            if (/scheduled/i.test(st) && !done && ms < today && !clockedPO[poNum] && vendor && (!noShow || ms < noShow.ms)) {
+              noShow = { ms: ms, vendor: vendor, trip: (t.number != null ? String(t.number) : '') };
+            }
+          });
+        });
+        var payload = { v: 1, ts: Date.now(), src: 'api', latestScheduled: latest };
+        if (noShow) payload.noShow = noShow;
+        try { BWN.ssSetJSON('bwn:trips:' + woNum, payload); } catch (e) { }
+        try { refresh(); } catch (e) { }
+      });
+    }
+
     // ---- Signals --------------------------------------------------------------
     // Tolerant (shared, v5): absolute, relative ("2 hours ago"), or Date.parse-able -
     // relative timestamps previously read as "no date" and hid stale-note ages.
@@ -1631,6 +1750,8 @@
       // priority AND published on state.hd so the pure computeNextActions engine reads the
       // WO's identity/intake fields (tracking/location/trade/scope) from STATE, not the DOM.
       var hd = (function () { try { return headerInfo(); } catch (e) { return {}; } })();
+      var woApi = readWO(currentWOId());   // async WO-header read (cached); null until it lands
+      try { if (woApi && woApi.id) fetchTrips(currentWOId(), woApi.id); } catch (e) { }   // async: populates bwn:trips no-show from the API (needs jobId)
       var pos = readPOs();
       var vendorTotal = pos.reduce(function (a, p) { return a + (p.amount > 0 ? p.amount : 0); }, 0);
       var nte = detectNTE();
@@ -1660,7 +1781,7 @@
         pos: pos, vendorTotal: vendorTotal, nte: nte, gp: gp, gpPct: gpPct,
         eta: pos.length ? etaStatus(pos, notes, stall) : null,
         stall: stall, status: woStatus(), hrs: hrsInStatus(),
-        priority: hd.priority || '',
+        priority: (woApi && woApi.priority && woApi.priority.label) || hd.priority || '',
         due: dueStatus(C),
         staleDays: staleness(notes), noteCount: notes.length, lastNote: lastNoteTs ? new Date(lastNoteTs).toISOString() : null, deep: !!deepNotes, notesSrc: lastNotesSrc,
         lastClientNoteDays: lastClientTs ? Math.floor((Date.now() - lastClientTs) / 86400000) : null,   // null = no client-labeled note among the loaded notes
@@ -1670,6 +1791,8 @@
         // HERE so state fully determines the playbook (mirrors the computeVerdict refactor -
         // facts in, verdict out). Each is fail-safe so compute() never throws.
         hd: hd,
+        jobId: (woApi && woApi.id) || null,   // internal job id (the DOM can't give it) - unblocks the trips/no-show route
+        woApi: woApi || null,
         authoredPlan: (function () { try { return readAuthoredPlan(); } catch (e) { return null; } })(),
         docs: (function () { try { return readDocs(); } catch (e) { return null; } })(),
         escRank: (function () { try { return bwnEscRank(); } catch (e) { return null; } })(),
@@ -4660,7 +4783,7 @@
   });
 
   // ==========================================================================
-  // MODULE: WO List Heat v3.15
+  // MODULE: WO List Heat v3.16
   // ==========================================================================
   if (BWN_MODULES.listHeat) BWN.safeModule('listHeat', function () {
     'use strict';
@@ -4671,7 +4794,7 @@
     }
     window.__bwnWoHeat = true;
 
-    console.info('[BWN HEAT] v3.15 loaded on', location.href);
+    console.info('[BWN HEAT] v3.16 loaded on', location.href);
 
     // ---- Config (edit here) ----------------------------------------------
     // Advanced knobs (status-class regexes + priority multipliers) now live in the
@@ -4848,15 +4971,25 @@
     // (more rows = more likely the real board query, not a sidebar widget).
     function heatRecordCapture(reqBody, data) {
       if (heatReplaying) return;   // don't re-capture our own enlarged replay pages
+      // (v3.16) The board query only fires on the WO-list route. A WO-details page fires
+      // reads like purchaseOrders(workOrderNumber) whose PO rows carry a numeric `number`
+      // and so masquerade as WO rows; gate to the list route so a details read can never
+      // latch (real board content is also required below).
+      if (!isListPage()) return;
       try {
         var found = heatFindWOList(data);
         if (!found || !found.rows.length) return;
         if (apiList && found.rows.length < (apiList._rows || 0) && (Date.now() - apiCapTs) < 60000) return;
         var body = (typeof reqBody === 'string') ? JSON.parse(reqBody) : reqBody;
         if (!body || !body.query) return;
-        // Only accept an operation whose rows genuinely map to WOs (a real WO number).
+        // Only accept an operation whose rows genuinely map to WOs: a real WO number
+        // AND at least one substantive board field (status/prio/client/assignee/age/hrs/
+        // dne/dates). A details-page purchaseOrders read maps its PO `number` into the WO
+        // slot but leaves every board field blank - reject it so it never mis-latches.
         var probe = heatApiRowToEntry(found.rows[0]);
         if (!probe) return;
+        var pe = probe.entry;
+        if (!(pe.status || pe.prio || pe.client || pe.assignee || pe.days || pe.hrs || pe.dne || pe.sched || pe.lastNote || pe.exp)) return;
         apiList = { query: body.query, variables: body.variables || {}, path: found.path, conn: found.conn, _rows: found.rows.length, sample: probe.entry };
         apiCapTs = Date.now();
         console.info('[BWN HEAT] captured list query (' + found.rows.length + ' rows, path ' + found.path.join('.') + (found.conn ? '/' + found.conn : '') + ') - API scan available. Sample:', probe.entry);
