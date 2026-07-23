@@ -1,0 +1,16 @@
+{
+  "name": "bwn-userscripts",
+  "version": "0.0.0",
+  "private": true,
+  "type": "module",
+  "description": "Dev-only test harness for the BWN Tampermonkey userscripts. The shipped .user.js files load their runtime deps via CDN @require and are NOT built or bundled; this package exists solely so the Vitest runner can execute scripts/**/*.test.js.",
+  "scripts": {
+    "test": "vitest run"
+  },
+  "engines": {
+    "node": ">=20"
+  },
+  "devDependencies": {
+    "vitest": "^4.1.10"
+  }
+}

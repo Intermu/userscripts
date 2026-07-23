@@ -1,0 +1,11 @@
+{
+  "permissions": {
+    "allow": [
+      "Bash(cd \"C:/Users/mnajarro/OneDrive - Broadway National/mcpvault\" && echo \"=== ci.yml ===\" && cat .github/workflows/ci.yml 2>/dev/null && echo \"\" && echo \"=== codeql.yml ===\" && cat .github/workflows/codeql.yml 2>/dev/null)",
+      "Bash(awk '{print $5, $9}')",
+      "Bash(npm --version)",
+      "Bash(cd \"C:/Users/mnajarro/OneDrive - Broadway National/mcpvault\" && ls -la && echo \"---SKILLS---\" && ls -la skills/obsidian/ 2>/dev/null && echo \"---RESOURCES---\" && ls -la skills/obsidian/resources/ 2>/dev/null)",
+      "Bash(cd \"C:/Users/mnajarro/OneDrive - Broadway National/mcpvault\" 2>/dev/null && echo \"=== mcpvault root ===\" && ls -la | head -40 && echo \"=== find vitest config + test files ===\" && find . -maxdepth 3 -name \"vitest.config.*\" -o -maxdepth 3 -name \"*.test.ts\" 2>/dev/null | grep -v node_modules | head -20 || echo \"mcpvault not found\")"
+    ]
+  }
+}
