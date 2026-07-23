@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         BWN WO Audit (Broadway National)
 // @namespace    broadwaynational.bwn
-// @version      0.1.0
+// @version      0.3.0
 // @downloadURL  https://raw.githubusercontent.com/Intermu/userscripts/main/bwn-wo-audit.user.js
 // @updateURL    https://raw.githubusercontent.com/Intermu/userscripts/main/bwn-wo-audit.user.js
 // @description  Batch WO-audit tool. Upload a WO audit .xlsx; for each work order this reads its two most recent notes DIRECTLY from Umbrava's GraphQL API in-page (using your live Umbrava session - the same read the BWN Ops Suite AI drafts use), then asks the broadway-internal-ops SWA summarize route (x-bwn-key gated, Anthropic key server-side) to write a 1-3 sentence client-ready status note. Fills the audit's notes column and downloads the workbook, preserving every other cell and formula. Runs entirely in the app.umbrava.com page so it inherits your Umbrava auth - no MCP, no pasted keys, nothing sensitive in this script. This replaces the old standalone WO_Audit_Automation.html SWA tool, whose server-side MCP path could not authenticate to Umbrava.
@@ -19,7 +19,7 @@
 (function () {
   'use strict';
 
-  var VER = '0.1.0';
+  var VER = '0.3.0';
   var FONT = "-apple-system,BlinkMacSystemFont,'Segoe UI','Helvetica Neue',Arial,sans-serif";
   var SWA_BASE = 'https://green-stone-0717dab0f.7.azurestaticapps.net';
   var AUDIT_URL = SWA_BASE + '/api/wo-audit';
@@ -80,40 +80,35 @@
   function _stripHtml(s) { return String(s || '').replace(/<[^>]*>/g, ' ').replace(/\s+/g, ' ').trim(); }
   function sleep(ms) { return new Promise(function (r) { setTimeout(r, ms); }); }
 
-  // One WO's id + status + notes, newest first. Mirrors bwn-suite-ai woToJob's
-  // proven ID/notes selectors (workOrder(workOrderNumber) -> id; workOrderNotes(workOrderId)).
+  // One WO's status + notes, newest first. Notes use Umbrava's REAL query, captured off the wire
+  // 2026-07-23: jobNotes(workOrderNumber, includeDeleted) - a ROOT field keyed by the WO NUMBER,
+  // so no internal-id lookup is needed. Field list is the confirmed WONoteFields subset. A real
+  // query error now REJECTS (surfaces loudly per WO) instead of silently returning 0 notes.
+  // statusName is an isolated best-effort read; on any drift it falls back to the xlsx Status col.
+  var NOTES_Q = 'query($n:Int!){ jobNotes(workOrderNumber:$n, includeDeleted:false){ id type content contentHtml createdDate isPinned isCompletion workOrderNoteSource createdBy { firstName lastName } } }';
+  var STATUS_Q = 'query($n:Int!){ workOrder(workOrderNumber:$n){ statusName } }';
   function woNotes(number) {
     var n = parseInt(String(number).replace(/^W-?/i, '').replace(/[^0-9]/g, ''), 10);
     if (!n || isNaN(n)) return Promise.reject(new Error('not a WO number: "' + number + '"'));
-    // CRITICAL query is `{ id }` ONLY (the proven woToJob selector). statusName is fetched in
-    // an ISOLATED follow-up so a drifted field name can never error the whole query and starve
-    // the notes read; if it drifts we just fall back to the xlsx Status column.
-    return gql('query($n:Int!){ workOrder(workOrderNumber:$n){ id } }', { n: n })
-      .then(function (idr) {
-        var wo = idr && idr.workOrder;
-        if (!wo || wo.id == null) throw new Error('WO ' + n + ' not found');
-        var statusP = gql('query($n:Int!){ workOrder(workOrderNumber:$n){ statusName } }', { n: n })
-          .then(function (sr) { return (sr && sr.workOrder && sr.workOrder.statusName) || ''; })
-          .catch(function () { return ''; });
-        var notesP = gql('query($id:Int!){ workOrderNotes(workOrderId:$id){ content contentHtml createdDate isPinned type } }', { id: wo.id })
-          .then(function (nr) { return (nr && nr.workOrderNotes) || []; })
-          .catch(function () { return []; });   // notes selector drift -> empty, never fatal
-        return Promise.all([statusP, notesP]).then(function (a) { return { wo: { id: wo.id, statusName: a[0] }, notes: a[1] }; });
-      })
-      .then(function (res) {
-        var notes = res.notes.slice().sort(function (a, b) {
-          return (_date(b && b.createdDate) || 0) - (_date(a && a.createdDate) || 0);
-        }).map(function (x) {
-          x = x || {};
-          return {
-            content: (x.content && String(x.content).trim()) || _stripHtml(x.contentHtml),
-            createdDate: x.createdDate || '',
-            type: x.type || '',
-            isPinned: !!x.isPinned,
-          };
-        });
-        return { id: res.wo.id, statusName: res.wo.statusName || '', notes: notes };
+    var statusP = gql(STATUS_Q, { n: n }).then(function (d) { return (d && d.workOrder && d.workOrder.statusName) || ''; }).catch(function () { return ''; });
+    var notesP = gql(NOTES_Q, { n: n }).then(function (d) { return (d && d.jobNotes) || []; });
+    return Promise.all([statusP, notesP]).then(function (a) {
+      var notes = a[1].slice().sort(function (x, y) {
+        return (_date(y && y.createdDate) || 0) - (_date(x && x.createdDate) || 0);
+      }).map(function (x) {
+        x = x || {};
+        var who = x.createdBy ? [x.createdBy.firstName, x.createdBy.lastName].filter(Boolean).join(' ') : '';
+        return {
+          content: (x.content && String(x.content).trim()) || _stripHtml(x.contentHtml),
+          createdDate: x.createdDate || '',
+          type: x.type || '',
+          isPinned: !!x.isPinned,
+          by: who,
+          source: x.workOrderNoteSource || '',
+        };
       });
+      return { id: n, statusName: a[0], notes: notes };
+    });
   }
 
   // ---- SWA summarize call (cross-origin -> GM_xmlhttpRequest + @connect) ----
@@ -183,11 +178,14 @@
     return -1;
   }
   function findNoteCol(hdr) {
-    // Prefer an explicit audit/status-note column; else any "note(s)" column (last one).
-    var pref = [/audit.*note|note.*audit/i, /status\s*note/i];
+    // Prefer an explicit notes column; then any "note(s)" header that is about note CONTENT -
+    // never a date/count/author/timestamp column, so "Last Note Date" must NOT match.
+    var pref = [/^audit\s*notes?$/i, /^status\s*notes?$/i, /^notes?$/i, /coordinator\s*notes?/i, /audit.*note|note.*audit/i, /status\s*note/i];
     for (var p = 0; p < pref.length; p++) { for (var c = 0; c < hdr.length; c++) { if (pref[p].test(hdr[c])) return c; } }
     var last = -1;
-    for (var i = 0; i < hdr.length; i++) { if (/\bnotes?\b/i.test(hdr[i])) last = i; }
+    for (var i = 0; i < hdr.length; i++) {
+      if (/\bnotes?\b/i.test(hdr[i]) && !/date|count|#|by|author|time|updated|\blast\b/i.test(hdr[i])) last = i;
+    }
     return last;
   }
   function mapSheet(ws) {
@@ -269,6 +267,7 @@
       '<input type="file" id="bwn-woaudit-file" accept=".xlsx,.xls" style="margin-bottom:6px">' +
       '<div id="bwn-woaudit-sheetwrap" style="display:none;margin:8px 0"><label style="font-weight:600;margin-right:8px">Sheet</label><select id="bwn-woaudit-sheet"></select></div>' +
       '<div id="bwn-woaudit-mapinfo" style="font-size:12.5px;color:#444;margin:8px 0;white-space:pre-line"></div>' +
+      '<div id="bwn-woaudit-notecolwrap" style="display:none;margin:8px 0"><label style="font-weight:600;margin-right:8px">Write notes to column</label><select id="bwn-woaudit-notecol"></select></div>' +
       '<div style="display:flex;gap:16px;margin:12px 0;flex-wrap:wrap">' +
       '<div><label style="display:block;font-weight:600;margin-bottom:4px">Model</label><select id="bwn-woaudit-model"></select></div>' +
       '<div><label style="display:block;font-weight:600;margin-bottom:4px">Concurrency</label><input id="bwn-woaudit-conc" type="number" min="1" max="6" value="3" style="width:64px"></div>' +
@@ -323,14 +322,22 @@
       if (!loaded) return;
       var ws = loaded.wb.Sheets[currentSheet()];
       var map = mapSheet(ws);
+      var hdr = (map.aoa[map.headerRow] || []).map(function (x) { return String(x == null ? '' : x); });
       var dataRows = [];
       for (var r = map.headerRow + 1; r < map.aoa.length; r++) {
         var key = cellStr(map.aoa, r, map.key);
         if (key) dataRows.push({ rowIdx: r, key: key });
       }
+      // Write-back column picker: every header + an append option, defaulting to the detection.
+      // Header-detection is a hint only; the operator confirms so a wrong guess is never silent.
+      var ncsel = $('bwn-woaudit-notecol');
+      ncsel.innerHTML = '';
+      hdr.forEach(function (h, i) { var o = document.createElement('option'); o.value = String(i); o.textContent = (h || ('(col ' + (i + 1) + ')')) + (i === map.note ? '  <-- detected' : ''); ncsel.appendChild(o); });
+      var appendOpt = document.createElement('option'); appendOpt.value = 'append'; appendOpt.textContent = '+ append new "Audit Notes" column'; ncsel.appendChild(appendOpt);
+      ncsel.value = (map.note > -1) ? String(map.note) : 'append';
+      $('bwn-woaudit-notecolwrap').style.display = 'block';
       var info = [
         'WO # column: ' + (map.keyName != null ? '"' + map.keyName + '"' : 'NOT FOUND (cannot run)'),
-        'Notes write-back: ' + (map.noteName != null ? '"' + map.noteName + '"' : 'none found -> will append "Audit Notes"'),
         'Work orders detected: ' + dataRows.length,
       ].join('\n');
       $('bwn-woaudit-mapinfo').textContent = info;
@@ -350,7 +357,10 @@
       var model = $('bwn-woaudit-model').value;
       var conc = Math.max(1, Math.min(6, parseInt($('bwn-woaudit-conc').value, 10) || 3));
       var ws = session.wb.Sheets[session.sheet];
-      ensureNoteCol(ws, session.map);
+      // Resolve the write-back column from the picker (detection is only the default).
+      var pick = $('bwn-woaudit-notecol').value;
+      if (pick === 'append') { session.map.note = -1; ensureNoteCol(ws, session.map); }
+      else { session.map.note = parseInt(pick, 10); if (isNaN(session.map.note)) { session.map.note = -1; ensureNoteCol(ws, session.map); } }
 
       var targets = retryOnly
         ? session.rows.filter(function (row, i) { return session.results[i] && session.results[i].error; })
