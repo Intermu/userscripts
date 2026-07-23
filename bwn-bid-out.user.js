@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         BWN Bid-Out (Broadway National)
 // @namespace    broadwaynational.bwn
-// @version      0.22.0
+// @version      0.23.0
 // @downloadURL  https://raw.githubusercontent.com/Intermu/userscripts/main/bwn-bid-out.user.js
 // @updateURL    https://raw.githubusercontent.com/Intermu/userscripts/main/bwn-bid-out.user.js
 // @description  Email RFP to outside / net-new vendors, launched from a caret on Umbrava's own "See Who Is Available" button (network-vendor bidding stays native - no separate Bid-Out button). The caret menu opens the tracked email RFP wizard: finds net-new vendors nearby through Google Places, looks up their emails via the BWN scrape-contacts function, takes pasted outside addresses, and can still include assignable Umbrava vendors in the same email. You pick who's included, then review the exact recipient list and the rendered email before anything sends. Send from your own mailbox via the SWA send-bid function (Microsoft Graph), or open a plain Outlook draft. Vendors are BCC'd; nothing sends until you click Send. Network access is limited to Umbrava (same-origin), Google Places, and your SWA host.
@@ -20,7 +20,7 @@
 (function () {
   'use strict';
 
-  var VER = '0.22.0';
+  var VER = '0.23.0';
   console.info('[BWN BID-OUT] v' + VER + ' - 3-step Build Requests wizard (WO details -> select vendors -> review) · Umbrava vendors + Places net-new discovery + email scrape · one-click Graph send via SWA (Outlook-draft fallback)');
 
   var COMPANY_ADDR = 'Broadway National Group, 100 Davids Dr, Hauppauge, NY 11788';
@@ -1713,6 +1713,79 @@
     }
     else { mountFloating(); }   // no native button on this layout - keep the floating entry
   }
+
+  // ---- SR recon: console-only probe to pin the Service Requests inline anchor -----
+  // Email RFP today rides a caret on Umbrava's native "See Who Is Available" button and
+  // falls back to a floating FAB when that button is absent (the "reverts after send"
+  // bug). To re-anchor it to the Service Requests card we need the stable container /
+  // testids captured live. This probe only DUMPS candidates - nothing automatic depends
+  // on it. Run __bwnSRRecon() in the console on a WO that has a Service Requests section,
+  // BEFORE and AFTER an RFP send, and compare (esp. seeWhoPresent + the SR-row state
+  // chips). See the bwn-email-rfp-inline-anchor spec.
+  function srReconEl(el) {
+    if (!el || !el.tagName) return null;
+    var cls = typeof el.className === 'string' ? el.className : '';
+    return {
+      tag: el.tagName.toLowerCase(),
+      testid: (el.getAttribute && el.getAttribute('data-testid')) || '',
+      id: el.id || '',
+      role: (el.getAttribute && el.getAttribute('role')) || '',
+      aria: (el.getAttribute && el.getAttribute('aria-label')) || '',
+      cls: cls.slice(0, 80),
+      txt: (el.textContent || '').replace(/\s+/g, ' ').trim().slice(0, 50)
+    };
+  }
+  function srReconChain(el, depth) {
+    var chain = [], n = 0;
+    while (el && n < (depth || 8)) { chain.push(srReconEl(el)); el = el.parentElement; n++; }
+    return chain;
+  }
+  function srRecon() {
+    var out = { path: location.pathname, wo: woNumber(), seeWhoPresent: false, seeWhoChain: [], srHeaders: [], srHeaderChain: [], viewChain: [], srTestids: {}, viewCtrls: [], stateChips: [] };
+    // 1. ancestor chain of the native button the caret rides today (present only in the
+    //    "See Who Is Available" WO state) - reveals its enclosing card + any testid.
+    var nb = seeWhoBtn();
+    out.seeWhoPresent = !!nb;
+    if (nb) out.seeWhoChain = srReconChain(nb, 9);
+    // 2. testids mentioning a service request / bid / request (section + rows).
+    document.querySelectorAll('[data-testid*="service-request" i],[data-testid*="servicerequest" i],[data-testid*="bid" i],[data-testid*="request" i]').forEach(function (el) {
+      var t = el.getAttribute('data-testid'); if (t && !(t in out.srTestids)) out.srTestids[t] = (el.textContent || '').replace(/\s+/g, ' ').trim().slice(0, 50);
+    });
+    // 3. "Service Request(s)" header candidates + the ancestor chain of the FIRST one -
+    //    this is the tier-2 anchor (the SR card container + its stable testid). Needed
+    //    because in the SR-present-but-no-See-Who state (the bug), seeWhoChain is empty.
+    var hdrEl = null;
+    document.querySelectorAll('h1,h2,h3,h4,h5,h6,div,span,p').forEach(function (el) {
+      var tx = (el.textContent || '').replace(/\s+/g, ' ').trim();
+      if (/^service requests?\b/i.test(tx) && tx.length < 40 && el.querySelectorAll('*').length <= 4) { out.srHeaders.push(srReconEl(el)); if (!hdrEl) hdrEl = el; }
+    });
+    if (hdrEl) out.srHeaderChain = srReconChain(hdrEl, 8);
+    // 4. "View" controls (per-row anchor candidates) + the ancestor chain of the first
+    //    (the SR row container, for the per-row granularity option).
+    var viewEl = null;
+    document.querySelectorAll('button,a').forEach(function (el) {
+      if (/^view$/i.test((el.textContent || '').replace(/\s+/g, ' ').trim())) { out.viewCtrls.push(srReconEl(el)); if (!viewEl) viewEl = el; }
+    });
+    if (viewEl) out.viewChain = srReconChain(viewEl, 8);
+    // 5. per-request state chips - Umbrava's OWN row lifecycle (not our RFP), captured to
+    //    confirm no "RFP sent" signal lives in the DOM.
+    var chips = {};
+    document.querySelectorAll('[data-testid*="status" i],[class*="chip" i],[class*="badge" i],[class*="status" i],[class*="tag" i]').forEach(function (el) {
+      var tx = (el.textContent || '').replace(/\s+/g, ' ').trim();
+      if (tx && tx.length < 30 && /sent|pending|await|bid|request|declin|award|receiv|complete|open/i.test(tx)) chips[tx] = 1;
+    });
+    out.stateChips = Object.keys(chips).slice(0, 30);
+    out.viewCtrls = out.viewCtrls.slice(0, 20);
+    console.info('[BWN BID-OUT] SR recon:', out);
+    return out;
+  }
+  try { window.__bwnSRRecon = srRecon; } catch (e) { }
+  // Bid-Out is sandboxed (@grant GM_*), so `window` is the TM sandbox, not the page. The
+  // devtools console runs in the PAGE context by default, so also expose on unsafeWindow
+  // or __bwnSRRecon() would be undefined there. (Core's docsRecon needs only `window`
+  // because Core is @grant none.)
+  try { if (typeof unsafeWindow !== 'undefined' && unsafeWindow) unsafeWindow.__bwnSRRecon = srRecon; } catch (e) { }
+
   var lastPath = '';
   function tick() {
     if (location.pathname !== lastPath) {
@@ -1755,6 +1828,17 @@
     GM_registerMenuCommand('Set your phone (bid email contact)', function () {
       var v = prompt('Phone shown in the bid email contact block (blank = company main ' + COMPANY_PHONE + '):', GM_getValue('sender_phone', '') || '');
       if (v !== null) { GM_setValue('sender_phone', v.trim()); toast(v.trim() ? 'Phone saved.' : 'Phone cleared (company main used).'); }
+    });
+    // Recon launcher for the Service Requests inline anchor (bwn-email-rfp-inline-anchor
+    // spec). Runs entirely in the sandbox (no unsafeWindow needed), logs to the page
+    // console, and copies the JSON to the clipboard so it can be pasted straight back.
+    GM_registerMenuCommand('Recon: Service Requests DOM', function () {
+      try {
+        var o = srRecon();
+        var j = JSON.stringify(o, null, 2);
+        try { navigator.clipboard.writeText(j).then(function () { }, function () { }); } catch (e2) { }
+        toast('SR recon done: ' + (o.srHeaders.length) + ' header hit(s), ' + o.viewCtrls.length + ' View ctrl(s), See-Who=' + o.seeWhoPresent + '. Copied to clipboard + logged to console.');
+      } catch (e) { toast('SR recon failed: ' + (e && e.message)); }
     });
   } catch (e) { /* GM menu unavailable */ }
 })();
