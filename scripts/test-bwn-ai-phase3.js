@@ -21,14 +21,9 @@ var crypto = require('crypto');
 var DIR = path.join(__dirname, '..');
 function read(f) { return fs.readFileSync(path.join(DIR, f), 'utf8').replace(/\r\n/g, '\n'); }
 
-// ---- tiny assert harness --------------------------------------------------------------
-var pass = 0, fail = 0, cases = 0;
-function ok(name, cond, detail) {
-  cases++;
-  if (cond) { pass++; console.log('  ok  - ' + name); }
-  else { fail++; console.log('  FAIL- ' + name + (detail ? ('  [' + detail + ']') : '')); }
-}
-function eq(name, got, want) { ok(name, JSON.stringify(got) === JSON.stringify(want), 'got ' + JSON.stringify(got) + ' want ' + JSON.stringify(want)); }
+// ---- assert harness (shared: scripts/assert.js) ---------------------------------------
+var assert = require('./assert.js');
+var ok = assert.ok, eq = assert.eq;
 
 // ---- shared stubs ---------------------------------------------------------------------
 function b64url(obj) { return Buffer.from(JSON.stringify(obj)).toString('base64').replace(/=+$/, '').replace(/\+/g, '-').replace(/\//g, '_'); }
@@ -234,8 +229,7 @@ function staticChecks() {
 console.log('BWN AI Phase 3 consumer-migration harness (TASK-011/013/014)\n');
 run().then(function () {
   staticChecks();
-  console.log('\n' + pass + '/' + cases + ' assertions passed' + (fail ? (', ' + fail + ' FAILED') : ''));
-  process.exit(fail ? 1 : 0);
+  assert.finish();
 }).catch(function (e) {
   console.error('\nHARNESS ERROR:', e && e.stack || e);
   process.exit(2);
