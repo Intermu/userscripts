@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         BWN WO Audit (Broadway National)
 // @namespace    broadwaynational.bwn
-// @version      0.3.0
+// @version      0.4.0
 // @downloadURL  https://raw.githubusercontent.com/Intermu/userscripts/main/bwn-wo-audit.user.js
 // @updateURL    https://raw.githubusercontent.com/Intermu/userscripts/main/bwn-wo-audit.user.js
 // @description  Batch WO-audit tool. Upload a WO audit .xlsx; for each work order this reads its two most recent notes DIRECTLY from Umbrava's GraphQL API in-page (using your live Umbrava session - the same read the BWN Ops Suite AI drafts use), then asks the broadway-internal-ops SWA summarize route (x-bwn-key gated, Anthropic key server-side) to write a 1-3 sentence client-ready status note. Fills the audit's notes column and downloads the workbook, preserving every other cell and formula. Runs entirely in the app.umbrava.com page so it inherits your Umbrava auth - no MCP, no pasted keys, nothing sensitive in this script. This replaces the old standalone WO_Audit_Automation.html SWA tool, whose server-side MCP path could not authenticate to Umbrava.
@@ -19,10 +19,9 @@
 (function () {
   'use strict';
 
-  var VER = '0.3.0';
+  var VER = '0.4.0';
   var FONT = "-apple-system,BlinkMacSystemFont,'Segoe UI','Helvetica Neue',Arial,sans-serif";
   var SWA_BASE = 'https://green-stone-0717dab0f.7.azurestaticapps.net';
-  var AUDIT_URL = SWA_BASE + '/api/wo-audit';
   var GREEN = '#0d3d26';
   var MS_DAY = 86400000;
   var MODELS = [
@@ -31,7 +30,7 @@
     { id: 'claude-haiku-4-5', label: 'Haiku 4.5 (cheapest)' },
   ];
   var XLSX_MIME = 'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet';
-  console.info('[BWN WO AUDIT] v' + VER + ' - in-page GraphQL notes read -> SWA summarize route -> filled .xlsx download');
+  console.info('[BWN WO AUDIT] v' + VER + ' - in-page GraphQL notes read -> bwnAI -> /api/ai summarize -> filled .xlsx download');
 
   // ====================================================================
   // Auth: the live Umbrava Auth0 bearer, read straight from the page (same
@@ -124,28 +123,283 @@
       } catch (e) { reject(e); }
     });
   }
-  // Summarize one WO's notes into a status note. Retries 429/5xx/network with backoff;
-  // 400/403 are non-retryable (bad input / bad key) and throw immediately.
-  function summarize(woFacts, notes, model, key, tries) {
-    tries = tries || 3;
-    var attempt = 0, lastErr = '';
+  // ===== BWN AI TRANSPORT (Phase 3, TASK-011) =====================================
+  // Batch summarize now rides the shared suite-wide bwnAI router and the single
+  // /api/ai route (server Anthropic key; summarize tier is key-gated, no rank on the
+  // server). The bwnAI block below is pasted BYTE-IDENTICAL from the suite (PAT-002) -
+  // verify the SHA matches across scripts; do NOT edit its internals, only the injected
+  // sender differs. summarize passes NO tools, so the sender is a single POST (no tool
+  // loop, no registry).
+  // ===== bwnAI v1 - shared suite-wide AI router - KEEP IN SYNC across suite scripts =====
+  // Single tiered helper (spec: [[bwn-ai-tiering]]). Generalizes this module's original
+  // on-device aiSummary into a router every module can call the same way. Three tiers:
+  //   local    - a module-supplied mechanical fn (no model). Always-available floor.
+  //   ondevice - Chrome's built-in Prompt API (Gemini Nano). Free, zero-egress, no key,
+  //              @grant none. Everyone. Good for summaries/labels/short classification.
+  //   proxy    - one SERVER key behind the bwn-ai SWA (Claude/Haiku). Rank-gated to
+  //              managers+ (BWN_AI_ADVANCED_MIN_RANK, default 4). The network transport
+  //              is INJECTED by a grant-holding script via bwnAI.setProxy(fn); modules
+  //              that are @grant none (this one) never attempt it - proxy simply misses
+  //              and the router falls through to on-device / local.
+  // Contract: async, self-bounded by timeoutMs, ALWAYS resolves (never throws), returns
+  // '' (or the local result) on any miss. Paste this block verbatim into any module that
+  // needs AI; only put the block here, never a key. This is UX/cost routing - the SERVER
+  // re-enforces the rank on the proxy tier (403 ROLE_REQUIRED, treated here as a miss).
+  var bwnAI = (function () {
+    var TASK_TIER = { summarize: 'ondevice', classify: 'ondevice', draft: 'proxy', render: 'proxy' };
+    var TASK_ONELINE = { summarize: true, classify: true };
+    var TASK_SYSTEM = {
+      summarize: 'Summarize the input into a single plain-text line (<=200 chars). No greeting, no sign-off, no preamble, no quotes - output only the one line.',
+      classify: 'Classify the input. Respond with ONLY a short label of a few words - no explanation, no punctuation beyond the label.',
+      draft: 'Draft a short, professional message for a facilities coordinator. Clear and courteous. Output only the message body - no preamble.',
+      render: 'Synthesize the provided work-order details into a clear, well-structured plain-text brief for a facilities coordinator. Output only the brief.'
+    };
+    var ROLE_TTL_MS = 6 * 3600 * 1000;   // trust the cross-refresh role slot this long
+
+    // ---- Rank read (client, cost/UX only - the server is the real gate) ----------
+    // @grant-none-safe: the AI script resolves the SERVER-computed rank once per session
+    // ([[umbrava-role-auth]]) and publishes it on the `bwn:role` bus event + the
+    // localStorage `bwn:role:last` slot. A live bus event is trusted directly; the slot
+    // is the cross-refresh fallback, trusted only when marked ok + fresh. Never re-fetches.
+    var _liveRank = null;
+    try {
+      document.addEventListener('bwn:evt', function (e) {
+        var d = e && e.detail;
+        if (d && d.id === 'bwn:role' && typeof d.rank === 'number') _liveRank = d.rank;
+      });
+    } catch (e) { /* no document (worker) - rank stays unknown -> on-device */ }
+    function rank() {
+      if (typeof _liveRank === 'number') return _liveRank;
+      try {
+        var r = JSON.parse(localStorage.getItem('bwn:role:last') || 'null');
+        if (r && r.ok && typeof r.rank === 'number' && r.ts && (Date.now() - r.ts) < ROLE_TTL_MS) return r.rank;
+      } catch (e2) { }
+      return null;
+    }
+
+    // ---- On-device (Chrome built-in Prompt API) -----------------------------------
+    function langModel() {
+      // The Prompt API surface has shifted across Chrome versions; probe the globals.
+      var g = (typeof self !== 'undefined') ? self : (typeof window !== 'undefined' ? window : null);
+      if (typeof LanguageModel !== 'undefined' && LanguageModel) return LanguageModel;
+      if (g && g.LanguageModel) return g.LanguageModel;
+      if (g && g.ai && g.ai.languageModel) return g.ai.languageModel;   // older window.ai shape
+      return null;
+    }
+    function ready(api) {
+      // Newer: availability() -> 'available'|'downloadable'|'downloading'|'unavailable'.
+      // Older: capabilities() -> {available:'readily'|'after-download'|'no'}. Only
+      // 'available'/'readily' means we can infer NOW without a multi-GB model download.
+      try {
+        if (typeof api.availability === 'function') return Promise.resolve(api.availability()).then(function (s) { return s === 'available'; }, function () { return false; });
+        if (typeof api.capabilities === 'function') return Promise.resolve(api.capabilities()).then(function (c) { return !!c && c.available === 'readily'; }, function () { return false; });
+      } catch (e) { }
+      return Promise.resolve(false);
+    }
+    // Reuse one session PER system prompt (a new task/system gets its own; recreated on error).
+    var SESSIONS = {};
+    function session(api, sys) {
+      var cached = SESSIONS[sys];
+      if (cached) return Promise.resolve(cached);
+      function keep(hasSystem) { return function (s) { try { s._bwnSystem = hasSystem; } catch (e) { } SESSIONS[sys] = s; return s; }; }
+      // Prefer the system-prompt option; fall back to a bare session (older/newer variants)
+      // where the instruction is prepended to the user prompt instead (_bwnSystem = false).
+      return Promise.resolve(api.create({ initialPrompts: [{ role: 'system', content: sys }] }))
+        .then(keep(true), function () { return Promise.resolve(api.create()).then(keep(false)); });
+    }
+    function onDevice(sys, content) {
+      var api = langModel();
+      if (!api || typeof api.create !== 'function') return Promise.resolve('');
+      return ready(api).then(function (ok) {
+        if (!ok) return '';
+        return session(api, sys).then(function (s) {
+          var usedSystem = !!(s && s._bwnSystem !== false);   // best-effort; harmless if unknown
+          return s.prompt((usedSystem ? '' : sys + '\n\n') + content);
+        });
+      }).catch(function () { SESSIONS[sys] = null; return ''; });   // drop a bad cached session
+    }
+
+    // ---- Proxy (server key, injected transport) -----------------------------------
+    // A grant-holding script installs the real cross-origin sender:
+    //   bwnAI.setProxy(function (payload) { ... return Promise<string text>; })
+    // payload = {task, system, prompt, maxTokens, minRank, rank}. The sender owns auth
+    // (token in the JSON BODY, never Authorization - the SWA edge overwrites it) and must
+    // RESOLVE '' / REJECT on any miss (403 ROLE_REQUIRED, network, empty) so we fall through.
+    var _proxySend = null;
+    function proxy(payload, send) {
+      var fn = send || _proxySend;
+      if (typeof fn !== 'function') return Promise.resolve('');   // no transport -> miss
+      return Promise.resolve().then(function () { return fn(payload); })
+        .then(function (t) { return String(t || ''); }, function () { return ''; });
+    }
+
+    function withTimeout(p, ms) {
+      return new Promise(function (resolve) {
+        var t = setTimeout(function () { resolve(undefined); }, ms);
+        Promise.resolve(p).then(function (v) { clearTimeout(t); resolve(v); }, function () { clearTimeout(t); resolve(undefined); });
+      });
+    }
+    function clean(text, oneLine, maxChars) {
+      var s = String(text || '');
+      if (oneLine) s = s.replace(/\s+/g, ' ').replace(/^["']+|["']+$/g, '');
+      return s.trim().slice(0, maxChars);
+    }
+
+    // ---- Router -------------------------------------------------------------------
+    function bwnAI(opts) {
+      opts = opts || {};
+      var task = opts.task || 'summarize';
+      var oneLine = (opts.oneLine !== undefined) ? !!opts.oneLine : !!TASK_ONELINE[task];
+      var maxChars = opts.maxChars || (oneLine ? 300 : 4000);
+      var sys = opts.system || TASK_SYSTEM[task] || TASK_SYSTEM.summarize;
+      var content = (opts.prompt != null) ? String(opts.prompt)
+        : (typeof opts.input === 'string' ? opts.input : (opts.input != null ? JSON.stringify(opts.input) : ''));
+      var localFn = (typeof opts.local === 'function') ? opts.local : null;
+      var floor = function () { try { return localFn ? clean(localFn(), oneLine, maxChars) : ''; } catch (e) { return ''; } };
+
+      // Ordered tier list: desired ceiling first (task default, unless tier overrides),
+      // then the fallback chain. Deduped, capped at proxy when tier says 'ondevice'.
+      var desired = (opts.tier && opts.tier !== 'auto') ? opts.tier : (TASK_TIER[task] || 'ondevice');
+      var order = [desired].concat(opts.fallback || ['ondevice', 'local']);
+      var seen = {}, tiers = [];
+      order.forEach(function (t) { if (t && !seen[t]) { seen[t] = 1; tiers.push(t); } });
+
+      var minRank = (typeof opts.minRank === 'number') ? opts.minRank : 4;
+      var r = rank();
+
+      function step(i) {
+        if (i >= tiers.length) return Promise.resolve('');
+        var t = tiers[i], next = function () { return step(i + 1); };
+        if (t === 'local') { return Promise.resolve(floor()); }   // terminal floor
+        if (t === 'proxy') {
+          // Fail CLOSED: unknown/under-rank quietly skips the paid tier (no 403 flash, no
+          // wasted key) and drops to on-device. The server still backstops if we do send.
+          if (r == null || r < minRank) return next();
+          return proxy({ task: task, system: sys, prompt: content, maxTokens: opts.maxTokens, minRank: minRank, rank: r }, opts.proxySend)
+            .then(function (out) { out = clean(out, oneLine, maxChars); return out || next(); });
+        }
+        if (t === 'ondevice') {
+          return onDevice(sys, content).then(function (out) { out = clean(out, oneLine, maxChars); return out || next(); });
+        }
+        return next();
+      }
+
+      var run = step(0).then(function (out) { return out || floor(); });
+      return withTimeout(run, opts.timeoutMs || 8000).then(function (v) { return v || floor() || ''; });
+    }
+    bwnAI.setProxy = function (fn) { _proxySend = (typeof fn === 'function') ? fn : null; };
+    bwnAI.rank = rank;   // exposed for debug / gating UI
+    return bwnAI;
+  })();
+  // ===== END bwnAI =====
+
+  // ---- injected transport: constants + one-shot sender (TASK-011) --------------------
+  var AI_URL = SWA_BASE + '/api/ai';
+
+  // The old /api/wo-audit system prompt, replicated verbatim (hyphens only, no em-dash)
+  // so the status-note style matches the retired route (output parity, TASK-011).
+  var WO_AUDIT_SYSTEM = [
+    'You are a work order audit assistant for a facilities-maintenance company.',
+    '',
+    'You are given one work order\'s header facts and its most recent notes (newest first).',
+    'Write a professional 1-3 sentence client-ready status note describing where the work',
+    'order stands right now, based ONLY on the notes and facts provided.',
+    '',
+    'Note writing rules:',
+    '- Pending scheduling -> scheduling is in progress, state reason if known.',
+    '- Materials pending -> materials ordered/in transit, note next action if confirmed.',
+    '- Proposal in review -> state proposal status and awaiting approval.',
+    '- On-site active -> state progress and next confirmed milestone.',
+    '- Waiting on third party/client/vendor -> clearly state the dependency.',
+    '- Complete -> state completion, mention closeout items only if confirmed.',
+    '- Never invent ETAs, dates, approvals, or facts not present in the notes.',
+    '- If the notes are empty or say nothing about status, say so plainly',
+    '  (e.g. "No recent status notes on file.") - do NOT fabricate a status.',
+    '',
+    'Return ONLY the note text: 1-3 plain sentences, no preamble, no JSON, no markdown, no quotes.'
+  ].join('\n');
+
+  // Build the user turn exactly as /api/wo-audit did (WO header facts + the two most
+  // recent notes, newest first) so the model sees the same input it always did.
+  function buildAuditInput(wo, notes) {
+    wo = wo || {};
+    var top2 = (notes || []).slice(0, 2);
+    var noteLines = top2.map(function (n, i) {
+      n = (n && typeof n === 'object') ? n : {};
+      var when = String(n.createdDate || '').trim().slice(0, 40);
+      var type = String(n.type || '').trim().slice(0, 40);
+      var txt = String(n.content || '').trim().slice(0, 4000);
+      var head = 'Note ' + (i + 1) + (when ? ' (' + when + ')' : '') + (type ? ' [' + type + ']' : '') + ':';
+      return head + '\n' + (txt || '(empty)');
+    });
+    var loc = [String(wo.location || '').trim(), [String(wo.city || '').trim(), String(wo.state || '').trim()].filter(Boolean).join(', ')].filter(Boolean).join(' ');
+    return [
+      'WO #: ' + (String(wo.raw || wo.number || '').trim() || '(unknown)'),
+      'Status: ' + (String(wo.status || '').trim() || '(unknown)'),
+      'Location: ' + (loc || '(unknown)'),
+      'Days open: ' + (String(wo.days || '').trim() || '(unknown)'),
+      'Assigned: ' + (String(wo.assignedTo || '').trim() || '(unknown)'),
+      '',
+      'Most recent notes (newest first):',
+      noteLines.length ? noteLines.join('\n\n') : '(no notes provided)',
+      '',
+      'Write ONLY the 1-3 sentence client-ready status note.'
+    ].join('\n');
+  }
+
+  // Injected proxy sender: ONE POST to /api/ai (summarize tier). Reuses the existing
+  // ingest-key + Umbrava-token plumbing. Keeps the old per-WO transient-retry policy
+  // (429/5xx/network, 3 tries, backoff) so batch retry behavior is unchanged. Resolves
+  // '' on any miss so bwnAI falls through and never throws (backgrounded-tab rule).
+  function aiProxySend(payload) {
+    payload = payload || {};
+    var key = getKey();
+    if (!key) return Promise.resolve('');
+    var body = {
+      task: payload.task || 'summarize',
+      input: (payload.prompt != null) ? String(payload.prompt) : '',
+      userToken: authToken()
+    };
+    if (payload.system) body.system = payload.system;
+    if (payload.model) body.model = payload.model;
+    var tries = 3, attempt = 0;
     function once() {
       attempt++;
-      return gmPost(AUDIT_URL, { 'Content-Type': 'application/json', 'x-bwn-key': key }, { wo: woFacts, notes: notes, model: model }, 60000)
+      return gmPost(AI_URL, { 'Content-Type': 'application/json', 'x-bwn-key': key }, body, 60000)
         .then(function (r) {
-          if (r.status >= 200 && r.status < 300 && r.json && r.json.ok) return r.json.note || '';
-          if ((r.status === 429 || r.status >= 500 || r.status === 0) && attempt < tries) {
-            lastErr = 'HTTP ' + r.status + ((r.json && r.json.error) ? ': ' + r.json.error : '');
-            return sleep(600 * attempt).then(once);
-          }
-          throw new Error('HTTP ' + r.status + ((r.json && r.json.error) ? ': ' + r.json.error : ''));
-        })
-        .catch(function (e) {
-          if (attempt < tries) { lastErr = (e && e.message) || 'network'; return sleep(600 * attempt).then(once); }
-          throw new Error((e && e.message) || lastErr || 'summarize failed');
+          if (r.status >= 200 && r.status < 300 && r.json && r.json.ok && r.json.status === 'final') return String(r.json.text || '');
+          if ((r.status === 429 || r.status >= 500 || r.status === 0) && attempt < tries) return sleep(600 * attempt).then(once);
+          return '';
+        }, function () {
+          if (attempt < tries) return sleep(600 * attempt).then(once);
+          return '';
         });
     }
     return once();
+  }
+  bwnAI.setProxy(aiProxySend);
+
+  // Summarize one WO into a status note through the unified transport. tier:'proxy'
+  // (minRank 1) forces the /api/ai summarize call for any staff+ with a known role; the
+  // server is key-only, so the client rank read is UX-only. A miss (connector down / role
+  // not yet resolved) throws so the batch pool marks the row for "Retry Errors" (unchanged).
+  function summarize(woFacts, notes, model) {
+    return bwnAI({
+      task: 'summarize',
+      tier: 'proxy',
+      minRank: 1,
+      prompt: buildAuditInput(woFacts, notes),
+      system: WO_AUDIT_SYSTEM,
+      oneLine: false,
+      maxChars: 4000,
+      timeoutMs: 60000,
+      fallback: [],
+      proxySend: function (p) { p.model = model; return aiProxySend(p); }
+    }).then(function (note) {
+      note = String(note || '').trim();
+      if (!note) throw new Error('AI summarize unavailable - check the SWA ingest key and that your Umbrava role has resolved, then Retry Errors');
+      return note;
+    });
   }
 
   // ---- Bounded-concurrency runner ----
@@ -387,7 +641,7 @@
               assignedTo: cellStr(session.map.aoa, row.rowIdx, session.map.assigned),
             };
             var top2 = data.notes.slice(0, 2);
-            return summarize(woFacts, top2, model, key, 3).then(function (note) {
+            return summarize(woFacts, top2, model).then(function (note) {
               return { note: note, notesFound: data.notes.length };
             });
           })
