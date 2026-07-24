@@ -5629,7 +5629,7 @@ if (BWN_MODULES.jobView) BWN.safeModule('jobView', function () {
       listEl.innerHTML = SR_LEADS.map(function (l, i) {
         var rating = l.rating != null ? ('★ ' + l.rating.toFixed(1) + ' (' + (l.ratingCount || 0) + ')') : 'unrated';
         var miles = l.mi != null ? (l.mi.toFixed(1) + ' mi') : '';
-        var site = l.website ? '<a href="' + srEsc(l.website) + '" target="_blank" rel="noopener noreferrer" style="color:#1a5f3e;">site</a>' : '';
+        var site = l.website ? (/^https?:\/\//i.test(l.website) ? '<a href="' + srEsc(l.website) + '" target="_blank" rel="noopener noreferrer" style="color:#1a5f3e;">site</a>' : 'site') : '';
         return '<label style="display:flex;align-items:center;gap:8px;padding:6px 4px;border-bottom:1px solid #eef2f7;font-size:12px;cursor:pointer;">' +
           '<input type="checkbox" data-lead="' + i + '" checked style="flex:none;">' +
           '<span style="flex:1;min-width:0;"><span style="font-weight:500;color:#0d3d26;">' + srEsc(l.name) + '</span> <span style="color:#94a3b8;font-size:10px;">outside network</span></span>' +
