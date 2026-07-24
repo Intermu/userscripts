@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         BWN Ask (Coordinator Copilot)
 // @namespace    https://broadwaynational.com/bwn
-// @version      0.4.0
+// @version      0.5.0
 // @description  Ask questions about the work order you're viewing. Reads the WO live from Umbrava via same-origin GraphQL (details + full note / site-visit history) AND a summary roster of the other work orders at the same location, plus the team knowledge doc, and answers through the Broadway AI proxy with dates and references. Phase 1.5 = page-scoped + location roster (Path A); no data leaves the trusted Broadway path.
 // @match        https://app.umbrava.com/*
 // @run-at       document-idle
@@ -467,6 +467,36 @@
     document.body.appendChild(wrap);
   }
 
+  // ---- Shared launcher dock (bwn:dock:*) -----------------------------------
+  // bwn-suite-core's Launcher hosts the shared dock ([[bwn-launcher-dock]]); we
+  // register one entry ('ask') instead of hand-placing a left-edge button. The
+  // host also re-mounts the pill across SPA repaints, so the old self-healing
+  // interval is only needed for the no-host fallback. detail.key carries the entry
+  // id (detail.id is the bwn:evt event name).
+  var DOCK_KEY = 'ask';
+  var _hostSeen = false;
+  var _fallbackActive = false;
+  function removeLauncher() { var w = document.getElementById('bwn-ask-launch'); if (w) w.remove(); }
+  function dockRegister() {
+    try {
+      document.dispatchEvent(new CustomEvent('bwn:evt', { detail: {
+        id: 'bwn:dock:register', key: DOCK_KEY, label: 'Ask BWN', icon: '💬', weight: 30,
+        title: 'Ask about the work order you are viewing'
+      } }));
+    } catch (e) { }
+  }
+  try {
+    document.addEventListener('bwn:evt', function (e) {
+      var d = e && e.detail; if (!d) return;
+      if (d.id === 'bwn:dock:host' || d.id === 'bwn:dock:ping') {
+        _hostSeen = true;
+        if (_fallbackActive) { _fallbackActive = false; removeLauncher(); }
+        dockRegister();
+      }
+      if (d.id === 'bwn:dock:open' && d.key === DOCK_KEY) buildPanel();
+    });
+  } catch (e) { }
+
   // ---- Menu: set the shared ingest key (same key as the rest of the suite) ---
   try {
     GM_registerMenuCommand('BWN Ask: set ingest key', function () {
@@ -477,10 +507,15 @@
   } catch (e) { }
 
   // ---- Boot -----------------------------------------------------------------
-  // Render as soon as the body is ready, then re-check on an interval: Umbrava's SPA can
-  // remount its root and wipe the launcher, so a one-shot render isn't enough. renderLauncher
-  // is a no-op when the button already exists, so the interval is cheap and self-healing.
-  function ensureLauncher() { try { renderLauncher(); } catch (e) { } }
-  setTimeout(ensureLauncher, 1200);
+  // Register into the shared dock (covers a host already up); the host heartbeat
+  // re-registers us later and re-mounts the pill across SPA repaints. If no host
+  // announces within 4s, fall back to the old self-drawn launcher. Umbrava's SPA
+  // can wipe a self-drawn button, so the fallback keeps the cheap self-healing
+  // interval - a no-op unless the fallback is active.
+  function ensureLauncher() { if (_fallbackActive) { try { renderLauncher(); } catch (e) { } } }
+  dockRegister();
+  setTimeout(function () {
+    if (!_hostSeen && !_fallbackActive) { _fallbackActive = true; ensureLauncher(); }
+  }, 4000);
   setInterval(ensureLauncher, 2500);
 })();
