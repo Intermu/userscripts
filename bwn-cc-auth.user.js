@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         BWN CC Request (Broadway National)
 // @namespace    broadwaynational.bwn
-// @version      0.2.0
+// @version      0.3.0
 // @downloadURL  https://raw.githubusercontent.com/Intermu/userscripts/main/bwn-cc-auth.user.js
 // @updateURL    https://raw.githubusercontent.com/Intermu/userscripts/main/bwn-cc-auth.user.js
 // @description  Replaces the "CC Authorization Form" Microsoft Form with an in-page CC Request modal. Requesting a card purchase is a coordinator action (any vouched Broadway Umbrava user): fill the fields and submit; it POSTs to the broadway-internal-ops SWA proxy (x-bwn-key gated) which proves your Umbrava session token with Umbrava's own current-user API, injects your verified email as the Requester, and forwards to the HTTP-triggered Power Automate flow "CC Authorization (HTTP)". That flow starts an approval (mnajarro@, GKohlmann@, LPorzelt@) and, on approve, emails you back that the order will be placed. This script OWNS the single floating Credit Card launcher: coordinators and leads see just "CC Request"; supervisors and above get a dropdown that also opens the Supervisor-only "Log CC Purchase" modal (provided by bwn-cc-purchase, driven over the bwn:evt bus so there is only ever one button). Opened on a work order it prefills the Tracking # and drops the client/location into the description, and defaults Supplier to whichever PO line you flipped to "Supplier" in the BWN Ops Suite. The flow's secret URL stays server-side; nothing sensitive lives in this script.
@@ -18,14 +18,14 @@
 (function () {
   'use strict';
 
-  var VER = '0.2.0';
+  var VER = '0.3.0';
   var FONT = "-apple-system,BlinkMacSystemFont,'Segoe UI','Helvetica Neue',Arial,sans-serif";
   var SWA_BASE = 'https://green-stone-0717dab0f.7.azurestaticapps.net';
   var PROXY_URL = SWA_BASE + '/api/cc-auth';
   var ROLE_URL = SWA_BASE + '/api/user-role';
   var GREEN = '#0d3d26';          // BWN Ops Suite brand green - one launcher, matches CC Purchase
   var MIN_SUPER = 3;              // supervisor - matches api/shared/umbrava-auth.js RANK.SUPERVISOR
-  console.info('[BWN CC REQUEST] v' + VER + ' - coordinator CC Request modal -> SWA proxy (server vouches you + injects your email) -> Power Automate approval flow; owns the single Credit Card launcher (dropdown adds Log CC Purchase for supervisors+)');
+  console.info('[BWN CC REQUEST] v' + VER + ' - coordinator CC Request modal -> SWA proxy (server vouches you + injects your email) -> Power Automate approval flow; registers the single Credit Card launcher into the shared dock (bwn:dock:*), supervisor+ chooser adds Log CC Purchase, floating-button fallback when no dock host');
 
   // ---- BWN Ops Suite bus (read-only consumer of the suite data contract v1) ----
   // bwn-suite-core (WO Assist) PUBLISHES the current WO's facts to sessionStorage
@@ -161,7 +161,7 @@
   function applyRank(rank) {
     if (typeof rank !== 'number') return;
     _rank = rank;
-    renderLauncher();
+    if (_fallbackActive) renderLauncher();   // docked: rank only feeds openCc()'s chooser decision
   }
   function resolveRank() {
     var r = sharedRoleRank();
@@ -177,11 +177,71 @@
   // first render so the handshake works regardless of which script loads first.
   document.addEventListener('bwn:evt', function (e) {
     var d = e && e.detail; if (!d) return;
-    if (d.id === 'bwn:cc:register' && d.tool === 'purchase') { _ccPurchaseAvail = true; renderLauncher(); }
+    if (d.id === 'bwn:cc:register' && d.tool === 'purchase') { _ccPurchaseAvail = true; if (_fallbackActive) renderLauncher(); }
     if (d.id === 'bwn:role' && typeof d.rank === 'number') applyRank(d.rank);   // live sign-in changes
+    // Shared launcher dock ([[bwn-launcher-dock]]): bwn-suite-core's Launcher hosts it.
+    if (d.id === 'bwn:dock:host' || d.id === 'bwn:dock:ping') onDockHost();
+    if (d.id === 'bwn:dock:open' && d.key === DOCK_KEY) openCc();
   });
   function pingCcPurchase() { try { document.dispatchEvent(new CustomEvent('bwn:evt', { detail: { id: 'bwn:cc:ping' } })); } catch (e) { } }
   function openCcPurchase() { try { document.dispatchEvent(new CustomEvent('bwn:evt', { detail: { id: 'bwn:cc:open', tool: 'purchase' } })); } catch (e) { } }
+
+  // ---- Shared launcher dock (bwn:dock:*) -----------------------------------
+  // We OWN the CC launcher, so in the dock we register ONE entry ('cc') and keep
+  // our internal bwn:cc:* request/purchase split behind the centered chooser below
+  // (the dock never learns about it). detail.key carries the entry id (detail.id is
+  // the bwn:evt event name). If no host announces within a few seconds of load we
+  // fall back to the old self-drawn floating button so CC is never stranded.
+  var DOCK_KEY = 'cc';
+  var _hostSeen = false;
+  var _fallbackActive = false;
+  function dockRegister() {
+    try {
+      document.dispatchEvent(new CustomEvent('bwn:evt', { detail: {
+        id: 'bwn:dock:register', key: DOCK_KEY, label: 'CC Request', icon: '🧾', weight: 10,
+        title: 'Request a credit card purchase'
+      } }));
+    } catch (e) { }
+  }
+  function onDockHost() {
+    _hostSeen = true;
+    if (_fallbackActive) { _fallbackActive = false; removeLauncher(); }
+    dockRegister();
+  }
+  function showDropdown() { return (typeof _rank === 'number' && _rank >= MIN_SUPER && _ccPurchaseAvail); }
+  function openCc() { if (showDropdown()) openCcChooser(); else buildModal(); }
+  // Supervisors+ with CC Purchase present pick request-vs-purchase here (the dock owns
+  // only the launcher button, so the two-way split can't live on an anchored dropdown).
+  function openCcChooser() {
+    if (document.getElementById('bwn-cc-chooser')) return;
+    var back = document.createElement('div');
+    back.id = 'bwn-cc-chooser';
+    back.style.cssText = 'position:fixed;inset:0;z-index:2147483646;background:rgba(0,0,0,.35);display:flex;align-items:center;justify-content:center;';
+    function close() { back.remove(); document.removeEventListener('keydown', onK, true); }
+    function onK(e) { if (e.key === 'Escape') close(); }
+    back.addEventListener('click', function (e) { if (e.target === back) close(); });
+    var card = document.createElement('div');
+    card.style.cssText = 'background:#fff;border-radius:14px;box-shadow:0 18px 60px rgba(0,0,0,.35);overflow:hidden;min-width:260px;font:400 14px ' + FONT + ';';
+    var hd = document.createElement('div');
+    hd.textContent = 'Credit Card';
+    hd.style.cssText = 'background:' + GREEN + ';color:#fff;padding:13px 16px;font-weight:600;';
+    card.appendChild(hd);
+    [
+      { label: '🧾  New CC Request', fn: function () { close(); buildModal(); } },
+      { label: '💳  Log CC Purchase', fn: function () { close(); openCcPurchase(); } }
+    ].forEach(function (it, i) {
+      var b = document.createElement('button');
+      b.type = 'button'; b.textContent = it.label;
+      b.style.cssText = 'display:block;width:100%;text-align:left;background:#fff;border:none;' + (i ? 'border-top:1px solid #eef2ef;' : '') + 'padding:14px 18px;font:600 13px ' + FONT + ';color:#12241b;cursor:pointer;';
+      b.addEventListener('mouseenter', function () { b.style.background = '#f2f7f4'; });
+      b.addEventListener('mouseleave', function () { b.style.background = '#fff'; });
+      b.addEventListener('click', it.fn);
+      card.appendChild(b);
+    });
+    back.appendChild(card);
+    document.body.appendChild(back);
+    document.addEventListener('keydown', onK, true);
+  }
 
   // ---- Field spec (order = modal layout). Mirrors the flow's body ----------
   // key = the JSON prop the flow / proxy expect (RequesterEmail is injected server-side).
@@ -441,7 +501,14 @@
     });
   } catch (e) { /* menu API absent - launcher button still works */ }
 
-  // Render the launcher shortly after load (single "CC Request" until rank/CC-Purchase resolve),
-  // ping CC Purchase to announce itself, then resolve rank (may upgrade the button to a dropdown).
-  setTimeout(function () { renderLauncher(); pingCcPurchase(); resolveRank(); }, 1500);
+  // Register into the shared dock (covers a host already up); the host's heartbeat/ping
+  // re-registers us for a host that starts later. Ping CC Purchase + resolve rank as before.
+  // If no dock host announces within 4s, fall back to the old self-drawn floating launcher
+  // (single "CC Request", or a dropdown once rank/CC-Purchase resolve) so CC is never stranded.
+  setTimeout(function () {
+    dockRegister(); pingCcPurchase(); resolveRank();
+    setTimeout(function () {
+      if (!_hostSeen && !_fallbackActive) { _fallbackActive = true; renderLauncher(); }
+    }, 4000);
+  }, 1500);
 })();
