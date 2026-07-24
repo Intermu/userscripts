@@ -6452,7 +6452,7 @@
   });
 
   // ==========================================================================
-  // MODULE: BWN Launcher v1.10  (+ shared bwn:dock:* host for suite launchers)
+  // MODULE: BWN Launcher v2.0  (+ shared bwn:dock:* host for suite launchers)
   // ==========================================================================
   if (BWN_MODULES.launcher) BWN.safeModule('launcher', function () {
     'use strict';
@@ -6460,7 +6460,7 @@
     if (window.__bwnLauncher) return;
     window.__bwnLauncher = true;
 
-    console.info('[BWN LAUNCH] v1.10 loaded (dock host)');
+    console.info('[BWN LAUNCH] v2.0 loaded (dock host, rail card)');
 
     // ---- App registry (EDIT PATHS HERE) --------------------------------------
     // All BWN tools live on one Azure Static Web App. Set each tool's path
@@ -6481,7 +6481,7 @@
 
       var DOCK_ID = 'bwn-launch-dock';
     var MENU_ID = 'bwn-launch-menu';
-    var DOCK_STACK_ID = 'bwn-dock-stack';   // shared launcher dock: registrant pills stacked above the Tools pill
+    var DOCK_STACK_ID = 'bwn-dock-stack';   // shared launcher dock: one dark rail card (logo + icon rows) bottom-left
 
     // ---- Bus + page context (shared via BWN core) -----------------------------
     var currentWOId = BWN.woId;
@@ -6922,15 +6922,37 @@
         '#' + MENU_ID + ' .it .sub{display:block;font:500 10px ui-monospace,"Segoe UI Mono","SF Mono",monospace;color:var(--bwn-text-faint);margin-top:2px;}' +
         '#' + MENU_ID + ' .empty{padding:14px;font-size:12px;color:var(--bwn-text-faint);}' +
         '#' + MENU_ID + ' .it:focus-visible{outline:2px solid var(--bwn-accent);outline-offset:-2px;}' +
-        // Shared launcher dock: registrant pills stacked UP from the Tools pill (left edge).
-        '#' + DOCK_STACK_ID + '{position:fixed;left:0;bottom:56px;z-index:99998;display:flex;flex-direction:column;gap:8px;align-items:flex-start;}' +
-        '#' + DOCK_STACK_ID + ' .bwn-dock-pill{display:flex;align-items:center;gap:7px;border:none;cursor:pointer;color:#fff;' +
-        'background:linear-gradient(135deg,var(--bwn-green),var(--bwn-green-dk));padding:8px 13px 8px 10px;border-radius:0 18px 18px 0;' +
-        'font:600 12px -apple-system,BlinkMacSystemFont,"Segoe UI","Helvetica Neue",Arial,sans-serif;box-shadow:2px 2px 10px rgba(0,0,0,.22);white-space:nowrap;}' +
-        '#' + DOCK_STACK_ID + ' .bwn-dock-pill:hover{filter:brightness(1.12);}' +
-        '#' + DOCK_STACK_ID + ' .bwn-dock-pill:focus-visible{outline:2px solid var(--bwn-accent);outline-offset:2px;}' +
-        '#' + DOCK_STACK_ID + ' .bwn-dock-badge{background:var(--bwn-accent);color:#08301d;border-radius:9px;padding:0 6px;' +
-        'font:700 10px ui-monospace,"Segoe UI Mono","SF Mono",monospace;min-width:16px;text-align:center;}' +
+        // Shared launcher dock: one dark rail card at the bottom-left edge (wireframe-deck
+        // style) - logo header, flat icon+label rows, Tools footer row, collapse chevron.
+        '#' + DOCK_STACK_ID + '{position:fixed;left:10px;bottom:16px;z-index:99998;' +
+        'font-family:-apple-system,BlinkMacSystemFont,"Segoe UI","Helvetica Neue",Arial,sans-serif;}' +
+        '#' + DOCK_STACK_ID + '.bwn-dock-rail{width:158px;background:var(--bwn-green-dk);border-radius:14px;' +
+        'box-shadow:0 6px 22px rgba(0,0,0,.28);overflow:hidden;}' +
+        '#' + DOCK_STACK_ID + ' .bwn-dock-hd{padding:13px 13px 11px;border-bottom:1px solid rgba(255,255,255,.14);}' +
+        '#' + DOCK_STACK_ID + ' .bwn-dock-hd img{display:block;width:100%;height:auto;user-select:none;}' +
+        '#' + DOCK_STACK_ID + ' .bwn-dock-hd-txt{font:600 12px -apple-system,BlinkMacSystemFont,"Segoe UI","Helvetica Neue",Arial,sans-serif;color:#fff;letter-spacing:.4px;}' +
+        '#' + DOCK_STACK_ID + ' .bwn-dock-body{padding:5px 0;}' +
+        '#' + DOCK_STACK_ID + ' .bwn-dock-row{display:flex;align-items:center;gap:10px;width:100%;box-sizing:border-box;' +
+        'padding:10px 14px;border:none;background:transparent;color:rgba(255,255,255,.85);cursor:pointer;text-align:left;' +
+        'font:500 13px -apple-system,BlinkMacSystemFont,"Segoe UI","Helvetica Neue",Arial,sans-serif;white-space:nowrap;}' +
+        '#' + DOCK_STACK_ID + ' .bwn-dock-row:hover{background:rgba(255,255,255,.1);color:#fff;}' +
+        '#' + DOCK_STACK_ID + ' .bwn-dock-row:focus-visible{outline:2px solid var(--bwn-accent);outline-offset:-2px;}' +
+        '#' + DOCK_STACK_ID + ' .bwn-dock-row svg{flex:none;}' +
+        '#' + DOCK_STACK_ID + ' .bwn-dock-emoji{font-size:14px;line-height:1;flex:none;}' +
+        '#' + DOCK_STACK_ID + ' .bwn-dock-lbl{flex:1;overflow:hidden;text-overflow:ellipsis;}' +
+        '#' + DOCK_STACK_ID + ' .bwn-dock-badge{background:var(--bwn-accent);color:#08301d;border-radius:9px;padding:1px 6px;' +
+        'font:700 10px ui-monospace,"Segoe UI Mono","SF Mono",monospace;min-width:14px;text-align:center;}' +
+        '#' + DOCK_STACK_ID + ' .bwn-dock-tools{border-top:1px solid rgba(255,255,255,.14);}' +
+        '#' + DOCK_STACK_ID + ' .bwn-dock-collapse{display:flex;align-items:center;justify-content:center;width:100%;box-sizing:border-box;' +
+        'padding:6px;border:none;background:transparent;color:rgba(255,255,255,.5);cursor:pointer;border-top:1px solid rgba(255,255,255,.14);}' +
+        '#' + DOCK_STACK_ID + ' .bwn-dock-collapse:hover{color:#fff;background:rgba(255,255,255,.08);}' +
+        '#' + DOCK_STACK_ID + ' .bwn-dock-collapse:focus-visible{outline:2px solid var(--bwn-accent);outline-offset:-2px;}' +
+        // Collapsed: just the green "b" brand chip (matches the logo mark).
+        '#' + DOCK_STACK_ID + ' .bwn-dock-chip{width:42px;height:42px;border:none;border-radius:13px;background:#3ecf4f;color:#fff;' +
+        'font:700 22px/1 -apple-system,BlinkMacSystemFont,"Segoe UI","Helvetica Neue",Arial,sans-serif;cursor:pointer;' +
+        'box-shadow:0 5px 18px rgba(0,0,0,.3);display:flex;align-items:center;justify-content:center;padding:0 0 3px;}' +
+        '#' + DOCK_STACK_ID + ' .bwn-dock-chip:hover{filter:brightness(1.08);}' +
+        '#' + DOCK_STACK_ID + ' .bwn-dock-chip:focus-visible{outline:2px solid var(--bwn-accent);outline-offset:2px;}' +
         '.bwn-ops-overlay{position:fixed;inset:0;z-index:100001;background:rgba(13,38,26,.5);backdrop-filter:blur(6px);-webkit-backdrop-filter:blur(6px);display:flex;align-items:center;justify-content:center;font-family:-apple-system,BlinkMacSystemFont,"Segoe UI","Helvetica Neue",Arial,sans-serif;}' +
         '.bwn-ops-card{width:540px;max-width:94vw;max-height:88vh;display:flex;flex-direction:column;background:var(--bwn-surface);border-radius:16px;overflow:hidden;box-shadow:0 18px 60px rgba(0,0,0,.35);}' +
         '.bwn-ops-hd{background:linear-gradient(135deg,var(--bwn-green),var(--bwn-green-dk));color:#fff;padding:16px 20px;}' +
@@ -6972,7 +6994,9 @@
     function onDocClick(e) {
       var m = document.getElementById(MENU_ID);
       var d = document.getElementById(DOCK_ID);
-      if (m && !m.contains(e.target) && !(d && d.contains(e.target))) closeMenu();
+      // The rail's Tools row toggles the menu itself - don't double-close it here.
+      var t = e.target && e.target.closest ? e.target.closest('.bwn-dock-tools') : null;
+      if (m && !m.contains(e.target) && !(d && d.contains(e.target)) && !t) closeMenu();
     }
 
     function openMenu() {
@@ -7098,6 +7122,14 @@
         menu.appendChild(tlIt);
       }
 
+      // Anchor beside the rail when it's up; otherwise the default CSS spot
+      // (above the fallback Tools pill) applies.
+      var rail = document.getElementById(DOCK_STACK_ID);
+      if (rail && rail.classList.contains('bwn-dock-rail')) {
+        var rr = rail.getBoundingClientRect();
+        menu.style.left = Math.round(rr.right + 10) + 'px';
+        menu.style.bottom = '16px';
+      }
       document.body.appendChild(menu);
       document.addEventListener('keydown', onKey);
       document.addEventListener('click', onDocClick, true);
@@ -7124,8 +7156,9 @@
     // ---- Shared launcher dock (bwn:dock:* host) --------------------------------
     // Generalizes the CC pair's two-party bwn:cc:* coordination into an N-party dock:
     // any suite module registers ONE launcher over the document-level bwn:evt bus and
-    // this host renders them as a single coordinated stack ABOVE the Tools pill, killing
-    // the old hand-picked-corner launchers. Modules never touch the dock DOM - only
+    // this host renders them as ONE dark rail card at the bottom-left (logo header,
+    // line-icon rows, Tools footer row, collapse-to-chip), killing the old
+    // hand-picked-corner launchers. Modules never touch the dock DOM - only
     // serializable events cross the bus (sandbox-safe, @grant none). The dock owns the
     // button; a click just emits bwn:dock:open back to the owner, which opens its own UI.
     //
@@ -7140,13 +7173,12 @@
     var HOST_PRIORITY = 100;                      // Core is the always-present, high-priority host
     var DOCK_PING_MS = 20000;                     // heartbeat: re-announce + pull registrations
     var DOCK_TTL_MS = DOCK_PING_MS * 3 + 5000;    // an entry drops if not re-registered within ~3 pings
-    var DOCK_COLLAPSE_OVER = 3;                    // >3 entries collapse to a speed-dial FAB (never a wall of buttons)
+    var DOCK_COLLAPSED_KEY = 'bwn:dock:collapsed'; // user pref: rail folded to the brand chip
     var dockBornTs = Date.now();
     var dockHostId = 'h' + Math.random().toString(36).slice(2) + dockBornTs.toString(36);
     var dockAmHost = true;
     var dockRoster = {};                           // key -> {key,label,icon,weight,badge,minRank,title,order,seen}
     var dockOrderSeq = 0;
-    var dockExpanded = false;
     var dockRank = null;                           // reader's rank (UX gating only; server is the real boundary)
     var dockRenderT = null;
 
@@ -7181,36 +7213,96 @@
       var now = Date.now();
       Object.keys(dockRoster).forEach(function (k) { if (now - dockRoster[k].seen > DOCK_TTL_MS) delete dockRoster[k]; });
     }
-    function dockPillEl(en, onClick) {
+    // Line icons (stroke=currentColor) for the rail rows. Registrant keys map to a
+    // built-in glyph so the rail stays consistent; unknown keys fall back to whatever
+    // emoji the registrant sent over the bus.
+    var DOCK_ICONS = {
+      cc: ['M5 21V5a2 2 0 0 1 2-2h10a2 2 0 0 1 2 2v16l-3-2-2 2-2-2-2 2-2-2-3 2', 'M9 7h6', 'M9 11h6'],
+      'wo-audit': ['M9 5H7a2 2 0 0 0-2 2v12a2 2 0 0 0 2 2h10a2 2 0 0 0 2-2V7a2 2 0 0 0-2-2h-2',
+        'M9 5a2 2 0 0 1 2-2h2a2 2 0 0 1 2 2 2 2 0 0 1-2 2h-2a2 2 0 0 1-2-2z', 'M9 14l2 2 4-4'],
+      ask: ['M8 9h8', 'M8 13h6', 'M9 18H6a3 3 0 0 1-3-3V7a3 3 0 0 1 3-3h12a3 3 0 0 1 3 3v8a3 3 0 0 1-3 3h-3l-3 3-3-3'],
+      dispatch: ['M7 17a2 2 0 1 0 4 0 2 2 0 0 0-4 0z', 'M15 17a2 2 0 1 0 4 0 2 2 0 0 0-4 0z',
+        'M5 17H3V6a1 1 0 0 1 1-1h9v12m-2 0h4m4 0h2v-6h-8m0-5h5l3 5'],
+      tools: ['M4 6h16', 'M4 12h16', 'M4 18h16', 'M14 4v4', 'M8 10v4', 'M16 16v4'],
+      chevronLeft: ['M15 6l-6 6 6 6']
+    };
+    function dockIcon(name) {
+      var paths = DOCK_ICONS[name];
+      if (!paths) return null;
+      var NS = 'http://www.w3.org/2000/svg';
+      var svg = document.createElementNS(NS, 'svg');
+      svg.setAttribute('viewBox', '0 0 24 24');
+      svg.setAttribute('width', '16'); svg.setAttribute('height', '16');
+      svg.setAttribute('fill', 'none'); svg.setAttribute('stroke', 'currentColor');
+      svg.setAttribute('stroke-width', '1.7'); svg.setAttribute('stroke-linecap', 'round'); svg.setAttribute('stroke-linejoin', 'round');
+      svg.setAttribute('aria-hidden', 'true');
+      paths.forEach(function (d) { var p = document.createElementNS(NS, 'path'); p.setAttribute('d', d); svg.appendChild(p); });
+      return svg;
+    }
+    function dockRowEl(en, iconName, onClick) {
       var b = document.createElement('button');
-      b.type = 'button'; b.className = 'bwn-dock-pill';
+      b.type = 'button'; b.className = 'bwn-dock-row';
       if (en.title) b.title = en.title;
-      if (en.icon) { var ic = document.createElement('span'); ic.textContent = en.icon; b.appendChild(ic); }
-      var lb = document.createElement('span'); lb.textContent = en.label; b.appendChild(lb);
+      var ic = iconName ? dockIcon(iconName) : null;
+      if (ic) b.appendChild(ic);
+      else if (en.icon) { var sp = document.createElement('span'); sp.className = 'bwn-dock-emoji'; sp.textContent = en.icon; b.appendChild(sp); }
+      var lb = document.createElement('span'); lb.className = 'bwn-dock-lbl'; lb.textContent = en.label; b.appendChild(lb);
       if (en.badge) { var bd = document.createElement('span'); bd.className = 'bwn-dock-badge'; bd.textContent = en.badge; b.appendChild(bd); }
       b.addEventListener('click', BWN.guard(onClick, 'launcher:dockclick'));
       return b;
     }
+    function dockIsCollapsed() { try { return localStorage.getItem(DOCK_COLLAPSED_KEY) === '1'; } catch (e) { return false; } }
+    function dockSetCollapsed(v) {
+      try { if (v) localStorage.setItem(DOCK_COLLAPSED_KEY, '1'); else localStorage.removeItem(DOCK_COLLAPSED_KEY); } catch (e) { }
+    }
     function renderDock() {
       if (!dockAmHost) { removeDockStack(); return; }
       var vis = dockVisible();
+      var pill = document.getElementById(DOCK_ID);
       var stack = document.getElementById(DOCK_STACK_ID);
-      if (!vis.length) { if (stack) stack.remove(); return; }   // NO-OP with zero registrants
+      // Zero registrants: no rail; the standalone Tools pill stays as the fallback launcher.
+      if (!vis.length) { if (stack) stack.remove(); if (pill) pill.style.display = ''; return; }
       ensureStyle();
+      if (pill) pill.style.display = 'none';   // Tools folds into the rail's footer row
       if (!stack) { stack = document.createElement('div'); stack.id = DOCK_STACK_ID; document.body.appendChild(stack); }
       stack.textContent = '';
-      if (vis.length > DOCK_COLLAPSE_OVER && !dockExpanded) {
-        stack.appendChild(dockPillEl({ icon: '➕', label: vis.length + ' tools', title: 'Show suite tools' },
-          function () { dockExpanded = true; renderDock(); }));
+      if (dockIsCollapsed()) {
+        stack.className = '';
+        var chip = document.createElement('button');
+        chip.type = 'button'; chip.className = 'bwn-dock-chip';
+        chip.title = 'BWN tools'; chip.setAttribute('aria-label', 'Expand BWN tools');
+        chip.textContent = 'b';
+        chip.addEventListener('click', BWN.guard(function () { dockSetCollapsed(false); renderDock(); }, 'launcher:dockexpand'));
+        stack.appendChild(chip);
         return;
       }
-      if (vis.length > DOCK_COLLAPSE_OVER) {
-        stack.appendChild(dockPillEl({ icon: '✖', label: 'Hide', title: 'Collapse tools' },
-          function () { dockExpanded = false; renderDock(); }));
-      }
-      vis.forEach(function (en) {
-        stack.appendChild(dockPillEl(en, function () { dockEmit('bwn:dock:open', { key: en.key }); }));
+      stack.className = 'bwn-dock-rail';
+      // Header: company logo (white wordmark, built for the dark rail). Text fallback if
+      // the page blocks the cross-origin image.
+      var hd = document.createElement('div'); hd.className = 'bwn-dock-hd';
+      var img = document.createElement('img');
+      img.alt = 'Broadway National'; img.draggable = false;
+      img.addEventListener('error', function () {
+        var t = document.createElement('span'); t.className = 'bwn-dock-hd-txt'; t.textContent = 'broadway national';
+        hd.textContent = ''; hd.appendChild(t);
       });
+      img.src = LAUNCHER_BASE.replace(/\/$/, '') + '/assets/bwn-logo.png';
+      hd.appendChild(img); stack.appendChild(hd);
+      var body = document.createElement('div'); body.className = 'bwn-dock-body';
+      vis.forEach(function (en) {
+        body.appendChild(dockRowEl(en, DOCK_ICONS[en.key] ? en.key : null,
+          function () { dockEmit('bwn:dock:open', { key: en.key }); }));
+      });
+      stack.appendChild(body);
+      var tools = dockRowEl({ label: 'Tools', title: 'Ops tools - Job Board, Suite settings, WO context' }, 'tools', openMenu);
+      tools.className += ' bwn-dock-tools';
+      stack.appendChild(tools);
+      var col = document.createElement('button');
+      col.type = 'button'; col.className = 'bwn-dock-collapse';
+      col.title = 'Collapse'; col.setAttribute('aria-label', 'Collapse BWN tools');
+      col.appendChild(dockIcon('chevronLeft'));
+      col.addEventListener('click', BWN.guard(function () { dockSetCollapsed(true); renderDock(); }, 'launcher:dockcollapse'));
+      stack.appendChild(col);
     }
 
     document.addEventListener('bwn:evt', BWN.guard(function (e) {

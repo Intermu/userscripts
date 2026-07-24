@@ -1,10 +1,10 @@
 // ==UserScript==
 // @name         BWN Dispatch (Broadway National)
 // @namespace    broadwaynational.bwn
-// @version      0.1.0
+// @version      0.3.0
 // @downloadURL  https://raw.githubusercontent.com/Intermu/userscripts/main/bwn-dispatch.user.js
 // @updateURL    https://raw.githubusercontent.com/Intermu/userscripts/main/bwn-dispatch.user.js
-// @description  One-click Dispatch for a work order - replaces manually typing a row into Dispatch_Notifications.xlsx. On a work order it opens a confirm modal prefilled from the BWN Ops Suite bus (Tracking / Location) and a same-origin Umbrava GraphQL read (Priority + the coordinator this WO / site is assigned to); the coordinator name + email are editable before you send. On submit it POSTs the 5 fields to the broadway-internal-ops SWA proxy (x-bwn-key gated) which forwards to the HTTP-triggered "Dispatch HTTP" Power Automate flow - the flow adds the row to Dispatch_Notifications.xlsx AND dispatches it (posts a Teams adaptive card to the coordinator and waits for their accept). Dispatching is a coordinator action, so there is no role gate (the x-bwn-key is the boundary). The assignee's email is not on the WO record, so it is resolved from a per-user name->email roster (you maintain it; it also remembers each coordinator you dispatch to). The flow's secret URL stays server-side; nothing sensitive lives in this script. Registers a single "Dispatch" launcher into the shared dock (bwn:dock:*); floating-button fallback when no dock host.
+// @description  One-click Dispatch for a work order - replaces manually typing a row into Dispatch_Notifications.xlsx. The Dispatch launcher shows only on a WO that is in "Pending Dispatch". It opens a confirm modal prefilled from the BWN Ops Suite bus (Tracking / Location) and a same-origin Umbrava GraphQL read (Priority + the coordinator to ping): it uses the person this WO is assigned to (whoever a supervisor/manager assigned it to, read live when you open it), and when that is a team or blank it falls back to the coordinator from the most recent work order(s) at the same location. The coordinator name + email are editable before you send. On submit it POSTs the 5 fields to the broadway-internal-ops SWA proxy (x-bwn-key gated) which forwards to the HTTP-triggered "Dispatch HTTP" Power Automate flow - the flow adds the row to Dispatch_Notifications.xlsx AND dispatches it (posts a Teams adaptive card to the coordinator and waits for their accept). Dispatching is a coordinator action, so there is no role gate (the x-bwn-key is the boundary). The assignee's email is not on the WO record (Umbrava exposes the coordinator NAME only), so it is resolved from a per-user name->email roster you maintain (seeded with you, and it remembers each coordinator you dispatch to). The flow's secret URL stays server-side; nothing sensitive lives in this script. Registers a single "Dispatch" launcher into the shared dock (bwn:dock:*); floating-button fallback when no dock host.
 // @match        https://app.umbrava.com/*
 // @run-at       document-idle
 // @noframes
@@ -19,19 +19,24 @@
 (function () {
   'use strict';
 
-  var VER = '0.1.0';
+  var VER = '0.3.0';
   var FONT = "-apple-system,BlinkMacSystemFont,'Segoe UI','Helvetica Neue',Arial,sans-serif";
   var GREEN = '#0d3d26';          // BWN Ops Suite brand green - matches CC Request / WO Audit
   var SWA_BASE = 'https://green-stone-0717dab0f.7.azurestaticapps.net';
   var PROXY_URL = SWA_BASE + '/api/dispatch';
-  console.info('[BWN DISPATCH] v' + VER + ' - confirm modal (bus + same-origin GraphQL prefill, name->email roster) -> SWA /api/dispatch (x-bwn-key) -> Dispatch HTTP flow -> Dispatch_Notifications.xlsx + Teams card. Registers the Dispatch launcher into the shared dock (bwn:dock:*), floating-button fallback when no host.');
+  // The dispatchable status. Live recon 2026-07-24: freshly-created WOs sit in
+  // statusName "Pending Dispatch" (statusId 41); that is the state this button is for.
+  // Lenient match (substring, case-insensitive) so minor header/API formatting drift
+  // does not hide the launcher.
+  var DISPATCH_STATUS_RE = /pending\s+dispatch/i;
+  console.info('[BWN DISPATCH] v' + VER + ' - Pending-Dispatch-gated launcher -> confirm modal (bus + live GraphQL prefill, name->email roster) -> SWA /api/dispatch (x-bwn-key) -> Dispatch HTTP flow -> Dispatch_Notifications.xlsx + Teams card. Registers into the shared dock (bwn:dock:*), floating-button fallback when no host.');
 
   // ---- WO id + BWN Ops Suite bus (read-only consumer, suite data contract v1) --
   // bwn-suite-core (WO Assist) PUBLISHES the current WO's facts to sessionStorage
-  // key `bwn:wo:{id}` (fields incl. tracking, location, coordinator = the WO's
-  // "Assigned To"). We only READ it. Priority is NOT on the bus, so it comes from
-  // the GraphQL read below. Absent (Core not installed / Job View not opened yet)
-  // -> graceful blank, and the modal fields are all editable anyway.
+  // key `bwn:wo:{id}` (fields incl. tracking, location, status, coordinator = the WO's
+  // "Assigned To"). We only READ it. Priority is NOT on the bus, so it comes from the
+  // GraphQL read below. Absent (Core not installed / Job View not opened yet) -> we fall
+  // back to a live GraphQL status read for gating, and the modal fields stay editable.
   function woIdFromUrl() {
     var m = location.pathname.match(/(?:^|\/)work-orders\/(\d+)(?:\/|$|\?|#)/);
     return m ? m[1] : null;
@@ -49,8 +54,8 @@
   }
 
   // ---- Who's signed in (Umbrava Auth0 session) -----------------------------
-  // Used as the telemetry `actor`, and as a known-good name->email seed for the
-  // roster (a coordinator most often dispatches to themselves or a teammate).
+  // Used as the telemetry `actor`, and as a known-good name->email seed for the roster
+  // (if the WO is assigned to the person doing the dispatching, their email is known).
   function actor() {
     try {
       var k = Object.keys(localStorage).find(function (x) { return /@@auth0spajs@@::.*::@@user@@/.test(x); });
@@ -87,9 +92,9 @@
   }
 
   // ---- Same-origin GraphQL (mirrors bwn-ask / bwn-wo-audit gql) ------------
-  // app.umbrava.com is same-origin, so a plain fetch carries no @connect need; the
-  // page's own bearer is passed explicitly so it works from the GM_* sandbox. Best
-  // effort only: any miss leaves the modal on its bus prefill, never blocks the send.
+  // app.umbrava.com is same-origin, so a plain fetch needs no @connect; the page's own
+  // bearer is passed explicitly so it works from the GM_* sandbox. Best-effort only: any
+  // miss leaves gating fail-open and the modal on its bus prefill, never blocks the send.
   function gql(query, variables) {
     var tok = authToken();
     return fetch('/api/graphql', {
@@ -102,18 +107,46 @@
         return j && j.data;
       });
   }
-
-  // Current WO: all selectors proven live (bwn-ask CORE_Q / COORD_Q). One isolated
-  // query - if it errors we just fall back to the bus prefill.
+  // All selectors proven live (bwn-ask CORE_Q / STATUS_Q / COORD_Q). Isolated queries -
+  // an error just falls back to the bus / fail-open gating.
+  var GATE_Q = 'query($n:Int!){ workOrder(workOrderNumber:$n){ statusName } }';
   var DISP_WO_Q = 'query($n:Int!){ workOrder(workOrderNumber:$n){ trackingNumber locationId locationName assignedToMemberName priority{ label } } }';
 
-  // ---- Site-history coordinator (Phase 1.5 location roster, reused) ---------
-  // On a NEW / undispatched WO the "Assigned To" field is often blank, so the best
-  // default assignee is the coordinator who most recently handled THIS location.
-  // Umbrava's "work orders at a location" field/arg name is not known from source, so
-  // (exactly like bwn-ask) we DISCOVER it via introspection rather than guess, then
-  // read a compact roster. Everything here is best-effort + isolated: any miss leaves
-  // the name blank for manual entry, never fabricated. Cached per session.
+  // The WO's default assignee is often the CLIENT's team (e.g. "Team J"), not a dispatchable
+  // person. Treat a "Team ..." name as not-a-person so we fall back to a real coordinator.
+  function isTeamName(name) { return /^\s*team\b/i.test(String(name || '')); }
+  function isPerson(name) { name = String(name || '').trim(); return !!name && !isTeamName(name); }
+
+  // ---- Status gate ---------------------------------------------------------
+  // Decide, per WO, whether it is dispatchable ("Pending Dispatch"). Bus first (sync,
+  // free - the common case when WO Assist has run), live GraphQL as the fallback.
+  // Cached per WO for the session; a null (unreadable) result is NOT cached so a later
+  // bus publish can retry. isDispatchable fails OPEN on an unknown status (show the
+  // launcher; the confirm modal is still the gate) so a read hiccup never hides it.
+  var _statusCache = {};
+  function resolveStatus(woId) {
+    if (!woId) return Promise.resolve(null);
+    if (_statusCache[woId]) return Promise.resolve(_statusCache[woId]);
+    var bus = busGet(woId, 12 * 3600000);
+    if (bus && bus.status) { _statusCache[woId] = String(bus.status); return Promise.resolve(_statusCache[woId]); }
+    return gql(GATE_Q, { n: parseInt(woId, 10) }).then(function (d) {
+      var s = d && d.workOrder && d.workOrder.statusName ? String(d.workOrder.statusName) : '';
+      if (s) { _statusCache[woId] = s; return s; }
+      return null;
+    }, function () { return null; });
+  }
+  function isDispatchable(status) {
+    if (status == null || status === '') return true;   // unknown -> fail open
+    return DISPATCH_STATUS_RE.test(status);
+  }
+
+  // ---- Location-history coordinator (Phase 1.5 location roster, reused) -----
+  // When the WO's own live assignee is a team / blank, the best default is the coordinator
+  // who most recently handled THIS location. Umbrava's "work orders at a location" field/arg
+  // name is not known from source, so (like bwn-ask) we DISCOVER it via introspection rather
+  // than guess, then read a compact roster and take the most recent PERSON coordinator (skip
+  // team-assigned prior WOs - we want a real person to ping). Everything here is best-effort +
+  // isolated: any miss leaves the name blank for manual entry, never fabricated. Cached/session.
   var _locField;             // undefined=unqueried, null=none found, else {field,locArg,argType,container}
   var _locRoster = {};       // locationId -> [wo...]  (session cache)
   var ROSTER_SEL = 'number assignedToMemberName workOrderDate creationDate';
@@ -163,25 +196,26 @@
     });
   }
   function ts(d) { var n = Date.parse(d); return isNaN(n) ? 0 : n; }
-  // Most-recent prior WO (excluding the current one) that carries an assignee name.
+  // The person who had the last (most recent) work order at this location - skipping the
+  // current WO and any team-assigned prior WOs.
   function siteCoordinator(locationId, curNumber) {
     return fetchLocationRoster(locationId).then(function (wos) {
       var cur = String(curNumber == null ? '' : curNumber);
-      var withName = (wos || [])
-        .filter(function (w) { return w && String(w.number) !== cur && w.assignedToMemberName; })
+      var people = (wos || [])
+        .filter(function (w) { return w && String(w.number) !== cur && isPerson(w.assignedToMemberName); })
         .sort(function (a, b) { return ts(b && (b.workOrderDate || b.creationDate)) - ts(a && (a.workOrderDate || a.creationDate)); });
-      return withName.length ? String(withName[0].assignedToMemberName).trim() : '';
+      return people.length ? String(people[0].assignedToMemberName).trim() : '';
     }, function () { return ''; });
   }
 
   // ---- Name -> email roster (the AssigneeEmail source) ----------------------
-  // The assignee's email is NOT on the WO record (Umbrava exposes the coordinator
-  // NAME, not their UPN), and Get-user-profile (V2) in the flow resolves the Teams
-  // identity by email - so we keep a per-user name->email map in GM storage. It is
-  // seeded with the signed-in user, grows automatically on each successful dispatch,
-  // and is editable from the Tampermonkey menu. Store work emails only. (Live recon
-  // TODO in wo-dispatch-button.md: a members(name)->email GraphQL read could later
-  // seed this, but that field is unproven, so we do not guess it here.)
+  // The assignee's email is NOT on the WO record and is not exposed by Umbrava's member
+  // lookup either (live recon 2026-07-24: WO carries the member GUID + display NAME only;
+  // search_members returns no email; first names are ambiguous). So there is no reliable
+  // auto-resolve - we keep a per-user name->email map in GM storage. It is seeded with the
+  // signed-in user, grows automatically on each successful dispatch, and is editable from
+  // the Tampermonkey menu. Team assignees (e.g. "Team J") simply will not resolve, which is
+  // correct - the dispatcher picks the actual person. Store work emails only.
   function loadRoster() {
     try { var o = JSON.parse(GM_getValue('dispatch_roster', '{}')); return (o && typeof o === 'object') ? o : {}; }
     catch (e) { return {}; }
@@ -212,7 +246,8 @@
       if (nm && /^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(em)) next[nm] = em;
     });
     saveRoster(next);
-    toast(Object.keys(next).length ? 'Saved ' + Object.keys(next).length + ' roster entr' + (Object.keys(next).length === 1 ? 'y' : 'ies') + '.' : 'Roster cleared.');
+    var n = Object.keys(next).length;
+    toast(n ? 'Saved ' + n + ' roster entr' + (n === 1 ? 'y' : 'ies') + '.' : 'Roster cleared.');
   }
 
   // ---- Toast --------------------------------------------------------------
@@ -243,7 +278,7 @@
   // required = enforced client-side (api/dispatch re-checks the same minimum;
   //            Priority is optional - the card's else-branch color-codes a blank).
   var FIELDS = [
-    { key: 'AssignedToName', label: 'Assigned To (coordinator)', type: 'text', required: true, ph: 'Coordinator who owns this WO' },
+    { key: 'AssignedToName', label: 'Assigned To (coordinator)', type: 'text', required: true, ph: 'Coordinator this WO is assigned to' },
     { key: 'AssigneeEmail', label: 'Assignee Email', type: 'email', required: true, ph: 'coordinator@broadwaynational.com' },
     { key: 'Tracking', label: 'Tracking #', type: 'text', required: true, ph: 'WO tracking number' },
     { key: 'Location', label: 'Location', type: 'text', required: true, ph: 'Site / store' },
@@ -262,16 +297,20 @@
     var woId = woIdFromUrl();
     var bus = busGet(woId, 12 * 3600000);
 
-    // Synchronous prefill from the bus (present immediately). GraphQL patches the
-    // rest below once it resolves - only for fields the user has not typed into.
+    // Synchronous prefill from the bus (present immediately). The live GraphQL read below
+    // upgrades it - the coordinator name in particular is overwritten from the WO's live
+    // assignment, since that is who a supervisor/manager assigned it to "when the button
+    // is used". Only fields the user has not typed into are touched.
+    // Only seed the name from the bus if it is a PERSON; a team ("Team J") is not a dispatch
+    // target, so leave it blank and let the live read / location history fill a real coordinator.
+    var busCoord = (bus && bus.coordinator && isPerson(bus.coordinator)) ? String(bus.coordinator).trim() : '';
     var pre = {
-      AssignedToName: (bus && bus.coordinator) ? String(bus.coordinator).trim() : '',
-      AssigneeEmail: '',
+      AssignedToName: busCoord,
+      AssigneeEmail: busCoord ? rosterLookup(busCoord) : '',
       Tracking: (bus && bus.tracking) ? String(bus.tracking).trim() : (woId || ''),
       Location: (bus && bus.location) ? String(bus.location).trim() : '',
       Priority: ''
     };
-    if (pre.AssignedToName) pre.AssigneeEmail = rosterLookup(pre.AssignedToName);
 
     var back = document.createElement('div');
     back.style.cssText = 'position:fixed;inset:0;z-index:2147483646;background:rgba(0,0,0,.45);display:flex;align-items:flex-start;justify-content:center;overflow:auto;padding:40px 16px;';
@@ -296,7 +335,7 @@
     // What happens on send (the flow posts a Teams card the coordinator must accept).
     var who = document.createElement('div');
     who.style.cssText = 'font-size:12.5px;color:#33473d;background:#eef4f0;border:1px solid #cfe0d7;border-radius:8px;padding:8px 11px;margin-bottom:14px;line-height:1.45;';
-    who.textContent = 'Sends a Teams "New Dispatch Work Order" card to the coordinator below, who accepts it. Assignee is prefilled from this WO / the site history - edit it before sending.';
+    who.textContent = 'Sends a Teams "New Dispatch Work Order" card to the coordinator below, who accepts it. Prefilled from who this WO is assigned to - if that is a team, set the individual coordinator before sending.';
     form.appendChild(who);
 
     var inputs = {};
@@ -323,8 +362,8 @@
       form.appendChild(wrap);
     });
 
-    // When the coordinator name is (re)typed, offer the roster email if we know it
-    // and the email field is still empty / untouched.
+    // When the coordinator name is (re)typed, offer the roster email if we know it and the
+    // email field is still empty / untouched.
     inputs.AssignedToName.addEventListener('change', function () {
       if (touched.AssigneeEmail || inputs.AssigneeEmail.value.trim()) return;
       var em = rosterLookup(inputs.AssignedToName.value);
@@ -398,8 +437,8 @@
     openEl = back;
     document.addEventListener('keydown', onKey);
 
-    // If we are not on a WO page (opened from the TM menu), say so - the fields are
-    // then all manual. Otherwise upgrade the prefill from Umbrava in the background.
+    // If we are not on a WO page (opened from the TM menu), say so - the fields are then
+    // all manual. Otherwise upgrade the prefill from Umbrava (live) in the background.
     if (!woId) {
       msg.style.color = '#7a5b00';
       msg.textContent = 'No work order open - enter the dispatch fields manually.';
@@ -411,10 +450,11 @@
     if (first) setTimeout(function () { first.focus(); first.select && first.select(); }, 30);
   }
 
-  // Background prefill upgrade: read the current WO live, patch Priority + Tracking +
-  // Location + the coordinator name/email, but ONLY for fields the user has not typed
-  // into and that are still empty. If the WO has no assignee yet, fall back to the most
-  // recent coordinator at the same location (site history). All best-effort.
+  // Background prefill upgrade: read the current WO live and patch the fields the user has
+  // not typed into. Tracking / Location / Priority fill only if empty. The coordinator NAME
+  // resolves to a PERSON: the WO's live assignee if that is a real person (who a supervisor/
+  // manager assigned it to), else the coordinator from the most recent work order(s) at the
+  // same location; a team assignee is skipped in favour of that history person. Best-effort.
   function hydrateFromUmbrava(woId, inputs, touched) {
     var n = parseInt(woId, 10);
     function setIfEmpty(k, v) {
@@ -423,27 +463,30 @@
       var el = inputs[k];
       if (el && !touched[k] && !el.value.trim()) el.value = v;
     }
+    function setName(v) {   // overwrite the (maybe stale/blank) prefill unless the user typed
+      v = (v == null) ? '' : String(v).trim();
+      if (!v || touched.AssignedToName) return;
+      inputs.AssignedToName.value = v;
+      fillEmailFor(inputs, touched, v);
+    }
     gql(DISP_WO_Q, { n: n }).then(function (d) {
       var wo = (d && d.workOrder) || {};
       setIfEmpty('Tracking', wo.trackingNumber);
       setIfEmpty('Location', wo.locationName);
       setIfEmpty('Priority', wo.priority && wo.priority.label);
       var name = wo.assignedToMemberName ? String(wo.assignedToMemberName).trim() : '';
-      if (name) {
-        setIfEmpty('AssignedToName', name);
-        fillEmailFor(inputs, touched, inputs.AssignedToName.value);
-        return;
-      }
-      // No assignee on this WO -> site history (most recent coordinator at the location).
+      if (isPerson(name)) { setName(name); return; }              // supervisor/manager assigned a real person
+      // Team / blank assignee -> the person from the most recent WO(s) at this location.
       if (wo.locationId != null) {
         siteCoordinator(wo.locationId, wo.number != null ? wo.number : n).then(function (sc) {
-          if (sc) { setIfEmpty('AssignedToName', sc); fillEmailFor(inputs, touched, inputs.AssignedToName.value); }
+          if (sc) setName(sc);
+          else if (name) setName(name);   // no history person found - fall back to showing the team
         });
-      }
+      } else if (name) { setName(name); }
     }, function () { /* GraphQL unavailable - bus prefill stands */ });
   }
-  // Prefill AssigneeEmail from the roster (or from the signed-in user when the name
-  // matches them), only if untouched + empty.
+  // Prefill AssigneeEmail from the roster (or from the signed-in user when the name matches
+  // them), only if untouched + empty.
   function fillEmailFor(inputs, touched, name) {
     if (touched.AssigneeEmail || inputs.AssigneeEmail.value.trim()) return;
     var em = rosterLookup(name);
@@ -452,15 +495,17 @@
   }
 
   // ---- Shared launcher dock (bwn:dock:*) -----------------------------------
-  // bwn-suite-core's Launcher hosts the shared dock ([[bwn-launcher-dock]]). Dispatch
-  // is a WO-level action, so we register the 'dispatch' entry ONLY on a work-order page
-  // and unregister when navigating away (Umbrava is a SPA). detail.key carries the entry
-  // id (detail.id is the bwn:evt event name). If no host announces within a few seconds
-  // we fall back to a self-drawn floating button (also WO-page gated) so it is reachable.
+  // bwn-suite-core's Launcher hosts the shared dock ([[bwn-launcher-dock]]). Dispatch is a
+  // WO-level action shown ONLY on a work order in "Pending Dispatch", so we register the
+  // 'dispatch' entry when the current WO is dispatchable and unregister otherwise (Umbrava
+  // is a SPA - we reconcile on nav, on the host heartbeat, and when the bus updates).
+  // detail.key carries the entry id (detail.id is the bwn:evt event name). If no host
+  // announces within a few seconds we fall back to a self-drawn floating button (same gate).
   var DOCK_KEY = 'dispatch';
   var _hostSeen = false;
   var _fallbackActive = false;
   var _registered = false;
+  var _navToken = 0;
   function dockRegister() {
     try {
       document.dispatchEvent(new CustomEvent('bwn:evt', { detail: {
@@ -485,21 +530,29 @@
     b.onclick = buildModal;
     document.body.appendChild(b);
   }
-  // Reconcile dock/fallback presence with the current route.
+  // Apply the desired presence for the current route + status. Registering with no host
+  // yet is harmless (no listener); the host picks it up on its next heartbeat.
+  function applyPresence(show) {
+    if (show && !_registered) { dockRegister(); _registered = true; }
+    else if (!show && _registered) { dockUnregister(); _registered = false; }
+    if (_fallbackActive && show) { if (document.body) addButton(); }
+    else removeButton();
+  }
+  // Reconcile: gate on WO page AND dispatchable status (async, race-guarded by _navToken).
   function reeval() {
-    var on = isWOPage();
-    if (_hostSeen) {
-      removeButton(); _fallbackActive = false;
-      if (on && !_registered) { dockRegister(); _registered = true; }
-      else if (!on && _registered) { dockUnregister(); _registered = false; }
-    } else if (_fallbackActive) {
-      if (on) { if (document.body) addButton(); } else { removeButton(); }
-    }
+    var woId = woIdFromUrl();
+    if (!woId) { applyPresence(false); return; }
+    var myTok = ++_navToken;
+    resolveStatus(woId).then(function (st) {
+      if (myTok !== _navToken) return;              // navigated away meanwhile
+      applyPresence(isDispatchable(st));
+    });
   }
   function onDockHost() {
     _hostSeen = true;
-    if (_fallbackActive) { _fallbackActive = false; removeButton(); }
-    _registered = false;   // force a fresh register for a newly-elected host
+    _fallbackActive = false;
+    _registered = false;      // force a fresh register for this (possibly newly-elected) host
+    removeButton();
     reeval();
   }
   document.addEventListener('bwn:evt', function (e) {
@@ -507,13 +560,15 @@
     if (d.id === 'bwn:dock:host' || d.id === 'bwn:dock:ping') onDockHost();
     if (d.id === 'bwn:dock:open' && d.key === DOCK_KEY) buildModal();
   });
-  // Post-WO-Intake / cross-script opener hook: any suite script can request the modal
-  // with bwn:cmd {id:'dispatch:open'} (e.g. WO Intake could fire it after Create so the
-  // coordinator can dispatch the fresh WO immediately - see wo-dispatch-button.md).
+  // The suite bus (bwn:wo:{id}) landing can flip a WO to a known "Pending Dispatch" status
+  // after our first (bus-less) check - re-reconcile when it publishes.
+  document.addEventListener('bwn:update', function () { reeval(); });
+  // Post-WO-Intake / cross-script opener hook: any suite script can request the modal with
+  // bwn:cmd {id:'dispatch:open'} (e.g. WO Intake could fire it after Create - see
+  // wo-dispatch-button.md). This opener bypasses the status gate on purpose (explicit ask).
   document.addEventListener('bwn:cmd', function (e) {
     var d = e && e.detail; if (d && d.id === 'dispatch:open') buildModal();
   });
-
   // SPA route changes: re-reconcile on history navigation.
   (function hookNav() {
     function fire() { setTimeout(reeval, 0); }
@@ -535,13 +590,13 @@
     });
   } catch (e) { /* menu API absent - the dock / fallback button still opens the modal */ }
 
-  // Register into the dock on load (covers a host already up); the host heartbeat/ping
-  // re-registers us later. If no host is seen within 4s, switch to the fallback button.
+  // Reconcile on load (covers a host already up); the host heartbeat/ping re-registers us
+  // later. If no host is seen within 4s, switch on the fallback button (same status gate).
   seedRosterWithMe();
-  if (isWOPage()) { dockRegister(); _registered = true; }
+  reeval();
   setTimeout(function () {
     if (_hostSeen || _fallbackActive) return;
-    _fallbackActive = true; _registered = false;
+    _fallbackActive = true;
     reeval();
   }, 4000);
 })();
