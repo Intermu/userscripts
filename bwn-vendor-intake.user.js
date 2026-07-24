@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         BWN Vendor Intake (Broadway National)
 // @namespace    broadwaynational.bwn
-// @version      0.8.2
+// @version      0.8.3
 // @downloadURL  https://raw.githubusercontent.com/Intermu/userscripts/main/bwn-vendor-intake.user.js
 // @updateURL    https://raw.githubusercontent.com/Intermu/userscripts/main/bwn-vendor-intake.user.js
 // @description  Prefills Umbrava's Create Vendor form (and the detail-page Tax ID) from a Prospect Set-Up Form or a W-9. Fillable PDFs are read straight from their form fields; SCANNED W-9s are read by on-device OCR (Tesseract + pdf.js, fetched once at install, run entirely in the browser). The document and its tax ID never leave your machine. Adds a "Prefill from document" button; every extracted field is a suggestion to review before saving - the TIN especially, since OCR can misread digits.
@@ -11,11 +11,11 @@
 // @grant        GM_getResourceURL
 // @require      https://cdn.jsdelivr.net/npm/pdfjs-dist@3.11.174/build/pdf.min.js#sha384=ff5a940921b04eeafdbe37ffcfd966bbf7825186e93938128e6a5b310675fc2b57daffd670020aa91bfe5350d4086e9e
 // @require      https://cdn.jsdelivr.net/npm/tesseract.js@6.0.1/dist/tesseract.min.js#sha384=af5aeeded71fe8586708547807ba48146f8184517d2e516dcff3f5cb8a5b9569f7006b3dcb7941c7948a2cd7f8fab103
-// @resource     pdfWorker   https://cdn.jsdelivr.net/npm/pdfjs-dist@3.11.174/build/pdf.worker.min.js
-// @resource     tessWorker  https://cdn.jsdelivr.net/npm/tesseract.js@6.0.1/dist/worker.min.js
-// @resource     tessCore    https://cdn.jsdelivr.net/npm/tesseract.js-core@6.0.0/tesseract-core-simd-lstm.wasm.js
-// @resource     tessCoreFb  https://cdn.jsdelivr.net/npm/tesseract.js-core@6.0.0/tesseract-core-lstm.wasm.js
-// @resource     tessLangEng https://cdn.jsdelivr.net/npm/@tesseract.js-data/eng@1.0.0/4.0.0_best_int/eng.traineddata.gz
+// @resource     pdfWorker   https://cdn.jsdelivr.net/npm/pdfjs-dist@3.11.174/build/pdf.worker.min.js#sha384=4a7ccea1ba5130b5d9e76889bd99bf0b47d8c343907a64d7cd38c8b1db1f31cac2b4211ef6a833c537774529253b9c76
+// @resource     tessWorker  https://cdn.jsdelivr.net/npm/tesseract.js@6.0.1/dist/worker.min.js#sha384=5f3f1cb47b59807fde5b03aa77a8a0394fe47a99e2973e1da305bce11104d8a2fd0ed0dbc449ddff1c58873061342cdd
+// @resource     tessCore    https://cdn.jsdelivr.net/npm/tesseract.js-core@6.0.0/tesseract-core-simd-lstm.wasm.js#sha384=2176b458e83f5d52c4fa75c9bc420c1c30f382ab1d5458cd2c12887b01566795e7ebfff455f1cceaf595f7388afa9b2e
+// @resource     tessCoreFb  https://cdn.jsdelivr.net/npm/tesseract.js-core@6.0.0/tesseract-core-lstm.wasm.js#sha384=95608c64032d98e5eea0a6aba5a5a92c0ad78903ef61983ed1fab103ebc5827c1b1e125a1ee2692bf0eb8616c43e0540
+// @resource     tessLangEng https://cdn.jsdelivr.net/npm/@tesseract.js-data/eng@1.0.0/4.0.0_best_int/eng.traineddata.gz#sha384=248f9fada180a1ce460462258aeab31d19cfd67272aee920e6080d481bff4cef983958fee937ba5d740ec7b89ad74c6a
 // ==/UserScript==
 
 (function () {
