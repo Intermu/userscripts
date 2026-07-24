@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         BWN Suite - Core (Broadway National)
 // @namespace    broadwaynational.bwn
-// @version      1.64.0
+// @version      1.65.0
 // @downloadURL  https://raw.githubusercontent.com/Intermu/userscripts/main/bwn-suite-core.user.js
 // @updateURL    https://raw.githubusercontent.com/Intermu/userscripts/main/bwn-suite-core.user.js
 // @description  Runs several Umbrava helpers for BWN coordinators, in the browser with no privileged grants. Includes: PO Approval + ETA Builder; WO Assist (GP/ETA, a stall watchdog, DNE calculator, and a next-action playbook); Email Leak Guard (checks recipients against vendor names, PO amounts, and client budget references before an outbound email sends); WO List Heat (a triage overlay + My Day strip on the work-order list, with an optional same-origin Umbrava API scan for deterministic full-board coverage); and the BWN Launcher (opens the Azure Static Web App tools with the current WO's context). Modules share state through sessionStorage/localStorage. The only network calls are same-origin Umbrava GraphQL reads (app.umbrava.com/api/graphql, the app's own session): List Heat's full-board scan and WO Assist's work-order / trip / clock-in reads; everything else is offline. Toggle modules in BWN_MODULES below.
@@ -6452,7 +6452,7 @@
   });
 
   // ==========================================================================
-  // MODULE: BWN Launcher v1.9
+  // MODULE: BWN Launcher v1.10  (+ shared bwn:dock:* host for suite launchers)
   // ==========================================================================
   if (BWN_MODULES.launcher) BWN.safeModule('launcher', function () {
     'use strict';
@@ -6460,7 +6460,7 @@
     if (window.__bwnLauncher) return;
     window.__bwnLauncher = true;
 
-    console.info('[BWN LAUNCH] v1.9 loaded');
+    console.info('[BWN LAUNCH] v1.10 loaded (dock host)');
 
     // ---- App registry (EDIT PATHS HERE) --------------------------------------
     // All BWN tools live on one Azure Static Web App. Set each tool's path
@@ -6481,6 +6481,7 @@
 
       var DOCK_ID = 'bwn-launch-dock';
     var MENU_ID = 'bwn-launch-menu';
+    var DOCK_STACK_ID = 'bwn-dock-stack';   // shared launcher dock: registrant pills stacked above the Tools pill
 
     // ---- Bus + page context (shared via BWN core) -----------------------------
     var currentWOId = BWN.woId;
@@ -6921,6 +6922,15 @@
         '#' + MENU_ID + ' .it .sub{display:block;font:500 10px ui-monospace,"Segoe UI Mono","SF Mono",monospace;color:var(--bwn-text-faint);margin-top:2px;}' +
         '#' + MENU_ID + ' .empty{padding:14px;font-size:12px;color:var(--bwn-text-faint);}' +
         '#' + MENU_ID + ' .it:focus-visible{outline:2px solid var(--bwn-accent);outline-offset:-2px;}' +
+        // Shared launcher dock: registrant pills stacked UP from the Tools pill (left edge).
+        '#' + DOCK_STACK_ID + '{position:fixed;left:0;bottom:56px;z-index:99998;display:flex;flex-direction:column;gap:8px;align-items:flex-start;}' +
+        '#' + DOCK_STACK_ID + ' .bwn-dock-pill{display:flex;align-items:center;gap:7px;border:none;cursor:pointer;color:#fff;' +
+        'background:linear-gradient(135deg,var(--bwn-green),var(--bwn-green-dk));padding:8px 13px 8px 10px;border-radius:0 18px 18px 0;' +
+        'font:600 12px -apple-system,BlinkMacSystemFont,"Segoe UI","Helvetica Neue",Arial,sans-serif;box-shadow:2px 2px 10px rgba(0,0,0,.22);white-space:nowrap;}' +
+        '#' + DOCK_STACK_ID + ' .bwn-dock-pill:hover{filter:brightness(1.12);}' +
+        '#' + DOCK_STACK_ID + ' .bwn-dock-pill:focus-visible{outline:2px solid var(--bwn-accent);outline-offset:2px;}' +
+        '#' + DOCK_STACK_ID + ' .bwn-dock-badge{background:var(--bwn-accent);color:#08301d;border-radius:9px;padding:0 6px;' +
+        'font:700 10px ui-monospace,"Segoe UI Mono","SF Mono",monospace;min-width:16px;text-align:center;}' +
         '.bwn-ops-overlay{position:fixed;inset:0;z-index:100001;background:rgba(13,38,26,.5);backdrop-filter:blur(6px);-webkit-backdrop-filter:blur(6px);display:flex;align-items:center;justify-content:center;font-family:-apple-system,BlinkMacSystemFont,"Segoe UI","Helvetica Neue",Arial,sans-serif;}' +
         '.bwn-ops-card{width:540px;max-width:94vw;max-height:88vh;display:flex;flex-direction:column;background:var(--bwn-surface);border-radius:16px;overflow:hidden;box-shadow:0 18px 60px rgba(0,0,0,.35);}' +
         '.bwn-ops-hd{background:linear-gradient(135deg,var(--bwn-green),var(--bwn-green-dk));color:#fff;padding:16px 20px;}' +
@@ -7111,6 +7121,142 @@
       BWN.beat('launcher', 'ok', 'dock mounted');
     }
 
+    // ---- Shared launcher dock (bwn:dock:* host) --------------------------------
+    // Generalizes the CC pair's two-party bwn:cc:* coordination into an N-party dock:
+    // any suite module registers ONE launcher over the document-level bwn:evt bus and
+    // this host renders them as a single coordinated stack ABOVE the Tools pill, killing
+    // the old hand-picked-corner launchers. Modules never touch the dock DOM - only
+    // serializable events cross the bus (sandbox-safe, @grant none). The dock owns the
+    // button; a click just emits bwn:dock:open back to the owner, which opens its own UI.
+    //
+    // Bus (bwn:evt detail.id namespaced bwn:dock:*). NOTE: detail.id is the EVENT name,
+    // so an entry's stable key rides as detail.key (not detail.id):
+    //   bwn:dock:host      host->all  {hostId,priority,ts}          "I am the host" (announce + heartbeat)
+    //   bwn:dock:ping      host->all  {hostId}                      "all modules (re)register now"
+    //   bwn:dock:register  mod->host  {key,label,icon,weight,badge?,minRank?,title?}  add/replace (idempotent by key)
+    //   bwn:dock:update    mod->host  {key,label?,icon?,badge?,minRank?}              live-patch an entry
+    //   bwn:dock:unregister mod->host {key}                         remove an entry
+    //   bwn:dock:open      host->mod  {key}                         user clicked; module opens its modal/panel
+    var HOST_PRIORITY = 100;                      // Core is the always-present, high-priority host
+    var DOCK_PING_MS = 20000;                     // heartbeat: re-announce + pull registrations
+    var DOCK_TTL_MS = DOCK_PING_MS * 3 + 5000;    // an entry drops if not re-registered within ~3 pings
+    var DOCK_COLLAPSE_OVER = 3;                    // >3 entries collapse to a speed-dial FAB (never a wall of buttons)
+    var dockBornTs = Date.now();
+    var dockHostId = 'h' + Math.random().toString(36).slice(2) + dockBornTs.toString(36);
+    var dockAmHost = true;
+    var dockRoster = {};                           // key -> {key,label,icon,weight,badge,minRank,title,order,seen}
+    var dockOrderSeq = 0;
+    var dockExpanded = false;
+    var dockRank = null;                           // reader's rank (UX gating only; server is the real boundary)
+    var dockRenderT = null;
+
+    function dockEmit(id, extra) {
+      try {
+        var detail = { id: id };
+        if (extra) Object.keys(extra).forEach(function (k) { detail[k] = extra[k]; });
+        document.dispatchEvent(new CustomEvent('bwn:evt', { detail: detail }));
+      } catch (e) { }
+    }
+    function dockAnnounce() { if (dockAmHost) dockEmit('bwn:dock:host', { hostId: dockHostId, priority: HOST_PRIORITY, ts: dockBornTs }); }
+    function dockPing() { if (dockAmHost) dockEmit('bwn:dock:ping', { hostId: dockHostId }); }
+    // Total order so exactly one host survives: higher priority wins, then earlier ts, then hostId string.
+    function dockOtherWins(o) {
+      if (!o || o.hostId === dockHostId) return false;
+      var op = typeof o.priority === 'number' ? o.priority : 0;
+      if (op !== HOST_PRIORITY) return op > HOST_PRIORITY;
+      var ot = typeof o.ts === 'number' ? o.ts : Infinity;
+      if (ot !== dockBornTs) return ot < dockBornTs;
+      return String(o.hostId) < String(dockHostId);
+    }
+    function scheduleDockRender() { clearTimeout(dockRenderT); dockRenderT = setTimeout(BWN.guard(renderDock, 'launcher:dockrender'), 120); }
+    function removeDockStack() { var s = document.getElementById(DOCK_STACK_ID); if (s) s.remove(); }
+    function dockVisible() {
+      var arr = Object.keys(dockRoster).map(function (k) { return dockRoster[k]; });
+      // Fail-OPEN when rank is unknown (show the entry; the server rejects if truly unauthorized).
+      arr = arr.filter(function (en) { return en.minRank == null || dockRank == null || dockRank >= en.minRank; });
+      arr.sort(function (a, b) { return (a.weight - b.weight) || (a.order - b.order); });
+      return arr;
+    }
+    function pruneDock() {
+      var now = Date.now();
+      Object.keys(dockRoster).forEach(function (k) { if (now - dockRoster[k].seen > DOCK_TTL_MS) delete dockRoster[k]; });
+    }
+    function dockPillEl(en, onClick) {
+      var b = document.createElement('button');
+      b.type = 'button'; b.className = 'bwn-dock-pill';
+      if (en.title) b.title = en.title;
+      if (en.icon) { var ic = document.createElement('span'); ic.textContent = en.icon; b.appendChild(ic); }
+      var lb = document.createElement('span'); lb.textContent = en.label; b.appendChild(lb);
+      if (en.badge) { var bd = document.createElement('span'); bd.className = 'bwn-dock-badge'; bd.textContent = en.badge; b.appendChild(bd); }
+      b.addEventListener('click', BWN.guard(onClick, 'launcher:dockclick'));
+      return b;
+    }
+    function renderDock() {
+      if (!dockAmHost) { removeDockStack(); return; }
+      var vis = dockVisible();
+      var stack = document.getElementById(DOCK_STACK_ID);
+      if (!vis.length) { if (stack) stack.remove(); return; }   // NO-OP with zero registrants
+      ensureStyle();
+      if (!stack) { stack = document.createElement('div'); stack.id = DOCK_STACK_ID; document.body.appendChild(stack); }
+      stack.textContent = '';
+      if (vis.length > DOCK_COLLAPSE_OVER && !dockExpanded) {
+        stack.appendChild(dockPillEl({ icon: '➕', label: vis.length + ' tools', title: 'Show suite tools' },
+          function () { dockExpanded = true; renderDock(); }));
+        return;
+      }
+      if (vis.length > DOCK_COLLAPSE_OVER) {
+        stack.appendChild(dockPillEl({ icon: '✖', label: 'Hide', title: 'Collapse tools' },
+          function () { dockExpanded = false; renderDock(); }));
+      }
+      vis.forEach(function (en) {
+        stack.appendChild(dockPillEl(en, function () { dockEmit('bwn:dock:open', { key: en.key }); }));
+      });
+    }
+
+    document.addEventListener('bwn:evt', BWN.guard(function (e) {
+      var d = e && e.detail; if (!d || !d.id) return;
+      if (d.id === 'bwn:role' && typeof d.rank === 'number') { dockRank = d.rank; scheduleDockRender(); return; }
+      if (d.id === 'bwn:dock:host') { if (dockOtherWins(d)) { dockAmHost = false; removeDockStack(); } return; }
+      if (!dockAmHost) return;
+      if (d.id === 'bwn:dock:register' && d.key) {
+        var ex = dockRoster[d.key];
+        dockRoster[d.key] = {
+          key: d.key,
+          label: String(d.label || d.key),
+          icon: d.icon ? String(d.icon) : '',
+          weight: typeof d.weight === 'number' ? d.weight : 50,
+          badge: (d.badge != null && d.badge !== '') ? String(d.badge) : '',
+          minRank: typeof d.minRank === 'number' ? d.minRank : null,
+          title: d.title ? String(d.title) : '',
+          order: ex ? ex.order : (++dockOrderSeq),
+          seen: Date.now()
+        };
+        scheduleDockRender();
+      } else if (d.id === 'bwn:dock:update' && d.key && dockRoster[d.key]) {
+        var en = dockRoster[d.key];
+        if (d.label != null) en.label = String(d.label);
+        if (d.icon != null) en.icon = String(d.icon);
+        if (d.badge != null) en.badge = d.badge === '' ? '' : String(d.badge);
+        if (typeof d.minRank === 'number') en.minRank = d.minRank;
+        en.seen = Date.now();
+        scheduleDockRender();
+      } else if (d.id === 'bwn:dock:unregister' && d.key) {
+        if (dockRoster[d.key]) { delete dockRoster[d.key]; scheduleDockRender(); }
+      }
+    }, 'launcher:dockbus'));
+
+    // Seed rank from the persisted slot (same grant-none-safe read the rest of the suite uses).
+    try {
+      var _dr = JSON.parse(localStorage.getItem('bwn:role:last') || 'null');
+      if (_dr && _dr.ok && typeof _dr.rank === 'number' && _dr.ts && (Date.now() - _dr.ts) < 6 * 3600 * 1000) dockRank = _dr.rank;
+    } catch (e) { }
+
+    // Heartbeat: re-announce (registrants re-register on it) + ping + drop stale entries.
+    setInterval(BWN.guard(function () {
+      if (!dockAmHost) return;
+      dockAnnounce(); dockPing(); pruneDock(); scheduleDockRender();
+    }, 'launcher:dockbeat'), DOCK_PING_MS);
+
     // Command-palette bridge: lets the palette module open Suite settings without
     // reaching into this module's scope (modules only share DOM + storage).
     document.addEventListener('bwn:cmd', BWN.guard(function (e) {
@@ -7121,10 +7267,12 @@
     var debounce = null;
     var obs = new MutationObserver(BWN.guard(function () {
       clearTimeout(debounce);
-      debounce = setTimeout(BWN.guard(ensureDock, 'launcher:dock'), 600);
+      debounce = setTimeout(BWN.guard(function () { ensureDock(); if (dockAmHost) renderDock(); }, 'launcher:dock'), 600);
     }, 'launcher:observe'));
     obs.observe(document.body, { childList: true, subtree: true });
     ensureDock();
+    // Announce host + pull registrations so modules (loaded before or after us) sync now.
+    dockAnnounce(); dockPing();
   });
 
 
