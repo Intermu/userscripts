@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         BWN WO Audit (Broadway National)
 // @namespace    broadwaynational.bwn
-// @version      0.4.1
+// @version      0.5.0
 // @downloadURL  https://raw.githubusercontent.com/Intermu/userscripts/main/bwn-wo-audit.user.js
 // @updateURL    https://raw.githubusercontent.com/Intermu/userscripts/main/bwn-wo-audit.user.js
 // @description  Batch WO-audit tool. Upload a WO audit .xlsx; for each work order this reads its two most recent notes DIRECTLY from Umbrava's GraphQL API in-page (using your live Umbrava session - the same read the BWN Ops Suite AI drafts use), then asks the broadway-internal-ops SWA summarize route (x-bwn-key gated, Anthropic key server-side) to write a 1-3 sentence client-ready status note. Fills the audit's notes column and downloads the workbook, preserving every other cell and formula. Runs entirely in the app.umbrava.com page so it inherits your Umbrava auth - no MCP, no pasted keys, nothing sensitive in this script. This replaces the old standalone WO_Audit_Automation.html SWA tool, whose server-side MCP path could not authenticate to Umbrava.
@@ -19,7 +19,7 @@
 (function () {
   'use strict';
 
-  var VER = '0.4.0';
+  var VER = '0.5.0';
   var FONT = "-apple-system,BlinkMacSystemFont,'Segoe UI','Helvetica Neue',Arial,sans-serif";
   var SWA_BASE = 'https://green-stone-0717dab0f.7.azurestaticapps.net';
   var GREEN = '#0d3d26';
@@ -30,7 +30,7 @@
     { id: 'claude-haiku-4-5', label: 'Haiku 4.5 (cheapest)' },
   ];
   var XLSX_MIME = 'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet';
-  console.info('[BWN WO AUDIT] v' + VER + ' - in-page GraphQL notes read -> bwnAI -> /api/ai summarize -> filled .xlsx download');
+  console.info('[BWN WO AUDIT] v' + VER + ' - in-page GraphQL notes read -> bwnAI -> /api/ai summarize -> filled .xlsx download; registers into the shared dock (bwn:dock:*), floating-button fallback when no dock host');
 
   // ====================================================================
   // Auth: the live Umbrava Auth0 bearer, read straight from the page (same
@@ -691,7 +691,37 @@
     });
   } catch (e) { /* menu API absent - floating button still works */ }
 
-  // Small floating launcher, bottom-left so it never collides with the CC launcher (bottom-right).
+  // ---- Shared launcher dock (bwn:dock:*) -----------------------------------
+  // bwn-suite-core's Launcher hosts the shared dock ([[bwn-launcher-dock]]); we
+  // register one entry ('wo-audit') instead of hand-placing a bottom-left button.
+  // detail.key carries the entry id (detail.id is the bwn:evt event name). If no
+  // host announces within a few seconds we fall back to the old floating button.
+  var DOCK_KEY = 'wo-audit';
+  var _hostSeen = false;
+  var _fallbackActive = false;
+  function dockRegister() {
+    try {
+      document.dispatchEvent(new CustomEvent('bwn:evt', { detail: {
+        id: 'bwn:dock:register', key: DOCK_KEY, label: 'WO Audit', icon: '📋', weight: 20,
+        title: 'BWN WO Audit - batch status notes from an audit .xlsx'
+      } }));
+    } catch (e) { }
+  }
+  function removeButton() { var b = document.getElementById('bwn-woaudit-btn'); if (b) b.remove(); }
+  try {
+    document.addEventListener('bwn:evt', function (e) {
+      var d = e && e.detail; if (!d) return;
+      if (d.id === 'bwn:dock:host' || d.id === 'bwn:dock:ping') {
+        _hostSeen = true;
+        if (_fallbackActive) { _fallbackActive = false; removeButton(); }
+        dockRegister();
+      }
+      if (d.id === 'bwn:dock:open' && d.key === DOCK_KEY) buildModal();
+    });
+  } catch (e) { }
+
+  // Small floating launcher (fallback only): bottom-left so it never collides with
+  // the CC launcher. Normally the shared dock renders our entry instead.
   function addButton() {
     if (document.getElementById('bwn-woaudit-btn')) return;
     var b = document.createElement('button');
@@ -702,6 +732,14 @@
     b.onclick = buildModal;
     document.body.appendChild(b);
   }
-  if (document.body) addButton();
-  else document.addEventListener('DOMContentLoaded', addButton);
+
+  // Register into the dock on load (covers a host already up); the host heartbeat
+  // re-registers us later. If no host is seen within 4s, show the fallback button.
+  dockRegister();
+  setTimeout(function () {
+    if (_hostSeen || _fallbackActive) return;
+    _fallbackActive = true;
+    if (document.body) addButton();
+    else document.addEventListener('DOMContentLoaded', addButton);
+  }, 4000);
 })();
