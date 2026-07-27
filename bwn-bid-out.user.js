@@ -826,9 +826,11 @@
       '.bwn-bo-ddmenu{position:absolute;top:100%;left:0;margin-top:4px;background:#fff;border:1px solid #dde6e1;border-radius:8px;box-shadow:0 8px 24px rgba(13,38,26,.14);min-width:230px;z-index:2147483000;overflow:hidden;}' +
       '.bwn-bo-dditem{display:block;width:100%;text-align:left;background:#fff;border:none;padding:10px 14px;font:400 14px ' + FONT + ';color:#1f2a24;cursor:pointer;white-space:nowrap;text-transform:none;}' +
       '.bwn-bo-dditem:hover{background:#eef3f0;}' +
-      '#bwn-bidout-ov{position:fixed;inset:0;z-index:2147483001;background:rgba(13,38,26,.5);display:flex;align-items:center;justify-content:center;font-family:' + FONT + ';}' +
-      '.bwn-bo{width:740px;max-width:96vw;max-height:92vh;overflow:auto;background:#fff;border-radius:14px;box-shadow:0 18px 60px rgba(13,38,26,.28);color:#1f2a24;font-size:16px;}' +
-      '.bwn-bo-hd{background:linear-gradient(135deg,#1a5f3e,#0d3d26);color:#fff;padding:16px 18px;font:500 20px/32px ' + FONT + ';display:flex;align-items:center;gap:10px;}' +
+      // Suite drawer geometry: the wizard rides the dock rail edge like every other
+      // tool, so there is no centred overlay and no backdrop over the work order.
+      '#bwn-bidout-ov{position:fixed;top:0;bottom:0;left:var(--bwn-dock-w,158px);z-index:2147483001;display:flex;font-family:' + FONT + ';}' +
+      '.bwn-bo{width:560px;max-width:calc(100vw - var(--bwn-dock-w,158px) - 8px);display:flex;flex-direction:column;overflow:auto;background:#fff;border-radius:0 14px 14px 0;box-shadow:10px 0 34px rgba(13,38,26,.22);color:#1f2a24;font-size:16px;}' +
+      '.bwn-bo-hd{background:linear-gradient(135deg,#1a5f3e,#0d3d26);color:#fff;padding:15px 16px 14px 18px;font:600 16px/24px ' + FONT + ';display:flex;align-items:center;gap:10px;border-radius:0 14px 0 0;position:sticky;top:0;z-index:1;}' +
       '.bwn-bo-hd .x{margin-left:auto;background:transparent;border:none;color:#fff;font-size:20px;line-height:1;cursor:pointer;}' +
       '.bwn-bo-bd{padding:14px 18px;}' +
       '.bwn-bo-wo{font:500 14px ' + FONT + ';color:#0d3d26;margin-bottom:8px;}' +
@@ -893,11 +895,24 @@
 
   var openState = null;
 
+  // Bid-Out has no dock entry (it rides the native bid buttons), but it shares the one
+  // drawer slot: fold away when another tool claims it.
+  try {
+    document.addEventListener('bwn:evt', function (e) {
+      var d = e && e.detail;
+      if (d && d.id === 'bwn:drawer:open' && d.key !== 'bidout') {
+        var o = document.getElementById('bwn-bidout-ov'); if (o) o.remove();
+      }
+    });
+  } catch (e) { }
+
   function openPanel() {
     var n = woNumber();
     if (!n) { toast('Open a work order first.'); return; }
     ensureStyle();
     var old = document.getElementById('bwn-bidout-ov'); if (old) old.remove();
+    // Claim the shared drawer slot so a tool already open folds away.
+    try { document.dispatchEvent(new CustomEvent('bwn:evt', { detail: { id: 'bwn:drawer:open', key: 'bidout' } })); } catch (e) { }
     var ov = document.createElement('div'); ov.id = 'bwn-bidout-ov';
     var box = document.createElement('div'); box.className = 'bwn-bo';
     box.innerHTML =

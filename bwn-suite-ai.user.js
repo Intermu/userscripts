@@ -993,6 +993,10 @@
       document.addEventListener('bwn:evt', function (e) {
         var d = e && e.detail;
         if (d && d.id === 'bwn:role' && typeof d.rank === 'number') _liveRank = d.rank;
+        // Another tool claimed the shared drawer slot - fold the Find Techs panel away.
+        if (d && d.id === 'bwn:drawer:open' && d.key !== 'findtechs') {
+          var p = document.getElementById('bwn-ft-panel'); if (p) p.remove();
+        }
       });
     } catch (e) { /* no document (worker) - rank stays unknown -> on-device */ }
     function rank() {
@@ -4887,10 +4891,10 @@ if (BWN_MODULES.jobView) BWN.safeModule('jobView', function () {
       var st = document.createElement('style');
       st.id = STYLE_ID;
       st.textContent =
-        '.bwn-ft-overlay{position:fixed;inset:0;z-index:100000;background:rgba(13,38,26,.5);backdrop-filter:blur(6px);-webkit-backdrop-filter:blur(6px);display:flex;align-items:center;justify-content:center;font-family:-apple-system,BlinkMacSystemFont,"Segoe UI","Helvetica Neue",Arial,sans-serif;animation:bwnFtFade .2s ease-out;}' +
+        '.bwn-ft-overlay{position:fixed;top:0;bottom:0;left:var(--bwn-dock-w,158px);z-index:100000;display:flex;font-family:-apple-system,BlinkMacSystemFont,"Segoe UI","Helvetica Neue",Arial,sans-serif;animation:bwnFtFade .2s ease-out;}' +
         '@keyframes bwnFtFade{from{opacity:0}to{opacity:1}}' +
-        '@keyframes bwnFtUp{from{transform:translateY(14px) scale(.985);opacity:0}to{transform:translateY(0) scale(1);opacity:1}}' +
-        '.bwn-ft-card{width:720px;max-width:94vw;max-height:90vh;display:flex;flex-direction:column;background:var(--bwn-surface);border-radius:16px;overflow:hidden;box-shadow:0 1px 2px rgba(13,38,26,.06),0 12px 28px rgba(13,38,26,.16),0 32px 64px rgba(13,38,26,.22);animation:bwnFtUp .24s cubic-bezier(.2,.8,.2,1);}' +
+        '@keyframes bwnFtUp{from{transform:translateX(-14px);opacity:.4}to{transform:none;opacity:1}}' +
+        '.bwn-ft-card{width:560px;max-width:calc(100vw - var(--bwn-dock-w,158px) - 8px);display:flex;flex-direction:column;background:var(--bwn-surface);border-radius:0 14px 14px 0;overflow:hidden;box-shadow:10px 0 34px rgba(13,38,26,.2);animation:bwnFtUp .18s ease-out;}' +
         '.bwn-ft-head{position:relative;background:linear-gradient(135deg,var(--bwn-green),var(--bwn-green-dk));color:#fff;padding:18px 22px;display:flex;align-items:center;gap:14px;}' +
         '.bwn-ft-head::after{content:"";position:absolute;left:0;right:0;bottom:0;height:1px;background:linear-gradient(90deg,transparent,rgba(46,204,113,.5),transparent);}' +
         '.bwn-ft-head .t{font-weight:500;font-size:17px;line-height:1.15;letter-spacing:-.01em;}' +
@@ -4986,6 +4990,8 @@ if (BWN_MODULES.jobView) BWN.safeModule('jobView', function () {
       var wrap = document.createElement('div');
       wrap.id = 'bwn-ft-panel';
       wrap.className = 'bwn-ft-overlay';
+      // Claim the shared drawer slot so whatever tool is open folds away first.
+      try { document.dispatchEvent(new CustomEvent('bwn:evt', { detail: { id: 'bwn:drawer:open', key: 'findtechs' } })); } catch (e) { }
       var card = document.createElement('div');
       card.className = 'bwn-ft-card';
 
