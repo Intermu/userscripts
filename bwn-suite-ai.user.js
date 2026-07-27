@@ -993,9 +993,10 @@
       document.addEventListener('bwn:evt', function (e) {
         var d = e && e.detail;
         if (d && d.id === 'bwn:role' && typeof d.rank === 'number') _liveRank = d.rank;
-        // Another tool claimed the shared drawer slot - fold the Find Techs panel away.
-        if (d && d.id === 'bwn:drawer:open' && d.key !== 'findtechs') {
-          var p = document.getElementById('bwn-ft-panel'); if (p) p.remove();
+        // Another tool claimed the shared drawer slot - fold ours away.
+        if (d && d.id === 'bwn:drawer:open') {
+          if (d.key !== 'findtechs') { var p = document.getElementById('bwn-ft-panel'); if (p) p.remove(); }
+          if (d.key !== 'jobview') { var jv = document.getElementById('bwn-jv-overlay'); if (jv) jv.remove(); }
         }
       });
     } catch (e) { /* no document (worker) - rank stays unknown -> on-device */ }
@@ -4030,7 +4031,7 @@ if (BWN_MODULES.jobView) BWN.safeModule('jobView', function () {
   // MODAL SHELL  (mirrors the Client Update overlay pattern)
   // ====================================================================
   var JV_CSS = `
-#bwn-jv-overlay{position:fixed;inset:0;z-index:100000;background:rgba(15,23,42,0.55);display:flex;align-items:flex-start;justify-content:center;padding:40px 16px;overflow-y:auto;font-family:-apple-system,BlinkMacSystemFont,'Segoe UI','Helvetica Neue',Arial,sans-serif;
+#bwn-jv-overlay{position:fixed;top:0;bottom:0;left:var(--bwn-dock-w,158px);z-index:100000;display:flex;overflow:hidden;font-family:-apple-system,BlinkMacSystemFont,'Segoe UI','Helvetica Neue',Arial,sans-serif;
   --color-bg:#f0f4f8;--color-surface:#ffffff;--color-surface-alt:#f8fafc;--color-surface-faint:#fafffe;
   --color-text:#1e293b;--color-text-muted:#64748b;--color-text-ghost:#94a3b8;
   --color-border:#e2e8f0;--color-border-strong:#cbd5e1;
@@ -4045,7 +4046,11 @@ if (BWN_MODULES.jobView) BWN.safeModule('jobView', function () {
   --border:#e2e8f0;--text:#1e293b;--muted:#64748b;--bg:#f0f4f8;
   --green-darker:#0d3d26;--amber-text:#7d5a00;--red-text:#8b1a1a;--card:#ffffff;--card2:#f6faf7;}
 #bwn-jv-overlay *,#bwn-jv-overlay *::before,#bwn-jv-overlay *::after{box-sizing:border-box;}
-#bwn-jv-card{background:var(--color-surface);border:1px solid var(--border);border-radius:10px;max-width:1100px;width:100%;max-height:calc(100vh - 80px);display:flex;flex-direction:column;box-shadow:0 12px 40px rgba(0,0,0,0.25);font-family:-apple-system,BlinkMacSystemFont,'Segoe UI','Helvetica Neue',Arial,sans-serif;overflow:hidden;color:var(--text);}
+/* Suite drawer: the reading pane rides the dock rail edge like every other tool. It is
+   wider than the form drawers (1100px) because the two-column layout needs the room; it
+   clamps to whatever the rail leaves, and the max-width:900px rule at the bottom of this
+   sheet stacks the columns once that clamp gets tight. */
+#bwn-jv-card{background:var(--color-surface);border:none;border-radius:0 14px 14px 0;width:1100px;max-width:calc(100vw - var(--bwn-dock-w,158px) - 8px);height:100%;display:flex;flex-direction:column;box-shadow:10px 0 34px rgba(0,0,0,0.2);font-family:-apple-system,BlinkMacSystemFont,'Segoe UI','Helvetica Neue',Arial,sans-serif;overflow:hidden;color:var(--text);animation:bwn-drawer-in .16s ease-out;}
 #bwn-jv-overlay .badge{display:inline-block;font-size:9px;font-weight:600;padding:2px 7px;border-radius:99px;letter-spacing:normal;text-transform:none;}
 #bwn-jv-overlay .badge.b-red{background:var(--color-danger-bg-alt);color:var(--color-danger-text);}
 #bwn-jv-overlay .badge.b-amber{background:var(--color-warning-bg);color:var(--color-warning-text);}
@@ -4053,7 +4058,7 @@ if (BWN_MODULES.jobView) BWN.safeModule('jobView', function () {
 #bwn-jv-overlay .badge.b-blue{background:var(--color-info-bg);color:var(--color-info-text);}
 #bwn-jv-overlay .badge.b-gray{background:var(--color-surface-sunken);color:var(--color-text-soft);}
 #bwn-jv-overlay .pri2{display:inline-block;font-size:9.5px;font-weight:500;padding:2px 7px;border-radius:99px;border:1px solid var(--border);background:var(--color-surface-alt);color:var(--text);}
-#bwn-jv-overlay .job-modal-head{display:flex;align-items:center;gap:10px;padding:14px 18px;border-bottom:1px solid var(--border);position:sticky;top:0;background:var(--color-surface);border-radius:10px 10px 0 0;}
+#bwn-jv-overlay .job-modal-head{display:flex;align-items:center;gap:10px;padding:14px 18px;border-bottom:1px solid var(--border);position:sticky;top:0;background:var(--color-surface);border-radius:0 14px 0 0;}
 #bwn-jv-overlay .job-modal-head .jm-id{font-family:ui-monospace,'Segoe UI Mono','SF Mono',monospace;font-weight:500;font-size:14px;color:var(--text);}
 #bwn-jv-overlay .job-modal-head .jm-x{margin-left:auto;background:none;border:none;font-size:20px;line-height:1;cursor:pointer;color:var(--muted);}
 #bwn-jv-overlay .job-modal-head{background:linear-gradient(135deg,#1a5f3e,#0d3d26);border-bottom:none;}
@@ -4332,6 +4337,8 @@ if (BWN_MODULES.jobView) BWN.safeModule('jobView', function () {
     VENDOR_KIND = {};
 
     var old = document.getElementById('bwn-jv-overlay'); if (old) old.remove();
+    // Claim the shared drawer slot so whatever tool is open folds away first.
+    try { document.dispatchEvent(new CustomEvent('bwn:evt', { detail: { id: 'bwn:drawer:open', key: 'jobview' } })); } catch (e) { }
     var wrap = document.createElement('div'); wrap.id = 'bwn-jv-overlay';
     var card = document.createElement('div'); card.id = 'bwn-jv-card';
     wrap.appendChild(card);
@@ -4351,9 +4358,10 @@ if (BWN_MODULES.jobView) BWN.safeModule('jobView', function () {
     function onKey(e) { if (e.key === 'Escape') { close(); } }
     _jvClose = close;
     document.addEventListener('keydown', onKey, true);
-    wrap.addEventListener('click', function (e) { if (e.target === wrap) close(); });
     document.body.appendChild(wrap);
-    releaseA11y = bwnA11yDialog(card, { label: 'Job View', modal: true });
+    // Non-modal, like the rest of the drawers: there is no backdrop to click away and the
+    // work order behind stays usable, so Escape and the header X are the ways out.
+    releaseA11y = bwnA11yDialog(card, { label: 'Job View', modal: false });
   }
 
   // Auto-update: when Core republishes the bus for the WO we're showing, re-render the open
