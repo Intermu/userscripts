@@ -20,7 +20,7 @@
     woAssist: true,      // side-docked GP + ETA watchdog + playbook on WO pages
     leakGuard: true,     // outbound email cross-contamination guard
     listHeat: true,      // heat overlay + audit on the Work Orders list
-    launcher: true,      // BWN tools dock (bottom-left)
+    launcher: true,      // BWN tools dock (left edge)
     viewManager: true,   // saved column+assignee view presets on the WO list
     palette: true,       // Ctrl/Cmd-K command palette for the whole suite
     visitLog: true,      // per-WO "what changed" watch strip + end-of-day digest
@@ -6481,7 +6481,7 @@
 
       var DOCK_ID = 'bwn-launch-dock';
     var MENU_ID = 'bwn-launch-menu';
-    var DOCK_STACK_ID = 'bwn-dock-stack';   // shared launcher dock: one dark rail card (logo + icon rows) bottom-left
+    var DOCK_STACK_ID = 'bwn-dock-stack';   // shared launcher dock: one dark rail card (logo + icon rows) on the left edge
 
     // ---- Bus + page context (shared via BWN core) -----------------------------
     var currentWOId = BWN.woId;
@@ -6922,9 +6922,11 @@
         '#' + MENU_ID + ' .it .sub{display:block;font:500 10px ui-monospace,"Segoe UI Mono","SF Mono",monospace;color:var(--bwn-text-faint);margin-top:2px;}' +
         '#' + MENU_ID + ' .empty{padding:14px;font-size:12px;color:var(--bwn-text-faint);}' +
         '#' + MENU_ID + ' .it:focus-visible{outline:2px solid var(--bwn-accent);outline-offset:-2px;}' +
-        // Shared launcher dock: one dark rail card at the bottom-left edge (wireframe-deck
+        // Shared launcher dock: one dark rail card flush to the left edge (wireframe-deck
         // style) - logo header, flat icon+label rows, Tools footer row, collapse chevron.
-        '#' + DOCK_STACK_ID + '{position:fixed;left:0;bottom:16px;z-index:99998;' +
+        // Vertically centred so the collapsed pull tab sits level with Umbrava's own
+        // right-edge Tasks tabs; the rail then opens from where the tab was, no jump.
+        '#' + DOCK_STACK_ID + '{position:fixed;left:0;top:50%;transform:translateY(-50%);z-index:99998;' +
         'font-family:-apple-system,BlinkMacSystemFont,"Segoe UI","Helvetica Neue",Arial,sans-serif;}' +
         '#' + DOCK_STACK_ID + '.bwn-dock-rail{width:158px;background:var(--bwn-green-dk);border-radius:0 14px 14px 0;' +
         'box-shadow:2px 4px 22px rgba(0,0,0,.28);overflow:hidden;}' +
@@ -7142,7 +7144,11 @@
         var rr = rail.getBoundingClientRect();
         var mleft = Math.min(Math.round(rr.right + 10), window.innerWidth - menu.offsetWidth - 8);   // keep on-screen
         menu.style.left = Math.max(8, mleft) + 'px';
-        menu.style.bottom = '16px';
+        // Foot of the menu lines up with the foot of the (vertically centred) rail, then
+        // clamps so a tall menu cannot run off the top or bottom of the window.
+        var mbot = Math.round(window.innerHeight - rr.bottom);
+        mbot = Math.min(mbot, window.innerHeight - menu.offsetHeight - 8);
+        menu.style.bottom = Math.max(8, mbot) + 'px';
       }
       document.addEventListener('keydown', onKey);
       document.addEventListener('click', onDocClick, true);
@@ -7169,7 +7175,7 @@
     // ---- Shared launcher dock (bwn:dock:* host) --------------------------------
     // Generalizes the CC pair's two-party bwn:cc:* coordination into an N-party dock:
     // any suite module registers ONE launcher over the document-level bwn:evt bus and
-    // this host renders them as ONE dark rail card at the bottom-left (logo header,
+    // this host renders them as ONE dark rail card on the left edge (logo header,
     // line-icon rows, Tools footer row, collapse-to-chip), killing the old
     // hand-picked-corner launchers. Modules never touch the dock DOM - only
     // serializable events cross the bus (sandbox-safe, @grant none). The dock owns the
