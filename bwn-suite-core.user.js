@@ -6480,7 +6480,6 @@
     ];
 
       var DOCK_ID = 'bwn-launch-dock';
-    var MENU_ID = 'bwn-launch-menu';
     var DOCK_STACK_ID = 'bwn-dock-stack';   // shared launcher dock: one dark rail card (logo + icon rows) on the left edge
 
     // ---- Bus + page context (shared via BWN core) -----------------------------
@@ -6910,18 +6909,14 @@
         'user-select:none;display:flex;align-items:center;gap:6px;}' +
         '#' + DOCK_ID + ':hover{filter:brightness(1.12);}' +
         '#' + DOCK_ID + ' .dot{width:8px;height:8px;border-radius:50%;background:var(--bwn-accent);}' +
-        '#' + MENU_ID + '{position:fixed;left:8px;bottom:54px;z-index:99999;width:250px;' +
-        'background:var(--bwn-surface);border:1px solid var(--bwn-border);border-radius:12px;overflow:hidden;' +
-        'box-shadow:0 10px 32px rgba(0,0,0,.22);font-family:-apple-system,BlinkMacSystemFont,"Segoe UI","Helvetica Neue",Arial,sans-serif;}' +
-        '#' + MENU_ID + ' .hd{background:linear-gradient(135deg,var(--bwn-green),var(--bwn-green-dk));color:#fff;' +
-        'padding:9px 13px;font:500 11px ui-monospace,"Segoe UI Mono","SF Mono",monospace;letter-spacing:.6px;}' +
-        '#' + MENU_ID + ' .it{display:block;width:100%;text-align:left;padding:10px 13px;border:none;' +
+        // Tools list, rendered inside the shared drawer (it used to be its own popup).
+        '.bwn-tools .it{display:block;width:100%;text-align:left;padding:11px 12px;border:none;' +
         'background:var(--bwn-surface);cursor:pointer;font:500 13px -apple-system,BlinkMacSystemFont,"Segoe UI","Helvetica Neue",Arial,sans-serif;color:var(--bwn-text);' +
-        'border-bottom:1px solid var(--bwn-surface-3);box-sizing:border-box;}' +
-        '#' + MENU_ID + ' .it:hover{background:var(--bwn-tint);color:var(--bwn-green);}' +
-        '#' + MENU_ID + ' .it .sub{display:block;font:500 10px ui-monospace,"Segoe UI Mono","SF Mono",monospace;color:var(--bwn-text-faint);margin-top:2px;}' +
-        '#' + MENU_ID + ' .empty{padding:14px;font-size:12px;color:var(--bwn-text-faint);}' +
-        '#' + MENU_ID + ' .it:focus-visible{outline:2px solid var(--bwn-accent);outline-offset:-2px;}' +
+        'border-bottom:1px solid var(--bwn-surface-3);box-sizing:border-box;border-radius:8px;}' +
+        '.bwn-tools .it:hover{background:var(--bwn-tint);color:var(--bwn-green);}' +
+        '.bwn-tools .it .sub{display:block;font:500 10px ui-monospace,"Segoe UI Mono","SF Mono",monospace;color:var(--bwn-text-faint);margin-top:2px;}' +
+        '.bwn-tools .empty{padding:14px;font-size:12px;color:var(--bwn-text-faint);}' +
+        '.bwn-tools .it:focus-visible{outline:2px solid var(--bwn-accent);outline-offset:-2px;}' +
         // Shared launcher dock: one dark rail card flush to the left edge (wireframe-deck
         // style) - logo header, flat icon+label rows, Tools footer row, collapse chevron.
         // Vertically centred so the collapsed pull tab sits level with Umbrava's own
@@ -6965,6 +6960,41 @@
         'user-select:none;display:block;}' +
         '#' + DOCK_STACK_ID + ' .bwn-dock-tab-txt{font:700 11px -apple-system,BlinkMacSystemFont,"Segoe UI","Helvetica Neue",Arial,sans-serif;' +
         'color:#fff;letter-spacing:1px;transform:rotate(-90deg);white-space:nowrap;}' +
+        // ---- Shared drawer shell (the suite's one panel surface) -----------------
+        // Every suite tool opens HERE: a panel that slides out from the rail, the way
+        // Umbrava's Tasks tab slides out from its own edge. Modules build their own DOM
+        // (most of them are sandboxed and cannot call into this scope) but style it with
+        // these classes, so one stylesheet governs the look. Body content keeps using the
+        // existing .bwn-ops-* rows/sections/buttons below.
+        //
+        // Contract for a module drawer:
+        //   <aside class="bwn-drawer" id="bwn-drawer-<key>" role="dialog" aria-label="...">
+        //     <div class="bwn-drawer-hd"><div><div class="t">Title</div><div class="s">sub</div></div>
+        //       <button class="bwn-drawer-x" aria-label="Close">x</button></div>
+        //     <div class="bwn-drawer-body">...</div>
+        //     <div class="bwn-drawer-ft">...</div>
+        //   </aside>
+        // Announce with bwn:drawer:open {key} before mounting; every other module drops
+        // its own drawer when it sees a key that is not its own (see the bus below).
+        '.bwn-drawer{position:fixed;top:0;bottom:0;left:var(--bwn-dock-w,158px);z-index:99997;' +
+        'width:420px;max-width:calc(100vw - var(--bwn-dock-w,158px) - 8px);display:flex;flex-direction:column;' +
+        'background:var(--bwn-surface);border-radius:0 14px 14px 0;box-shadow:10px 0 34px rgba(0,0,0,.2);' +
+        'font-family:-apple-system,BlinkMacSystemFont,"Segoe UI","Helvetica Neue",Arial,sans-serif;' +
+        'animation:bwn-drawer-in .16s ease-out;}' +
+        '@keyframes bwn-drawer-in{from{transform:translateX(-14px);opacity:.4;}to{transform:none;opacity:1;}}' +
+        '@media (prefers-reduced-motion:reduce){.bwn-drawer{animation:none;}}' +
+        '.bwn-drawer-hd{display:flex;align-items:flex-start;gap:10px;padding:15px 16px 14px 18px;' +
+        'background:linear-gradient(135deg,var(--bwn-green),var(--bwn-green-dk));color:#fff;border-radius:0 14px 0 0;}' +
+        '.bwn-drawer-hd .t{font:600 15px -apple-system,BlinkMacSystemFont,"Segoe UI","Helvetica Neue",Arial,sans-serif;}' +
+        '.bwn-drawer-hd .s{font:500 11px ui-monospace,"Segoe UI Mono","SF Mono",monospace;color:rgba(255,255,255,.72);margin-top:3px;}' +
+        '.bwn-drawer-hd>div:first-child{flex:1;min-width:0;}' +
+        '.bwn-drawer-x{flex:none;width:26px;height:26px;border:none;border-radius:7px;cursor:pointer;' +
+        'background:rgba(255,255,255,.14);color:#fff;font:400 17px/1 -apple-system,BlinkMacSystemFont,"Segoe UI",Arial,sans-serif;}' +
+        '.bwn-drawer-x:hover{background:rgba(255,255,255,.26);}' +
+        '.bwn-drawer-x:focus-visible{outline:2px solid var(--bwn-accent);outline-offset:2px;}' +
+        '.bwn-drawer-body{flex:1;overflow:auto;padding:14px 18px;}' +
+        '.bwn-drawer-ft{display:flex;gap:8px;justify-content:flex-end;align-items:center;padding:12px 18px;' +
+        'border-top:1px solid var(--bwn-border-2);background:var(--bwn-surface-2);border-radius:0 0 14px 0;}' +
         '.bwn-ops-overlay{position:fixed;inset:0;z-index:100001;background:rgba(13,38,26,.5);backdrop-filter:blur(6px);-webkit-backdrop-filter:blur(6px);display:flex;align-items:center;justify-content:center;font-family:-apple-system,BlinkMacSystemFont,"Segoe UI","Helvetica Neue",Arial,sans-serif;}' +
         '.bwn-ops-card{width:540px;max-width:94vw;max-height:88vh;display:flex;flex-direction:column;background:var(--bwn-surface);border-radius:16px;overflow:hidden;box-shadow:0 18px 60px rgba(0,0,0,.35);}' +
         '.bwn-ops-hd{background:linear-gradient(135deg,var(--bwn-green),var(--bwn-green-dk));color:#fff;padding:16px 20px;}' +
@@ -6995,30 +7025,19 @@
       document.head.appendChild(st);
     }
 
-    // ---- Menu -------------------------------------------------------------------
-    function closeMenu() {
-      var m = document.getElementById(MENU_ID);
-      if (m) m.remove();
-      document.removeEventListener('keydown', onKey);
-      document.removeEventListener('click', onDocClick, true);
-    }
-    function onKey(e) { if (e.key === 'Escape') closeMenu(); }
-    function onDocClick(e) {
-      var m = document.getElementById(MENU_ID);
-      var d = document.getElementById(DOCK_ID);
-      // The rail's Tools row toggles the menu itself - don't double-close it here.
-      var t = e.target && e.target.closest ? e.target.closest('.bwn-dock-tools') : null;
-      if (m && !m.contains(e.target) && !(d && d.contains(e.target)) && !t) closeMenu();
-    }
+    // ---- Tools list (rendered in the shared drawer) -------------------------------
+    function closeMenu() { closeDrawer(); }
 
     function openMenu() {
-      if (document.getElementById(MENU_ID)) { closeMenu(); return; }
-      var menu = document.createElement('div');
-      menu.id = MENU_ID;
-      var hd = document.createElement('div'); hd.className = 'hd';
       var ctx = woContext();
-      hd.textContent = 'OPS TOOLS' + (ctx && ctx.tracking ? ' \u00b7 #' + ctx.tracking : '');
-      menu.appendChild(hd);
+      var menu = null;
+      var drawer = openDrawer({
+        key: 'tools',
+        title: 'Ops Tools',
+        sub: ctx && ctx.tracking ? '#' + ctx.tracking : 'BWN suite',
+        build: function (body) { menu = body; menu.className += ' bwn-tools'; }
+      });
+      if (!drawer) return;   // toggled shut
 
       var shown = 0;
       LAUNCHER_APPS.forEach(function (app) {
@@ -7134,24 +7153,53 @@
         menu.appendChild(tlIt);
       }
 
-      document.body.appendChild(menu);
-      // Anchor beside the rail when it's up; otherwise the default CSS spot
-      // (above the fallback Tools pill) applies. Measured AFTER the append so
-      // offsetWidth is real - on a narrow window the menu would otherwise run
-      // off the right edge with no way to reach its items.
-      var rail = document.getElementById(DOCK_STACK_ID);
-      if (rail && rail.classList.contains('bwn-dock-rail')) {
-        var rr = rail.getBoundingClientRect();
-        var mleft = Math.min(Math.round(rr.right + 10), window.innerWidth - menu.offsetWidth - 8);   // keep on-screen
-        menu.style.left = Math.max(8, mleft) + 'px';
-        // Foot of the menu lines up with the foot of the (vertically centred) rail, then
-        // clamps so a tall menu cannot run off the top or bottom of the window.
-        var mbot = Math.round(window.innerHeight - rr.bottom);
-        mbot = Math.min(mbot, window.innerHeight - menu.offsetHeight - 8);
-        menu.style.bottom = Math.max(8, mbot) + 'px';
-      }
-      document.addEventListener('keydown', onKey);
-      document.addEventListener('click', onDocClick, true);
+    }
+
+    // ---- Drawer -------------------------------------------------------------------
+    // One panel surface for the whole suite. Core owns this copy; sandboxed modules
+    // build the same markup themselves (they cannot reach this scope) and announce on
+    // the same bus, so at most one drawer is open across all the scripts at once.
+    var DRAWER_ID_PFX = 'bwn-drawer-';
+    var drawerOpenKey = null;
+    var drawerRelease = null;
+    function onDrawerKey(e) { if (e.key === 'Escape') closeDrawer(); }
+    function closeDrawer() {
+      if (drawerRelease) { try { drawerRelease(); } catch (e) { } drawerRelease = null; }
+      document.removeEventListener('keydown', onDrawerKey);
+      var d = drawerOpenKey && document.getElementById(DRAWER_ID_PFX + drawerOpenKey);
+      if (d) d.remove();
+      drawerOpenKey = null;
+    }
+    // opts: {key, title, sub, build(bodyEl, footEl, api)}. Returns the drawer element.
+    function openDrawer(opts) {
+      ensureStyle();
+      var wasOpen = drawerOpenKey;
+      closeDrawer();
+      if (wasOpen === opts.key) return null;            // second click on the same entry closes it
+      dockEmit('bwn:drawer:open', { key: opts.key });   // other modules drop their drawers
+      var el = document.createElement('aside');
+      el.id = DRAWER_ID_PFX + opts.key; el.className = 'bwn-drawer';
+      var hd = document.createElement('div'); hd.className = 'bwn-drawer-hd';
+      var txt = document.createElement('div');
+      var t = document.createElement('div'); t.className = 't'; t.textContent = opts.title || 'BWN';
+      txt.appendChild(t);
+      if (opts.sub) { var s = document.createElement('div'); s.className = 's'; s.textContent = opts.sub; txt.appendChild(s); }
+      var x = document.createElement('button');
+      x.type = 'button'; x.className = 'bwn-drawer-x'; x.textContent = '×';
+      x.title = 'Close'; x.setAttribute('aria-label', 'Close');
+      x.addEventListener('click', BWN.guard(closeDrawer, 'launcher:drawerclose'));
+      hd.appendChild(txt); hd.appendChild(x); el.appendChild(hd);
+      var body = document.createElement('div'); body.className = 'bwn-drawer-body'; el.appendChild(body);
+      var foot = document.createElement('div'); foot.className = 'bwn-drawer-ft'; el.appendChild(foot);
+      document.body.appendChild(el);
+      drawerOpenKey = opts.key;
+      // Non-modal: the drawer sits beside the page the way the Tasks pull-out does, so the
+      // WO underneath stays clickable. Esc and the focus trap still behave like a dialog.
+      drawerRelease = BWN.a11yDialog(el, { modal: false, label: opts.title || 'BWN panel' });
+      document.addEventListener('keydown', onDrawerKey);
+      if (opts.build) opts.build(body, foot, { close: closeDrawer, el: el });
+      if (!foot.firstChild) foot.remove();
+      return el;
     }
 
     // ---- Dock ---------------------------------------------------------------------
@@ -7188,7 +7236,8 @@
     //   bwn:dock:register  mod->host  {key,label,icon,weight,badge?,minRank?,title?}  add/replace (idempotent by key)
     //   bwn:dock:update    mod->host  {key,label?,icon?,badge?,minRank?}              live-patch an entry
     //   bwn:dock:unregister mod->host {key}                         remove an entry
-    //   bwn:dock:open      host->mod  {key}                         user clicked; module opens its modal/panel
+    //   bwn:dock:open      host->mod  {key}                         user clicked; module opens its drawer
+    //   bwn:drawer:open    any->all   {key}                         "my drawer is opening" - everyone else closes theirs
     var HOST_PRIORITY = 100;                      // Core is the always-present, high-priority host
     var DOCK_PING_MS = 20000;                     // heartbeat: re-announce + pull registrations
     var DOCK_TTL_MS = DOCK_PING_MS * 3 + 5000;    // an entry drops if not re-registered within ~3 pings
@@ -7304,13 +7353,18 @@
       var next = stack ? stack.querySelector(sel) : null;
       if (next) { try { next.focus(); } catch (e) { } }
     }
+    // Drawers open flush against whatever the dock is currently showing, so the rail's
+    // own width is published as a CSS variable rather than hard-coded in every module.
+    function publishDockWidth(px) {
+      try { document.documentElement.style.setProperty('--bwn-dock-w', px + 'px'); } catch (e) { }
+    }
     function renderDock() {
       if (!dockAmHost) { removeDockStack(); return; }
       var vis = dockVisible();
       var pill = document.getElementById(DOCK_ID);
       var stack = document.getElementById(DOCK_STACK_ID);
       // Zero registrants: no rail; the standalone Tools pill stays as the fallback launcher.
-      if (!vis.length) { if (stack) stack.remove(); if (pill) pill.style.display = ''; dockSig = ''; return; }
+      if (!vis.length) { if (stack) stack.remove(); if (pill) pill.style.display = ''; dockSig = ''; publishDockWidth(0); return; }
       // These two run BEFORE the signature check on purpose. Both are idempotent and neither
       // writes into the rail subtree, so they cannot restart the rebuild loop - but they are
       // repairs, and the old unconditional rebuild is what used to re-run them. Behind the early
@@ -7327,6 +7381,7 @@
       stack.textContent = '';
       if (dockIsCollapsed()) {
         stack.className = '';
+        publishDockWidth(32);
         var tab = document.createElement('button');
         tab.type = 'button'; tab.className = 'bwn-dock-tab';
         tab.title = 'BWN tools'; tab.setAttribute('aria-label', 'Expand BWN tools');
@@ -7346,6 +7401,7 @@
         return;
       }
       stack.className = 'bwn-dock-rail';
+      publishDockWidth(158);
       // Header: company logo (white wordmark, built for the dark rail). Text fallback if
       // the page blocks the cross-origin image.
       var hd = document.createElement('div'); hd.className = 'bwn-dock-hd';
@@ -7377,6 +7433,8 @@
     document.addEventListener('bwn:evt', BWN.guard(function (e) {
       var d = e && e.detail; if (!d || !d.id) return;
       if (d.id === 'bwn:role' && typeof d.rank === 'number') { dockRank = d.rank; scheduleDockRender(); return; }
+      // Another module's drawer is taking the slot - drop ours (and only ours).
+      if (d.id === 'bwn:drawer:open') { if (drawerOpenKey && d.key !== drawerOpenKey) closeDrawer(); return; }
       if (d.id === 'bwn:dock:host') { if (dockOtherWins(d)) { dockAmHost = false; removeDockStack(); } return; }
       if (!dockAmHost) return;
       if (d.id === 'bwn:dock:register' && d.key) {
