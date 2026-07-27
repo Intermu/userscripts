@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         BWN Suite - Core (Broadway National)
 // @namespace    broadwaynational.bwn
-// @version      1.66.2
+// @version      1.66.3
 // @downloadURL  https://raw.githubusercontent.com/Intermu/userscripts/main/bwn-suite-core.user.js
 // @updateURL    https://raw.githubusercontent.com/Intermu/userscripts/main/bwn-suite-core.user.js
 // @description  Runs several Umbrava helpers for BWN coordinators, in the browser with no privileged grants. Includes: PO Approval + ETA Builder; WO Assist (GP/ETA, a stall watchdog, DNE calculator, and a next-action playbook); Email Leak Guard (checks recipients against vendor names, PO amounts, and client budget references before an outbound email sends); WO List Heat (a triage overlay + My Day strip on the work-order list, with an optional same-origin Umbrava API scan for deterministic full-board coverage); and the BWN Launcher (opens the Azure Static Web App tools with the current WO's context). Modules share state through sessionStorage/localStorage. The only network calls are same-origin Umbrava GraphQL reads (app.umbrava.com/api/graphql, the app's own session): List Heat's full-board scan and WO Assist's work-order / trip / clock-in reads; everything else is offline. Toggle modules in BWN_MODULES below.
@@ -6460,7 +6460,7 @@
     if (window.__bwnLauncher) return;
     window.__bwnLauncher = true;
 
-    console.info('[BWN LAUNCH] v2.0.2 loaded (dock host, rail card)');
+    console.info('[BWN LAUNCH] v2.0.3 loaded (dock host, edge rail + logo pull tab)');
 
     // ---- App registry (EDIT PATHS HERE) --------------------------------------
     // All BWN tools live on one Azure Static Web App. Set each tool's path
@@ -6924,10 +6924,10 @@
         '#' + MENU_ID + ' .it:focus-visible{outline:2px solid var(--bwn-accent);outline-offset:-2px;}' +
         // Shared launcher dock: one dark rail card at the bottom-left edge (wireframe-deck
         // style) - logo header, flat icon+label rows, Tools footer row, collapse chevron.
-        '#' + DOCK_STACK_ID + '{position:fixed;left:10px;bottom:16px;z-index:99998;' +
+        '#' + DOCK_STACK_ID + '{position:fixed;left:0;bottom:16px;z-index:99998;' +
         'font-family:-apple-system,BlinkMacSystemFont,"Segoe UI","Helvetica Neue",Arial,sans-serif;}' +
-        '#' + DOCK_STACK_ID + '.bwn-dock-rail{width:158px;background:var(--bwn-green-dk);border-radius:14px;' +
-        'box-shadow:0 6px 22px rgba(0,0,0,.28);overflow:hidden;}' +
+        '#' + DOCK_STACK_ID + '.bwn-dock-rail{width:158px;background:var(--bwn-green-dk);border-radius:0 14px 14px 0;' +
+        'box-shadow:2px 4px 22px rgba(0,0,0,.28);overflow:hidden;}' +
         '#' + DOCK_STACK_ID + ' .bwn-dock-hd{padding:13px 13px 11px;border-bottom:1px solid rgba(255,255,255,.14);}' +
         '#' + DOCK_STACK_ID + ' .bwn-dock-hd img{display:block;width:100%;height:auto;user-select:none;}' +
         '#' + DOCK_STACK_ID + ' .bwn-dock-hd-txt{font:600 12px -apple-system,BlinkMacSystemFont,"Segoe UI","Helvetica Neue",Arial,sans-serif;color:#fff;letter-spacing:.4px;}' +
@@ -6948,12 +6948,21 @@
         'padding:6px;border:none;background:transparent;color:rgba(255,255,255,.5);cursor:pointer;border-top:1px solid rgba(255,255,255,.14);}' +
         '#' + DOCK_STACK_ID + ' .bwn-dock-collapse:hover{color:#fff;background:rgba(255,255,255,.08);}' +
         '#' + DOCK_STACK_ID + ' .bwn-dock-collapse:focus-visible{outline:2px solid var(--bwn-accent);outline-offset:-2px;}' +
-        // Collapsed: just the green "b" brand chip (matches the logo mark).
-        '#' + DOCK_STACK_ID + ' .bwn-dock-chip{width:42px;height:42px;border:none;border-radius:13px;background:#3ecf4f;color:#fff;' +
-        'font:700 22px/1 -apple-system,BlinkMacSystemFont,"Segoe UI","Helvetica Neue",Arial,sans-serif;cursor:pointer;' +
-        'box-shadow:0 5px 18px rgba(0,0,0,.3);display:flex;align-items:center;justify-content:center;padding:0 0 3px;}' +
-        '#' + DOCK_STACK_ID + ' .bwn-dock-chip:hover{filter:brightness(1.08);}' +
-        '#' + DOCK_STACK_ID + ' .bwn-dock-chip:focus-visible{outline:2px solid var(--bwn-accent);outline-offset:2px;}' +
+        // Collapsed: an edge-flush pull tab (same handle shape Umbrava uses for its Tasks
+        // pull-out) carrying the company logo mark. The mark is cropped out of the shared
+        // wordmark PNG so there is one logo asset, not a second cut kept in sync by hand.
+        '#' + DOCK_STACK_ID + ' .bwn-dock-tab{display:flex;align-items:center;justify-content:center;' +
+        'width:32px;height:72px;border:none;padding:0;background:var(--bwn-green-dk);cursor:pointer;' +
+        'border-radius:0 12px 12px 0;box-shadow:2px 3px 14px rgba(0,0,0,.28);overflow:hidden;}' +
+        '#' + DOCK_STACK_ID + ' .bwn-dock-tab:hover{filter:brightness(1.14);}' +
+        '#' + DOCK_STACK_ID + ' .bwn-dock-tab:focus-visible{outline:2px solid var(--bwn-accent);outline-offset:2px;}' +
+        // 24px window over a 24px-tall wordmark: the mark runs x 0-229 of the 2000x240 PNG,
+        // i.e. 22.9px at this scale, so the window ends in the gap before "broadway".
+        '#' + DOCK_STACK_ID + ' .bwn-dock-mark{position:relative;display:block;width:24px;height:24px;overflow:hidden;flex:none;}' +
+        '#' + DOCK_STACK_ID + ' .bwn-dock-mark img{position:absolute;left:0;top:0;height:24px;width:auto;max-width:none;' +
+        'user-select:none;display:block;}' +
+        '#' + DOCK_STACK_ID + ' .bwn-dock-tab-txt{font:700 11px -apple-system,BlinkMacSystemFont,"Segoe UI","Helvetica Neue",Arial,sans-serif;' +
+        'color:#fff;letter-spacing:1px;transform:rotate(-90deg);white-space:nowrap;}' +
         '.bwn-ops-overlay{position:fixed;inset:0;z-index:100001;background:rgba(13,38,26,.5);backdrop-filter:blur(6px);-webkit-backdrop-filter:blur(6px);display:flex;align-items:center;justify-content:center;font-family:-apple-system,BlinkMacSystemFont,"Segoe UI","Helvetica Neue",Arial,sans-serif;}' +
         '.bwn-ops-card{width:540px;max-width:94vw;max-height:88vh;display:flex;flex-direction:column;background:var(--bwn-surface);border-radius:16px;overflow:hidden;box-shadow:0 18px 60px rgba(0,0,0,.35);}' +
         '.bwn-ops-hd{background:linear-gradient(135deg,var(--bwn-green),var(--bwn-green-dk));color:#fff;padding:16px 20px;}' +
@@ -7263,6 +7272,7 @@
       b.addEventListener('click', BWN.guard(onClick, 'launcher:dockclick'));
       return b;
     }
+    function dockLogoUrl() { return LAUNCHER_BASE.replace(/\/$/, '') + '/assets/bwn-logo.png'; }
     function dockIsCollapsed() { try { return localStorage.getItem(DOCK_COLLAPSED_KEY) === '1'; } catch (e) { return false; } }
     function dockSetCollapsed(v) {
       try { if (v) localStorage.setItem(DOCK_COLLAPSED_KEY, '1'); else localStorage.removeItem(DOCK_COLLAPSED_KEY); } catch (e) { }
@@ -7311,12 +7321,22 @@
       stack.textContent = '';
       if (dockIsCollapsed()) {
         stack.className = '';
-        var chip = document.createElement('button');
-        chip.type = 'button'; chip.className = 'bwn-dock-chip';
-        chip.title = 'BWN tools'; chip.setAttribute('aria-label', 'Expand BWN tools');
-        chip.textContent = 'b';
-        chip.addEventListener('click', BWN.guard(function () { dockToggle(false, '.bwn-dock-collapse'); }, 'launcher:dockexpand'));
-        stack.appendChild(chip);
+        var tab = document.createElement('button');
+        tab.type = 'button'; tab.className = 'bwn-dock-tab';
+        tab.title = 'BWN tools'; tab.setAttribute('aria-label', 'Expand BWN tools');
+        // Logo mark: the wordmark PNG shifted left inside a narrow window so only the
+        // brand mark shows. Falls back to a rotated "BWN" if the page blocks the image.
+        var mark = document.createElement('span'); mark.className = 'bwn-dock-mark';
+        var mimg = document.createElement('img');
+        mimg.alt = 'Broadway National'; mimg.draggable = false;
+        mimg.addEventListener('error', function () {
+          var t = document.createElement('span'); t.className = 'bwn-dock-tab-txt'; t.textContent = 'BWN';
+          tab.textContent = ''; tab.appendChild(t);
+        });
+        mimg.src = dockLogoUrl();
+        mark.appendChild(mimg); tab.appendChild(mark);
+        tab.addEventListener('click', BWN.guard(function () { dockToggle(false, '.bwn-dock-collapse'); }, 'launcher:dockexpand'));
+        stack.appendChild(tab);
         return;
       }
       stack.className = 'bwn-dock-rail';
@@ -7329,7 +7349,7 @@
         var t = document.createElement('span'); t.className = 'bwn-dock-hd-txt'; t.textContent = 'broadway national';
         hd.textContent = ''; hd.appendChild(t);
       });
-      img.src = LAUNCHER_BASE.replace(/\/$/, '') + '/assets/bwn-logo.png';
+      img.src = dockLogoUrl();
       hd.appendChild(img); stack.appendChild(hd);
       var body = document.createElement('div'); body.className = 'bwn-dock-body';
       vis.forEach(function (en) {
@@ -7344,7 +7364,7 @@
       col.type = 'button'; col.className = 'bwn-dock-collapse';
       col.title = 'Collapse'; col.setAttribute('aria-label', 'Collapse BWN tools');
       col.appendChild(dockIcon('chevronLeft'));
-      col.addEventListener('click', BWN.guard(function () { dockToggle(true, '.bwn-dock-chip'); }, 'launcher:dockcollapse'));
+      col.addEventListener('click', BWN.guard(function () { dockToggle(true, '.bwn-dock-tab'); }, 'launcher:dockcollapse'));
       stack.appendChild(col);
     }
 
