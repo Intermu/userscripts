@@ -161,7 +161,6 @@
   function applyRank(rank) {
     if (typeof rank !== 'number') return;
     _rank = rank;
-    if (_fallbackActive) renderLauncher();   // docked: rank only feeds openCc()'s chooser decision
   }
   function resolveRank() {
     var r = sharedRoleRank();
@@ -177,7 +176,7 @@
   // first render so the handshake works regardless of which script loads first.
   document.addEventListener('bwn:evt', function (e) {
     var d = e && e.detail; if (!d) return;
-    if (d.id === 'bwn:cc:register' && d.tool === 'purchase') { _ccPurchaseAvail = true; if (_fallbackActive) renderLauncher(); }
+    if (d.id === 'bwn:cc:register' && d.tool === 'purchase') { _ccPurchaseAvail = true; }
     if (d.id === 'bwn:role' && typeof d.rank === 'number') applyRank(d.rank);   // live sign-in changes
     // Shared launcher dock ([[bwn-launcher-dock]]): bwn-suite-core's Launcher hosts it.
     if (d.id === 'bwn:dock:host' || d.id === 'bwn:dock:ping') onDockHost();
@@ -194,7 +193,6 @@
   // fall back to the old self-drawn floating button so CC is never stranded.
   var DOCK_KEY = 'cc';
   var _hostSeen = false;
-  var _fallbackActive = false;
   function dockRegister() {
     try {
       document.dispatchEvent(new CustomEvent('bwn:evt', { detail: {
@@ -205,7 +203,6 @@
   }
   function onDockHost() {
     _hostSeen = true;
-    if (_fallbackActive) { _fallbackActive = false; removeLauncher(); }
     dockRegister();
   }
   function showDropdown() { return (typeof _rank === 'number' && _rank >= MIN_SUPER && _ccPurchaseAvail); }
@@ -440,57 +437,8 @@
   // ---- The single floating launcher (this script owns it) ------------------
   // Everyone gets CC Request. Supervisors+ with bwn-cc-purchase present get a dropdown that also
   // opens Log CC Purchase. Re-rendered whenever the rank or CC-Purchase availability changes.
-  var _menuEl = null;
-  function closeMenu() { if (_menuEl) { _menuEl.remove(); _menuEl = null; document.removeEventListener('click', onDocClick, true); } }
-  function onDocClick(e) {
-    var wrap = document.getElementById('bwn-cc-launch');
-    if (_menuEl && wrap && !wrap.contains(e.target) && !_menuEl.contains(e.target)) closeMenu();
-  }
-  function removeLauncher() { closeMenu(); var b = document.getElementById('bwn-cc-launch'); if (b) b.remove(); }
-
-  function pillCss() {
-    return 'background:' + GREEN + ';color:#fff;border:none;border-radius:24px;padding:11px 16px;font:600 13px ' + FONT + ';cursor:pointer;box-shadow:0 6px 20px rgba(13,38,26,.35);';
-  }
-  function renderLauncher() {
-    removeLauncher();
-    var wrap = document.createElement('div');
-    wrap.id = 'bwn-cc-launch';
-    wrap.style.cssText = 'position:fixed;z-index:2147483645;right:18px;bottom:18px;';
-    var showDropdown = (typeof _rank === 'number' && _rank >= MIN_SUPER && _ccPurchaseAvail);
-
-    var btn = document.createElement('button');
-    btn.style.cssText = pillCss();
-    if (showDropdown) {
-      btn.textContent = '💳 Credit Card ▾';
-      btn.title = 'Credit card actions';
-      btn.addEventListener('click', function (ev) {
-        ev.stopPropagation();
-        if (_menuEl) { closeMenu(); return; }
-        _menuEl = document.createElement('div');
-        _menuEl.style.cssText = 'position:absolute;right:0;bottom:52px;background:#fff;border:1px solid #cfe0d7;border-radius:10px;box-shadow:0 10px 30px rgba(0,0,0,.28);overflow:hidden;min-width:200px;';
-        [
-          { label: '🧾  New CC Request', fn: function () { closeMenu(); buildModal(); } },
-          { label: '💳  Log CC Purchase', fn: function () { closeMenu(); openCcPurchase(); } }
-        ].forEach(function (it, i) {
-          var mi = document.createElement('button');
-          mi.textContent = it.label;
-          mi.style.cssText = 'display:block;width:100%;text-align:left;background:#fff;border:none;' + (i ? 'border-top:1px solid #eef2ef;' : '') + 'padding:12px 16px;font:600 13px ' + FONT + ';color:#12241b;cursor:pointer;';
-          mi.addEventListener('mouseenter', function () { mi.style.background = '#f2f7f4'; });
-          mi.addEventListener('mouseleave', function () { mi.style.background = '#fff'; });
-          mi.addEventListener('click', it.fn);
-          _menuEl.appendChild(mi);
-        });
-        wrap.appendChild(_menuEl);
-        setTimeout(function () { document.addEventListener('click', onDocClick, true); }, 0);
-      });
-    } else {
-      btn.textContent = '🧾 CC Request';
-      btn.title = 'Request a credit card purchase';
-      btn.addEventListener('click', buildModal);
-    }
-    wrap.appendChild(btn);
-    document.body.appendChild(wrap);
-  }
+  // No self-drawn launcher: CC Request is reached from the dock tab only. The chooser
+  // between Request and Purchase still lives in openCc().
 
   // ---- Tampermonkey menu --------------------------------------------------
   try {
@@ -503,12 +451,11 @@
 
   // Register into the shared dock (covers a host already up); the host's heartbeat/ping
   // re-registers us for a host that starts later. Ping CC Purchase + resolve rank as before.
-  // If no dock host announces within 4s, fall back to the old self-drawn floating launcher
-  // (single "CC Request", or a dropdown once rank/CC-Purchase resolve) so CC is never stranded.
+  // No dock host means Core is off or failed to load - warn instead of drawing a corner button.
   setTimeout(function () {
     dockRegister(); pingCcPurchase(); resolveRank();
     setTimeout(function () {
-      if (!_hostSeen && !_fallbackActive) { _fallbackActive = true; renderLauncher(); }
+      if (!_hostSeen) console.warn('[BWN CC REQUEST] no dock host - install/enable BWN Suite Core to reach CC Request.');
     }, 4000);
   }, 1500);
 })();

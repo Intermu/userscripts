@@ -339,11 +339,6 @@
   // ---- Panel UI -------------------------------------------------------------
   var panelEl = null, msgsEl = null, inputEl = null, sendBtn = null, modelSel = null, busy = false;
 
-  function pillCss() {
-    return 'all:unset;cursor:pointer;font:600 13px/1.2 -apple-system,Segoe UI,Roboto,sans-serif;' +
-      'color:#fff;background:#1A5F3E;padding:10px 14px;border-radius:22px;' +
-      'box-shadow:0 2px 10px rgba(0,0,0,.25);display:inline-flex;align-items:center;gap:6px;';
-  }
   function esc(s) { return String(s == null ? '' : s).replace(/[&<>"']/g, function (c) { return { '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;' }[c]; }); }
 
   function addMsg(role, text) {
@@ -402,44 +397,54 @@
     });
   }
 
+  // The panel is a suite drawer: it slides out from the dock rail and is styled by
+  // Core's page-wide .bwn-drawer sheet, so every tool in the suite looks the same when
+  // you click into it. Hiding detaches the node instead of destroying it, which keeps
+  // the conversation thread across open/close.
+  function hidePanel() { if (panelEl && panelEl.parentNode) panelEl.remove(); }
   function buildPanel() {
-    if (panelEl) { panelEl.style.display = 'flex'; inputEl && inputEl.focus(); return; }
-    panelEl = document.createElement('div');
-    panelEl.style.cssText = 'position:fixed;left:18px;bottom:120px;z-index:2147483646;width:390px;max-width:calc(100vw - 36px);' +
-      'height:540px;max-height:calc(100vh - 110px);background:#fff;border:1px solid #d5ddd8;border-radius:14px;' +
-      'box-shadow:0 8px 30px rgba(0,0,0,.28);display:flex;flex-direction:column;overflow:hidden;';
+    if (panelEl && panelEl.isConnected) { hidePanel(); return; }   // dock entry toggles
+    try {
+      document.dispatchEvent(new CustomEvent('bwn:evt', { detail: { id: 'bwn:drawer:open', key: DOCK_KEY } }));
+    } catch (e) { }
+    if (panelEl) { document.body.appendChild(panelEl); inputEl && inputEl.focus(); return; }
+
+    panelEl = document.createElement('aside');
+    panelEl.id = 'bwn-drawer-ask'; panelEl.className = 'bwn-drawer';
+    panelEl.setAttribute('role', 'dialog'); panelEl.setAttribute('aria-label', 'Ask BWN');
 
     var head = document.createElement('div');
-    head.style.cssText = 'background:#1A5F3E;color:#fff;padding:10px 12px;display:flex;align-items:center;gap:8px;font:600 14px -apple-system,Segoe UI,Roboto,sans-serif;';
-    head.innerHTML = '<span style="flex:1">Ask BWN</span>';
+    head.className = 'bwn-drawer-hd';
+    head.innerHTML = '<div><div class="t">Ask BWN</div><div class="s">reads this WO live</div></div>';
 
     modelSel = document.createElement('select');
-    modelSel.style.cssText = 'all:unset;cursor:pointer;font:12px -apple-system,Segoe UI,Roboto,sans-serif;color:#fff;background:rgba(255,255,255,.15);padding:3px 6px;border-radius:6px;';
+    modelSel.style.cssText = 'all:unset;cursor:pointer;font:12px -apple-system,Segoe UI,Roboto,sans-serif;color:#fff;background:rgba(255,255,255,.15);padding:3px 6px;border-radius:6px;margin-right:6px;';
     modelSel.innerHTML = '<option value="claude-haiku-4-5" style="color:#000">Fast</option><option value="claude-sonnet-5" style="color:#000">Deep</option>';
     modelSel.title = 'Fast = Haiku (cheap). Deep = Sonnet (harder synthesis).';
     head.appendChild(modelSel);
 
     var x = document.createElement('button');
-    x.textContent = '×';
-    x.style.cssText = 'all:unset;cursor:pointer;font-size:20px;line-height:1;color:#fff;padding:0 4px;';
-    x.addEventListener('click', function () { panelEl.style.display = 'none'; });
+    x.type = 'button'; x.className = 'bwn-drawer-x'; x.textContent = '×';
+    x.title = 'Close'; x.setAttribute('aria-label', 'Close');
+    x.addEventListener('click', hidePanel);
     head.appendChild(x);
     panelEl.appendChild(head);
 
     msgsEl = document.createElement('div');
-    msgsEl.style.cssText = 'flex:1;overflow-y:auto;padding:10px 12px;background:#fafbfa;';
+    msgsEl.className = 'bwn-drawer-body';
     panelEl.appendChild(msgsEl);
 
     var foot = document.createElement('div');
-    foot.style.cssText = 'border-top:1px solid #e3e9e6;padding:8px;display:flex;gap:6px;align-items:flex-end;background:#fff;';
+    foot.className = 'bwn-drawer-ft';
+    foot.style.cssText = 'align-items:flex-end;gap:6px;';
     inputEl = document.createElement('textarea');
     inputEl.rows = 2;
     inputEl.placeholder = 'Ask about the work order you\'re viewing...';
     inputEl.style.cssText = 'flex:1;resize:none;font:13px -apple-system,Segoe UI,Roboto,sans-serif;padding:7px 9px;border:1px solid #cdd6d1;border-radius:9px;outline:none;';
     inputEl.addEventListener('keydown', function (e) { if (e.key === 'Enter' && !e.shiftKey) { e.preventDefault(); doAsk(); } });
     sendBtn = document.createElement('button');
+    sendBtn.type = 'button'; sendBtn.className = 'bwn-ops-btn primary';
     sendBtn.textContent = 'Send';
-    sendBtn.style.cssText = 'all:unset;cursor:pointer;font:600 13px -apple-system,Segoe UI,Roboto,sans-serif;color:#fff;background:#1A5F3E;padding:9px 14px;border-radius:9px;';
     sendBtn.addEventListener('click', doAsk);
     foot.appendChild(inputEl);
     foot.appendChild(sendBtn);
@@ -450,33 +455,14 @@
     inputEl.focus();
   }
 
-  // ---- Launcher -------------------------------------------------------------
-  function renderLauncher() {
-    if (document.getElementById('bwn-ask-launch')) return;
-    var wrap = document.createElement('div');
-    wrap.id = 'bwn-ask-launch';
-    // Left column, above the WO Audit button. The right corner (bottom:18/66) is the CC
-    // Purchase / CC Request stack - Ask BWN sat exactly on top of CC and was hidden behind it.
-    wrap.style.cssText = 'position:fixed;left:18px;bottom:70px;z-index:2147483646;';
-    var btn = document.createElement('button');
-    btn.style.cssText = pillCss();
-    btn.innerHTML = '💬 Ask BWN';
-    btn.title = 'Ask about the work order you are viewing';
-    btn.addEventListener('click', buildPanel);
-    wrap.appendChild(btn);
-    document.body.appendChild(wrap);
-  }
-
   // ---- Shared launcher dock (bwn:dock:*) -----------------------------------
   // bwn-suite-core's Launcher hosts the shared dock ([[bwn-launcher-dock]]); we
   // register one entry ('ask') instead of hand-placing a left-edge button. The
-  // host also re-mounts the pill across SPA repaints, so the old self-healing
-  // interval is only needed for the no-host fallback. detail.key carries the entry
-  // id (detail.id is the bwn:evt event name).
+  // host also re-mounts the entry across SPA repaints. detail.key carries the entry
+  // id (detail.id is the bwn:evt event name). There is no self-drawn fallback button
+  // any more: the dock tab is the only launcher this tool has on the page.
   var DOCK_KEY = 'ask';
   var _hostSeen = false;
-  var _fallbackActive = false;
-  function removeLauncher() { var w = document.getElementById('bwn-ask-launch'); if (w) w.remove(); }
   function dockRegister() {
     try {
       document.dispatchEvent(new CustomEvent('bwn:evt', { detail: {
@@ -490,10 +476,11 @@
       var d = e && e.detail; if (!d) return;
       if (d.id === 'bwn:dock:host' || d.id === 'bwn:dock:ping') {
         _hostSeen = true;
-        if (_fallbackActive) { _fallbackActive = false; removeLauncher(); }
         dockRegister();
       }
       if (d.id === 'bwn:dock:open' && d.key === DOCK_KEY) buildPanel();
+      // Another tool took the drawer slot - fold ours away (thread is kept in memory).
+      if (d.id === 'bwn:drawer:open' && d.key !== DOCK_KEY) hidePanel();
     });
   } catch (e) { }
 
@@ -508,14 +495,10 @@
 
   // ---- Boot -----------------------------------------------------------------
   // Register into the shared dock (covers a host already up); the host heartbeat
-  // re-registers us later and re-mounts the pill across SPA repaints. If no host
-  // announces within 4s, fall back to the old self-drawn launcher. Umbrava's SPA
-  // can wipe a self-drawn button, so the fallback keeps the cheap self-healing
-  // interval - a no-op unless the fallback is active.
-  function ensureLauncher() { if (_fallbackActive) { try { renderLauncher(); } catch (e) { } } }
+  // re-registers us later. No host means BWN Suite Core is off or failed to load -
+  // say so in the console rather than drawing a stray corner button on the page.
   dockRegister();
   setTimeout(function () {
-    if (!_hostSeen && !_fallbackActive) { _fallbackActive = true; ensureLauncher(); }
+    if (!_hostSeen) console.warn('[BWN ASK] no dock host - install/enable BWN Suite Core to reach Ask BWN.');
   }, 4000);
-  setInterval(ensureLauncher, 2500);
 })();

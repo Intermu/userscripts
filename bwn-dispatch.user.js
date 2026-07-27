@@ -503,7 +503,6 @@
   // announces within a few seconds we fall back to a self-drawn floating button (same gate).
   var DOCK_KEY = 'dispatch';
   var _hostSeen = false;
-  var _fallbackActive = false;
   var _registered = false;
   var _navToken = 0;
   function dockRegister() {
@@ -517,26 +516,11 @@
   function dockUnregister() {
     try { document.dispatchEvent(new CustomEvent('bwn:evt', { detail: { id: 'bwn:dock:unregister', key: DOCK_KEY } })); } catch (e) { }
   }
-  function removeButton() { var b = document.getElementById('bwn-dispatch-btn'); if (b) b.remove(); }
-  function addButton() {
-    if (document.getElementById('bwn-dispatch-btn')) return;
-    var b = document.createElement('button');
-    b.id = 'bwn-dispatch-btn';
-    b.textContent = '🚚 Dispatch';
-    b.title = 'Dispatch this work order to a coordinator';
-    // bottom-right, lifted above the CC Request fallback (bottom:18px) so the two rare
-    // no-host fallbacks do not overlap.
-    b.style.cssText = 'position:fixed;z-index:2147483645;right:18px;bottom:70px;background:' + GREEN + ';color:#fff;border:0;padding:11px 16px;border-radius:24px;font:600 13px ' + FONT + ';cursor:pointer;box-shadow:0 6px 20px rgba(13,38,26,.35);';
-    b.onclick = buildModal;
-    document.body.appendChild(b);
-  }
   // Apply the desired presence for the current route + status. Registering with no host
   // yet is harmless (no listener); the host picks it up on its next heartbeat.
   function applyPresence(show) {
     if (show && !_registered) { dockRegister(); _registered = true; }
     else if (!show && _registered) { dockUnregister(); _registered = false; }
-    if (_fallbackActive && show) { if (document.body) addButton(); }
-    else removeButton();
   }
   // Reconcile: gate on WO page AND dispatchable status (async, race-guarded by _navToken).
   function reeval() {
@@ -550,9 +534,7 @@
   }
   function onDockHost() {
     _hostSeen = true;
-    _fallbackActive = false;
     _registered = false;      // force a fresh register for this (possibly newly-elected) host
-    removeButton();
     reeval();
   }
   document.addEventListener('bwn:evt', function (e) {
@@ -588,15 +570,13 @@
       var v = prompt('SWA ingest key (same value as the connector WO_INGEST_KEY - used across the BWN Ops Suite):', GM_getValue('ingest_key', '') || '');
       if (v !== null) { GM_setValue('ingest_key', v.trim()); toast(v.trim() ? 'Ingest key saved.' : 'Ingest key cleared.'); }
     });
-  } catch (e) { /* menu API absent - the dock / fallback button still opens the modal */ }
+  } catch (e) { /* menu API absent - the dock entry still opens the modal */ }
 
   // Reconcile on load (covers a host already up); the host heartbeat/ping re-registers us
-  // later. If no host is seen within 4s, switch on the fallback button (same status gate).
+  // later. No host means Core is off or failed to load - warn instead of drawing a button.
   seedRosterWithMe();
   reeval();
   setTimeout(function () {
-    if (_hostSeen || _fallbackActive) return;
-    _fallbackActive = true;
-    reeval();
+    if (!_hostSeen) console.warn('[BWN DISPATCH] no dock host - install/enable BWN Suite Core to reach Dispatch.');
   }, 4000);
 })();

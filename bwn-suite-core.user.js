@@ -2833,6 +2833,30 @@
       return null;
     }
 
+    // Where the NEXT ACTIONS card mounts: directly above Umbrava's own "Open Tasks"
+    // section in the right-hand column, so the coordinator's to-dos and ours read as
+    // one stack instead of sitting a column apart. Same heuristic style as the PO
+    // anchor - find the heading, then climb to the outermost node that is still only
+    // this section. Falls back to the old spot above Purchase Orders when the WO has
+    // no tasks section mounted (it only appears once tasks exist).
+    function tasksAnchorBlock() {
+      var head = null;
+      var els = document.querySelectorAll('h1,h2,h3,h4,h5,h6,div,span,p');
+      for (var i = 0; i < els.length; i++) {
+        var tx = (els[i].textContent || '').replace(/\s+/g, ' ').trim();
+        if (/^open tasks\b/i.test(tx) && els[i].querySelectorAll('*').length <= 2) { head = els[i]; break; }
+      }
+      if (!head) return null;
+      var node = head, hops = 0;
+      while (node.parentElement && node.parentElement !== document.body && hops++ < 8) {
+        var ptx = (node.parentElement.textContent || '').replace(/\s+/g, ' ').trim();
+        if (!/^open tasks\b/i.test(ptx)) break;   // parent holds more than this section
+        node = node.parentElement;
+      }
+      return node.parentElement ? node : null;
+    }
+    function actsAnchorBlock() { return tasksAnchorBlock() || poAnchorBlock(); }
+
     // ---- PO vendor/supplier grouping (CSS-order, non-destructive) --------------
     // The PO list container is a flex COLUMN whose direct children each wrap one PO
     // accordion (recon 339766). We GROUP by setting CSS `order` on those children - never
@@ -3248,7 +3272,7 @@
     function renderActsInline(state) {
       var card = document.getElementById(ACT_CARD_ID);
       var acts = nextActions(state);
-      var row = poAnchorBlock();
+      var row = actsAnchorBlock();
       if (!acts.length || !row) { if (card) card.remove(); return; }
       ensureWAStyle();
       autoDetectActioned(acts, state);

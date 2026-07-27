@@ -698,7 +698,6 @@
   // host announces within a few seconds we fall back to the old floating button.
   var DOCK_KEY = 'wo-audit';
   var _hostSeen = false;
-  var _fallbackActive = false;
   function dockRegister() {
     try {
       document.dispatchEvent(new CustomEvent('bwn:evt', { detail: {
@@ -707,39 +706,22 @@
       } }));
     } catch (e) { }
   }
-  function removeButton() { var b = document.getElementById('bwn-woaudit-btn'); if (b) b.remove(); }
   try {
     document.addEventListener('bwn:evt', function (e) {
       var d = e && e.detail; if (!d) return;
       if (d.id === 'bwn:dock:host' || d.id === 'bwn:dock:ping') {
         _hostSeen = true;
-        if (_fallbackActive) { _fallbackActive = false; removeButton(); }
         dockRegister();
       }
       if (d.id === 'bwn:dock:open' && d.key === DOCK_KEY) buildModal();
     });
   } catch (e) { }
 
-  // Small floating launcher (fallback only): bottom-left so it never collides with
-  // the CC launcher. Normally the shared dock renders our entry instead.
-  function addButton() {
-    if (document.getElementById('bwn-woaudit-btn')) return;
-    var b = document.createElement('button');
-    b.id = 'bwn-woaudit-btn';
-    b.textContent = 'WO Audit';
-    b.title = 'BWN WO Audit - batch status notes from an audit .xlsx';
-    b.style.cssText = 'position:fixed;bottom:18px;left:18px;z-index:2147483645;background:' + GREEN + ';color:#fff;border:0;padding:9px 14px;border-radius:20px;font:600 13px ' + FONT + ';cursor:pointer;box-shadow:0 3px 12px rgba(0,0,0,.25)';
-    b.onclick = buildModal;
-    document.body.appendChild(b);
-  }
-
   // Register into the dock on load (covers a host already up); the host heartbeat
-  // re-registers us later. If no host is seen within 4s, show the fallback button.
+  // re-registers us later. No host means Core is off or failed to load - warn rather
+  // than drawing a corner button; the dock tab is the only launcher this tool has.
   dockRegister();
   setTimeout(function () {
-    if (_hostSeen || _fallbackActive) return;
-    _fallbackActive = true;
-    if (document.body) addButton();
-    else document.addEventListener('DOMContentLoaded', addButton);
+    if (!_hostSeen) console.warn('[BWN WO AUDIT] no dock host - install/enable BWN Suite Core to reach WO Audit.');
   }, 4000);
 })();

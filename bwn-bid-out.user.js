@@ -815,7 +815,6 @@
     if (document.getElementById('bwn-bidout-style')) return;
     var st = document.createElement('style'); st.id = 'bwn-bidout-style';
     st.textContent =
-      '#bwn-bidout-fab{position:fixed;right:18px;bottom:76px;z-index:2147483000;background:#1a5f3e;color:#fff;border:none;border-radius:24px;padding:11px 16px;font:500 14px/1 ' + FONT + ';text-transform:none;box-shadow:0 6px 20px rgba(13,38,26,.28);cursor:pointer;}' +
       // Inline anchor: injected next to the "Service Requests" card heading (no floating).
       '#bwn-bidout-inline{margin-left:10px;vertical-align:middle;background:#1a5f3e;color:#fff;border:none;border-radius:16px;padding:5px 12px;font:500 12px/1.2 ' + FONT + ';text-transform:none;cursor:pointer;white-space:nowrap;}' +
       '#bwn-bidout-inline:hover{background:#0d3d26;}' +
@@ -1699,13 +1698,6 @@
     wrap.appendChild(btn); wrap.appendChild(menu);
     return wrap;
   }
-  function mountFloating() {
-    if (document.getElementById('bwn-bidout-fab')) return;
-    var b = document.createElement('button'); b.id = 'bwn-bidout-fab'; b.type = 'button';
-    b.textContent = '📤 Email RFP'; b.title = 'Email RFP to outside / net-new vendors (network bidding = See Who Is Available)';
-    b.addEventListener('click', function () { launchPanel({ invite: true }); });
-    document.body.appendChild(b);
-  }
   // The Service Requests card heading. No testids exist on this section and the MUI/JSS
   // class names are build-unstable (jss####), so anchor on the user-facing "Service
   // Requests" heading TEXT and navigate relative to it (verified via __bwnSRRecon on WO
@@ -1726,15 +1718,14 @@
   }
   // Launcher cascade (see the bwn-email-rfp-inline-anchor spec): 1) caret on Umbrava's
   // native "See Who Is Available" button when present; else 2) an inline control on the
-  // Service Requests card; else 3) a floating FAB as a true LAST resort. The FAB no longer
-  // takes over merely because the native button is gone - that was the "reverts to the
-  // corner after send" bug (the SR card is present in exactly that state).
+  // Service Requests card. There is no third tier: a floating corner button is exactly
+  // the kind of stray anchor the dock tab replaced, so when neither host exists the RFP
+  // is reached from the tab instead.
   function mountLauncher() {
     if (!woNumber()) return;
     ensureStyle();
     var nb = seeWhoBtn();
     if (nb) {   // tier 1: split-button caret on the native button
-      var f1 = document.getElementById('bwn-bidout-fab'); if (f1) f1.remove();
       var i1 = document.getElementById('bwn-bidout-inline'); if (i1) i1.remove();
       if (!document.getElementById('bwn-bidout-dd')) nb.parentElement.insertBefore(buildCaret(nb), nb.nextSibling);
       return;
@@ -1742,11 +1733,9 @@
     var dd = document.getElementById('bwn-bidout-dd'); if (dd) dd.remove();   // native button gone -> drop its orphaned caret
     var hdr = srHeader();
     if (hdr) {   // tier 2: inline on the Service Requests card
-      var f2 = document.getElementById('bwn-bidout-fab'); if (f2) f2.remove();
       mountInline(hdr);
       return;
     }
-    mountFloating();   // tier 3: last resort only when neither anchor exists
   }
 
   // ---- SR recon: console-only probe to pin the Service Requests inline anchor -----
@@ -1822,6 +1811,8 @@
   try { if (typeof unsafeWindow !== 'undefined' && unsafeWindow) unsafeWindow.__bwnSRRecon = srRecon; } catch (e) { }
 
   function removeLaunchers() {
+    // -fab is no longer mounted; the id stays here to sweep one left over on a tab that
+    // was open across the upgrade.
     ['bwn-bidout-dd', 'bwn-bidout-fab', 'bwn-bidout-inline'].forEach(function (id) {
       var el = document.getElementById(id); if (el) el.remove();
     });
