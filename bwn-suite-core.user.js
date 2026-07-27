@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         BWN Suite - Core (Broadway National)
 // @namespace    broadwaynational.bwn
-// @version      1.66.1
+// @version      1.66.2
 // @downloadURL  https://raw.githubusercontent.com/Intermu/userscripts/main/bwn-suite-core.user.js
 // @updateURL    https://raw.githubusercontent.com/Intermu/userscripts/main/bwn-suite-core.user.js
 // @description  Runs several Umbrava helpers for BWN coordinators, in the browser with no privileged grants. Includes: PO Approval + ETA Builder; WO Assist (GP/ETA, a stall watchdog, DNE calculator, and a next-action playbook); Email Leak Guard (checks recipients against vendor names, PO amounts, and client budget references before an outbound email sends); WO List Heat (a triage overlay + My Day strip on the work-order list, with an optional same-origin Umbrava API scan for deterministic full-board coverage); and the BWN Launcher (opens the Azure Static Web App tools with the current WO's context). Modules share state through sessionStorage/localStorage. The only network calls are same-origin Umbrava GraphQL reads (app.umbrava.com/api/graphql, the app's own session): List Heat's full-board scan and WO Assist's work-order / trip / clock-in reads; everything else is offline. Toggle modules in BWN_MODULES below.
@@ -6460,7 +6460,7 @@
     if (window.__bwnLauncher) return;
     window.__bwnLauncher = true;
 
-    console.info('[BWN LAUNCH] v2.0.1 loaded (dock host, rail card)');
+    console.info('[BWN LAUNCH] v2.0.2 loaded (dock host, rail card)');
 
     // ---- App registry (EDIT PATHS HERE) --------------------------------------
     // All BWN tools live on one Azure Static Web App. Set each tool's path
@@ -6942,7 +6942,7 @@
         '#' + DOCK_STACK_ID + ' .bwn-dock-lbl{flex:1;overflow:hidden;text-overflow:ellipsis;}' +
         '#' + DOCK_STACK_ID + ' .bwn-dock-badge{background:var(--bwn-accent);color:#08301d;border-radius:9px;padding:1px 6px;' +
         'font:700 10px ui-monospace,"Segoe UI Mono","SF Mono",monospace;min-width:14px;text-align:center;' +
-        'flex:none;max-width:64px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;}' +
+        'flex:none;box-sizing:border-box;max-width:34px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;}' +
         '#' + DOCK_STACK_ID + ' .bwn-dock-tools{border-top:1px solid rgba(255,255,255,.14);}' +
         '#' + DOCK_STACK_ID + ' .bwn-dock-collapse{display:flex;align-items:center;justify-content:center;width:100%;box-sizing:border-box;' +
         'padding:6px;border:none;background:transparent;color:rgba(255,255,255,.5);cursor:pointer;border-top:1px solid rgba(255,255,255,.14);}' +
@@ -7123,15 +7123,18 @@
         menu.appendChild(tlIt);
       }
 
+      document.body.appendChild(menu);
       // Anchor beside the rail when it's up; otherwise the default CSS spot
-      // (above the fallback Tools pill) applies.
+      // (above the fallback Tools pill) applies. Measured AFTER the append so
+      // offsetWidth is real - on a narrow window the menu would otherwise run
+      // off the right edge with no way to reach its items.
       var rail = document.getElementById(DOCK_STACK_ID);
       if (rail && rail.classList.contains('bwn-dock-rail')) {
         var rr = rail.getBoundingClientRect();
-        menu.style.left = Math.round(rr.right + 10) + 'px';
+        var mleft = Math.min(Math.round(rr.right + 10), window.innerWidth - menu.offsetWidth - 8);   // keep on-screen
+        menu.style.left = Math.max(8, mleft) + 'px';
         menu.style.bottom = '16px';
       }
-      document.body.appendChild(menu);
       document.addEventListener('keydown', onKey);
       document.addEventListener('click', onDocClick, true);
     }
@@ -7274,6 +7277,17 @@
         en.title == null ? '' : en.title].join('\u0001');
       }).join('\u0002');
     }
+    // Collapse/expand rebuilds the rail, which destroys the very button that was
+    // activated - keyboard focus would land on <body> and a keyboard user would lose
+    // their place. Hand it to the control that replaced it. Ring only shows for
+    // keyboard users (the dock styles :focus-visible), so a mouse click stays quiet.
+    function dockToggle(collapsed, sel) {
+      dockSetCollapsed(collapsed);
+      renderDock();
+      var stack = document.getElementById(DOCK_STACK_ID);
+      var next = stack ? stack.querySelector(sel) : null;
+      if (next) { try { next.focus(); } catch (e) { } }
+    }
     function renderDock() {
       if (!dockAmHost) { removeDockStack(); return; }
       var vis = dockVisible();
@@ -7281,13 +7295,18 @@
       var stack = document.getElementById(DOCK_STACK_ID);
       // Zero registrants: no rail; the standalone Tools pill stays as the fallback launcher.
       if (!vis.length) { if (stack) stack.remove(); if (pill) pill.style.display = ''; dockSig = ''; return; }
+      // These two run BEFORE the signature check on purpose. Both are idempotent and neither
+      // writes into the rail subtree, so they cannot restart the rebuild loop - but they are
+      // repairs, and the old unconditional rebuild is what used to re-run them. Behind the early
+      // return, a removed stylesheet or an ensureDock-recreated pill would never be fixed.
+      ensureStyle();
+      if (pill) pill.style.display = 'none';   // Tools folds into the rail's footer row
       var sig = dockSignature(vis, dockIsCollapsed());
       // Unchanged roster AND the rail is still intact: touch nothing. The firstChild test keeps
       // the self-heal - if the SPA empties the node, the signature match is ignored and we rebuild.
+      // Known gap: a PARTIAL child wipe still matches and is not repaired.
       if (stack && stack.firstChild && sig === dockSig) return;
       dockSig = sig;
-      ensureStyle();
-      if (pill) pill.style.display = 'none';   // Tools folds into the rail's footer row
       if (!stack) { stack = document.createElement('div'); stack.id = DOCK_STACK_ID; document.body.appendChild(stack); }
       stack.textContent = '';
       if (dockIsCollapsed()) {
@@ -7296,7 +7315,7 @@
         chip.type = 'button'; chip.className = 'bwn-dock-chip';
         chip.title = 'BWN tools'; chip.setAttribute('aria-label', 'Expand BWN tools');
         chip.textContent = 'b';
-        chip.addEventListener('click', BWN.guard(function () { dockSetCollapsed(false); renderDock(); }, 'launcher:dockexpand'));
+        chip.addEventListener('click', BWN.guard(function () { dockToggle(false, '.bwn-dock-collapse'); }, 'launcher:dockexpand'));
         stack.appendChild(chip);
         return;
       }
@@ -7325,7 +7344,7 @@
       col.type = 'button'; col.className = 'bwn-dock-collapse';
       col.title = 'Collapse'; col.setAttribute('aria-label', 'Collapse BWN tools');
       col.appendChild(dockIcon('chevronLeft'));
-      col.addEventListener('click', BWN.guard(function () { dockSetCollapsed(true); renderDock(); }, 'launcher:dockcollapse'));
+      col.addEventListener('click', BWN.guard(function () { dockToggle(true, '.bwn-dock-chip'); }, 'launcher:dockcollapse'));
       stack.appendChild(col);
     }
 
