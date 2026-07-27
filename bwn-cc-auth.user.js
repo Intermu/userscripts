@@ -4,7 +4,7 @@
 // @version      0.3.0
 // @downloadURL  https://raw.githubusercontent.com/Intermu/userscripts/main/bwn-cc-auth.user.js
 // @updateURL    https://raw.githubusercontent.com/Intermu/userscripts/main/bwn-cc-auth.user.js
-// @description  Replaces the "CC Authorization Form" Microsoft Form with an in-page CC Request modal. Requesting a card purchase is a coordinator action (any vouched Broadway Umbrava user): fill the fields and submit; it POSTs to the broadway-internal-ops SWA proxy (x-bwn-key gated) which proves your Umbrava session token with Umbrava's own current-user API, injects your verified email as the Requester, and forwards to the HTTP-triggered Power Automate flow "CC Authorization (HTTP)". That flow starts an approval (mnajarro@, GKohlmann@, LPorzelt@) and, on approve, emails you back that the order will be placed. This script OWNS the single floating Credit Card launcher: coordinators and leads see just "CC Request"; supervisors and above get a dropdown that also opens the Supervisor-only "Log CC Purchase" modal (provided by bwn-cc-purchase, driven over the bwn:evt bus so there is only ever one button). Opened on a work order it prefills the Tracking # and drops the client/location into the description, and defaults Supplier to whichever PO line you flipped to "Supplier" in the BWN Ops Suite. The flow's secret URL stays server-side; nothing sensitive lives in this script.
+// @description  Replaces the "CC Authorization Form" Microsoft Form with an in-page CC Request modal. Requesting a card purchase is a coordinator action (any vouched Broadway Umbrava user): fill the fields and submit; it POSTs to the broadway-internal-ops SWA proxy (x-bwn-key gated) which proves your Umbrava session token with Umbrava's own current-user API, injects your verified email as the Requester, and forwards to the HTTP-triggered Power Automate flow "CC Authorization (HTTP)". That flow starts an approval (mnajarro@, GKohlmann@, LPorzelt@) and, on approve, emails you back that the order will be placed. This script OWNS the single Credit Card entry in the shared dock tab: coordinators and leads see just "CC Request"; supervisors and above get a dropdown that also opens the Supervisor-only "Log CC Purchase" modal (provided by bwn-cc-purchase, driven over the bwn:evt bus so there is only ever one button). Opened on a work order it prefills the Tracking # and drops the client/location into the description, and defaults Supplier to whichever PO line you flipped to "Supplier" in the BWN Ops Suite. The flow's secret URL stays server-side; nothing sensitive lives in this script.
 // @match        https://app.umbrava.com/*
 // @run-at       document-idle
 // @noframes
@@ -25,7 +25,7 @@
   var ROLE_URL = SWA_BASE + '/api/user-role';
   var GREEN = '#0d3d26';          // BWN Ops Suite brand green - one launcher, matches CC Purchase
   var MIN_SUPER = 3;              // supervisor - matches api/shared/umbrava-auth.js RANK.SUPERVISOR
-  console.info('[BWN CC REQUEST] v' + VER + ' - coordinator CC Request modal -> SWA proxy (server vouches you + injects your email) -> Power Automate approval flow; registers the single Credit Card launcher into the shared dock (bwn:dock:*), supervisor+ chooser adds Log CC Purchase, floating-button fallback when no dock host');
+  console.info('[BWN CC REQUEST] v' + VER + ' - coordinator CC Request modal -> SWA proxy (server vouches you + injects your email) -> Power Automate approval flow; registers the single Credit Card launcher into the shared dock (bwn:dock:*), supervisor+ chooser adds Log CC Purchase, no floating fallback button');
 
   // ---- BWN Ops Suite bus (read-only consumer of the suite data contract v1) ----
   // bwn-suite-core (WO Assist) PUBLISHES the current WO's facts to sessionStorage
@@ -181,6 +181,9 @@
     // Shared launcher dock ([[bwn-launcher-dock]]): bwn-suite-core's Launcher hosts it.
     if (d.id === 'bwn:dock:host' || d.id === 'bwn:dock:ping') onDockHost();
     if (d.id === 'bwn:dock:open' && d.key === DOCK_KEY) openCc();
+    // Another tool took the drawer slot - close ours (a half-filled form is dropped,
+    // same as the old modal's Escape).
+    if (d.id === 'bwn:drawer:open' && d.key !== DOCK_KEY) closeModal();
   });
   function pingCcPurchase() { try { document.dispatchEvent(new CustomEvent('bwn:evt', { detail: { id: 'bwn:cc:ping' } })); } catch (e) { } }
   function openCcPurchase() { try { document.dispatchEvent(new CustomEvent('bwn:evt', { detail: { id: 'bwn:cc:open', tool: 'purchase' } })); } catch (e) { } }
@@ -282,24 +285,27 @@
     suppliers.concat(nonSuppliers).concat(busVendorNames).forEach(function (v) { if (v && woVendors.indexOf(v) === -1) woVendors.push(v); });
     var flippedSupplier = (suppliers.length === 1) ? suppliers[0] : '';
 
-    var back = document.createElement('div');
-    back.style.cssText = 'position:fixed;inset:0;z-index:2147483646;background:rgba(0,0,0,.45);display:flex;align-items:flex-start;justify-content:center;overflow:auto;padding:40px 16px;';
-    back.addEventListener('click', function (e) { if (e.target === back) closeModal(); });
+    // Suite drawer: slides out from the dock rail, styled by Core's page-wide sheet so
+    // every tool looks the same when you click into it.
+    var back = document.createElement('aside');
+    back.id = 'bwn-drawer-cc'; back.className = 'bwn-drawer';
+    back.setAttribute('role', 'dialog'); back.setAttribute('aria-label', 'New CC Request');
+    try { document.dispatchEvent(new CustomEvent('bwn:evt', { detail: { id: 'bwn:drawer:open', key: DOCK_KEY } })); } catch (e) { }
 
     var card = document.createElement('div');
-    card.style.cssText = 'background:#fff;color:#12241b;font:400 14px ' + FONT + ';width:520px;max-width:100%;border-radius:14px;box-shadow:0 18px 60px rgba(0,0,0,.35);overflow:hidden;';
+    card.style.cssText = 'display:flex;flex-direction:column;flex:1;min-height:0;color:#12241b;font:400 14px ' + FONT + ';';
 
     var head = document.createElement('div');
-    head.style.cssText = 'background:' + GREEN + ';color:#fff;padding:16px 20px;font-weight:600;font-size:16px;display:flex;justify-content:space-between;align-items:center;';
-    head.innerHTML = '<span>New CC Request</span>';
+    head.className = 'bwn-drawer-hd';
+    head.innerHTML = '<div><div class="t">New CC Request</div><div class="s">card purchase approval</div></div>';
     var x = document.createElement('button');
-    x.textContent = '×';
-    x.style.cssText = 'background:none;border:none;color:#fff;font-size:24px;line-height:1;cursor:pointer;padding:0 4px;';
+    x.type = 'button'; x.className = 'bwn-drawer-x'; x.textContent = '×';
+    x.title = 'Close'; x.setAttribute('aria-label', 'Close');
     x.addEventListener('click', closeModal);
     head.appendChild(x);
 
     var form = document.createElement('form');
-    form.style.cssText = 'padding:18px 20px 8px;';
+    form.className = 'bwn-drawer-body';
     form.setAttribute('autocomplete', 'off');
 
     // Who the approval reply goes to = the verified account (server derives it; we only show it).
@@ -360,7 +366,7 @@
     msg.style.cssText = 'min-height:18px;color:#b4231f;font-size:12.5px;margin:2px 0 10px;';
 
     var foot = document.createElement('div');
-    foot.style.cssText = 'display:flex;gap:10px;justify-content:flex-end;padding:6px 0 14px;';
+    foot.style.cssText = 'display:flex;gap:10px;justify-content:flex-end;padding:6px 0 2px;';
     var cancel = document.createElement('button');
     cancel.type = 'button'; cancel.textContent = 'Cancel';
     cancel.style.cssText = 'padding:9px 16px;border:1px solid #c6d2cc;background:#fff;color:#33473d;border-radius:8px;font:600 13px ' + FONT + ';cursor:pointer;';

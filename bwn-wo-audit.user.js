@@ -30,7 +30,7 @@
     { id: 'claude-haiku-4-5', label: 'Haiku 4.5 (cheapest)' },
   ];
   var XLSX_MIME = 'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet';
-  console.info('[BWN WO AUDIT] v' + VER + ' - in-page GraphQL notes read -> bwnAI -> /api/ai summarize -> filled .xlsx download; registers into the shared dock (bwn:dock:*), floating-button fallback when no dock host');
+  console.info('[BWN WO AUDIT] v' + VER + ' - in-page GraphQL notes read -> bwnAI -> /api/ai summarize -> filled .xlsx download; registers into the shared dock (bwn:dock:*), no floating fallback button');
 
   // ====================================================================
   // Auth: the live Umbrava Auth0 bearer, read straight from the page (same
@@ -506,16 +506,17 @@
 
   function buildModal() {
     if (document.getElementById('bwn-woaudit-ov')) return;
-    var ov = document.createElement('div');
-    ov.id = 'bwn-woaudit-ov';
-    ov.style.cssText = 'position:fixed;inset:0;background:rgba(0,0,0,.45);z-index:2147483646;display:flex;align-items:center;justify-content:center;font:14px ' + FONT;
+    // Suite drawer: slides out from the dock rail, styled by Core's page-wide sheet.
+    var ov = document.createElement('aside');
+    ov.id = 'bwn-woaudit-ov'; ov.className = 'bwn-drawer';
+    ov.setAttribute('role', 'dialog'); ov.setAttribute('aria-label', 'WO Audit');
+    try { document.dispatchEvent(new CustomEvent('bwn:evt', { detail: { id: 'bwn:drawer:open', key: DOCK_KEY } })); } catch (e) { }
     var box = document.createElement('div');
-    box.style.cssText = 'background:#fff;width:min(680px,94vw);max-height:90vh;overflow:auto;border-radius:12px;box-shadow:0 12px 48px rgba(0,0,0,.4)';
+    box.style.cssText = 'display:flex;flex-direction:column;flex:1;min-height:0;';
     box.innerHTML =
-      '<div style="background:' + GREEN + ';color:#fff;padding:14px 18px;border-radius:12px 12px 0 0;display:flex;justify-content:space-between;align-items:center">' +
-      '<b style="font-size:15px">WO Audit - batch status notes</b>' +
-      '<span id="bwn-woaudit-x" style="cursor:pointer;font-size:20px;line-height:1">&times;</span></div>' +
-      '<div style="padding:18px">' +
+      '<div class="bwn-drawer-hd"><div><div class="t">WO Audit</div><div class="s">batch status notes from an audit .xlsx</div></div>' +
+      '<button type="button" id="bwn-woaudit-x" class="bwn-drawer-x" title="Close" aria-label="Close">&times;</button></div>' +
+      '<div class="bwn-drawer-body">' +
       '<div id="bwn-woaudit-keywarn" style="display:none;background:#fff4e5;border:1px solid #ffcf99;color:#8a4b00;padding:8px 10px;border-radius:8px;margin-bottom:12px;font-size:12.5px"></div>' +
       '<label style="display:block;font-weight:600;margin-bottom:6px">1. Audit workbook (.xlsx)</label>' +
       '<input type="file" id="bwn-woaudit-file" accept=".xlsx,.xls" style="margin-bottom:6px">' +
@@ -714,6 +715,10 @@
         dockRegister();
       }
       if (d.id === 'bwn:dock:open' && d.key === DOCK_KEY) buildModal();
+      // Another tool took the drawer slot - close ours.
+      if (d.id === 'bwn:drawer:open' && d.key !== DOCK_KEY) {
+        var o = document.getElementById('bwn-woaudit-ov'); if (o) o.remove();
+      }
     });
   } catch (e) { }
 

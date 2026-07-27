@@ -162,10 +162,14 @@
   function announcePurchase() {
     try { document.dispatchEvent(new CustomEvent('bwn:evt', { detail: { id: 'bwn:cc:register', tool: 'purchase' } })); } catch (e) { }
   }
+  // This tool has no dock entry of its own - CC Request's supervisor chooser opens it -
+  // but it still needs a name for the shared drawer slot.
+  var DRAWER_KEY = 'ccpurchase';
   document.addEventListener('bwn:evt', function (e) {
     var d = e && e.detail; if (!d) return;
     if (d.id === 'bwn:cc:ping') announcePurchase();
     if (d.id === 'bwn:cc:open' && d.tool === 'purchase') buildModal();
+    if (d.id === 'bwn:drawer:open' && d.key !== DRAWER_KEY) closeModal();   // another tool took the slot
   });
 
   // ---- SWA POST (GM_xmlhttpRequest bypasses same-origin; @connect authorizes) ----
@@ -233,24 +237,27 @@
     // blank so the coordinator picks (they're all in the suggestion list, suppliers first).
     var flippedSupplier = (suppliers.length === 1) ? suppliers[0] : '';
 
-    var back = document.createElement('div');
-    back.style.cssText = 'position:fixed;inset:0;z-index:2147483646;background:rgba(0,0,0,.45);display:flex;align-items:flex-start;justify-content:center;overflow:auto;padding:40px 16px;';
-    back.addEventListener('click', function (e) { if (e.target === back) closeModal(); });
+    // Suite drawer: slides out from the dock rail, styled by Core's page-wide sheet so
+    // every tool looks the same when you click into it.
+    var back = document.createElement('aside');
+    back.id = 'bwn-drawer-ccpurchase'; back.className = 'bwn-drawer';
+    back.setAttribute('role', 'dialog'); back.setAttribute('aria-label', 'Log Credit Card Purchase');
+    try { document.dispatchEvent(new CustomEvent('bwn:evt', { detail: { id: 'bwn:drawer:open', key: DRAWER_KEY } })); } catch (e) { }
 
     var card = document.createElement('div');
-    card.style.cssText = 'background:#fff;color:#12241b;font:400 14px ' + FONT + ';width:520px;max-width:100%;border-radius:14px;box-shadow:0 18px 60px rgba(0,0,0,.35);overflow:hidden;';
+    card.style.cssText = 'display:flex;flex-direction:column;flex:1;min-height:0;color:#12241b;font:400 14px ' + FONT + ';';
 
     var head = document.createElement('div');
-    head.style.cssText = 'background:#0d3d26;color:#fff;padding:16px 20px;font-weight:600;font-size:16px;display:flex;justify-content:space-between;align-items:center;';
-    head.innerHTML = '<span>Log Credit Card Purchase</span>';
+    head.className = 'bwn-drawer-hd';
+    head.innerHTML = '<div><div class="t">Log Credit Card Purchase</div><div class="s">receipt + coding</div></div>';
     var x = document.createElement('button');
-    x.textContent = '×';
-    x.style.cssText = 'background:none;border:none;color:#fff;font-size:24px;line-height:1;cursor:pointer;padding:0 4px;';
+    x.type = 'button'; x.className = 'bwn-drawer-x'; x.textContent = '×';
+    x.title = 'Close'; x.setAttribute('aria-label', 'Close');
     x.addEventListener('click', closeModal);
     head.appendChild(x);
 
     var form = document.createElement('form');
-    form.style.cssText = 'padding:18px 20px 8px;';
+    form.className = 'bwn-drawer-body';
     form.setAttribute('autocomplete', 'off');
 
     var inputs = {};

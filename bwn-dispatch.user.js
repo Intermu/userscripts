@@ -4,7 +4,7 @@
 // @version      0.3.0
 // @downloadURL  https://raw.githubusercontent.com/Intermu/userscripts/main/bwn-dispatch.user.js
 // @updateURL    https://raw.githubusercontent.com/Intermu/userscripts/main/bwn-dispatch.user.js
-// @description  One-click Dispatch for a work order - replaces manually typing a row into Dispatch_Notifications.xlsx. The Dispatch launcher shows only on a WO that is in "Pending Dispatch". It opens a confirm modal prefilled from the BWN Ops Suite bus (Tracking / Location) and a same-origin Umbrava GraphQL read (Priority + the coordinator to ping): it uses the person this WO is assigned to (whoever a supervisor/manager assigned it to, read live when you open it), and when that is a team or blank it falls back to the coordinator from the most recent work order(s) at the same location. The coordinator name + email are editable before you send. On submit it POSTs the 5 fields to the broadway-internal-ops SWA proxy (x-bwn-key gated) which forwards to the HTTP-triggered "Dispatch HTTP" Power Automate flow - the flow adds the row to Dispatch_Notifications.xlsx AND dispatches it (posts a Teams adaptive card to the coordinator and waits for their accept). Dispatching is a coordinator action, so there is no role gate (the x-bwn-key is the boundary). The assignee's email is not on the WO record (Umbrava exposes the coordinator NAME only), so it is resolved from a per-user name->email roster you maintain (seeded with you, and it remembers each coordinator you dispatch to). The flow's secret URL stays server-side; nothing sensitive lives in this script. Registers a single "Dispatch" launcher into the shared dock (bwn:dock:*); floating-button fallback when no dock host.
+// @description  One-click Dispatch for a work order - replaces manually typing a row into Dispatch_Notifications.xlsx. The Dispatch launcher shows only on a WO that is in "Pending Dispatch". It opens a confirm modal prefilled from the BWN Ops Suite bus (Tracking / Location) and a same-origin Umbrava GraphQL read (Priority + the coordinator to ping): it uses the person this WO is assigned to (whoever a supervisor/manager assigned it to, read live when you open it), and when that is a team or blank it falls back to the coordinator from the most recent work order(s) at the same location. The coordinator name + email are editable before you send. On submit it POSTs the 5 fields to the broadway-internal-ops SWA proxy (x-bwn-key gated) which forwards to the HTTP-triggered "Dispatch HTTP" Power Automate flow - the flow adds the row to Dispatch_Notifications.xlsx AND dispatches it (posts a Teams adaptive card to the coordinator and waits for their accept). Dispatching is a coordinator action, so there is no role gate (the x-bwn-key is the boundary). The assignee's email is not on the WO record (Umbrava exposes the coordinator NAME only), so it is resolved from a per-user name->email roster you maintain (seeded with you, and it remembers each coordinator you dispatch to). The flow's secret URL stays server-side; nothing sensitive lives in this script. Registers a single "Dispatch" launcher into the shared dock (bwn:dock:*) - the dock tab is the only launcher; no floating fallback button.
 // @match        https://app.umbrava.com/*
 // @run-at       document-idle
 // @noframes
@@ -29,7 +29,7 @@
   // Lenient match (substring, case-insensitive) so minor header/API formatting drift
   // does not hide the launcher.
   var DISPATCH_STATUS_RE = /pending\s+dispatch/i;
-  console.info('[BWN DISPATCH] v' + VER + ' - Pending-Dispatch-gated launcher -> confirm modal (bus + live GraphQL prefill, name->email roster) -> SWA /api/dispatch (x-bwn-key) -> Dispatch HTTP flow -> Dispatch_Notifications.xlsx + Teams card. Registers into the shared dock (bwn:dock:*), floating-button fallback when no host.');
+  console.info('[BWN DISPATCH] v' + VER + ' - Pending-Dispatch-gated launcher -> confirm modal (bus + live GraphQL prefill, name->email roster) -> SWA /api/dispatch (x-bwn-key) -> Dispatch HTTP flow -> Dispatch_Notifications.xlsx + Teams card. Registers into the shared dock (bwn:dock:*); no floating fallback button.');
 
   // ---- WO id + BWN Ops Suite bus (read-only consumer, suite data contract v1) --
   // bwn-suite-core (WO Assist) PUBLISHES the current WO's facts to sessionStorage
@@ -312,24 +312,27 @@
       Priority: ''
     };
 
-    var back = document.createElement('div');
-    back.style.cssText = 'position:fixed;inset:0;z-index:2147483646;background:rgba(0,0,0,.45);display:flex;align-items:flex-start;justify-content:center;overflow:auto;padding:40px 16px;';
-    back.addEventListener('click', function (e) { if (e.target === back) closeModal(); });
+    // Suite drawer: slides out from the dock rail, styled by Core's page-wide sheet so
+    // every tool looks the same when you click into it.
+    var back = document.createElement('aside');
+    back.id = 'bwn-drawer-dispatch'; back.className = 'bwn-drawer';
+    back.setAttribute('role', 'dialog'); back.setAttribute('aria-label', 'Dispatch Work Order');
+    try { document.dispatchEvent(new CustomEvent('bwn:evt', { detail: { id: 'bwn:drawer:open', key: DOCK_KEY } })); } catch (e) { }
 
     var card = document.createElement('div');
-    card.style.cssText = 'background:#fff;color:#12241b;font:400 14px ' + FONT + ';width:480px;max-width:100%;border-radius:14px;box-shadow:0 18px 60px rgba(0,0,0,.35);overflow:hidden;';
+    card.style.cssText = 'display:flex;flex-direction:column;flex:1;min-height:0;color:#12241b;font:400 14px ' + FONT + ';';
 
     var head = document.createElement('div');
-    head.style.cssText = 'background:' + GREEN + ';color:#fff;padding:16px 20px;font-weight:600;font-size:16px;display:flex;justify-content:space-between;align-items:center;';
-    head.innerHTML = '<span>Dispatch Work Order</span>';
+    head.className = 'bwn-drawer-hd';
+    head.innerHTML = '<div><div class="t">Dispatch Work Order</div><div class="s">notify a coordinator</div></div>';
     var x = document.createElement('button');
-    x.textContent = '×';
-    x.style.cssText = 'background:none;border:none;color:#fff;font-size:24px;line-height:1;cursor:pointer;padding:0 4px;';
+    x.type = 'button'; x.className = 'bwn-drawer-x'; x.textContent = '×';
+    x.title = 'Close'; x.setAttribute('aria-label', 'Close');
     x.addEventListener('click', closeModal);
     head.appendChild(x);
 
     var form = document.createElement('form');
-    form.style.cssText = 'padding:18px 20px 8px;';
+    form.className = 'bwn-drawer-body';
     form.setAttribute('autocomplete', 'off');
 
     // What happens on send (the flow posts a Teams card the coordinator must accept).
@@ -541,6 +544,7 @@
     var d = e && e.detail; if (!d) return;
     if (d.id === 'bwn:dock:host' || d.id === 'bwn:dock:ping') onDockHost();
     if (d.id === 'bwn:dock:open' && d.key === DOCK_KEY) buildModal();
+    if (d.id === 'bwn:drawer:open' && d.key !== DOCK_KEY) closeModal();   // another tool took the slot
   });
   // The suite bus (bwn:wo:{id}) landing can flip a WO to a known "Pending Dispatch" status
   // after our first (bus-less) check - re-reconcile when it publishes.
