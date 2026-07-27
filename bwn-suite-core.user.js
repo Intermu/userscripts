@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         BWN Suite - Core (Broadway National)
 // @namespace    broadwaynational.bwn
-// @version      1.66.0
+// @version      1.66.1
 // @downloadURL  https://raw.githubusercontent.com/Intermu/userscripts/main/bwn-suite-core.user.js
 // @updateURL    https://raw.githubusercontent.com/Intermu/userscripts/main/bwn-suite-core.user.js
 // @description  Runs several Umbrava helpers for BWN coordinators, in the browser with no privileged grants. Includes: PO Approval + ETA Builder; WO Assist (GP/ETA, a stall watchdog, DNE calculator, and a next-action playbook); Email Leak Guard (checks recipients against vendor names, PO amounts, and client budget references before an outbound email sends); WO List Heat (a triage overlay + My Day strip on the work-order list, with an optional same-origin Umbrava API scan for deterministic full-board coverage); and the BWN Launcher (opens the Azure Static Web App tools with the current WO's context). Modules share state through sessionStorage/localStorage. The only network calls are same-origin Umbrava GraphQL reads (app.umbrava.com/api/graphql, the app's own session): List Heat's full-board scan and WO Assist's work-order / trip / clock-in reads; everything else is offline. Toggle modules in BWN_MODULES below.
@@ -2995,7 +2995,7 @@
         if (!/^\d+$/.test(tracking) || !items || !items.length) return;
         var norm = items.map(function (s) { return String(s || '').replace(/\s+/g, ' ').trim(); }).filter(Boolean).slice(0, 25);
         if (!norm.length) return;
-        var h = authoredKeyHash(norm.join(''));
+        var h = authoredKeyHash(norm.join('\u0001'));
         // Dedup on 'bwn:plansent' -- the content the AI has CONFIRMED handled (sent ok, or
         // 400-dropped as invalid) -- NOT a local marker set at enqueue, which would
         // permanently block a plan the server never accepted (silent loss). Keying off the
@@ -6460,7 +6460,7 @@
     if (window.__bwnLauncher) return;
     window.__bwnLauncher = true;
 
-    console.info('[BWN LAUNCH] v2.0 loaded (dock host, rail card)');
+    console.info('[BWN LAUNCH] v2.0.1 loaded (dock host, rail card)');
 
     // ---- App registry (EDIT PATHS HERE) --------------------------------------
     // All BWN tools live on one Azure Static Web App. Set each tool's path
@@ -6941,7 +6941,8 @@
         '#' + DOCK_STACK_ID + ' .bwn-dock-emoji{font-size:14px;line-height:1;flex:none;}' +
         '#' + DOCK_STACK_ID + ' .bwn-dock-lbl{flex:1;overflow:hidden;text-overflow:ellipsis;}' +
         '#' + DOCK_STACK_ID + ' .bwn-dock-badge{background:var(--bwn-accent);color:#08301d;border-radius:9px;padding:1px 6px;' +
-        'font:700 10px ui-monospace,"Segoe UI Mono","SF Mono",monospace;min-width:14px;text-align:center;}' +
+        'font:700 10px ui-monospace,"Segoe UI Mono","SF Mono",monospace;min-width:14px;text-align:center;' +
+        'flex:none;max-width:64px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;}' +
         '#' + DOCK_STACK_ID + ' .bwn-dock-tools{border-top:1px solid rgba(255,255,255,.14);}' +
         '#' + DOCK_STACK_ID + ' .bwn-dock-collapse{display:flex;align-items:center;justify-content:center;width:100%;box-sizing:border-box;' +
         'padding:6px;border:none;background:transparent;color:rgba(255,255,255,.5);cursor:pointer;border-top:1px solid rgba(255,255,255,.14);}' +
@@ -7201,7 +7202,13 @@
       return String(o.hostId) < String(dockHostId);
     }
     function scheduleDockRender() { clearTimeout(dockRenderT); dockRenderT = setTimeout(BWN.guard(renderDock, 'launcher:dockrender'), 120); }
-    function removeDockStack() { var s = document.getElementById(DOCK_STACK_ID); if (s) s.remove(); }
+    // Restore the standalone Tools pill on the way out - renderDock hides it while the rail
+    // renders, so tearing the rail down without this strands the launcher entirely.
+    function removeDockStack() {
+      var s = document.getElementById(DOCK_STACK_ID); if (s) s.remove();
+      var p = document.getElementById(DOCK_ID); if (p) p.style.display = '';
+      dockSig = '';   // next render must rebuild, not match a signature whose DOM is gone
+    }
     function dockVisible() {
       var arr = Object.keys(dockRoster).map(function (k) { return dockRoster[k]; });
       // Fail-OPEN when rank is unknown (show the entry; the server rejects if truly unauthorized).
@@ -7227,7 +7234,9 @@
       chevronLeft: ['M15 6l-6 6 6 6']
     };
     function dockIcon(name) {
-      var paths = DOCK_ICONS[name];
+      // Own-property only: a registrant key like 'constructor' would otherwise pull a truthy
+      // non-array off Object.prototype and throw mid-render.
+      var paths = Object.prototype.hasOwnProperty.call(DOCK_ICONS, name) ? DOCK_ICONS[name] : null;
       if (!paths) return null;
       var NS = 'http://www.w3.org/2000/svg';
       var svg = document.createElementNS(NS, 'svg');
@@ -7255,13 +7264,28 @@
     function dockSetCollapsed(v) {
       try { if (v) localStorage.setItem(DOCK_COLLAPSED_KEY, '1'); else localStorage.removeItem(DOCK_COLLAPSED_KEY); } catch (e) { }
     }
+    // What the rail would draw, as a string. renderDock rebuilds only when this changes:
+    // its unconditional rebuild otherwise feeds the MutationObserver below, which reschedules
+    // renderDock, and the rail rebuilds itself forever on a completely idle page.
+    var dockSig = '';
+    function dockSignature(vis, collapsed) {
+      return (collapsed ? 'c|' : 'e|') + vis.map(function (en) {
+        return [en.key, en.label, en.icon, en.badge == null ? '' : en.badge,
+        en.title == null ? '' : en.title].join('\u0001');
+      }).join('\u0002');
+    }
     function renderDock() {
       if (!dockAmHost) { removeDockStack(); return; }
       var vis = dockVisible();
       var pill = document.getElementById(DOCK_ID);
       var stack = document.getElementById(DOCK_STACK_ID);
       // Zero registrants: no rail; the standalone Tools pill stays as the fallback launcher.
-      if (!vis.length) { if (stack) stack.remove(); if (pill) pill.style.display = ''; return; }
+      if (!vis.length) { if (stack) stack.remove(); if (pill) pill.style.display = ''; dockSig = ''; return; }
+      var sig = dockSignature(vis, dockIsCollapsed());
+      // Unchanged roster AND the rail is still intact: touch nothing. The firstChild test keeps
+      // the self-heal - if the SPA empties the node, the signature match is ignored and we rebuild.
+      if (stack && stack.firstChild && sig === dockSig) return;
+      dockSig = sig;
       ensureStyle();
       if (pill) pill.style.display = 'none';   // Tools folds into the rail's footer row
       if (!stack) { stack = document.createElement('div'); stack.id = DOCK_STACK_ID; document.body.appendChild(stack); }
@@ -7290,7 +7314,7 @@
       hd.appendChild(img); stack.appendChild(hd);
       var body = document.createElement('div'); body.className = 'bwn-dock-body';
       vis.forEach(function (en) {
-        body.appendChild(dockRowEl(en, DOCK_ICONS[en.key] ? en.key : null,
+        body.appendChild(dockRowEl(en, Object.prototype.hasOwnProperty.call(DOCK_ICONS, en.key) ? en.key : null,
           function () { dockEmit('bwn:dock:open', { key: en.key }); }));
       });
       stack.appendChild(body);
