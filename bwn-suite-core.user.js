@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         BWN Suite - Core (Broadway National)
 // @namespace    broadwaynational.bwn
-// @version      1.66.6
+// @version      1.66.7
 // @downloadURL  https://raw.githubusercontent.com/Intermu/userscripts/main/bwn-suite-core.user.js
 // @updateURL    https://raw.githubusercontent.com/Intermu/userscripts/main/bwn-suite-core.user.js
 // @description  Runs several Umbrava helpers for BWN coordinators, in the browser with no privileged grants. Includes: PO Approval + ETA Builder; WO Assist (GP/ETA, a stall watchdog, DNE calculator, and a next-action playbook); Email Leak Guard (checks recipients against vendor names, PO amounts, and client budget references before an outbound email sends); WO List Heat (a triage overlay + My Day strip on the work-order list, with an optional same-origin Umbrava API scan for deterministic full-board coverage); and the BWN Launcher (opens the Azure Static Web App tools with the current WO's context). Modules share state through sessionStorage/localStorage. The only network calls are same-origin Umbrava GraphQL reads (app.umbrava.com/api/graphql, the app's own session): List Heat's full-board scan and WO Assist's work-order / trip / clock-in reads; everything else is offline. Toggle modules in BWN_MODULES below.
@@ -6880,9 +6880,17 @@
       // Footer + lifecycle
       function close() {
         document.removeEventListener('keydown', onKeyP, true);
+        document.removeEventListener('bwn:evt', onSlotTaken);
         ov.remove();
         try { if (prevFocus && prevFocus.focus && prevFocus.isConnected) prevFocus.focus(); } catch (e) { }
       }
+      // Announcing on open is only half of the shared slot - without this we sat there
+      // while another tool opened alongside us (seen live: Suite settings + Ask BWN both up).
+      function onSlotTaken(e) {
+        var d = e && e.detail;
+        if (d && d.id === 'bwn:drawer:open' && d.key !== 'settings') close();
+      }
+      document.addEventListener('bwn:evt', onSlotTaken);
       function onKeyP(e) {
         if (e.key === 'Escape') { close(); return; }
         if (e.key !== 'Tab') return;
@@ -7148,53 +7156,10 @@
       setTimeout(function () { if (el.isConnected) el.textContent = old; }, 1200);
     }
 
-    // ---- Drawer -------------------------------------------------------------------
-    // One panel surface for the whole suite. Core owns this copy; sandboxed modules
-    // build the same markup themselves (they cannot reach this scope) and announce on
-    // the same bus, so at most one drawer is open across all the scripts at once.
-    var DRAWER_ID_PFX = 'bwn-drawer-';
-    var drawerOpenKey = null;
-    var drawerRelease = null;
-    function onDrawerKey(e) { if (e.key === 'Escape') closeDrawer(); }
-    function closeDrawer() {
-      if (drawerRelease) { try { drawerRelease(); } catch (e) { } drawerRelease = null; }
-      document.removeEventListener('keydown', onDrawerKey);
-      var d = drawerOpenKey && document.getElementById(DRAWER_ID_PFX + drawerOpenKey);
-      if (d) d.remove();
-      drawerOpenKey = null;
-    }
-    // opts: {key, title, sub, build(bodyEl, footEl, api)}. Returns the drawer element.
-    function openDrawer(opts) {
-      ensureStyle();
-      var wasOpen = drawerOpenKey;
-      closeDrawer();
-      if (wasOpen === opts.key) return null;            // second click on the same entry closes it
-      dockEmit('bwn:drawer:open', { key: opts.key });   // other modules drop their drawers
-      var el = document.createElement('aside');
-      el.id = DRAWER_ID_PFX + opts.key; el.className = 'bwn-drawer';
-      var hd = document.createElement('div'); hd.className = 'bwn-drawer-hd';
-      var txt = document.createElement('div');
-      var t = document.createElement('div'); t.className = 't'; t.textContent = opts.title || 'BWN';
-      txt.appendChild(t);
-      if (opts.sub) { var s = document.createElement('div'); s.className = 's'; s.textContent = opts.sub; txt.appendChild(s); }
-      var x = document.createElement('button');
-      x.type = 'button'; x.className = 'bwn-drawer-x'; x.textContent = '×';
-      x.title = 'Close'; x.setAttribute('aria-label', 'Close');
-      x.addEventListener('click', BWN.guard(closeDrawer, 'launcher:drawerclose'));
-      hd.appendChild(txt); hd.appendChild(x); el.appendChild(hd);
-      var body = document.createElement('div'); body.className = 'bwn-drawer-body'; el.appendChild(body);
-      var foot = document.createElement('div'); foot.className = 'bwn-drawer-ft'; el.appendChild(foot);
-      document.body.appendChild(el);
-      drawerOpenKey = opts.key;
-      // Non-modal: the drawer sits beside the page the way the Tasks pull-out does, so the
-      // WO underneath stays clickable. Esc and the focus trap still behave like a dialog.
-      drawerRelease = BWN.a11yDialog(el, { modal: false, label: opts.title || 'BWN panel' });
-      document.addEventListener('keydown', onDrawerKey);
-      if (opts.build) opts.build(body, foot, { close: closeDrawer, el: el });
-      if (!foot.firstChild) foot.remove();
-      return el;
-    }
-
+    // NOTE: Core no longer builds drawers itself - its one panel (Suite settings) owns its
+    // own markup, and the Ops Tools list became rows on the rail. The .bwn-drawer styles in
+    // ensureStyle() stay: the sandboxed modules build that markup and rely on them, and the
+    // bwn:drawer:open contract documented above the CSS is what keeps one panel up at a time.
     // ---- Dock ---------------------------------------------------------------------
     function ensureDock() {
       if (document.getElementById(DOCK_ID)) { BWN.beat('launcher', 'ok', 'dock mounted'); return; }
@@ -7459,8 +7424,6 @@
     document.addEventListener('bwn:evt', BWN.guard(function (e) {
       var d = e && e.detail; if (!d || !d.id) return;
       if (d.id === 'bwn:role' && typeof d.rank === 'number') { dockRank = d.rank; scheduleDockRender(); return; }
-      // Another module's drawer is taking the slot - drop ours (and only ours).
-      if (d.id === 'bwn:drawer:open') { if (drawerOpenKey && d.key !== drawerOpenKey) closeDrawer(); return; }
       if (d.id === 'bwn:dock:host') { if (dockOtherWins(d)) { dockAmHost = false; removeDockStack(); } return; }
       if (!dockAmHost) return;
       if (d.id === 'bwn:dock:register' && d.key) {
