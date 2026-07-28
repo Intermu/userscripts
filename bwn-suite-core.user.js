@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         BWN Suite - Core (Broadway National)
 // @namespace    broadwaynational.bwn
-// @version      1.66.5
+// @version      1.66.6
 // @downloadURL  https://raw.githubusercontent.com/Intermu/userscripts/main/bwn-suite-core.user.js
 // @updateURL    https://raw.githubusercontent.com/Intermu/userscripts/main/bwn-suite-core.user.js
 // @description  Runs several Umbrava helpers for BWN coordinators, in the browser with no privileged grants. Includes: PO Approval + ETA Builder; WO Assist (GP/ETA, a stall watchdog, DNE calculator, and a next-action playbook); Email Leak Guard (checks recipients against vendor names, PO amounts, and client budget references before an outbound email sends); WO List Heat (a triage overlay + My Day strip on the work-order list, with an optional same-origin Umbrava API scan for deterministic full-board coverage); and the BWN Launcher (opens the Azure Static Web App tools with the current WO's context). Modules share state through sessionStorage/localStorage. The only network calls are same-origin Umbrava GraphQL reads (app.umbrava.com/api/graphql, the app's own session): List Heat's full-board scan and WO Assist's work-order / trip / clock-in reads; everything else is offline. Toggle modules in BWN_MODULES below.
@@ -6498,7 +6498,7 @@
     if (window.__bwnLauncher) return;
     window.__bwnLauncher = true;
 
-    console.info('[BWN LAUNCH] v2.0.3 loaded (dock host, edge rail + logo pull tab)');
+    console.info('[BWN LAUNCH] v2.0.4 loaded (dock host, edge rail + tools on the rail)');
 
     // ---- App registry (EDIT PATHS HERE) --------------------------------------
     // All BWN tools live on one Azure Static Web App. Set each tool's path
@@ -6510,7 +6510,8 @@
     var LAUNCHER_APPS = [
       // NOTE: link straight to the tool file. The splash at '/' redirects to the
       // tracker and DROPS the query string, killing the context handoff.
-      { id: 'jobBoard',  label: 'Projects Job Board',    path: '/Broadway_Projects_Tracker.html', context: true },
+      // `short` is what the rail shows - the full label does not fit a 158px row.
+      { id: 'jobBoard',  label: 'Projects Job Board',    short: 'Job Board', path: '/Broadway_Projects_Tracker.html', context: true },
       // Not yet deployed on this host (verified 404) - set paths when published:
       { id: 'pricing',   label: 'Pricing Assistant',     path: '',   context: true },
       { id: 'intake',    label: 'Client Profile Intake', path: '',   context: false },
@@ -6549,7 +6550,7 @@
       var url = location.href;
       var plain = label + ' - ' + url;
       var html = '<a href="' + esc(url) + '">' + esc(label) + '</a>';
-      function done() { if (labelNode) labelNode.textContent = 'Copied ✓'; setTimeout(function () { if (!labelNode || labelNode.isConnected) closeMenu(); }, 650); }   // guard: don't close a menu that was reopened within 650ms
+      function done() { flashLabel(labelNode, 'Copied ✓'); }   // rail row acknowledges in place; nothing to close
       function plainCopy() { navigator.clipboard.writeText(plain).then(done, function () { prompt('Copy manually:', plain); }); }
       try {
         if (navigator.clipboard && window.ClipboardItem) {
@@ -6600,13 +6601,15 @@
     var opsConfigSave = BWN.cfgSave;
 
     function openSuitePanel() {
-      closeMenu();
       if (document.getElementById('bwn-ops-overlay')) return;
       ensureStyle();
+      // Suite settings is a drawer like every other tool - it was the last centred
+      // overlay Core still owned. Claim the shared slot so an open panel folds away.
+      try { document.dispatchEvent(new CustomEvent('bwn:evt', { detail: { id: 'bwn:drawer:open', key: 'settings' } })); } catch (e) { }
       var prevFocus = document.activeElement;
       var ov = document.createElement('div'); ov.id = 'bwn-ops-overlay'; ov.className = 'bwn-ops-overlay';
       var card = document.createElement('div'); card.className = 'bwn-ops-card';
-      card.setAttribute('role', 'dialog'); card.setAttribute('aria-modal', 'true'); card.setAttribute('aria-label', 'Ops Suite settings'); card.tabIndex = -1;
+      card.setAttribute('role', 'dialog'); card.setAttribute('aria-label', 'Ops Suite settings'); card.tabIndex = -1;
 
       var hd = document.createElement('div'); hd.className = 'bwn-ops-hd';
       var ht = document.createElement('div'); ht.className = 't'; ht.textContent = 'Ops Suite';
@@ -6947,16 +6950,8 @@
         'user-select:none;display:flex;align-items:center;gap:6px;}' +
         '#' + DOCK_ID + ':hover{filter:brightness(1.12);}' +
         '#' + DOCK_ID + ' .dot{width:8px;height:8px;border-radius:50%;background:var(--bwn-accent);}' +
-        // Tools list, rendered inside the shared drawer (it used to be its own popup).
-        '.bwn-tools .it{display:block;width:100%;text-align:left;padding:11px 12px;border:none;' +
-        'background:var(--bwn-surface);cursor:pointer;font:500 13px -apple-system,BlinkMacSystemFont,"Segoe UI","Helvetica Neue",Arial,sans-serif;color:var(--bwn-text);' +
-        'border-bottom:1px solid var(--bwn-surface-3);box-sizing:border-box;border-radius:8px;}' +
-        '.bwn-tools .it:hover{background:var(--bwn-tint);color:var(--bwn-green);}' +
-        '.bwn-tools .it .sub{display:block;font:500 10px ui-monospace,"Segoe UI Mono","SF Mono",monospace;color:var(--bwn-text-faint);margin-top:2px;}' +
-        '.bwn-tools .empty{padding:14px;font-size:12px;color:var(--bwn-text-faint);}' +
-        '.bwn-tools .it:focus-visible{outline:2px solid var(--bwn-accent);outline-offset:-2px;}' +
         // Shared launcher dock: one dark rail card flush to the left edge (wireframe-deck
-        // style) - logo header, flat icon+label rows, Tools footer row, collapse chevron.
+        // style) - logo header, registrant rows, a TOOLS section, collapse chevron.
         // Vertically centred so the collapsed pull tab sits level with Umbrava's own
         // right-edge Tasks tabs; the rail then opens from where the tab was, no jump.
         '#' + DOCK_STACK_ID + '{position:fixed;left:0;top:50%;transform:translateY(-50%);z-index:99998;' +
@@ -6966,7 +6961,13 @@
         '#' + DOCK_STACK_ID + ' .bwn-dock-hd{padding:13px 13px 11px;border-bottom:1px solid rgba(255,255,255,.14);}' +
         '#' + DOCK_STACK_ID + ' .bwn-dock-hd img{display:block;width:100%;height:auto;user-select:none;}' +
         '#' + DOCK_STACK_ID + ' .bwn-dock-hd-txt{font:600 12px -apple-system,BlinkMacSystemFont,"Segoe UI","Helvetica Neue",Arial,sans-serif;color:#fff;letter-spacing:.4px;}' +
-        '#' + DOCK_STACK_ID + ' .bwn-dock-body{padding:5px 0;}' +
+        // The rail now carries the tool rows too, so it grows with its contents and scrolls
+        // inside itself on a short window rather than running off the top and bottom.
+        '#' + DOCK_STACK_ID + '.bwn-dock-rail{max-height:calc(100vh - 24px);display:flex;flex-direction:column;}' +
+        '#' + DOCK_STACK_ID + ' .bwn-dock-hd,#' + DOCK_STACK_ID + ' .bwn-dock-collapse{flex:none;}' +
+        '#' + DOCK_STACK_ID + ' .bwn-dock-body{padding:5px 0;flex:1 1 auto;min-height:0;overflow-y:auto;overscroll-behavior:contain;}' +
+        '#' + DOCK_STACK_ID + ' .bwn-dock-sec{padding:9px 14px 4px;font:600 9px ui-monospace,"Segoe UI Mono","SF Mono",monospace;' +
+        'letter-spacing:.9px;color:rgba(255,255,255,.45);border-top:1px solid rgba(255,255,255,.14);margin-top:4px;}' +
         '#' + DOCK_STACK_ID + ' .bwn-dock-row{display:flex;align-items:center;gap:10px;width:100%;box-sizing:border-box;' +
         'padding:10px 14px;border:none;background:transparent;color:rgba(255,255,255,.85);cursor:pointer;text-align:left;' +
         'font:500 13px -apple-system,BlinkMacSystemFont,"Segoe UI","Helvetica Neue",Arial,sans-serif;white-space:nowrap;}' +
@@ -6978,7 +6979,6 @@
         '#' + DOCK_STACK_ID + ' .bwn-dock-badge{background:var(--bwn-accent);color:#08301d;border-radius:9px;padding:1px 6px;' +
         'font:700 10px ui-monospace,"Segoe UI Mono","SF Mono",monospace;min-width:14px;text-align:center;' +
         'flex:none;box-sizing:border-box;max-width:34px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;}' +
-        '#' + DOCK_STACK_ID + ' .bwn-dock-tools{border-top:1px solid rgba(255,255,255,.14);}' +
         '#' + DOCK_STACK_ID + ' .bwn-dock-collapse{display:flex;align-items:center;justify-content:center;width:100%;box-sizing:border-box;' +
         'padding:6px;border:none;background:transparent;color:rgba(255,255,255,.5);cursor:pointer;border-top:1px solid rgba(255,255,255,.14);}' +
         '#' + DOCK_STACK_ID + ' .bwn-dock-collapse:hover{color:#fff;background:rgba(255,255,255,.08);}' +
@@ -7033,9 +7033,10 @@
         '.bwn-drawer-body{flex:1;overflow:auto;padding:14px 18px;}' +
         '.bwn-drawer-ft{display:flex;gap:8px;justify-content:flex-end;align-items:center;padding:12px 18px;' +
         'border-top:1px solid var(--bwn-border-2);background:var(--bwn-surface-2);border-radius:0 0 14px 0;}' +
-        '.bwn-ops-overlay{position:fixed;inset:0;z-index:100001;background:rgba(13,38,26,.5);backdrop-filter:blur(6px);-webkit-backdrop-filter:blur(6px);display:flex;align-items:center;justify-content:center;font-family:-apple-system,BlinkMacSystemFont,"Segoe UI","Helvetica Neue",Arial,sans-serif;}' +
-        '.bwn-ops-card{width:540px;max-width:94vw;max-height:88vh;display:flex;flex-direction:column;background:var(--bwn-surface);border-radius:16px;overflow:hidden;box-shadow:0 18px 60px rgba(0,0,0,.35);}' +
-        '.bwn-ops-hd{background:linear-gradient(135deg,var(--bwn-green),var(--bwn-green-dk));color:#fff;padding:16px 20px;}' +
+        // Suite settings rides the same drawer geometry as the rest of the tools.
+        '.bwn-ops-overlay{position:fixed;top:0;bottom:0;left:var(--bwn-dock-w,158px);z-index:100001;display:flex;font-family:-apple-system,BlinkMacSystemFont,"Segoe UI","Helvetica Neue",Arial,sans-serif;}' +
+        '.bwn-ops-card{width:540px;max-width:calc(100vw - var(--bwn-dock-w,158px) - 8px);height:100%;display:flex;flex-direction:column;background:var(--bwn-surface);border-radius:0 14px 14px 0;overflow:hidden;box-shadow:10px 0 34px rgba(0,0,0,.2);animation:bwn-drawer-in .16s ease-out;}' +
+        '.bwn-ops-hd{background:linear-gradient(135deg,var(--bwn-green),var(--bwn-green-dk));color:#fff;padding:16px 20px;border-radius:0 14px 0 0;}' +
         '.bwn-ops-hd .t{font:600 16px -apple-system,BlinkMacSystemFont,"Segoe UI","Helvetica Neue",Arial,sans-serif;}' +
         '.bwn-ops-hd .s{font:500 11px ui-monospace,"Segoe UI Mono","SF Mono",monospace;color:rgba(255,255,255,.7);margin-top:3px;}' +
         '.bwn-ops-body{padding:14px 18px;overflow:auto;flex:1;}' +
@@ -7064,133 +7065,87 @@
     }
 
     // ---- Tools list (rendered in the shared drawer) -------------------------------
-    function closeMenu() { closeDrawer(); }
 
-    function openMenu() {
+    // The Ops Tools list. These used to sit behind a "Tools" row that opened a drawer
+    // containing nothing but links - a whole surface just to show a menu. They are rows on
+    // the rail itself now, so the rail is the nav and a drawer only ever holds a real tool UI.
+    // Returns [{key,label,title,icon,run(labelEl)}]; renderDock draws them.
+    function toolItems() {
       var ctx = woContext();
-      var menu = null;
-      var drawer = openDrawer({
-        key: 'tools',
-        title: 'Ops Tools',
-        sub: ctx && ctx.tracking ? '#' + ctx.tracking : 'BWN suite',
-        build: function (body) { menu = body; menu.className += ' bwn-tools'; }
-      });
-      if (!drawer) return;   // toggled shut
+      var items = [];
 
-      var shown = 0;
       LAUNCHER_APPS.forEach(function (app) {
         var url = buildUrl(app);
         if (!url) return;
-        shown++;
-        var btn = document.createElement('button');
-        btn.type = 'button'; btn.className = 'it';
-        btn.textContent = app.label;
-        if (app.context && ctx) {
-          var sub = document.createElement('span'); sub.className = 'sub';
-          sub.textContent = 'opens with this WO\u2019s context';
-          btn.appendChild(sub);
-        }
-        btn.addEventListener('click', function () {
-          window.open(url, '_blank', 'noopener');
-          closeMenu();
+        items.push({
+          key: 'app:' + app.label, label: app.short || app.label, icon: 'board',
+          title: (app.context && ctx) ? (app.label + ' - opens with this WO\u2019s context') : app.label,
+          run: function () { window.open(url, '_blank', 'noopener'); }
         });
-        menu.appendChild(btn);
       });
 
-      // Copy Context: for tools (or chats) without URL-param support.
       if (ctx) {
-        var cc = document.createElement('button');
-        cc.type = 'button'; cc.className = 'it';
-        cc.textContent = 'Copy WO context';
-        var sub2 = document.createElement('span'); sub2.className = 'sub';
-        sub2.textContent = 'tracking \u00b7 WO \u00b7 client/location \u00b7 status \u00b7 DNE \u00b7 GP%';
-        cc.appendChild(sub2);
-        cc.addEventListener('click', function () {
-          var lines = [
-            'Tracking #' + (ctx.tracking || '?'),
-            'WO ' + (ctx.wo || '?'),
-            ctx.location, 'Status: ' + (ctx.status || '?'),
-            ctx.dne ? 'DNE: $' + ctx.dne : '',
-            ctx.gpPct ? 'GP: ' + ctx.gpPct + '%' : '',
-            location.href
-          ].filter(Boolean).join('\n');
-          navigator.clipboard.writeText(lines).then(function () {
-            cc.firstChild.textContent = 'Copied \u2713';
-            setTimeout(function () { if (cc.isConnected) closeMenu(); }, 700);   // guard: don't close a reopened menu
-          }, function () { prompt('Copy manually:', lines); });
+        // Copy Context: for tools (or chats) without URL-param support.
+        items.push({
+          key: 'copyctx', label: 'Copy context', icon: 'copy',
+          title: 'tracking \u00b7 WO \u00b7 client/location \u00b7 status \u00b7 DNE \u00b7 GP%',
+          run: function (labelEl) {
+            var lines = [
+              'Tracking #' + (ctx.tracking || '?'),
+              'WO ' + (ctx.wo || '?'),
+              ctx.location, 'Status: ' + (ctx.status || '?'),
+              ctx.dne ? 'DNE: $' + ctx.dne : '',
+              ctx.gpPct ? 'GP: ' + ctx.gpPct + '%' : '',
+              location.href
+            ].filter(Boolean).join('\n');
+            navigator.clipboard.writeText(lines).then(function () {
+              flashLabel(labelEl, 'Copied \u2713');
+            }, function () { prompt('Copy manually:', lines); });
+          }
         });
-        menu.appendChild(cc);
-        shown++;
-
-        var lk = document.createElement('button');
-        lk.type = 'button'; lk.className = 'it';
-        lk.textContent = 'Copy WO link';
-        var subL = document.createElement('span'); subL.className = 'sub';
-        subL.textContent = 'clickable rich link for Teams / Outlook';
-        lk.appendChild(subL);
-        lk.addEventListener('click', function () { copyWOLink(ctx, lk.firstChild); });
-        menu.appendChild(lk);
-        shown++;
+        items.push({
+          key: 'copylink', label: 'Copy link', icon: 'link',
+          title: 'clickable rich link for Teams / Outlook',
+          run: function (labelEl) { copyWOLink(ctx, labelEl); }
+        });
       }
-
-      if (!shown) {
-        var em = document.createElement('div'); em.className = 'empty';
-        em.textContent = 'No tools configured yet. Edit LAUNCHER_APPS at the top of the Launcher script and set each tool\u2019s path on the Static Web App.';
-        menu.appendChild(em);
-      }
-
-      var setIt = document.createElement('button');
-      setIt.type = 'button'; setIt.className = 'it';
-      setIt.textContent = 'Suite settings';
-      var sub3 = document.createElement('span'); sub3.className = 'sub';
-      sub3.textContent = 'modules · thresholds · status';
-      setIt.appendChild(sub3);
-      setIt.addEventListener('click', openSuitePanel);
-      menu.appendChild(setIt);
 
       // End-of-day digest - cross-module via bwn:cmd (Visit Memory owns the log).
       if (BWN_MODULES.visitLog) {
-        var eodIt = document.createElement('button');
-        eodIt.type = 'button'; eodIt.className = 'it';
-        eodIt.textContent = 'End-of-day digest';
-        var subE = document.createElement('span'); subE.className = 'sub';
-        subE.textContent = 'today’s touched WOs, grouped & paste-ready';
-        eodIt.appendChild(subE);
-        eodIt.addEventListener('click', function () {
-          document.dispatchEvent(new CustomEvent('bwn:cmd', { detail: { id: 'core:eoddigest' } }));
-          closeMenu();
+        items.push({
+          key: 'eod', label: 'EOD digest', icon: 'digest',
+          title: 'today\u2019s touched WOs, grouped & paste-ready',
+          run: function () { document.dispatchEvent(new CustomEvent('bwn:cmd', { detail: { id: 'core:eoddigest' } })); }
         });
-        menu.appendChild(eodIt);
       }
-
       if (BWN_MODULES.reminders) {
-        var remIt = document.createElement('button');
-        remIt.type = 'button'; remIt.className = 'it';
-        remIt.textContent = 'Follow-up reminders';
-        var subR = document.createElement('span'); subR.className = 'sub';
-        subR.textContent = 'nudge me about this WO · view pending';
-        remIt.appendChild(subR);
-        remIt.addEventListener('click', function () {
-          document.dispatchEvent(new CustomEvent('bwn:cmd', { detail: { id: 'core:remind' } }));
-          closeMenu();
+        items.push({
+          key: 'remind', label: 'Reminders', icon: 'bell',
+          title: 'nudge me about this WO \u00b7 view pending',
+          run: function () { document.dispatchEvent(new CustomEvent('bwn:cmd', { detail: { id: 'core:remind' } })); }
         });
-        menu.appendChild(remIt);
       }
-
       if (BWN_MODULES.notesTimeline && ctx) {
-        var tlIt = document.createElement('button');
-        tlIt.type = 'button'; tlIt.className = 'it';
-        tlIt.textContent = 'Notes timeline';
-        var subT = document.createElement('span'); subT.className = 'sub';
-        subT.textContent = 'chronological read · day + quiet-gap markers';
-        tlIt.appendChild(subT);
-        tlIt.addEventListener('click', function () {
-          document.dispatchEvent(new CustomEvent('bwn:cmd', { detail: { id: 'core:notestimeline' } }));
-          closeMenu();
+        items.push({
+          key: 'timeline', label: 'Notes timeline', icon: 'timeline',
+          title: 'chronological read \u00b7 day + quiet-gap markers',
+          run: function () { document.dispatchEvent(new CustomEvent('bwn:cmd', { detail: { id: 'core:notestimeline' } })); }
         });
-        menu.appendChild(tlIt);
       }
-
+      items.push({
+        key: 'settings', label: 'Suite settings', icon: 'settings',
+        title: 'modules \u00b7 thresholds \u00b7 status',
+        run: function () { openSuitePanel(); }
+      });
+      return items;
+    }
+    // Row-label acknowledgement, restored on a timer. The rail re-renders on its own
+    // signature, so the restore is guarded on the node still being mounted.
+    function flashLabel(el, text) {
+      if (!el) return;
+      var old = el.textContent;
+      el.textContent = text;
+      setTimeout(function () { if (el.isConnected) el.textContent = old; }, 1200);
     }
 
     // ---- Drawer -------------------------------------------------------------------
@@ -7248,12 +7203,15 @@
       dock.id = DOCK_ID;
       dock.setAttribute('role', 'button');
       dock.setAttribute('tabindex', '0');
-      dock.title = 'Ops tools \u2014 launch Job Board, Pricing Assistant, and more with this WO\u2019s context';
+      dock.title = 'BWN Suite settings \u2014 no tools have registered on this page';
       var dot = document.createElement('span'); dot.className = 'dot';
-      var label = document.createElement('span'); label.textContent = 'Tools';
+      var label = document.createElement('span'); label.textContent = 'BWN';
       dock.appendChild(dot); dock.appendChild(label);
-      dock.addEventListener('click', openMenu);
-      dock.addEventListener('keydown', function (e) { if (e.key === 'Enter' || e.key === ' ') { e.preventDefault(); openMenu(); } });
+      // No-registrant fallback: the rail is the tools UI now, so this pill opens Suite
+      // settings (the one tool that is always available) rather than a menu that no
+      // longer exists.
+      dock.addEventListener('click', openSuitePanel);
+      dock.addEventListener('keydown', function (e) { if (e.key === 'Enter' || e.key === ' ') { e.preventDefault(); openSuitePanel(); } });
       document.body.appendChild(dock);
       BWN.beat('launcher', 'ok', 'dock mounted');
     }
@@ -7336,6 +7294,16 @@
       dispatch: ['M7 17a2 2 0 1 0 4 0 2 2 0 0 0-4 0z', 'M15 17a2 2 0 1 0 4 0 2 2 0 0 0-4 0z',
         'M5 17H3V6a1 1 0 0 1 1-1h9v12m-2 0h4m4 0h2v-6h-8m0-5h5l3 5'],
       tools: ['M4 6h16', 'M4 12h16', 'M4 18h16', 'M14 4v4', 'M8 10v4', 'M16 16v4'],
+      // Ops Tools rows (they render on the rail now, so they each need a mark)
+      board: ['M4 5h16v14H4z', 'M4 10h16', 'M10 10v9'],
+      copy: ['M9 9h10v10H9z', 'M5 15V5h10'],
+      link: ['M10 13a4 4 0 0 0 5.66 0l2.83-2.83a4 4 0 1 0-5.66-5.66L11.5 5.5',
+        'M14 11a4 4 0 0 0-5.66 0L5.5 13.84a4 4 0 1 0 5.66 5.66L12.5 18.5'],
+      settings: ['M12 15a3 3 0 1 0 0-6 3 3 0 0 0 0 6z',
+        'M19.4 15a1.7 1.7 0 0 0 .34 1.87l.06.06a2 2 0 1 1-2.83 2.83l-.06-.06a1.7 1.7 0 0 0-2.87 1.2V21a2 2 0 1 1-4 0v-.1A1.7 1.7 0 0 0 7 19.4a1.7 1.7 0 0 0-1.87.34l-.06.06a2 2 0 1 1-2.83-2.83l.06-.06A1.7 1.7 0 0 0 2.6 15a1.7 1.7 0 0 0-1.6-1H1a2 2 0 1 1 0-4h.1A1.7 1.7 0 0 0 2.6 9a1.7 1.7 0 0 0-.34-1.87l-.06-.06a2 2 0 1 1 2.83-2.83l.06.06A1.7 1.7 0 0 0 7 4.6h.09A1.7 1.7 0 0 0 8 3V3a2 2 0 1 1 4 0v.09A1.7 1.7 0 0 0 15 4.6a1.7 1.7 0 0 0 1.87-.34l.06-.06a2 2 0 1 1 2.83 2.83l-.06.06A1.7 1.7 0 0 0 19.4 9v.09a1.7 1.7 0 0 0 1.6 1H21a2 2 0 1 1 0 4h-.09a1.7 1.7 0 0 0-1.51 1z'],
+      digest: ['M5 4h11l3 3v13H5z', 'M9 10h7', 'M9 14h7', 'M9 18h4'],
+      bell: ['M18 15v-4a6 6 0 1 0-12 0v4l-2 3h16z', 'M10 21h4'],
+      timeline: ['M6 4v16', 'M6 8h13', 'M6 14h9', 'M6 19h11'],
       chevronLeft: ['M15 6l-6 6 6 6']
     };
     function dockIcon(name) {
@@ -7362,7 +7330,9 @@
       else if (en.icon) { var sp = document.createElement('span'); sp.className = 'bwn-dock-emoji'; sp.textContent = en.icon; b.appendChild(sp); }
       var lb = document.createElement('span'); lb.className = 'bwn-dock-lbl'; lb.textContent = en.label; b.appendChild(lb);
       if (en.badge) { var bd = document.createElement('span'); bd.className = 'bwn-dock-badge'; bd.textContent = en.badge; b.appendChild(bd); }
-      b.addEventListener('click', BWN.guard(onClick, 'launcher:dockclick'));
+      // The label node is handed to the handler so a row can acknowledge in place
+      // ("Copied ✓") now that there is no menu to close as the confirmation.
+      b.addEventListener('click', BWN.guard(function () { onClick(lb); }, 'launcher:dockclick'));
       return b;
     }
     function dockLogoUrl() { return LAUNCHER_BASE.replace(/\/$/, '') + '/assets/bwn-logo.png'; }
@@ -7374,11 +7344,21 @@
     // its unconditional rebuild otherwise feeds the MutationObserver below, which reschedules
     // renderDock, and the rail rebuilds itself forever on a completely idle page.
     var dockSig = '';
+    // The tool rows live on the rail now, and which of them exist changes with the page
+    // (Copy WO context / link and Notes timeline are WO-only). Their keys have to be in the
+    // signature, or navigating list -> WO would leave the rail stale until some registrant
+    // happened to change. See the tail of this function.
     function dockSignature(vis, collapsed) {
-      return (collapsed ? 'c|' : 'e|') + vis.map(function (en) {
+      return (collapsed ? 'c|' : 'e|') + dockToolSig(collapsed) + vis.map(function (en) {
         return [en.key, en.label, en.icon, en.badge == null ? '' : en.badge,
         en.title == null ? '' : en.title].join('\u0001');
       }).join('\u0002');
+    }
+    function dockToolSig(collapsed) {
+      if (collapsed) return '';   // collapsed draws only the tab; tool rows are irrelevant
+      try {
+        return toolItems().map(function (it) { return it.key + '=' + it.label; }).join(',') + '|';
+      } catch (e) { return '|'; }
     }
     // Collapse/expand rebuilds the rail, which destroys the very button that was
     // activated - keyboard focus would land on <body> and a keyboard user would lose
@@ -7456,10 +7436,18 @@
         body.appendChild(dockRowEl(en, Object.prototype.hasOwnProperty.call(DOCK_ICONS, en.key) ? en.key : null,
           function () { dockEmit('bwn:dock:open', { key: en.key }); }));
       });
+      // Ops Tools, as rows on the rail rather than a "Tools" row that opened a drawer of
+      // links. The rail grows to fit and scrolls if the window is short (see .bwn-dock-body).
+      var tools = toolItems();
+      if (tools.length) {
+        var sec = document.createElement('div');
+        sec.className = 'bwn-dock-sec'; sec.textContent = 'TOOLS';
+        body.appendChild(sec);
+        tools.forEach(function (it) {
+          body.appendChild(dockRowEl(it, it.icon, function (labelEl) { it.run(labelEl); }));
+        });
+      }
       stack.appendChild(body);
-      var tools = dockRowEl({ label: 'Tools', title: 'Ops tools - Job Board, Suite settings, WO context' }, 'tools', openMenu);
-      tools.className += ' bwn-dock-tools';
-      stack.appendChild(tools);
       var col = document.createElement('button');
       col.type = 'button'; col.className = 'bwn-dock-collapse';
       col.title = 'Collapse'; col.setAttribute('aria-label', 'Collapse BWN tools');
