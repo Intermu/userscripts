@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         BWN Vendor Intake (Broadway National)
 // @namespace    broadwaynational.bwn
-// @version      0.8.3
+// @version      0.8.4
 // @downloadURL  https://raw.githubusercontent.com/Intermu/userscripts/main/bwn-vendor-intake.user.js
 // @updateURL    https://raw.githubusercontent.com/Intermu/userscripts/main/bwn-vendor-intake.user.js
 // @description  Prefills Umbrava's Create Vendor form (and the detail-page Tax ID) from a Prospect Set-Up Form or a W-9. Fillable PDFs are read straight from their form fields; SCANNED W-9s are read by on-device OCR (Tesseract + pdf.js, fetched once at install, run entirely in the browser). The document and its tax ID never leave your machine. Adds a "Prefill from document" button; every extracted field is a suggestion to review before saving - the TIN especially, since OCR can misread digits.
@@ -21,7 +21,7 @@
 (function () {
   'use strict';
 
-  var VER = '0.8.1';
+  var VER = '0.8.4';
   // v0.4.0 - real IRS fillable W-9 support: map by FIELD NAME (UTF-16BE-decoded f1_/c1_1 names)
   // after inflating compressed object streams, since the IRS form carries no /TU tooltips; the
   // tooltip mapping stays as a fallback for other fillable forms. Also fixed stream inflation to
@@ -323,7 +323,10 @@
   async function ocrWorker(onProgress) {
     if (_tessWorker) return _tessWorker;
     if (typeof Tesseract === 'undefined') throw new Error('OCR engine not loaded - reinstall this script from its URL so @require/@resource fetch the engine.');
-    var coreURL = GM_getResourceURL(wasmSimdOk() ? 'tessCore' : 'tessCoreFb');
+    // GM_getResourceURL returns a data:/blob: URL, which doesn't end in "js" - tesseract's getCore
+    // then treats corePath as a DIRECTORY and appends /tesseract-core-*.wasm.js onto the data URL
+    // (NetworkError). A fragment ending in .js forces its load-as-file branch; fetch ignores fragments.
+    var coreURL = GM_getResourceURL(wasmSimdOk() ? 'tessCore' : 'tessCoreFb') + '#tesseract-core.wasm.js';
     var trainedURL = GM_getResourceURL('tessLangEng');   // .gz bytes, local blob (same-origin)
     var realWorker = GM_getResourceURL('tessWorker');
     // Wrapper worker: intercept any *.traineddata* fetch and serve the local blob instead.

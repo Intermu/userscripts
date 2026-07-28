@@ -4036,7 +4036,7 @@ if (BWN_MODULES.jobView) BWN.safeModule('jobView', function () {
   // MODAL SHELL  (mirrors the Client Update overlay pattern)
   // ====================================================================
   var JV_CSS = `
-#bwn-jv-overlay{position:fixed;top:0;bottom:0;left:var(--bwn-dock-w,158px);z-index:100000;display:flex;overflow:hidden;font-family:-apple-system,BlinkMacSystemFont,'Segoe UI','Helvetica Neue',Arial,sans-serif;
+#bwn-jv-overlay{position:fixed;top:0;bottom:0;left:var(--bwn-dock-w,158px);z-index:100000;display:flex;overflow:hidden;font-variant-numeric:tabular-nums;font-family:-apple-system,BlinkMacSystemFont,'Segoe UI','Helvetica Neue',Arial,sans-serif;
   --color-bg:#f0f4f8;--color-surface:#ffffff;--color-surface-alt:#f8fafc;--color-surface-faint:#fafffe;
   --color-text:#1e293b;--color-text-muted:#64748b;--color-text-ghost:#94a3b8;
   --color-border:#e2e8f0;--color-border-strong:#cbd5e1;
@@ -4055,7 +4055,10 @@ if (BWN_MODULES.jobView) BWN.safeModule('jobView', function () {
    wider than the form drawers (1100px) because the two-column layout needs the room; it
    clamps to whatever the rail leaves, and the max-width:900px rule at the bottom of this
    sheet stacks the columns once that clamp gets tight. */
-#bwn-jv-card{background:var(--color-surface);border:none;border-radius:0 14px 14px 0;width:1100px;max-width:calc(100vw - var(--bwn-dock-w,158px) - 8px);height:100%;display:flex;flex-direction:column;box-shadow:10px 0 34px rgba(0,0,0,0.2);font-family:-apple-system,BlinkMacSystemFont,'Segoe UI','Helvetica Neue',Arial,sans-serif;overflow:hidden;color:var(--text);animation:bwn-drawer-in .16s ease-out;}
+#bwn-jv-card{background:var(--color-surface);border:none;border-radius:0 14px 14px 0;width:1100px;max-width:calc(100vw - var(--bwn-dock-w,158px) - 8px);height:100%;display:flex;flex-direction:column;box-shadow:10px 0 34px rgba(11,40,26,0.22);font-family:-apple-system,BlinkMacSystemFont,'Segoe UI','Helvetica Neue',Arial,sans-serif;overflow:hidden;color:var(--text);animation:bwn-drawer-in .16s ease-out;}
+/* Core also defines these keyframes (drawer host); duplicated here so the slide-in
+   survives when Core is off - same no-host fallback rule as the launch button. */
+@keyframes bwn-drawer-in{from{transform:translateX(-14px);opacity:.4;}to{transform:none;opacity:1;}}
 #bwn-jv-overlay .badge{display:inline-block;font-size:9px;font-weight:600;padding:2px 7px;border-radius:99px;letter-spacing:normal;text-transform:none;}
 #bwn-jv-overlay .badge.b-red{background:var(--color-danger-bg-alt);color:var(--color-danger-text);}
 #bwn-jv-overlay .badge.b-amber{background:var(--color-warning-bg);color:var(--color-warning-text);}
@@ -4092,12 +4095,17 @@ if (BWN_MODULES.jobView) BWN.safeModule('jobView', function () {
 #bwn-jv-overlay .jm-step-why{font-size:11px;color:var(--muted);line-height:1.5;margin-bottom:6px;}
 #bwn-jv-overlay .jm-step-msg{font-size:11.5px;color:var(--text);line-height:1.5;background:var(--color-surface);border:1px solid var(--border);border-radius:6px;padding:8px 10px;white-space:pre-wrap;margin-bottom:8px;}
 #bwn-jv-overlay .jm-step-acts{display:flex;flex-wrap:wrap;gap:6px;}
-#bwn-jv-overlay .jm-step-btn{font:500 10.5px -apple-system,BlinkMacSystemFont,'Segoe UI',Arial,sans-serif;padding:4px 10px;border-radius:6px;border:1px solid var(--border);background:var(--color-surface);color:var(--green-dk);cursor:pointer;}
+#bwn-jv-overlay .jm-step-btn{font:500 10.5px -apple-system,BlinkMacSystemFont,'Segoe UI',Arial,sans-serif;padding:4px 10px;border-radius:6px;border:1px solid var(--border);background:var(--color-surface);color:var(--green-dk);cursor:pointer;transition:background .12s,border-color .12s;}
+#bwn-jv-overlay .jm-step-btn:hover{background:var(--color-primary-faint);border-color:#cfe3d7;}
+#bwn-jv-overlay .jm-step-btn:active{transform:translateY(1px);}
+#bwn-jv-overlay .jm-step-btn.primary:hover{background:var(--color-primary);border-color:transparent;}
 #bwn-jv-overlay .jm-step-btn.primary{background:var(--green-dk);color:#fff;border-color:transparent;}
 #bwn-jv-overlay .jm-section-label{font-size:10px;text-transform:none;letter-spacing:normal;color:var(--muted);font-weight:500;margin:0 0 5px;}
 #bwn-jv-overlay .jm-notes{font-size:12px;color:var(--text);line-height:1.55;white-space:pre-wrap;background:var(--color-surface-alt);border:1px solid var(--border);border-radius:8px;padding:10px 12px;max-height:260px;overflow-y:auto;}
 #bwn-jv-overlay .jm-holdup .holdup-row{display:flex;align-items:flex-start;gap:10px;justify-content:space-between;}
-#bwn-jv-overlay .holdup-ai-btn{flex:none;font-size:9.5px;font-weight:500;padding:3px 8px;border-radius:6px;border:1px solid var(--border);background:var(--color-surface);color:var(--green-dk);cursor:pointer;font-family:-apple-system,BlinkMacSystemFont,'Segoe UI','Helvetica Neue',Arial,sans-serif;white-space:nowrap;}
+#bwn-jv-overlay .holdup-ai-btn{flex:none;font-size:9.5px;font-weight:500;padding:3px 8px;border-radius:6px;border:1px solid var(--border);background:var(--color-surface);color:var(--green-dk);cursor:pointer;font-family:-apple-system,BlinkMacSystemFont,'Segoe UI','Helvetica Neue',Arial,sans-serif;white-space:nowrap;transition:background .12s,border-color .12s;}
+#bwn-jv-overlay .holdup-ai-btn:hover{background:var(--color-primary-faint);border-color:#cfe3d7;}
+#bwn-jv-overlay .holdup-ai-btn:active{transform:translateY(1px);}
 #bwn-jv-overlay .holdup-meta{font-size:9px;color:var(--muted);margin-top:5px;}
 #bwn-jv-overlay .jm-cols{display:grid;grid-template-columns:minmax(0,0.95fr) minmax(0,1.05fr);grid-template-rows:minmax(0,1fr);gap:18px;flex:1 1 auto;min-height:0;}
 #bwn-jv-overlay .jm-col{min-width:0;min-height:0;overflow-y:auto;padding-right:6px;}
@@ -4106,7 +4114,7 @@ if (BWN_MODULES.jobView) BWN.safeModule('jobView', function () {
 #bwn-jv-overlay .jm-timing{display:grid;grid-template-columns:repeat(3,1fr);gap:8px;margin:0 0 14px;}
 #bwn-jv-overlay .jt{background:var(--color-surface-alt);border:1px solid var(--border);border-radius:8px;padding:8px 10px;text-align:center;}
 #bwn-jv-overlay .jt-n{font:500 17px -apple-system,BlinkMacSystemFont,'Segoe UI','Helvetica Neue',Arial,sans-serif;color:#0d3d26;line-height:1.1;}
-#bwn-jv-overlay .jt-l{font-size:8.5px;font-weight:500;text-transform:none;letter-spacing:normal;color:var(--muted);margin-top:3px;}
+#bwn-jv-overlay .jt-l{font-size:9px;font-weight:500;text-transform:none;letter-spacing:normal;color:var(--muted);margin-top:3px;}
 #bwn-jv-overlay .jm-na{background:linear-gradient(135deg,#f1f9f4,#eaf5ef);border:1px solid #d3e8dc;border-radius:8px;padding:11px 14px 6px;margin-bottom:14px;}
 #bwn-jv-overlay .jm-na-h{display:flex;align-items:center;justify-content:space-between;gap:8px;font:500 10.5px ui-monospace,'Segoe UI Mono','SF Mono',monospace;color:#0d3d26;text-transform:none;letter-spacing:normal;margin-bottom:5px;}
 #bwn-jv-overlay .jm-na-copy{flex:none;font:500 9.5px ui-monospace,'Segoe UI Mono','SF Mono',monospace;text-transform:none;letter-spacing:0;color:#1a5f3e;background:#fff;border:1px solid #cfe3d7;border-radius:6px;padding:3px 8px;cursor:pointer;transition:background .12s,border-color .12s;}
@@ -4143,7 +4151,9 @@ if (BWN_MODULES.jobView) BWN.safeModule('jobView', function () {
 #bwn-jv-overlay .jn-actsel{font:500 12px -apple-system,BlinkMacSystemFont,'Segoe UI',sans-serif;color:var(--muted);display:inline-flex;align-items:center;gap:6px;}
 #bwn-jv-overlay .jn-actsel select{font:400 13px -apple-system,BlinkMacSystemFont,'Segoe UI',sans-serif;padding:5px 8px;border:1px solid var(--border);border-radius:6px;background:var(--color-surface);color:var(--text);}
 #bwn-jv-overlay .jn-saved{font:400 12px -apple-system,BlinkMacSystemFont,'Segoe UI',sans-serif;color:var(--muted);margin-left:auto;}
-#bwn-jv-overlay .jn-save{background:#1a5f3e;color:#fff;border:none;border-radius:8px;padding:8px 16px;font:500 14px -apple-system,BlinkMacSystemFont,'Segoe UI',sans-serif;cursor:pointer;}
+#bwn-jv-overlay .jn-save{background:#1a5f3e;color:#fff;border:none;border-radius:8px;padding:8px 16px;font:500 14px -apple-system,BlinkMacSystemFont,'Segoe UI',sans-serif;cursor:pointer;transition:background .12s;}
+#bwn-jv-overlay .jn-save:hover:not(:disabled){background:#0d3d26;}
+#bwn-jv-overlay .jn-save:active:not(:disabled){transform:translateY(1px);}
 #bwn-jv-overlay .jn-save:disabled{opacity:.6;cursor:default;}
 #bwn-jv-overlay .np-text{font-size:13px;line-height:1.55;color:#2a3530;white-space:pre-wrap;font-family:-apple-system,BlinkMacSystemFont,'Segoe UI','Helvetica Neue',Arial,sans-serif;}
 #bwn-jv-overlay .np-text.np-empty{color:var(--muted);font-style:italic;white-space:normal;}
