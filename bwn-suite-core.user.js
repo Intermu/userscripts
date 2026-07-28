@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         BWN Suite - Core (Broadway National)
 // @namespace    broadwaynational.bwn
-// @version      1.66.4
+// @version      1.66.5
 // @downloadURL  https://raw.githubusercontent.com/Intermu/userscripts/main/bwn-suite-core.user.js
 // @updateURL    https://raw.githubusercontent.com/Intermu/userscripts/main/bwn-suite-core.user.js
 // @description  Runs several Umbrava helpers for BWN coordinators, in the browser with no privileged grants. Includes: PO Approval + ETA Builder; WO Assist (GP/ETA, a stall watchdog, DNE calculator, and a next-action playbook); Email Leak Guard (checks recipients against vendor names, PO amounts, and client budget references before an outbound email sends); WO List Heat (a triage overlay + My Day strip on the work-order list, with an optional same-origin Umbrava API scan for deterministic full-board coverage); and the BWN Launcher (opens the Azure Static Web App tools with the current WO's context). Modules share state through sessionStorage/localStorage. The only network calls are same-origin Umbrava GraphQL reads (app.umbrava.com/api/graphql, the app's own session): List Heat's full-board scan and WO Assist's work-order / trip / clock-in reads; everything else is offline. Toggle modules in BWN_MODULES below.
@@ -2839,18 +2839,32 @@
     // anchor - find the heading, then climb to the outermost node that is still only
     // this section. Falls back to the old spot above Purchase Orders when the WO has
     // no tasks section mounted (it only appears once tasks exist).
+    // Section text with OUR card discounted. The card is still mounted when the next
+    // anchor is computed, so an undiscounted read returns "NEXT ACTIONS..." for the very
+    // container we are trying to identify - the anchor then poisons itself and every
+    // later render re-confirms the wrong spot.
+    function sectionTxt(el, skip) {
+      var t = el.textContent || '';
+      if (skip && el.contains(skip)) t = t.replace(skip.textContent || '', '');
+      return t.replace(/\s+/g, ' ').trim();
+    }
     function tasksAnchorBlock() {
       var head = null;
       var els = document.querySelectorAll('h1,h2,h3,h4,h5,h6,div,span,p');
       for (var i = 0; i < els.length; i++) {
         var tx = (els[i].textContent || '').replace(/\s+/g, ' ').trim();
-        if (/^open tasks\b/i.test(tx) && els[i].querySelectorAll('*').length <= 2) { head = els[i]; break; }
+        if (/^open tasks/i.test(tx) && els[i].querySelectorAll('*').length <= 2) { head = els[i]; break; }
       }
       if (!head) return null;
+      // Prefix match, NOT /^open tasks\b/: the heading sits in a flex row with its count
+      // badge, so that row reads "Open Tasks0" - and there is no word boundary between
+      // "s" and "0". A \b test fails there, stops the climb at the heading, and the card
+      // gets inserted INTO the heading row, rendering beside "Open Tasks" instead of
+      // above the section (seen live on WO 364040).
+      var own = document.getElementById(ACT_CARD_ID);
       var node = head, hops = 0;
       while (node.parentElement && node.parentElement !== document.body && hops++ < 8) {
-        var ptx = (node.parentElement.textContent || '').replace(/\s+/g, ' ').trim();
-        if (!/^open tasks\b/i.test(ptx)) break;   // parent holds more than this section
+        if (!/^open tasks/i.test(sectionTxt(node.parentElement, own))) break;   // parent holds more than this section
         node = node.parentElement;
       }
       return node.parentElement ? node : null;
