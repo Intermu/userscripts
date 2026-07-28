@@ -1,10 +1,18 @@
-name: Publish userscript
+name: Publish userscripts
+
+# Mirrors the root *.user.js files to the public update repo
+# (Intermu/userscripts-public) so Tampermonkey @updateURL/@downloadURL resolve
+# without auth. This repo is private; raw URLs into it 404 for teammates, so
+# every script's headers point at the public mirror instead.
+#
+# Requires the PUBLISH_TOKEN secret: a fine-grained PAT with Contents
+# read/write on Intermu/userscripts-public only.
 
 on:
   push:
     branches: [main]
     paths:
-      - '**/*.user.js'
+      - '*.user.js'
   workflow_dispatch:
 
 jobs:
@@ -12,28 +20,27 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       - name: Checkout source (private)
-        uses: actions/checkout@v4
+        uses: actions/checkout@v7
 
       - name: Checkout target (public update repo)
-        uses: actions/checkout@v4
+        uses: actions/checkout@v7
         with:
-          repository: YOUR_USER/YOUR_PUBLIC_REPO
+          repository: Intermu/userscripts-public
           token: ${{ secrets.PUBLISH_TOKEN }}
           path: public
 
-      - name: Copy userscript
-        run: |
-          cp path/to/script.user.js public/script.user.js
+      - name: Copy userscripts
+        run: cp *.user.js public/
 
       - name: Commit and push
         working-directory: public
         run: |
           git config user.name  "github-actions[bot]"
           git config user.email "github-actions[bot]@users.noreply.github.com"
-          git add script.user.js
+          git add *.user.js
           if git diff --cached --quiet; then
             echo "No changes."
             exit 0
           fi
-          git commit -m "Publish userscript from ${{ github.sha }}"
+          git commit -m "Publish userscripts from ${{ github.sha }}"
           git push
