@@ -997,6 +997,8 @@
         if (d && d.id === 'bwn:drawer:open') {
           if (d.key !== 'findtechs') { var p = document.getElementById('bwn-ft-panel'); if (p) p.remove(); }
           if (d.key !== 'jobview') { var jv = document.getElementById('bwn-jv-overlay'); if (jv) jv.remove(); }
+          if (d.key !== 'clientupdate') { var cu = document.getElementById('bwn-cu-overlay'); if (cu) cu.remove(); }
+          if (d.key !== 'over30') { var o3 = document.getElementById('bwn-o30b-overlay'); if (o3) o3.remove(); }
         }
       });
     } catch (e) { /* no document (worker) - rank stays unknown -> on-device */ }
@@ -1851,11 +1853,11 @@
       var st = document.createElement('style');
       st.id = STYLE_ID;
       st.textContent =
-        '#bwn-cu-overlay{position:fixed;inset:0;z-index:100000;background:rgba(13,38,26,.5);backdrop-filter:blur(6px);-webkit-backdrop-filter:blur(6px);display:flex;align-items:center;justify-content:center;font-family:-apple-system,BlinkMacSystemFont,"Segoe UI","Helvetica Neue",Arial,sans-serif;animation:bwnFade .2s ease-out;}' +
+        '#bwn-cu-overlay{position:fixed;top:0;bottom:0;left:var(--bwn-dock-w,158px);z-index:100000;display:flex;font-family:-apple-system,BlinkMacSystemFont,"Segoe UI","Helvetica Neue",Arial,sans-serif;animation:bwnFade .2s ease-out;}' +
         '@keyframes bwnFade{from{opacity:0}to{opacity:1}}' +
-        '@keyframes bwnUp{from{transform:translateY(14px) scale(.985);opacity:0}to{transform:translateY(0) scale(1);opacity:1}}' +
+        '@keyframes bwnUp{from{transform:translateX(-14px);opacity:.4}to{transform:none;opacity:1}}' +
         '@keyframes bwnSpin{to{transform:rotate(360deg)}}' +
-        '#bwn-cu-card{width:920px;max-width:96vw;max-height:90vh;display:flex;flex-direction:column;background:var(--bwn-surface);border-radius:16px;overflow:hidden;box-shadow:0 1px 2px rgba(13,38,26,.06),0 12px 28px rgba(13,38,26,.16),0 32px 64px rgba(13,38,26,.22);animation:bwnUp .24s cubic-bezier(.2,.8,.2,1);}' +
+        '#bwn-cu-card{width:920px;max-width:calc(100vw - var(--bwn-dock-w,158px) - 8px);height:100%;display:flex;flex-direction:column;background:var(--bwn-surface);border-radius:0 14px 14px 0;overflow:hidden;box-shadow:10px 0 34px rgba(13,38,26,.2);animation:bwnUp .18s ease-out;}' +
         '.bwn-cu-head{position:relative;background:linear-gradient(135deg,var(--bwn-green),var(--bwn-green-dk));color:#fff;padding:18px 22px;display:flex;align-items:center;gap:14px;}' +
         '.bwn-cu-head::after{content:"";position:absolute;left:0;right:0;bottom:0;height:1px;background:linear-gradient(90deg,transparent,rgba(46,204,113,.5),transparent);}' +
         '.bwn-cu-head .t{font-weight:500;font-size:17px;line-height:1.15;letter-spacing:-.01em;}' +
@@ -2101,6 +2103,8 @@
       var old = document.getElementById('bwn-cu-overlay');
       if (old) old.remove();
 
+      // Claim the shared drawer slot so whatever tool is open folds away first.
+      try { document.dispatchEvent(new CustomEvent('bwn:evt', { detail: { id: 'bwn:drawer:open', key: 'clientupdate' } })); } catch (e) { }
       var wrap = document.createElement('div'); wrap.id = 'bwn-cu-overlay';
       var card = document.createElement('div'); card.id = 'bwn-cu-card';
 
@@ -2679,8 +2683,8 @@
       var st = document.createElement('style');
       st.id = O30B_STYLE_ID;
       st.textContent =
-        '#bwn-o30b-overlay{position:fixed;inset:0;z-index:100000;background:rgba(13,38,26,.5);backdrop-filter:blur(6px);-webkit-backdrop-filter:blur(6px);display:flex;align-items:center;justify-content:center;font-family:-apple-system,BlinkMacSystemFont,"Segoe UI","Helvetica Neue",Arial,sans-serif;}' +
-        '.bwn-o30b{width:780px;max-width:95vw;max-height:88vh;display:flex;flex-direction:column;background:var(--bwn-surface);border-radius:16px;overflow:hidden;box-shadow:0 18px 60px rgba(0,0,0,.35);}' +
+        '#bwn-o30b-overlay{position:fixed;top:0;bottom:0;left:var(--bwn-dock-w,158px);z-index:100000;display:flex;font-family:-apple-system,BlinkMacSystemFont,"Segoe UI","Helvetica Neue",Arial,sans-serif;animation:bwnFade .2s ease-out;}' +
+        '.bwn-o30b{width:780px;max-width:calc(100vw - var(--bwn-dock-w,158px) - 8px);height:100%;display:flex;flex-direction:column;background:var(--bwn-surface);border-radius:0 14px 14px 0;overflow:hidden;box-shadow:10px 0 34px rgba(0,0,0,.2);}' +
         '.bwn-o30b-hd{background:linear-gradient(135deg,var(--bwn-green),var(--bwn-green-dk));color:#fff;padding:15px 20px;}' +
         '.bwn-o30b-hd .t{font:600 16px -apple-system,BlinkMacSystemFont,"Segoe UI","Helvetica Neue",Arial,sans-serif;}' +
         '.bwn-o30b-hd .s{font:500 11px ui-monospace,"Segoe UI Mono","SF Mono",monospace;color:rgba(255,255,255,.72);margin-top:3px;}' +
@@ -2748,6 +2752,7 @@
       var results = new Array(jobs.length);
       var cancelled = false, releaseA11y = null;
 
+      try { document.dispatchEvent(new CustomEvent('bwn:evt', { detail: { id: 'bwn:drawer:open', key: 'over30' } })); } catch (e) { }
       var ov = document.createElement('div'); ov.id = 'bwn-o30b-overlay';
       var card = document.createElement('div'); card.className = 'bwn-o30b';
       function close() {
