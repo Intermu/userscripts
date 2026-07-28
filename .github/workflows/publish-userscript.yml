@@ -1,0 +1,39 @@
+name: Publish userscript
+
+on:
+  push:
+    branches: [main]
+    paths:
+      - '**/*.user.js'
+  workflow_dispatch:
+
+jobs:
+  publish:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout source (private)
+        uses: actions/checkout@v4
+
+      - name: Checkout target (public update repo)
+        uses: actions/checkout@v4
+        with:
+          repository: YOUR_USER/YOUR_PUBLIC_REPO
+          token: ${{ secrets.PUBLISH_TOKEN }}
+          path: public
+
+      - name: Copy userscript
+        run: |
+          cp path/to/script.user.js public/script.user.js
+
+      - name: Commit and push
+        working-directory: public
+        run: |
+          git config user.name  "github-actions[bot]"
+          git config user.email "github-actions[bot]@users.noreply.github.com"
+          git add script.user.js
+          if git diff --cached --quiet; then
+            echo "No changes."
+            exit 0
+          fi
+          git commit -m "Publish userscript from ${{ github.sha }}"
+          git push
