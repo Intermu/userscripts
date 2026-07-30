@@ -151,7 +151,10 @@
   // and testing only the pristine dash let `O7081-1234` / `07081 1234` / `07081.1234` through. The
   // single-separator requirement is what keeps a real TIN out of this net: `123456789` has no
   // separator and a comb-box run (`1 2 3 4 5 6 7 8 9`) has one between every digit.
-  function looksLikeZip4(t) { return /^\d{5}[\s.\-_]{1,3}\d{4}$/.test(String(t || '').trim()); }
+  // Separator class matches the comb scan's own: OCR also emits `|`, `,`, `/` and `\` for that
+  // hyphen, and testing a narrower set let `07081|1234` and `07081,1234` through (5th recurrence
+  // of the same gap). Callers must skip this test for comb-spaced runs - see combSpaced().
+  function looksLikeZip4(t) { return /^\d{5}[\s|.,_\/\\-]{1,3}\d{4}$/.test(String(t || '').trim()); }
   // The box GROUPING a form prints is the only in-text evidence of which kind a comb run is: an
   // SSN comb is grouped 3-2-4 and an EIN comb 2-7. Anything else (notably per-box spacing, where
   // every digit is separated alike) carries no grouping signal at all.
@@ -169,6 +172,59 @@
     if (kind === 'ein') return d.slice(0, 2) + '-' + d.slice(2);
     return d;
   }
+  // ===== TIN REGION =========================================================
+  // Where on the page a Tax ID is ALLOWED to be. Measured against the real IRS Form W-9
+  // (Rev. March 2024), not assumed - see wiki/w9-part-i-caption-anchor.md for the offsets.
+  //
+  // 0.8.9 dropped caption anchoring when it moved to reading runs first, and 0.9.0 shipped that:
+  // every strategy searched the WHOLE page and took the first hit, so a number the VENDOR controls
+  // outranked the real comb. `12 3456789` typed into line 7 ("List account number(s) here") wins,
+  // and a routing number printed above Part I becomes the recorded Tax ID - silently, because the
+  // toast never prints the value.
+  //
+  // The obvious repair, anchoring on the first occurrence of a caption phrase, fails TWICE:
+  //   - the phrase is text a vendor can print on their own document, so the window moves to them
+  //   - on the real form both phrases occur FIRST inside Part I's instruction prose ("this is
+  //     generally your social security number (SSN)... it is your employer identification number
+  //     (EIN)"), 451 chars above the real label, so the window closes before the comb
+  // Both are closed by anchoring on STRUCTURE the form owns rather than on a phrase.
+  var SSN_CAP = 'social security number', EIN_CAP = 'employer identification number';
+  var PART_I_RE = /^[^\S\n]*part\s+i\b[^\n]*/gim;
+  var PART_II_RE = /^[^\S\n]*part\s+ii\b[^\n]*/gim;
+  // A caption acting as a BOX LABEL owns its whole line. The prose mentions are mid-sentence, so
+  // this one test separates them without needing to know where either sits.
+  var CAP_LINE_RE = /^[^\S\n]*(?:social security number|employer identification number)[^\S\n]*$/gim;
+  function allMatches(s, re) {
+    var out = [], m;
+    re.lastIndex = 0;
+    while ((m = re.exec(s)) !== null) { out.push(m.index); if (m.index === re.lastIndex) re.lastIndex++; }
+    return out;
+  }
+  function tinRegion(s) {
+    var t = String(s || '');
+    // Exactly one heading of each. A genuine W-9 page has one Part I and one Part II; anything
+    // else is either an unscoped multi-form packet or a page where someone printed the heading to
+    // move the window, and both deserve a refusal rather than a guess.
+    var p1 = allMatches(t, PART_I_RE), p2 = allMatches(t, PART_II_RE);
+    if (p1.length !== 1 || p2.length !== 1) return null;
+    var floor = p1[0], hi = p2[0];
+    if (!(hi > floor)) return null;
+    var caps = allMatches(t, CAP_LINE_RE).filter(function (o) { return o > floor && o < hi; });
+    if (!caps.length) return null;
+    // FIRST caption inside the block, not last. The labels read `Social security number`, `or`,
+    // `Employer identification number`, so anchoring on the last one starts below the SSN box and
+    // silently blanks the Tax ID for every sole proprietor - the same population 0.8.8's comb
+    // mis-grouping hit. Ceiling is Part II, so no character-count window is involved at all.
+    return { lo: Math.min.apply(null, caps), hi: hi };
+  }
+  // A comb-spaced run carries a separator between most of its digits; a ZIP+4 has exactly one
+  // separator group. Only the second shape can be confused with a ZIP, so only it is worth
+  // rejecting - blanket-rejecting both threw away real Tax IDs read as `12345 6789`.
+  function combSpaced(rawRun) {
+    return (String(rawRun || '').match(/[\s|.,_\/\\-]/g) || []).length >= 4;
+  }
+  // ===== END TIN REGION =====================================================
+
   // Find the TIN in already-page-scoped text (the caller picks the page; see pickFormPage).
   //
   // This reads RUNS FIRST and attributes them afterwards, rather than windowing after each caption.
@@ -178,10 +234,20 @@
   // which made the EIN window claim a sole proprietor's SSN and report 987-65-4321 as 98-7654321,
   // while the SSN window could only ever see the word "or".
   function findTIN(text) {
-    var s = String(text || '').split('\f')[0];
-    var ein = s.match(/\b(\d{2}-\d{7})\b/); if (ein && !looksLikeZip4(ein[1])) return { tin: ein[1], kind: 'ein' };
-    var ssn = s.match(/\b(\d{3}-\d{2}-\d{4})\b/); if (ssn) return { tin: ssn[1], kind: 'ssn' };
-    var SSN_CAP = 'social security number', EIN_CAP = 'employer identification number';
+    // No `.split('\f')[0]` here: pickFormPage already hands us ONE page and the form feed is gone
+    // by then, so that scoping was dead code pretending to be a guard. Page selection is the
+    // caller's job; this function decides where ON that page the number may sit.
+    var s = String(text || '');
+    var reg = tinRegion(s);
+    // No Part I structure means no TIN region, so no TIN. Deliberate: blank is the designed-safe
+    // outcome throughout this extractor, a confident wrong number is not.
+    if (!reg) return { tin: '', kind: '' };
+    var lo = reg.lo, hi = reg.hi;
+    var win = s.slice(lo, hi);
+    // Both pristine-format pre-scans are region-bounded too. Unbounded they were the FIRST thing
+    // to run, so an already-hyphenated plant above Part I won before the comb was ever read.
+    var ein = win.match(/\b(\d{2}-\d{7})\b/); if (ein && !looksLikeZip4(ein[1])) return { tin: ein[1], kind: 'ein' };
+    var ssn = win.match(/\b(\d{3}-\d{2}-\d{4})\b/); if (ssn) return { tin: ssn[1], kind: 'ssn' };
     // Digit-confusion fixups, applied to a COPY so the captions we attribute against stay intact.
     // Pipes are box edges first and digit 1s only on a second pass.
     var sub = s.replace(/[OoQ]/g, '0').replace(/[lI]/g, '1').replace(/S/g, '5').replace(/B/g, '8').replace(/Z/g, '2');
@@ -209,10 +275,19 @@
     // single-character, so an index into `hay` addresses the same character in `s`.
     function scan(hay) {
       var re = /(?<!\d)\d(?:[\s|.,_\/\\-]{0,3}\d){8}(?!\d)/g, m;
+      // Start at the caption and stop at Part II. `hay` is always the same length as `s` (both
+      // fixup passes are single-character substitutions), so these indices address the same
+      // characters in every pass.
+      re.lastIndex = lo;
       while ((m = re.exec(hay)) !== null) {
+        if (m.index >= hi) break;
         var digits = m[0].replace(/\D/g, '');
         var rawRun = s.slice(m.index, m.index + m[0].length);
-        if (looksLikeZip4(rawRun) || looksLikeZip4(m[0])) continue;
+        // ZIP+4 rejection, but never against a comb-spaced run: `12345 6789` is a real Tax ID read
+        // out of comb boxes and is structurally identical to a ZIP+4, so the old blanket test threw
+        // real numbers away. The region floor already keeps the address line out of reach; this is
+        // the second line of defence, not the first.
+        if (!combSpaced(rawRun) && (looksLikeZip4(rawRun) || looksLikeZip4(m[0]))) continue;
         if ((rawRun.match(/\d/g) || []).length < 5) continue;
         if (/^(\d)\1{8}$/.test(digits)) continue;
         var kind = attribute(m.index, rawRun);
@@ -225,7 +300,9 @@
     // Legacy label-adjacent fallback (typed forms, "Vendor tax id: 12 3456789"). It must honour the
     // SAME rejections as the comb scan - it bypassed them, so nine literal box-edge 1s came back
     // from here as 11-1111111 after the scan had correctly refused them.
-    var m = s.match(/(?:EIN|employer identification|TIN|tax\s*id)\D{0,12}(\d[\d\s-]{7,}\d)/i);
+    // Region-bounded like the rest. This fallback carries its own label anchor, but that anchor
+    // also matches the "(TIN)" inside the masthead, so on its own it still needed the floor.
+    var m = win.match(/(?:EIN|employer identification|TIN|tax\s*id)\D{0,12}(\d[\d\s-]{7,}\d)/i);
     if (m && !looksLikeZip4(m[1])) {
       var d = m[1].replace(/\D/g, '');
       if (d.length === 9 && !/^(\d)\1{8}$/.test(d)) return { tin: fmtTIN(d, groupedKind(m[1]) || 'ein'), kind: groupedKind(m[1]) || 'ein' };
@@ -255,7 +332,14 @@
       return t.value && !/^off$/i.test(t.value) && /tax classification|c corp|s corp|partnership|sole propriet|single.member|trust|estate|limited liability|individual/i.test(t.tip);
     });
     if (cls.length) out.entity = classToEntity(cls[0].tip) || classToEntity(cls[0].value);
-    var tt = findTIN(af.text); out.tin = tt.tin; out.tinKind = tt.kind;
+    // The Tax ID is deliberately NOT read here. `af.text` is a concatenation of every AcroForm
+    // field VALUE (see acroFieldsFromStr), with no page structure and no printed captions, so a
+    // vendor authoring the PDF can add one hidden zero-sized field containing
+    // `employer identification number 123456789`, leave the real comb fields empty, and draw the
+    // true TIN as page content. A human reviewing that document sees a correctly filled W-9 while
+    // the only caption in `af.text` is the attacker's - deterministic, no OCR variance, no visual
+    // trace. On a fillable W-9 the TIN comes from the MAPPED comb fields (extractW9Fillable) or
+    // not at all. This path still contributes name, DBA and address, which carry no such leverage.
     return out;
   }
 

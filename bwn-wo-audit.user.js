@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         BWN WO Audit (Broadway National)
 // @namespace    broadwaynational.bwn
-// @version      0.7.0
+// @version      0.7.1
 // @downloadURL  https://raw.githubusercontent.com/Intermu/userscripts-public/main/bwn-wo-audit.user.js
 // @updateURL    https://raw.githubusercontent.com/Intermu/userscripts-public/main/bwn-wo-audit.user.js
 // @description  Batch WO-audit tool. Upload a WO audit .xlsx; for each work order this reads its two most recent notes DIRECTLY from Umbrava's GraphQL API in-page (using your live Umbrava session - the same read the BWN Ops Suite AI drafts use), then asks the broadway-internal-ops SWA summarize route (x-bwn-key gated, Anthropic key server-side) to write a 1-3 sentence client-ready status note. Fills the audit's notes column and downloads the workbook, preserving every other cell and formula. Runs entirely in the app.umbrava.com page so it inherits your Umbrava auth - no MCP, no pasted keys, nothing sensitive in this script. This replaces the old standalone WO_Audit_Automation.html SWA tool, whose server-side MCP path could not authenticate to Umbrava.
@@ -19,7 +19,7 @@
 (function () {
   'use strict';
 
-  var VER = '0.7.0';
+  var VER = '0.7.1';
   var FONT = "-apple-system,BlinkMacSystemFont,'Segoe UI','Helvetica Neue',Arial,sans-serif";
   var SWA_BASE = 'https://green-stone-0717dab0f.7.azurestaticapps.net';
   var GREEN = '#0d3d26';
@@ -363,6 +363,15 @@
     if (!(secs > 0)) return 0;
     return Math.min(secs, 120) * 1000;
   }
+  // Whether the header was PRESENT, independent of whether it parsed to a usable wait. This used
+  // to be inferred at the call site as `retryAfterMs(...) > 0`, which is wrong for every header
+  // the server really did send but that clamps to 0: `retry-after: 0`, `+60`, `-5`, `60, 30`, or
+  // any garbage. The log line it feeds ("(no retry-after header)") is the designated live proof
+  // that the SWA edge forwards the header at all, so deriving it from the value makes the one
+  // planned verification report a working feature as dead.
+  function hasRetryAfter(rawHeaders) {
+    return /^[ \t]*retry-after[ \t]*:/im.test(String(rawHeaders || ''));
+  }
 
   // Timing budget. These MUST fit inside the timeoutMs handed to bwnAI at the call site: the
   // BYTE-FROZEN router wraps the whole run in withTimeout(run, timeoutMs) and resolves '' when
@@ -375,6 +384,10 @@
   var AI_ROUTER_TIMEOUT_MS = AI_ROW_BUDGET_MS + 15000;        // backstop, never the reporter
   var THROTTLE_BACKOFF_MS = [15000, 45000];   // cumulative 60s - clears either 60s window
   var TRANSIENT_BACKOFF_MS = [2000, 6000];    // plain 5xx / network blip
+  // A wait that leaves less than this cannot produce an answer, so it is the point at which the
+  // budget is genuinely spent rather than merely tight. Used to TRIM an over-long wait instead of
+  // abandoning the row while budget remains.
+  var AI_MIN_ATTEMPT_MS = 8000;
 
   // Plain-language cause for a coordinator, wire detail kept in parentheses for support.
   // "HTTP 502: Anthropic API error (429)" tells the reader nothing they can act on.
@@ -438,7 +451,14 @@
     // abort is what discarded the reason, and a late POST spends the shared IP throttle on a
     // row that has already been marked errored.
     function pause(waitMs, throttled, hadHeader) {
-      if (Date.now() + waitMs >= deadline) return Promise.resolve(giveBudget());
+      // TRIM an over-long wait, do not abandon the row. A wait that does not fit is not proof the
+      // budget is spent: a 60s hint arriving at t=90s used to fail the row reporting "the 150s
+      // limit for one row ran out" with roughly 60s still unspent, when a shorter wait would have
+      // left room for a third attempt. Only when there is no room for a usable attempt at all is
+      // the budget actually gone - which is also what makes giveBudget()'s claim true.
+      var room = deadline - Date.now() - AI_MIN_ATTEMPT_MS;
+      if (waitMs > room) waitMs = room;
+      if (waitMs <= 0) return Promise.resolve(giveBudget());
       if (ctx.onWait) { try { ctx.onWait(waitMs, throttled, hadHeader); } catch (e) { } }
       return sleep(waitMs).then(once);
     }
@@ -462,7 +482,15 @@
           if (attempt >= tries) return give(causeText(lastKind, r.status, detail));
           var hinted = retryAfterMs(r.headers);
           var table = throttled ? THROTTLE_BACKOFF_MS : TRANSIENT_BACKOFF_MS;
-          return pause(hinted || table[attempt - 1] || table[table.length - 1], throttled, hinted > 0);
+          var planned = table[attempt - 1] || table[table.length - 1];
+          // FLOOR the server hint against the table; never let it REPLACE the table. The server
+          // now emits the real remaining window, which is the wait for one slot to free (~1s under
+          // a steady batch) and NOT the wait until this caller is admitted. Taking it verbatim
+          // made a throttled row burn all three tries in about two seconds - the same sub-2s burn
+          // this release exists to remove, reintroduced by making the server honest. The table is
+          // the floor because it is sized to clear the 60s sliding window on both sides of the
+          // wire; a longer hint still wins, which is the case where the server knows better.
+          return pause(Math.max(hinted, planned), throttled, hasRetryAfter(r.headers));
         }, function (e) {
           var why = (e && e.message) || 'network error';
           lastKind = /timed out/i.test(why) ? 'timeout' : 'error';
