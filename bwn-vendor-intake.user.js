@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         BWN Vendor Intake (Broadway National)
 // @namespace    broadwaynational.bwn
-// @version      0.9.0
+// @version      0.9.1
 // @downloadURL  https://raw.githubusercontent.com/Intermu/userscripts-public/main/bwn-vendor-intake.user.js
 // @updateURL    https://raw.githubusercontent.com/Intermu/userscripts-public/main/bwn-vendor-intake.user.js
 // @description  Prefills Umbrava's Create Vendor form (and the detail-page Tax ID) from a Prospect Set-Up Form or a W-9. Fillable PDFs are read straight from their form fields; SCANNED W-9s are read by on-device OCR (Tesseract + pdf.js, fetched once at install, run entirely in the browser). The document and its tax ID never leave your machine. Adds a "Prefill from document" button; every extracted field is a suggestion to review before saving - the TIN especially, since OCR can misread digits.
@@ -21,7 +21,7 @@
 (function () {
   'use strict';
 
-  var VER = '0.9.0';
+  var VER = '0.9.1';
   // v0.4.0 - real IRS fillable W-9 support: map by FIELD NAME (UTF-16BE-decoded f1_/c1_1 names)
   // after inflating compressed object streams, since the IRS form carries no /TU tooltips; the
   // tooltip mapping stays as a fallback for other fillable forms. Also fixed stream inflation to
@@ -211,17 +211,16 @@
     if (!(hi > floor)) return null;
     var caps = allMatches(t, CAP_LINE_RE).filter(function (o) { return o > floor && o < hi; });
     if (!caps.length) return null;
+    // A genuine Part I carries exactly two comb labels, one per column. A third means someone
+    // printed a caption line of their own inside the block to drag the floor up above their own
+    // number - the only remaining way to aim this, once the region is bounded by the headings.
+    // Refuse rather than pick, because picking is what the whole class of bug is made of.
+    if (caps.length > 2) return null;
     // FIRST caption inside the block, not last. The labels read `Social security number`, `or`,
     // `Employer identification number`, so anchoring on the last one starts below the SSN box and
     // silently blanks the Tax ID for every sole proprietor - the same population 0.8.8's comb
     // mis-grouping hit. Ceiling is Part II, so no character-count window is involved at all.
     return { lo: Math.min.apply(null, caps), hi: hi };
-  }
-  // A comb-spaced run carries a separator between most of its digits; a ZIP+4 has exactly one
-  // separator group. Only the second shape can be confused with a ZIP, so only it is worth
-  // rejecting - blanket-rejecting both threw away real Tax IDs read as `12345 6789`.
-  function combSpaced(rawRun) {
-    return (String(rawRun || '').match(/[\s|.,_\/\\-]/g) || []).length >= 4;
   }
   // ===== END TIN REGION =====================================================
 
@@ -283,11 +282,13 @@
         if (m.index >= hi) break;
         var digits = m[0].replace(/\D/g, '');
         var rawRun = s.slice(m.index, m.index + m[0].length);
-        // ZIP+4 rejection, but never against a comb-spaced run: `12345 6789` is a real Tax ID read
-        // out of comb boxes and is structurally identical to a ZIP+4, so the old blanket test threw
-        // real numbers away. The region floor already keeps the address line out of reach; this is
-        // the second line of defence, not the first.
-        if (!combSpaced(rawRun) && (looksLikeZip4(rawRun) || looksLikeZip4(m[0]))) continue;
+        // No ZIP+4 rejection in here. It failed in BOTH directions - OCR separators escaped it,
+        // and a genuine comb read as `12345 6789` is structurally IDENTICAL to a ZIP+4, so the net
+        // threw away real Tax IDs. There is no heuristic that separates those two, which is why
+        // the bound is structural instead: this loop runs between the Part I and Part II headings,
+        // and that span contains the comb labels and nothing else. Line 6 (city, state, ZIP) and
+        // the requester panel both sit above Part I and are unreachable from here.
+        // The ZIP test is kept on the pristine pre-scans above as cheap defence in depth.
         if ((rawRun.match(/\d/g) || []).length < 5) continue;
         if (/^(\d)\1{8}$/.test(digits)) continue;
         var kind = attribute(m.index, rawRun);
