@@ -33,9 +33,17 @@ function slice(startMark, endMark) {
   if (a === -1 || b === -1) throw new Error('marker not found: ' + (a === -1 ? startMark : endMark));
   return t.slice(a, b);
 }
+// classToEntity sits above the TIN block and extractW9FromText calls it.
+var src0 = slice('  function classToEntity', '  // A ZIP+4 is nine digits');
 // Covers looksLikeZip4/groupedKind/fmtTIN, the TIN REGION block, and findTIN itself.
 var src = slice('  // A ZIP+4 is nine digits', '  function extractW9(af) {');
-var mod = new Function(src + '\n; return { findTIN: findTIN, tinRegion: tinRegion, looksLikeZip4: looksLikeZip4 };')();
+// ...and the FIELD extractor, which the previous suite stopped short of, so plausibleValue, the
+// certification anchor, the street/city part anchors and the ZIP separators had zero coverage
+// while being reported as closed (council UAT-5c).
+var src2 = slice('  // Of the (up to 2) rasterized pages', '  // ---- Field mapping ---');
+var mod = new Function(src0 + '\n' + src + '\n' + src2 +
+  '\n; return { findTIN: findTIN, tinRegion: tinRegion, looksLikeZip4: looksLikeZip4,' +
+  ' plausibleValue: plausibleValue, extractW9FromText: extractW9FromText, pickFormPage: pickFormPage };')();
 var findTIN = mod.findTIN, tinRegion = mod.tinRegion;
 
 // ---- the REAL Part I block --------------------------------------------------------------
@@ -201,9 +209,74 @@ function section5() {
     findTIN(w9Page({ aboveJunk: 'Mail to 07081-1234' })).tin, '987654321');
 }
 
+// ---- 6. the field-value gate (round-5 leftovers, council UAT-5c) --------------------------
+function section6() {
+  console.log('\n6. plausibleValue accepts real names and still rejects glyph soup');
+  var pv = mod.plausibleValue;
+
+  // Names the old gate blanked.
+  A.ok('GE (2 chars) is a company name', pv('GE'));
+  A.ok('3M (letter+digit, 2 chars) is a company name', pv('3M'));
+  A.ok('H&R is a company name', pv('H&R'));
+  A.ok("R|verside's Sales & Service survives an OCR pipe", pv("R|verside's Sales & Service"));
+  A.ok('a curly apostrophe is not a reject', pv('O’Brien Mechanical Inc'));
+  A.ok('an ordinary long name passes', pv('Northgate Sales & Service LLC'));
+  A.ok('a street address passes', pv('118 Mill Road'));
+
+  // Glyph soup that reached the live form in earlier rounds - must STILL be rejected.
+  A.ok('checkbox-column soup is rejected', !pv('o | 38'));
+  A.ok('comb-box soup is rejected', !pv('1 fein) > 4 HA0)\\'));
+  A.ok('a degree-mark comb read is rejected', !pv('417° 7 7'));
+  A.ok('a single character is rejected', !pv('x'));
+  A.ok('box edges are rejected', !pv('| | | |'));
+  A.ok('empty is rejected', !pv(''));
+}
+
+// ---- 7. label anchors no longer eat real values --------------------------------------------
+function section7() {
+  console.log('\n7. certification / part anchors stop matching inside real values');
+  var page = w9Page();
+
+  // `certification` unanchored blanked a company whose NAME contains it.
+  var certPage = page.replace('Northgate Sales & Service LLC', 'Rand Certification Inc');
+  A.eq('a company named "Rand Certification Inc" is read', mod.extractW9FromText(certPage).name, 'Rand Certification Inc');
+
+  // `part` unanchored matched inside Sparta and discarded the city line whole.
+  var got = mod.extractW9FromText(page);
+  A.eq('city survives a place name containing "part"', got.city, 'Sparta');
+  A.eq('state', got.state, 'NJ');
+  A.eq('zip', got.zip, '07871');
+  A.eq('street still reads', got.street, '118 Mill Road');
+  A.eq('and the TIN still comes through the same call', got.tin, '987654321');
+}
+
+// ---- 8. grouping forcing (PEN-3) -----------------------------------------------------------
+function section8() {
+  console.log('\n8. a printed caption cannot force the wrong grouping');
+  // Both captions precede the run in the genuine side-by-side layout -> bare digits.
+  A.eq('genuine layout emits bare digits', findTIN(w9Page()).kind, '');
+  // PEN-3: a lone digit between the two captions defeated the adjacency test, flipping a real EIN
+  // to 'ssn' so fmtTIN rendered 123456789 as 123-45-6789 - right digits, wrong format, which
+  // passes an eyeball check and fails IRS name/TIN matching.
+  //
+  // Aiming this is fiddly, and getting it wrong makes the test look like it passes against the
+  // OLD code too. The planted SSN mention has to be the LAST caption before the run (so it must
+  // sit AFTER the real EIN label), it must have a digit between it and that label, and it must
+  // NOT be alone on its line or tinRegion's duplicate-caption refusal rejects the page first and
+  // the attribution path is never reached.
+  var forced = w9Page().replace(
+    'Employer identification number\n9 8 7 6 5 4 3 2 1',
+    'Employer identification number\nref 5 social security number\n9 8 7 6 5 4 3 2 1');
+  A.ok('the plant is positioned to actually reach attribute()', tinRegion(forced) !== null);
+  var r = findTIN(forced);
+  A.eq('the digits still read correctly', r.tin.replace(/\D/g, ''), '987654321');
+  A.ok('a digit between captions does not force a grouping', r.kind !== 'ssn', JSON.stringify(r));
+  A.ok('...and the emitted value is not a fake SSN', !/^\d{3}-\d{2}-\d{4}$/.test(r.tin), r.tin);
+}
+
 console.log('W-9 Tax ID region - ' + path.basename(SRC));
 try {
-  section1(); section2(); section3(); section4(); section5();
+  section1(); section2(); section3(); section4(); section5(); section6(); section7(); section8();
   A.finish();
 } catch (e) {
   console.error('\nHARNESS ERROR: ' + (e && e.stack || e));

@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         BWN Vendor Intake (Broadway National)
 // @namespace    broadwaynational.bwn
-// @version      0.9.1
+// @version      0.9.2
 // @downloadURL  https://raw.githubusercontent.com/Intermu/userscripts-public/main/bwn-vendor-intake.user.js
 // @updateURL    https://raw.githubusercontent.com/Intermu/userscripts-public/main/bwn-vendor-intake.user.js
 // @description  Prefills Umbrava's Create Vendor form (and the detail-page Tax ID) from a Prospect Set-Up Form or a W-9. Fillable PDFs are read straight from their form fields; SCANNED W-9s are read by on-device OCR (Tesseract + pdf.js, fetched once at install, run entirely in the browser). The document and its tax ID never leave your machine. Adds a "Prefill from document" button; every extracted field is a suggestion to review before saving - the TIN especially, since OCR can misread digits.
@@ -21,7 +21,7 @@
 (function () {
   'use strict';
 
-  var VER = '0.9.1';
+  var VER = '0.9.2';
   // v0.4.0 - real IRS fillable W-9 support: map by FIELD NAME (UTF-16BE-decoded f1_/c1_1 names)
   // after inflating compressed object streams, since the IRS form carries no /TU tooltips; the
   // tooltip mapping stays as a fallback for other fillable forms. Also fixed stream inflation to
@@ -260,12 +260,14 @@
       var before = s.slice(Math.max(0, at - 220), at).toLowerCase();
       var iS = before.lastIndexOf(SSN_CAP), iE = before.lastIndexOf(EIN_CAP);
       if (iS < 0 && iE < 0) return '';
-      if (iS >= 0 && iE >= 0) {
-        var between = before.slice(Math.min(iS, iE), Math.max(iS, iE));
-        var adjacent = between.length < Math.max(SSN_CAP.length, EIN_CAP.length) + 40 && !/\d/.test(between);
-        if (adjacent) return '';
-        return iS > iE ? 'ssn' : 'ein';
-      }
+      // Attribute ONLY when exactly one caption precedes the run. The old adjacency heuristic
+      // tried to tell "both captions, side-by-side columns" from "one caption, then the other's
+      // box" by measuring the gap and requiring no digits in it - and a single printed digit
+      // between the two captions defeated it, returning 'ssn' for a genuine EIN. fmtTIN then
+      // rendered 123456789 as 123-45-6789: the right digits in the wrong format, which passes an
+      // operator's eyeball check and fails IRS name/TIN matching. Bare digits are what the
+      // operator verifies anyway, so ambiguity emits those instead of guessing a grouping.
+      if (iS >= 0 && iE >= 0) return '';
       return iS >= 0 ? 'ssn' : 'ein';
     }
     // An EMPTY comb box is not a TIN: its edges OCR to artifact runs (`| | | |`, `I l I l`) that the
@@ -559,11 +561,23 @@
   // which reached the live form from a real Rev-2026 scan.
   function plausibleValue(v) {
     var s = String(v || '').trim();
-    if (s.length < 3) return false;
-    if (/[|\\<>~^_={}\[\]*“”]/.test(s)) return false;
-    if (!/[A-Za-z]{2,}|\d{3,}/.test(s)) return false;
-    var junk = (s.match(/[^A-Za-z0-9\s.,'&\-#\/()]/g) || []).length;
-    return junk <= Math.floor(s.length * 0.2);
+    // 2, not 3: `GE` and `3M` are whole company names and the old gate blanked both.
+    if (s.length < 2) return false;
+    // `|` and the curly quotes are NOT hard rejects any more. Those two are exactly what OCR
+    // produces INSIDE a legitimate value - `|` for `I`/`l`, so `R|verside's Sales & Service` was
+    // rejected whole and Company came out empty, and U+2019 for an apostrophe. They go to the junk
+    // RATIO below, which tolerates a stray mark in a long name while still rejecting a line that
+    // is mostly marks. What remains here never occurs in a typed name, so one is decisive.
+    // `°` is here because a real Rev-2026 capture OCR'd a comb box as `417° 7 7`, and the `\d{3,}`
+    // branch below would otherwise accept it on the strength of the `417`.
+    if (/[\\<>~^_={}\[\]*°]/.test(s)) return false;
+    // A value carries real words or a real number. The third alternative admits short alphanumeric
+    // marks like `3M` and `H&R`, which have neither two consecutive letters nor three digits. It is
+    // anchored, so glyph soup with spaces (`o | 38`, `417° 7 7`) still fails.
+    if (!/[A-Za-z]{2,}|\d{3,}|^(?=.*[A-Za-z])[A-Za-z0-9&.\-]{2,5}$/.test(s)) return false;
+    var junk = (s.match(/[^A-Za-z0-9\s.,'’&\-#\/()]/g) || []).length;
+    // Floor of 1: a 5-char name with one OCR artifact would otherwise fail on a ratio of 0.
+    return junk <= Math.max(1, Math.floor(s.length * 0.2));
   }
   // Pull W-9 fields from OCR (or any) free text. Best-effort + label-anchored; digit-confusion
   // fixups happen inside findTIN. Everything is a SUGGESTION.
@@ -578,7 +592,7 @@
     // ^\d+[ab]?$ also swallows the bare "3a"/"3b" item numbers 2024 introduced.
     // Structural headings (Part I/II, the account-number line, the form's own masthead) are labels,
     // never values - a Rev-2026 scan put "lll Taxpayer Identification Number (TIN) LL" in City.
-    var LABEL_NOISE = /required on this line|as shown on|do not leave|this line blank|if different|disregarded entity|name on line \d|owner'?s name|entry is required|sole propriet|check (the )?appropriate|number, street|apt\.?\s*or suite|see instructions|taxpayer identification number|list account number|^\W*part\s+[i1]{1,3}\b|certification|request for taxpayer|department of the treasury|internal revenue|enter your tin|backup withholding|^\d+[ab]?$/i;
+    var LABEL_NOISE = /required on this line|as shown on|do not leave|this line blank|if different|disregarded entity|name on line \d|owner'?s name|entry is required|sole propriet|check (the )?appropriate|number, street|apt\.?\s*or suite|see instructions|taxpayer identification number|list account number|^\W*part\s+[i1]{1,3}\b|^\W*certification\b|request for taxpayer|department of the treasury|internal revenue|enter your tin|backup withholding|^\d+[ab]?$/i;
     // The stop pattern marks where the NEXT label begins, so it is applied PER LINE and the line it
     // matches is discarded whole. Searching for it as a character offset sliced into the middle of a
     // line instead: on a real Rev-2026 scan the next label OCR'd as "o | 38 Check the appropriate
@@ -609,8 +623,12 @@
     // Anchor DBA to the real line-2 label: the 2024 line-1 instruction also contains
     // "business/disregarded entity's name", and a loose match latched onto it.
     out.dba = seg(/^\s*2\s*business name[^\n]*|business name\s*\/\s*disregarded[^\n]*|^\s*2\s*disregarded entity[^\n]*/im, /federal tax|check (the )?appropriate|exempt|address|city,/i);
-    out.street = seg(/address\s*\(number[^)]*\)|^\s*5\s+address\b/im, /city,|requester|part/i);
-    var csz = seg(/city,\s*state,?\s*and\s*zip[^\n]*|^\s*6\s+city\b/im, /requester|part/i);
+    // The stops anchor "part" to the actual Part I/II headings. Unanchored it matched INSIDE
+    // ordinary place names - `Sparta, NJ 07871` stopped the city scan on its own value - and a
+    // matching line is discarded whole, so the address silently came out empty. Same for
+    // "certification" in LABEL_NOISE above, which blanked `Rand Certification Inc`.
+    out.street = seg(/address\s*\(number[^)]*\)|^\s*5\s+address\b/im, /city,|requester|\bpart\s+[i1]{1,3}\b/i);
+    var csz = seg(/city,\s*state,?\s*and\s*zip[^\n]*|^\s*6\s+city\b/im, /requester|\bpart\s+[i1]{1,3}\b/i);
     if (csz) { var mz = csz.match(/(.+?),?\s*([A-Za-z]{2})\s+(\d{5}(?:-\d{4})?)/); if (mz) { out.city = mz[1].replace(/,\s*$/, '').trim(); out.state = mz[2].toUpperCase(); out.zip = mz[3]; } else out.city = csz; }
     var mk = raw.match(/(?:\[x\]|\bx\b\s*|☒|■|✔|✓)\s*(individual|sole propriet|c corporation|s corporation|partnership|trust|estate|limited liability|llc)/i);
     if (mk) out.entity = classToEntity(mk[1]);
@@ -648,7 +666,16 @@
   }
   function modalRoot() {
     var c = document.querySelector('input[name="details.companyName"]');
-    return c ? (c.closest('.MuiDialog-container, [role="dialog"], .MuiPaper-root') || document) : null;
+    if (!c) return null;
+    // Sequential, not one comma-list. `closest` returns the NEAREST ancestor matching ANY selector
+    // in the list regardless of the order written, so an inner `.MuiPaper-root` won and the flow
+    // was keyed to a node the UI can swap while keeping the dialog open. Prefer the outermost
+    // container, which is the thing that actually survives a step change.
+    //
+    // No `|| document` fallback. A `document` owner makes flowStale permanently FALSE - it is
+    // always connected and always contains the live form - which silently disables the entire
+    // cross-vendor guard. Returning null fails closed instead.
+    return c.closest('.MuiDialog-container') || c.closest('[role="dialog"]') || c.closest('.MuiPaper-root') || null;
   }
   function fieldByLabel(root, re) {
     var lbls = [...root.querySelectorAll('label')];
@@ -800,10 +827,13 @@
   }
   // One watcher per field per flow: a second document for the same vendor supersedes the first's
   // watcher for the field it actually refills, instead of leaving two racing on one input.
+  // Passing a null `obs` RETIRES the slot without arming a replacement, which is what a document
+  // that has nothing to contribute for this field must still do.
   function claimSlot(flow, key, obs) {
     var prev = flow.slots && flow.slots[key];
     if (prev) { try { prev.disconnect(); } catch (e) { } }
-    if (flow.slots) flow.slots[key] = obs;
+    if (!flow.slots) return;
+    if (obs) flow.slots[key] = obs; else delete flow.slots[key];
   }
   // Standing down is silent otherwise, and the UI has ALREADY promised the fill (toast + a green
   // check in the held-files list), so the operator would reach the step, find it empty, and believe
@@ -815,8 +845,10 @@
   // One drop can arm both watchers, so the flow is armed ONCE by the caller and shared - arming it
   // per watcher would make the first watcher stale the instant the second one armed.
   function watchStep2(addr, flow) {
-    if (!addr.street && !addr.city && !addr.zip) return;
     if (!flow) return;
+    // Retire the PREVIOUS document's watcher for this field even when this one has nothing to
+    // fill. See watchBillingStep for why leaving it armed leaks one vendor's data into another's.
+    if (!addr.street && !addr.city && !addr.zip) { claimSlot(flow, 'addr', null); return; }
     var filled = false;
     var obs = new MutationObserver(function () {
       if (filled) return;
@@ -871,7 +903,15 @@
   // Watch for the Create-flow Billing step (step 3) and fill its Tax ID once. Separate from
   // watchStep2 (address). The TIN is filled straight in and never logged/toasted as a value.
   function watchBillingStep(tin, flow) {
-    if (!tin || !flow) return;
+    if (!flow) return;
+    // Retire the previous document's Tax ID watcher even when THIS document has no Tax ID to fill.
+    // Returning early used to skip claimSlot entirely, and that leaks across vendors: armFlow
+    // caches the flow on the dialog node and the UI REUSES that node, so opening vendor B in the
+    // same dialog yields the SAME flow object - flowStale is correctly false, and vendor A's
+    // watcher, still armed for its full five minutes, writes A's Tax ID into B's Billing step.
+    // The guard against this is claimSlot, so it has to run on every drop, not only on the drops
+    // that happen to carry the field.
+    if (!tin) { claimSlot(flow, 'tin', null); return; }
     var filled = false;
     var obs = new MutationObserver(function () {
       if (filled) return;
@@ -923,13 +963,20 @@
     if (w9.dba) { var d = q('details.doingBusinessAs'); if (d) { setNativeValue(d, w9.dba); done.push('DBA'); } }
     if (w9.entity) { var e = root.querySelector('select[name="details.entity"]'); if (e) { setNativeValue(e, w9.entity); done.push('Entity'); } }
     surfaceDup(root);
-    if (w9.street || w9.city || w9.zip) watchStep2({ street: w9.street, city: w9.city, state: w9.state, zip: w9.zip }, flow);
-    if (w9.tin) watchBillingStep(w9.tin, flow);   // Billing step, step 3
+    // Called UNCONDITIONALLY. Each one retires the previous document's watcher for its field, and
+    // skipping the call is what left a prior vendor's watcher armed against a shared flow.
+    watchStep2({ street: w9.street, city: w9.city, state: w9.state, zip: w9.zip }, flow);
+    watchBillingStep(w9.tin, flow);   // Billing step, step 3
     var notes = ['From W-9:'];
     if (done.length) notes.push('filled ' + done.join(', '));
     if (w9.street) notes.push('address on step 2');
     if (w9.tin) notes.push('Tax ID on the Billing step (kept local)');  // never the value
     if (!w9.entity) notes.push('confirm Entity');
+    // Absence was the only signal that a field did not read, and absence from a list of successes
+    // reads as "nothing to mention". Name what is missing, especially the Tax ID: the region bound
+    // added in 0.9.1 makes a blank TIN a normal outcome rather than a rare one.
+    var missing = w9Missing(w9);
+    if (missing.length) notes.push('NOT read: ' + missing.join(', ') + ' - enter ' + (missing.length > 1 ? 'them' : 'it') + ' manually');
     notes.push('review before Create');
     toast(notes.join(' · '), 13000);
   }
@@ -940,6 +987,16 @@
     if (w9.name) f.push('Company'); if (w9.dba) f.push('DBA'); if (w9.entity) f.push('Entity');
     if (w9.street || w9.city || w9.zip) f.push('Address'); if (w9.tin) f.push('Tax ID (local)');
     return f;
+  }
+  // The complement of w9Fields. DBA and Entity are deliberately absent: a W-9 legitimately has no
+  // DBA, so listing it as missing would cry wolf on most documents. These three are always
+  // expected on a valid form, so their absence is a real finding the operator has to act on.
+  function w9Missing(w9) {
+    var m = [];
+    if (!w9.name) m.push('Company');
+    if (!w9.street && !w9.city && !w9.zip) m.push('Address');
+    if (!w9.tin) m.push('Tax ID');
+    return m;
   }
   function prospectFields(p) {
     var f = [];
@@ -966,7 +1023,12 @@
         var w9 = extractW9FromText(text);
         if (w9.name || w9.tin || w9.dba || w9.street) {
           fillFromW9(root, w9, armed);
-          toast('OCR done - REVIEW every field before saving, the Tax ID especially (OCR can misread digits).', 15000);
+          // "the Tax ID especially" told the operator to check a number that is often not there:
+          // it is dropped when no TIN was read, and what DID fail to read is named instead.
+          var miss = w9Missing(w9);
+          toast('OCR done - REVIEW every field before saving' +
+            (w9.tin ? ', the Tax ID especially (OCR can misread digits)' : '') + '.' +
+            (miss.length ? ' NOT read: ' + miss.join(', ') + ' - enter ' + (miss.length > 1 ? 'them' : 'it') + ' manually.' : ''), 15000);
           return { ok: true, label: 'Scanned W-9 (OCR)', fields: w9Fields(w9) };
         }
         toast('OCR ran but could not confidently read the W-9 fields - enter them manually.', 12000);
