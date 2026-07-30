@@ -89,28 +89,84 @@ function loadWoAudit(opts) {
   var gmScript = opts.gmScript || [];
   var gi = 0, gsent = [];
   function gmPost(url, headers, bodyObj, timeoutMs) {
-    gsent.push({ url: url, headers: headers, body: bodyObj });
+    gsent.push({ url: url, headers: headers, body: bodyObj, timeoutMs: timeoutMs });
     var r = gmScript[gi++];
-    if (r && r.reject) return Promise.reject(new Error('network'));
-    // Only a NUMERIC status is the HTTP status; otherwise the script entry IS the json body
-    // (mirrors the Phase 2 makeGM stub so {ok,status:'final',text} maps to a 200 with json).
-    var status = (r && typeof r.status === 'number') ? r.status : 200;
-    var json = (r && r.json !== undefined) ? r.json : r;
-    return Promise.resolve({ status: status, json: json });
+    // `takesMs` burns virtual wire time, so a slow attempt counts against the row budget the
+    // same way it does live - the pathological all-slow case is otherwise untestable.
+    var wire = (r && r.takesMs) || 0;
+    // Honor timeoutMs the way GM_xmlhttpRequest does: a wire time past the cap fires ontimeout
+    // at the cap, it does NOT run long. Ignoring this made the stub blow through budgets no
+    // real request could blow through, and reported it as a product bug.
+    var cap = timeoutMs || 60000;
+    if (wire > cap) return vAdvance(cap).then(function () { return Promise.reject(new Error('timed out')); });
+    return (wire ? vAdvance(wire) : Promise.resolve()).then(function () {
+      if (r && r.reject) return Promise.reject(new Error(r.reject === true ? 'network error' : String(r.reject)));
+      // Only a NUMERIC status is the HTTP status; otherwise the script entry IS the json body
+      // (mirrors the Phase 2 makeGM stub so {ok,status:'final',text} maps to a 200 with json).
+      var status = (r && typeof r.status === 'number') ? r.status : 200;
+      var json = (r && r.json !== undefined) ? r.json : r;
+      // `resHeaders` becomes the raw CRLF blob the real gmPost hands back from
+      // GM_xmlhttpRequest's responseHeaders, so retry-after parsing is exercised for real.
+      return { status: status, json: json, headers: (r && r.resHeaders) || '' };
+    });
   }
+  // ONE virtual clock drives sleep, setTimeout AND Date.now, because the thing that has to be
+  // observable is the RACE between the sender's backoff and the frozen router's
+  // withTimeout(run, timeoutMs). A merely-instant sleep stub cannot see that race at all: it
+  // was why a 15s+45s schedule inside a 60s router budget tested green while being a guaranteed
+  // row failure in production. Timers fire in due order as the clock is advanced by sleeps, so
+  // tests stay fast and deterministic while the arithmetic is real.
+  var slept = [];
+  var RealDate = Date;
+  var T0 = RealDate.now();          // anchor to real time so the seeded role-cache ts stays valid
+  var clock = { now: T0, timers: [], seq: 0 };
+  function vSetTimeout(fn, ms) {
+    var t = { at: clock.now + (ms || 0), fn: fn, id: ++clock.seq };
+    clock.timers.push(t);
+    return t.id;
+  }
+  function vClearTimeout(id) { clock.timers = clock.timers.filter(function (t) { return t.id !== id; }); }
+  // Fire every timer due at or before the target, in time order, letting each one's microtasks
+  // settle before the next - that is what makes a withTimeout abort land in the correct place
+  // relative to a resuming sleep.
+  function vAdvance(ms) {
+    var target = clock.now + ms;
+    return (function step() {
+      var due = clock.timers
+        .filter(function (t) { return t.at <= target; })
+        .sort(function (a, b) { return a.at - b.at || a.id - b.id; });
+      if (!due.length) { clock.now = target; return Promise.resolve(); }
+      var t = due[0];
+      clock.timers = clock.timers.filter(function (x) { return x !== t; });
+      clock.now = t.at;
+      try { t.fn(); } catch (e) { /* a timer throwing must not wedge the clock */ }
+      return new Promise(function (r) { process.nextTick(r); }).then(step);
+    })();
+  }
+  function vSleep(ms) { slept.push(ms); return vAdvance(ms); }
   var factory = new Function(
-    'SWA_BASE', 'getKey', 'authToken', 'gmPost', 'sleep', 'document', 'localStorage', 'setTimeout', 'clearTimeout', 'console',
-    section + '\n;return { bwnAI: bwnAI, aiProxySend: aiProxySend, summarize: summarize, buildAuditInput: buildAuditInput, WO_AUDIT_SYSTEM: WO_AUDIT_SYSTEM };'
+    'SWA_BASE', 'getKey', 'authToken', 'gmPost', 'sleep', 'document', 'localStorage', 'setTimeout', 'clearTimeout', 'console', 'Date',
+    section + '\n;return { bwnAI: bwnAI, aiProxySend: aiProxySend, summarize: summarize, buildAuditInput: buildAuditInput, WO_AUDIT_SYSTEM: WO_AUDIT_SYSTEM, retryAfterMs: retryAfterMs, AI_ROW_BUDGET_MS: AI_ROW_BUDGET_MS, AI_ROUTER_TIMEOUT_MS: AI_ROUTER_TIMEOUT_MS, causeText: causeText, isThrottle: isThrottle };'
   );
+  // Date.now is virtual; everything else on Date stays real (retryAfterMs parses HTTP-dates).
+  function vDate(a) { return a === undefined ? new RealDate(clock.now) : new RealDate(a); }
+  vDate.now = function () { return clock.now; };
+  vDate.parse = function (s) { return RealDate.parse(s); };
+  vDate.UTC = function () { return RealDate.UTC.apply(RealDate, arguments); };
+  vDate.prototype = RealDate.prototype;
   var api = factory(
     'https://swa.example',
     function () { return opts.key !== undefined ? opts.key : 'test-key'; },
     function () { return opts.token !== undefined ? opts.token : 'umbrava-bearer'; },
     gmPost,
-    function () { return Promise.resolve(); },   // sleep: instant
-    docStub, makeLS(opts.seed), setTimeout, clearTimeout, console
+    vSleep,
+    docStub, makeLS(opts.seed), vSetTimeout, vClearTimeout, console, vDate
   );
   api._gsent = gsent;
+  api._slept = slept;
+  api._clock = clock;
+  api._advance = vAdvance;
+  api._elapsed = function () { return clock.now - T0; };
   return api;
 }
 
@@ -157,23 +213,141 @@ function run() {
     });
   });
 
-  // proxy miss -> summarize throws (batch pool marks the row / Retry Errors still works).
+  // proxy miss -> summarize throws (batch pool marks the row / Retry Errors still works), and
+  // the thrown message names the REAL cause in words, not the old canned key/role guess.
   chain = chain.then(function () {
-    var T = loadWoAudit({ seed: roleSlot(), gmScript: [{ status: 500, json: { ok: false } }, { status: 500, json: { ok: false } }, { status: 500, json: { ok: false } }] });
+    var T = loadWoAudit({ seed: roleSlot(), gmScript: [{ status: 500, json: { ok: false, error: 'ai error' } }, { status: 500, json: { ok: false, error: 'ai error' } }, { status: 500, json: { ok: false, error: 'ai error' } }] });
     return T.summarize({ raw: '1' }, [], 'claude-sonnet-5').then(function () {
       ok('wo-audit miss should have thrown', false);
     }, function (e) {
-      ok('wo-audit proxy miss -> summarize throws', /unavailable/i.test((e && e.message) || ''));
+      var m = (e && e.message) || '';
+      ok('wo-audit leads with a plain-language cause', /^the AI service errored/.test(m), m);
+      ok('wo-audit keeps the wire detail for support', /HTTP 500/.test(m) && /ai error/.test(m), m);
+      ok('wo-audit reports the try count', /after 3 tries/.test(m), m);
+      ok('wo-audit no longer repeats the key/role guidance per row', !/ingest key/i.test(m) && !/Retry Errors/.test(m), m);
+      eq('5xx uses the transient backoff table (was 600/1200ms)', JSON.stringify(T._slept), '[2000,6000]');
+      eq('per-attempt HTTP timeout is the budgeted one', T._gsent[0].timeoutMs, 45000);
     });
   });
 
-  // no ingest key -> sender misses -> summarize throws (never hangs).
+  // THE REGRESSION THIS SUITE PREVIOUSLY COULD NOT SEE. A 429 is a 60s sliding window on both
+  // sides of the wire, so the schedule must span it - but the frozen bwnAI router wraps the
+  // whole run in withTimeout(run, timeoutMs). With the old 60000ms budget the schedule summed
+  // to exactly the budget and attempt 3 could never land: the row failed after waiting a full
+  // minute AND lost its reason. The virtual clock makes that race observable.
+  chain = chain.then(function () {
+    var T = loadWoAudit({ seed: roleSlot(), gmScript: [
+      { status: 429, json: { ok: false, error: 'rate limited; slow down' } },
+      { status: 429, json: { ok: false, error: 'rate limited; slow down' } },
+      { ok: true, status: 'final', text: 'Recovered after the throttle cleared.' },
+    ] });
+    return T.summarize({ raw: '1' }, [], 'claude-sonnet-5').then(function (note) {
+      eq('429 x2 then success -> row still writes', note, 'Recovered after the throttle cleared.');
+      eq('429 backoff spans the full 60s window', JSON.stringify(T._slept), '[15000,45000]');
+      eq('all three attempts actually reached the wire', T._gsent.length, 3);
+      ok('the row settled INSIDE the router budget', T._elapsed() < T.AI_ROUTER_TIMEOUT_MS,
+        'elapsed ' + T._elapsed() + ' vs router budget ' + T.AI_ROUTER_TIMEOUT_MS);
+      ok('the backoff schedule fits the row budget', 60000 < T.AI_ROW_BUDGET_MS,
+        'schedule 60000 vs row budget ' + T.AI_ROW_BUDGET_MS);
+    });
+  });
+
+  // The sender must always report before the router aborts, even when every attempt is slow:
+  // a router win resolves '' with no reason and reintroduces the generic rank/key message.
+  chain = chain.then(function () {
+    var T = loadWoAudit({ seed: roleSlot(), gmScript: [
+      { status: 429, json: { ok: false }, takesMs: 44000 },
+      { status: 429, json: { ok: false }, takesMs: 44000 },
+      { status: 429, json: { ok: false }, takesMs: 44000 },
+    ] });
+    return T.summarize({ raw: '1' }, [], 'claude-sonnet-5').then(function () {
+      ok('slow-throttle row should have thrown', false);
+    }, function (e) {
+      var m = (e && e.message) || '';
+      ok('a slow throttled row still reports a real cause', /rate limit|busy/i.test(m), m);
+      ok('it never falls through to the rank/key fallback', !/rank not resolved/i.test(m), m);
+      ok('the sender reported before the router budget', T._elapsed() < T.AI_ROUTER_TIMEOUT_MS,
+        'elapsed ' + T._elapsed() + ' vs ' + T.AI_ROUTER_TIMEOUT_MS);
+      ok('no POST was issued past the row budget', T._gsent.length <= 3, 'posts ' + T._gsent.length);
+    });
+  });
+
+  // An upstream Anthropic throttle arrives as a GENERIC 502 naming the status in the body.
+  chain = chain.then(function () {
+    var T = loadWoAudit({ seed: roleSlot(), gmScript: [
+      { status: 502, json: { ok: false, error: 'Anthropic API error (429)' } },
+      { ok: true, status: 'final', text: 'ok' },
+    ] });
+    return T.summarize({ raw: '1' }, [], 'claude-sonnet-5').then(function () {
+      eq('502-carrying-429 uses the THROTTLE table, not the fast one', JSON.stringify(T._slept), '[15000]');
+    });
+  });
+  chain = chain.then(function () {
+    var T = loadWoAudit({ seed: roleSlot(), gmScript: [] });
+    ok('isThrottle: bare 429', T.isThrottle({ status: 429 }));
+    ok('isThrottle: bare 529', T.isThrottle({ status: 529 }));
+    ok('isThrottle: 502 wrapping 429', T.isThrottle({ status: 502, json: { error: 'Anthropic API error (429)' } }));
+    ok('isThrottle: 502 wrapping 529', T.isThrottle({ status: 502, json: { error: 'Anthropic API error (529)' } }));
+    ok('isThrottle: plain 502 is NOT a throttle', !T.isThrottle({ status: 502, json: { error: 'Anthropic API error (500)' } }));
+    ok('isThrottle: 500 is NOT a throttle', !T.isThrottle({ status: 500, json: {} }));
+    // The load-bearing invariant of the whole rework.
+    ok('router backstop strictly exceeds the row budget',
+      T.AI_ROUTER_TIMEOUT_MS > T.AI_ROW_BUDGET_MS, T.AI_ROUTER_TIMEOUT_MS + ' vs ' + T.AI_ROW_BUDGET_MS);
+    ok('row budget leaves room for a full 60s throttle wait plus two attempts',
+      T.AI_ROW_BUDGET_MS >= 60000 + 2 * 45000, String(T.AI_ROW_BUDGET_MS));
+  });
+
+  // A 403/400/413 is a verdict, not weather - retrying it only burns the row budget.
+  chain = chain.then(function () {
+    var T = loadWoAudit({ seed: roleSlot(), gmScript: [{ status: 403, json: { ok: false, error: 'unauthorized' } }] });
+    return T.summarize({ raw: '1' }, [], 'claude-sonnet-5').then(function () {
+      ok('403 row should have thrown', false);
+    }, function (e) {
+      eq('403 is not retried', T._gsent.length, 1);
+      eq('403 costs no backoff', JSON.stringify(T._slept), '[]');
+      ok('403 names the key, not a generic error', /ingest key/i.test((e && e.message) || ''), (e && e.message) || '');
+    });
+  });
+
+  // retry-after wins over the built-in table, in both units RFC 9110 allows, and is clamped.
+  chain = chain.then(function () {
+    var T = loadWoAudit({ seed: roleSlot(), gmScript: [
+      { status: 429, json: { ok: false }, resHeaders: 'content-type: application/json\r\nRetry-After: 30\r\n' },
+      { ok: true, status: 'final', text: 'ok' },
+    ] });
+    return T.summarize({ raw: '1' }, [], 'claude-sonnet-5').then(function () {
+      eq('server retry-after overrides the table', JSON.stringify(T._slept), '[30000]');
+    });
+  });
+  chain = chain.then(function () {
+    var T = loadWoAudit({ seed: roleSlot(), gmScript: [
+      { status: 429, json: { ok: false }, resHeaders: 'retry-after: 9999\r\n' },
+      { ok: true, status: 'final', text: 'ok' },
+    ] });
+    return T.summarize({ raw: '1' }, [], 'claude-sonnet-5').then(function () {
+      eq('a wild retry-after is clamped to 120s', JSON.stringify(T._slept), '[120000]');
+    });
+  });
+  chain = chain.then(function () {
+    var T = loadWoAudit({ seed: roleSlot(), gmScript: [] });
+    var f = T.retryAfterMs;
+    eq('retryAfterMs: delay-seconds', f('retry-after: 42\r\n'), 42000);
+    eq('retryAfterMs: case/space insensitive', f('  RETRY-AFTER :  7 \r\n'), 7000);
+    eq('retryAfterMs: absent -> 0', f('content-type: text/plain\r\n'), 0);
+    eq('retryAfterMs: garbage -> 0', f('retry-after: soon\r\n'), 0);
+    eq('retryAfterMs: empty blob -> 0', f(''), 0);
+    eq('retryAfterMs: past HTTP-date -> 0', f('retry-after: Wed, 21 Oct 2015 07:28:00 GMT\r\n'), 0);
+    ok('retryAfterMs: future HTTP-date -> ms', f('retry-after: ' + new Date(Date.now() + 20000).toUTCString() + '\r\n') > 15000);
+  });
+
+  // no ingest key -> sender misses -> summarize throws (never hangs), and says so precisely.
   chain = chain.then(function () {
     var T = loadWoAudit({ seed: roleSlot(), key: '', gmScript: [] });
     return T.summarize({ raw: '1' }, [], 'claude-haiku-4-5').then(function () {
       ok('wo-audit no-key should have thrown', false);
     }, function (e) {
-      ok('wo-audit no ingest key -> summarize throws (no POST)', T._gsent.length === 0 && /unavailable/i.test((e && e.message) || ''));
+      ok('wo-audit no ingest key -> summarize throws (no POST)', T._gsent.length === 0);
+      ok('wo-audit names the missing ingest key', /no ingest key set/.test((e && e.message) || ''), (e && e.message) || '');
     });
   });
 
@@ -191,12 +365,17 @@ function staticChecks() {
   ok('suite-ai draft passes timeoutMs 60000', /timeoutMs:\s*60000/.test(gseg));
 
   var wo = read('bwn-wo-audit.user.js');
-  var si = wo.indexOf('function summarize(woFacts, notes, model) {');
-  var sseg = wo.slice(si, si + 700);
+  var si = wo.indexOf('function summarize(woFacts, notes, model, onWait) {');
+  ok('wo-audit summarize signature is findable', si !== -1);
+  var sseg = wo.slice(si, si + 1100);
   ok('wo-audit summarize() routes through bwnAI', /bwnAI\(\{/.test(sseg));
   ok("wo-audit uses task:'summarize'", /task:\s*'summarize'/.test(sseg));
   ok("wo-audit forces tier:'proxy'", /tier:\s*'proxy'/.test(sseg));
-  ok('wo-audit passes timeoutMs 60000', /timeoutMs:\s*60000/.test(sseg));
+  // The invariant is not a magic number: the router budget must EXCEED the sender's own row
+  // budget, or a router win resolves '' and discards the reason - the bug this rework fixes.
+  ok('wo-audit hands bwnAI the router-backstop budget', /timeoutMs:\s*AI_ROUTER_TIMEOUT_MS/.test(sseg));
+  ok('router budget is derived from the row budget, not hardcoded',
+    /AI_ROUTER_TIMEOUT_MS\s*=\s*AI_ROW_BUDGET_MS\s*\+/.test(wo));
 
   // TASK-014: NO direct Anthropic path anywhere in the suite.
   var scripts = fs.readdirSync(DIR).filter(function (f) { return /\.user\.js$/.test(f); });
