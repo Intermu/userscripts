@@ -728,6 +728,12 @@
       '<button type="button" id="bwn-woaudit-x" class="bwn-drawer-x" title="Close" aria-label="Close">&times;</button></div>' +
       '<div class="bwn-drawer-body">' +
       '<div id="bwn-woaudit-keywarn" style="display:none;background:#fff4e5;border:1px solid #ffcf99;color:#8a4b00;padding:8px 10px;border-radius:8px;margin-bottom:12px;font-size:12.5px"></div>' +
+      // Completeness gets its OWN banner rather than sharing the ingest-key one: they fire in
+      // different situations and would clobber each other. It persists outside the 240px log,
+      // where the same sentence is one 12px monospace line among forty that look identical - the
+      // coordinator clicks Download, the browser takes focus, and the file is already on disk.
+      // role=status so it is announced rather than only drawn.
+      '<div id="bwn-woaudit-warn" role="status" aria-live="polite" style="display:none;background:#fff4e5;border:1px solid #ffcf99;color:#8a4b00;padding:8px 10px;border-radius:8px;margin-bottom:12px;font-size:12.5px;font-weight:600"></div>' +
       '<label style="display:block;font-weight:600;margin-bottom:6px">1. Audit workbook (.xlsx)</label>' +
       '<input type="file" id="bwn-woaudit-file" accept=".xlsx,.xls" style="margin-bottom:6px">' +
       '<div id="bwn-woaudit-sheetwrap" style="display:none;margin:8px 0"><label style="font-weight:600;margin-right:8px">Sheet</label><select id="bwn-woaudit-sheet"></select></div>' +
@@ -767,6 +773,13 @@
 
     var log = $('bwn-woaudit-log');
     function logln(s) { log.textContent += (log.textContent ? '\n' : '') + s; log.scrollTop = log.scrollHeight; }
+    // The persistent half of a warning. Null-safe for the same reason the button writes are: the
+    // drawer can be gone or rebuilt while a run is in flight.
+    function setWarn(msg) {
+      var w = $('bwn-woaudit-warn'); if (!w) return;
+      w.textContent = msg || '';
+      w.style.display = msg ? 'block' : 'none';
+    }
 
     var loaded = null;   // { wb, name }
     $('bwn-woaudit-file').onchange = function (e) {
@@ -805,6 +818,7 @@
       // the client's existing Notes text; leaving Download visible offers the previous workbook.
       var rb0 = $('bwn-woaudit-retry'); if (rb0) rb0.style.display = 'none';
       var db0 = $('bwn-woaudit-dl'); if (db0) db0.style.display = 'none';
+      setWarn('');   // the previous session's completeness state does not describe this workbook
       var ws = loaded.wb.Sheets[currentSheet()];
       var map = mapSheet(ws);
       var hdr = (map.aoa[map.headerRow] || []).map(function (x) { return String(x == null ? '' : x); });
@@ -877,6 +891,7 @@
       $('bwn-woaudit-cancel').style.display = 'inline-block';
       $('bwn-woaudit-cancel').disabled = false;
       _running = true; _cancelled = false;
+      setWarn('');   // stale from the previous pass; recomputed when this one finishes
       if (!retryOnly) { log.textContent = ''; session.results = new Array(session.rows.length); }
       logln((retryOnly ? 'Retrying ' : 'Auditing ') + targets.length + ' work orders with ' + model + ' (concurrency ' + conc + ')...');
       var prog = $('bwn-woaudit-prog');
@@ -967,6 +982,11 @@
           var cb = $('bwn-woaudit-cancel'); if (cb) cb.style.display = 'none';
           var db = $('bwn-woaudit-dl'); if (db) db.style.display = 'inline-block';
           if (tal.errs || tal.skipped) { var rb = $('bwn-woaudit-retry'); if (rb) rb.style.display = 'inline-block'; }
+          // Persist the completeness state outside the scrolling log, where it survives the
+          // coordinator being pulled away between finishing a run and pressing Download.
+          setWarn(tal.errs + tal.skipped
+            ? 'This workbook is INCOMPLETE: ' + owedPhrase(tal) + ' of ' + session.rows.length + '. ' + UNWRITTEN_NOTE + ' Press Retry Unfinished before sending it.'
+            : '');
         });
     }
 
@@ -975,17 +995,33 @@
       // The workbook is what reaches the client, so the warning fires HERE too, not only in the
       // run summary a coordinator may have scrolled past in a 240px log box.
       var tal = auditTally(session.results, session.rows.length);
-      if (tal.errs + tal.skipped) {
+      var owed = tal.errs + tal.skipped;
+      if (owed) {
         logln('! Downloading with ' + owedPhrase(tal) + ' of ' + session.rows.length + '. ' + UNWRITTEN_NOTE);
+        // A blocking acknowledgement, because everything softer has already failed here: the
+        // warning used to be one monospace line in a scrolling box, and the moment Download is
+        // pressed the browser takes focus and the file is on disk. This is the last point at
+        // which an incomplete workbook can still be stopped from reaching a client.
+        var proceed = true;
+        try {
+          proceed = window.confirm(
+            'This audit is INCOMPLETE.\n\n' + owedPhrase(tal) + ' of ' + session.rows.length + '.\n\n' +
+            UNWRITTEN_NOTE + '\n\nDownload it anyway?');
+        } catch (e) { proceed = true; }   // a page that breaks confirm must not trap the workbook
+        if (!proceed) { logln('Download cancelled. Press Retry Unfinished to complete the batch.'); return; }
       }
+      // The filename is the only part of this that survives into Downloads, an email, and the
+      // client's inbox. A partial export must not arrive under the same name as a complete one.
+      var fname = session.name + (owed ? '-audited-INCOMPLETE-' + owed + '-unwritten' : '-audited') + '.xlsx';
       try {
         var out = XLSX.write(session.wb, { bookType: 'xlsx', type: 'array', cellStyles: true });
         var blob = new Blob([out], { type: XLSX_MIME });
         var url = URL.createObjectURL(blob);
-        var a = document.createElement('a'); a.href = url; a.download = session.name + '-audited.xlsx';
+        var a = document.createElement('a'); a.href = url; a.download = fname;
         document.body.appendChild(a); a.click(); a.remove();
         setTimeout(function () { URL.revokeObjectURL(url); }, 5000);
-        toast('Downloaded ' + session.name + '-audited.xlsx');
+        // The toast is a success signal; it must not read as one for a partial export.
+        toast(owed ? ('Downloaded INCOMPLETE ' + fname) : ('Downloaded ' + fname));
       } catch (err) { logln('! Download failed: ' + ((err && err.message) || err)); }
     }
   }

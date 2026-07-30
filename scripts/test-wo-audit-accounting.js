@@ -189,6 +189,19 @@ function section6() {
   A.ok('button row wraps (UX-6)', /display:flex;flex-wrap:wrap;gap:10px;align-items:center/.test(TEXT));
   A.ok('button label covers skipped rows too', />Retry Unfinished</.test(TEXT));
   A.ok('no stale "Retry Errors" label remains', !/>Retry Errors</.test(TEXT));
+
+  // Phase 4: the incomplete-workbook path (UX-2, UAT-3a).
+  A.ok('a dedicated persistent warning banner exists', /id="bwn-woaudit-warn"/.test(TEXT));
+  A.ok('...announced, not just drawn', /id="bwn-woaudit-warn" role="status" aria-live="polite"/.test(TEXT));
+  A.ok('...and it is NOT the ingest-key banner', /id="bwn-woaudit-keywarn"/.test(TEXT) && /setWarn\(/.test(TEXT));
+  A.ok('the banner is cleared when a run starts', /_running = true; _cancelled = false;\n\s*setWarn\(''\)/.test(TEXT));
+  A.ok('the banner is cleared when describe() rebuilds the session',
+    /db0\.style\.display = 'none';\n\s*setWarn\(''\)/.test(TEXT));
+  A.ok('a partial download is gated behind an acknowledgement', /window\.confirm\(/.test(TEXT));
+  A.ok('...that cannot trap the workbook if confirm is broken',
+    /catch \(e\) \{ proceed = true; \}/.test(TEXT));
+  A.ok('a partial export gets a distinct filename', /-audited-INCOMPLETE-' \+ owed \+ '-unwritten/.test(TEXT));
+  A.ok('the success toast is conditional on completeness', /toast\(owed \? \('Downloaded INCOMPLETE /.test(TEXT));
   return Promise.resolve();
 }
 
