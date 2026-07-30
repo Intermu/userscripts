@@ -211,15 +211,17 @@
     if (!(hi > floor)) return null;
     var caps = allMatches(t, CAP_LINE_RE).filter(function (o) { return o > floor && o < hi; });
     if (!caps.length) return null;
-    // A genuine Part I carries exactly two comb labels, one per column. A third means someone
+    // A genuine Part I carries exactly two comb labels, one above each stacked comb row. A third
+    // means someone
     // printed a caption line of their own inside the block to drag the floor up above their own
     // number - the only remaining way to aim this, once the region is bounded by the headings.
     // Refuse rather than pick, because picking is what the whole class of bug is made of.
     if (caps.length > 2) return null;
-    // FIRST caption inside the block, not last. The labels read `Social security number`, `or`,
-    // `Employer identification number`, so anchoring on the last one starts below the SSN box and
-    // silently blanks the Tax ID for every sole proprietor - the same population 0.8.8's comb
-    // mis-grouping hit. Ceiling is Part II, so no character-count window is involved at all.
+    // FIRST caption inside the block, not last. This is geometry, not a guess about text order:
+    // the SSN comb (y=396..420) physically sits ABOVE the EIN caption (y=377), so anchoring on the
+    // last caption starts below the SSN box and silently blanks the Tax ID for every sole
+    // proprietor - the same population 0.8.8's comb mis-grouping hit. Ceiling is Part II, so no
+    // character-count window is involved at all.
     return { lo: Math.min.apply(null, caps), hi: hi };
   }
   // ===== END TIN REGION =====================================================
@@ -227,11 +229,23 @@
   // Find the TIN in already-page-scoped text (the caller picks the page; see pickFormPage).
   //
   // This reads RUNS FIRST and attributes them afterwards, rather than windowing after each caption.
-  // Caption-first windowing cannot work on the real form: the SSN and EIN combs sit SIDE BY SIDE, so
-  // tesseract prints both captions and THEN the single row of boxes -
+  // Caption-first windowing produced text in which both captions arrive before a single digit row -
   //     Social security number / or / Employer identification number / 9 8 7 6 5 4 3 2 1
-  // which made the EIN window claim a sole proprietor's SSN and report 987-65-4321 as 98-7654321,
-  // while the SSN window could only ever see the word "or".
+  // so the EIN window claimed a sole proprietor's SSN and reported 987-65-4321 as 98-7654321, while
+  // the SSN window could only ever see the word "or".
+  //
+  // That OCR observation is real; the explanation this comment used to give for it was NOT. It said
+  // the two combs "sit side by side". They do not. Measured on the blank Rev. March 2024 form
+  // (612x792, pdf.js `getFieldObjects()` + `getTextContent()`) the combs are STACKED in one column:
+  // SSN caption y=425 above SSN combs y=396..420, `or` y=388, EIN caption y=377 above EIN combs
+  // y=348..372, all at x=418..576. Each caption already sits directly above its own row.
+  //
+  // The real cause is column welding. Part I's instruction prose sits at x=36, on lines y=411 and
+  // y=392 - the SAME y band as the SSN comb at y=396..420. Line segmentation therefore merges the
+  // left prose column into the right label column, and the linear text order stops reflecting the
+  // page. So captions and prose are separated by X, not by string index, and Tesseract does report
+  // a bbox per word. That is the lever this file does not yet use; see
+  // wiki/w9-part-i-caption-anchor.md. Everything below works on linear text only.
   function findTIN(text) {
     // No `.split('\f')[0]` here: pickFormPage already hands us ONE page and the form feed is gone
     // by then, so that scoping was dead code pretending to be a guard. Page selection is the
@@ -251,9 +265,10 @@
     // Pipes are box edges first and digit 1s only on a second pass.
     var sub = s.replace(/[OoQ]/g, '0').replace(/[lI]/g, '1').replace(/S/g, '5').replace(/B/g, '8').replace(/Z/g, '2');
     // Which comb does a run at `at` belong to? The form's printed grouping decides when it survives
-    // OCR. Otherwise the caption context decides - but only when ONE caption precedes the run. When
-    // both precede as an adjacent block, the run sits under a row serving both columns and linear
-    // text carries no column information, so the kind is left unknown and fmtTIN emits bare digits.
+    // OCR. Otherwise the caption context decides - but only when ONE caption precedes the run. Both
+    // captions preceding it means the linear text no longer reflects the page (prose from the left
+    // column has been welded in between them, see the note above findTIN), so there is no reliable
+    // way to say which comb the run came from. The kind is left unknown and fmtTIN emits bare digits.
     function attribute(at, rawRun) {
       var g = groupedKind(rawRun);
       if (g) return g;
@@ -261,7 +276,7 @@
       var iS = before.lastIndexOf(SSN_CAP), iE = before.lastIndexOf(EIN_CAP);
       if (iS < 0 && iE < 0) return '';
       // Attribute ONLY when exactly one caption precedes the run. The old adjacency heuristic
-      // tried to tell "both captions, side-by-side columns" from "one caption, then the other's
+      // tried to tell "both captions welded together by OCR" from "one caption, then the other's
       // box" by measuring the gap and requiring no digits in it - and a single printed digit
       // between the two captions defeated it, returning 'ssn' for a genuine EIN. fmtTIN then
       // rendered 123456789 as 123-45-6789: the right digits in the wrong format, which passes an
