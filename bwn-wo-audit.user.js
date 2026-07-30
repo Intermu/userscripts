@@ -62,17 +62,40 @@
 
   // Same-origin GraphQL POST -> resolves to `data`, throws on errors[]. Carries the
   // page's own Umbrava bearer; no @connect needed (app.umbrava.com is same-origin).
+  // Bounded. Without a timeout one hung read parks runPool forever: that runner never settles, so
+  // Promise.all never resolves, the completion block never runs, Download never appears, and the
+  // close-guard refuses to let the drawer go because `_running` is still true. The only exit was
+  // reloading the tab, which discards every note already written into the in-memory workbook -
+  // exactly the orphaning the guard exists to prevent, made unrecoverable.
+  var GQL_TIMEOUT_MS = 30000;
   function gql(query, variables) {
     var tok = authToken();
-    return fetch('/api/graphql', {
-      method: 'POST',
-      headers: { 'Authorization': 'Bearer ' + tok, 'Content-Type': 'application/json' },
-      body: JSON.stringify({ query: query, variables: variables || {} })
-    }).then(function (r) { return r.json(); })
-      .then(function (j) {
+    var ctl = (typeof AbortController !== 'undefined') ? new AbortController() : null;
+    var timer = null;
+    return new Promise(function (resolve, reject) {
+      timer = setTimeout(function () {
+        if (ctl) { try { ctl.abort(); } catch (e) { } }
+        reject(new Error('Umbrava did not respond in time (' + Math.round(GQL_TIMEOUT_MS / 1000) + 's)'));
+      }, GQL_TIMEOUT_MS);
+      fetch('/api/graphql', {
+        method: 'POST',
+        headers: { 'Authorization': 'Bearer ' + tok, 'Content-Type': 'application/json' },
+        body: JSON.stringify({ query: query, variables: variables || {} }),
+        signal: ctl ? ctl.signal : undefined
+      }).then(function (r) {
+        // A batch now spans many minutes, so the bearer read once at Start can expire mid-run.
+        // r.json() on a non-JSON 401 body rejects with "Unexpected token '<'", which is the exact
+        // class of un-actionable message the plain-language cause layer exists to remove.
+        if (r.status === 401 || r.status === 403) {
+          throw new Error('your Umbrava session expired - reload the tab and press Retry Unfinished');
+        }
+        return r.json();
+      }).then(function (j) {
         if (j && j.errors && j.errors.length) throw new Error(j.errors[0].message || 'GraphQL error');
-        return j && j.data;
-      });
+        resolve(j && j.data);
+      }).catch(reject);
+    }).then(function (v) { clearTimeout(timer); return v; },
+      function (e) { clearTimeout(timer); throw e; });
   }
 
   function _date(v) { if (!v) return null; var d = new Date(v); return isNaN(+d) ? null : d; }
@@ -554,6 +577,54 @@
     });
   }
 
+  // ===== RUN ACCOUNTING =====================================================
+  // A row has THREE outcomes, not two. Cancel returns from next() before the row is ever handed
+  // to the worker, so `session.results[i]` stays a HOLE - distinct from a written note and from
+  // an `{error}`. Every consumer used to test `.error` alone, so a skipped row was invisible: it
+  // counted nowhere, could not be retried, and its note cell went out unwritten with nothing on
+  // screen saying so. Module scope, and marked, so the node harness drives the real shipped bytes.
+
+  // Index loop, not `.filter`/`.reduce`: `session.results` is a SPARSE array (assigned by index,
+  // never pushed) and the iterator methods skip holes entirely - the exact rows this counts.
+  // `skipped` is derived from the total so a hole cannot escape it.
+  function auditTally(results, total) {
+    var ok = 0, errs = 0;
+    for (var i = 0; i < total; i++) {
+      var r = results[i];
+      if (!r) continue;
+      if (r.error) errs++; else ok++;
+    }
+    return { ok: ok, errs: errs, skipped: total - ok - errs };
+  }
+
+  // Everything that still owes a note: errored rows AND rows the cancel never reached.
+  // Positional - `session.results` is indexed by position in `session.rows`.
+  function pendingRows(rows, results) {
+    return rows.filter(function (row, i) {
+      var r = results[i];
+      return !r || !!r.error;
+    });
+  }
+
+  // One vocabulary for every surface. The summary, the cancel warning and the download warning
+  // previously used three different phrasings and two different totals ("unaudited" meaning
+  // errored+skipped in one place, "never audited" meaning skipped only in another), so the number
+  // a coordinator read at download matched nothing they had been shown.
+  function owedPhrase(tal) {
+    var owed = tal.errs + tal.skipped;
+    var parts = [];
+    if (tal.errs) parts.push(tal.errs + ' failed');
+    if (tal.skipped) parts.push(tal.skipped + ' never audited');
+    return owed + ' row' + (owed === 1 ? '' : 's') + ' with no note' +
+      (parts.length ? ' (' + parts.join(', ') + ')' : '');
+  }
+  // Said wherever an unwritten cell can reach the client. Deliberately does NOT claim the cells
+  // are blank: nothing is written to a row that errored or was skipped, so the cell keeps whatever
+  // the uploaded workbook held - and on a recurring audit the detected notes column carries LAST
+  // cycle's status text. Shipping that as current is worse than shipping a blank.
+  var UNWRITTEN_NOTE = 'Those cells were not written: blank if this column is new, otherwise still holding the workbook\'s previous text.';
+  // ===== END RUN ACCOUNTING =================================================
+
   // ====================================================================
   // Workbook mapping. Header-based (survives column reorder) with a scan for the
   // header row; write-back column detected dynamically, appended if absent.
@@ -666,10 +737,10 @@
       '<div><label style="display:block;font-weight:600;margin-bottom:4px">Model</label><select id="bwn-woaudit-model"></select></div>' +
       '<div><label style="display:block;font-weight:600;margin-bottom:4px">Concurrency</label><input id="bwn-woaudit-conc" type="number" min="1" max="6" value="3" style="width:64px"></div>' +
       '</div>' +
-      '<div style="display:flex;gap:10px;align-items:center;margin:12px 0">' +
+      '<div style="display:flex;flex-wrap:wrap;gap:10px;align-items:center;margin:12px 0">' +
       '<button id="bwn-woaudit-start" style="background:' + GREEN + ';color:#fff;border:0;padding:9px 18px;border-radius:8px;font-weight:600;cursor:pointer">Start Audit</button>' +
       '<button id="bwn-woaudit-cancel" style="display:none;background:#6b1d1d;color:#fff;border:0;padding:9px 14px;border-radius:8px;font-weight:600;cursor:pointer">Cancel</button>' +
-      '<button id="bwn-woaudit-retry" style="display:none;background:#8a4b00;color:#fff;border:0;padding:9px 14px;border-radius:8px;font-weight:600;cursor:pointer">Retry Errors</button>' +
+      '<button id="bwn-woaudit-retry" style="display:none;background:#8a4b00;color:#fff;border:0;padding:9px 14px;border-radius:8px;font-weight:600;cursor:pointer">Retry Unfinished</button>' +
       '<button id="bwn-woaudit-dl" style="display:none;background:#1a5f3e;color:#fff;border:0;padding:9px 14px;border-radius:8px;font-weight:600;cursor:pointer">Download .xlsx</button>' +
       '</div>' +
       '<div id="bwn-woaudit-prog" style="font-weight:600;margin:6px 0"></div>' +
@@ -701,6 +772,9 @@
     $('bwn-woaudit-file').onchange = function (e) {
       var f = e.target.files && e.target.files[0];
       if (!f) return;
+      // Belt and braces with the disabled attribute set in runAudit: a file picked mid-run would
+      // replace `loaded` and orphan every note already written into the workbook in memory.
+      if (_running) { logln('! A run is in progress - finish or cancel it before loading another workbook.'); return; }
       var fr = new FileReader();
       fr.onload = function () {
         try {
@@ -721,6 +795,16 @@
     function currentSheet() { return loaded ? ($('bwn-woaudit-sheet').value || loaded.wb.SheetNames[0]) : null; }
     function describe() {
       if (!loaded) return;
+      // Never rebuild `session` mid-run. A run now spans minutes of backoff, and swapping the
+      // session under in-flight workers makes `session.rows.indexOf(row)` return -1, so their
+      // notes are written to `results[-1]` where auditTally's index loop can never see them -
+      // the rows report as "never audited" while their notes went into the OLD sheet.
+      if (_running) return;
+      // Results on screen belong to the session being replaced. Leaving Retry visible lets a
+      // stale press audit the NEW workbook into whatever column was detected for it, overwriting
+      // the client's existing Notes text; leaving Download visible offers the previous workbook.
+      var rb0 = $('bwn-woaudit-retry'); if (rb0) rb0.style.display = 'none';
+      var db0 = $('bwn-woaudit-dl'); if (db0) db0.style.display = 'none';
       var ws = loaded.wb.Sheets[currentSheet()];
       var map = mapSheet(ws);
       var hdr = (map.aoa[map.headerRow] || []).map(function (x) { return String(x == null ? '' : x); });
@@ -766,17 +850,30 @@
       var model = $('bwn-woaudit-model').value;
       var conc = Math.max(1, Math.min(6, parseInt($('bwn-woaudit-conc').value, 10) || 3));
       var ws = session.wb.Sheets[session.sheet];
-      // Resolve the write-back column from the picker (detection is only the default).
-      var pick = $('bwn-woaudit-notecol').value;
-      if (pick === 'append') { session.map.note = -1; ensureNoteCol(ws, session.map); }
-      else { session.map.note = parseInt(pick, 10); if (isNaN(session.map.note)) { session.map.note = -1; ensureNoteCol(ws, session.map); } }
+      // Resolve the write-back column from the picker (detection is only the default) - but never
+      // again once a column has been APPENDED. Both branches force `note = -1` first, which
+      // defeats ensureNoteCol's own `if (map.note > -1) return` guard, so re-resolving appends a
+      // SECOND "Audit Notes" column and splits one audit across two half-blank columns in the
+      // client's workbook. The picker still governs the first resolution, and a run against an
+      // EXISTING column stays re-resolvable because nothing was appended.
+      if (!session.map.noteAppended) {
+        var pick = $('bwn-woaudit-notecol').value;
+        if (pick === 'append') { session.map.note = -1; ensureNoteCol(ws, session.map); }
+        else { session.map.note = parseInt(pick, 10); if (isNaN(session.map.note)) { session.map.note = -1; ensureNoteCol(ws, session.map); } }
+      }
 
+      // Resume, not just retry: rows a cancel skipped owe a note exactly as much as errored rows
+      // do, and matching `.error` alone left them permanently unfinishable.
       var targets = retryOnly
-        ? session.rows.filter(function (row, i) { return session.results[i] && session.results[i].error; })
+        ? pendingRows(session.rows, session.results)
         : session.rows.slice();
-      if (retryOnly && !targets.length) { logln('No errored rows to retry.'); return; }
+      if (retryOnly && !targets.length) { logln('Nothing left to finish - every row has a note.'); return; }
 
       $('bwn-woaudit-start').disabled = true; $('bwn-woaudit-retry').style.display = 'none'; $('bwn-woaudit-dl').style.display = 'none';
+      // Lock the inputs that can replace `session` under in-flight workers. describe() also
+      // refuses while running; this stops the interaction reaching it at all.
+      $('bwn-woaudit-file').disabled = true;
+      var shSel = $('bwn-woaudit-sheet'); if (shSel) shSel.disabled = true;
       $('bwn-woaudit-cancel').style.display = 'inline-block';
       $('bwn-woaudit-cancel').disabled = false;
       _running = true; _cancelled = false;
@@ -830,28 +927,57 @@
         function () { return _cancelled; })
         .then(function () {
           _running = false;
-          var errs = session.results.filter(function (r) { return r && r.error; }).length;
-          var ok = session.results.filter(function (r) { return r && !r.error; }).length;
-          logln((_cancelled ? 'Cancelled. ' : 'Done. ') + ok + ' written, ' + errs + ' errored.');
+          var fi = $('bwn-woaudit-file'); if (fi) fi.disabled = false;
+          var sh = $('bwn-woaudit-sheet'); if (sh) sh.disabled = false;
+          var tal = auditTally(session.results, session.rows.length);
+          logln((_cancelled ? 'Cancelled. ' : 'Done. ') + tal.ok + ' written, ' + tal.errs + ' failed' +
+            (tal.skipped ? ', ' + tal.skipped + ' never audited' : '') + '.');
           // Guidance belongs HERE, once, not appended to every failing row: mid-run a reader
           // cannot evaluate "if every row failed", and 40 copies scroll the results out of the
           // 240px log box. This line is the actual decision point.
-          if (errs && !ok) {
-            logln('EVERY row failed. Check the SWA ingest key (Tampermonkey menu) and that you are signed into Umbrava with a resolved role - run the BWN Ops Suite alongside this.');
-          } else if (errs) {
-            logln('Some rows failed. The causes are listed above; rate limits clear on their own, so Retry Errors usually finishes them.');
+          // Guidance is derived from what the rows ACTUALLY reported, not from the fact that they
+          // all failed. The old all-failed branch reprinted the key/role diagnosis that this
+          // release exists to kill: when a whole batch throttles, ok is 0 and the last line the
+          // coordinator reads told them to re-enter a key that was never the problem.
+          if (tal.errs) {
+            var causes = [];
+            for (var ci = 0; ci < session.rows.length; ci++) {
+              var rr = session.results[ci];
+              if (rr && rr.error) causes.push(String(rr.error));
+            }
+            var allThrottle = causes.length && causes.every(function (c) { return /rate limited|was busy/i.test(c); });
+            var anyAuth = causes.some(function (c) { return /ingest key|rank not resolved|session expired/i.test(c); });
+            if (allThrottle) {
+              logln('Every failure was the AI service rate limiting this batch. Nothing is misconfigured - wait a minute and press Retry Unfinished.');
+            } else if (anyAuth) {
+              logln('At least one row failed on access. Check the SWA ingest key (Tampermonkey menu) and that you are signed into Umbrava with a resolved role - run the BWN Ops Suite alongside this.');
+            } else {
+              logln('Some rows failed. The causes are listed above; rate limits clear on their own, so Retry Unfinished usually finishes them.');
+            }
+          }
+          // The cancel path's own warning. A skipped row produced no log line at all while it was
+          // being skipped, so without this the only trace it existed is the row count.
+          if (tal.skipped) {
+            logln('! ' + tal.skipped + ' row' + (tal.skipped === 1 ? '' : 's') +
+              ' stopped before being audited. ' + UNWRITTEN_NOTE + ' Press Retry Unfinished to complete them.');
           }
           // Null-safe: the drawer can be gone if it was dismissed before the guard existed, or
           // rebuilt mid-run. Losing the buttons must not kill the results.
           var sb = $('bwn-woaudit-start'); if (sb) sb.disabled = false;
           var cb = $('bwn-woaudit-cancel'); if (cb) cb.style.display = 'none';
           var db = $('bwn-woaudit-dl'); if (db) db.style.display = 'inline-block';
-          if (errs) { var rb = $('bwn-woaudit-retry'); if (rb) rb.style.display = 'inline-block'; }
+          if (tal.errs || tal.skipped) { var rb = $('bwn-woaudit-retry'); if (rb) rb.style.display = 'inline-block'; }
         });
     }
 
     function downloadResult() {
       if (!session) return;
+      // The workbook is what reaches the client, so the warning fires HERE too, not only in the
+      // run summary a coordinator may have scrolled past in a 240px log box.
+      var tal = auditTally(session.results, session.rows.length);
+      if (tal.errs + tal.skipped) {
+        logln('! Downloading with ' + owedPhrase(tal) + ' of ' + session.rows.length + '. ' + UNWRITTEN_NOTE);
+      }
       try {
         var out = XLSX.write(session.wb, { bookType: 'xlsx', type: 'array', cellStyles: true });
         var blob = new Blob([out], { type: XLSX_MIME });
