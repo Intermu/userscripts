@@ -63,6 +63,9 @@ jobs:
       - name: PO act re-key harness (sid keys + migration)
         run: node scripts/test-po-act-keys.js
 
+      - name: vendor-intake flow-guard harness (cross-vendor leak)
+        run: node scripts/test-vendor-intake-flow.js
+
   lint:
     name: Lint (advisory)
     runs-on: ubuntu-latest
