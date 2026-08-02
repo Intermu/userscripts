@@ -16,6 +16,28 @@ allowed-tools: Read
 
 # Browser Use Open-Source Library Reference
 
+## On this machine (vault override - read first)
+
+Verified 2026-08-02: **do not act on this skill.** browser-use is an async Python library, and
+Python is banned here. There is no `python`, `pip`, `uv`, `npm`, or `npx` on PATH; the only Node is
+the Adobe-bundled `node.exe` at `C:\Program Files\Adobe\Adobe Creative Cloud Experience\libs\node.exe`.
+Claude never downloads or installs packages on this box (SentinelOne flags download activity; Mike
+installs manually), so the `uv pip install browser-use` line below is not an option for Claude.
+
+The ban is not stylistic. SentinelOne false-positived `claude.exe` (threat `290B659EFE63F711`) and
+its rollback mitigation deletes every file the flagged process wrote. On 2026-08-02 it wiped the
+entire vault working tree and the whole `C:\Users\mnajarro\repos` directory. The checked-out
+browser-use trees were quarantined, and the submodule has since been removed from all three repos.
+
+- **Browser automation that works today:** the in-app Browser tools (`mcp__Claude_Browser__*`), or
+  Claude in Chrome (`mcp__claude-in-chrome__*`) when the task needs real logged-in sessions. Both
+  drive a real browser with nothing to install.
+- **Never** re-add the submodule, and never run a `pip` / `uv` / `npx` install to make this skill
+  work. That is the exact action that gets `claude.exe` convicted.
+
+Everything below stays accurate as upstream reference if browser-use is ever run somewhere else.
+None of it is runnable here.
+
 Reference docs for writing Python code against the browser-use library.
 Read the relevant file based on what the user needs.
 
