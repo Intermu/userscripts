@@ -57,6 +57,9 @@ jobs:
       - name: Bid-out dock registration + ACT_TOOL harness
         run: node scripts/test-bidout-dock.js
 
+      - name: assist:due severity handoff harness
+        run: node scripts/test-assist-due.js
+
   lint:
     name: Lint (advisory)
     runs-on: ubuntu-latest

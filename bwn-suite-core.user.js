@@ -2454,7 +2454,11 @@
           label: esc.label,
           why: escReason + ' · ' + esc.tierName + ' tier',
           text: 'Re: ' + ref + '. ' + esc.lead + escReason + '. Routine follow-up has not resolved this - need a decision on next steps (extend / re-source / price / close).',
-          owner: esc.owner
+          owner: esc.owner,
+          // Carried for the render layer only: armAssistDue emits bwn:assist:due with this
+          // value so the assist drawer POSTs the engine's own severity (the server can bump
+          // the tier on it). Not part of the key, the label, or any stored state.
+          sev: escSev
         });
       }
 
@@ -3432,6 +3436,26 @@
       else if (d.id === 'bwn:dock:unregister') delete waDockSeen[d.key];
     }, false);
 
+    // ESCALATE SEVERITY HANDOFF. The engine computes escSev (how far past the escalate
+    // clock, >=1 at fire) but the assist drawer runs in its own sandbox and only hears the
+    // bus: bwn:assist:due {escSev} arms bwn-wo-assist's _pendingSev, which rides the POST
+    // as escSev so the SERVER can bump the tier (supervisor -> management) for a WO far
+    // past its clock. Fired at render time - the engine stays pure. Latched per
+    // path+key per page load (re-arming would be harmless, _pendingSev is consumed on
+    // open, but the bus stays quiet), and gated on the assist registrant being LIVE so
+    // the event cannot fire before a listener exists: the checklist signature includes
+    // the live-dock set, so assist coming online re-renders the card and this re-runs.
+    var assistDueSent = {};
+    function armAssistDue(a, isDone) {
+      if (isDone || !a || typeof a.sev !== 'number') return;
+      if ((a.key || '').split(':')[0] !== 'escalate') return;
+      if (!waDockAlive('assist')) return;
+      var k = location.pathname + '|' + a.key;
+      if (assistDueSent[k]) return;
+      assistDueSent[k] = 1;
+      try { document.dispatchEvent(new CustomEvent('bwn:evt', { detail: { id: 'bwn:assist:due', escSev: a.sev } })); } catch (e) { }
+    }
+
     // IN-PAGE NAVIGATION. Clicking a step label walks the page to the thing it is about.
     // Only targets with a PROVEN selector are offered (the same ones the engine already
     // reads): PO rows by their own testid, the ECD picker, the DNE/NTE input. Anything
@@ -3664,6 +3688,7 @@
             main.appendChild(lg);
           }
           var btns = document.createElement('div'); btns.className = 'bwn-act-btns';
+          armAssistDue(a, isDone);
           // Phase 2 tool launch - rendered only while the owning dock registrant is live,
           // so this is never a dead control. The click is the same bwn:dock:open the rail
           // itself emits, so the tool opens exactly as if launched from the dock. A step
