@@ -60,6 +60,9 @@ jobs:
       - name: assist:due severity handoff harness
         run: node scripts/test-assist-due.js
 
+      - name: PO act re-key harness (sid keys + migration)
+        run: node scripts/test-po-act-keys.js
+
   lint:
     name: Lint (advisory)
     runs-on: ubuntu-latest

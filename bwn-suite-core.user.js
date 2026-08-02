@@ -44,7 +44,7 @@
   try { localStorage.setItem('bwn:status:core', JSON.stringify({ ver: BWN_VER, ts: Date.now() })); } catch (e) { /* best-effort */ }
 
   console.info('[BWN SUITE CORE] v' + BWN_VER + ' |',
-    'Shared Core 7 \u00b7 PO Approval 1.13 \u00b7 WO Assist 2.64 \u00b7 Leak Guard 2.0 \u00b7 List Heat 3.16 \u00b7 Launcher 2.0 \u00b7 Views 1.0 \u00b7 Palette 1.1 \u00b7 Visit 1.2 \u00b7 Reminders 1.1 \u00b7 Timeline 1.1 \u00b7 TripCal 1.3 \u00b7 Connector 1.2 |',
+    'Shared Core 7 \u00b7 PO Approval 1.13 \u00b7 WO Assist 2.65 \u00b7 Leak Guard 2.0 \u00b7 List Heat 3.16 \u00b7 Launcher 2.0 \u00b7 Views 1.0 \u00b7 Palette 1.1 \u00b7 Visit 1.2 \u00b7 Reminders 1.1 \u00b7 Timeline 1.1 \u00b7 TripCal 1.3 \u00b7 Connector 1.2 |',
     'enabled:', Object.keys(BWN_MODULES).filter(function (k) { return BWN_MODULES[k]; }).join(', '));
 
   // ===== BWN SHARED CORE v7 - KEEP IN SYNC across both suite scripts =====
@@ -1091,7 +1091,7 @@
   });
 
   // ==========================================================================
-  // MODULE: WO Assist: GP + ETA Watchdog + Playbook v2.64 (Connector 1.2)
+  // MODULE: WO Assist: GP + ETA Watchdog + Playbook v2.65 (Connector 1.2)
   // ==========================================================================
   if (BWN_MODULES.woAssist) BWN.safeModule('woAssist', function () {
     'use strict';
@@ -1121,7 +1121,7 @@
     var PANEL_ID = 'bwn-gp-panel';
     var GREEN = BWN.GREEN;
 
-    console.info('[BWN GP] WO Assist v2.64 loaded on', location.href);
+    console.info('[BWN GP] WO Assist v2.65 loaded on', location.href);
 
     // ---- Parsing helpers (shared via BWN core) -----------------------------
     var parseMoney = BWN.parseMoney;
@@ -1151,7 +1151,7 @@
     }
     function nvVendor(s) { return (s || '').replace(/\s+/g, ' ').trim().toUpperCase(); }   // normalize for cross-page (trips vs PO rows) vendor comparison
     function readPOs() {
-      var out = [];
+      var out = [], seenSids = {};
       document.querySelectorAll('[data-testid^="POAccordion-"]').forEach(function (row) {
         var txt2 = row.textContent || '';
         var amts = [];
@@ -1170,6 +1170,14 @@
         // why /revoked?/ must NOT be matched loosely.
         var vend = vendorOf(row);
         var num = (row.getAttribute('data-testid') || '').replace('POAccordion-', '') || (out.length + 1) + '';
+        // Stable per-PO identity for act KEYS (poKeyOf ladder, defined below in this same
+        // module: Umbrava's assigned line number -> vendor GUID -> render index). The
+        // POAccordion-<n> render index in `num` re-sequences when a PO is added or
+        // cancelled, which orphaned checked state AND let structConvergeReason read the
+        // WRONG PO's done flag. `num` stays for display + the POAccordion-<n> nav lookup.
+        var sid = poKeyOf(row);
+        if (seenSids[sid]) sid = sid + '-' + num;   // two POs can share a vendor (GUID fallback) - keys must stay distinct
+        seenSids[sid] = 1;
         // Isolate the PO's OWN status: the text between the leading {num}{date} and the
         // vendor name, so status keywords never collide with the Description. Rows read
         // e.g. "001 03/03/2026 Confirm Complete VENDOR $…" / "003 05/08/2026 Open
@@ -1202,7 +1210,7 @@
         // Word-boundaried so a Description word ("avoid"/"prepaid") can't false-match and
         // drop a genuinely cost-open PO (parity with the terminal safety-net regex).
         var costOpen = amt > 0 && !/\b(cancell?ed|declined|revoked|void)\b/i.test(costRegion) && !/\b(paid|invoiced)\b/i.test(costRegion);
-        out.push({ vendor: vend, num: num, amount: amt, schedDate: schedDate, done: done, poStatus: poStatus, statusText: statusRegion, costOpen: costOpen });
+        out.push({ vendor: vend, num: num, sid: sid, amount: amt, schedDate: schedDate, done: done, poStatus: poStatus, statusText: statusRegion, costOpen: costOpen });
       });
       return out;
     }
@@ -2545,13 +2553,13 @@
         if (!(p.amount > 0)) return;
         if (p.poStatus === 'materials' && !p.done) {
           poThemes.materials = 1;
-          acts.push({ key: 'pomat:' + p.num + ':' + p.vendor, label: 'Chase ' + p.vendor + ' for material delivery ETA + tracking', why: 'PO ' + p.num + (p.statusText ? ' - ' + p.statusText : ' - materials ordered'), text: 'Hi - re: ' + ref + '. On PO ' + p.num + ': please confirm the materials - supplier, expected delivery date, and tracking #. Once they land, reply with the return-visit date so I can update the client.', resolve: ACT_SIGNALS.parts });
+          acts.push({ key: 'pomat:' + p.sid + ':' + p.vendor, poNum: p.num, label: 'Chase ' + p.vendor + ' for material delivery ETA + tracking', why: 'PO ' + p.num + (p.statusText ? ' - ' + p.statusText : ' - materials ordered'), text: 'Hi - re: ' + ref + '. On PO ' + p.num + ': please confirm the materials - supplier, expected delivery date, and tracking #. Once they land, reply with the return-visit date so I can update the client.', resolve: ACT_SIGNALS.parts });
         } else if (p.poStatus === 'accept') {
           poThemes.accept = 1;
-          acts.push({ key: 'poacc:' + p.num + ':' + p.vendor, label: p.vendor + ' has not accepted PO ' + p.num, why: 'PO ' + p.num + ' pending vendor acceptance', text: 'Hi - re: ' + ref + '. PO ' + p.num + ' is still pending your acceptance. Please accept with a scheduled date, or decline today so I can reassign coverage.', resolve: ACT_SIGNALS.quote });
+          acts.push({ key: 'poacc:' + p.sid + ':' + p.vendor, poNum: p.num, label: p.vendor + ' has not accepted PO ' + p.num, why: 'PO ' + p.num + ' pending vendor acceptance', text: 'Hi - re: ' + ref + '. PO ' + p.num + ' is still pending your acceptance. Please accept with a scheduled date, or decline today so I can reassign coverage.', resolve: ACT_SIGNALS.quote });
         } else if (p.poStatus === 'confirm') {
           poThemes.confirm = 1;
-          acts.push({ key: 'poconf:' + p.num + ':' + p.vendor, label: 'Confirm ' + p.vendor + ' completion + collect docs', why: 'PO ' + p.num + ' marked Confirm Complete', text: 'Hi - re: ' + ref + '. PO ' + p.num + ' is marked complete - please upload the completion package (signed ticket, sign-in/out, before/after photos) so we can confirm and invoice.', resolve: ACT_SIGNALS.stall });
+          acts.push({ key: 'poconf:' + p.sid + ':' + p.vendor, poNum: p.num, label: 'Confirm ' + p.vendor + ' completion + collect docs', why: 'PO ' + p.num + ' marked Confirm Complete', text: 'Hi - re: ' + ref + '. PO ' + p.num + ' is marked complete - please upload the completion package (signed ticket, sign-in/out, before/after photos) so we can confirm and invoice.', resolve: ACT_SIGNALS.stall });
         }
       });
 
@@ -2563,7 +2571,8 @@
         state.pos.forEach(function (p) {
           if (!p.costOpen) return;
           acts.push({
-            key: 'pocost:' + p.num + ':' + p.vendor,
+            key: 'pocost:' + p.sid + ':' + p.vendor,
+            poNum: p.num,
             label: 'Confirm the final cost on PO ' + p.num + ' (' + p.vendor + ') is correct',
             why: 'PO ' + p.num + (p.statusText ? ' - ' + p.statusText : '') + ' · ' + fmt(p.amount) + ' - verify the billed total before marking Work Complete',
             text: 'Hi - re: ' + ref + '. Before we close out PO ' + p.num + ', please confirm your final cost is ' + fmt(p.amount) + ' (or send the corrected final total) so billing matches the work performed.'
@@ -2764,6 +2773,36 @@
       } catch (e) { return {}; }
     }
     function actsSave(d) { try { localStorage.setItem(actsKey(), JSON.stringify(d)); } catch (e) { /* best-effort */ } }
+    // ONE-TIME per-WO store migration for the PO act re-key (render index -> stable sid,
+    // 2026-08-02). Old keys look like 'pomat:2:ACME' - a BARE-DIGITS middle, which the new
+    // form never produces (the poKeyOf ladder yields 'ln001' / 'v<guid>' / 'ix2', plus a
+    // '-<num>' collision suffix). An old record maps to a new key only when exactly ONE
+    // current PO carries that vendor; an ambiguous or vanished vendor leaves the record in
+    // place, inert - a step re-appearing unchecked is the safe direction, false-checking
+    // via a guessed mapping is not. Mirrors actsMigrate above (mutates d; returns d when
+    // changed, null when not). Cannot live in actsLoad like the authored-key migration -
+    // it needs state.pos - so renderActsInline runs it once per WO page-load.
+    function actsMigratePO(d, pos) {
+      var changed = false, k, m;
+      var byVendor = {};
+      (pos || []).forEach(function (p) {
+        if (!p || !p.sid) return;
+        var v = String(p.vendor || '');
+        byVendor[v] = Object.prototype.hasOwnProperty.call(byVendor, v) ? null : p;   // null = ambiguous
+      });
+      for (k in d) {
+        m = /^(pomat|poacc|poconf|pocost):(\d+):(.+)$/.exec(k);
+        if (!m) continue;
+        var p2 = byVendor[m[3]];
+        if (!p2) continue;                          // vendor gone or ambiguous - leave the record inert
+        var nk = m[1] + ':' + p2.sid + ':' + m[3];
+        if (!d[nk]) d[nk] = d[k];
+        delete d[k];
+        changed = true;
+      }
+      return changed ? d : null;
+    }
+    var actsMigratedPOFor = '';   // latch: once per WO page-load (the store is per-WO)
 
     function findAddNoteBtn() {
       var btns = document.querySelectorAll('button');
@@ -3349,18 +3388,22 @@
     // note-only remainder the spec named - materials/completion tied to a PO, and the trip
     // no-show, which is fed by the trips cache INDEPENDENT of PO state (so a PO that
     // completed with no per-PO status would otherwise keep nagging until a note matched).
-    function poByNum(state, num) {
+    // Sid lookup, NOT render-index lookup (2026-08-02 re-key): matching parts[1] against
+    // p.num was the false-CHECK half of the render-index defect - after a PO add/cancel
+    // re-sequenced the list, this read the WRONG PO's done flag and could auto-check an
+    // open step. A sid that matches nothing returns null, which converges NOTHING.
+    function poBySid(state, sid) {
       var ps = (state && state.pos) || [];
-      for (var i = 0; i < ps.length; i++) if (String(ps[i].num) === String(num)) return ps[i];
+      for (var i = 0; i < ps.length; i++) if (String(ps[i].sid) === String(sid)) return ps[i];
       return null;
     }
     function structConvergeReason(a, state) {
       if (!a || !state) return null;
       var parts = (a.key || '').split(':'), pfx = parts[0];
       if (pfx === 'pomat' || pfx === 'poconf') {          // materials / completion, per PO
-        var p = poByNum(state, parts[1]);
-        if (p && p.done) return 'PO ' + parts[1] + ' is marked done';
-        if (pfx === 'pomat' && p && p.poStatus && p.poStatus !== 'materials') return 'PO ' + parts[1] + ' is no longer awaiting materials';
+        var p = poBySid(state, parts[1]);
+        if (p && p.done) return 'PO ' + p.num + ' is marked done';
+        if (pfx === 'pomat' && p && p.poStatus && p.poStatus !== 'materials') return 'PO ' + p.num + ' is no longer awaiting materials';
       }
       if (pfx === 'noshow' && state.noShow) {              // trips-cache no-show vs. the real PO ledger
         var nv = nvVendor(state.noShow.vendor);
@@ -3464,7 +3507,10 @@
     function actNav(a) {
       if (!a || a.anchor) return null;
       var parts = (a.key || '').split(':'), p = parts[0];
-      if ((p === 'pomat' || p === 'poacc' || p === 'poconf' || p === 'pocost') && parts[1]) return { kind: 'po', num: parts[1] };
+      // PO keys carry a STABLE sid in parts[1] (2026-08-02 re-key), which is not the
+      // POAccordion-<n> testid value - navigation rides the act's own poNum (the render
+      // index, refreshed every render). parts[1] stays as a last-resort fallback only.
+      if ((p === 'pomat' || p === 'poacc' || p === 'poconf' || p === 'pocost') && parts[1]) return { kind: 'po', num: a.poNum != null ? a.poNum : parts[1] };
       if (p === 'ecd') return { kind: 'ecd' };
       if (p === 'intake' && /\bNTE\b/.test(a.why || '')) return { kind: 'nte' };
       return null;
@@ -3525,6 +3571,13 @@
       var row = actsAnchorBlock();
       if (!acts.length || !row) { if (card) card.remove(); return; }
       ensureWAStyle();
+      // PO-key store migration runs BEFORE anything reads or writes the store this
+      // page-load (autoDetectActioned loads it next line-ish) - see actsMigratePO.
+      if (actsMigratedPOFor !== actsKey()) {
+        actsMigratedPOFor = actsKey();
+        var mig0 = actsMigratePO(actsLoad(), state.pos);
+        if (mig0) actsSave(mig0);
+      }
       autoDetectActioned(acts, state);
       var store = actsLoad();
       // Open steps first (already worst-first from nextActions), done steps sink to the
