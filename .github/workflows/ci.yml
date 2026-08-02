@@ -40,6 +40,23 @@ jobs:
         # bwn-drop-upload / bwn-suite-ai / bwn-wo-audit. Makes that a real gate.
         run: node scripts/test-bwn-ai-phase3.js
 
+      # The four steps below close the 2026-07-31 audit finding that harnesses were
+      # committed but NEVER EXECUTED by CI - a green checkmark said nothing about them.
+      - name: Launcher dock latent-fix harness
+        run: node scripts/test-dock-latent-fixes.js
+
+      - name: W-9 TIN region harness
+        run: node scripts/test-w9-tin-region.js
+
+      - name: WO Audit accounting harness
+        run: node scripts/test-wo-audit-accounting.js
+
+      - name: WO Audit retry-floor harness
+        run: node scripts/test-wo-audit-retry-floor.js
+
+      - name: Bid-out dock registration + ACT_TOOL harness
+        run: node scripts/test-bidout-dock.js
+
   lint:
     name: Lint (advisory)
     runs-on: ubuntu-latest

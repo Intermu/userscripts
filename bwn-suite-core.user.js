@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         BWN Suite - Core (Broadway National)
 // @namespace    broadwaynational.bwn
-// @version      1.66.15
+// @version      1.66.16
 // @downloadURL  https://raw.githubusercontent.com/Intermu/userscripts-public/main/bwn-suite-core.user.js
 // @updateURL    https://raw.githubusercontent.com/Intermu/userscripts-public/main/bwn-suite-core.user.js
 // @description  Runs several Umbrava helpers for BWN coordinators, in the browser with no privileged grants. Includes: PO Approval + ETA Builder; WO Assist (GP/ETA, a stall watchdog, DNE calculator, and a next-action playbook); Email Leak Guard (checks recipients against vendor names, PO amounts, and client budget references before an outbound email sends); WO List Heat (a triage overlay + My Day strip on the work-order list, with an optional same-origin Umbrava API scan for deterministic full-board coverage); and the BWN Launcher (opens the Azure Static Web App tools with the current WO's context). Modules share state through sessionStorage/localStorage. The only network calls are same-origin Umbrava GraphQL reads (app.umbrava.com/api/graphql, the app's own session): List Heat's full-board scan and WO Assist's work-order / trip / clock-in reads; everything else is offline. Toggle modules in BWN_MODULES below.
@@ -3397,26 +3397,26 @@
     // opens that tool's drawer over the existing dock bus. It renders ONLY when the
     // registrant is currently registered, so a disabled module or a WO the tool does not
     // apply to yields no button rather than a dead control.
-    // PINNED against the live registrant table (2026-07-28): the dock has exactly four
-    // registrants - dispatch / cc / wo-audit / ask ([[bwn-launcher-dock]]). Only the
-    // dispatch mapping is real today: "Recruit / dispatch a vendor" (phase:schedule, the
-    // Pending Dispatch status) and the intake scoping step are precisely what the Dispatch
-    // drawer does, and the registrant self-gates to Pending Dispatch WOs - so presence
-    // does the status gating for free. Email RFP (bid-out) and AI Draft (suite-ai) are
-    // NOT dock registrants (they answer bwn:cmd only), so their presence cannot be
-    // detected and they are deliberately absent here; wiring them needs a one-line
-    // registration in each of those scripts, which is outside this Core-only phase.
+    // PINNED against the live registrant table ([[bwn-launcher-dock]]): dispatch / cc /
+    // wo-audit / assist / ask, plus `bidout` (bwn-bid-out 0.26.0, registered 2026-08-02
+    // exactly so this mapping could exist - it is dynamic on WO detail pages the way
+    // dispatch is dynamic on Pending Dispatch). A step key maps to the tools that DO
+    // that step: "Recruit / dispatch a vendor" (phase:schedule) and the intake scoping
+    // step offer BOTH paths to coverage - the Dispatch drawer (network vendor; its
+    // registrant self-gates to Pending Dispatch WOs, so presence does the status gating
+    // for free) and Email RFP (outside / net-new vendors). AI Draft (suite-ai) is still
+    // NOT a dock registrant (it answers bwn:cmd only), so it stays deliberately absent.
     // `escalate` -> the assist drawer (bwn-wo-assist), added once /api/wo-assist went live:
     // the escalation step is the one row whose whole point is handing the job to someone
     // else, and the assist tool is what actually routes it. Presence gating does the rest -
-    // the button only exists where the assist script is installed and registered, so a
-    // coordinator without it sees the row exactly as before.
-    var ACT_TOOL = { 'phase:schedule': 'dispatch', 'phase:intake': 'dispatch', escalate: 'assist' };
-    var ACT_TOOL_LABEL = { dispatch: 'Dispatch\u2026', cc: 'CC Request\u2026', 'wo-audit': 'WO Audit\u2026', ask: 'Ask BWN\u2026', assist: 'Escalate\u2026' };
+    // a button only exists where its registrant is installed and registered, so a
+    // coordinator without the script sees the row exactly as before.
+    var ACT_TOOL = { 'phase:schedule': ['dispatch', 'bidout'], 'phase:intake': ['dispatch', 'bidout'], escalate: ['assist'] };
+    var ACT_TOOL_LABEL = { dispatch: 'Dispatch\u2026', cc: 'CC Request\u2026', 'wo-audit': 'WO Audit\u2026', ask: 'Ask BWN\u2026', assist: 'Escalate\u2026', bidout: 'Email RFP\u2026' };
     function actTool(a) {
       if (!a || a.anchor || a.authored) return null;   // authored items are free text - no reliable tool to infer
       var d = ACT_TOOL[a.key] || ACT_TOOL[(a.key || '').split(':')[0]];
-      return d ? { dock: d } : null;
+      return d ? { docks: d } : null;
     }
     // Dock presence, WO Assist side. The Launcher module owns dockRoster but lives in its
     // own IIFE, so this listens to the same bus independently: registrants re-announce on
@@ -3522,7 +3522,7 @@
         // real content changes - without them the gate would hold a stale card.
         var tl = actTool(a);
         return a.key + '|' + a.label + '|' + (r && r.done ? 1 : 0) + '|' + ((r && r.note) || '') + '|' + (a.nudge || 0) + '|' + ((r && r.reason) || '') +
-          '|' + ((tl && waDockAlive(tl.dock)) ? tl.dock : '') + '|' + (actHelpOpen[a.key] ? 1 : 0);
+          '|' + (tl ? tl.docks.filter(waDockAlive).join(',') : '') + '|' + (actHelpOpen[a.key] ? 1 : 0);
       })]);
       if (card && card.isConnected && card.nextElementSibling === row && card.dataset.sig === sig) return;
       if (card) card.remove();
@@ -3666,17 +3666,22 @@
           var btns = document.createElement('div'); btns.className = 'bwn-act-btns';
           // Phase 2 tool launch - rendered only while the owning dock registrant is live,
           // so this is never a dead control. The click is the same bwn:dock:open the rail
-          // itself emits, so the tool opens exactly as if launched from the dock.
+          // itself emits, so the tool opens exactly as if launched from the dock. A step
+          // can map to more than one tool (recruit = Dispatch OR Email RFP); each button
+          // gates on its OWN registrant, so only installed-and-live tools render.
           var tool = actTool(a);
-          if (tool && waDockAlive(tool.dock) && !isDone) {
-            var tb = document.createElement('button');
-            tb.type = 'button'; tb.className = 'bwn-wa-btn ghost'; tb.textContent = ACT_TOOL_LABEL[tool.dock] || 'Open tool…';
-            tb.style.cssText = 'padding:3px 9px;font-size:10px;';
-            tb.title = 'Open the ' + (ACT_TOOL_LABEL[tool.dock] || 'tool').replace(/…$/, '') + ' drawer for this work order';
-            tb.addEventListener('click', function () {
-              try { document.dispatchEvent(new CustomEvent('bwn:evt', { detail: { id: 'bwn:dock:open', key: tool.dock } })); } catch (e) { }
+          if (tool && !isDone) {
+            tool.docks.forEach(function (dk) {
+              if (!waDockAlive(dk)) return;
+              var tb = document.createElement('button');
+              tb.type = 'button'; tb.className = 'bwn-wa-btn ghost'; tb.textContent = ACT_TOOL_LABEL[dk] || 'Open tool…';
+              tb.style.cssText = 'padding:3px 9px;font-size:10px;';
+              tb.title = 'Open the ' + (ACT_TOOL_LABEL[dk] || 'tool').replace(/…$/, '') + ' drawer for this work order';
+              tb.addEventListener('click', function () {
+                try { document.dispatchEvent(new CustomEvent('bwn:evt', { detail: { id: 'bwn:dock:open', key: dk } })); } catch (e) { }
+              });
+              btns.appendChild(tb);
             });
-            btns.appendChild(tb);
           }
           if (a.text) {
             var cp = document.createElement('button');
