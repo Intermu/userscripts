@@ -18,8 +18,6 @@ jobs:
     steps:
       - name: Checkout repository
         uses: actions/checkout@v7
-        # Default checkout does NOT fetch submodules, so the browser-use submodule
-        # stays absent here (it is unrelated Python and not part of this gate).
 
       - name: Setup Node.js
         uses: actions/setup-node@v6
