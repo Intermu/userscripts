@@ -6,6 +6,13 @@
 //      tracking number wherever the WO has one - it only falls back to the WO number when it does
 //      not, which is why it looked correct in July. Live card: /work-orders/1272451 on WO 383112.
 //      The body carried no WO number at all, so the flow had nothing correct to link from.
+//   1b. THE FALLBACK FIRED WHEN IT SHOULD NOT HAVE (found 2026-08-03 evening, third defect of
+//      the same shape as 2). "Only when the WO has no tracking number" was never true: the
+//      fallback keyed off the BUS, not off the WO. Queue row 466 went out as Tracking 383441
+//      while Umbrava holds trackingNumber 1273641 for W-383441 - and because the fallback filled
+//      the field synchronously, the live read's `setIfEmpty` could never correct it. Every one of
+//      100 sampled Pending Dispatch WOs has a distinct tracking number, so the "no tracking
+//      number" case the fallback was written for is rare-to-absent on this tenant.
 //   2. LOCATION. The modal seeded Location from the bus, which carries the location DISPLAY NAME
 //      ("Flying J PFJ 0722 (865) 531-7400"), and the live read's fallback used `locationName` too.
 //      The flow's `Lookup site` keys on the bare site NUMBER, so every dispatch both rendered an
@@ -70,10 +77,17 @@ function build(src) {
     actor: function () { return sandbox.signedIn; },
     siteCoordinator: function () { return { then: function () {} }; },
     gqlResult: null,
+    gqlFail: false,          // drive hydrate's rejection handler, not just its success path
     DISP_WO_Q: '(query text is not under test here)',
     gql: function () {
-      var r = sandbox.gqlResult;
-      return { then: function (ok) { ok(r); return { then: function () {} }; } };
+      var r = sandbox.gqlResult, fail = sandbox.gqlFail;
+      return {
+        then: function (ok, err) {
+          if (fail) { if (err) err(new Error('stub: GraphQL unavailable')); }
+          else { ok(r); }
+          return { then: function () {} };
+        }
+      };
     },
     EMAIL_RE: /^[^\s@]+@[^\s@]+\.[^\s@]+$/,
   };
@@ -136,6 +150,23 @@ function checkPre(S, label) {
 }
 checkPre(S, 'pre-fill');
 
+// ---- 2b. the pre-fill no longer stamps the WO number into Tracking -------------------------
+// The row-466 defect (2026-08-03). The bus value is a scrape of the header's tracking-number
+// element; when the bus entry is missing or stale the field used to be filled with the WO number
+// on the spot, which made the live read's `setIfEmpty` a no-op forever after. Measured live:
+// W-383441 dispatched as Tracking 383441 when its real client tracking number is 1273641.
+// Blank here is correct - hydrate fills it, and only falls back to the WO number afterwards.
+function checkPreNoBus(S, label) {
+  var pre = S.buildPre('Daniel Russell', { location: SITE_NAME }, '383441');
+  A.eq(label + ': no bus tracking -> Tracking is left EMPTY for the live read', pre.Tracking, '');
+  A.ok(label + ': the WO number is not stamped into Tracking', pre.Tracking !== '383441',
+    'got ' + pre.Tracking);
+  var noBus = S.buildPre('', null, '383441');
+  A.eq(label + ': no bus entry at all -> still empty', noBus.Tracking, '');
+  return pre;
+}
+checkPreNoBus(S, 'pre-fill/no-bus');
+
 // ---- 3. the live read fills Location from locationId, never locationName -------------------
 function checkHydrate(S, label) {
   S.gqlResult = {
@@ -161,6 +192,56 @@ S.gqlResult = { workOrder: { locationId: 999, locationName: SITE_NAME } };
 var typedIn = inputsFor({ Location: '402' });
 S.hydrateFromUmbrava('383112', typedIn, { Location: true });
 A.eq('hydrate: a typed Location wins over the live read', typedIn.Location.value, '402');
+
+// ---- 3b. Tracking: the WO record beats the header scrape ----------------------------------
+// Real values from W-383441 (the row-466 card): the bus seeded 383441, Umbrava holds 1273641.
+function checkTrackingLive(S, label) {
+  S.gqlFail = false;
+  S.gqlResult = { workOrder: { trackingNumber: 1273641, locationId: 674, locationName: SITE_NAME } };
+  var stale = inputsFor({ Tracking: '383441' });     // what a missing/stale bus scrape leaves behind
+  S.hydrateFromUmbrava('383441', stale, {});
+  A.eq(label + ': the live read OVERWRITES a wrong bus seed', stale.Tracking.value, '1273641');
+  var empty = inputsFor({});
+  S.hydrateFromUmbrava('383441', empty, {});
+  A.eq(label + ': and fills an empty field the same way', empty.Tracking.value, '1273641');
+  A.ok(label + ': Tracking and the WO number are now DISTINCT', empty.Tracking.value !== '383441',
+    'both read ' + empty.Tracking.value);
+  return stale;
+}
+checkTrackingLive(S, 'hydrate/tracking');
+
+// The fallback still exists - it just runs last. A WO with no client tracking number must still
+// produce a value for this required field.
+function checkTrackingFallback(S, label) {
+  S.gqlFail = false;
+  S.gqlResult = { workOrder: { trackingNumber: null, locationId: 674, locationName: SITE_NAME } };
+  var inputs = inputsFor({});
+  S.hydrateFromUmbrava('383441', inputs, {});
+  A.eq(label + ': no client tracking number -> the WO number fills in', inputs.Tracking.value, '383441');
+  return inputs;
+}
+checkTrackingFallback(S, 'hydrate/fallback');
+
+// Losing GraphQL degrades to the old behaviour rather than blocking a required field.
+function checkTrackingOffline(S, label) {
+  S.gqlFail = true;
+  S.gqlResult = null;
+  var inputs = inputsFor({});
+  S.hydrateFromUmbrava('383441', inputs, {});
+  A.eq(label + ': GraphQL down -> the WO number still fills in', inputs.Tracking.value, '383441');
+  var seeded = inputsFor({ Tracking: '1273641' });
+  S.hydrateFromUmbrava('383441', seeded, {});
+  A.eq(label + ': and a bus seed is left alone, not clobbered', seeded.Tracking.value, '1273641');
+  S.gqlFail = false;
+  return inputs;
+}
+checkTrackingOffline(S, 'hydrate/offline');
+
+// a typed Tracking outranks both the live read and the fallback
+S.gqlResult = { workOrder: { trackingNumber: 1273641, locationId: 674 } };
+var typedTrk = inputsFor({ Tracking: '999' });
+S.hydrateFromUmbrava('383441', typedTrk, { Tracking: true });
+A.eq('hydrate: a typed Tracking wins over the live read', typedTrk.Tracking.value, '999');
 
 // ---- 4. the derived email SUGGESTION -------------------------------------------------------
 // Last resort only, and flagged: Umbrava exposes no assignee email, so before this the field was
@@ -269,11 +350,26 @@ redUnder('M8 the guess is filled but never flagged',
   mutate(full, "    if (em) { inputs.AssigneeEmail.value = em; markEmailGuess(guessed); }",
     "    if (em) { inputs.AssigneeEmail.value = em; }", 'M8'),
   checkFlag);
+redUnder('M9 pre-fill stamps the WO number into Tracking again',
+  mutate(full, "      Tracking: (bus && bus.tracking) ? String(bus.tracking).trim() : '',",
+    "      Tracking: (bus && bus.tracking) ? String(bus.tracking).trim() : (woId || ''),", 'M9'),
+  checkPreNoBus);
+redUnder('M10 hydrate goes back to fill-only-if-empty for Tracking',
+  mutate(full, "      setTracking(wo.trackingNumber);", "      setIfEmpty('Tracking', wo.trackingNumber);", 'M10'),
+  checkTrackingLive);
+redUnder('M11 the fallback is dropped from the success path',
+  mutate(full, "      setTracking(wo.trackingNumber);\n      trackingFallback();",
+    "      setTracking(wo.trackingNumber);", 'M11'),
+  checkTrackingFallback);
+redUnder('M12 the fallback is dropped from the GraphQL failure path',
+  mutate(full, "}, function () { /* GraphQL unavailable - bus prefill stands */ trackingFallback(); });",
+    "}, function () { /* GraphQL unavailable - bus prefill stands */ });", 'M12'),
+  checkTrackingOffline);
 
 // The controls above deliberately register FAILING assertions, so report the REAL run only -
 // in the same shape the other harnesses print, and fail the process if either half misbehaved.
 var after = A.counts();
 console.log('\n' + (REAL.cases - REAL.fail) + '/' + REAL.cases + ' assertions passed' +
   (REAL.fail ? (', ' + REAL.fail + ' FAILED') : '') +
-  '  (plus ' + (after.fail - REAL.fail) + ' expected failures from the 8 negative controls)');
+  '  (plus ' + (after.fail - REAL.fail) + ' expected failures from the 12 negative controls)');
 process.exit((REAL.fail || process.exitCode) ? 1 : 0);
