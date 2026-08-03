@@ -1,10 +1,10 @@
 // ==UserScript==
 // @name         BWN Dispatch (Broadway National)
 // @namespace    broadwaynational.bwn
-// @version      0.5.0
+// @version      0.6.0
 // @downloadURL  https://raw.githubusercontent.com/Intermu/userscripts-public/main/bwn-dispatch.user.js
 // @updateURL    https://raw.githubusercontent.com/Intermu/userscripts-public/main/bwn-dispatch.user.js
-// @description  One-click Dispatch for a work order - replaces manually typing a row into Dispatch_Notifications.xlsx. The Dispatch launcher shows only on a WO that is in "Pending Dispatch". It opens a confirm modal prefilled from the BWN Ops Suite bus (Tracking) and a same-origin Umbrava GraphQL read (Location as the site NUMBER, Priority, and the coordinator to ping): it uses the person this WO is assigned to (whoever a supervisor/manager assigned it to, read live when you open it), and when that is a team or blank it falls back to the coordinator from the most recent work order(s) at the same location. The coordinator name + email are editable before you send. On submit it POSTs the 5 typed fields plus the WO number (read from the URL, never typed - the flow needs it to deep-link the card, because Tracking is the CLIENT's tracking number and points at the wrong record) to the broadway-internal-ops SWA proxy (x-bwn-key gated) which forwards to the HTTP-triggered "Dispatch HTTP" Power Automate flow - the flow adds the row to Dispatch_Notifications.xlsx AND dispatches it (posts a Teams adaptive card to the coordinator and waits for their accept). Dispatching is a coordinator action, so there is no role gate (the x-bwn-key is the boundary). The assignee's email is not on the WO record (Umbrava exposes the coordinator NAME only), so it is resolved from a per-user name->email roster you maintain (seeded with you, and it remembers each coordinator you dispatch to). The flow's secret URL stays server-side; nothing sensitive lives in this script. Registers a single "Dispatch" launcher into the shared dock (bwn:dock:*) - the dock tab is the only launcher; no floating fallback button.
+// @description  One-click Dispatch for a work order - replaces manually typing a row into Dispatch_Notifications.xlsx. The Dispatch launcher shows only on a WO that is in "Pending Dispatch". It opens a confirm modal prefilled from the BWN Ops Suite bus (Tracking) and a same-origin Umbrava GraphQL read (Location as the site NUMBER, Priority, and the coordinator to ping): it uses the person this WO is assigned to (whoever a supervisor/manager assigned it to, read live when you open it), and when that is a team or blank it falls back to the coordinator from the most recent work order(s) at the same location. The coordinator name + email are editable before you send. On submit it POSTs the 5 typed fields plus the WO number (read from the URL, never typed - the flow needs it to deep-link the card, because Tracking is the CLIENT's tracking number and points at the wrong record) to the broadway-internal-ops SWA proxy (x-bwn-key gated) which forwards to the HTTP-triggered "Dispatch HTTP" Power Automate flow - the flow adds the row to Dispatch_Notifications.xlsx AND dispatches it (posts a Teams adaptive card to the coordinator and waits for their accept). Dispatching is a coordinator action, so there is no role gate (the x-bwn-key is the boundary). The assignee's email is not on the WO record (Umbrava exposes the coordinator NAME only), so it is resolved from a per-user name->email roster you maintain (seeded with you, and it remembers each coordinator you dispatch to); for a coordinator the roster has never met it falls back to a GUESS derived from the house name pattern and the signed-in user's own domain, shown with a "check it before you send" warning and always editable - never a silent send to an address nobody confirmed. The flow's secret URL stays server-side; nothing sensitive lives in this script. Registers a single "Dispatch" launcher into the shared dock (bwn:dock:*) - the dock tab is the only launcher; no floating fallback button.
 // @match        https://app.umbrava.com/*
 // @run-at       document-idle
 // @noframes
@@ -232,6 +232,35 @@
     var me = actor();
     if (me.name && me.email) rosterRemember(me.name, me.email);
   }
+  // Derived-address SUGGESTION - the LAST resort, used only when the roster has never seen this
+  // coordinator and they are not the signed-in user. Before this the field was simply blank and
+  // the address had to be typed by hand (measured 2026-08-03: a coordinator the roster had never
+  // met, typed manually mid-dispatch).
+  //
+  // It is a GUESS and is labelled as one in the UI, because the evidence is thin: the house
+  // pattern is first initial + last name, and only two addresses have ever been observed to
+  // confirm it. Anything unusual - a middle name in the display name, a married name, a second
+  // person with the same initial and surname, a contractor on another domain - produces a
+  // plausible-looking wrong address, and this is a field that decides who gets the Teams card.
+  // Hence: never overwrite a roster hit, never overwrite anything typed, always visibly flagged,
+  // always editable. A guess only enters the roster if a human sent it (rosterRemember on
+  // submit), which is the confirmation step.
+  //
+  // The domain comes from the SIGNED-IN user, never a literal: this script is published to a
+  // public mirror, so no client domain is baked into it, and a coordinator signed in elsewhere
+  // gets no guess at all rather than a wrong-domain one.
+  function guessEmail(name) {
+    if (!isPerson(name)) return '';                       // "Team J" is not a person to guess at
+    var dom = String((actor().email || '')).split('@')[1] || '';
+    if (!dom) return '';                                  // no signed-in address -> fail closed
+    var parts = String(name || '').toLowerCase().replace(/[^a-z\s'-]+/g, ' ').split(/\s+/)
+      .map(function (t) { return t.replace(/[^a-z]/g, ''); })   // O'Brien -> obrien, Smith-Jones -> smithjones
+      .filter(Boolean);
+    if (parts.length < 2) return '';                      // one token is not a first + last name
+    var first = parts[0], last = parts[parts.length - 1];
+    if (!first || last.length < 2) return '';
+    return first.charAt(0) + last + '@' + dom;
+  }
   function manageRoster() {
     var o = loadRoster();
     var lines = Object.keys(o).sort().map(function (k) { return k + ' = ' + o[k]; });
@@ -287,7 +316,7 @@
   var EMAIL_RE = /^[^\s@]+@[^\s@]+\.[^\s@]+$/;
 
   var openEl = null;
-  function closeModal() { if (openEl) { openEl.remove(); openEl = null; document.removeEventListener('keydown', onKey); } }
+  function closeModal() { if (openEl) { openEl.remove(); openEl = null; emailGuessEl = null; document.removeEventListener('keydown', onKey); } }
   function onKey(e) { if (e.key === 'Escape') closeModal(); }
 
   function buildModal() {
@@ -381,12 +410,25 @@
       inputs.Location.parentNode.appendChild(siteHint);
     }
 
-    // When the coordinator name is (re)typed, offer the roster email if we know it and the
-    // email field is still empty / untouched.
+    // The "this address was guessed" warning, rendered under the email field. Created before the
+    // first fillEmailFor call below so a guess made during hydration has somewhere to announce
+    // itself.
+    emailGuessEl = document.createElement('div');
+    emailGuessEl.style.cssText = 'font-size:11.5px;color:#8a5a00;background:#fdf4e3;border:1px solid #f0dcb4;border-radius:6px;padding:5px 8px;margin-top:4px;display:none;';
+    if (inputs.AssigneeEmail && inputs.AssigneeEmail.parentNode) inputs.AssigneeEmail.parentNode.appendChild(emailGuessEl);
+    // Typing in the field makes it the operator's value, not a guess.
+    inputs.AssigneeEmail.addEventListener('input', function () { markEmailGuess(false); });
+    // The bus may have handed us a coordinator the roster has never met - resolve now rather than
+    // waiting on the live read, which may never arrive.
+    if (inputs.AssignedToName.value.trim() && !inputs.AssigneeEmail.value.trim()) {
+      fillEmailFor(inputs, touched, inputs.AssignedToName.value);
+    }
+
+    // When the coordinator name is (re)typed, resolve the email the same way hydration does -
+    // roster, then self, then a flagged guess. This used to inline a roster-only lookup, which
+    // meant a name typed by hand got no suggestion at all.
     inputs.AssignedToName.addEventListener('change', function () {
-      if (touched.AssigneeEmail || inputs.AssigneeEmail.value.trim()) return;
-      var em = rosterLookup(inputs.AssignedToName.value);
-      if (em) inputs.AssigneeEmail.value = em;
+      fillEmailFor(inputs, touched, inputs.AssignedToName.value);
     });
 
     var msg = document.createElement('div');
@@ -516,11 +558,24 @@
   }
   // Prefill AssigneeEmail from the roster (or from the signed-in user when the name matches
   // them), only if untouched + empty.
+  // Resolution order, best evidence first: the roster (a human sent to this address before) ->
+  // the signed-in user's own address -> a derived guess. Only the last one is uncertain, so only
+  // the last one is flagged.
   function fillEmailFor(inputs, touched, name) {
     if (touched.AssigneeEmail || inputs.AssigneeEmail.value.trim()) return;
     var em = rosterLookup(name);
     if (!em) { var me = actor(); if (me.email && rosterKey(me.name) === rosterKey(name)) em = me.email; }
-    if (em) inputs.AssigneeEmail.value = em;
+    var guessed = false;
+    if (!em) { em = guessEmail(name); guessed = !!em; }
+    if (em) { inputs.AssigneeEmail.value = em; markEmailGuess(guessed); }
+  }
+  // The guess marker. Held at module scope because only one modal exists at a time (buildModal
+  // returns early if one is open) and it is cleared on close.
+  var emailGuessEl = null;
+  function markEmailGuess(on) {
+    if (!emailGuessEl) return;
+    emailGuessEl.textContent = on ? 'Guessed from the name - check it before you send.' : '';
+    emailGuessEl.style.display = on ? 'block' : 'none';
   }
 
   // ---- Shared launcher dock (bwn:dock:*) -----------------------------------

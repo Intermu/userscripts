@@ -56,13 +56,18 @@ function build(src) {
   var S_PRE = slice(src, '    var pre = {', '    // Suite drawer:', 'pre-fill');
   var S_PAYLOAD = slice(src, '      var payload = { actor:', '      var reenable = function ()', 'payload builder');
   var S_HYDRATE = slice(src, '  function hydrateFromUmbrava(woId, inputs, touched) {', '  // Prefill AssigneeEmail from the roster', 'hydrateFromUmbrava');
+  var S_GUESS = slice(src, '  function guessEmail(name) {', '  function manageRoster()', 'guessEmail');
+  var S_FILLEMAIL = slice(src, '  function fillEmailFor(inputs, touched, name) {', '  // ---- Shared launcher dock', 'fillEmailFor+markEmailGuess');
 
   var sandbox = {
     console: console,
     // stubs for what the slices reach outside themselves
-    rosterLookup: function () { return ''; },
+    roster: {},
+    rosterKey: function (n) { return String(n || '').trim().toLowerCase().replace(/\s+/g, ' '); },
+    rosterLookup: function (n) { return sandbox.roster[sandbox.rosterKey(n)] || ''; },
     isPerson: function (n) { return !!n && !/^\s*team\b/i.test(n); },
-    fillEmailFor: function () {},
+    signedIn: { name: 'Mike Najarro', email: 'mnajarro@broadwaynational.com' },
+    actor: function () { return sandbox.signedIn; },
     siteCoordinator: function () { return { then: function () {} }; },
     gqlResult: null,
     DISP_WO_Q: '(query text is not under test here)',
@@ -79,6 +84,8 @@ function build(src) {
     'function buildPre(busCoord, bus, woId) {\n' + S_PRE + '\n  return pre;\n}\n' +
     // the payload block returns early on validation failure, so it is wrapped rather than reshaped
     'function buildPayload(me, inputs, msg, woId) {\n' + S_PAYLOAD + '\n  return payload;\n}\n' +
+    S_GUESS + '\n' +
+    S_FILLEMAIL + '\n' +
     S_HYDRATE + '\n',
     sandbox
   );
@@ -155,6 +162,70 @@ var typedIn = inputsFor({ Location: '402' });
 S.hydrateFromUmbrava('383112', typedIn, { Location: true });
 A.eq('hydrate: a typed Location wins over the live read', typedIn.Location.value, '402');
 
+// ---- 4. the derived email SUGGESTION -------------------------------------------------------
+// Last resort only, and flagged: Umbrava exposes no assignee email, so before this the field was
+// blank for any coordinator the roster had never met. The pattern rests on two observed
+// addresses, so a wrong-but-plausible guess is the failure mode that matters - these pin that it
+// never outranks better evidence and never fires where it cannot know.
+function checkGuess(S, label) {
+  S.roster = {};
+  S.signedIn = { name: 'Mike Najarro', email: 'mnajarro@broadwaynational.com' };
+  A.eq(label + ': first initial + last name at the signed-in domain',
+    S.guessEmail('Daniel Russell'), 'drussell@broadwaynational.com');
+  A.eq(label + ': matches the signed-in user\'s own address shape',
+    S.guessEmail('Mike Najarro'), 'mnajarro@broadwaynational.com');
+  A.eq(label + ': a TEAM is never guessed at', S.guessEmail('Team J'), '');
+  // "Team J" alone does NOT exercise the team guard - its last token is one character, so the
+  // short-name rule refuses it either way. Control M5 caught that: dropping the guard left the
+  // suite green. A named team is the fixture that actually reaches the guard, and without it
+  // "Team Pilot" would have produced a plausible tpilot@ address for a mailbox that is not a
+  // person. See wiki/negative-control-silent-noop.md.
+  A.eq(label + ': a NAMED team is never guessed at either', S.guessEmail('Team Pilot'), '');
+  A.eq(label + ': one token is not a name', S.guessEmail('Erick'), '');
+  A.eq(label + ': punctuation is normalised, not passed through',
+    S.guessEmail("Mary O'Brien-Smith"), 'mobriensmith@broadwaynational.com');
+  A.eq(label + ': a middle name still keys off the LAST token',
+    S.guessEmail('Mary Jo Smith'), 'msmith@broadwaynational.com');
+  return true;
+}
+checkGuess(S, 'guess');
+
+// fails closed when there is no signed-in address to take a domain from
+S.signedIn = { name: '', email: '' };
+A.eq('guess: no signed-in domain -> no guess at all', S.guessEmail('Daniel Russell'), '');
+S.signedIn = { name: 'Mike Najarro', email: 'mnajarro@broadwaynational.com' };
+
+function checkPrecedence(S, label) {
+  S.roster = { 'daniel russell': 'daniel.russell@broadwaynational.com' };
+  S.emailGuessEl = { textContent: '', style: {} };
+  var inputs = inputsFor({});
+  S.fillEmailFor(inputs, {}, 'Daniel Russell');
+  A.eq(label + ': a roster hit BEATS the guess', inputs.AssigneeEmail.value, 'daniel.russell@broadwaynational.com');
+  A.eq(label + ': and is not flagged as guessed', S.emailGuessEl.textContent, '');
+  return inputs;
+}
+checkPrecedence(S, 'precedence');
+
+function checkFlag(S, label) {
+  S.roster = {};
+  S.emailGuessEl = { textContent: '', style: {} };
+  var inputs = inputsFor({});
+  S.fillEmailFor(inputs, {}, 'Erick Sandoval');
+  A.eq(label + ': an unknown coordinator gets the guess', inputs.AssigneeEmail.value, 'esandoval@broadwaynational.com');
+  A.ok(label + ': and it is VISIBLY flagged as a guess', /check it before you send/i.test(S.emailGuessEl.textContent),
+    'warning read: ' + JSON.stringify(S.emailGuessEl.textContent));
+  return inputs;
+}
+checkFlag(S, 'flag');
+
+// never overwrites what a human typed, and never re-fills a field that already has a value
+S.roster = {};
+S.emailGuessEl = { textContent: '', style: {} };
+var typedEmail = inputsFor({ AssigneeEmail: 'someone.else@broadwaynational.com' });
+S.fillEmailFor(typedEmail, { AssigneeEmail: true }, 'Daniel Russell');
+A.eq('guess: a typed address is never overwritten', typedEmail.AssigneeEmail.value, 'someone.else@broadwaynational.com');
+A.eq('guess: and no warning is raised over it', S.emailGuessEl.textContent, '');
+
 // ---- negative controls: revert each fix, prove this harness reddens ------------------------
 function redUnder(name, mutated, probe) {
   var before = A.counts().fail;
@@ -184,11 +255,25 @@ redUnder('M3 payload drops WONumber',
 redUnder('M4 payload sets WONumber from Tracking',
   mutate(full, "      payload.WONumber = woId || '';", "      payload.WONumber = payload.Tracking;", 'M4'),
   checkPayload);
+redUnder('M5 guess drops the team guard',
+  mutate(full, "    if (!isPerson(name)) return '';", "    if (false) return '';", 'M5'),
+  checkGuess);
+redUnder('M6 guess uses the whole first name, not the initial',
+  mutate(full, "    return first.charAt(0) + last + '@' + dom;", "    return first + last + '@' + dom;", 'M6'),
+  checkGuess);
+redUnder('M7 guess outranks the roster',
+  mutate(full, "    if (!em) { em = guessEmail(name); guessed = !!em; }",
+    "    { em = guessEmail(name) || em; guessed = !!em; }", 'M7'),
+  checkPrecedence);
+redUnder('M8 the guess is filled but never flagged',
+  mutate(full, "    if (em) { inputs.AssigneeEmail.value = em; markEmailGuess(guessed); }",
+    "    if (em) { inputs.AssigneeEmail.value = em; }", 'M8'),
+  checkFlag);
 
 // The controls above deliberately register FAILING assertions, so report the REAL run only -
 // in the same shape the other harnesses print, and fail the process if either half misbehaved.
 var after = A.counts();
 console.log('\n' + (REAL.cases - REAL.fail) + '/' + REAL.cases + ' assertions passed' +
   (REAL.fail ? (', ' + REAL.fail + ' FAILED') : '') +
-  '  (plus ' + (after.fail - REAL.fail) + ' expected failures from the 4 negative controls)');
+  '  (plus ' + (after.fail - REAL.fail) + ' expected failures from the 8 negative controls)');
 process.exit((REAL.fail || process.exitCode) ? 1 : 0);
