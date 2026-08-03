@@ -329,7 +329,10 @@ async function probeAssist(src) {
   A.ok('render builds the strip from waEscStripText(escSt)', coreFull.indexOf('waEscStripText(escSt)') !== -1, 'call site missing');
   A.ok('tool label rides waEscToolLabel(dk, escSt)', coreFull.indexOf('waEscToolLabel(dk, escSt)') !== -1, 'call site missing');
   A.ok('escalation state is part of the render signature', coreFull.indexOf("escSt.status + '|' + escSt.id") !== -1, 'signature term missing');
-  A.ok('core @version is 1.66.18', coreFull.indexOf('// @version      1.66.18') !== -1, 'core version drift');
+  // Bumped to 1.66.19 for the split bus publish (identity ahead of the anchor gate). The pin is
+  // deliberate: it forces a conscious update whenever Core moves, so a version bump cannot ride
+  // out unnoticed alongside an unrelated change. The step-3 contract itself is untouched.
+  A.ok('core @version is 1.66.19', coreFull.indexOf('// @version      1.66.19') !== -1, 'core version drift');
   A.ok('core banner says WO Assist 2.66', coreFull.indexOf('WO Assist 2.66') !== -1, 'module banner drift');
   A.ok('assist @version is 0.2.0', assistFull.indexOf('// @version      0.2.0') !== -1, 'assist version drift');
   A.ok("assist VER is '0.2.0'", assistFull.indexOf("var VER = '0.2.0';") !== -1, 'assist VER drift');

@@ -72,6 +72,9 @@ jobs:
       - name: dispatch payload harness (WO number + site number)
         run: node scripts/test-dispatch-payload.js
 
+      - name: bus identity publish harness (identity ahead of the anchor gate)
+        run: node scripts/test-bus-identity-publish.js
+
   lint:
     name: Lint (advisory)
     runs-on: ubuntu-latest
