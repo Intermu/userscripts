@@ -63,6 +63,7 @@ function build(src) {
   var S_PRE = slice(src, '    var pre = {', '    // Suite drawer:', 'pre-fill');
   var S_PAYLOAD = slice(src, '      var payload = { actor:', '      var reenable = function ()', 'payload builder');
   var S_HYDRATE = slice(src, '  function hydrateFromUmbrava(woId, inputs, touched) {', '  // Prefill AssigneeEmail from the roster', 'hydrateFromUmbrava');
+  var S_SITENUM = slice(src, '  function siteNumberOf(locNum) {', '  // The person who had the last', 'siteNumberOf');
   var S_GUESS = slice(src, '  function guessEmail(name) {', '  function manageRoster()', 'guessEmail');
   var S_FILLEMAIL = slice(src, '  function fillEmailFor(inputs, touched, name, reresolve) {', '  // ---- Shared launcher dock', 'fillEmailFor+markEmailGuess');
 
@@ -78,9 +79,16 @@ function build(src) {
     siteCoordinator: function () { return { then: function () {} }; },
     gqlResult: null,
     gqlFail: false,          // drive hydrate's rejection handler, not just its success path
+    gqlUser: null,           // the second read: the assignee GUID -> person
+    gqlUserFail: false,
     DISP_WO_Q: '(query text is not under test here)',
-    gql: function () {
-      var r = sandbox.gqlResult, fail = sandbox.gqlFail;
+    USER_Q: '(query text is not under test here)',
+    // Routed by the VARIABLES, not the query text, so the stub does not depend on constants that
+    // live outside the sliced regions: {n} is the WO read, {id} is the user read.
+    gql: function (q, v) {
+      var isUser = !!(v && Object.prototype.hasOwnProperty.call(v, 'id'));
+      var r = isUser ? sandbox.gqlUser : sandbox.gqlResult;
+      var fail = isUser ? sandbox.gqlUserFail : sandbox.gqlFail;
       return {
         then: function (ok, err) {
           if (fail) { if (err) err(new Error('stub: GraphQL unavailable')); }
@@ -98,6 +106,7 @@ function build(src) {
     'function buildPre(busCoord, bus, woId) {\n' + S_PRE + '\n  return pre;\n}\n' +
     // the payload block returns early on validation failure, so it is wrapped rather than reshaped
     'function buildPayload(me, inputs, msg, woId) {\n' + S_PAYLOAD + '\n  return payload;\n}\n' +
+    S_SITENUM + '\n' +
     S_GUESS + '\n' +
     S_FILLEMAIL + '\n' +
     S_HYDRATE + '\n',
@@ -167,43 +176,131 @@ function checkPreNoBus(S, label) {
 }
 checkPreNoBus(S, 'pre-fill/no-bus');
 
-// ---- 3. the live read fills Location from locationId, never locationName -------------------
-// !! FIXTURE KNOWN WRONG AS OF 2026-08-03, KEPT ONLY UNTIL THE DECISION LANDS. Probed live
-// against app.umbrava.com: `DISP_WO_Q` is INVALID - `assignedToMemberName` does not exist on
-// type WorkOrder, so the whole query 400s and hydrateFromUmbrava has NEVER delivered. Under that
-// cover, two more things went unnoticed:
-//   - `locationId` is an ID scalar holding a GUID ("2ab2cde4-44c4-41d6-bb89-08de1acf8012"), NOT
-//     a site number. The `locationId: 343` below encodes the assumption the code was written on,
-//     and the live schema contradicts it: fixing the query without changing this line would start
-//     writing GUIDs into the Location field the flow's `Lookup site` keys on.
-//   - `assignedTo` is a GUID too, so no coordinator NAME is obtainable from this query at all.
-// This is a fixture that agrees with the code because both are wrong the same way - see
-// wiki/green-harness-proves-nothing-alone.md. Do not treat these two assertions as evidence that
-// the Location fill works; nothing in this file has ever executed against the real schema.
-function checkHydrate(S, label) {
-  S.gqlResult = {
-    workOrder: {
-      trackingNumber: '1272451',
-      locationId: 343,
-      locationName: SITE_NAME,
-      assignedToMemberName: 'Daniel Russell',
-      priority: { label: 'P2' },
-    },
+// ---- 3. the live read fills Location with a derived site NUMBER ----------------------------
+// Fixture shapes are the REAL ones, read off app.umbrava.com 2026-08-03 (W-383449 / W-383472):
+// locationId is a GUID, locationNumber is "PFJ 1177"-shaped, assignedTo is a user GUID with no
+// name on it. The previous fixture used `locationId: 343` - a number - which is what the code
+// assumed and what the live schema contradicts; it passed for years of sessions because fixture
+// and code were wrong the same way (wiki/green-harness-proves-nothing-alone.md).
+var LOC_GUID = '771104ef-2ceb-4842-9ed4-08db006b1e34';
+var USER_GUID = '980fa5bd-e655-4917-aad7-6d9cd49752e2';
+function woFixture(over) {
+  var wo = {
+    trackingNumber: 1273696,
+    locationId: LOC_GUID,
+    locationNumber: 'PFJ 1177',
+    locationName: 'Flying J',
+    assignedTo: USER_GUID,
+    priority: { label: 'P2 Next Day' },
   };
+  for (var k in (over || {})) wo[k] = over[k];
+  return { workOrder: wo };
+}
+function checkHydrate(S, label) {
+  S.gqlFail = false; S.gqlUserFail = false;
+  S.gqlResult = woFixture();
+  S.gqlUser = { user: { firstName: 'Daniel', lastName: 'Russell', emailAddress: 'DRussell@broadwaynational.com', isInactive: false } };
   var inputs = inputsFor({});
-  S.hydrateFromUmbrava('383112', inputs, {});
-  A.eq(label + ': Location is the site NUMBER', inputs.Location.value, '343');
-  A.ok(label + ': the display name never reaches the field', inputs.Location.value.indexOf('Flying J') === -1,
+  S.hydrateFromUmbrava('383449', inputs, {});
+  A.eq(label + ': Location is the DERIVED bare site number', inputs.Location.value, '1177');
+  A.ok(label + ': the location GUID never reaches the field', inputs.Location.value.indexOf('-') === -1,
     'got ' + inputs.Location.value);
+  A.ok(label + ': neither does the display name', inputs.Location.value.indexOf('Flying J') === -1,
+    'got ' + inputs.Location.value);
+  A.eq(label + ': Priority comes from the live read', inputs.Priority.value, 'P2 Next Day');
   return inputs;
 }
 checkHydrate(S, 'hydrate');
 
+// siteNumberOf is deliberately conservative: derive only when it is unambiguous, because a wrong
+// key makes the flow's `Lookup site` miss SILENTLY while an empty required field cannot.
+function checkSiteNumber(S, label) {
+  A.eq(label + ': a prefixed, zero-padded Pilot site derives', S.siteNumberOf('PFJ 0674'), '674');
+  A.eq(label + ': and an unpadded one', S.siteNumberOf('PFJ 1177'), '1177');
+  A.eq(label + ': a bare numeric site passes through', S.siteNumberOf('7099'), '7099');
+  A.eq(label + ': a long numeric site is not truncated', S.siteNumberOf('10000565'), '10000565');
+  A.eq(label + ': an alphanumeric code does NOT derive', S.siteNumberOf('DFW6'), '');
+  // The fixture that actually reaches the digits-only guard. Every other rejection above is
+  // caught downstream by parseInt returning NaN, so control M20 (drop the regex) stayed GREEN
+  // until this line existed - the mutation applied, the claim was right, and no fixture reached
+  // the mutated branch. A code that STARTS with digits is the only shape that separates them:
+  // parseInt('7099B') is 7099, so without the regex this half-derives into a plausible WRONG site
+  // number - the silent `Lookup site` miss, reintroduced. See wiki/negative-control-silent-noop.md.
+  A.eq(label + ': a code that STARTS with digits does not half-derive', S.siteNumberOf('7099B'), '');
+  A.eq(label + ': nor does a suffixed Pilot-style code', S.siteNumberOf('PFJ 0674A'), '');
+  A.eq(label + ': nor does a hyphenated one', S.siteNumberOf('IFM-JAX3'), '');
+  A.eq(label + ': nor a trailing-word code', S.siteNumberOf('091 FM'), '');
+  A.eq(label + ': the corporate pseudo-site yields nothing', S.siteNumberOf('PFJ 0000'), '');
+  A.eq(label + ': N/A yields nothing', S.siteNumberOf('N/A'), '');
+  A.eq(label + ': null and empty are safe', [S.siteNumberOf(null), S.siteNumberOf('')], ['', '']);
+  return true;
+}
+checkSiteNumber(S, 'siteNumberOf');
+
+// ---- 3c. the assignee GUID resolves to a person, and to their REAL address -----------------
+function checkAssignee(S, label) {
+  S.gqlFail = false; S.gqlUserFail = false;
+  S.gqlResult = woFixture();
+  S.gqlUser = { user: { firstName: 'Daniel', lastName: 'Russell', emailAddress: 'DRussell@broadwaynational.com', isInactive: false } };
+  S.roster = {};
+  S.emailGuessEl = { textContent: '', style: {} };
+  var inputs = inputsFor({});
+  S.hydrateFromUmbrava('383449', inputs, {});
+  A.eq(label + ': the GUID resolves to a person name', inputs.AssignedToName.value, 'Daniel Russell');
+  A.eq(label + ": and to Umbrava's own address for them", inputs.AssigneeEmail.value, 'DRussell@broadwaynational.com');
+  A.eq(label + ': a record is not a guess, so nothing is flagged', S.emailGuessEl.textContent, '');
+  return inputs;
+}
+checkAssignee(S, 'assignee');
+
+// An inactive assignee still resolves, but says so - and never claims the address was guessed.
+function checkInactiveAssignee(S, label) {
+  S.gqlFail = false; S.gqlUserFail = false;
+  S.gqlResult = woFixture();
+  S.gqlUser = { user: { firstName: 'Erick', lastName: 'Nieves-Cruz', emailAddress: 'ENieves@broadwaynational.com', isInactive: true } };
+  S.emailGuessEl = { textContent: '', style: {} };
+  var inputs = inputsFor({});
+  S.hydrateFromUmbrava('383449', inputs, {});
+  A.eq(label + ': the address is still filled', inputs.AssigneeEmail.value, 'ENieves@broadwaynational.com');
+  A.ok(label + ': and the INACTIVE state is announced', /inactive/i.test(S.emailGuessEl.textContent),
+    'warning read: ' + JSON.stringify(S.emailGuessEl.textContent));
+  A.ok(label + ': without claiming it was guessed', !/guessed/i.test(S.emailGuessEl.textContent),
+    'warning read: ' + JSON.stringify(S.emailGuessEl.textContent));
+  return inputs;
+}
+checkInactiveAssignee(S, 'assignee/inactive');
+
+// The query text itself is asserted, because the defect was a FIELD NAME: one invalid selector
+// 400s the whole document and every downstream fill dies silently.
+function checkQuery(src, label) {
+  var q = src.slice(src.indexOf('var DISP_WO_Q ='), src.indexOf('var USER_Q ='));
+  A.ok(label + ': the WO query no longer asks for assignedToMemberName',
+    q.indexOf('assignedToMemberName') === -1, 'the dead field is back in DISP_WO_Q');
+  A.ok(label + ': it asks for the assignee GUID instead', /\bassignedTo\b/.test(q), 'assignedTo missing');
+  A.ok(label + ': and for locationNumber, which the site number is derived from',
+    q.indexOf('locationNumber') !== -1, 'locationNumber missing');
+  A.ok(label + ': the roster selection dropped the dead field too',
+    src.indexOf("var ROSTER_SEL = 'number assignedTo") !== -1, 'ROSTER_SEL still selects a dead field');
+  A.ok(label + ': the user lookup passes ID! - ID alone is a type error',
+    src.indexOf('query($id:ID!){ user(id:$id)') !== -1, 'USER_Q is not ID!');
+  return true;
+}
+checkQuery(full, 'query');
+
 // a value the coordinator typed is never overwritten by the live read
-S.gqlResult = { workOrder: { locationId: 999, locationName: SITE_NAME } };
+S.gqlResult = woFixture({ locationNumber: 'PFJ 0999' });
+S.gqlUser = null;
 var typedIn = inputsFor({ Location: '402' });
-S.hydrateFromUmbrava('383112', typedIn, { Location: true });
+S.hydrateFromUmbrava('383449', typedIn, { Location: true });
 A.eq('hydrate: a typed Location wins over the live read', typedIn.Location.value, '402');
+
+// a name the coordinator typed is never overwritten by the resolved assignee either
+S.gqlResult = woFixture();
+S.gqlUser = { user: { firstName: 'Daniel', lastName: 'Russell', emailAddress: 'DRussell@broadwaynational.com', isInactive: false } };
+var typedName = inputsFor({ AssignedToName: 'Someone Else' });
+S.hydrateFromUmbrava('383449', typedName, { AssignedToName: true });
+A.eq('hydrate: a typed coordinator wins over the resolved assignee', typedName.AssignedToName.value, 'Someone Else');
+A.eq('hydrate: and their address is not filled in over it', typedName.AssigneeEmail.value, '');
 
 // ---- 3b. Tracking: the WO record beats the header scrape ----------------------------------
 // Real values from W-383441 (the row-466 card): the bus seeded 383441, Umbrava holds 1273641.
@@ -417,8 +514,11 @@ function redUnder(name, mutated, probe, useSource) {
 var REAL = A.counts();
 
 console.log('\nnegative controls (each reverts one fix; failures below are EXPECTED):');
-redUnder('M1 hydrate falls back to locationName',
-  mutate(full, "setIfEmpty('Location', wo.locationId);", "setIfEmpty('Location', wo.locationName);", 'M1'),
+// M1 used to revert the fill to `wo.locationId`. That string no longer exists, and mutate() threw
+// rather than quietly matching nothing - the guard doing its job. Retargeted to the equivalent
+// mistake against the current shape: derive the site number from the display NAME.
+redUnder('M1 hydrate derives the site number from locationName',
+  mutate(full, "setIfEmpty('Location', siteNumberOf(wo.locationNumber));", "setIfEmpty('Location', siteNumberOf(wo.locationName));", 'M1'),
   checkHydrate);
 redUnder('M2 pre-fill seeds Location from the bus again',
   mutate(full, "      Location: '',", "      Location: (bus && bus.location) ? String(bus.location).trim() : '',", 'M2'),
@@ -473,6 +573,29 @@ redUnder('M16 the name handler goes back to change-only',
   mutate(full, "    inputs.AssignedToName.addEventListener('input', function () {\n      if (nameTimer) clearTimeout(nameTimer);\n      nameTimer = setTimeout(resolveEmailFromName, 400);\n    });\n",
     "", 'M16'),
   checkNameHandler, true);
+redUnder('M18 Location goes back to the raw locationId (a GUID)',
+  mutate(full, "      setIfEmpty('Location', siteNumberOf(wo.locationNumber));",
+    "      setIfEmpty('Location', wo.locationId);", 'M18'),
+  checkHydrate);
+redUnder('M19 the site number is sent unparsed, prefix and all',
+  mutate(full, "    var tok = s.split(/\\s+/).pop();\n    if (!/^\\d+$/.test(tok)) return '';",
+    "    var tok = s.split(/\\s+/).pop();\n    if (!/^\\d+$/.test(tok)) return s;", 'M19'),
+  checkSiteNumber);
+redUnder('M20 siteNumberOf drops the digits-only guard',
+  mutate(full, "    if (!/^\\d+$/.test(tok)) return '';", "    if (false) return '';", 'M20'),
+  checkSiteNumber);
+redUnder('M21 setName ignores the address Umbrava supplied',
+  mutate(full, "      if (email && !touched.AssigneeEmail) {", "      if (false) {", 'M21'),
+  checkAssignee);
+redUnder('M22 the inactive assignee is filled in silently',
+  mutate(full, "        markEmailGuess(!!inactive, inactive ?", "        markEmailGuess(false, inactive ?", 'M22'),
+  checkInactiveAssignee);
+redUnder('M23 the dead field comes back into the WO query',
+  mutate(full, ' assignedTo priority{ label } } }', ' assignedToMemberName priority{ label } } }', 'M23'),
+  checkQuery, true);
+redUnder('M24 the user lookup goes back to a nullable ID',
+  mutate(full, "query($id:ID!){ user(id:$id)", "query($id:ID){ user(id:$id)", 'M24'),
+  checkQuery, true);
 redUnder('M17 the name handler stops asking for a re-resolve',
   mutate(full, "      fillEmailFor(inputs, touched, inputs.AssignedToName.value, true);",
     "      fillEmailFor(inputs, touched, inputs.AssignedToName.value);", 'M17'),
@@ -483,5 +606,5 @@ redUnder('M17 the name handler stops asking for a re-resolve',
 var after = A.counts();
 console.log('\n' + (REAL.cases - REAL.fail) + '/' + REAL.cases + ' assertions passed' +
   (REAL.fail ? (', ' + REAL.fail + ' FAILED') : '') +
-  '  (plus ' + (after.fail - REAL.fail) + ' expected failures from the 17 negative controls)');
+  '  (plus ' + (after.fail - REAL.fail) + ' expected failures from the 24 negative controls)');
 process.exit((REAL.fail || process.exitCode) ? 1 : 0);
