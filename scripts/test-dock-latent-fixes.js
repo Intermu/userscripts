@@ -378,6 +378,49 @@ function withSection(t, probe) {
   try { return probe(); } finally { SECTION = real; }
 }
 
-console.log('\n(3 fixes x real source + 3 mutations. Nothing here proves the rail RENDERS -' +
-  ' that is the live Umbrava dock test on the open-work board.)');
+// ---- 4. every registrant that can appear on the rail has a line icon -----------------------
+// Reported live 2026-08-03: "Escalate" showed a RED flag and "Email RFP" a blue envelope beside
+// eleven monochrome line icons. Cause: `DOCK_ICONS` had no entry for the `assist` or `bidout`
+// keys, and dockRowEl falls back to whatever emoji the registrant sent. That fallback is right
+// for an UNKNOWN tool and wrong for a shipped one - and nothing failed, because a missing icon
+// is a silently different-looking row, not an error.
+// Derived from the SIBLING SCRIPTS rather than a hardcoded list, so a tool added later that
+// registers a new key without an icon fails here instead of shipping mismatched.
+function registrantKeys() {
+  var dir = path.join(__dirname, '..');
+  return fs.readdirSync(dir)
+    .filter(function (f) { return /\.user\.js$/.test(f) && f !== 'bwn-suite-core.user.js'; })
+    .map(function (f) {
+      var t = fs.readFileSync(path.join(dir, f), 'utf8');
+      var m = t.match(/var DOCK_KEY = '([^']+)'/);
+      // only scripts that actually register a rail row
+      return (m && /bwn:dock:register/.test(t)) ? { file: f, key: m[1] } : null;
+    })
+    .filter(Boolean);
+}
+// Returns the registrants with no icon entry, so the control can assert on the RESULT rather
+// than registering a deliberate failure into the suite counters - the idiom the probes above use.
+function missingIcons(section) {
+  var map = section.slice(section.indexOf('var DOCK_ICONS = {'), section.indexOf('function dockIcon('));
+  return registrantKeys().filter(function (r) {
+    return !new RegExp("(^|[\\s,{])'?" + r.key + "'?\\s*:").test(map);
+  });
+}
+var regs = registrantKeys();
+A.ok('icons: found the registrants to check', regs.length >= 5, 'only found ' + regs.length);
+A.eq('icons: every rail registrant has a built-in line icon, so none falls back to an emoji',
+  missingIcons(SECTION).map(function (r) { return r.key + ' (' + r.file + ')'; }), []);
+
+// The two that were actually missing, pinned by name so a future edit cannot quietly drop them.
+A.ok('icons: Escalate (assist) is a line icon, not the red flag emoji', /(^|[\s,{])assist\s*:/.test(SECTION));
+A.ok('icons: Email RFP (bidout) is a line icon, not the envelope emoji', /(^|[\s,{])bidout\s*:/.test(SECTION));
+
+// Control: drop one entry and the check must SEE it. Without this, "the icon set is complete" is
+// an assertion nobody has watched fail.
+var m4 = missingIcons(mutate(SECTION, "      bidout: ['M4 6h16v12H4z', 'M4 7l8 6 8-6'],\n", ''));
+A.ok('removing the bidout icon is detected by the completeness check',
+  m4.length === 1 && m4[0].key === 'bidout', JSON.stringify(m4));
+
+console.log('\n(3 fixes x real source + 4 mutations, plus the rail icon-set check. Nothing here' +
+  ' proves the rail RENDERS - that is the live Umbrava dock test on the open-work board.)');
 A.finish();
