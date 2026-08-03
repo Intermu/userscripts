@@ -66,6 +66,9 @@ jobs:
       - name: vendor-intake flow-guard harness (cross-vendor leak)
         run: node scripts/test-vendor-intake-flow.js
 
+      - name: assist state round-trip harness (queue-spec step 3)
+        run: node scripts/test-assist-roundtrip.js
+
   lint:
     name: Lint (advisory)
     runs-on: ubuntu-latest

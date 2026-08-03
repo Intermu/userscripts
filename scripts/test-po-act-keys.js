@@ -255,7 +255,14 @@ A.ok('all four PO act keys ride p.sid', (coreFull.match(/'(?:pomat|poacc|poconf|
 A.ok('all four PO acts carry poNum: p.num', (coreFull.match(/poNum: p\.num/g) || []).length === 4, 'expected 4 poNum properties');
 A.ok('no PO act key still rides p.num', (coreFull.match(/'(?:pomat|poacc|poconf|pocost):' \+ p\.num/g) || []).length === 0, 'a render-index key survives');
 A.ok('renderActsInline runs the migration', coreFull.indexOf('actsMigratePO(actsLoad(), state.pos)') !== -1, 'hook missing');
-A.ok('the three WO Assist version strings all read 2.65', /WO Assist 2\.65/.test(coreFull) && /Playbook v2\.65/.test(coreFull) && /WO Assist v2\.65 loaded/.test(coreFull), 'version strings drifted');
+// The invariant is AGREEMENT, not a literal: a partial bump (TM sees a new @version
+// while a banner still claims the old module version) is the bug this guards. Was a
+// hard-pinned "2.65", which correctly reddened on the 2.66 bump - now it extracts one
+// string and demands the other two match it.
+var waVer = (coreFull.match(/WO Assist (\d+\.\d+) ·/) || [])[1] || (coreFull.match(/WO Assist (\d+\.\d+)/) || [])[1];
+A.ok('the three WO Assist version strings agree (' + waVer + ')',
+  !!waVer && new RegExp('Playbook v' + waVer.replace('.', '\\.') + ' ').test(coreFull) && new RegExp('WO Assist v' + waVer.replace('.', '\\.') + ' loaded').test(coreFull),
+  'version strings drifted');
 
 // ---- mutations: revert one piece each, assert the harness goes red -------------------------
 console.log('\nmutations (each must redden its probe)');
