@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         BWN Dispatch (Broadway National)
 // @namespace    broadwaynational.bwn
-// @version      0.7.0
+// @version      0.8.0
 // @downloadURL  https://raw.githubusercontent.com/Intermu/userscripts-public/main/bwn-dispatch.user.js
 // @updateURL    https://raw.githubusercontent.com/Intermu/userscripts-public/main/bwn-dispatch.user.js
 // @description  One-click Dispatch for a work order - replaces manually typing a row into Dispatch_Notifications.xlsx. The Dispatch launcher shows only on a WO that is in "Pending Dispatch". It opens a confirm modal prefilled from the BWN Ops Suite bus (Tracking) and a same-origin Umbrava GraphQL read (Location as the site NUMBER, Priority, and the coordinator to ping): it uses the person this WO is assigned to (whoever a supervisor/manager assigned it to, read live when you open it), and when that is a team or blank it falls back to the coordinator from the most recent work order(s) at the same location. The coordinator name + email are editable before you send. On submit it POSTs the 5 typed fields plus the WO number (read from the URL, never typed - the flow needs it to deep-link the card, because Tracking is the CLIENT's tracking number and points at the wrong record) to the broadway-internal-ops SWA proxy (x-bwn-key gated) which forwards to the HTTP-triggered "Dispatch HTTP" Power Automate flow - the flow adds the row to Dispatch_Notifications.xlsx AND dispatches it (posts a Teams adaptive card to the coordinator and waits for their accept). Dispatching is a coordinator action, so there is no role gate (the x-bwn-key is the boundary). The assignee's email is not on the WO record (Umbrava exposes the coordinator NAME only), so it is resolved from a per-user name->email roster you maintain (seeded with you, and it remembers each coordinator you dispatch to); for a coordinator the roster has never met it falls back to a GUESS derived from the house name pattern and the signed-in user's own domain, shown with a "check it before you send" warning and always editable - never a silent send to an address nobody confirmed. The flow's secret URL stays server-side; nothing sensitive lives in this script. Registers a single "Dispatch" launcher into the shared dock (bwn:dock:*) - the dock tab is the only launcher; no floating fallback button.
@@ -19,7 +19,7 @@
 (function () {
   'use strict';
 
-  var VER = '0.4.0';
+  var VER = '0.8.0';   // keep in step with @version - this is what the console banner reports
   var FONT = "-apple-system,BlinkMacSystemFont,'Segoe UI','Helvetica Neue',Arial,sans-serif";
   var GREEN = '#0d3d26';          // BWN Ops Suite brand green - matches CC Request / WO Audit
   var SWA_BASE = 'https://green-stone-0717dab0f.7.azurestaticapps.net';
@@ -433,8 +433,22 @@
     // When the coordinator name is (re)typed, resolve the email the same way hydration does -
     // roster, then self, then a flagged guess. This used to inline a roster-only lookup, which
     // meant a name typed by hand got no suggestion at all.
+    // `input`, not `change`: `change` only fires on BLUR, so the warning could not appear while
+    // the operator was still typing the name - and blur usually IS the click on Dispatch, which
+    // would have shown the warning for the few milliseconds before the form submitted. Debounced
+    // so a half-typed name ("Daniel Ru") does not briefly resolve to a wrong-but-plausible
+    // address; `change` is kept as a backstop for paste and autofill.
+    var nameTimer = null;
+    function resolveEmailFromName() {
+      fillEmailFor(inputs, touched, inputs.AssignedToName.value, true);
+    }
+    inputs.AssignedToName.addEventListener('input', function () {
+      if (nameTimer) clearTimeout(nameTimer);
+      nameTimer = setTimeout(resolveEmailFromName, 400);
+    });
     inputs.AssignedToName.addEventListener('change', function () {
-      fillEmailFor(inputs, touched, inputs.AssignedToName.value);
+      if (nameTimer) { clearTimeout(nameTimer); nameTimer = null; }
+      resolveEmailFromName();
     });
 
     var msg = document.createElement('div');
@@ -585,8 +599,16 @@
   // Resolution order, best evidence first: the roster (a human sent to this address before) ->
   // the signed-in user's own address -> a derived guess. Only the last one is uncertain, so only
   // the last one is flagged.
-  function fillEmailFor(inputs, touched, name) {
-    if (touched.AssigneeEmail || inputs.AssigneeEmail.value.trim()) return;
+  // `reresolve` relaxes the already-has-a-value guard, and ONLY the coordinator-name handler
+  // passes it. After the name changes, an address auto-filled for the PREVIOUS name is stale by
+  // construction, so refusing to touch it left the old coordinator's address sitting under a new
+  // name - and, because the guess never ran, with no amber warning either. That is what "the
+  // check-it-before-you-send line never appears" was, reported 2026-08-03. A value the HUMAN
+  // typed is still protected: that is what `touched.AssigneeEmail` is for, and it is checked
+  // first either way.
+  function fillEmailFor(inputs, touched, name, reresolve) {
+    if (touched.AssigneeEmail) return;
+    if (!reresolve && inputs.AssigneeEmail.value.trim()) return;
     var em = rosterLookup(name);
     if (!em) { var me = actor(); if (me.email && rosterKey(me.name) === rosterKey(name)) em = me.email; }
     var guessed = false;

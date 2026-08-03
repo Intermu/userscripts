@@ -64,7 +64,7 @@ function build(src) {
   var S_PAYLOAD = slice(src, '      var payload = { actor:', '      var reenable = function ()', 'payload builder');
   var S_HYDRATE = slice(src, '  function hydrateFromUmbrava(woId, inputs, touched) {', '  // Prefill AssigneeEmail from the roster', 'hydrateFromUmbrava');
   var S_GUESS = slice(src, '  function guessEmail(name) {', '  function manageRoster()', 'guessEmail');
-  var S_FILLEMAIL = slice(src, '  function fillEmailFor(inputs, touched, name) {', '  // ---- Shared launcher dock', 'fillEmailFor+markEmailGuess');
+  var S_FILLEMAIL = slice(src, '  function fillEmailFor(inputs, touched, name, reresolve) {', '  // ---- Shared launcher dock', 'fillEmailFor+markEmailGuess');
 
   var sandbox = {
     console: console,
@@ -168,6 +168,18 @@ function checkPreNoBus(S, label) {
 checkPreNoBus(S, 'pre-fill/no-bus');
 
 // ---- 3. the live read fills Location from locationId, never locationName -------------------
+// !! FIXTURE KNOWN WRONG AS OF 2026-08-03, KEPT ONLY UNTIL THE DECISION LANDS. Probed live
+// against app.umbrava.com: `DISP_WO_Q` is INVALID - `assignedToMemberName` does not exist on
+// type WorkOrder, so the whole query 400s and hydrateFromUmbrava has NEVER delivered. Under that
+// cover, two more things went unnoticed:
+//   - `locationId` is an ID scalar holding a GUID ("2ab2cde4-44c4-41d6-bb89-08de1acf8012"), NOT
+//     a site number. The `locationId: 343` below encodes the assumption the code was written on,
+//     and the live schema contradicts it: fixing the query without changing this line would start
+//     writing GUIDs into the Location field the flow's `Lookup site` keys on.
+//   - `assignedTo` is a GUID too, so no coordinator NAME is obtainable from this query at all.
+// This is a fixture that agrees with the code because both are wrong the same way - see
+// wiki/green-harness-proves-nothing-alone.md. Do not treat these two assertions as evidence that
+// the Location fill works; nothing in this file has ever executed against the real schema.
 function checkHydrate(S, label) {
   S.gqlResult = {
     workOrder: {
@@ -307,10 +319,91 @@ S.fillEmailFor(typedEmail, { AssigneeEmail: true }, 'Daniel Russell');
 A.eq('guess: a typed address is never overwritten', typedEmail.AssigneeEmail.value, 'someone.else@broadwaynational.com');
 A.eq('guess: and no warning is raised over it', S.emailGuessEl.textContent, '');
 
+// ---- 5. RE-RESOLVE on a coordinator name change --------------------------------------------
+// Reported live 2026-08-03: the amber "check it before you send" line never appears. Cause: the
+// modal pre-fills an address for the coordinator the WO is assigned to, and `fillEmailFor` then
+// returned early on `inputs.AssigneeEmail.value.trim()` - so typing a DIFFERENT coordinator's
+// name re-resolved nothing. The old address stayed under the new name, unflagged. Worse than a
+// missing warning: it is the previous coordinator's mailbox attached to someone else's dispatch.
+function checkReresolve(S, label) {
+  S.roster = { 'daniel russell': 'drussell@broadwaynational.com' };
+  S.emailGuessEl = { textContent: '', style: {} };
+  // the modal opened on a WO assigned to Daniel, so his address is already sitting there
+  var inputs = inputsFor({ AssignedToName: 'Daniel Russell', AssigneeEmail: 'drussell@broadwaynational.com' });
+  // ...and the operator types a coordinator the roster has never met
+  inputs.AssignedToName.value = 'Erick Sandoval';
+  S.fillEmailFor(inputs, {}, 'Erick Sandoval', true);
+  A.eq(label + ': the stale address is replaced, not kept', inputs.AssigneeEmail.value, 'esandoval@broadwaynational.com');
+  A.ok(label + ': and the new one is VISIBLY flagged as a guess',
+    /check it before you send/i.test(S.emailGuessEl.textContent),
+    'warning read: ' + JSON.stringify(S.emailGuessEl.textContent));
+  return inputs;
+}
+checkReresolve(S, 'reresolve');
+
+// A human-typed address still wins, re-resolve or not - that is what `touched` is for.
+function checkReresolveRespectsTyped(S, label) {
+  S.roster = { 'erick sandoval': 'esandoval@broadwaynational.com' };
+  S.emailGuessEl = { textContent: '', style: {} };
+  var inputs = inputsFor({ AssignedToName: 'Erick Sandoval', AssigneeEmail: 'erick.sandoval@broadwaynational.com' });
+  S.fillEmailFor(inputs, { AssigneeEmail: true }, 'Erick Sandoval', true);
+  A.eq(label + ': a typed address survives a re-resolve', inputs.AssigneeEmail.value, 'erick.sandoval@broadwaynational.com');
+  A.eq(label + ': and is not flagged', S.emailGuessEl.textContent, '');
+  return inputs;
+}
+checkReresolveRespectsTyped(S, 'reresolve/typed');
+
+// Without the flag, the old behaviour stands: an existing value is left alone. The initial
+// prefill and the hydrate path both rely on that.
+function checkNoReresolveByDefault(S, label) {
+  S.roster = {};
+  S.emailGuessEl = { textContent: '', style: {} };
+  var inputs = inputsFor({ AssigneeEmail: 'drussell@broadwaynational.com' });
+  S.fillEmailFor(inputs, {}, 'Erick Sandoval');
+  A.eq(label + ': no flag means no overwrite', inputs.AssigneeEmail.value, 'drussell@broadwaynational.com');
+  return inputs;
+}
+checkNoReresolveByDefault(S, 'reresolve/default');
+
+// A re-resolve that cannot resolve anything leaves the field alone rather than blanking a
+// required input mid-edit ("Dan" on the way to "Daniel Russell" resolves to nothing).
+function checkReresolveUnresolvable(S, label) {
+  S.roster = {};
+  S.emailGuessEl = { textContent: '', style: {} };
+  var inputs = inputsFor({ AssigneeEmail: 'drussell@broadwaynational.com' });
+  S.fillEmailFor(inputs, {}, 'Dan', true);
+  A.eq(label + ': a one-token name resolves nothing and clears nothing', inputs.AssigneeEmail.value, 'drussell@broadwaynational.com');
+  return inputs;
+}
+checkReresolveUnresolvable(S, 'reresolve/partial');
+
+// ORDER-of-events property, asserted against the source: `change` alone fires only on BLUR, and
+// blur is usually the click on Dispatch - the warning would have appeared for milliseconds
+// before the form submitted. The name handler must listen on `input` and pass the re-resolve
+// flag; the debounce is what stops a half-typed name resolving to a plausible wrong address.
+function checkNameHandler(src, label) {
+  A.ok(label + ': the name field is watched on input, not just change',
+    src.indexOf("inputs.AssignedToName.addEventListener('input'") !== -1, "no 'input' listener on the name field");
+  A.ok(label + ': the name handler asks for a re-resolve',
+    src.indexOf('fillEmailFor(inputs, touched, inputs.AssignedToName.value, true);') !== -1,
+    'the name handler does not pass reresolve');
+  A.ok(label + ': and it is debounced', src.indexOf('setTimeout(resolveEmailFromName, 400)') !== -1,
+    'no debounce on the input handler');
+  A.ok(label + ': change is kept as a paste/autofill backstop',
+    src.indexOf("inputs.AssignedToName.addEventListener('change'") !== -1, "no 'change' backstop");
+  return true;
+}
+checkNameHandler(full, 'name handler');
+
 // ---- negative controls: revert each fix, prove this harness reddens ------------------------
-function redUnder(name, mutated, probe) {
+// `useSource` hands the probe the mutated SOURCE TEXT instead of a built sandbox, for the
+// assertions that are about where code sits rather than what it computes (the name handler's
+// event and its re-resolve flag live in buildModal, which this harness never executes).
+function redUnder(name, mutated, probe, useSource) {
   var before = A.counts().fail;
-  var S2 = build(mutated);
+  var S2;
+  try { S2 = useSource ? mutated : build(mutated); }
+  catch (e) { console.log('  ok  - ' + name + ' threw at build: ' + e.message); return; }
   try { probe(S2, 'MUTANT ' + name); } catch (e) { console.log('  ok  - ' + name + ' threw: ' + e.message); return; }
   var after = A.counts().fail;
   console.log(after > before
@@ -365,11 +458,30 @@ redUnder('M12 the fallback is dropped from the GraphQL failure path',
   mutate(full, "}, function () { /* GraphQL unavailable - bus prefill stands */ trackingFallback(); });",
     "}, function () { /* GraphQL unavailable - bus prefill stands */ });", 'M12'),
   checkTrackingOffline);
+redUnder('M13 the value guard is restored unconditionally (the reported defect)',
+  mutate(full, "    if (!reresolve && inputs.AssigneeEmail.value.trim()) return;",
+    "    if (inputs.AssigneeEmail.value.trim()) return;", 'M13'),
+  checkReresolve);
+redUnder('M14 a typed address loses its protection',
+  mutate(full, "    if (touched.AssigneeEmail) return;\n    if (!reresolve", "    if (false) return;\n    if (!reresolve", 'M14'),
+  checkReresolveRespectsTyped);
+redUnder('M15 re-resolve becomes the default, so the prefill path overwrites too',
+  mutate(full, "    if (!reresolve && inputs.AssigneeEmail.value.trim()) return;",
+    "    if (false && inputs.AssigneeEmail.value.trim()) return;", 'M15'),
+  checkNoReresolveByDefault);
+redUnder('M16 the name handler goes back to change-only',
+  mutate(full, "    inputs.AssignedToName.addEventListener('input', function () {\n      if (nameTimer) clearTimeout(nameTimer);\n      nameTimer = setTimeout(resolveEmailFromName, 400);\n    });\n",
+    "", 'M16'),
+  checkNameHandler, true);
+redUnder('M17 the name handler stops asking for a re-resolve',
+  mutate(full, "      fillEmailFor(inputs, touched, inputs.AssignedToName.value, true);",
+    "      fillEmailFor(inputs, touched, inputs.AssignedToName.value);", 'M17'),
+  checkNameHandler, true);
 
 // The controls above deliberately register FAILING assertions, so report the REAL run only -
 // in the same shape the other harnesses print, and fail the process if either half misbehaved.
 var after = A.counts();
 console.log('\n' + (REAL.cases - REAL.fail) + '/' + REAL.cases + ' assertions passed' +
   (REAL.fail ? (', ' + REAL.fail + ' FAILED') : '') +
-  '  (plus ' + (after.fail - REAL.fail) + ' expected failures from the 12 negative controls)');
+  '  (plus ' + (after.fail - REAL.fail) + ' expected failures from the 17 negative controls)');
 process.exit((REAL.fail || process.exitCode) ? 1 : 0);
