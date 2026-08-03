@@ -69,6 +69,9 @@ jobs:
       - name: assist state round-trip harness (queue-spec step 3)
         run: node scripts/test-assist-roundtrip.js
 
+      - name: dispatch payload harness (WO number + site number)
+        run: node scripts/test-dispatch-payload.js
+
   lint:
     name: Lint (advisory)
     runs-on: ubuntu-latest

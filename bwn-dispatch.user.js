@@ -1,10 +1,10 @@
 // ==UserScript==
 // @name         BWN Dispatch (Broadway National)
 // @namespace    broadwaynational.bwn
-// @version      0.4.1
+// @version      0.5.0
 // @downloadURL  https://raw.githubusercontent.com/Intermu/userscripts-public/main/bwn-dispatch.user.js
 // @updateURL    https://raw.githubusercontent.com/Intermu/userscripts-public/main/bwn-dispatch.user.js
-// @description  One-click Dispatch for a work order - replaces manually typing a row into Dispatch_Notifications.xlsx. The Dispatch launcher shows only on a WO that is in "Pending Dispatch". It opens a confirm modal prefilled from the BWN Ops Suite bus (Tracking / Location) and a same-origin Umbrava GraphQL read (Priority + the coordinator to ping): it uses the person this WO is assigned to (whoever a supervisor/manager assigned it to, read live when you open it), and when that is a team or blank it falls back to the coordinator from the most recent work order(s) at the same location. The coordinator name + email are editable before you send. On submit it POSTs the 5 fields to the broadway-internal-ops SWA proxy (x-bwn-key gated) which forwards to the HTTP-triggered "Dispatch HTTP" Power Automate flow - the flow adds the row to Dispatch_Notifications.xlsx AND dispatches it (posts a Teams adaptive card to the coordinator and waits for their accept). Dispatching is a coordinator action, so there is no role gate (the x-bwn-key is the boundary). The assignee's email is not on the WO record (Umbrava exposes the coordinator NAME only), so it is resolved from a per-user name->email roster you maintain (seeded with you, and it remembers each coordinator you dispatch to). The flow's secret URL stays server-side; nothing sensitive lives in this script. Registers a single "Dispatch" launcher into the shared dock (bwn:dock:*) - the dock tab is the only launcher; no floating fallback button.
+// @description  One-click Dispatch for a work order - replaces manually typing a row into Dispatch_Notifications.xlsx. The Dispatch launcher shows only on a WO that is in "Pending Dispatch". It opens a confirm modal prefilled from the BWN Ops Suite bus (Tracking) and a same-origin Umbrava GraphQL read (Location as the site NUMBER, Priority, and the coordinator to ping): it uses the person this WO is assigned to (whoever a supervisor/manager assigned it to, read live when you open it), and when that is a team or blank it falls back to the coordinator from the most recent work order(s) at the same location. The coordinator name + email are editable before you send. On submit it POSTs the 5 typed fields plus the WO number (read from the URL, never typed - the flow needs it to deep-link the card, because Tracking is the CLIENT's tracking number and points at the wrong record) to the broadway-internal-ops SWA proxy (x-bwn-key gated) which forwards to the HTTP-triggered "Dispatch HTTP" Power Automate flow - the flow adds the row to Dispatch_Notifications.xlsx AND dispatches it (posts a Teams adaptive card to the coordinator and waits for their accept). Dispatching is a coordinator action, so there is no role gate (the x-bwn-key is the boundary). The assignee's email is not on the WO record (Umbrava exposes the coordinator NAME only), so it is resolved from a per-user name->email roster you maintain (seeded with you, and it remembers each coordinator you dispatch to). The flow's secret URL stays server-side; nothing sensitive lives in this script. Registers a single "Dispatch" launcher into the shared dock (bwn:dock:*) - the dock tab is the only launcher; no floating fallback button.
 // @match        https://app.umbrava.com/*
 // @run-at       document-idle
 // @noframes
@@ -304,11 +304,17 @@
     // Only seed the name from the bus if it is a PERSON; a team ("Team J") is not a dispatch
     // target, so leave it blank and let the live read / location history fill a real coordinator.
     var busCoord = (bus && bus.coordinator && isPerson(bus.coordinator)) ? String(bus.coordinator).trim() : '';
+    // Location is deliberately NOT seeded from the bus. The bus carries the location DISPLAY
+    // NAME (Core reads the WO's location dropdown label, e.g. "Flying J PFJ 0722 (865) 531-7400"),
+    // but the flow's `Lookup site` keys on the bare site NUMBER - so a name here both made the
+    // Teams card unreadable and silently missed the site lookup on every dispatch (measured on
+    // the first correctly-targeted card, 2026-08-03). The live read below fills the site number
+    // from `locationId`; the name is shown as a hint under the field instead of being sent.
     var pre = {
       AssignedToName: busCoord,
       AssigneeEmail: busCoord ? rosterLookup(busCoord) : '',
       Tracking: (bus && bus.tracking) ? String(bus.tracking).trim() : (woId || ''),
-      Location: (bus && bus.location) ? String(bus.location).trim() : '',
+      Location: '',
       Priority: ''
     };
 
@@ -365,6 +371,16 @@
       form.appendChild(wrap);
     });
 
+    // The site NAME is context for the human, never payload: it tells the coordinator which site
+    // the bare number belongs to without putting a name back into the field the flow looks up on.
+    var siteName = (bus && bus.location) ? String(bus.location).trim() : '';
+    if (siteName && inputs.Location && inputs.Location.parentNode) {
+      var siteHint = document.createElement('div');
+      siteHint.style.cssText = 'font-size:11.5px;color:#5b7367;margin-top:4px;';
+      siteHint.textContent = siteName;
+      inputs.Location.parentNode.appendChild(siteHint);
+    }
+
     // When the coordinator name is (re)typed, offer the roster email if we know it and the
     // email field is still empty / untouched.
     inputs.AssignedToName.addEventListener('change', function () {
@@ -406,6 +422,14 @@
       });
       if (missing.length) { msg.textContent = 'Required: ' + missing.join(', '); return; }
       if (!EMAIL_RE.test(payload.AssigneeEmail)) { msg.textContent = 'Assignee Email must be a valid email address.'; return; }
+
+      // The WO number, read from the URL and never typed. It is NOT Tracking: Tracking is the
+      // CLIENT's tracking number wherever the WO has one (it only falls back to the WO number
+      // when it does not), so the flow's `Tracking Link` column - built from Tracking since
+      // 07-27 - deep-links every card to the wrong record. Measured live 2026-08-03:
+      // /work-orders/1272451 on WO 383112. The proxy accepts this as an optional 6th prop and
+      // forwards it; the link is only actually fixed once the flow maps it, which is Mike's edit.
+      payload.WONumber = woId || '';
 
       var reenable = function () { submit.disabled = false; submit.textContent = 'Dispatch'; };
       submit.disabled = true;
@@ -475,7 +499,9 @@
     gql(DISP_WO_Q, { n: n }).then(function (d) {
       var wo = (d && d.workOrder) || {};
       setIfEmpty('Tracking', wo.trackingNumber);
-      setIfEmpty('Location', wo.locationName);
+      // locationId, NOT locationName: the flow's `Lookup site` keys on the bare site number, and
+      // a display name silently resolves to no site at all (see the pre-fill comment above).
+      setIfEmpty('Location', wo.locationId);
       setIfEmpty('Priority', wo.priority && wo.priority.label);
       var name = wo.assignedToMemberName ? String(wo.assignedToMemberName).trim() : '';
       if (isPerson(name)) { setName(name); return; }              // supervisor/manager assigned a real person
