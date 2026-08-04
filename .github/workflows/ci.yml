@@ -48,6 +48,11 @@ jobs:
       - name: W-9 TIN region harness
         run: node scripts/test-w9-tin-region.js
 
+      # The scanned path's Tax ID no longer comes from findTIN, so the region harness above says
+      # nothing about it - it scored identically on 0.9.2 and 0.9.3, one of which could fabricate.
+      - name: W-9 TIN crop-pass harness (scanned path)
+        run: node scripts/test-w9-tin-crop.js
+
       - name: WO Audit accounting harness
         run: node scripts/test-wo-audit-accounting.js
 
