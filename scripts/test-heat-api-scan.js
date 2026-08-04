@@ -78,8 +78,18 @@ var SRC_MAP = slice(core,
   'heatFlatten/heatDateStr/heatApiRowToEntry');
 var SRC_CAPTURE = slice(core,
   '    // Record a captured list query. THE REQUEST ALONE IS ENOUGH (v3.18).',
-  '    // Install the fetch + XHR hooks ONCE per page (survives SPA route changes).',
+  '    // Attach to the hook (v3.21).',
   'heatRecordCapture');
+// v3.21: the hook moved to document-start, so the buffer/sink that carries requests
+// from before List Heat exists is file-level code, outside every module.
+var SRC_GQLBUF = slice(core,
+  '  var BWN_GQL_SINK = null;',
+  '  (function installGqlHook() {',
+  'bwnGqlSeen + bwnGqlSetSink');
+var SRC_BOOTQ = slice(core,
+  '  var BWN_BOOTED = false;',
+  '  // ===== BEGIN bwnNotesApi =====',
+  'bwnBoot + bwnBootAll');
 var SRC_SCAN = slice(core,
   '    function apiScanAll(btn) {',
   '    // ---- Scan All (scroll fallback) ---',
@@ -442,6 +452,32 @@ function buildStore(opts) {
   vm.runInNewContext(src, sandbox, { filename: 'store-slice.js' });
   return sandbox;
 }
+// The document-start buffer/sink, standalone - it has no dependencies by design.
+function buildGqlBuf(opts) {
+  var o = opts || {};
+  var src = SRC_GQLBUF;
+  (o.mutations || []).forEach(function (m) { src = mutate(src, m[0], m[1]); });
+  var sandbox = {};
+  vm.runInNewContext(src, sandbox, { filename: 'gqlbuf-slice.js' });
+  return sandbox;
+}
+// The module boot queue, with safeModule instrumented so a test can see that modules
+// still go through the error-containing wrapper rather than being called raw.
+function buildBootQ(opts) {
+  var o = opts || {};
+  var src = SRC_BOOTQ;
+  (o.mutations || []).forEach(function (m) { src = mutate(src, m[0], m[1]); });
+  var sandbox = { __ran: [], __wrapped: 0 };
+  sandbox.BWN = {
+    safeModule: function (id, fn) {
+      sandbox.__wrapped++;
+      try { fn(); } catch (e) { sandbox.__ran.push('THREW:' + id); }
+    }
+  };
+  vm.runInNewContext(src, sandbox, { filename: 'bootq-slice.js' });
+  return sandbox;
+}
+
 // What the API scan leaves behind for one WO: the rich record, tagged src:'api'.
 function apiRec(num) {
   return {
@@ -1008,6 +1044,96 @@ console.log('\n-- heatStore writes: the DOM pass adds rows, it never doubles or 
   A.eq('and it is DOM-sourced', s.heatStore['/work-orders/399999'].src, undefined);
 })();
 
+// ============================================================================
+// v3.21 / Core 1.66.28: THE HOOK HAS TO BEAT THE APP.
+//
+// Capture is passive - it can only latch a board query fired AFTER the hook is in place.
+// Measured live 2026-08-04, four reloads of the same page, and the correlation was exact:
+//
+//   core script starts | GraphQL landing after it | auto-scan
+//   4015 ms            | 0 of 17                  | never ran
+//   1464 ms            | 15 of 18                 | ran
+//   3466 ms            | 0 of 17                  | never ran
+//   1822 ms            | 14 of 18                 | ran
+//
+// The app's first GraphQL request starts at ~1240 ms; `@run-at document-idle` landed
+// anywhere from 1464 ms to 4015 ms. So the hook moved to document-start and the modules
+// were deferred to the load event to keep their old timing. These two slices are the
+// seam that makes that safe: a buffer that holds what the app fired before List Heat
+// existed, and a queue that holds the modules until there is a page for them.
+console.log('\n-- document-start GraphQL buffer: nothing fired before List Heat is lost --');
+(function () {
+  var s = buildGqlBuf({});
+  // Boot-time requests, before any consumer exists.
+  s.bwnGqlSeen('{"query":"A"}', null);
+  s.bwnGqlSeen('{"query":"B"}', { rows: 1 });
+  var got = [];
+  var replayed = s.bwnGqlSetSink(function (body, data) { got.push([body, data]); });
+  A.eq('both boot-time requests were replayed', replayed, 2);
+  A.eq('in the order the app fired them', got.map(function (g) { return g[0]; }), ['{"query":"A"}', '{"query":"B"}']);
+  A.eq('the request-only frame arrives with no data', got[0][1], null);
+  A.eq('the response bonus rides along when there was one', got[1][1], { rows: 1 });
+
+  // After attach the buffer is out of the picture.
+  s.bwnGqlSeen('{"query":"C"}', null);
+  A.eq('a later request goes straight to the consumer', got.length, 3);
+  A.eq('and the buffer stayed empty', s.BWN_GQL_BUF.length, 0);
+  A.eq('so re-attaching replays nothing', s.bwnGqlSetSink(function () { }), 0);
+
+  // Bounded: a page that never attaches a consumer must not grow forever.
+  var s2 = buildGqlBuf({});
+  for (var i = 0; i < 60; i++) s2.bwnGqlSeen('q' + i, null);
+  A.eq('the buffer caps at 40 frames', s2.BWN_GQL_BUF.length, 40);
+  var kept = [];
+  s2.bwnGqlSetSink(function (b) { kept.push(b); });
+  A.eq('and it keeps the EARLIEST frames - the board query fires at boot, not at the end',
+    [kept[0], kept[39]], ['q0', 'q39']);
+
+  // One bad frame must not cost the rest: the drain is the only chance they get.
+  var s3 = buildGqlBuf({});
+  s3.bwnGqlSeen('x1', null); s3.bwnGqlSeen('x2', null); s3.bwnGqlSeen('x3', null);
+  var seen3 = [];
+  s3.bwnGqlSetSink(function (b) { if (b === 'x2') throw new Error('consumer blew up'); seen3.push(b); });
+  A.eq('a throwing consumer does not abort the drain', seen3, ['x1', 'x3']);
+  var s4 = buildGqlBuf({});
+  var live4 = 0;
+  s4.bwnGqlSetSink(function () { live4++; throw new Error('still blowing up'); });
+  s4.bwnGqlSeen('later', null);
+  A.eq('and a throw on a live frame is swallowed too', live4, 1);
+})();
+
+console.log('\n-- module boot queue: document-start must not run module bodies --');
+(function () {
+  var s = buildBootQ({});
+  var order = [];
+  s.bwnBoot('alpha', true, function () { order.push('alpha'); });
+  s.bwnBoot('beta', false, function () { order.push('beta'); });     // kill switch off
+  s.bwnBoot('gamma', true, function () { order.push('gamma'); });
+  A.eq('nothing runs at registration time - there is no page yet', order, []);
+  A.eq('a disabled module is not even queued', s.BWN_BOOT_Q.length, 2);
+
+  s.bwnBootAll();
+  A.eq('the flush runs the enabled modules in registration order', order, ['alpha', 'gamma']);
+  A.eq('a module whose kill switch is off never runs', order.indexOf('beta'), -1);
+  A.eq('every module went through safeModule, so one throw cannot take the suite down', s.__wrapped, 2);
+
+  s.bwnBootAll();
+  A.eq('a second flush is a no-op', order, ['alpha', 'gamma']);
+
+  s.bwnBoot('delta', true, function () { order.push('delta'); });
+  A.eq('a module registered after the flush runs immediately rather than being dropped',
+    order, ['alpha', 'gamma', 'delta']);
+
+  // Containment survives: a module that throws is recorded, the next one still runs.
+  var s2 = buildBootQ({});
+  var ran2 = [];
+  s2.bwnBoot('bad', true, function () { throw new Error('module init failed'); });
+  s2.bwnBoot('good', true, function () { ran2.push('good'); });
+  s2.bwnBootAll();
+  A.eq('a module that throws does not stop the ones after it', ran2, ['good']);
+  A.eq('and the failure is recorded, not swallowed silently', s2.__ran, ['THREW:bad']);
+})();
+
 // The call site is not inside any slice above, so it is checked as shipped bytes: the raw
 // href must be gone from the writer, and both the key and the merge must go through the
 // named functions. This is what stops the mismatch being re-introduced one edit later.
@@ -1019,6 +1145,32 @@ console.log('\n-- the shipped call site --');
     core.indexOf("heatStoreDomPut(heatKey(link.getAttribute('href')), {") !== -1);
   A.ok('the API mapper builds its href through heatKey too',
     core.indexOf("href: heatKey('/work-orders/' + num),") !== -1);
+
+  // v3.21 entry point. These are the assertions that would catch someone reverting the
+  // @run-at, or adding a 12th module the old way and having it run before the page.
+  A.ok('the script runs at document-start', core.indexOf('// @run-at       document-start') !== -1);
+  // The metadata line specifically - the prose above the boot block still says the word,
+  // because it records what this replaced and why.
+  A.ok('and the metadata block no longer says document-idle', core.indexOf('// @run-at       document-idle') === -1);
+  A.ok('the hook is installed at file level, not inside a module',
+    core.indexOf('(function installGqlHook() {') !== -1 && core.indexOf('(function installNetHook() {') === -1);
+  A.ok('List Heat attaches to it rather than installing its own',
+    core.indexOf('bwnGqlSetSink(function (body, data) { heatRecordCapture(body, data); })') !== -1);
+  A.ok('the module queue is flushed on load',
+    core.indexOf("if (document.readyState === 'complete') bwnBootAll();") !== -1 &&
+    core.indexOf("else window.addEventListener('load', bwnBootAll);") !== -1);
+  // EVERY module must go through the queue. A stray inline BWN.safeModule dispatch would
+  // run its body at document-start, with no document.body - the exact failure this
+  // restructure exists to avoid, and one that shows up as a module silently not mounting.
+  var dispatch = core.match(/^  bwnBoot\('\w+', BWN_MODULES\.\w+, function \(\) \{$/gm) || [];
+  A.eq('all 11 modules are registered through bwnBoot', dispatch.length, 11);
+  A.eq('and none is dispatched inline', (core.match(/^  if \(BWN_MODULES\.\w+\) BWN\.safeModule\(/gm) || []).length, 0);
+  // Cheap proof the ids still line up with their kill switches after a bulk rewrite.
+  var mismatched = dispatch.filter(function (d) {
+    var m = d.match(/bwnBoot\('(\w+)', BWN_MODULES\.(\w+)/);
+    return !m || m[1] !== m[2];
+  });
+  A.eq('each module id matches its own kill switch', mismatched, []);
 })();
 
 function main() {
@@ -1323,6 +1475,29 @@ function main() {
     s15.heatStoreDomPut(s15.heatKey('/work-orders/326991/details'), domRec(326991));
     A.eq('M15 control: without the guard the API record is thinned', s15.heatStore['/work-orders/326991'].assigneeId, undefined);
     A.eq('M15 control: and it stops reading as an API row', s15.heatStore['/work-orders/326991'].src, undefined);
+
+    // ---- v3.21 controls. ----
+
+    // M16: attach without draining - a document-start hook that throws away what it
+    // buffered is worth nothing, because the board query fires during boot. This is the
+    // measured live symptom restated: no capture, so the auto-scan never runs.
+    var m16 = [['    var buf = BWN_GQL_BUF;', '    var buf = [];']];
+    var s16 = buildGqlBuf({ mutations: m16 });
+    s16.bwnGqlSeen('{"query":"the board query"}', null);
+    var got16 = [];
+    var n16 = s16.bwnGqlSetSink(function (b) { got16.push(b); });
+    A.eq('M16 control: the boot-time board query is dropped on attach', got16, []);
+    A.eq('M16 control: and nothing is reported as replayed', n16, 0);
+
+    // M17: bwnBoot running inline instead of queueing - which is what every module did
+    // before this change. At document-start that means a module body runs with no
+    // document.body, and safeModule turns the throw into a module that silently never
+    // mounted.
+    var m17 = [['    BWN_BOOT_Q.push([id, fn]);', '    BWN.safeModule(id, fn);']];
+    var s17 = buildBootQ({ mutations: m17 });
+    var early17 = [];
+    s17.bwnBoot('tripCal', true, function () { early17.push('ran'); });
+    A.eq('M17 control: the module body runs at registration, before there is a page', early17, ['ran']);
   }).then(function () {
     A.finish();
   }, function (err) {
