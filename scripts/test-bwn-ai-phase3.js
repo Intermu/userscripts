@@ -403,6 +403,52 @@ function staticChecks() {
   ok('bwnAI block byte-identical across drop-upload/suite-ai/wo-audit', allEq, carriers.map(function (f, i) { return f + '=' + (shas[i] || 'MISSING'); }).join(' '));
   console.log('  ... block SHA: ' + shas[0]);
   ok('bid-out carries NO bwnAI block (migration deferred)', blockSha('bwn-bid-out.user.js') === null);
+
+  // PAT-003: the BWN SHARED CORE block must match across core + ai too. Added 2026-08-04
+  // after the Ops panel's own runtime drift guard reported the real thing it was built to
+  // catch: busPatch went into core's block in 6ffdb32 (Core 1.66.19) and was never pasted
+  // into the AI script, so the two export manifests disagreed for a day. The runtime guard
+  // only fires when both scripts are loaded in a live tab and only compares EXPORTED names;
+  // this gate fires in CI and compares the whole block, so an unexported helper cannot
+  // drift either. The ONE legitimate per-file difference is the announceCore() argument.
+  function sharedCoreBlock(f) {
+    var s = read(f).replace(/\r\n/g, '\n');
+    var a = s.indexOf('// ===== BWN SHARED CORE v7 - KEEP IN SYNC across both suite scripts =====');
+    var b = s.indexOf('// ===== END BWN SHARED CORE =====');
+    if (a === -1 || b === -1) return null;
+    // Normalise the intended difference: core announces 'core', ai announces 'ai'.
+    return s.slice(a, b).replace(/BWN\.announceCore\('(core|ai)'\);/, "BWN.announceCore('SCRIPT');");
+  }
+  var scCore = sharedCoreBlock('bwn-suite-core.user.js');
+  var scAi = sharedCoreBlock('bwn-suite-ai.user.js');
+  ok('shared-core block found in both files', !!scCore && !!scAi, 'core=' + !!scCore + ' ai=' + !!scAi);
+  if (scCore && scAi) {
+    var h1 = crypto.createHash('sha256').update(scCore, 'utf8').digest('hex');
+    var h2 = crypto.createHash('sha256').update(scAi, 'utf8').digest('hex');
+    var firstDiff = null;
+    if (h1 !== h2) {
+      var l1 = scCore.split('\n'), l2 = scAi.split('\n');
+      for (var i = 0; i < Math.max(l1.length, l2.length); i++) {
+        if (l1[i] !== l2[i]) { firstDiff = 'line ' + (i + 1) + ': core=' + JSON.stringify((l1[i] || '').trim().slice(0, 60)) + ' ai=' + JSON.stringify((l2[i] || '').trim().slice(0, 60)); break; }
+      }
+    }
+    ok('BWN SHARED CORE block byte-identical across core/ai (PAT-003)', h1 === h2, firstDiff || 'sha mismatch');
+    console.log('  ... shared-core SHA: ' + h1.slice(0, 16));
+    // The export manifest is what the runtime guard actually compares, so pin it directly.
+    function exportsOf(block) {
+      var m = block.match(/\n    return \{\n([\s\S]*?)\n    \};/);
+      if (!m) return null;
+      return (m[1].match(/([A-Za-z_$][\w$]*)\s*:/g) || []).map(function (k) { return k.replace(/\s*:$/, ''); }).sort();
+    }
+    var eC = exportsOf(scCore), eA = exportsOf(scAi);
+    ok('export manifests parse', !!eC && !!eA);
+    if (eC && eA) {
+      var only = eC.filter(function (k) { return eA.indexOf(k) === -1; }).concat(eA.filter(function (k) { return eC.indexOf(k) === -1; }));
+      ok('export manifests identical - what the Ops panel drift guard reads', only.length === 0, 'unmatched: ' + only.join(', '));
+      ok('busPatch is exported by BOTH (the drift that started this gate)', eC.indexOf('busPatch') !== -1 && eA.indexOf('busPatch') !== -1,
+        'core=' + (eC.indexOf('busPatch') !== -1) + ' ai=' + (eA.indexOf('busPatch') !== -1));
+    }
+  }
 }
 
 console.log('BWN AI Phase 3 consumer-migration harness (TASK-011/013/014)\n');
