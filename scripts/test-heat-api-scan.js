@@ -88,6 +88,43 @@ var SRC_TOTAL = slice(core,
   '    function umbravaTotal() {',
   '    // ---- Acknowledge / snooze (v3.8) ---',
   'umbravaTotal');
+// v3.19 blocks.
+var SRC_MARSHAL = slice(core,
+  '    // One place that turns a STORED row',
+  '    // ---- Assignee names from GUIDs ---',
+  'heatVerdictFor');
+var SRC_USERS = slice(core,
+  '    // ---- Assignee names from GUIDs ---',
+  '    // ---- Next step per row',
+  'heatResolveAssignees + the user(id:) batch');
+var SRC_NEXTSTEP = slice(core,
+  '    // ---- Next step per row',
+  '    // ---- Heat pass ---',
+  'heatNextStep');
+// File-level: the shared status-clock engine and the real verdict engine. These are built
+// SEPARATELY (buildVerdict) - the scan build stubs computeVerdict on purpose so its
+// assertions can read which FACTS reached the engine.
+var SRC_THRESH = slice(core,
+  '  var BWN_HEAT_CFG = {',
+  '  // ---- Next-actions engine, published across module closures',
+  'BWN_HEAT_CFG + bwnSlaMult + bwnThresholdsFor');
+var SRC_VERDICT = slice(core,
+  '    function computeVerdict(f, C) {',
+  '    // One place that turns a STORED row',
+  'computeVerdict');
+// The REAL next-actions engine and its taxonomy. Sliced rather than stubbed because the
+// question this answers cannot be answered by a stub: does the MATURE engine, written for a
+// full WO page, tolerate the much thinner state a board row can supply - and does it produce
+// a sensible step rather than throwing or inventing one? heatNextStep has a try/catch, so a
+// throw degrades safely, but "safely degraded on every row" is a dead feature shipped green.
+var SRC_ENGINE_DEPS = slice(core,
+  '    var ACT_SIGNALS = {',
+  '    // Newest note carrying an authored plan.',
+  'ACT_SIGNALS / ESCALATE_DAYS / WO_PHASE / woActionForStatus / scoreAct / authoredKeyHash');
+var SRC_ENGINE = slice(core,
+  '    function computeNextActions(state, C) {',
+  '    bwnActsEngine = computeNextActions;',
+  'computeNextActions');
 
 // The pieces the sliced code leans on that live elsewhere in the file (bus, config,
 // DOM, threshold engine). Stubbed, and instrumented so the assertions can see what the
@@ -119,9 +156,26 @@ var PRELUDE = [
   'function toggleAuditPanel() { }',
   'function cleanName(s) { return String(s == null ? "" : s).trim(); }',
   'function dSince(ts) { return Math.floor((__today - ts) / 86400000); }',
+  'function dUntil(ts) { return Math.ceil((ts - __today) / 86400000); }',
+  // v3.19 stubs. heatAuthToken lives between two slices, so it is stubbed; __tokenOn lets a
+  // test drive the no-token branch (resolution must degrade, never leak an id to the panel).
+  'var __tokenOn = true;',
+  'function heatAuthToken() { return __tokenOn ? "tok" : ""; }',
+  'var __ss = {};',
+  'var sessionStorage = { getItem: function (k) { return (k in __ss) ? __ss[k] : null; }, setItem: function (k, v) { __ss[k] = String(v); } };',
+  // The next-actions engine is published from the WO Assist closure at runtime. Here it is a
+  // RECORDER: the contract worth testing is which state List Heat hands it (a fabricated
+  // `pos: []` would read as "checked, found no POs" and invent steps), plus that the
+  // standing completion anchor is never reported as the next thing to do.
+  'var __actStates = [], __actsOut = null, __actsThrow = false;',
+  'var bwnActsEngine = function (state, C) { __actStates.push(state); if (__actsThrow) throw new Error("thin state"); return __actsOut; };',
   'var BWN = {',
   '  parseUSDate: function (s) { var m = /^(\\d{1,2})\\/(\\d{1,2})\\/(\\d{4})$/.exec(String(s == null ? "" : s)); if (!m) return null; var d = new Date(Number(m[3]), Number(m[1]) - 1, Number(m[2])); d.setHours(0, 0, 0, 0); return d.getTime(); },',
-  '  money: function (n) { return "$" + Number(n).toFixed(2); }',
+  // The REAL formatter, not an approximation: it is what decides whether a minor-unit bug is
+  // visible. `toFixed(2)` would have hidden the thousands separators the panel actually shows.
+  '  money: function (n) { return "$" + n.toLocaleString("en-US", { minimumFractionDigits: 2, maximumFractionDigits: 2 }); },',
+  '  parseMoney: function (s) { var m = (s || "").match(/\\$\\s*([\\d,]+(?:\\.\\d{1,2})?)/); return m ? parseFloat(m[1].replace(/,/g, "")) : null; },',
+  '  parseBare: function (s) { var n = parseFloat(String(s || "").replace(/[$,\\s]/g, "")); return isNaN(n) ? null : n; }',
   '};',
   'var parseUSDate = BWN.parseUSDate;'
 ].join('\n');
@@ -132,30 +186,66 @@ var PRELUDE = [
 // first matching key, so this ordering is part of the fixture, not decoration - see the
 // reversed-order row below, which is the same data a reorder would hand us.
 // Timestamps use midday UTC so the date strings are the same in CI (UTC) and here (EDT).
+// v3.19: this fixture was REWRITTEN from a live read (search_work_orders / get_work_order
+// against the tenant, 2026-08-04) because the v3.18 version was written from assumption and
+// therefore agreed with three separate bugs instead of catching them:
+//   - `assignedTo: 'Coordinator One'` - the live field is an ID scalar GUID, and the row
+//     carries the NAME separately as `assignedToMemberName`. With a name in the id's slot the
+//     harness could not see that g() was returning the id.
+//   - `timeInStatus: 1293.5` read as hours - the live value is MINUTES (81001 on a WO 137
+//     days old, i.e. 3288 hours of total age, so it cannot be hours at all).
+//   - `doNotExceed.amount: 89871.1` - a FRACTIONAL minor-unit amount, which the server cannot
+//     emit. Real: { amount: 1448564, precision: 2 } = $14,485.64, and BWN.money does not scale.
+// KEY ORDER MATTERS and is copied from the live response: roughly alphabetical, so
+// `assignedTo` arrives BEFORE `assignedToMemberName` and `nextOnsiteDate` before the nested
+// `priority` object. g() returns the first matching key, so this ordering is the bug's cause
+// and part of the fixture, not decoration - see the reversed-order row below.
+// Timestamps use midday UTC so the date strings are the same in CI (UTC) and here (EDT).
 function makeRow(i) {
   return {
     __typename: 'WorkOrderListItem',
-    assignedTo: 'Coordinator One',
+    assignedTo: 'ad017f63-30f6-4074-b073-cec166f9aa7b',
+    assignedToMemberName: 'Daniel Russell',
     clientName: 'Pilot Travel Centers',
-    doNotExceed: { __typename: 'Money', amount: 89871.1, currency: 'USD', precision: 2 },
+    doNotExceed: { __typename: 'Money', amount: 1448564, currency: 'USD', precision: 2 },
     lastModifiedDate: '2026-08-03T12:00:00Z',
     lastNoteDate: '2026-07-22T12:00:00Z',
     locationName: 'Pilot Travel Center #0017',
     nextOnsiteDate: '2026-08-10T12:00:00Z',
     number: 327000 + i,
     numberOfDays: 201,
+    phase: 'Open',
     priority: {
       __typename: 'Priority',
       label: 'Yellow - Medium Priority',
+      category: 'High',
+      responseMinutes: 4320,
+      serviceLevelAgreementMinutes: 201600,
       expectedCompletionDate: '2026-08-20T12:00:00Z',
       firstTripDate: '2026-07-01T12:00:00Z'
     },
+    remainingDays: -88,
     statusName: 'Awaiting Client Approval',
     systemStatusName: 'Open',
-    timeInStatus: 1293.5,
+    timeInStatus: 81001,
+    totalNTE: { __typename: 'Money', amount: 1058866, currency: 'USD', precision: 2 },
     trackingNumber: '105' + (2000 + i),
+    vendorNames: ['FACE N SON\'S LLC', 'LSI INDUSTRIES INC'],
     workOrderDate: '2026-01-15T12:00:00Z'
   };
+}
+// Same row, minus every name-shaped assignee key: what the board returns when the Assigned To
+// column is NOT in the column chooser. All that is left is the id, and an id must never
+// display - this is the row the user(id:) resolver exists for.
+function makeRowIdOnly(i) {
+  var r = makeRow(i);
+  delete r.assignedToMemberName;
+  return r;
+}
+function omitKeys(row, ks) {
+  var out = {};
+  Object.keys(row).forEach(function (k) { if (ks.indexOf(k) === -1) out[k] = row[k]; });
+  return out;
 }
 // The same row with the nested priority FIRST - what a schema reorder would produce. Only
 // gPref's preference order keeps `sched` on nextOnsiteDate here instead of firstTripDate.
@@ -221,11 +311,44 @@ function makeTransport(opts) {
 }
 
 // Build a context from the REAL sliced source (optionally mutated) plus the stubs.
-function build(opts) {
+// Transport for the user(id:) lookups: records every document it is handed and answers from
+// a small roster. The two GUIDs are the ones the live board actually returned.
+var USER_ROSTER = {
+  'ad017f63-30f6-4074-b073-cec166f9aa7b': { firstName: 'Daniel', lastName: 'Russell', isInactive: false },
+  '980fa5bd-e655-4917-aad7-6d9cd49752e2': { firstName: 'Carol', lastName: 'Serra', isInactive: true }
+};
+function guidN(i) {
+  var h = ('0000000' + i).slice(-8);
+  return h + '-aaaa-bbbb-cccc-dddddddddddd';
+}
+function makeUserTransport(opts) {
   var o = opts || {};
-  var src = [PRELUDE, SRC_PAGING, SRC_FIND, SRC_MAP, SRC_CAPTURE, SRC_TOTAL, SRC_SCAN].join('\n\n');
-  (o.mutations || []).forEach(function (m) { src = mutate(src, m[0], m[1]); });
-  var sandbox = {
+  var queries = [];
+  function t(q, v) {
+    queries.push({ q: q, v: v });
+    var single = /^query\(\$id:ID!\)/.test(q);
+    if (o.failBatch && !single) return Promise.reject(new Error('Variable "$i1" got invalid value'));
+    var data = {};
+    Object.keys(v || {}).forEach(function (k) {
+      var alias = single ? 'user' : 'u' + k.slice(1);
+      var rec = o.unknown ? null : (USER_ROSTER[v[k]] || { firstName: 'Member', lastName: String(v[k]).slice(0, 4), isInactive: false });
+      data[alias] = rec;
+    });
+    return Promise.resolve(data);
+  }
+  t.queries = queries;
+  return t;
+}
+// A stored row carrying an id but no name - what the board returns with the Assigned To
+// column out of view. Built through the REAL mapper so the store shape cannot drift.
+function idOnlyRow(s, i, guid) {
+  var row = makeRowIdOnly(i);
+  row.assignedTo = guid;
+  return s.heatApiRowToEntry(row).entry;
+}
+
+function sandboxFor(o) {
+  return {
     Promise: Promise, JSON: JSON, Math: Math, Date: Date, RegExp: RegExp, Error: Error,
     Object: Object, Array: Array, String: String, Number: Number, Boolean: Boolean,
     isNaN: isNaN, isFinite: isFinite, parseFloat: parseFloat, parseInt: parseInt,
@@ -233,7 +356,69 @@ function build(opts) {
     __transport: o.transport || makeTransport({}),
     __today: new Date(2026, 7, 4).setHours(0, 0, 0, 0)
   };
+}
+function build(opts) {
+  var o = opts || {};
+  // computeVerdict stays STUBBED here (see PRELUDE): these tests assert which facts the scan
+  // hands the engine. The real engine is exercised by buildVerdict() below.
+  var src = [PRELUDE, SRC_PAGING, SRC_FIND, SRC_MAP, SRC_CAPTURE, SRC_TOTAL, SRC_MARSHAL, SRC_USERS, SRC_NEXTSTEP, SRC_SCAN].join('\n\n');
+  (o.mutations || []).forEach(function (m) { src = mutate(src, m[0], m[1]); });
+  var sandbox = sandboxFor(o);
   vm.runInNewContext(src, sandbox, { filename: 'heat-slice.js' });
+  return sandbox;
+}
+// The REAL threshold + verdict engines, with no computeVerdict stub in scope.
+var VERDICT_PRELUDE = [
+  'var __log = [];',
+  'var console = { info: function () { }, warn: function () { } };',
+  'function dSince(ts) { return Math.floor((__today - ts) / 86400000); }',
+  'function dUntil(ts) { return Math.ceil((ts - __today) / 86400000); }',
+  'function cleanName(s) { return String(s == null ? "" : s).trim(); }',
+  'function ackGet() { return false; }',
+  'function bwnConfig() { return __cfg; }',
+  'function thresholdsFor(status, prioText, C, sla) { return bwnThresholdsFor(status, prioText, C, sla); }',
+  'var BWN = {',
+  '  cfg: function () { return __cfg; },',
+  '  parseUSDate: function (s) { var m = /^(\\d{1,2})\\/(\\d{1,2})\\/(\\d{4})$/.exec(String(s == null ? "" : s)); if (!m) return null; var d = new Date(Number(m[3]), Number(m[1]) - 1, Number(m[2])); d.setHours(0, 0, 0, 0); return d.getTime(); },',
+  '  money: function (n) { return "$" + n.toLocaleString("en-US", { minimumFractionDigits: 2, maximumFractionDigits: 2 }); },',
+  '  parseMoney: function (s) { var m = (s || "").match(/\\$\\s*([\\d,]+(?:\\.\\d{1,2})?)/); return m ? parseFloat(m[1].replace(/,/g, "")) : null; },',
+  '  parseBare: function (s) { var n = parseFloat(String(s || "").replace(/[$,\\s]/g, "")); return isNaN(n) ? null : n; },',
+  '  parseNoteDateLoose: function () { return null; }',
+  '};'
+].join('\n');
+// Everything the real engine leans on that is NOT the engine: DOM reads, money formatting,
+// note-date parsing, the escalation tier. Stubbed as leaves - none of them decides WHETHER a
+// step fires, they only decorate one that already did.
+var ENGINE_PRELUDE = [
+  'function nvVendor(s) { return (s || "").replace(/\\s+/g, " ").trim().toUpperCase(); }',
+  'function readDocs() { return null; }',                 // DOM read; a list row has none
+  'function statPrefix(a) { return String(a.key || "").split(":")[0]; }',
+  'function fmt(n) { return "$" + Number(n || 0).toFixed(2); }',
+  'function bwnEscalationTier(sev, prioNum, rank) { return { tier: "mgmt", label: "management" }; }',
+  'function nudgedPrefixes() { return {}; }',
+  'function stagePlanPush() { }'
+].join('\n');
+function buildEngine(opts) {
+  var o = opts || {};
+  var src = [VERDICT_PRELUDE, ENGINE_PRELUDE, SRC_MAP, SRC_THRESH, SRC_ENGINE_DEPS, SRC_ENGINE, SRC_VERDICT, SRC_MARSHAL, SRC_NEXTSTEP].join('\n\n')
+    // heatNextStep calls the PUBLISHED reference; in the file that assignment is the slice's
+    // end marker, so wire it here exactly as the module does at load time.
+    + '\nvar bwnActsEngine = computeNextActions;\n';
+  (o.mutations || []).forEach(function (m) { src = mutate(src, m[0], m[1]); });
+  var sandbox = sandboxFor(o);
+  sandbox.__cfg = o.cfg || { hrsWarn: 60, hrsBad: 120, activeMult: 0.5, dueWarnDays: 3, schedGraceDays: 1, noteStaleDays: 7, gpBad: 15, gpWarn: 25, targetGP: 35 };
+  sandbox.BWN_PARSE_NOTE = null;
+  vm.runInNewContext(src, sandbox, { filename: 'engine-slice.js' });
+  return sandbox;
+}
+function buildVerdict(opts) {
+  var o = opts || {};
+  var src = [VERDICT_PRELUDE, SRC_THRESH, SRC_VERDICT, SRC_MARSHAL].join('\n\n');
+  (o.mutations || []).forEach(function (m) { src = mutate(src, m[0], m[1]); });
+  var sandbox = sandboxFor(o);
+  // The live defaults, so the numbers in these assertions are the numbers on the board.
+  sandbox.__cfg = o.cfg || { hrsWarn: 60, hrsBad: 120, activeMult: 0.5, dueWarnDays: 3, schedGraceDays: 1, noteStaleDays: 7 };
+  vm.runInNewContext(src, sandbox, { filename: 'verdict-slice.js' });
   return sandbox;
 }
 
@@ -355,9 +540,7 @@ console.log('\n-- row mapping: __typename must not outrank the real field --');
   var s = build({});
   var e = s.heatApiRowToEntry(makeRow(0)).entry;
   A.eq('priority is the label, not the type name', e.prio, 'Yellow - Medium Priority');
-  A.eq('DNE is the amount, not the type name', e.dne, '$89871.10');
   A.eq('status', e.status, 'Awaiting Client Approval');
-  A.eq('hours in status', e.hrs, '1293.5');
   A.eq('age in days', e.days, '201');
   A.eq('scheduled date is the next onsite date', e.sched, '8/10/2026');
   A.eq('expected completion (nested under priority)', e.exp, '8/20/2026');
@@ -369,6 +552,318 @@ console.log('\n-- row mapping: __typename must not outrank the real field --');
   var e2 = s.heatApiRowToEntry(makeRowPriorityFirst(0)).entry;
   A.eq('sched still prefers next-onsite when priority is emitted first', e2.sched, '8/10/2026');
   A.eq('and the rest of the row is unchanged by the reorder', [e2.prio, e2.exp, e2.status], [e.prio, e.exp, e.status]);
+})();
+
+console.log('\n-- v3.19 FAULT 1: an id must never be read as a name --');
+(function () {
+  var s = build({});
+  var e = s.heatApiRowToEntry(makeRow(0)).entry;
+  A.eq('the assignee is the member NAME, even though the id key sorts first', e.assignee, 'Daniel Russell');
+  A.eq('and the id is kept separately for the lookup', e.assigneeId, 'ad017f63-30f6-4074-b073-cec166f9aa7b');
+  A.ok('no GUID reaches the assignee slot', !s.heatIsGuid(e.assignee), e.assignee);
+
+  // The column-not-in-view case: only the id is on the row.
+  var eIdOnly = s.heatApiRowToEntry(makeRowIdOnly(0)).entry;
+  A.eq('with no name field the assignee is BLANK, not the id', eIdOnly.assignee, '');
+  A.eq('and the id is carried so it can be resolved', eIdOnly.assigneeId, 'ad017f63-30f6-4074-b073-cec166f9aa7b');
+
+  // A nested member object: two keys, neither of which is the whole name.
+  var nested = omitKeys(makeRow(0), ['assignedTo', 'assignedToMemberName']);
+  nested.assignedTo = { __typename: 'User', id: 'ad017f63-30f6-4074-b073-cec166f9aa7b', firstName: 'Daniel', lastName: 'Russell' };
+  A.eq('first + last are joined, not truncated to the first', s.heatApiRowToEntry(nested).entry.assignee, 'Daniel Russell');
+
+  // Shape test, not a key blocklist: an id under a name nobody predicted still cannot display.
+  var odd = omitKeys(makeRow(0), ['assignedTo', 'assignedToMemberName']);
+  odd.assigneeName = '498aa8d3-d697-4493-83f1-abaa366bd575';
+  A.eq('an id-shaped value under a NAME-shaped key is still refused', s.heatApiRowToEntry(odd).entry.assignee, '');
+
+  A.eq('a GUID is recognised', s.heatIsGuid('980fa5bd-e655-4917-aad7-6d9cd49752e2'), true);
+  A.eq('a name is not', s.heatIsGuid('Daniel Russell'), false);
+  A.eq('and neither is a WO number', s.heatIsGuid('344409'), false);
+})();
+
+console.log('\n-- v3.19 FAULT 2: timeInStatus is MINUTES, the model is HOURS --');
+(function () {
+  var s = build({});
+  // 81001 minutes = 1350.02h = 56d. As hours it would be 9.2 years, on a 201-day-old WO.
+  A.eq('minutes are converted to hours', s.heatApiRowToEntry(makeRow(0)).entry.hrs, '1350');
+
+  // A key that SAYS hours is trusted as hours - no double conversion, no heuristic.
+  var hoursRow = omitKeys(makeRow(0), ['timeInStatus']);
+  hoursRow.hoursInStatus = 1350;
+  A.eq('an hours-named key is read as hours', s.heatApiRowToEntry(hoursRow).entry.hrs, '1350');
+
+  // Both present: the explicit hours key wins, whatever the key order.
+  var both = omitKeys(makeRow(0), ['timeInStatus']);
+  both.hoursInStatus = 1350;
+  both.timeInStatus = 81001;
+  A.eq('hours beats minutes when the row carries both', s.heatApiRowToEntry(both).entry.hrs, '1350');
+
+  var none = omitKeys(makeRow(0), ['timeInStatus']);
+  A.eq('no clock at all stays blank, never zero', s.heatApiRowToEntry(none).entry.hrs, '');
+  A.eq('sub-hour values keep one decimal', s.heatApiRowToEntry((function () { var r = omitKeys(makeRow(0), ['timeInStatus']); r.timeInStatus = 45; return r; })()).entry.hrs, '0.8');
+})();
+
+console.log('\n-- v3.19 FAULT 3: money is in MINOR UNITS with its own precision --');
+(function () {
+  var s = build({});
+  var e = s.heatApiRowToEntry(makeRow(0)).entry;
+  A.eq('DNE is scaled by precision, not printed raw', e.dne, '$14,485.64');
+  A.eq('vendor NTE too', e.nte, '$10,588.66');
+  A.eq('and the numbers are kept for comparison', [e.dneAmt, e.nteAmt], [14485.64, 10588.66]);
+
+  // No precision key -> the value is already in major units and must not be scaled.
+  var plain = omitKeys(makeRow(0), ['doNotExceed']);
+  plain.doNotExceed = 500;
+  A.eq('a bare number with no precision is left alone', s.heatApiRowToEntry(plain).entry.dne, '$500.00');
+
+  // Already formatted upstream (a DOM-ish shape) -> passed through, not re-scaled.
+  var fmt = omitKeys(makeRow(0), ['doNotExceed']);
+  fmt.doNotExceed = '$1,448.56';
+  A.eq('a pre-formatted string is not double-converted', s.heatApiRowToEntry(fmt).entry.dne, '$1,448.56');
+
+  var noneM = omitKeys(makeRow(0), ['doNotExceed', 'totalNTE']);
+  A.eq('absent money stays blank, never $0.00', [s.heatApiRowToEntry(noneM).entry.dne, s.heatApiRowToEntry(noneM).entry.nte], ['', '']);
+})();
+
+console.log('\n-- v3.19: fields the board returned and the audit ignored --');
+(function () {
+  var s = build({});
+  var e = s.heatApiRowToEntry(makeRow(0)).entry;
+  A.eq('phase is read', e.phase, 'Open');
+  A.eq('the server’s own signed overdue clock is read', e.remDays, -88);
+  A.eq('SLA facts come off the row, not out of the label text',
+    [e.sla.responseMinutes, e.sla.slaMinutes, e.sla.category], [4320, 201600, 'High']);
+
+  // A list of plain strings used to be dropped by heatFlatten entirely.
+  A.eq('a string array is joined', e.vendors, 'FACE N SON\'S LLC, LSI INDUSTRIES INC');
+  A.eq('and marked as read', e.vendorsKnown, true);
+
+  // The distinction the no-vendor signal rests on: read-and-empty vs never-read.
+  var empty = omitKeys(makeRow(0), ['vendorNames']);
+  empty.vendorNames = [];
+  var eE = s.heatApiRowToEntry(empty).entry;
+  A.eq('an EMPTY vendor list is a fact: known, blank', [eE.vendorsKnown, eE.vendors], [true, '']);
+  var missing = omitKeys(makeRow(0), ['vendorNames']);
+  A.eq('an ABSENT vendor field is not a fact', s.heatApiRowToEntry(missing).entry.vendorsKnown, false);
+})();
+
+console.log('\n-- v3.19: the status clock scales off the client SLA, not a parsed label --');
+(function () {
+  var s = buildVerdict({});
+  // Live labels, verbatim. Only the first of these carries a P-number, so before v3.19
+  // every other client on the board fell through to a neutral 1.0x - priority scaling was
+  // real only for Pilot.
+  A.eq('a P-numbered label still scales when there are no SLA facts',
+    s.bwnThresholdsFor('Awaiting Client Approval', 'P1 Emergency', null, null).bad, 30);
+  A.eq('"SEV 4" carries no P-number and cannot scale on its own',
+    s.bwnThresholdsFor('Awaiting Client Approval', 'SEV 4', null, null).bad, 120);
+  A.eq('nor can "Emergency Life/Safety/Operations: Same Day Service"',
+    s.bwnThresholdsFor('Awaiting Client Approval', 'Emergency Life/Safety/Operations: Same Day Service', null, null).bad, 120);
+
+  // With the row's own response clock, the same unparseable labels scale correctly.
+  A.eq('a same-day response promise (240 min) pulls the limit in',
+    s.bwnThresholdsFor('Awaiting Client Approval', 'Emergency Life/Safety/Operations: Same Day Service', null, { responseMinutes: 240 }).bad, 30);
+  A.eq('a 3-day promise (4320 min) pushes it out',
+    s.bwnThresholdsFor('Awaiting Client Approval', 'P2 Next Day', null, { responseMinutes: 4320 }).bad, 240);
+  A.eq('and the clamp stops a 30-day SLA from parking a WO permanently quiet',
+    s.bwnThresholdsFor('Awaiting Client Approval', 'P4 Normal', null, { responseMinutes: 43200 }).bad, 240);
+  A.eq('the category is the fallback when there is no response clock',
+    s.bwnThresholdsFor('Awaiting Client Approval', 'Unknown', null, { category: 'Emergency' }).bad, 30);
+  A.eq('"Standard" is neutral', s.bwnThresholdsFor('Awaiting Client Approval', 'Unknown', null, { category: 'Standard' }).bad, 120);
+  A.eq('an unrecognised category falls back to the label parse, never harsher',
+    s.bwnThresholdsFor('Awaiting Client Approval', 'Unknown', null, { category: 'Whatever' }).bad, 120);
+
+  A.eq('the SLA basis is reported so the panel can say which clock judged the row',
+    [s.bwnThresholdsFor('x', 'y', null, { responseMinutes: 240 }).sla, s.bwnThresholdsFor('x', 'y', null, null).sla], [true, false]);
+
+  // Additive: three-arg callers (WO Assist's header read, the DOM scan) are untouched.
+  A.eq('the 3-arg call is byte-for-byte the old behaviour',
+    [s.bwnThresholdsFor('Scheduled', 'P2 Next Day', null).warn, s.bwnThresholdsFor('Scheduled', 'P2 Next Day', null).bad],
+    [15, 30]);
+})();
+
+console.log('\n-- v3.19: the new verdict signals --');
+(function () {
+  var s = buildVerdict({});
+  function V(over) {
+    var f = {
+      status: 'Awaiting Client Approval', prio: 'Yellow - Medium Priority', phase: 'Open',
+      ageDays: 201, hrs: NaN, expTs: null, schedTs: null, lastNoteTs: null,
+      remDays: null, sla: null, vendors: undefined, vendorsKnown: undefined,
+      dneAmt: undefined, nteAmt: undefined, assignee: '', assigneeInactive: undefined
+    };
+    Object.keys(over || {}).forEach(function (k) { f[k] = over[k]; });
+    return s.computeVerdict(f, s.__cfg);
+  }
+  A.eq('a clean row is sev 0', V({}).sev, 0);
+
+  // THE 60x FAULT, as a verdict: 3000 minutes is 50 hours - inside a 120h limit. Read as
+  // hours it is 3000, 25x over, and the row goes red for no reason. This is the assertion
+  // that would have caught "red 217 of 242".
+  A.eq('50h in status (3000 minutes) is not a problem', V({ hrs: 50 }).sev, 0);
+  A.eq('but 3000 "hours" is red', V({ hrs: 3000 }).sev, 2);
+
+  // remainingDays as the overdue fallback when the complete-by column is out of view.
+  A.eq('no complete-by date + a negative day count is overdue', V({ remDays: -88 }).sev, 2);
+  A.ok('and it says how far', /overdue 88d/.test(V({ remDays: -88 }).reasons.join('|')), V({ remDays: -88 }).reasons.join('|'));
+  A.eq('a positive count inside the warn window is amber', V({ remDays: 2 }).sev, 1);
+  A.eq('a comfortable count is silent', V({ remDays: 30 }).sev, 0);
+  // Never counted twice: a real date wins and the fallback stays out.
+  var both = V({ expTs: new Date(2026, 7, 20).setHours(0, 0, 0, 0), remDays: -88 });
+  A.eq('a readable date beats the day count, and only one of them fires', both.reasons.length, 0);
+
+  // Phase as a terminal signal for statuses the name regex cannot know about.
+  A.eq('a red clock on a Closed-phase WO is silent', V({ hrs: 3000, phase: 'Closed' }).sev, 0);
+  A.eq('Canceled too', V({ hrs: 3000, phase: 'Canceled' }).sev, 0);
+  A.eq('an Open phase does not suppress anything', V({ hrs: 3000, phase: 'Open' }).sev, 2);
+
+  // No vendor on a WO that implies one is committed.
+  var nv = V({ status: 'Scheduled', vendorsKnown: true, vendors: '' });
+  A.eq('scheduled with nobody assigned is amber', nv.sev, 1);
+  A.ok('and names the status', /no vendor on a "Scheduled" WO/.test(nv.reasons.join('|')), nv.reasons.join('|'));
+  A.eq('a vendor present is silent', V({ status: 'Scheduled', vendorsKnown: true, vendors: 'ACME' }).sev, 0);
+  A.eq('"Pending Dispatch" with no vendor is its NORMAL state, not a finding',
+    V({ status: 'Pending Dispatch', vendorsKnown: true, vendors: '' }).sev, 0);
+  A.eq('"Pending Schedule" likewise', V({ status: 'Pending Schedule', vendorsKnown: true, vendors: '' }).sev, 0);
+  // Those two are excluded by the status list itself ("Schedule" is not "Scheduled").
+  // The `^pending` guard is for the other shape: a WAITING status that does reach the
+  // list. Umbrava lets a tenant name its own statuses and the live board already carries
+  // "Pending Materials Supplier" and "Vendor Proposal Required", so a "Pending Vendor
+  // Proposal" is a status this tenant could add tomorrow - and waiting for a proposal is
+  // precisely when there is legitimately no vendor yet.
+  A.eq('a "Pending ..." status that DOES reach the list is still not a finding',
+    V({ status: 'Pending Vendor Proposal', vendorsKnown: true, vendors: '' }).sev, 0);
+  A.eq('while the settled form of the same status IS',
+    V({ status: 'Vendor Proposal Approved', vendorsKnown: true, vendors: '' }).sev, 1);
+  A.eq('and a field that was never read is never a finding',
+    V({ status: 'Scheduled', vendorsKnown: false, vendors: '' }).sev, 0);
+
+  // Committed vendor cost over the client's authorization.
+  var ov = V({ dneAmt: 14485.64, nteAmt: 20000 });
+  A.eq('vendor NTE over DNE is red', ov.sev, 2);
+  A.ok('and shows both numbers', /over DNE \$14,485\.64/.test(ov.reasons.join('|')), ov.reasons.join('|'));
+  A.eq('under is silent', V({ dneAmt: 14485.64, nteAmt: 10588.66 }).sev, 0);
+  A.eq('equal is not over', V({ dneAmt: 100, nteAmt: 100 }).sev, 0);
+  A.eq('a zero DNE is not a breach - it is an unset authorization', V({ dneAmt: 0, nteAmt: 100 }).sev, 0);
+  A.eq('one number alone proves nothing', V({ nteAmt: 20000 }).sev, 0);
+
+  // Orphaned WO. Only ever true, never guessed.
+  var orph = V({ assigneeInactive: true, assignee: 'Daniel Russell' });
+  A.eq('assigned to a deactivated account is amber', orph.sev, 1);
+  A.ok('and says who', /inactive user \(Daniel Russell\)/.test(orph.reasons.join('|')), orph.reasons.join('|'));
+  A.eq('an active assignee is silent', V({ assigneeInactive: false }).sev, 0);
+  A.eq('an unknown assignee state is silent', V({ assigneeInactive: undefined }).sev, 0);
+
+  // Kinds drive the snooze, so a new signal must carry a stable kind.
+  A.eq('every new signal has a snoozable kind',
+    [V({ status: 'Scheduled', vendorsKnown: true, vendors: '' }).kinds[0],
+      V({ dneAmt: 1, nteAmt: 2 }).kinds[0],
+      V({ assigneeInactive: true }).kinds[0]],
+    ['novendor', 'nteover', 'orphan']);
+})();
+
+console.log('\n-- v3.19: the next step comes from the playbook, on board facts only --');
+(function () {
+  var s = build({});
+  var e = s.heatApiRowToEntry(makeRow(0)).entry;
+  s.__actsOut = [
+    { key: 'anchor:completion', label: 'Completion package reference', anchor: true },
+    { key: 'phase:client', label: 'Chase the client for approval', why: 'Waiting on the client 12d' }
+  ];
+  var act = s.heatNextStep(e, s.bwnConfig());
+  A.eq('the standing completion ANCHOR is never reported as the next step', act && act.key, 'phase:client');
+  A.eq('and the step is the engine’s own label', act && act.label, 'Chase the client for approval');
+
+  var st = s.__actStates[s.__actStates.length - 1];
+  // Per-field, not one blanket rule - see heatNextStep's comment. `pos` MUST be an array
+  // (the engine dereferences it unguarded) and an empty one emits no PO steps; `docs` MUST
+  // stay null, because `docs.count === 0` is what fires "no documents on file".
+  A.eq('pos is an empty array - the one field the engine dereferences unguarded', st.pos, []);
+  A.eq('every other absent collection is null, so "unread" cannot read as "empty"',
+    [st.docs, st.openTasks, st.noShow, st.stall], [null, null, null, null]);
+  A.eq('money the row cannot know is null, not zero', [st.gpPct, st.nte, st.vendorTotal], [null, null, null]);
+  A.eq('no authored plan is read from a list row', st.authoredPlan, null);
+  A.eq('the clock is passed as a number', st.hrs, 1350);
+  A.eq('the complete-by date becomes a due verdict', [st.due.kind, st.due.label], ['ok', 'Due 16d']);
+  A.eq('note age is days, from the row’s own last-note date', st.staleDays, 13);
+  A.eq('identity rides along for the step text', [st.hd.wo, st.hd.tracking], ['W-327000', '1052000']);
+
+  // An overdue row must reach the engine as overdue.
+  var od = s.heatApiRowToEntry(makeRow(1)).entry;
+  od.exp = '7/01/2026';
+  s.heatNextStep(od, s.bwnConfig());
+  var st2 = s.__actStates[s.__actStates.length - 1];
+  A.eq('a passed complete-by date is a bad due verdict', [st2.due.kind, st2.due.label], ['bad', 'Overdue 34d']);
+
+  // No date at all -> null, not a fabricated "due today".
+  var nd = s.heatApiRowToEntry(makeRow(2)).entry;
+  nd.exp = '';
+  s.heatNextStep(nd, s.bwnConfig());
+  A.eq('no complete-by date means no due verdict', s.__actStates[s.__actStates.length - 1].due, null);
+
+  // Degradation: an engine that returns nothing, throws, or is not published at all.
+  s.__actsOut = [{ key: 'anchor:x', label: 'anchor only', anchor: true }];
+  A.eq('an anchor-only list yields no next step', s.heatNextStep(e, s.bwnConfig()), null);
+  s.__actsOut = [];
+  A.eq('an empty list yields no next step', s.heatNextStep(e, s.bwnConfig()), null);
+  s.__actsThrow = true;
+  A.eq('a thrown engine yields null instead of killing the audit', s.heatNextStep(e, s.bwnConfig()), null);
+  A.ok('and says so once', s.__log.join('|').indexOf('next-step engine declined') !== -1, s.__log.join('|'));
+  var before = s.__log.length;
+  s.heatNextStep(e, s.bwnConfig());
+  A.eq('never twice', s.__log.length, before);
+  s.__actsThrow = false;
+  s.bwnActsEngine = null;
+  A.eq('an unpublished engine (WO Assist module off) yields null, not a crash', s.heatNextStep(e, s.bwnConfig()), null);
+})();
+
+console.log('\n-- v3.19: the REAL engine against a real board row (no stub) --');
+(function () {
+  var s = buildEngine({});
+  // Mapped by the REAL mapper in the SAME sandbox, so the row handed to the engine is
+  // byte-for-byte what a scan would have stored.
+  function entryFor(over) {
+    var row = makeRow(0);
+    Object.keys(over || {}).forEach(function (k) { row[k] = over[k]; });
+    return s.heatApiRowToEntry(row).entry;
+  }
+
+  // The fixture: 201 days old, waiting on client approval, 1350h in status, complete-by
+  // 16 days out. The playbook's answer should be to chase the client.
+  var act = s.heatNextStep(entryFor({}), s.__cfg);
+  A.ok('the mature engine accepts a board row and returns a step', !!act, 'got ' + JSON.stringify(act));
+  A.ok('and the step is a real, labelled action', !!(act && act.label && act.key), JSON.stringify(act));
+  A.ok('it is not the standing completion anchor', !(act && act.anchor), JSON.stringify(act && act.key));
+  A.ok('a client-waiting status yields an escalate-or-chase step, not a PO/trip step',
+    /^(escalate|phase|note|ecd)/.test(String(act && act.key)), String(act && act.key));
+
+  // Terminal statuses must yield nothing - the engine's own early return, reached through
+  // heatNextStep with no help from List Heat.
+  A.eq('a Closed WO has no next step', s.heatNextStep(entryFor({ statusName: 'Closed' }), s.__cfg), null);
+  A.eq('a Cancelled WO likewise', s.heatNextStep(entryFor({ statusName: 'Cancelled' }), s.__cfg), null);
+  A.eq('and Paid', s.heatNextStep(entryFor({ statusName: 'Paid' }), s.__cfg), null);
+
+  // The engine must not manufacture PO / no-show / docs steps out of the nulls we pass.
+  var keys = [];
+  ['Scheduled', 'Pending Dispatch', 'In Progress', 'Pending Materials Supplier',
+    'Vendor Proposal Required', 'Awaiting Client Approval', 'Work Complete'].forEach(function (st) {
+      var a = s.heatNextStep(entryFor({ statusName: st }), s.__cfg);
+      if (a) keys.push(st + ' -> ' + a.key.split(':')[0]);
+    });
+  A.ok('every live status the board carries is either answered or silent, never a crash',
+    keys.length >= 4, keys.join(' | '));
+  A.ok('and no step is invented from the PO / trip / document nulls',
+    !/(^|\| )\S+ -> (poacc|pocost|pomat|poconf|noshow|docs|task)\b/.test(keys.join(' | ')), keys.join(' | '));
+
+  // An overdue row must escalate harder than a comfortable one - proof the dates we pass
+  // actually reach the ranking, not just the state object.
+  var overdue = entryFor({});
+  overdue.exp = '5/01/2026';
+  var aOver = s.heatNextStep(overdue, s.__cfg);
+  A.ok('an overdue row still returns a step', !!aOver, JSON.stringify(aOver));
+  A.ok('and the overdue date is what it leads with',
+    /ecd|escalate/.test(String(aOver && aOver.key)), String(aOver && aOver.key));
 })();
 
 // ============================================================================
@@ -452,6 +947,83 @@ function main() {
       A.ok('the reason is recorded', /navigated away/.test(String(s.heatScanNote)), String(s.heatScanNote));
     });
   }).then(function () {
+    console.log('\n-- v3.19: resolving assignee names from ids --');
+    var s = build({ transport: makeUserTransport({}) });
+    var store = {};
+    // Two rows share a coordinator, one has a different one, one already came with a name:
+    // the lookup must be per DISTINCT id, and must not re-read a row that needs nothing.
+    store['/work-orders/1'] = idOnlyRow(s, 1, 'ad017f63-30f6-4074-b073-cec166f9aa7b');
+    store['/work-orders/2'] = idOnlyRow(s, 2, 'ad017f63-30f6-4074-b073-cec166f9aa7b');
+    store['/work-orders/3'] = idOnlyRow(s, 3, '980fa5bd-e655-4917-aad7-6d9cd49752e2');
+    store['/work-orders/4'] = s.heatApiRowToEntry(makeRow(4)).entry;   // arrived with a name
+    return s.heatResolveAssignees(store).then(function (n) {
+      A.eq('every id-only row was filled', n, 3);
+      A.eq('two rows sharing an id both get the name',
+        [store['/work-orders/1'].assignee, store['/work-orders/2'].assignee], ['Daniel Russell', 'Daniel Russell']);
+      A.eq('and the other id resolves independently', store['/work-orders/3'].assignee, 'Carol Serra');
+      A.eq('a row that already had a name is left alone', store['/work-orders/4'].assignee, 'Daniel Russell');
+      A.eq('ONE document, not one per row', s.__transport.queries.length, 1);
+      A.eq('with one alias per DISTINCT id', (s.__transport.queries[0].q.match(/user\(id:/g) || []).length, 2);
+      A.ok('ids ride as variables, never interpolated into the query text',
+        s.__transport.queries[0].q.indexOf('ad017f63') === -1, s.__transport.queries[0].q);
+      A.eq('and the variables carry them', s.__transport.queries[0].v.i0, 'ad017f63-30f6-4074-b073-cec166f9aa7b');
+      A.ok('isInactive is selected, so the orphan signal costs no extra call',
+        /isInactive/.test(s.__transport.queries[0].q), s.__transport.queries[0].q);
+      // The inactive flag has to reach the verdict engine, or an orphan can never alarm.
+      A.eq('the inactive account is recorded on the row', store['/work-orders/3'].assigneeInactive, true);
+      var facts = s.__verdictFacts[s.__verdictFacts.length - 1];
+      A.eq('and the row is re-judged with it', facts.assigneeInactive, true);
+
+      // Cached for the tab: a rescan must not re-ask.
+      var store2 = { '/work-orders/9': idOnlyRow(s, 9, 'ad017f63-30f6-4074-b073-cec166f9aa7b') };
+      return s.heatResolveAssignees(store2).then(function (n2) {
+        A.eq('a second scan resolves from cache', [n2, store2['/work-orders/9'].assignee], [1, 'Daniel Russell']);
+        A.eq('with no new request', s.__transport.queries.length, 1);
+      });
+    });
+  }).then(function () {
+    // An id that does not resolve must still never display as an id.
+    var s = build({ transport: makeUserTransport({ unknown: true }) });
+    var store = { '/work-orders/1': idOnlyRow(s, 1, 'ad017f63-30f6-4074-b073-cec166f9aa7b') };
+    return s.heatResolveAssignees(store).then(function () {
+      A.eq('an unreadable id shows as unresolved, NOT as the id', store['/work-orders/1'].assignee, '(unresolved member)');
+      A.ok('and it is distinct from "(blank)" so the panel cannot conflate them',
+        store['/work-orders/1'].assignee !== '' && store['/work-orders/1'].assignee !== '(blank)');
+    });
+  }).then(function () {
+    // No token: degrade without a request, and still never leak the id.
+    var s = build({ transport: makeUserTransport({}) });
+    s.__tokenOn = false;
+    var store = { '/work-orders/1': idOnlyRow(s, 1, 'ad017f63-30f6-4074-b073-cec166f9aa7b') };
+    return s.heatResolveAssignees(store).then(function () {
+      A.eq('with no token the row degrades to unresolved', store['/work-orders/1'].assignee, '(unresolved member)');
+      A.eq('and nothing was requested', s.__transport.queries.length, 0);
+    });
+  }).then(function () {
+    // 25 distinct ids -> two documents, because one 25-alias document is a bigger blast
+    // radius per failure than two.
+    var s = build({ transport: makeUserTransport({}) });
+    var store = {};
+    for (var i = 0; i < 25; i++) store['/work-orders/' + i] = idOnlyRow(s, i, guidN(i));
+    return s.heatResolveAssignees(store).then(function (n) {
+      A.eq('all 25 filled', n, 25);
+      A.eq('chunked into 2 documents at 20 per document', s.__transport.queries.length, 2);
+      A.eq('20 aliases then 5', s.__transport.queries.map(function (q) { return (q.q.match(/user\(id:/g) || []).length; }), [20, 5]);
+    });
+  }).then(function () {
+    // One bad id rejects the WHOLE GraphQL document, so a chunk failure must not write off
+    // every coordinator in it.
+    var s = build({ transport: makeUserTransport({ failBatch: true }) });
+    var store = {
+      '/work-orders/1': idOnlyRow(s, 1, 'ad017f63-30f6-4074-b073-cec166f9aa7b'),
+      '/work-orders/2': idOnlyRow(s, 2, '980fa5bd-e655-4917-aad7-6d9cd49752e2')
+    };
+    return s.heatResolveAssignees(store).then(function () {
+      A.eq('a rejected batch falls back to single reads',
+        [store['/work-orders/1'].assignee, store['/work-orders/2'].assignee], ['Daniel Russell', 'Carol Serra']);
+      A.eq('one batch attempt plus one read per id', s.__transport.queries.length, 3);
+    });
+  }).then(function () {
     // ========================================================================
     // MUTATION CONTROLS - each reverts one piece of v3.18 and must go red.
     // ========================================================================
@@ -512,6 +1084,77 @@ function main() {
     }, function (err) {
       A.ok('M5 control: without the guard the nulled store throws', /null|undefined/i.test(String(err && err.message)), String(err && err.message));
     });
+  }).then(function () {
+    // ---- v3.19 controls. Each reverts ONE fix and must reproduce the live symptom. ----
+
+    // M6: the pre-v3.19 assignee read - one broad pattern through g(), no GUID refusal.
+    // This is the reported bug, exactly: the panel labelled its buckets with GUIDs.
+    var m6 = [[
+      'var assignee = gName([/(^|\\.)(assignedtomembername|assignedtoname|assigneename|assigneedisplayname|coordinatorname|coordinatormembername|ownername|membername|displayname|fullname)$/i]);',
+      'var assignee = String(g(/assigned.*(to|user|name)|assignee|coordinator|owner.*name/i) || \'\');'
+    ]];
+    var s6 = build({ mutations: m6 });
+    var e6 = s6.heatApiRowToEntry(makeRow(0)).entry;
+    A.eq('M6 control: the old read puts the GUID in the assignee slot', e6.assignee, 'ad017f63-30f6-4074-b073-cec166f9aa7b');
+    A.ok('M6 control: which is what the live panel showed', s6.heatIsGuid(e6.assignee));
+
+    // M7: no minutes conversion - the 60x clock.
+    var m7 = [['hrs = String(Math.round(parseFloat(hrsMinutes) / 6) / 10);', 'hrs = String(parseFloat(hrsMinutes));']];
+    var s7 = build({ mutations: m7 });
+    A.eq('M7 control: without the conversion the row reads 81001h', s7.heatApiRowToEntry(makeRow(0)).entry.hrs, '81001');
+
+    // M8: no precision scaling - money 100x over.
+    var m8 = [['      return n / Math.pow(10, p);', '      return n;']];
+    var s8 = build({ mutations: m8 });
+    A.eq('M8 control: unscaled minor units print 100x', s8.heatApiRowToEntry(makeRow(0)).entry.dne, '$1,448,564.00');
+
+    // M9: no SLA scaling - an unparseable label falls back to a neutral limit, so a
+    // same-day emergency is judged on the same clock as a 30-day job.
+    var m9 = [['    if (sm !== null) mult *= sm;', '    if (false) mult *= sm;']];
+    var s9 = buildVerdict({ mutations: m9 });
+    A.eq('M9 control: without SLA scaling a same-day promise gets the neutral limit',
+      s9.bwnThresholdsFor('Awaiting Client Approval', 'Emergency Life/Safety/Operations: Same Day Service', null, { responseMinutes: 240 }).bad, 120);
+
+    // M10: no "pending" guard - a third of the board goes amber for being at rest.
+    var m10 = [['        !/^pending\\s/i.test(String(f.status || \'\').trim())) {', '        true) {']];
+    var s10 = buildVerdict({ mutations: m10 });
+    A.eq('M10 control: without the guard a WO still WAITING for its proposal is flagged for having no vendor',
+      s10.computeVerdict({ status: 'Pending Vendor Proposal', prio: '', ageDays: 1, hrs: NaN, expTs: null, schedTs: null, lastNoteTs: null, vendorsKnown: true, vendors: '' }, s10.__cfg).sev, 1);
+
+    // M11: no anchor skip - the standing completion reference is reported as the next step.
+    var m11 = [['        for (var i = 0; i < acts.length; i++) if (acts[i] && !acts[i].anchor) return acts[i];', '        return acts[0];']];
+    var s11 = build({ mutations: m11 });
+    s11.__actsOut = [
+      { key: 'anchor:completion', label: 'Completion package reference', anchor: true },
+      { key: 'phase:client', label: 'Chase the client for approval' }
+    ];
+    A.eq('M11 control: without the skip the anchor is reported as the next step',
+      s11.heatNextStep(s11.heatApiRowToEntry(makeRow(0)).entry, s11.bwnConfig()).key, 'anchor:completion');
+
+    // M12: `pos: null` - which is what this code shipped as until the REAL engine was put
+    // under test. `state.pos.forEach` is unguarded, so every row threw, the try/catch
+    // swallowed it, and the column was silently absent on the entire board while a
+    // stub-driven harness reported the feature green. The control proves the array is
+    // load-bearing, against the real engine.
+    var m12 = [['          pos: [], docs: null, openTasks: null, noShow: null, stall: null,', '          pos: null, docs: null, openTasks: null, noShow: null, stall: null,']];
+    var s12 = buildEngine({ mutations: m12 });
+    A.eq('M12 control: pos:null makes the real engine throw, so every row loses its step',
+      s12.heatNextStep(s12.heatApiRowToEntry ? s12.heatApiRowToEntry(makeRow(0)).entry : null, s12.__cfg), null);
+
+    // M13: `docs: {count: 0}` instead of null - "unread" read as "empty", which fabricates a
+    // completion-package chase on every WO at closure off data a board row never carried.
+    var m13 = [['          pos: [], docs: null, openTasks: null, noShow: null, stall: null,', '          pos: [], docs: { count: 0 }, openTasks: null, noShow: null, stall: null,']];
+    var s13 = buildEngine({ mutations: m13 });
+    var e13 = s13.heatApiRowToEntry(makeRow(0)).entry;
+    e13.status = 'Confirm Complete';
+    var a13 = s13.heatNextStep(e13, s13.__cfg);
+    A.eq('M13 control: a zero doc count invents "no documents on file"', a13 && a13.key, 'docs:none');
+    // And the shipped code must NOT do that on the same row.
+    var s13ok = buildEngine({});
+    var e13ok = s13ok.heatApiRowToEntry(makeRow(0)).entry;
+    e13ok.status = 'Confirm Complete';
+    var a13ok = s13ok.heatNextStep(e13ok, s13ok.__cfg);
+    A.ok('and the shipped code does not', !a13ok || a13ok.key !== 'docs:none', String(a13ok && a13ok.key));
   }).then(function () {
     A.finish();
   }, function (err) {
