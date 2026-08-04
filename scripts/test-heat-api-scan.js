@@ -1,18 +1,25 @@
 // test-heat-api-scan.js - node harness for WO List Heat v3.18: the API scan that never ran.
 //
 // WHAT WAS BROKEN, measured against the live board on 2026-08-04 (not inferred):
-//   1. CAPTURE NEVER LATCHED. v3.15-3.17 only accepted a list query when the RESPONSE body
-//      could be read, via res.clone().json() in the fetch/XHR hook. The app aborts its own
-//      fetches on teardown, so every clone read rejected with AbortError - measured across
-//      every operation on the page, board query included. apiList therefore stayed null,
-//      which is why no auto-scan ever ran and why "Scan All" always fell through to the
-//      slow scroll sweep: the overlay demanded a full scan on every arrival at the list.
-//   2. THE PAGING ARG WAS THE WRONG TYPE. Umbrava's board op is PagedWorkOrders with
-//      `page: PageInput!` - an OBJECT, {skip, take}. The replay's key sniffing matched the
-//      name "page" and wrote the NUMBER 1 over it, and the server rejects the whole call:
-//      'Variable "$page" got invalid value 1; Expected type "PageInput" to be an object.'
-//      So even a successful capture could not have produced a full board.
-//   3. __typename OUTRANKED THE REAL FIELD. heatApiRowToEntry takes the first key its
+//   1. THE PAGING ARG WAS THE WRONG TYPE - the live root cause. Umbrava's board op is
+//      PagedWorkOrders with `page: PageInput!` - an OBJECT, {skip, take}. The replay's key
+//      sniffing matched the name "page" and wrote the NUMBER 1 over it, and the server
+//      rejects the whole call. The live console said it outright:
+//      '[BWN HEAT] API scan errored - falling back to scroll scan: Variable "$page" got
+//      invalid value 1; Expected type "PageInput" to be an object.'
+//      So every arrival at the list fell through to the slow scroll sweep, and the manual
+//      button did the same - which is what "still requires a full scan" looked like.
+//   2. A FAILED SCAN THEN LIED. The auto path left heatStore as {} - empty but TRUTHY -
+//      and the DOM tinting pass fills heatStore when it exists, so the viewport's ~23 rows
+//      became the "full board". Live proof: the strip read "of 23 open - full board" on a
+//      213-row board, off a scan that had errored seconds earlier.
+//   3. CAPTURE RESTED ON A RACE. v3.15-3.17 only latched when the RESPONSE body could be
+//      read, via res.clone().json(). Measured: with one more clone reader on the same
+//      responses, every clone read of every operation rejected with AbortError and apiList
+//      stayed null for the whole session; alone, the same read usually wins. A latch that
+//      works only when nothing else is listening is not a latch, so v3.18 latches off the
+//      request body and treats a readable response as a bonus.
+//   4. __typename OUTRANKED THE REAL FIELD. heatApiRowToEntry takes the first key its
 //      regex matches; GraphQL adds __typename to every object, so `priority.__typename`
 //      beat `priority.label` and `doNotExceed.__typename` beat `doNotExceed.amount`.
 //      Priority scales the status time limits, so every API-scanned row would have been
@@ -284,7 +291,7 @@ console.log('\n-- board-shaped from the REQUEST alone --');
   A.ok('a request with no query text is not', s.heatQueryIsWOList({ operationName: 'PagedWorkOrders', variables: boardVars() }) === false);
 })();
 
-console.log('\n-- capture latches with NO readable response (the AbortError case) --');
+console.log('\n-- capture latches with NO readable response (the clone-read race) --');
 (function () {
   var s = build({});
   s.heatRecordCapture(JSON.stringify(boardRequest()), null);
