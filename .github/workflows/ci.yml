@@ -80,6 +80,11 @@ jobs:
       - name: bus identity publish harness (identity ahead of the anchor gate)
         run: node scripts/test-bus-identity-publish.js
 
+      # List Heat v3.18: the capture that never latched (response reads lose a race with the
+      # app's own abort) and the PageInput paging arg the replay used to overwrite with a number.
+      - name: List Heat API scan harness (capture + PageInput paging)
+        run: node scripts/test-heat-api-scan.js
+
   lint:
     name: Lint (advisory)
     runs-on: ubuntu-latest
