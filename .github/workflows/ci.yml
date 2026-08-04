@@ -18,8 +18,6 @@ jobs:
     steps:
       - name: Checkout repository
         uses: actions/checkout@v7
-        # Default checkout does NOT fetch submodules, so the browser-use submodule
-        # stays absent here (it is unrelated Python and not part of this gate).
 
       - name: Setup Node.js
         uses: actions/setup-node@v6
@@ -41,6 +39,41 @@ jobs:
         # Enforces PAT-002: the bwnAI TRANSPORT block must be SHA-identical across
         # bwn-drop-upload / bwn-suite-ai / bwn-wo-audit. Makes that a real gate.
         run: node scripts/test-bwn-ai-phase3.js
+
+      # The four steps below close the 2026-07-31 audit finding that harnesses were
+      # committed but NEVER EXECUTED by CI - a green checkmark said nothing about them.
+      - name: Launcher dock latent-fix harness
+        run: node scripts/test-dock-latent-fixes.js
+
+      - name: W-9 TIN region harness
+        run: node scripts/test-w9-tin-region.js
+
+      - name: WO Audit accounting harness
+        run: node scripts/test-wo-audit-accounting.js
+
+      - name: WO Audit retry-floor harness
+        run: node scripts/test-wo-audit-retry-floor.js
+
+      - name: Bid-out dock registration + ACT_TOOL harness
+        run: node scripts/test-bidout-dock.js
+
+      - name: assist:due severity handoff harness
+        run: node scripts/test-assist-due.js
+
+      - name: PO act re-key harness (sid keys + migration)
+        run: node scripts/test-po-act-keys.js
+
+      - name: vendor-intake flow-guard harness (cross-vendor leak)
+        run: node scripts/test-vendor-intake-flow.js
+
+      - name: assist state round-trip harness (queue-spec step 3)
+        run: node scripts/test-assist-roundtrip.js
+
+      - name: dispatch payload harness (WO number + site number)
+        run: node scripts/test-dispatch-payload.js
+
+      - name: bus identity publish harness (identity ahead of the anchor gate)
+        run: node scripts/test-bus-identity-publish.js
 
   lint:
     name: Lint (advisory)

@@ -96,7 +96,7 @@ const correctness = {
 };
 
 export default [
-  { ignores: ['browser-use/**', '.git/**', '.github/**'] },
+  { ignores: ['.git/**', '.github/**'] },
 
   {
     files: ['**/*.user.js'],

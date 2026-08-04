@@ -1,10 +1,10 @@
 // ==UserScript==
 // @name         BWN Dispatch (Broadway National)
 // @namespace    broadwaynational.bwn
-// @version      0.4.1
+// @version      0.9.0
 // @downloadURL  https://raw.githubusercontent.com/Intermu/userscripts-public/main/bwn-dispatch.user.js
 // @updateURL    https://raw.githubusercontent.com/Intermu/userscripts-public/main/bwn-dispatch.user.js
-// @description  One-click Dispatch for a work order - replaces manually typing a row into Dispatch_Notifications.xlsx. The Dispatch launcher shows only on a WO that is in "Pending Dispatch". It opens a confirm modal prefilled from the BWN Ops Suite bus (Tracking / Location) and a same-origin Umbrava GraphQL read (Priority + the coordinator to ping): it uses the person this WO is assigned to (whoever a supervisor/manager assigned it to, read live when you open it), and when that is a team or blank it falls back to the coordinator from the most recent work order(s) at the same location. The coordinator name + email are editable before you send. On submit it POSTs the 5 fields to the broadway-internal-ops SWA proxy (x-bwn-key gated) which forwards to the HTTP-triggered "Dispatch HTTP" Power Automate flow - the flow adds the row to Dispatch_Notifications.xlsx AND dispatches it (posts a Teams adaptive card to the coordinator and waits for their accept). Dispatching is a coordinator action, so there is no role gate (the x-bwn-key is the boundary). The assignee's email is not on the WO record (Umbrava exposes the coordinator NAME only), so it is resolved from a per-user name->email roster you maintain (seeded with you, and it remembers each coordinator you dispatch to). The flow's secret URL stays server-side; nothing sensitive lives in this script. Registers a single "Dispatch" launcher into the shared dock (bwn:dock:*) - the dock tab is the only launcher; no floating fallback button.
+// @description  One-click Dispatch for a work order - replaces manually typing a row into Dispatch_Notifications.xlsx. The Dispatch launcher shows only on a WO that is in "Pending Dispatch". It opens a confirm modal prefilled from the BWN Ops Suite bus (Tracking) and a same-origin Umbrava GraphQL read (Location as the site NUMBER, Priority, and the coordinator to ping): it uses the person this WO is assigned to (whoever a supervisor/manager assigned it to, read live when you open it), and when that is a team or blank it falls back to the coordinator from the most recent work order(s) at the same location. The coordinator name + email are editable before you send. On submit it POSTs the 5 typed fields plus the WO number (read from the URL, never typed - the flow needs it to deep-link the card, because Tracking is the CLIENT's tracking number and points at the wrong record) to the broadway-internal-ops SWA proxy (x-bwn-key gated) which forwards to the HTTP-triggered "Dispatch HTTP" Power Automate flow - the flow adds the row to Dispatch_Notifications.xlsx AND dispatches it (posts a Teams adaptive card to the coordinator and waits for their accept). Dispatching is a coordinator action, so there is no role gate (the x-bwn-key is the boundary). The assignee's email is not on the WO record (Umbrava exposes the coordinator NAME only), so it is resolved from a per-user name->email roster you maintain (seeded with you, and it remembers each coordinator you dispatch to); for a coordinator the roster has never met it falls back to a GUESS derived from the house name pattern and the signed-in user's own domain, shown with a "check it before you send" warning and always editable - never a silent send to an address nobody confirmed. The flow's secret URL stays server-side; nothing sensitive lives in this script. Registers a single "Dispatch" launcher into the shared dock (bwn:dock:*) - the dock tab is the only launcher; no floating fallback button.
 // @match        https://app.umbrava.com/*
 // @run-at       document-idle
 // @noframes
@@ -19,7 +19,7 @@
 (function () {
   'use strict';
 
-  var VER = '0.4.0';
+  var VER = '0.9.0';   // keep in step with @version - this is what the console banner reports
   var FONT = "-apple-system,BlinkMacSystemFont,'Segoe UI','Helvetica Neue',Arial,sans-serif";
   var GREEN = '#0d3d26';          // BWN Ops Suite brand green - matches CC Request / WO Audit
   var SWA_BASE = 'https://green-stone-0717dab0f.7.azurestaticapps.net';
@@ -110,7 +110,20 @@
   // All selectors proven live (bwn-ask CORE_Q / STATUS_Q / COORD_Q). Isolated queries -
   // an error just falls back to the bus / fail-open gating.
   var GATE_Q = 'query($n:Int!){ workOrder(workOrderNumber:$n){ statusName } }';
-  var DISP_WO_Q = 'query($n:Int!){ workOrder(workOrderNumber:$n){ trackingNumber locationId locationName assignedToMemberName priority{ label } } }';
+  // !! `assignedToMemberName` DOES NOT EXIST on type WorkOrder. It was in this query until
+  // 2026-08-03, and because ONE invalid field rejects the WHOLE GraphQL document with a 400, the
+  // dispatch modal's live read had never returned - Location, Priority, the coordinator name and
+  // the email suggestion were all dead, silently, for the life of the feature. Probed live on
+  // W-383472. Every selector below was verified against the running schema the same session.
+  //   assignedTo    ID scalar, a USER GUID - resolve it through USER_Q, there is no name here
+  //   locationId    ID scalar, a GUID - NOT a site number, never put it in the Location field
+  //   locationNumber String, "PFJ 0674"-shaped - siteNumberOf() derives the bare number
+  var DISP_WO_Q = 'query($n:Int!){ workOrder(workOrderNumber:$n){ trackingNumber locationId locationNumber locationName assignedTo priority{ label } } }';
+  // The assignee, resolved from the GUID above. `emailAddress` is the WO assignee's REAL address:
+  // the 2026-07-24 recon concluded no email was readable anywhere, but that was the REST
+  // `search_members` endpoint - GraphQL `user(id:)` carries it. That makes the derived guess a
+  // last resort rather than the normal path. `id` is ID! - passing ID gets a type error.
+  var USER_Q = 'query($id:ID!){ user(id:$id){ firstName lastName emailAddress isInactive } }';
 
   // The WO's default assignee is often the CLIENT's team (e.g. "Team J"), not a dispatchable
   // person. Treat a "Team ..." name as not-a-person so we fall back to a real coordinator.
@@ -149,7 +162,13 @@
   // isolated: any miss leaves the name blank for manual entry, never fabricated. Cached/session.
   var _locField;             // undefined=unqueried, null=none found, else {field,locArg,argType,container}
   var _locRoster = {};       // locationId -> [wo...]  (session cache)
-  var ROSTER_SEL = 'number assignedToMemberName workOrderDate creationDate';
+  // Same dead field as DISP_WO_Q carried: `assignedToMemberName` does not exist, so this query
+  // 400'd too and the location-history fallback has never produced a name either. Now selects the
+  // GUID. STILL UNPROVEN: `listWorkOrders` is a valid query but returned 0 rows for every
+  // location and every filter shape tried on 2026-08-03 (by GUID and by locationNumber), so this
+  // path is expected to stay inert until someone works out which `statuses` argument it wants.
+  // It only runs when the WO's own assignee fails to resolve to a person, which is now rare.
+  var ROSTER_SEL = 'number assignedTo workOrderDate creationDate';
   function unwrapType(t) { var isList = false, cur = t; while (cur && cur.ofType) { if (cur.kind === 'LIST') isList = true; cur = cur.ofType; } return { name: cur && cur.name, kind: cur && cur.kind, isList: isList }; }
   function discoverLocField() {
     if (_locField !== undefined) return Promise.resolve(_locField);
@@ -196,6 +215,21 @@
     });
   }
   function ts(d) { var n = Date.parse(d); return isNaN(n) ? 0 : n; }
+  // "PFJ 0674" -> "674". The flow's `Lookup site` keys on the bare site number, and Umbrava's
+  // `locationNumber` carries a client prefix and zero-padding on some tenants. Conservative on
+  // purpose: LAST whitespace-separated token, digits only, non-zero - anything else yields '' and
+  // the field is left empty for the coordinator to type. Site codes like "DFW6", "IFM-JAX3" and
+  // "091 FM" deliberately do NOT derive: a wrong key makes `Lookup site` miss SILENTLY, which is
+  // the failure this whole line of work started from, and an empty required field cannot.
+  // "PFJ 0000" (the corporate pseudo-site) yields '' too.
+  function siteNumberOf(locNum) {
+    var s = String(locNum == null ? '' : locNum).trim();
+    if (!s) return '';
+    var tok = s.split(/\s+/).pop();
+    if (!/^\d+$/.test(tok)) return '';
+    var num = parseInt(tok, 10);
+    return num > 0 ? String(num) : '';
+  }
   // The person who had the last (most recent) work order at this location - skipping the
   // current WO and any team-assigned prior WOs.
   function siteCoordinator(locationId, curNumber) {
@@ -231,6 +265,35 @@
   function seedRosterWithMe() {
     var me = actor();
     if (me.name && me.email) rosterRemember(me.name, me.email);
+  }
+  // Derived-address SUGGESTION - the LAST resort, used only when the roster has never seen this
+  // coordinator and they are not the signed-in user. Before this the field was simply blank and
+  // the address had to be typed by hand (measured 2026-08-03: a coordinator the roster had never
+  // met, typed manually mid-dispatch).
+  //
+  // It is a GUESS and is labelled as one in the UI, because the evidence is thin: the house
+  // pattern is first initial + last name, and only two addresses have ever been observed to
+  // confirm it. Anything unusual - a middle name in the display name, a married name, a second
+  // person with the same initial and surname, a contractor on another domain - produces a
+  // plausible-looking wrong address, and this is a field that decides who gets the Teams card.
+  // Hence: never overwrite a roster hit, never overwrite anything typed, always visibly flagged,
+  // always editable. A guess only enters the roster if a human sent it (rosterRemember on
+  // submit), which is the confirmation step.
+  //
+  // The domain comes from the SIGNED-IN user, never a literal: this script is published to a
+  // public mirror, so no client domain is baked into it, and a coordinator signed in elsewhere
+  // gets no guess at all rather than a wrong-domain one.
+  function guessEmail(name) {
+    if (!isPerson(name)) return '';                       // "Team J" is not a person to guess at
+    var dom = String((actor().email || '')).split('@')[1] || '';
+    if (!dom) return '';                                  // no signed-in address -> fail closed
+    var parts = String(name || '').toLowerCase().replace(/[^a-z\s'-]+/g, ' ').split(/\s+/)
+      .map(function (t) { return t.replace(/[^a-z]/g, ''); })   // O'Brien -> obrien, Smith-Jones -> smithjones
+      .filter(Boolean);
+    if (parts.length < 2) return '';                      // one token is not a first + last name
+    var first = parts[0], last = parts[parts.length - 1];
+    if (!first || last.length < 2) return '';
+    return first.charAt(0) + last + '@' + dom;
   }
   function manageRoster() {
     var o = loadRoster();
@@ -287,7 +350,7 @@
   var EMAIL_RE = /^[^\s@]+@[^\s@]+\.[^\s@]+$/;
 
   var openEl = null;
-  function closeModal() { if (openEl) { openEl.remove(); openEl = null; document.removeEventListener('keydown', onKey); } }
+  function closeModal() { if (openEl) { openEl.remove(); openEl = null; emailGuessEl = null; document.removeEventListener('keydown', onKey); } }
   function onKey(e) { if (e.key === 'Escape') closeModal(); }
 
   function buildModal() {
@@ -304,11 +367,23 @@
     // Only seed the name from the bus if it is a PERSON; a team ("Team J") is not a dispatch
     // target, so leave it blank and let the live read / location history fill a real coordinator.
     var busCoord = (bus && bus.coordinator && isPerson(bus.coordinator)) ? String(bus.coordinator).trim() : '';
+    // Location is deliberately NOT seeded from the bus. The bus carries the location DISPLAY
+    // NAME (Core reads the WO's location dropdown label, e.g. "Flying J PFJ 0722 (865) 531-7400"),
+    // but the flow's `Lookup site` keys on the bare site NUMBER - so a name here both made the
+    // Teams card unreadable and silently missed the site lookup on every dispatch (measured on
+    // the first correctly-targeted card, 2026-08-03). The live read below fills the site number
+    // from `locationId`; the name is shown as a hint under the field instead of being sent.
+    // Tracking has the SAME hazard one field up, and it bit on 2026-08-03. The bus value is a DOM
+    // scrape of the header's tracking-number element; when that is missing or the bus entry is
+    // stale, this used to fall back to the WO number IMMEDIATELY - which filled the field, so the
+    // live read's `setIfEmpty` could never correct it. Queue row 466 went out as Tracking 383441
+    // on a WO whose real client tracking number is 1273641. The fallback now happens only AFTER
+    // the live read has had its say (see hydrateFromUmbrava), so a blank here is temporary.
     var pre = {
       AssignedToName: busCoord,
       AssigneeEmail: busCoord ? rosterLookup(busCoord) : '',
-      Tracking: (bus && bus.tracking) ? String(bus.tracking).trim() : (woId || ''),
-      Location: (bus && bus.location) ? String(bus.location).trim() : '',
+      Tracking: (bus && bus.tracking) ? String(bus.tracking).trim() : '',
+      Location: '',
       Priority: ''
     };
 
@@ -365,12 +440,49 @@
       form.appendChild(wrap);
     });
 
-    // When the coordinator name is (re)typed, offer the roster email if we know it and the
-    // email field is still empty / untouched.
+    // The site NAME is context for the human, never payload: it tells the coordinator which site
+    // the bare number belongs to without putting a name back into the field the flow looks up on.
+    var siteName = (bus && bus.location) ? String(bus.location).trim() : '';
+    if (siteName && inputs.Location && inputs.Location.parentNode) {
+      var siteHint = document.createElement('div');
+      siteHint.style.cssText = 'font-size:11.5px;color:#5b7367;margin-top:4px;';
+      siteHint.textContent = siteName;
+      inputs.Location.parentNode.appendChild(siteHint);
+    }
+
+    // The "this address was guessed" warning, rendered under the email field. Created before the
+    // first fillEmailFor call below so a guess made during hydration has somewhere to announce
+    // itself.
+    emailGuessEl = document.createElement('div');
+    emailGuessEl.style.cssText = 'font-size:11.5px;color:#8a5a00;background:#fdf4e3;border:1px solid #f0dcb4;border-radius:6px;padding:5px 8px;margin-top:4px;display:none;';
+    if (inputs.AssigneeEmail && inputs.AssigneeEmail.parentNode) inputs.AssigneeEmail.parentNode.appendChild(emailGuessEl);
+    // Typing in the field makes it the operator's value, not a guess.
+    inputs.AssigneeEmail.addEventListener('input', function () { markEmailGuess(false); });
+    // The bus may have handed us a coordinator the roster has never met - resolve now rather than
+    // waiting on the live read, which may never arrive.
+    if (inputs.AssignedToName.value.trim() && !inputs.AssigneeEmail.value.trim()) {
+      fillEmailFor(inputs, touched, inputs.AssignedToName.value);
+    }
+
+    // When the coordinator name is (re)typed, resolve the email the same way hydration does -
+    // roster, then self, then a flagged guess. This used to inline a roster-only lookup, which
+    // meant a name typed by hand got no suggestion at all.
+    // `input`, not `change`: `change` only fires on BLUR, so the warning could not appear while
+    // the operator was still typing the name - and blur usually IS the click on Dispatch, which
+    // would have shown the warning for the few milliseconds before the form submitted. Debounced
+    // so a half-typed name ("Daniel Ru") does not briefly resolve to a wrong-but-plausible
+    // address; `change` is kept as a backstop for paste and autofill.
+    var nameTimer = null;
+    function resolveEmailFromName() {
+      fillEmailFor(inputs, touched, inputs.AssignedToName.value, true);
+    }
+    inputs.AssignedToName.addEventListener('input', function () {
+      if (nameTimer) clearTimeout(nameTimer);
+      nameTimer = setTimeout(resolveEmailFromName, 400);
+    });
     inputs.AssignedToName.addEventListener('change', function () {
-      if (touched.AssigneeEmail || inputs.AssigneeEmail.value.trim()) return;
-      var em = rosterLookup(inputs.AssignedToName.value);
-      if (em) inputs.AssigneeEmail.value = em;
+      if (nameTimer) { clearTimeout(nameTimer); nameTimer = null; }
+      resolveEmailFromName();
     });
 
     var msg = document.createElement('div');
@@ -406,6 +518,14 @@
       });
       if (missing.length) { msg.textContent = 'Required: ' + missing.join(', '); return; }
       if (!EMAIL_RE.test(payload.AssigneeEmail)) { msg.textContent = 'Assignee Email must be a valid email address.'; return; }
+
+      // The WO number, read from the URL and never typed. It is NOT Tracking: Tracking is the
+      // CLIENT's tracking number wherever the WO has one (it only falls back to the WO number
+      // when it does not), so the flow's `Tracking Link` column - built from Tracking since
+      // 07-27 - deep-links every card to the wrong record. Measured live 2026-08-03:
+      // /work-orders/1272451 on WO 383112. The proxy accepts this as an optional 6th prop and
+      // forwards it; the link is only actually fixed once the flow maps it, which is Mike's edit.
+      payload.WONumber = woId || '';
 
       var reenable = function () { submit.disabled = false; submit.textContent = 'Dispatch'; };
       submit.disabled = true;
@@ -454,10 +574,12 @@
   }
 
   // Background prefill upgrade: read the current WO live and patch the fields the user has
-  // not typed into. Tracking / Location / Priority fill only if empty. The coordinator NAME
-  // resolves to a PERSON: the WO's live assignee if that is a real person (who a supervisor/
-  // manager assigned it to), else the coordinator from the most recent work order(s) at the
-  // same location; a team assignee is skipped in favour of that history person. Best-effort.
+  // not typed into. Location / Priority fill only if empty. TRACKING is different: the live read
+  // OVERWRITES the bus seed, because the bus value is a DOM scrape and this one is the record.
+  // The coordinator NAME resolves to a PERSON: the WO's live assignee if that is a real person
+  // (who a supervisor/manager assigned it to), else the coordinator from the most recent work
+  // order(s) at the same location; a team assignee is skipped in favour of that history person.
+  // Best-effort.
   function hydrateFromUmbrava(woId, inputs, touched) {
     var n = parseInt(woId, 10);
     function setIfEmpty(k, v) {
@@ -466,35 +588,94 @@
       var el = inputs[k];
       if (el && !touched[k] && !el.value.trim()) el.value = v;
     }
-    function setName(v) {   // overwrite the (maybe stale/blank) prefill unless the user typed
+    // Overwrite the (maybe stale/blank) prefill unless the user typed. `email` is Umbrava's own
+    // record for that person, which outranks everything except a value the operator typed: it is
+    // the system of record, where the roster only records what someone has sent before (possibly
+    // an unverified guess) and the derived guess is a pattern. An address from here is NOT
+    // flagged, because it is not a guess.
+    function setName(v, email, inactive) {
       v = (v == null) ? '' : String(v).trim();
       if (!v || touched.AssignedToName) return;
       inputs.AssignedToName.value = v;
-      fillEmailFor(inputs, touched, v);
+      if (email && !touched.AssigneeEmail) {
+        inputs.AssigneeEmail.value = String(email).trim();
+        markEmailGuess(!!inactive, inactive ? 'This person is marked INACTIVE in Umbrava - check before you send.' : '');
+      } else {
+        fillEmailFor(inputs, touched, v);
+      }
+    }
+    // The WO record beats the header scrape. setIfEmpty cannot do this job: a stale or missing
+    // bus entry leaves a non-empty WRONG value behind (the 2026-08-03 row-466 defect), and
+    // "only if empty" is exactly what let it stand.
+    function setTracking(v) {
+      v = (v == null) ? '' : String(v).trim();
+      if (!v || touched.Tracking) return;
+      inputs.Tracking.value = v;
+    }
+    // Last resort, and deliberately AFTER the read: a WO with no client tracking number still
+    // needs a value in this required field, but the WO number must never pre-empt a real one.
+    // Runs on the failure path too, so losing GraphQL degrades to the old behaviour, not a block.
+    function trackingFallback() {
+      var el = inputs.Tracking;
+      if (el && !touched.Tracking && !el.value.trim() && woId) el.value = String(woId);
     }
     gql(DISP_WO_Q, { n: n }).then(function (d) {
       var wo = (d && d.workOrder) || {};
-      setIfEmpty('Tracking', wo.trackingNumber);
-      setIfEmpty('Location', wo.locationName);
+      setTracking(wo.trackingNumber);
+      trackingFallback();
+      // locationId, NOT locationName: the flow's `Lookup site` keys on the bare site number, and
+      // a display name silently resolves to no site at all (see the pre-fill comment above).
+      // NOT locationId - that is a GUID. The bare site number is derived from locationNumber,
+      // and stays empty when it cannot be derived unambiguously (see siteNumberOf).
+      setIfEmpty('Location', siteNumberOf(wo.locationNumber));
       setIfEmpty('Priority', wo.priority && wo.priority.label);
-      var name = wo.assignedToMemberName ? String(wo.assignedToMemberName).trim() : '';
-      if (isPerson(name)) { setName(name); return; }              // supervisor/manager assigned a real person
-      // Team / blank assignee -> the person from the most recent WO(s) at this location.
-      if (wo.locationId != null) {
+      // The WO carries only the assignee's GUID, so the name costs a second read. Falls back to
+      // the location-history person exactly as before when it does not resolve to a real person.
+      function historyFallback() {
+        if (wo.locationId == null) return;
         siteCoordinator(wo.locationId, wo.number != null ? wo.number : n).then(function (sc) {
           if (sc) setName(sc);
-          else if (name) setName(name);   // no history person found - fall back to showing the team
         });
-      } else if (name) { setName(name); }
-    }, function () { /* GraphQL unavailable - bus prefill stands */ });
+      }
+      if (!wo.assignedTo) { historyFallback(); return; }
+      gql(USER_Q, { id: wo.assignedTo }).then(function (u) {
+        var p = (u && u.user) || null;
+        var nm = p ? ((p.firstName || '') + ' ' + (p.lastName || '')).replace(/\s+/g, ' ').trim() : '';
+        if (!isPerson(nm)) { historyFallback(); return; }
+        setName(nm, p.emailAddress, p.isInactive);
+      }, function () { historyFallback(); });
+    }, function () { /* GraphQL unavailable - bus prefill stands */ trackingFallback(); });
   }
   // Prefill AssigneeEmail from the roster (or from the signed-in user when the name matches
   // them), only if untouched + empty.
-  function fillEmailFor(inputs, touched, name) {
-    if (touched.AssigneeEmail || inputs.AssigneeEmail.value.trim()) return;
+  // Resolution order, best evidence first: the roster (a human sent to this address before) ->
+  // the signed-in user's own address -> a derived guess. Only the last one is uncertain, so only
+  // the last one is flagged.
+  // `reresolve` relaxes the already-has-a-value guard, and ONLY the coordinator-name handler
+  // passes it. After the name changes, an address auto-filled for the PREVIOUS name is stale by
+  // construction, so refusing to touch it left the old coordinator's address sitting under a new
+  // name - and, because the guess never ran, with no amber warning either. That is what "the
+  // check-it-before-you-send line never appears" was, reported 2026-08-03. A value the HUMAN
+  // typed is still protected: that is what `touched.AssigneeEmail` is for, and it is checked
+  // first either way.
+  function fillEmailFor(inputs, touched, name, reresolve) {
+    if (touched.AssigneeEmail) return;
+    if (!reresolve && inputs.AssigneeEmail.value.trim()) return;
     var em = rosterLookup(name);
     if (!em) { var me = actor(); if (me.email && rosterKey(me.name) === rosterKey(name)) em = me.email; }
-    if (em) inputs.AssigneeEmail.value = em;
+    var guessed = false;
+    if (!em) { em = guessEmail(name); guessed = !!em; }
+    if (em) { inputs.AssigneeEmail.value = em; markEmailGuess(guessed); }
+  }
+  // The guess marker. Held at module scope because only one modal exists at a time (buildModal
+  // returns early if one is open) and it is cleared on close.
+  var emailGuessEl = null;
+  // `text` overrides the wording for warnings that are not about a guess (an inactive assignee),
+  // so the amber line never claims an address was guessed when it came from Umbrava's record.
+  function markEmailGuess(on, text) {
+    if (!emailGuessEl) return;
+    emailGuessEl.textContent = on ? (text || 'Guessed from the name - check it before you send.') : '';
+    emailGuessEl.style.display = on ? 'block' : 'none';
   }
 
   // ---- Shared launcher dock (bwn:dock:*) -----------------------------------

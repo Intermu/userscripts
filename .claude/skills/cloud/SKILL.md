@@ -18,6 +18,29 @@ allowed-tools: Read
 
 # Browser Use Cloud Reference
 
+## On this machine (vault override - read first)
+
+Verified 2026-08-02: **the SDKs below cannot be installed here.** There is no `python`, `pip`,
+`uv`, `npm`, or `npx` on PATH, and the only Node is the Adobe-bundled `node.exe` at
+`C:\Program Files\Adobe\Adobe Creative Cloud Experience\libs\node.exe`, which ships no packages.
+Claude never downloads or installs packages on this box (SentinelOne flags download activity; Mike
+installs manually), so both `uv pip install browser-use-sdk` and `npm install browser-use-sdk` are
+out. Its sibling [[open-source]] skill is banned outright: that one is Python.
+
+Two further blockers before anyone reaches for the raw REST API instead:
+
+- **No key is configured.** `BROWSER_USE_API_KEY` is not set, and this is a paid external service.
+- **It is data egress.** Driving a browser through a third-party cloud sends page content, and any
+  session state it carries, off Broadway's network. On Umbrava that can include the operator's live
+  Auth0 bearer, which per SEC-001 never leaves the browser. That is Mike's call to make, not
+  Claude's - ask before proposing it.
+
+What works today instead: the in-app Browser tools (`mcp__Claude_Browser__*`), or Claude in Chrome
+(`mcp__claude-in-chrome__*`) when the task needs real logged-in sessions. Both drive a real browser
+locally, with nothing to install and nothing sent to a third party.
+
+Everything below stays accurate as upstream API reference. None of it is runnable here as written.
+
 Reference docs for the Cloud REST API, SDKs, and integration patterns.
 Read the relevant file based on what the user needs.
 

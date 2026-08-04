@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         BWN Suite - Core (Broadway National)
 // @namespace    broadwaynational.bwn
-// @version      1.66.14
+// @version      1.66.20
 // @downloadURL  https://raw.githubusercontent.com/Intermu/userscripts-public/main/bwn-suite-core.user.js
 // @updateURL    https://raw.githubusercontent.com/Intermu/userscripts-public/main/bwn-suite-core.user.js
 // @description  Runs several Umbrava helpers for BWN coordinators, in the browser with no privileged grants. Includes: PO Approval + ETA Builder; WO Assist (GP/ETA, a stall watchdog, DNE calculator, and a next-action playbook); Email Leak Guard (checks recipients against vendor names, PO amounts, and client budget references before an outbound email sends); WO List Heat (a triage overlay + My Day strip on the work-order list, with an optional same-origin Umbrava API scan for deterministic full-board coverage); and the BWN Launcher (opens the Azure Static Web App tools with the current WO's context). Modules share state through sessionStorage/localStorage. The only network calls are same-origin Umbrava GraphQL reads (app.umbrava.com/api/graphql, the app's own session): List Heat's full-board scan and WO Assist's work-order / trip / clock-in reads; everything else is offline. Toggle modules in BWN_MODULES below.
@@ -44,7 +44,7 @@
   try { localStorage.setItem('bwn:status:core', JSON.stringify({ ver: BWN_VER, ts: Date.now() })); } catch (e) { /* best-effort */ }
 
   console.info('[BWN SUITE CORE] v' + BWN_VER + ' |',
-    'Shared Core 7 \u00b7 PO Approval 1.13 \u00b7 WO Assist 2.64 \u00b7 Leak Guard 2.0 \u00b7 List Heat 3.16 \u00b7 Launcher 2.0 \u00b7 Views 1.0 \u00b7 Palette 1.1 \u00b7 Visit 1.2 \u00b7 Reminders 1.1 \u00b7 Timeline 1.1 \u00b7 TripCal 1.3 \u00b7 Connector 1.2 |',
+    'Shared Core 7 \u00b7 PO Approval 1.13 \u00b7 WO Assist 2.66 \u00b7 Leak Guard 2.0 \u00b7 List Heat 3.16 \u00b7 Launcher 2.0 \u00b7 Views 1.0 \u00b7 Palette 1.1 \u00b7 Visit 1.2 \u00b7 Reminders 1.1 \u00b7 Timeline 1.1 \u00b7 TripCal 1.3 \u00b7 Connector 1.2 |',
     'enabled:', Object.keys(BWN_MODULES).filter(function (k) { return BWN_MODULES[k]; }).join(', '));
 
   // ===== BWN SHARED CORE v7 - KEEP IN SYNC across both suite scripts =====
@@ -79,6 +79,25 @@
         sessionStorage.setItem('bwn:wo:' + id, JSON.stringify(data));
         document.dispatchEvent(new CustomEvent('bwn:update', { detail: { id: id } }));
       } catch (e) { /* storage full or blocked: bus is best-effort */ }
+    }
+    // MERGE a partial payload over whatever is already on the bus, instead of replacing it.
+    // For publishing header identity before the full WO state is computable: a consumer that
+    // reads early gets the real Tracking # rather than nothing, and a later full busPut still
+    // overwrites everything. BLANKS ARE SKIPPED - a field the header has not rendered yet must
+    // never clobber a good value from an earlier pass. Clearing a field is the full publish's
+    // job, since only it knows the difference between "not read yet" and "genuinely empty".
+    function busPatch(id, data) {
+      try {
+        var cur = null;
+        try { var raw = sessionStorage.getItem('bwn:wo:' + id); cur = raw ? JSON.parse(raw) : null; } catch (e) { cur = null; }
+        if (!cur || typeof cur !== 'object' || cur.v !== 1) cur = {};
+        for (var k in data) {
+          if (!Object.prototype.hasOwnProperty.call(data, k)) continue;
+          if (data[k] === '' || data[k] == null) continue;
+          cur[k] = data[k];
+        }
+        busPut(id, cur);
+      } catch (e) { /* bus is best-effort */ }
     }
     function busHeatGet(id, maxAgeMs) {
       try {
@@ -668,7 +687,7 @@
 
     return {
       VERSION: VERSION,
-      woId: woId, busGet: busGet, busPut: busPut, busHeatGet: busHeatGet, busVendors: busVendors,
+      woId: woId, busGet: busGet, busPut: busPut, busPatch: busPatch, busHeatGet: busHeatGet, busVendors: busVendors,
       CFG_DEFAULTS: CFG_DEFAULTS, cfg: cfg, cfgSave: cfgSave,
       money: money, parseMoney: parseMoney, parseBare: parseBare, parseUSDate: parseUSDate,
       alphaOnly: alphaOnly, lcsLen: lcsLen,
@@ -1091,7 +1110,7 @@
   });
 
   // ==========================================================================
-  // MODULE: WO Assist: GP + ETA Watchdog + Playbook v2.64 (Connector 1.2)
+  // MODULE: WO Assist: GP + ETA Watchdog + Playbook v2.66 (Connector 1.2)
   // ==========================================================================
   if (BWN_MODULES.woAssist) BWN.safeModule('woAssist', function () {
     'use strict';
@@ -1121,7 +1140,7 @@
     var PANEL_ID = 'bwn-gp-panel';
     var GREEN = BWN.GREEN;
 
-    console.info('[BWN GP] WO Assist v2.64 loaded on', location.href);
+    console.info('[BWN GP] WO Assist v2.66 loaded on', location.href);
 
     // ---- Parsing helpers (shared via BWN core) -----------------------------
     var parseMoney = BWN.parseMoney;
@@ -1136,6 +1155,7 @@
     // WO Assist is the PRODUCER of bwn:wo:{id}; others consume DOM-first, bus-fallback.
     var currentWOId = BWN.woId;
     var busPut = BWN.busPut;
+    var busPatch = BWN.busPatch;
     var busHeatGet = BWN.busHeatGet;
 
     // ---- PO rows: vendor, amount, scheduled date, state --------------------
@@ -1151,7 +1171,7 @@
     }
     function nvVendor(s) { return (s || '').replace(/\s+/g, ' ').trim().toUpperCase(); }   // normalize for cross-page (trips vs PO rows) vendor comparison
     function readPOs() {
-      var out = [];
+      var out = [], seenSids = {};
       document.querySelectorAll('[data-testid^="POAccordion-"]').forEach(function (row) {
         var txt2 = row.textContent || '';
         var amts = [];
@@ -1170,6 +1190,14 @@
         // why /revoked?/ must NOT be matched loosely.
         var vend = vendorOf(row);
         var num = (row.getAttribute('data-testid') || '').replace('POAccordion-', '') || (out.length + 1) + '';
+        // Stable per-PO identity for act KEYS (poKeyOf ladder, defined below in this same
+        // module: Umbrava's assigned line number -> vendor GUID -> render index). The
+        // POAccordion-<n> render index in `num` re-sequences when a PO is added or
+        // cancelled, which orphaned checked state AND let structConvergeReason read the
+        // WRONG PO's done flag. `num` stays for display + the POAccordion-<n> nav lookup.
+        var sid = poKeyOf(row);
+        if (seenSids[sid]) sid = sid + '-' + num;   // two POs can share a vendor (GUID fallback) - keys must stay distinct
+        seenSids[sid] = 1;
         // Isolate the PO's OWN status: the text between the leading {num}{date} and the
         // vendor name, so status keywords never collide with the Description. Rows read
         // e.g. "001 03/03/2026 Confirm Complete VENDOR $…" / "003 05/08/2026 Open
@@ -1202,7 +1230,7 @@
         // Word-boundaried so a Description word ("avoid"/"prepaid") can't false-match and
         // drop a genuinely cost-open PO (parity with the terminal safety-net regex).
         var costOpen = amt > 0 && !/\b(cancell?ed|declined|revoked|void)\b/i.test(costRegion) && !/\b(paid|invoiced)\b/i.test(costRegion);
-        out.push({ vendor: vend, num: num, amount: amt, schedDate: schedDate, done: done, poStatus: poStatus, statusText: statusRegion, costOpen: costOpen });
+        out.push({ vendor: vend, num: num, sid: sid, amount: amt, schedDate: schedDate, done: done, poStatus: poStatus, statusText: statusRegion, costOpen: costOpen });
       });
       return out;
     }
@@ -1658,7 +1686,7 @@
         // fast a status is "past its limit". Read the WO-header Priority field; the
         // raw text (e.g. "P2 - Normal (24 hrs)") is passed through - bwnPrioNum pulls
         // the P#. Empty -> neutral 1.0 multiplier (never guesses a harsher clock).
-        priority: fieldByLabel(/^priority\b/i),
+        priority: fieldByLabel(/^(?:wo )?priority\b/i),
         // Intake actionability fields (Phase 2). Empty '' when the field is unset OR
         // not present as a labeled field - the intake gate treats '' as "verify", not
         // a hard assertion, so a mis-read only over-surfaces (the safe direction).
@@ -1962,6 +1990,8 @@
         '.bwn-act-anchor{background:var(--bwn-surface-2);border-bottom:none;border-radius:8px;margin-top:3px;}' +
         '.bwn-act-anchor .bwn-act-lbl{font-style:italic;color:var(--bwn-text-faint);}' +
         '.bwn-act-anchor-mk{flex:none;width:15px;text-align:center;color:var(--bwn-warn);margin-top:1px;font-size:13px;}' +
+        '.bwn-act-esc{padding:7px 12px;font:500 11.5px ui-monospace,"Segoe UI Mono","SF Mono",monospace;background:var(--bwn-warn-bg);color:var(--bwn-warn-fg);border-top:1px solid var(--bwn-border-2);line-height:1.4;}' +
+        '.bwn-act-esc:last-child{border-radius:0 0 9px 9px;}' +
         '.bwn-actc{display:block;width:100%;align-self:stretch;box-sizing:border-box;margin:6px 0 14px;border:1px solid var(--bwn-border);border-left:3px solid var(--bwn-green);border-radius:10px;background:var(--bwn-surface);font-family:-apple-system,BlinkMacSystemFont,"Segoe UI","Helvetica Neue",Arial,sans-serif;box-shadow:0 1px 4px rgba(13,38,26,.06);}' +
         '.bwn-actc-hd{display:flex;align-items:center;gap:10px;padding:8px 12px;cursor:pointer;user-select:none;}' +
         '.bwn-actc-hd:focus-visible{outline:2px solid var(--bwn-accent);outline-offset:-2px;}' +
@@ -2454,7 +2484,11 @@
           label: esc.label,
           why: escReason + ' · ' + esc.tierName + ' tier',
           text: 'Re: ' + ref + '. ' + esc.lead + escReason + '. Routine follow-up has not resolved this - need a decision on next steps (extend / re-source / price / close).',
-          owner: esc.owner
+          owner: esc.owner,
+          // Carried for the render layer only: armAssistDue emits bwn:assist:due with this
+          // value so the assist drawer POSTs the engine's own severity (the server can bump
+          // the tier on it). Not part of the key, the label, or any stored state.
+          sev: escSev
         });
       }
 
@@ -2541,13 +2575,13 @@
         if (!(p.amount > 0)) return;
         if (p.poStatus === 'materials' && !p.done) {
           poThemes.materials = 1;
-          acts.push({ key: 'pomat:' + p.num + ':' + p.vendor, label: 'Chase ' + p.vendor + ' for material delivery ETA + tracking', why: 'PO ' + p.num + (p.statusText ? ' - ' + p.statusText : ' - materials ordered'), text: 'Hi - re: ' + ref + '. On PO ' + p.num + ': please confirm the materials - supplier, expected delivery date, and tracking #. Once they land, reply with the return-visit date so I can update the client.', resolve: ACT_SIGNALS.parts });
+          acts.push({ key: 'pomat:' + p.sid + ':' + p.vendor, poNum: p.num, label: 'Chase ' + p.vendor + ' for material delivery ETA + tracking', why: 'PO ' + p.num + (p.statusText ? ' - ' + p.statusText : ' - materials ordered'), text: 'Hi - re: ' + ref + '. On PO ' + p.num + ': please confirm the materials - supplier, expected delivery date, and tracking #. Once they land, reply with the return-visit date so I can update the client.', resolve: ACT_SIGNALS.parts });
         } else if (p.poStatus === 'accept') {
           poThemes.accept = 1;
-          acts.push({ key: 'poacc:' + p.num + ':' + p.vendor, label: p.vendor + ' has not accepted PO ' + p.num, why: 'PO ' + p.num + ' pending vendor acceptance', text: 'Hi - re: ' + ref + '. PO ' + p.num + ' is still pending your acceptance. Please accept with a scheduled date, or decline today so I can reassign coverage.', resolve: ACT_SIGNALS.quote });
+          acts.push({ key: 'poacc:' + p.sid + ':' + p.vendor, poNum: p.num, label: p.vendor + ' has not accepted PO ' + p.num, why: 'PO ' + p.num + ' pending vendor acceptance', text: 'Hi - re: ' + ref + '. PO ' + p.num + ' is still pending your acceptance. Please accept with a scheduled date, or decline today so I can reassign coverage.', resolve: ACT_SIGNALS.quote });
         } else if (p.poStatus === 'confirm') {
           poThemes.confirm = 1;
-          acts.push({ key: 'poconf:' + p.num + ':' + p.vendor, label: 'Confirm ' + p.vendor + ' completion + collect docs', why: 'PO ' + p.num + ' marked Confirm Complete', text: 'Hi - re: ' + ref + '. PO ' + p.num + ' is marked complete - please upload the completion package (signed ticket, sign-in/out, before/after photos) so we can confirm and invoice.', resolve: ACT_SIGNALS.stall });
+          acts.push({ key: 'poconf:' + p.sid + ':' + p.vendor, poNum: p.num, label: 'Confirm ' + p.vendor + ' completion + collect docs', why: 'PO ' + p.num + ' marked Confirm Complete', text: 'Hi - re: ' + ref + '. PO ' + p.num + ' is marked complete - please upload the completion package (signed ticket, sign-in/out, before/after photos) so we can confirm and invoice.', resolve: ACT_SIGNALS.stall });
         }
       });
 
@@ -2559,7 +2593,8 @@
         state.pos.forEach(function (p) {
           if (!p.costOpen) return;
           acts.push({
-            key: 'pocost:' + p.num + ':' + p.vendor,
+            key: 'pocost:' + p.sid + ':' + p.vendor,
+            poNum: p.num,
             label: 'Confirm the final cost on PO ' + p.num + ' (' + p.vendor + ') is correct',
             why: 'PO ' + p.num + (p.statusText ? ' - ' + p.statusText : '') + ' · ' + fmt(p.amount) + ' - verify the billed total before marking Work Complete',
             text: 'Hi - re: ' + ref + '. Before we close out PO ' + p.num + ', please confirm your final cost is ' + fmt(p.amount) + ' (or send the corrected final total) so billing matches the work performed.'
@@ -2760,6 +2795,36 @@
       } catch (e) { return {}; }
     }
     function actsSave(d) { try { localStorage.setItem(actsKey(), JSON.stringify(d)); } catch (e) { /* best-effort */ } }
+    // ONE-TIME per-WO store migration for the PO act re-key (render index -> stable sid,
+    // 2026-08-02). Old keys look like 'pomat:2:ACME' - a BARE-DIGITS middle, which the new
+    // form never produces (the poKeyOf ladder yields 'ln001' / 'v<guid>' / 'ix2', plus a
+    // '-<num>' collision suffix). An old record maps to a new key only when exactly ONE
+    // current PO carries that vendor; an ambiguous or vanished vendor leaves the record in
+    // place, inert - a step re-appearing unchecked is the safe direction, false-checking
+    // via a guessed mapping is not. Mirrors actsMigrate above (mutates d; returns d when
+    // changed, null when not). Cannot live in actsLoad like the authored-key migration -
+    // it needs state.pos - so renderActsInline runs it once per WO page-load.
+    function actsMigratePO(d, pos) {
+      var changed = false, k, m;
+      var byVendor = {};
+      (pos || []).forEach(function (p) {
+        if (!p || !p.sid) return;
+        var v = String(p.vendor || '');
+        byVendor[v] = Object.prototype.hasOwnProperty.call(byVendor, v) ? null : p;   // null = ambiguous
+      });
+      for (k in d) {
+        m = /^(pomat|poacc|poconf|pocost):(\d+):(.+)$/.exec(k);
+        if (!m) continue;
+        var p2 = byVendor[m[3]];
+        if (!p2) continue;                          // vendor gone or ambiguous - leave the record inert
+        var nk = m[1] + ':' + p2.sid + ':' + m[3];
+        if (!d[nk]) d[nk] = d[k];
+        delete d[k];
+        changed = true;
+      }
+      return changed ? d : null;
+    }
+    var actsMigratedPOFor = '';   // latch: once per WO page-load (the store is per-WO)
 
     function findAddNoteBtn() {
       var btns = document.querySelectorAll('button');
@@ -3345,18 +3410,22 @@
     // note-only remainder the spec named - materials/completion tied to a PO, and the trip
     // no-show, which is fed by the trips cache INDEPENDENT of PO state (so a PO that
     // completed with no per-PO status would otherwise keep nagging until a note matched).
-    function poByNum(state, num) {
+    // Sid lookup, NOT render-index lookup (2026-08-02 re-key): matching parts[1] against
+    // p.num was the false-CHECK half of the render-index defect - after a PO add/cancel
+    // re-sequenced the list, this read the WRONG PO's done flag and could auto-check an
+    // open step. A sid that matches nothing returns null, which converges NOTHING.
+    function poBySid(state, sid) {
       var ps = (state && state.pos) || [];
-      for (var i = 0; i < ps.length; i++) if (String(ps[i].num) === String(num)) return ps[i];
+      for (var i = 0; i < ps.length; i++) if (String(ps[i].sid) === String(sid)) return ps[i];
       return null;
     }
     function structConvergeReason(a, state) {
       if (!a || !state) return null;
       var parts = (a.key || '').split(':'), pfx = parts[0];
       if (pfx === 'pomat' || pfx === 'poconf') {          // materials / completion, per PO
-        var p = poByNum(state, parts[1]);
-        if (p && p.done) return 'PO ' + parts[1] + ' is marked done';
-        if (pfx === 'pomat' && p && p.poStatus && p.poStatus !== 'materials') return 'PO ' + parts[1] + ' is no longer awaiting materials';
+        var p = poBySid(state, parts[1]);
+        if (p && p.done) return 'PO ' + p.num + ' is marked done';
+        if (pfx === 'pomat' && p && p.poStatus && p.poStatus !== 'materials') return 'PO ' + p.num + ' is no longer awaiting materials';
       }
       if (pfx === 'noshow' && state.noShow) {              // trips-cache no-show vs. the real PO ledger
         var nv = nvVendor(state.noShow.vendor);
@@ -3397,26 +3466,26 @@
     // opens that tool's drawer over the existing dock bus. It renders ONLY when the
     // registrant is currently registered, so a disabled module or a WO the tool does not
     // apply to yields no button rather than a dead control.
-    // PINNED against the live registrant table (2026-07-28): the dock has exactly four
-    // registrants - dispatch / cc / wo-audit / ask ([[bwn-launcher-dock]]). Only the
-    // dispatch mapping is real today: "Recruit / dispatch a vendor" (phase:schedule, the
-    // Pending Dispatch status) and the intake scoping step are precisely what the Dispatch
-    // drawer does, and the registrant self-gates to Pending Dispatch WOs - so presence
-    // does the status gating for free. Email RFP (bid-out) and AI Draft (suite-ai) are
-    // NOT dock registrants (they answer bwn:cmd only), so their presence cannot be
-    // detected and they are deliberately absent here; wiring them needs a one-line
-    // registration in each of those scripts, which is outside this Core-only phase.
+    // PINNED against the live registrant table ([[bwn-launcher-dock]]): dispatch / cc /
+    // wo-audit / assist / ask, plus `bidout` (bwn-bid-out 0.26.0, registered 2026-08-02
+    // exactly so this mapping could exist - it is dynamic on WO detail pages the way
+    // dispatch is dynamic on Pending Dispatch). A step key maps to the tools that DO
+    // that step: "Recruit / dispatch a vendor" (phase:schedule) and the intake scoping
+    // step offer BOTH paths to coverage - the Dispatch drawer (network vendor; its
+    // registrant self-gates to Pending Dispatch WOs, so presence does the status gating
+    // for free) and Email RFP (outside / net-new vendors). AI Draft (suite-ai) is still
+    // NOT a dock registrant (it answers bwn:cmd only), so it stays deliberately absent.
     // `escalate` -> the assist drawer (bwn-wo-assist), added once /api/wo-assist went live:
     // the escalation step is the one row whose whole point is handing the job to someone
     // else, and the assist tool is what actually routes it. Presence gating does the rest -
-    // the button only exists where the assist script is installed and registered, so a
-    // coordinator without it sees the row exactly as before.
-    var ACT_TOOL = { 'phase:schedule': 'dispatch', 'phase:intake': 'dispatch', escalate: 'assist' };
-    var ACT_TOOL_LABEL = { dispatch: 'Dispatch\u2026', cc: 'CC Request\u2026', 'wo-audit': 'WO Audit\u2026', ask: 'Ask BWN\u2026', assist: 'Escalate\u2026' };
+    // a button only exists where its registrant is installed and registered, so a
+    // coordinator without the script sees the row exactly as before.
+    var ACT_TOOL = { 'phase:schedule': ['dispatch', 'bidout'], 'phase:intake': ['dispatch', 'bidout'], escalate: ['assist'] };
+    var ACT_TOOL_LABEL = { dispatch: 'Dispatch\u2026', cc: 'CC Request\u2026', 'wo-audit': 'WO Audit\u2026', ask: 'Ask BWN\u2026', assist: 'Escalate\u2026', bidout: 'Email RFP\u2026' };
     function actTool(a) {
       if (!a || a.anchor || a.authored) return null;   // authored items are free text - no reliable tool to infer
       var d = ACT_TOOL[a.key] || ACT_TOOL[(a.key || '').split(':')[0]];
-      return d ? { dock: d } : null;
+      return d ? { docks: d } : null;
     }
     // Dock presence, WO Assist side. The Launcher module owns dockRoster but lives in its
     // own IIFE, so this listens to the same bus independently: registrants re-announce on
@@ -3432,6 +3501,81 @@
       else if (d.id === 'bwn:dock:unregister') delete waDockSeen[d.key];
     }, false);
 
+    // ESCALATE SEVERITY HANDOFF. The engine computes escSev (how far past the escalate
+    // clock, >=1 at fire) but the assist drawer runs in its own sandbox and only hears the
+    // bus: bwn:assist:due {escSev} arms bwn-wo-assist's _pendingSev, which rides the POST
+    // as escSev so the SERVER can bump the tier (supervisor -> management) for a WO far
+    // past its clock. Fired at render time - the engine stays pure. Latched per
+    // path+key per page load (re-arming would be harmless, _pendingSev is consumed on
+    // open, but the bus stays quiet), and gated on the assist registrant being LIVE so
+    // the event cannot fire before a listener exists: the checklist signature includes
+    // the live-dock set, so assist coming online re-renders the card and this re-runs.
+    var assistDueSent = {};
+    function armAssistDue(a, isDone) {
+      if (isDone || !a || typeof a.sev !== 'number') return;
+      if ((a.key || '').split(':')[0] !== 'escalate') return;
+      if (!waDockAlive('assist')) return;
+      var k = location.pathname + '|' + a.key;
+      if (assistDueSent[k]) return;
+      assistDueSent[k] = 1;
+      try { document.dispatchEvent(new CustomEvent('bwn:evt', { detail: { id: 'bwn:assist:due', escSev: a.sev } })); } catch (e) { }
+    }
+
+    // ASSIST STATE ROUND-TRIP (queue-spec step 3). The queue's lifecycle lives on the
+    // server and Core is @grant none, so it cannot ask. bwn-wo-assist (which can) queries
+    // op:'status' and publishes the current WO's ACTIVE escalation two ways: a
+    // bwn:assist:state bus event (live re-render) and sessionStorage
+    // bwn:assist:state:<woId> (render-time reads after a reload). Core only CONSUMES -
+    // the same one-way pattern as bwn:role. Render-layer only: the pure engine never
+    // sees any of it, so engine output stays byte-identical.
+    var WA_ESC_TTL_MS = 30 * 60000;   // assist refreshes ~5-minutely; a dead install ages out
+    var waAssistState = {};
+    document.addEventListener('bwn:evt', function (e) {
+      var d = e && e.detail;
+      if (d && d.id === 'bwn:assist:state' && d.wo) waAssistState[d.wo] = { v: 1, ts: Date.now(), found: !!d.found, record: d.record || null };
+    }, false);
+    // The current WO's active escalation record, or null. Only open/ack count - a
+    // resolved item must clear the strip the moment anyone resolves it, and stale
+    // published state ages out rather than lying forever.
+    function waEscState() {
+      var m = location.pathname.match(/work-orders\/(\d+)/);
+      if (!m) return null;
+      var s = waAssistState[m[1]];
+      if (!s) {
+        s = BWN.ssGetJSON('bwn:assist:state:' + m[1], null);
+        if (!s || s.v !== 1) return null;
+      }
+      if (!s.found || !s.record) return null;
+      if (!s.ts || (Date.now() - s.ts) > WA_ESC_TTL_MS) return null;
+      var st = s.record.status;
+      return (st === 'open' || st === 'ack') ? s.record : null;
+    }
+    // Strip wording, pure. "Escalated - awaiting mgmt" is the queue-spec's literal
+    // round-trip phrase; ack and own-call get their own honest variants.
+    function waEscStripText(rec) {
+      function md(iso) { var d = new Date(iso); return isNaN(+d) ? '' : ((d.getMonth() + 1) + '/' + d.getDate()); }
+      function nm(s) { s = String(s || ''); var i = s.indexOf('@'); return i > 0 ? s.slice(0, i) : s; }
+      if (!rec) return '';
+      var p;
+      if (rec.status === 'ack') {
+        p = ['Escalated - mgmt has it (acknowledged' + (nm(rec.assignee) ? ' by ' + nm(rec.assignee) : '') + (md(rec.ackAt) ? ' ' + md(rec.ackAt) : '') + ')'];
+      } else if (rec.tier === 'own-call') {
+        p = ['Escalation recorded - own call, yours to decide'];
+      } else {
+        p = ['Escalated - awaiting mgmt'];
+        if (nm(rec.requester)) p.push('by ' + nm(rec.requester));
+      }
+      if (md(rec.openedAt)) p.push('opened ' + md(rec.openedAt));
+      if (rec.status !== 'ack' && md(rec.dueAt)) p.push('due ' + md(rec.dueAt));
+      return p.join(' · ');
+    }
+    // Tool-button label: an already-escalated WO's assist button opens the SAME drawer,
+    // which shows the ack/resolve panel instead of a form the server would dedup-refuse
+    // anyway - so say what it does.
+    function waEscToolLabel(dk, esc) {
+      return (dk === 'assist' && esc) ? 'View escalation…' : (ACT_TOOL_LABEL[dk] || 'Open tool…');
+    }
+
     // IN-PAGE NAVIGATION. Clicking a step label walks the page to the thing it is about.
     // Only targets with a PROVEN selector are offered (the same ones the engine already
     // reads): PO rows by their own testid, the ECD picker, the DNE/NTE input. Anything
@@ -3440,7 +3584,10 @@
     function actNav(a) {
       if (!a || a.anchor) return null;
       var parts = (a.key || '').split(':'), p = parts[0];
-      if ((p === 'pomat' || p === 'poacc' || p === 'poconf' || p === 'pocost') && parts[1]) return { kind: 'po', num: parts[1] };
+      // PO keys carry a STABLE sid in parts[1] (2026-08-02 re-key), which is not the
+      // POAccordion-<n> testid value - navigation rides the act's own poNum (the render
+      // index, refreshed every render). parts[1] stays as a last-resort fallback only.
+      if ((p === 'pomat' || p === 'poacc' || p === 'poconf' || p === 'pocost') && parts[1]) return { kind: 'po', num: a.poNum != null ? a.poNum : parts[1] };
       if (p === 'ecd') return { kind: 'ecd' };
       if (p === 'intake' && /\bNTE\b/.test(a.why || '')) return { kind: 'nte' };
       return null;
@@ -3501,6 +3648,13 @@
       var row = actsAnchorBlock();
       if (!acts.length || !row) { if (card) card.remove(); return; }
       ensureWAStyle();
+      // PO-key store migration runs BEFORE anything reads or writes the store this
+      // page-load (autoDetectActioned loads it next line-ish) - see actsMigratePO.
+      if (actsMigratedPOFor !== actsKey()) {
+        actsMigratedPOFor = actsKey();
+        var mig0 = actsMigratePO(actsLoad(), state.pos);
+        if (mig0) actsSave(mig0);
+      }
       autoDetectActioned(acts, state);
       var store = actsLoad();
       // Open steps first (already worst-first from nextActions), done steps sink to the
@@ -3513,16 +3667,20 @@
       var realOpen = acts.filter(function (a) { return !a.anchor && !(store[a.key] && store[a.key].done); }).length;
       var collapsed = false;
       try { collapsed = localStorage.getItem('bwn:acts:collapsed') === '1'; } catch (e) { }
+      // Live escalation state (render-layer only; see waEscState). Part of the signature
+      // so the strip appears, flips and clears the moment the assist script publishes.
+      var escSt = null;
+      try { escSt = waEscState(); } catch (e) { }
       // Signature gate: rebuild only when content or placement actually changed, so
       // the steady-state refresh loop never re-renders the card under the cursor.
-      var sig = JSON.stringify([collapsed, acts.map(function (a) {
+      var sig = JSON.stringify([collapsed, escSt ? escSt.status + '|' + escSt.id + '|' + (escSt.ackAt || '') : '', acts.map(function (a) {
         var r = store[a.key];
         // Phase 2 additions to the signature: a tool button appearing when its registrant
         // comes online (or vanishing when it drops) and a help block toggling are both
         // real content changes - without them the gate would hold a stale card.
         var tl = actTool(a);
         return a.key + '|' + a.label + '|' + (r && r.done ? 1 : 0) + '|' + ((r && r.note) || '') + '|' + (a.nudge || 0) + '|' + ((r && r.reason) || '') +
-          '|' + ((tl && waDockAlive(tl.dock)) ? tl.dock : '') + '|' + (actHelpOpen[a.key] ? 1 : 0);
+          '|' + (tl ? tl.docks.filter(waDockAlive).join(',') : '') + '|' + (actHelpOpen[a.key] ? 1 : 0);
       })]);
       if (card && card.isConnected && card.nextElementSibling === row && card.dataset.sig === sig) return;
       if (card) card.remove();
@@ -3561,6 +3719,17 @@
       hd.addEventListener('click', toggleCollapse);
       hd.addEventListener('keydown', function (e) { if (e.key === 'Enter' || e.key === ' ') { e.preventDefault(); toggleCollapse(); } });
       card.appendChild(hd);
+
+      // The round-trip strip: "Escalated - awaiting mgmt" while the queue holds an
+      // ACTIVE item for this WO. Deliberately outside the collapsed gate - an open
+      // escalation is exactly what a one-line glance is for.
+      if (escSt) {
+        var esb = document.createElement('div');
+        esb.className = 'bwn-act-esc';
+        esb.textContent = '🚩 ' + waEscStripText(escSt);
+        esb.title = 'Live from the assist queue' + (escSt.requester ? ' · requested by ' + escSt.requester : '') + (escSt.reason ? ' · ' + escSt.reason : '') + ' · acknowledge or resolve from the Escalate drawer or the dashboard';
+        card.appendChild(esb);
+      }
 
       if (!collapsed) {
         var body = document.createElement('div'); body.className = 'bwn-actc-body';
@@ -3664,19 +3833,27 @@
             main.appendChild(lg);
           }
           var btns = document.createElement('div'); btns.className = 'bwn-act-btns';
+          armAssistDue(a, isDone);
           // Phase 2 tool launch - rendered only while the owning dock registrant is live,
           // so this is never a dead control. The click is the same bwn:dock:open the rail
-          // itself emits, so the tool opens exactly as if launched from the dock.
+          // itself emits, so the tool opens exactly as if launched from the dock. A step
+          // can map to more than one tool (recruit = Dispatch OR Email RFP); each button
+          // gates on its OWN registrant, so only installed-and-live tools render.
           var tool = actTool(a);
-          if (tool && waDockAlive(tool.dock) && !isDone) {
-            var tb = document.createElement('button');
-            tb.type = 'button'; tb.className = 'bwn-wa-btn ghost'; tb.textContent = ACT_TOOL_LABEL[tool.dock] || 'Open tool…';
-            tb.style.cssText = 'padding:3px 9px;font-size:10px;';
-            tb.title = 'Open the ' + (ACT_TOOL_LABEL[tool.dock] || 'tool').replace(/…$/, '') + ' drawer for this work order';
-            tb.addEventListener('click', function () {
-              try { document.dispatchEvent(new CustomEvent('bwn:evt', { detail: { id: 'bwn:dock:open', key: tool.dock } })); } catch (e) { }
+          if (tool && !isDone) {
+            tool.docks.forEach(function (dk) {
+              if (!waDockAlive(dk)) return;
+              var tb = document.createElement('button');
+              tb.type = 'button'; tb.className = 'bwn-wa-btn ghost'; tb.textContent = waEscToolLabel(dk, escSt);
+              tb.style.cssText = 'padding:3px 9px;font-size:10px;';
+              tb.title = (dk === 'assist' && escSt)
+                ? 'An escalation is already open on this work order - view, acknowledge or resolve it'
+                : 'Open the ' + (ACT_TOOL_LABEL[dk] || 'tool').replace(/…$/, '') + ' drawer for this work order';
+              tb.addEventListener('click', function () {
+                try { document.dispatchEvent(new CustomEvent('bwn:evt', { detail: { id: 'bwn:dock:open', key: dk } })); } catch (e) { }
+              });
+              btns.appendChild(tb);
             });
-            btns.appendChild(tb);
           }
           if (a.text) {
             var cp = document.createElement('button');
@@ -4393,6 +4570,28 @@
         BWN.beat('woAssist', 'waiting', 'not a WO page');
         return;
       }
+      // ---- Identity publishes FIRST, ahead of the anchor gate below --------------------------
+      // The gate waits for a PO accordion or a rendered note summary before anything is
+      // published. A WO in Pending Dispatch has no POs at all, and a brand-new one has no notes
+      // either for the first seconds of its life (W-383441: created 14:55:59, first note
+      // +11s). A tab loaded inside that window satisfies neither anchor and then never
+      // publishes, because republishing is event-driven rather than on a timer (measured
+      // 2026-08-03: gaps of 18.0s then 1.0s) and sessionStorage is per-tab. That is how the
+      // dispatch modal read an empty bus and sent the WO number as the Tracking # on queue row
+      // 466. Header identity does not depend on POs or notes, so it must not wait for them.
+      // Computed state (GP, POs, next actions) still publishes below and merges over this.
+      // busPatch skips blanks, so a not-yet-rendered field never clobbers a good earlier value;
+      // the full publish below stays authoritative and does write blanks.
+      var hd = headerInfo();
+      var woIdent = currentWOId();
+      if (woIdent && (hd.tracking || hd.wo)) {
+        busPatch(woIdent, {
+          tracking: hd.tracking, wo: hd.wo, location: hd.location,
+          client: hd.client || '', addr: hd.addr || '',
+          coordinator: hd.coordinator || '', sourceJob: hd.sourceJob || '', sourcePo: hd.sourcePo || '',
+          priority: hd.priority || '', trade: hd.trade || ''
+        });
+      }
       if (!document.querySelector('[data-testid^="POAccordion-"]') &&
           !document.querySelector('[data-testid^="wo-note-"][data-testid$="-summary"]')) {
         var p2 = document.getElementById(PILL_ID); if (p2) p2.remove();
@@ -4419,15 +4618,23 @@
       maybeAutoECD(st);
       maybePreflight(st);
       BWN.beat('woAssist', 'ok', 'pill active');
-      // Publish the canonical WO state for the rest of the suite.
+      // Publish the canonical WO state for the rest of the suite. This one REPLACES: it carries
+      // every identity field as well, so it stays authoritative over the early patch above -
+      // including writing a field back to blank when the header genuinely clears it. `hd` is the
+      // same read taken before the gate; re-reading it here would only cost another full label
+      // sweep of the DOM.
       var woId = currentWOId();
       if (woId) {
-        var hd = headerInfo();
         busPut(woId, {
           tracking: hd.tracking, wo: hd.wo, location: hd.location,
           client: hd.client || '', addr: hd.addr || '',
           coordinator: hd.coordinator || '', sourceJob: hd.sourceJob || '', sourcePo: hd.sourcePo || '',
           status: st.status, hrs: st.hrs,
+          // bwn-wo-assist prefills its escalation POST from bus.priority / bus.trade - the
+          // drawer read these keys from day one, but the publish never carried them, so the
+          // first live escalation (W-371126, 2026-08-03) rendered '-' for both.
+          priority: st.priority || '',
+          trade: ((st.woApi && st.woApi.trades && st.woApi.trades.map) ? st.woApi.trades.map(function (t) { return t && t.name; }).filter(Boolean).join(', ') : '') || hd.trade || '',
           staleDays: (st.staleDays != null ? st.staleDays : null), noteCount: (st.noteCount != null ? st.noteCount : null), lastNote: st.lastNote || null,
           vendorTotal: (st.vendorTotal != null ? st.vendorTotal : null),
           dne: st.nte ? st.nte.amount : null, dneSource: st.nte ? st.nte.source : null,
@@ -7478,7 +7685,15 @@
     var dockBornTs = Date.now();
     var dockHostId = 'h' + Math.random().toString(36).slice(2) + dockBornTs.toString(36);
     var dockAmHost = true;
-    var dockRoster = {};                           // key -> {key,label,icon,weight,badge,minRank,title,order,seen}
+    var dockOtherSeen = 0;                         // last bwn:dock:host/ping heard from a FOREIGN host
+    // Null prototype on purpose. `dockRoster[d.key] = {...}` with the key '__proto__' otherwise
+    // hits the inherited setter instead of creating an own property: Object.keys never sees it, so
+    // no row and no diagnostic - and worse, the entry is then INHERITED, after which any of its
+    // truthy-valued keys ('seen' is always a timestamp; also 'weight', 'minRank', 'key') satisfies
+    // the `dockRoster[d.key]` gates on update and unregister. With no
+    // prototype there is nothing to pollute and nothing to inherit, and a '__proto__' key renders
+    // as an ordinary row like 'constructor' already does.
+    var dockRoster = Object.create(null);          // key -> {key,label,icon,weight,badge,minRank,title,order,seen}
     var dockOrderSeq = 0;
     var dockRank = null;                           // reader's rank (UX gating only; server is the real boundary)
     var dockRenderT = null;
@@ -7528,6 +7743,12 @@
       'wo-audit': ['M9 5H7a2 2 0 0 0-2 2v12a2 2 0 0 0 2 2h10a2 2 0 0 0 2-2V7a2 2 0 0 0-2-2h-2',
         'M9 5a2 2 0 0 1 2-2h2a2 2 0 0 1 2 2 2 2 0 0 1-2 2h-2a2 2 0 0 1-2-2z', 'M9 14l2 2 4-4'],
       ask: ['M8 9h8', 'M8 13h6', 'M9 18H6a3 3 0 0 1-3-3V7a3 3 0 0 1 3-3h12a3 3 0 0 1 3 3v8a3 3 0 0 1-3 3h-3l-3 3-3-3'],
+      // Escalate + Email RFP were the two registrants with no entry here, so the rail fell back
+      // to their emoji (a RED flag and a blue envelope) beside eleven monochrome line icons -
+      // the only two rows that did not match, reported 2026-08-03. The fallback is deliberate for
+      // an UNKNOWN tool; these two are not unknown.
+      assist: ['M6 3v18', 'M6 4h13l-3 4 3 4H6z'],
+      bidout: ['M4 6h16v12H4z', 'M4 7l8 6 8-6'],
       dispatch: ['M7 17a2 2 0 1 0 4 0 2 2 0 0 0-4 0z', 'M15 17a2 2 0 1 0 4 0 2 2 0 0 0-4 0z',
         'M5 17H3V6a1 1 0 0 1 1-1h9v12m-2 0h4m4 0h2v-6h-8m0-5h5l3 5'],
       tools: ['M4 6h16', 'M4 12h16', 'M4 18h16', 'M14 4v4', 'M8 10v4', 'M16 16v4'],
@@ -7614,17 +7835,22 @@
       try { document.documentElement.style.setProperty('--bwn-dock-w', px + 'px'); } catch (e) { }
     }
     function renderDock() {
+      // Above EVERY early return, not just the signature check. The stylesheet is what makes the
+      // fallback pill visible too, so a demoted page and a zero-registrant page have to repair a
+      // deleted #bwn-launch-style exactly as much as a rendering rail does - and those are the two
+      // states Core sits in when it runs alone. Idempotent, and it appends to document.head while
+      // the observer watches document.body, so it cannot restart the rebuild loop.
+      ensureStyle();
       if (!dockAmHost) { removeDockStack(); return; }
       var vis = dockVisible();
       var pill = document.getElementById(DOCK_ID);
       var stack = document.getElementById(DOCK_STACK_ID);
       // Zero registrants: no rail; the standalone Tools pill stays as the fallback launcher.
       if (!vis.length) { if (stack) stack.remove(); if (pill) pill.style.display = ''; dockSig = ''; publishDockWidth(0); return; }
-      // These two run BEFORE the signature check on purpose. Both are idempotent and neither
-      // writes into the rail subtree, so they cannot restart the rebuild loop - but they are
-      // repairs, and the old unconditional rebuild is what used to re-run them. Behind the early
-      // return, a removed stylesheet or an ensureDock-recreated pill would never be fixed.
-      ensureStyle();
+      // Runs BEFORE the signature check on purpose: idempotent, does not write into the rail
+      // subtree (an attribute write against a childList-only observer), and it is a repair - behind
+      // the early return an ensureDock-recreated pill would never be re-hidden. It stays BELOW the
+      // zero-registrant branch so it cannot fight that branch's pill restore.
       if (pill) pill.style.display = 'none';   // Tools folds into the rail's footer row
       var sig = dockSignature(vis, dockIsCollapsed());
       // Unchanged roster AND the rail is still intact: touch nothing. The firstChild test keeps
@@ -7696,7 +7922,11 @@
     document.addEventListener('bwn:evt', BWN.guard(function (e) {
       var d = e && e.detail; if (!d || !d.id) return;
       if (d.id === 'bwn:role' && typeof d.rank === 'number') { dockRank = d.rank; scheduleDockRender(); return; }
-      if (d.id === 'bwn:dock:host') { if (dockOtherWins(d)) { dockAmHost = false; removeDockStack(); } return; }
+      if (d.id === 'bwn:dock:host') { if (dockOtherWins(d)) { dockAmHost = false; dockOtherSeen = Date.now(); removeDockStack(); } return; }
+      // A host that is still alive re-announces AND pings every DOCK_PING_MS; that traffic is what
+      // holds off the reclaim in the heartbeat. Guarded on hostId so our own ping - same document,
+      // same listener - never counts as somebody else's.
+      if (d.id === 'bwn:dock:ping' && d.hostId && d.hostId !== dockHostId) { dockOtherSeen = Date.now(); return; }
       if (!dockAmHost) return;
       if (d.id === 'bwn:dock:register' && d.key) {
         var ex = dockRoster[d.key];
@@ -7733,7 +7963,16 @@
 
     // Heartbeat: re-announce (registrants re-register on it) + ping + drop stale entries.
     setInterval(BWN.guard(function () {
-      if (!dockAmHost) return;
+      // Reclaim. dockAmHost used to be a one-way latch: ONE bwn:dock:host from anything on the page
+      // - a real second host that then closed, or a spoofed priority:999 - demoted this dock for the
+      // rest of the page's life, with no path back. A live winner re-announces and pings every
+      // DOCK_PING_MS, so silence past the same TTL an entry gets means it is gone. If it is in fact
+      // alive, our announce loses to it again on the same total order and we demote right back, so
+      // the worst case is one wasted render, not two rails.
+      if (!dockAmHost) {
+        if (Date.now() - dockOtherSeen <= DOCK_TTL_MS) return;
+        dockAmHost = true; dockSig = '';   // roster went stale while demoted; the announce refills it
+      }
       dockAnnounce(); dockPing(); pruneDock(); scheduleDockRender();
     }, 'launcher:dockbeat'), DOCK_PING_MS);
 
