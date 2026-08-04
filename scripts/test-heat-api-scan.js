@@ -88,6 +88,15 @@ var SRC_TOTAL = slice(core,
   '    function umbravaTotal() {',
   '    // ---- Acknowledge / snooze (v3.8) ---',
   'umbravaTotal');
+// v3.20: the two heatStore writers and the one function that decides their shared key.
+var SRC_KEY = slice(core,
+  "    // heatStore's KEY, and the ONE place that decides its shape (v3.20).",
+  '    function clearEl(el) {',
+  'heatKey');
+var SRC_DOMPUT = slice(core,
+  "    // The DOM tinting pass's write into heatStore.",
+  '    var heatScanning = false;',
+  'heatStoreDomPut');
 // v3.19 blocks.
 var SRC_MARSHAL = slice(core,
   '    // One place that turns a STORED row',
@@ -361,7 +370,7 @@ function build(opts) {
   var o = opts || {};
   // computeVerdict stays STUBBED here (see PRELUDE): these tests assert which facts the scan
   // hands the engine. The real engine is exercised by buildVerdict() below.
-  var src = [PRELUDE, SRC_PAGING, SRC_FIND, SRC_MAP, SRC_CAPTURE, SRC_TOTAL, SRC_MARSHAL, SRC_USERS, SRC_NEXTSTEP, SRC_SCAN].join('\n\n');
+  var src = [PRELUDE, SRC_KEY, SRC_PAGING, SRC_FIND, SRC_MAP, SRC_CAPTURE, SRC_TOTAL, SRC_MARSHAL, SRC_USERS, SRC_NEXTSTEP, SRC_SCAN].join('\n\n');
   (o.mutations || []).forEach(function (m) { src = mutate(src, m[0], m[1]); });
   var sandbox = sandboxFor(o);
   vm.runInNewContext(src, sandbox, { filename: 'heat-slice.js' });
@@ -400,7 +409,7 @@ var ENGINE_PRELUDE = [
 ].join('\n');
 function buildEngine(opts) {
   var o = opts || {};
-  var src = [VERDICT_PRELUDE, ENGINE_PRELUDE, SRC_MAP, SRC_THRESH, SRC_ENGINE_DEPS, SRC_ENGINE, SRC_VERDICT, SRC_MARSHAL, SRC_NEXTSTEP].join('\n\n')
+  var src = [VERDICT_PRELUDE, ENGINE_PRELUDE, SRC_KEY, SRC_MAP, SRC_THRESH, SRC_ENGINE_DEPS, SRC_ENGINE, SRC_VERDICT, SRC_MARSHAL, SRC_NEXTSTEP].join('\n\n')
     // heatNextStep calls the PUBLISHED reference; in the file that assignment is the slice's
     // end marker, so wire it here exactly as the module does at load time.
     + '\nvar bwnActsEngine = computeNextActions;\n';
@@ -420,6 +429,39 @@ function buildVerdict(opts) {
   sandbox.__cfg = o.cfg || { hrsWarn: 60, hrsBad: 120, activeMult: 0.5, dueWarnDays: 3, schedGraceDays: 1, noteStaleDays: 7 };
   vm.runInNewContext(src, sandbox, { filename: 'verdict-slice.js' });
   return sandbox;
+}
+
+// heatKey + heatStoreDomPut alone, with heatStore as a plain context global so a test can
+// seed it the way a finished API scan leaves it. Nothing about the store is stubbed - the
+// store IS a plain object in the module too.
+function buildStore(opts) {
+  var o = opts || {};
+  var src = ['var heatStore = null;', SRC_KEY, SRC_DOMPUT].join('\n\n');
+  (o.mutations || []).forEach(function (m) { src = mutate(src, m[0], m[1]); });
+  var sandbox = {};
+  vm.runInNewContext(src, sandbox, { filename: 'store-slice.js' });
+  return sandbox;
+}
+// What the API scan leaves behind for one WO: the rich record, tagged src:'api'.
+function apiRec(num) {
+  return {
+    id: String(num), kinds: [], acked: false, sev: 2, reasons: ['past status limit'],
+    wo: String(num), tracking: '1052746', status: 'Pending Schedule', prio: 'Yellow - Medium Priority',
+    client: 'Pilot Travel Centers', assignee: 'Matthew Zozimo', hrs: '1299.7', days: '202',
+    assigneeId: 'ae7bb143-d386-4a0c-8be6-5a182c0b988f', nte: '$9,752.73', dneAmt: 0, nteAmt: 9752.73,
+    phase: 'Open', vendors: 'HERC RENTALS INC', vendorsKnown: true, remDays: -3,
+    sla: { responseMinutes: 51840 }, slaScaled: true, src: 'api'
+  };
+}
+// What the DOM tinting pass builds for the same row: everything a <tr> can give, and
+// nothing it cannot. No src tag - that is how the store tells the two apart.
+function domRec(num) {
+  return {
+    id: String(num), kinds: [], acked: true, sev: 2, reasons: ['past status limit'],
+    wo: 'W-' + num, tracking: '1052746', status: 'Pending Schedule', prio: 'Yellow - Medium Priority',
+    client: 'Pilot Travel Centers', assignee: 'Matthew Zozimo', hrs: '1299.65', days: '202',
+    dne: '$89,871.10', sched: '', lastNote: '08/04/2026', exp: '05/31/2026'
+  };
 }
 
 function storeSize(s) { return s.heatStore ? Object.keys(s.heatStore).length : null; }
@@ -876,6 +918,109 @@ function runScan(opts) {
   return s.apiScanAll(btn).then(function (ok) { return { s: s, ok: ok, btn: btn }; });
 }
 
+// ============================================================================
+// v3.20: THE TWO WRITERS AND THE ONE KEY.
+//
+// Measured live 2026-08-04 on the real board: the list row's WO link is
+// "/work-orders/371126/details" - a ROUTE SUFFIX - while the API path built the key as
+// "/work-orders/371126". Both write into the same heatStore, so every row the DOM pass
+// touched was filed a SECOND time and the board count grew as the virtualizer rendered
+// more of the list. A one-row board announced "of 2 open - full board"; the user's
+// 217-row board opened at 221 and reached 286 after scrolling.
+//
+// This was latent for as long as the API scan was broken: until v3.18 every replay threw
+// and heatStore was DOM-only, so both keys came from the same producer and agreed. Fixing
+// the scan is what made the mismatch reachable.
+console.log('\n-- heatStore key: the DOM row and the API row must agree (v3.20) --');
+(function () {
+  var s = build({});
+  var LIVE = '/work-orders/371126/details';   // copied off the live DOM, not invented
+  A.eq('the live row href canonicalizes to the bare WO route', s.heatKey(LIVE), '/work-orders/371126');
+  A.eq('a bare route is already canonical', s.heatKey('/work-orders/371126'), '/work-orders/371126');
+  A.eq('an absolute href canonicalizes the same', s.heatKey('https://app.umbrava.com/work-orders/371126/details'), '/work-orders/371126');
+  A.eq('a trailing query/hash is not part of the key', s.heatKey('/work-orders/371126?tab=notes#x'), '/work-orders/371126');
+  A.eq('a non-numeric route has no key', s.heatKey('/work-orders/new'), null);
+  A.eq('empty href has no key', s.heatKey(''), null);
+  A.eq('null href has no key', s.heatKey(null), null);
+
+  // The regression itself, real bytes on both sides: the API mapper's href and the DOM
+  // row's canonicalized href are the SAME string, so the same WO cannot be stored twice.
+  var row = makeRow(0);
+  var mapped = s.heatApiRowToEntry(row);
+  A.eq('API writer key', mapped.href, '/work-orders/327000');
+  A.eq('DOM writer key for the same WO is identical',
+    s.heatKey('/work-orders/' + row.number + '/details'), mapped.href);
+  A.ok('and the RAW href - the pre-v3.20 key - is not that string, which is the whole bug',
+    ('/work-orders/' + row.number + '/details') !== mapped.href);
+})();
+
+console.log('\n-- heatStore writes: the DOM pass adds rows, it never doubles or thins them --');
+(function () {
+  var s = buildStore({});
+
+  // No store yet (no scan has run): the DOM pass must not conjure one.
+  s.heatStore = null;
+  s.heatStoreDomPut('/work-orders/326991', domRec(326991));
+  A.eq('no store -> no write, no throw', s.heatStore, null);
+
+  // Scroll-scan path: the store is DOM-owned, so the DOM record lands and later repaints
+  // refresh it (a status edited in place must not be frozen at its first read).
+  s.heatStore = {};
+  s.heatStoreDomPut(s.heatKey('/work-orders/326991/details'), domRec(326991));
+  A.eq('DOM row files under the canonical key', Object.keys(s.heatStore), ['/work-orders/326991']);
+  var moved = domRec(326991); moved.status = 'Scheduled';
+  s.heatStoreDomPut(s.heatKey('/work-orders/326991/details'), moved);
+  A.eq('a DOM-sourced record IS replaced on the next pass', s.heatStore['/work-orders/326991'].status, 'Scheduled');
+  A.eq('and it is still one row, not two', Object.keys(s.heatStore).length, 1);
+
+  // A row with no WO id in its href is not a WO row: it must not become a key.
+  s.heatStoreDomPut(s.heatKey('/work-orders/new'), domRec(0));
+  A.eq('an unkeyable href writes nothing', Object.keys(s.heatStore).length, 1);
+
+  // The reported symptom: an API scan owns the board, then the DOM pass sweeps the rows
+  // on screen. Store size must not move.
+  s.heatStore = {};
+  s.heatStore['/work-orders/326991'] = apiRec(326991);
+  s.heatStore['/work-orders/327018'] = apiRec(327018);
+  s.heatStoreDomPut(s.heatKey('/work-orders/326991/details'), domRec(326991));
+  s.heatStoreDomPut(s.heatKey('/work-orders/327018/details'), domRec(327018));
+  A.eq('a DOM sweep over an API-scanned board adds no rows', Object.keys(s.heatStore).length, 2);
+  A.eq('and the keys are still the canonical ones',
+    Object.keys(s.heatStore).sort(), ['/work-orders/326991', '/work-orders/327018']);
+
+  // ...and the API record is not thinned by the sweep. These are the facts no <tr> carries;
+  // blanking them would quietly degrade exactly the rows the coordinator is looking at.
+  var kept = s.heatStore['/work-orders/326991'];
+  A.eq('API-only assigneeId survives the DOM sweep', kept.assigneeId, 'ae7bb143-d386-4a0c-8be6-5a182c0b988f');
+  A.eq('API-only NTE survives', kept.nteAmt, 9752.73);
+  A.eq('API-only phase survives', kept.phase, 'Open');
+  A.eq('API-only remainingDays survives', kept.remDays, -3);
+  A.eq('API-only vendorsKnown survives', kept.vendorsKnown, true);
+  A.eq('the record is still tagged as the API read', kept.src, 'api');
+  A.eq('the API-converted hours are kept, not overwritten by the column text', kept.hrs, '1299.7');
+  // One field DOES cross over: a snooze toggled while the store stands.
+  A.eq('acked is refreshed from the row', kept.acked, true);
+
+  // A DOM row the scan never returned (added to the board since, or outside the scanned
+  // filter) still has to land - the sweep is additive, it is only non-destructive.
+  s.heatStoreDomPut(s.heatKey('/work-orders/399999/details'), domRec(399999));
+  A.eq('a genuinely new row is still added', Object.keys(s.heatStore).length, 3);
+  A.eq('and it is DOM-sourced', s.heatStore['/work-orders/399999'].src, undefined);
+})();
+
+// The call site is not inside any slice above, so it is checked as shipped bytes: the raw
+// href must be gone from the writer, and both the key and the merge must go through the
+// named functions. This is what stops the mismatch being re-introduced one edit later.
+console.log('\n-- the shipped call site --');
+(function () {
+  A.ok('the DOM writer no longer keys on the raw href',
+    core.indexOf("heatStore[link.getAttribute('href')]") === -1);
+  A.ok('it keys through heatKey and merges through heatStoreDomPut',
+    core.indexOf("heatStoreDomPut(heatKey(link.getAttribute('href')), {") !== -1);
+  A.ok('the API mapper builds its href through heatKey too',
+    core.indexOf("href: heatKey('/work-orders/' + num),") !== -1);
+})();
+
 function main() {
   console.log('\n-- full-board replay against the live paging contract --');
   var tx = makeTransport({ total: 213 });
@@ -1155,6 +1300,29 @@ function main() {
     e13ok.status = 'Confirm Complete';
     var a13ok = s13ok.heatNextStep(e13ok, s13ok.__cfg);
     A.ok('and the shipped code does not', !a13ok || a13ok.key !== 'docs:none', String(a13ok && a13ok.key));
+
+    // ---- v3.20 controls. ----
+
+    // M14: heatKey reverted to the raw href - the pre-v3.20 DOM key. This IS the live
+    // symptom: two keys for one WO, and a board count that climbs as you scroll.
+    var m14 = [["      return m ? '/work-orders/' + m[1] : null;", '      return href || null;']];
+    var s14 = buildStore({ mutations: m14 });
+    s14.heatStore = {};
+    s14.heatStore['/work-orders/326991'] = apiRec(326991);          // as the API scan left it
+    s14.heatStoreDomPut(s14.heatKey('/work-orders/326991/details'), domRec(326991));
+    A.eq('M14 control: the raw href files the same WO twice', Object.keys(s14.heatStore).length, 2);
+    A.eq('M14 control: which is the "of 2 open" a one-row board printed',
+      Object.keys(s14.heatStore).sort(), ['/work-orders/326991', '/work-orders/326991/details']);
+
+    // M15: no API guard in the merge - the DOM record clobbers the richer one, so every row
+    // on screen silently loses the facts a <tr> cannot carry.
+    var m15 = [["      if (prev && prev.src === 'api') { prev.acked = rec.acked; return; }", '']];
+    var s15 = buildStore({ mutations: m15 });
+    s15.heatStore = {};
+    s15.heatStore['/work-orders/326991'] = apiRec(326991);
+    s15.heatStoreDomPut(s15.heatKey('/work-orders/326991/details'), domRec(326991));
+    A.eq('M15 control: without the guard the API record is thinned', s15.heatStore['/work-orders/326991'].assigneeId, undefined);
+    A.eq('M15 control: and it stops reading as an API row', s15.heatStore['/work-orders/326991'].src, undefined);
   }).then(function () {
     A.finish();
   }, function (err) {

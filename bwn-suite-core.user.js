@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         BWN Suite - Core (Broadway National)
 // @namespace    broadwaynational.bwn
-// @version      1.66.26
+// @version      1.66.27
 // @downloadURL  https://raw.githubusercontent.com/Intermu/userscripts-public/main/bwn-suite-core.user.js
 // @updateURL    https://raw.githubusercontent.com/Intermu/userscripts-public/main/bwn-suite-core.user.js
 // @description  Runs several Umbrava helpers for BWN coordinators, in the browser with no privileged grants. Includes: PO Approval + ETA Builder; WO Assist (GP/ETA, a stall watchdog, DNE calculator, and a next-action playbook); Email Leak Guard (checks recipients against vendor names, PO amounts, and client budget references before an outbound email sends); WO List Heat (a triage overlay + My Day strip on the work-order list, with an optional same-origin Umbrava API scan for deterministic full-board coverage); and the BWN Launcher (opens the Azure Static Web App tools with the current WO's context). Modules share state through sessionStorage/localStorage. The only network calls are same-origin Umbrava GraphQL reads (app.umbrava.com/api/graphql, the app's own session): List Heat's full-board scan and WO Assist's work-order / trip / clock-in reads; everything else is offline. Toggle modules in BWN_MODULES below.
@@ -44,7 +44,7 @@
   try { localStorage.setItem('bwn:status:core', JSON.stringify({ ver: BWN_VER, ts: Date.now() })); } catch (e) { /* best-effort */ }
 
   console.info('[BWN SUITE CORE] v' + BWN_VER + ' |',
-    'Shared Core 7 \u00b7 PO Approval 1.13 \u00b7 WO Assist 2.66 \u00b7 Leak Guard 2.0 \u00b7 List Heat 3.17 \u00b7 Launcher 2.0 \u00b7 Views 1.0 \u00b7 Palette 1.1 \u00b7 Visit 1.2 \u00b7 Reminders 1.1 \u00b7 Timeline 1.1 \u00b7 TripCal 1.4 \u00b7 Connector 1.2 |',
+    'Shared Core 7 \u00b7 PO Approval 1.13 \u00b7 WO Assist 2.66 \u00b7 Leak Guard 2.0 \u00b7 List Heat 3.20 \u00b7 Launcher 2.0 \u00b7 Views 1.0 \u00b7 Palette 1.1 \u00b7 Visit 1.2 \u00b7 Reminders 1.1 \u00b7 Timeline 1.1 \u00b7 TripCal 1.4 \u00b7 Connector 1.2 |',
     'enabled:', Object.keys(BWN_MODULES).filter(function (k) { return BWN_MODULES[k]; }).join(', '));
 
   // ===== BWN SHARED CORE v7 - KEEP IN SYNC across both suite scripts =====
@@ -5539,7 +5539,7 @@
   });
 
   // ==========================================================================
-  // MODULE: WO List Heat v3.19
+  // MODULE: WO List Heat v3.20
   // ==========================================================================
   if (BWN_MODULES.listHeat) BWN.safeModule('listHeat', function () {
     'use strict';
@@ -5550,7 +5550,7 @@
     }
     window.__bwnWoHeat = true;
 
-    console.info('[BWN HEAT] v3.19 loaded on', location.href);
+    console.info('[BWN HEAT] v3.20 loaded on', location.href);
 
     // ---- Config (edit here) ----------------------------------------------
     // Advanced knobs (status-class regexes + priority multipliers) now live in the
@@ -5937,7 +5937,8 @@
       var dneAmt = moneyNum(dne, g(/donotexceed.*precision/i));
       var nteAmt = moneyNum(nte, g(/totalnte.*precision/i));
       return {
-        href: '/work-orders/' + num,
+        // Through heatKey so the API writer and the DOM writer cannot drift apart again.
+        href: heatKey('/work-orders/' + num),
         entry: {
           id: num, wo: String(numRaw), tracking: String(g(/trackingnumber|(^|\.)tracking$/i) || '').replace(/\D+/g, ''),
           status: status, prio: prio, client: client, assignee: cleanName(assignee),
@@ -6082,6 +6083,18 @@
         if (/\/work-orders\/\d+/.test(as[i].getAttribute('href') || '')) return as[i];
       }
       return null;
+    }
+    // heatStore's KEY, and the ONE place that decides its shape (v3.20). Two writers fill
+    // that store - the API scan and the DOM tinting pass - and they were producing
+    // DIFFERENT strings for the same WO, so every row on screen was stored TWICE and the
+    // board count grew as the virtualizer rendered more. Measured live 2026-08-04: the
+    // list row's link is "/work-orders/371126/details" (a route suffix), the API path built
+    // "/work-orders/371126", and a ONE-row board announced "of 2 open - full board".
+    // The bare route redirects to /details, so the canonical key is still a working href
+    // for the audit panel's links. Returns null when there is no WO id to key on.
+    function heatKey(href) {
+      var m = String(href || '').match(/\/work-orders\/(\d+)/);
+      return m ? '/work-orders/' + m[1] : null;
     }
     function clearEl(el) { while (el.firstChild) el.removeChild(el.firstChild); }
 
@@ -6642,7 +6655,20 @@
     var heatActsWarned = false;
 
     // ---- Heat pass ----------------------------------------------------------------
-    var heatStore = null;     // { href: {sev, reasons[], wo, client, status, assignee, prio, hrs, days, dne, sched, lastNote, exp} }
+    var heatStore = null;     // { heatKey(href): {sev, reasons[], wo, client, status, assignee, prio, hrs, days, dne, sched, lastNote, exp} }
+    // The DOM tinting pass's write into heatStore. Two rules, both learned the hard way:
+    //   - the key comes from heatKey, never from the raw href (see there);
+    //   - a row the API scan already read is NOT overwritten. The API record carries facts
+    //     no board row can supply - assigneeId, NTE, phase, vendors, remainingDays, the SLA
+    //     minutes - and clobbering it with the DOM read would blank those for exactly the
+    //     rows currently on screen, which is the subset a coordinator is looking at.
+    //     Only `acked` is refreshed, because a snooze can be toggled while the store stands.
+    function heatStoreDomPut(key, rec) {
+      if (!heatStore || !key) return;
+      var prev = heatStore[key];
+      if (prev && prev.src === 'api') { prev.acked = rec.acked; return; }
+      heatStore[key] = rec;
+    }
     var heatScanning = false;
     var heatScanAbort = false;   // set by the route-change observer so an in-flight API scan bails cleanly
     var heatScanClean = false;   // true only after a clean Scan All convergence - gates trend/snapshot writes
@@ -6765,7 +6791,7 @@
         } catch (eS) { /* best-effort */ }
 
         if (heatStore) {
-          heatStore[link.getAttribute('href')] = {
+          heatStoreDomPut(heatKey(link.getAttribute('href')), {
             id: rowId, kinds: kinds.slice(), acked: acked,
             sev: sev, reasons: reasons.slice(),
             wo: (link.textContent || '').trim() || cellText(tr, H.wo),
@@ -6779,7 +6805,7 @@
             // cell would zero the over-30 signal everywhere except the row tint (review).
             hrs: cellText(tr, H.hrs), days: cellText(tr, H.days) || (!isNaN(ageDays) ? String(Math.round(ageDays)) : ''), dne: cellText(tr, H.dne),
             sched: cellText(tr, H.sched), lastNote: cellText(tr, H.lastNote), exp: cellText(tr, H.exp)
-          };
+          });
         }
       });
       diag(table, H, nRows);
