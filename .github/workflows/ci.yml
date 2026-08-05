@@ -96,6 +96,12 @@ jobs:
       - name: Notes API harness (bwnNotesApi block + cross-file SHA)
         run: node scripts/test-notes-api.js
 
+      # bwn-kanban 0.4.0: the board card rendered timeInStatus (MINUTES) as hours, 60x on every
+      # card of a 219-row board. Also gates the List Heat v3.24 full-board verdict publish the
+      # board reads its severity from, and that both bwn:heat writers emit one payload shape.
+      - name: Kanban card harness (status-clock units + verdict publish)
+        run: node scripts/test-kanban-card.js
+
   lint:
     name: Lint (advisory)
     runs-on: ubuntu-latest
