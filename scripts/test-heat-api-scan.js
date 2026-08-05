@@ -128,13 +128,23 @@ var SRC_THRESH = slice(core,
   '  // ---- Next-actions engine, published across module closures',
   'BWN_HEAT_CFG + bwnSlaMult + bwnThresholdsFor');
 // v3.22: the one "is this row finished?" test. Sliced as its own block rather than folded
-// into SRC_VERDICT so the slice below still starts at computeVerdict and the 3-arg
-// thresholdsFor alias that sits between them stays OUT of these sandboxes (VERDICT_PRELUDE
-// supplies its own). computeVerdict CALLS heatDone, so a build without this block throws.
+// into SRC_VERDICT so the slice below still starts at computeVerdict.
+// computeVerdict CALLS heatDone, so a build without this block throws.
 var SRC_DONE = slice(core,
   '    // ---- Is this row finished? ONE place (v3.22) ---',
   '    // ---- Threshold model ---',
   'heatDone');
+// v3.23: the module-local thresholdsFor alias, SLICED rather than stubbed. VERDICT_PRELUDE
+// used to declare its own `function thresholdsFor(status, prioText, C, sla)` that forwarded
+// all four args, while the shipped alias declared three and dropped the 4th on the floor.
+// So every assertion below ran against a signature the browser never had: bwnSlaMult never
+// ran in List Heat, `slaScaled` was false on every row, the v3.19 client-SLA clock was dead
+// on the board - and 287 assertions passed. A stub cannot answer "does the SHIPPED alias
+// forward its arguments", so it does not get to be a stub any more.
+var SRC_ALIAS = slice(core,
+  '    // ---- Threshold model ---',
+  '    // ---- Per-row verdict',
+  'thresholdsFor alias');
 var SRC_VERDICT = slice(core,
   '    function computeVerdict(f, C) {',
   '    // One place that turns a STORED row',
@@ -403,7 +413,7 @@ var VERDICT_PRELUDE = [
   'function cleanName(s) { return String(s == null ? "" : s).trim(); }',
   'function ackGet() { return false; }',
   'function bwnConfig() { return __cfg; }',
-  'function thresholdsFor(status, prioText, C, sla) { return bwnThresholdsFor(status, prioText, C, sla); }',
+  // NO thresholdsFor stub here - SRC_ALIAS supplies the real one. See its slice above.
   'var BWN = {',
   '  cfg: function () { return __cfg; },',
   '  parseUSDate: function (s) { var m = /^(\\d{1,2})\\/(\\d{1,2})\\/(\\d{4})$/.exec(String(s == null ? "" : s)); if (!m) return null; var d = new Date(Number(m[3]), Number(m[1]) - 1, Number(m[2])); d.setHours(0, 0, 0, 0); return d.getTime(); },',
@@ -427,7 +437,7 @@ var ENGINE_PRELUDE = [
 ].join('\n');
 function buildEngine(opts) {
   var o = opts || {};
-  var src = [VERDICT_PRELUDE, ENGINE_PRELUDE, SRC_KEY, SRC_MAP, SRC_THRESH, SRC_ENGINE_DEPS, SRC_ENGINE, SRC_DONE, SRC_VERDICT, SRC_MARSHAL, SRC_NEXTSTEP].join('\n\n')
+  var src = [VERDICT_PRELUDE, ENGINE_PRELUDE, SRC_KEY, SRC_MAP, SRC_THRESH, SRC_ENGINE_DEPS, SRC_ENGINE, SRC_DONE, SRC_ALIAS, SRC_VERDICT, SRC_MARSHAL, SRC_NEXTSTEP].join('\n\n')
     // heatNextStep calls the PUBLISHED reference; in the file that assignment is the slice's
     // end marker, so wire it here exactly as the module does at load time.
     + '\nvar bwnActsEngine = computeNextActions;\n';
@@ -440,7 +450,7 @@ function buildEngine(opts) {
 }
 function buildVerdict(opts) {
   var o = opts || {};
-  var src = [VERDICT_PRELUDE, SRC_THRESH, SRC_DONE, SRC_VERDICT, SRC_MARSHAL].join('\n\n');
+  var src = [VERDICT_PRELUDE, SRC_THRESH, SRC_DONE, SRC_ALIAS, SRC_VERDICT, SRC_MARSHAL].join('\n\n');
   (o.mutations || []).forEach(function (m) { src = mutate(src, m[0], m[1]); });
   var sandbox = sandboxFor(o);
   // The live defaults, so the numbers in these assertions are the numbers on the board.
@@ -767,6 +777,86 @@ console.log('\n-- v3.19: the status clock scales off the client SLA, not a parse
   A.eq('the 3-arg call is byte-for-byte the old behaviour',
     [s.bwnThresholdsFor('Scheduled', 'P2 Next Day', null).warn, s.bwnThresholdsFor('Scheduled', 'P2 Next Day', null).bad],
     [15, 30]);
+})();
+
+// ============================================================================
+// v3.23: THE ALIAS THAT DROPPED THE ARGUMENT.
+// Everything above measures bwnThresholdsFor DIRECTLY. Nothing measured the module-local
+// `thresholdsFor` that List Heat's two call sites actually go through - it was a 3-parameter
+// forwarder, so `f.sla` / `e.sla` were dropped, bwnSlaMult never ran, and the v3.19 clock
+// was inert on the board. These assertions go through the REAL alias (SRC_ALIAS), and the
+// numbers below are the pair measured in a vm against the shipped 1.66.29 bytes.
+console.log('\n-- v3.23: the module alias forwards the row’s SLA facts --');
+(function () {
+  var s = buildVerdict({});
+  var SLA = { responseMinutes: 480, category: 'high' };
+  A.eq('the alias returns what the engine returns, argument for argument',
+    s.thresholdsFor('Scheduled', 'P2 Next Day', s.__cfg, SLA),
+    s.bwnThresholdsFor('Scheduled', 'P2 Next Day', s.__cfg, SLA));
+  // The measured "after". The shipped 1.66.29 alias returned {warn:15,bad:30,sla:false} here.
+  A.eq('and those are the SLA numbers, not the label-parsed ones',
+    s.thresholdsFor('Scheduled', 'P2 Next Day', s.__cfg, SLA), { warn: 10, bad: 20, sla: true });
+  A.eq('a 3-arg call through the alias is still the old behaviour, untouched',
+    s.thresholdsFor('Scheduled', 'P2 Next Day', s.__cfg), { warn: 15, bad: 30, sla: false });
+
+  // computeVerdict is the consumer that matters: `slaScaled` is exactly what the Audit
+  // panel's "status limits: N of M scaled by the client SLA" line counts, and it was false
+  // on every row of every scan.
+  function V(over) {
+    var f = {
+      status: 'Scheduled', prio: 'P2 Next Day', phase: 'Open',
+      ageDays: 10, hrs: NaN, expTs: null, schedTs: null, lastNoteTs: null, remDays: null, sla: null
+    };
+    Object.keys(over || {}).forEach(function (k) { f[k] = over[k]; });
+    return s.computeVerdict(f, s.__cfg);
+  }
+  A.eq('an API row with a response clock reports which clock judged it',
+    V({ sla: { responseMinutes: 480 } }).slaScaled, true);
+  A.eq('the category alone is enough of a basis',
+    V({ sla: { responseMinutes: null, slaMinutes: null, category: 'High' } }).slaScaled, true);
+  A.eq('a row with no SLA facts says so, and falls back to the label',
+    V({ sla: null }).slaScaled, false);
+  // The live shape when the priority columns were not in the captured query: heatApiRowToEntry
+  // always emits an sla OBJECT, so "truthy object" must not be mistaken for "has facts".
+  A.eq('an sla object with nothing usable in it is not a basis',
+    V({ sla: { responseMinutes: null, slaMinutes: 201600, category: '' } }).slaScaled, false);
+
+  // And the numbers MOVE - which is why this was kept out of the v3.22 commit. Both
+  // directions, on the live config (hrsWarn 60 / hrsBad 120 / activeMult 0.5).
+  A.eq('25h in status: past its limit on a 480-minute promise, only watch on the label',
+    [V({ hrs: 25, sla: { responseMinutes: 480 } }).sev, V({ hrs: 25, sla: null }).sev], [2, 1]);
+  A.ok('and the reason quotes the SLA limit, so the row explains itself',
+    /25h in "Scheduled" \(limit 20h\)/.test(V({ hrs: 25, sla: { responseMinutes: 480 } }).reasons.join('|')),
+    V({ hrs: 25, sla: { responseMinutes: 480 } }).reasons.join('|'));
+  // The direction that will actually move THIS board: the live Pilot rows carry a
+  // 51840-minute (36-day) response clock, which clamps to 2.0x and LOOSENS them.
+  A.eq('70h on a Pilot row: red on the label clock, amber on the client’s own',
+    [V({ prio: 'Yellow - Medium Priority', hrs: 70, sla: null }).sev,
+    V({ prio: 'Yellow - Medium Priority', hrs: 70, sla: { responseMinutes: 51840 } }).sev], [2, 1]);
+  A.eq('so a red count can fall as well as rise - this change is not one-directional',
+    [V({ prio: 'Yellow - Medium Priority', hrs: 70, sla: { responseMinutes: 51840 } }).limitBad,
+    V({ prio: 'Yellow - Medium Priority', hrs: 70, sla: null }).limitBad], [false, true]);
+})();
+
+console.log('\n-- v3.23: the shipped alias and both call sites (source check) --');
+(function () {
+  A.ok('the alias declares the 4th parameter and forwards it',
+    core.indexOf('function thresholdsFor(status, prioText, C, sla) { return bwnThresholdsFor(status, prioText, C, sla); }') !== -1);
+  // 1 definition + 2 call sites. A 3-arg call would silently mean "this row has no SLA facts",
+  // so the count is pinned rather than the strings alone: a NEW call site has to be considered.
+  A.eq('the alias is defined once and called exactly twice', core.split('thresholdsFor(').length - 1, 3);
+  A.ok('computeVerdict passes the row’s own facts',
+    core.indexOf('var th = thresholdsFor(f.status, f.prio, C, f.sla);') !== -1);
+  A.ok('and the offender ranking ranks on the same limit the row was judged by',
+    core.indexOf('var th2 = thresholdsFor(e.status, e.prio, Cn, e.sla);') !== -1);
+  // The other half: `sla` has to REACH computeVerdict from all four of its callers, or the
+  // pills, the tint and the stored sev are three different clocks. heatVerdictFor already
+  // carried it; the DOM tint and My Day did not until v3.23.
+  A.ok('the marshal carries it', core.indexOf('remDays: e.remDays, sla: e.sla,') !== -1);
+  A.ok('the DOM tint borrows it from the API record for the same row',
+    core.indexOf('sla: apiRec ? apiRec.sla : undefined,') !== -1);
+  A.ok('and the My Day tally counts against it',
+    core.indexOf('status: o.status, prio: o.prio, phase: o.phase, sla: o.sla,') !== -1);
 })();
 
 console.log('\n-- v3.19: the new verdict signals --');
@@ -1513,6 +1603,27 @@ function main() {
     var early17 = [];
     s17.bwnBoot('tripCal', true, function () { early17.push('ran'); });
     A.eq('M17 control: the module body runs at registration, before there is a page', early17, ['ran']);
+
+    // ---- v3.23 controls. ----
+
+    // M18: the alias back to THREE parameters - the shipped 1.66.29 bytes, verbatim. This is
+    // the control that could not exist while VERDICT_PRELUDE stubbed the alias with four:
+    // the stub WAS the mutation, permanently applied in the harness' favour.
+    var m18 = [['    function thresholdsFor(status, prioText, C, sla) { return bwnThresholdsFor(status, prioText, C, sla); }',
+      '    function thresholdsFor(status, prioText, C) { return bwnThresholdsFor(status, prioText, C); }']];
+    var s18 = buildVerdict({ mutations: m18 });
+    A.eq('M18 control: the 3-param alias drops the SLA facts - the measured live numbers',
+      s18.thresholdsFor('Scheduled', 'P2 Next Day', s18.__cfg, { responseMinutes: 480, category: 'high' }),
+      { warn: 15, bad: 30, sla: false });
+    A.eq('M18 control: and the engine it delegates to disagrees with it, which is the bug',
+      s18.bwnThresholdsFor('Scheduled', 'P2 Next Day', s18.__cfg, { responseMinutes: 480, category: 'high' }),
+      { warn: 10, bad: 20, sla: true });
+    A.eq('M18 control: so slaScaled is false on a row that HAS a response clock - which is why the audit panel’s SLA line never printed',
+      s18.computeVerdict({ status: 'Scheduled', prio: 'P2 Next Day', phase: 'Open', ageDays: 10, hrs: 25, expTs: null, schedTs: null, lastNoteTs: null, sla: { responseMinutes: 480 } }, s18.__cfg).slaScaled,
+      false);
+    A.eq('M18 control: and the row that should be red is only amber',
+      s18.computeVerdict({ status: 'Scheduled', prio: 'P2 Next Day', phase: 'Open', ageDays: 10, hrs: 25, expTs: null, schedTs: null, lastNoteTs: null, sla: { responseMinutes: 480 } }, s18.__cfg).sev,
+      1);
   }).then(function () {
     A.finish();
   }, function (err) {

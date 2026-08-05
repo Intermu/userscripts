@@ -42,15 +42,19 @@
 // "of 218 open - full board" on this board, with the 19 "Clocked Out: Complete" rows tinted
 // per their own clocks.
 //
-// KNOWN OPEN, found while reading this code and deliberately NOT fixed in this pass (it moves
-// every row's threshold, which would blur this change's live gate): the module-local alias
-// `function thresholdsFor(status, prioText, C)` takes THREE parameters while both call sites
-// pass four - computeVerdict passes `f.sla`, the offender ranking passes `e.sla` - so the
-// v3.19 client-SLA scaling is dropped on the floor and `slaScaled` is never true. The
-// VERDICT_PRELUDE stub in test-heat-api-scan.js takes four and forwards, which is why 287
-// assertions stay green over a dead feature. Live corroboration: the Audit panel's
-// "status limits: N of M scaled by the client SLA" line is absent on an API scan that did
-// capture responseMinutes.
+// FIXED IN v3.23 (this note was the "KNOWN OPEN" of the v3.22 pass): the module-local alias
+// `function thresholdsFor(status, prioText, C)` took THREE parameters while both call sites
+// passed four - computeVerdict passes `f.sla`, the offender ranking passes `e.sla` - so the
+// v3.19 client-SLA scaling was dropped on the floor and `slaScaled` was never true. It was
+// held back deliberately because it moves every row's threshold, which would have blurred
+// this change's live gate. Both harnesses now SLICE the real alias instead of stubbing it
+// (the stub took four args and forwarded, which is how 287 assertions stayed green over a
+// dead path), so the same shape cannot come back. The numbers are asserted in
+// test-heat-api-scan.js under "v3.23".
+//
+// This harness' own counts are unaffected by that fix and that is the point: its fixture is
+// a DOM/scroll-shaped board with no `sla` on any row, so every threshold here still comes
+// from the "P3 Standard" label parse, exactly as it did in v3.22.
 //
 // Run: "/c/Program Files/Adobe/Adobe Creative Cloud Experience/libs/node.exe" scripts/test-heat-open-count.js
 
@@ -92,6 +96,12 @@ var SRC_THRESH = slice(core,
   '  var BWN_HEAT_CFG = {',
   '  // ---- Next-actions engine, published across module closures',
   'BWN_HEAT_CFG + bwnSlaMult + bwnThresholdsFor');
+// v3.23: the module-local alias, SLICED not stubbed (see the FIXED IN v3.23 note in the
+// header). The PRELUDE used to declare a 4-arg forwarder while the shipped alias took 3.
+var SRC_ALIAS = slice(core,
+  '    // ---- Threshold model ---',
+  '    // ---- Per-row verdict',
+  'thresholdsFor alias');
 var SRC_VERDICT = slice(core,
   '    function computeVerdict(f, C) {',
   '    // One place that turns a STORED row',
@@ -131,7 +141,7 @@ var PRELUDE = [
   'function dSince(ts) { return Math.floor((__today - ts) / 86400000); }',
   'function dUntil(ts) { return Math.ceil((ts - __today) / 86400000); }',
   'function mydayDateKey() { return "2026-08-05"; }',
-  'function thresholdsFor(status, prioText, C, sla) { return bwnThresholdsFor(status, prioText, C, sla); }',
+  // NO thresholdsFor stub - SRC_ALIAS supplies the shipped one.
   'function bwnConfig() { return __cfg; }',
   'function ackGet() { return false; }',
   'function cleanName(s) { return String(s == null ? "" : s).trim(); }',
@@ -156,7 +166,7 @@ var PRELUDE = [
 
 function build(opts) {
   var o = opts || {};
-  var src = [PRELUDE, SRC_THRESH, SRC_DONE, SRC_VERDICT, SRC_SNAP, SRC_O30, SRC_MYDAY].join('\n\n');
+  var src = [PRELUDE, SRC_THRESH, SRC_DONE, SRC_ALIAS, SRC_VERDICT, SRC_SNAP, SRC_O30, SRC_MYDAY].join('\n\n');
   (o.mutations || []).forEach(function (m) { src = mutate(src, m[0], m[1]); });
   var sandbox = { Date: Date, JSON: JSON, Math: Math, String: String, Number: Number, parseFloat: parseFloat, parseInt: parseInt, isNaN: isNaN, Object: Object, Array: Array };
   // The live config, so these numbers are the board's numbers.
@@ -331,7 +341,7 @@ console.log('\n-- mutation controls (each must FAIL an assertion above) --');
 
   // M2: the count gate fixed but the phase NOT forwarded into the engine from myDayCounts.
   // The nastier half-fix: 218 open and not one problem among the extra 19.
-  var m2 = [['          status: o.status, prio: o.prio, phase: o.phase,', '          status: o.status, prio: o.prio,']];
+  var m2 = [['          status: o.status, prio: o.prio, phase: o.phase, sla: o.sla,', '          status: o.status, prio: o.prio, sla: o.sla,']];
   var s2 = seed(build({ mutations: m2 }));
   var d2 = s2.myDayCounts();
   A.eq('M2 control: without the phase, the 19 count as open', d2.open, 218);
@@ -392,8 +402,8 @@ console.log('\n-- the shipped call sites: all five ask the same question --');
   A.ok('and the tint borrows the phase from the API record for the same row',
     core.indexOf('phase: apiRec ? apiRec.phase : undefined') !== -1);
   // Version bumps: without them the fix reaches nobody (Tampermonkey compares versions).
-  A.ok('Core is bumped past 1.66.28', core.indexOf('// @version      1.66.29') !== -1);
-  A.ok('and List Heat announces v3.22', core.indexOf("console.info('[BWN HEAT] v3.22 loaded on', location.href);") !== -1);
+  A.ok('Core is bumped past 1.66.29', core.indexOf('// @version      1.66.30') !== -1);
+  A.ok('and List Heat announces v3.23', core.indexOf("console.info('[BWN HEAT] v3.23 loaded on', location.href);") !== -1);
 })();
 
 A.finish();

@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         BWN Suite - Core (Broadway National)
 // @namespace    broadwaynational.bwn
-// @version      1.66.29
+// @version      1.66.30
 // @downloadURL  https://raw.githubusercontent.com/Intermu/userscripts-public/main/bwn-suite-core.user.js
 // @updateURL    https://raw.githubusercontent.com/Intermu/userscripts-public/main/bwn-suite-core.user.js
 // @description  Runs several Umbrava helpers for BWN coordinators, in the browser with no privileged grants. Includes: PO Approval + ETA Builder; WO Assist (GP/ETA, a stall watchdog, DNE calculator, and a next-action playbook); Email Leak Guard (checks recipients against vendor names, PO amounts, and client budget references before an outbound email sends); WO List Heat (a triage overlay + My Day strip on the work-order list, with an optional same-origin Umbrava API scan for deterministic full-board coverage); and the BWN Launcher (opens the Azure Static Web App tools with the current WO's context). Modules share state through sessionStorage/localStorage. The only network calls are same-origin Umbrava GraphQL reads (app.umbrava.com/api/graphql, the app's own session): List Heat's full-board scan and WO Assist's work-order / trip / clock-in reads; everything else is offline. Toggle modules in BWN_MODULES below.
@@ -5654,7 +5654,7 @@
   });
 
   // ==========================================================================
-  // MODULE: WO List Heat v3.22
+  // MODULE: WO List Heat v3.23
   // ==========================================================================
   bwnBoot('listHeat', BWN_MODULES.listHeat, function () {
     'use strict';
@@ -5665,7 +5665,7 @@
     }
     window.__bwnWoHeat = true;
 
-    console.info('[BWN HEAT] v3.22 loaded on', location.href);
+    console.info('[BWN HEAT] v3.23 loaded on', location.href);
 
     // ---- Config (edit here) ----------------------------------------------
     // Advanced knobs (status-class regexes + priority multipliers) now live in the
@@ -6515,7 +6515,19 @@
 
     // ---- Threshold model -----------------------------------------------------------
     // Delegates to the file-shared engine (single source of truth with WO Assist).
-    function thresholdsFor(status, prioText, C) { return bwnThresholdsFor(status, prioText, C); }
+    // THE 4th PARAMETER IS LOAD-BEARING (v3.23). This alias declared only three while both
+    // of its call sites already passed four - computeVerdict passes `f.sla`, the offender
+    // ranking passes `e.sla` - so the row's own { responseMinutes, category } was dropped
+    // here and bwnSlaMult never ran for List Heat at all. `slaScaled` was false on every
+    // row, which is why the Audit panel's "status limits: N of M scaled by the client SLA"
+    // line never appeared on a scan that HAD captured responseMinutes, and the whole v3.19
+    // client-SLA clock was inert on the board while the shared engine passed its own tests
+    // (those tests called bwnThresholdsFor directly, and the harness stub for this alias
+    // took four args - so 287 assertions ran green over a dead path).
+    // Measured on the shipped 1.66.29 bytes, status "Scheduled" / label "P2 Next Day" /
+    // sla { responseMinutes: 480 }: through this alias warn 15 / bad 30 / sla false, into
+    // the engine direct warn 10 / bad 20 / sla true.
+    function thresholdsFor(status, prioText, C, sla) { return bwnThresholdsFor(status, prioText, C, sla); }
 
     // ---- Per-row verdict: ONE source of truth (v3.15) ------------------------------
     // Pure fn - facts in, verdict out - so the DOM tinting pass, the API scan, and the
@@ -6856,9 +6868,14 @@
         var rowKey = heatKey(link.getAttribute('href'));
         var apiRec = (heatStore && heatStore[rowKey] && heatStore[rowKey].src === 'api') ? heatStore[rowKey] : null;
         // Verdict via the shared computeVerdict (same fn the API scan + My Day use),
-        // so row tint, audit counts, and My Day can never disagree.
+        // so row tint, audit counts, and My Day can never disagree. `sla` rides along for
+        // the same reason `phase` does (v3.23): the board has no responseMinutes column,
+        // and once thresholdsFor actually honours the 4th arg, a tint that omitted it would
+        // judge the row on the label clock while the stored sev beside it came from the
+        // client's. Same WO, same store record - undefined on a DOM-only scan, as before.
         var vf = computeVerdict({
           status: status, prio: prio, phase: apiRec ? apiRec.phase : undefined, ageDays: ageDays,
+          sla: apiRec ? apiRec.sla : undefined,
           hrs: parseFloat(cellText(tr, H.hrs).replace(/,/g, '')),
           expTs: parseUSDate(cellText(tr, H.exp)),
           schedTs: parseUSDate(cellText(tr, H.sched)),
@@ -7841,8 +7858,11 @@
         // engine - counted as open, but contributing nothing to any pill. That reads as
         // "19 more open jobs and not one of them has a problem", which is worse than the
         // bug it replaces.
+        // `sla` travels for the same reason (v3.23) - a stored API row carries the client's
+        // response clock, and the pills have to be counted against the SAME limit the row was
+        // tinted and ranked by. A DOM-built row has no sla key -> undefined -> the label parse.
         var vf = computeVerdict({
-          status: o.status, prio: o.prio, phase: o.phase,
+          status: o.status, prio: o.prio, phase: o.phase, sla: o.sla,
           ageDays: parseFloat(String(o.days || '').replace(/,/g, '')),
           hrs: parseFloat(String(o.hrs || '').replace(/,/g, '')),
           expTs: parseUSDate(o.exp), schedTs: parseUSDate(o.sched), lastNoteTs: parseUSDate(o.lastNote)
