@@ -332,8 +332,8 @@ async function probeAssist(src) {
   // Bumped to 1.66.19 for the split bus publish (identity ahead of the anchor gate). The pin is
   // deliberate: it forces a conscious update whenever Core moves, so a version bump cannot ride
   // out unnoticed alongside an unrelated change. The step-3 contract itself is untouched.
-  A.ok('core @version is 1.66.31', coreFull.indexOf('// @version      1.66.31') !== -1, 'core version drift');
-  A.ok('core banner says WO Assist 2.66', coreFull.indexOf('WO Assist 2.66') !== -1, 'module banner drift');
+  A.ok('core @version is 1.66.32', coreFull.indexOf('// @version      1.66.32') !== -1, 'core version drift');
+  A.ok('core banner says WO Assist 2.67', coreFull.indexOf('WO Assist 2.67') !== -1, 'module banner drift');
   A.ok('assist @version is 0.3.0', assistFull.indexOf('// @version      0.3.0') !== -1, 'assist version drift');
   A.ok("assist VER is '0.3.0'", assistFull.indexOf("var VER = '0.3.0';") !== -1, 'assist VER drift');
   // Step 4 hangs the client-response state read off the SAME tick, deliberately: two queues on
