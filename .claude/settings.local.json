@@ -1,0 +1,13 @@
+{
+  "permissions": {
+    "allow": [
+      "Bash(\"/c/Program Files/Adobe/Adobe Creative Cloud Experience/libs/node.exe\" \"C:/Users/mnajarro/AppData/Local/Temp/claude/C--Users-mnajarro-repos-userscripts/72d82ed2-e06b-413d-bd93-43061774ee01/scratchpad/measure-sla.js\")",
+      "Bash(\"/c/Program Files/Adobe/Adobe Creative Cloud Experience/libs/node.exe\" scripts/test-heat-open-count.js)",
+      "Bash(\"/c/Program Files/Adobe/Adobe Creative Cloud Experience/libs/node.exe\" scripts/test-heat-api-scan.js)",
+      "Bash(perl -0pi -e 's/    function thresholdsFor\\\\\\(status, prioText, C, sla\\\\\\) \\\\{ return bwnThresholdsFor\\\\\\(status, prioText, C, sla\\\\\\); \\\\}/    function thresholdsFor\\(status, prioText, C\\) { return bwnThresholdsFor\\(status, prioText, C\\); }/' C:/Users/mnajarro/AppData/Local/Temp/claude/C--Users-mnajarro-repos-userscripts/72d82ed2-e06b-413d-bd93-43061774ee01/scratchpad/revert/bwn-suite-core.user.js)",
+      "Bash(grep -n 'function thresholdsFor' C:/Users/mnajarro/AppData/Local/Temp/claude/C--Users-mnajarro-repos-userscripts/72d82ed2-e06b-413d-bd93-43061774ee01/scratchpad/revert/bwn-suite-core.user.js)",
+      "Bash(echo \"=== api-scan against the REVERTED alias \\(must go red\\) ===\")",
+      "Bash('/c/Program Files/Adobe/Adobe Creative Cloud Experience/libs/node.exe' C:/Users/mnajarro/AppData/Local/Temp/claude/C--Users-mnajarro-repos-userscripts/72d82ed2-e06b-413d-bd93-43061774ee01/scratchpad/revert/scripts/test-heat-api-scan.js)"
+    ]
+  }
+}
