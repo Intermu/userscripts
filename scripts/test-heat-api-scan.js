@@ -127,6 +127,14 @@ var SRC_THRESH = slice(core,
   '  var BWN_HEAT_CFG = {',
   '  // ---- Next-actions engine, published across module closures',
   'BWN_HEAT_CFG + bwnSlaMult + bwnThresholdsFor');
+// v3.22: the one "is this row finished?" test. Sliced as its own block rather than folded
+// into SRC_VERDICT so the slice below still starts at computeVerdict and the 3-arg
+// thresholdsFor alias that sits between them stays OUT of these sandboxes (VERDICT_PRELUDE
+// supplies its own). computeVerdict CALLS heatDone, so a build without this block throws.
+var SRC_DONE = slice(core,
+  '    // ---- Is this row finished? ONE place (v3.22) ---',
+  '    // ---- Threshold model ---',
+  'heatDone');
 var SRC_VERDICT = slice(core,
   '    function computeVerdict(f, C) {',
   '    // One place that turns a STORED row',
@@ -419,7 +427,7 @@ var ENGINE_PRELUDE = [
 ].join('\n');
 function buildEngine(opts) {
   var o = opts || {};
-  var src = [VERDICT_PRELUDE, ENGINE_PRELUDE, SRC_KEY, SRC_MAP, SRC_THRESH, SRC_ENGINE_DEPS, SRC_ENGINE, SRC_VERDICT, SRC_MARSHAL, SRC_NEXTSTEP].join('\n\n')
+  var src = [VERDICT_PRELUDE, ENGINE_PRELUDE, SRC_KEY, SRC_MAP, SRC_THRESH, SRC_ENGINE_DEPS, SRC_ENGINE, SRC_DONE, SRC_VERDICT, SRC_MARSHAL, SRC_NEXTSTEP].join('\n\n')
     // heatNextStep calls the PUBLISHED reference; in the file that assignment is the slice's
     // end marker, so wire it here exactly as the module does at load time.
     + '\nvar bwnActsEngine = computeNextActions;\n';
@@ -432,7 +440,7 @@ function buildEngine(opts) {
 }
 function buildVerdict(opts) {
   var o = opts || {};
-  var src = [VERDICT_PRELUDE, SRC_THRESH, SRC_VERDICT, SRC_MARSHAL].join('\n\n');
+  var src = [VERDICT_PRELUDE, SRC_THRESH, SRC_DONE, SRC_VERDICT, SRC_MARSHAL].join('\n\n');
   (o.mutations || []).forEach(function (m) { src = mutate(src, m[0], m[1]); });
   var sandbox = sandboxFor(o);
   // The live defaults, so the numbers in these assertions are the numbers on the board.
@@ -1141,8 +1149,15 @@ console.log('\n-- the shipped call site --');
 (function () {
   A.ok('the DOM writer no longer keys on the raw href',
     core.indexOf("heatStore[link.getAttribute('href')]") === -1);
+  // v3.22 moved the key into a local (rowKey) because the tint now also looks the row up in
+  // the store to borrow its phase - one key expression, used by BOTH, so a lookup miss and a
+  // write can never land on different keys. The intent under test is unchanged: the DOM
+  // writer's key comes from heatKey, never from the raw href.
   A.ok('it keys through heatKey and merges through heatStoreDomPut',
-    core.indexOf("heatStoreDomPut(heatKey(link.getAttribute('href')), {") !== -1);
+    core.indexOf("var rowKey = heatKey(link.getAttribute('href'));") !== -1 &&
+    core.indexOf('heatStoreDomPut(rowKey, {') !== -1);
+  A.ok('and the phase the tint borrows is read at that same key',
+    core.indexOf("heatStore[rowKey] && heatStore[rowKey].src === 'api'") !== -1);
   A.ok('the API mapper builds its href through heatKey too',
     core.indexOf("href: heatKey('/work-orders/' + num),") !== -1);
 

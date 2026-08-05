@@ -85,6 +85,12 @@ jobs:
       - name: List Heat API scan harness (capture + PageInput paging)
         run: node scripts/test-heat-api-scan.js
 
+      # List Heat v3.22: which rows count as OPEN. A 218-row board every one of whose rows was
+      # phase "Open" reported "of 199 open" - the status-name regex matched the word "Complete"
+      # in "Clocked Out: Complete" and muted 19 live rows in five counts at once.
+      - name: List Heat open-count harness (phase beats the status name)
+        run: node scripts/test-heat-open-count.js
+
       # Notes without scraping: workOrderNotes in one call, plus the SHA gate that keeps
       # the block identical in bwn-suite-core and bwn-suite-ai.
       - name: Notes API harness (bwnNotesApi block + cross-file SHA)
