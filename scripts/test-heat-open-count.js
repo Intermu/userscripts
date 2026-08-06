@@ -402,13 +402,13 @@ console.log('\n-- the shipped call sites: all five ask the same question --');
   A.ok('and the tint borrows the phase from the API record for the same row',
     core.indexOf('phase: apiRec ? apiRec.phase : undefined') !== -1);
   // Version bumps: without them the fix reaches nobody (Tampermonkey compares versions).
-  // Updated for 1.66.36: List Heat gained the board->dashboard dataset push and is bumped to v3.25.
+  // Updated for 1.66.37: the dataset push now carries Last Note Date; List Heat bumps to v3.26 (v3.25 added the push).
   // (1.66.35 had added the closure auto-advance step.) The exact pin is the
   // point: it forces a conscious edit on every Core bump, so a version can never ride out
   // attached to an unrelated change. It was red on main from 1.66.33 (the mirror-retirement
   // sweep bumped Core without acknowledging it here) until 2026-08-06.
-  A.ok('Core is bumped to 1.66.36', core.indexOf('// @version      1.66.36') !== -1);
-  A.ok('and List Heat announces v3.25', core.indexOf("console.info('[BWN HEAT] v3.25 loaded on', location.href);") !== -1);
+  A.ok('Core is bumped to 1.66.37', core.indexOf('// @version      1.66.37') !== -1);
+  A.ok('and List Heat announces v3.26', core.indexOf("console.info('[BWN HEAT] v3.26 loaded on', location.href);") !== -1);
 })();
 
 A.finish();

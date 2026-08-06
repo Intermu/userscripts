@@ -77,6 +77,7 @@ A.eq('vendorNte = nteAmt', w.vendorNte, 12000);
 A.eq('vendors carried when known', w.vendors, 'Acme, Bolt');
 A.eq('nextOnsiteDate = sched', w.nextOnsiteDate, '08/10/2026');
 A.eq('expectedCompletion = exp', w.expectedCompletion, '05/01/2026');
+A.eq('lastNoteDate = lastNote', w.lastNoteDate, '08/05/2026');
 
 // ---- skips / drops -----------------------------------------------------------------------
 A.ok('"(unresolved member)" is NOT a coordinator', !('coordinator' in heatDatasetRows(store([rec({ assignee: '(unresolved member)' })]))[0]));
@@ -95,7 +96,7 @@ A.eq('row cap enforced at HEAT_DATASET_MAX', heatDatasetRows(many).length, env.H
 // not map is a column silently dropped on the board push - keep the two sides in lockstep.
 var ROUTE_WIRE_KEYS = {
   target: 1, woNumber: 1, status: 1, priority: 1, client: 1, coordinator: 1, statusHrs: 1, aged: 1,
-  amount: 1, vendorNte: 1, vendors: 1, nextOnsiteDate: 1, expectedCompletion: 1,
+  amount: 1, vendorNte: 1, vendors: 1, nextOnsiteDate: 1, expectedCompletion: 1, lastNoteDate: 1,
   lastUpdated: 1, woDate: 1, firstTripDate: 1, daysSinceUpdate: 1, sourceJob: 1, sourcePo: 1,
   fm: 1, location: 1, city: 1, state: 1, projectType: 1
 };
