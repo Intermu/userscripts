@@ -1,7 +1,9 @@
 // ==UserScript==
 // @name         BWN Wide List (Broadway National)
 // @namespace    broadwaynational.bwn
-// @version      1.2.0
+// @version      1.2.1
+// @downloadURL  https://raw.githubusercontent.com/Intermu/userscripts/main/bwn-wide-list.user.js
+// @updateURL    https://raw.githubusercontent.com/Intermu/userscripts/main/bwn-wide-list.user.js
 // @description  Runs Umbrava border to border instead of the app shell's centered 86% / 2048px column - Work Orders, Projects, Clients, Vendors, Invoices, Proposals, Analytics and the detail pages alike. The shell caps every page's content at `width:86%; max-width:2048px` and centres it with `justify-content:space-around`, so on a wide monitor a third of the screen is empty gutter while the tables inside scroll sideways. This script measures the page column - the tall, near-full-height block that is narrower than its own full-width parent - and stamps it so a width rule applies. It matches on measurement, never on a class name, so a JSS or styled-components rebuild cannot break it; it finds nothing and does nothing on a page that is already full width (Umbrava itself drops the cap below 1670px). v1.2.0 keeps a measured gutter clear on each side for the edge furniture that used to float in the dead space - Umbrava's right-hand drawer tab rail and the BWN launcher dock - and no longer widens one half of a two-column layout. Dialogs, overlays, toolbars and anything short are left alone. A Tampermonkey menu item toggles it, and the choice sticks.
 // @match        https://app.umbrava.com/*
 // @run-at       document-idle
@@ -14,7 +16,7 @@
 (function () {
   'use strict';
 
-  var VER = '1.2.0';
+  var VER = '1.2.1';   // keep in step with @version - this is what the console banner reports
   var ATTR = 'data-bwn-wide';
   var STYLE_ID = 'bwn-wide-list-css';
 
