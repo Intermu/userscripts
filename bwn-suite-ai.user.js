@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         BWN Suite - AI (Broadway National)
 // @namespace    broadwaynational.bwn
-// @version      1.42.7
+// @version      1.42.8
 // @downloadURL  https://raw.githubusercontent.com/Intermu/userscripts/main/bwn-suite-ai.user.js
 // @updateURL    https://raw.githubusercontent.com/Intermu/userscripts/main/bwn-suite-ai.user.js
 // @description  The Umbrava tools that call outside APIs, kept separate from the zero-egress Core script. Client Update and WO Audit drafts (Anthropic Claude; draft-only, scrubbed before sending, you review before posting); Find Techs / Find Suppliers (Google Places; vendor leads near a WO); and Job View (opens the Ops-Dashboard job card on the WO page - WO details from Umbrava plus the authored case file and next actions, read-only). Network access is limited by the browser to the declared API hosts and the BWN Static Web App. API keys are stored in Tampermonkey's storage via the menu commands and never enter the page. Toggle modules in BWN_MODULES below.
@@ -3373,26 +3373,34 @@ if (BWN_MODULES.jobView) BWN.safeModule('jobView', function () {
       aug = (ar && ar.workOrder) || {};
     } catch (e) { aug = {}; }
 
-    // --- COORDINATOR + VENDORS. BOTH SELECTORS ARE DEAD - measured 2026-08-06.
-    // Type `WorkOrder` has 75 fields and neither `assignedToMemberName` nor
-    // `vendorNames` is among them, so this query throws on EVERY call and the catch
-    // below leaves coordinator null forever. `vendorNames` was also the preferred
-    // source for the draft's vendor list, which is why `vendors` has always been
-    // null too - the poVendors fallback under it was itself dead until the trips fix
-    // below. That fallback now works, so vendors is populated; the COORDINATOR is
-    // still always null and needs a real fix: `assignedTo` EXISTS on WorkOrder but
-    // is an id, so it needs the `user(id:)` lookup bwn-dispatch already uses.
-    // Left as-is rather than half-fixed - see the vault entry.
-    var coordinator = null, vendorNames = null;
+    // --- COORDINATOR via assignedTo (an id) + user(id:). Isolated.
+    // The old query read `assignedToMemberName` and `vendorNames`, NEITHER of which
+    // is among WorkOrder's 75 fields (measured 2026-08-06), so it threw on every call
+    // and coordinator was null in every draft ever written - the same swallow-to-empty
+    // trap as the trips read below and the notes read above. WorkOrder exposes the
+    // assignee only as `assignedTo` (ID, a GUID), so it takes the two-step the whole
+    // suite uses: read the id, then user(id:){ firstName lastName }. Same USER_Q shape
+    // and same ID! typing as bwn-dispatch. `id` is ID! - passing a bare Int type-errors.
+    // `vendorNames` is gone: no such field exists, and the draft's vendor list now
+    // comes from the PO-trips read below (poVendors), which is why `vendorArr` no
+    // longer has a vendorNames branch.
+    // A "Team ..." assignee is the CLIENT's team, not a dispatchable person; treat it
+    // as no coordinator so the draft attributes actions to a real name or to none.
+    var coordinator = null;
     try {
-      var C_Q = 'query($n:Int!){ workOrder(workOrderNumber:$n){ assignedToMemberName vendorNames } }';
-      var cr = await gql(C_Q, { n: n });
-      var cwo = cr && cr.workOrder;
-      if (cwo) {
-        coordinator = cwo.assignedToMemberName || null;
-        if (Array.isArray(cwo.vendorNames)) vendorNames = cwo.vendorNames;
+      var CID_Q = 'query($n:Int!){ workOrder(workOrderNumber:$n){ assignedTo } }';
+      var cr = await gql(CID_Q, { n: n });
+      var assigneeId = cr && cr.workOrder && cr.workOrder.assignedTo;
+      if (assigneeId) {
+        var CU_Q = 'query($id:ID!){ user(id:$id){ firstName lastName } }';
+        var ur = await gql(CU_Q, { id: assigneeId });
+        var u = ur && ur.user;
+        var full = u ? [u.firstName, u.lastName].filter(Boolean).join(' ').trim() : '';
+        if (full && !/^team\b/i.test(full)) coordinator = full;
       }
-    } catch (e) { /* selectors not on the SPA schema → coordinator/vendors stay null */ }
+    } catch (e) {
+      console.warn('[BWN SUITE AI] coordinator read FAILED for W-' + n + ' - the draft will have no owner for its next actions, not "unassigned":', (e && e.message) || e);
+    }
 
     // --- NOTES. Umbrava's REAL query: jobNotes(workOrderNumber) is a ROOT field keyed by
     // the WO NUMBER (n), NOT the internal id. The older workOrderNotes(workOrderId) field
@@ -3475,8 +3483,10 @@ if (BWN_MODULES.jobView) BWN.safeModule('jobView', function () {
     var cents = dne.amount != null ? dne.amount : 0;
     var amount = cents / Math.pow(10, prec);
 
-    var vendorArr = Array.isArray(vendorNames) ? vendorNames : poVendors;
-    var vendors = (vendorArr || []).filter(Boolean).join(', ') || null;
+    // Vendors come from the PO-trips read (poVendors); the old WorkOrder.vendorNames
+    // selector never existed. NOT `vendorNames` here - that is a DOM-reader function in
+    // an outer scope, and referencing it would silently bind to the function object.
+    var vendors = (poVendors || []).filter(Boolean).join(', ') || null;
     var trades = (wo.trades || []).map(function (t) { return t && t.name; }).filter(Boolean).join(', ') || null;
 
     var statusName = aug.statusName || null;

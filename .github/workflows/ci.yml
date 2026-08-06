@@ -117,6 +117,13 @@ jobs:
       - name: AI trips-read harness (query vs measured schema + read isolation)
         run: node scripts/test-ai-trips-read.js
 
+      # The AI drafts' coordinator read was dead the same way: assignedToMemberName is not
+      # a WorkOrder field, so every draft attributed its next actions to nobody. Pins the
+      # assignedTo -> user(id:) two-step against the schema (incl. the ID! typing), the
+      # Team-name filter, and warn-on-failure.
+      - name: AI coordinator-read harness (assignedTo + user(id:) two-step)
+        run: node scripts/test-ai-coordinator-read.js
+
   lint:
     name: Lint (advisory)
     runs-on: ubuntu-latest
