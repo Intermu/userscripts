@@ -222,8 +222,29 @@ A.eq('a top-level date still wins if a future selection includes one',
   R.expectedOf({ expectedCompletionDate: '2026-01-01', priority: { expectedCompletionDate: '2026-09-09' } }), '2026-01-01');
 // remainingDays -4 and a priority.expectedCompletionDate 4 days past agree - that is why one
 // can stand in for the other.
-A.ok('remainingDays agrees with the nested date it substitutes for',
-  Math.abs(R.dayDelta(R.expectedOf(LIVE_ROW)) - LIVE_ROW.remainingDays) <= 1);
+//
+// Measured against the CAPTURE date, not against today. This assertion used to call
+// R.dayDelta(), which measures from Date.now(): the fixture's -4 was Umbrava's own answer on
+// 2026-08-04, so the two sides drifted one day further apart with every day that passed and the
+// suite went red on 2026-08-06 with no code change behind it. Re-capturing the row would only
+// restart the same clock, and widening the tolerance would delete the assertion's meaning - the
+// claim being tested is that the two fields AGREED when the row was read, which is a fact about
+// that moment. dayDelta's own now-relative behaviour is covered above, on synthetic dates built
+// from Date.now() (isoAgo), where drift is impossible by construction.
+//
+// Whole-day floor on both sides, identical to dayDelta's with today swapped for the reference.
+var CAPTURED_ON = '2026-08-05';   // the header date of this fixture; -4 puts Umbrava's read one day earlier, inside the 1-day tolerance
+function daysFromCapture(iso) {
+  if (!iso) return null;
+  var t = new Date(iso);
+  if (isNaN(t.getTime())) return null;
+  var p = CAPTURED_ON.split('-');
+  var ref = new Date(+p[0], +p[1] - 1, +p[2]);
+  var a = new Date(t.getFullYear(), t.getMonth(), t.getDate());
+  return Math.round((a - ref) / 86400000);
+}
+A.ok('remainingDays agreed with the nested date it substitutes for, as captured',
+  Math.abs(daysFromCapture(R.expectedOf(LIVE_ROW)) - LIVE_ROW.remainingDays) <= 1);
 // trades are OBJECTS. Joining them raw is "[object Object]" on nearly every card.
 A.eq('trades resolve to their names', R.nameList(LIVE_ROW.trades), 'Exterior Lighting');
 A.eq('several trades join', R.nameList([{ name: 'Electrical' }, { name: 'Plumbing' }]), 'Electrical, Plumbing');
