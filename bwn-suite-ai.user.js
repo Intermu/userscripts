@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         BWN Suite - AI (Broadway National)
 // @namespace    broadwaynational.bwn
-// @version      1.42.6
+// @version      1.42.7
 // @downloadURL  https://raw.githubusercontent.com/Intermu/userscripts/main/bwn-suite-ai.user.js
 // @updateURL    https://raw.githubusercontent.com/Intermu/userscripts/main/bwn-suite-ai.user.js
 // @description  The Umbrava tools that call outside APIs, kept separate from the zero-egress Core script. Client Update and WO Audit drafts (Anthropic Claude; draft-only, scrubbed before sending, you review before posting); Find Techs / Find Suppliers (Google Places; vendor leads near a WO); and Job View (opens the Ops-Dashboard job card on the WO page - WO details from Umbrava plus the authored case file and next actions, read-only). Network access is limited by the browser to the declared API hosts and the BWN Static Web App. API keys are stored in Tampermonkey's storage via the menu commands and never enter the page. Toggle modules in BWN_MODULES below.
@@ -3373,7 +3373,16 @@ if (BWN_MODULES.jobView) BWN.safeModule('jobView', function () {
       aug = (ar && ar.workOrder) || {};
     } catch (e) { aug = {}; }
 
-    // --- COORDINATOR + VENDORS (SPA selector names UNVERIFIED). Isolated.
+    // --- COORDINATOR + VENDORS. BOTH SELECTORS ARE DEAD - measured 2026-08-06.
+    // Type `WorkOrder` has 75 fields and neither `assignedToMemberName` nor
+    // `vendorNames` is among them, so this query throws on EVERY call and the catch
+    // below leaves coordinator null forever. `vendorNames` was also the preferred
+    // source for the draft's vendor list, which is why `vendors` has always been
+    // null too - the poVendors fallback under it was itself dead until the trips fix
+    // below. That fallback now works, so vendors is populated; the COORDINATOR is
+    // still always null and needs a real fix: `assignedTo` EXISTS on WorkOrder but
+    // is an id, so it needs the `user(id:)` lookup bwn-dispatch already uses.
+    // Left as-is rather than half-fixed - see the vault entry.
     var coordinator = null, vendorNames = null;
     try {
       var C_Q = 'query($n:Int!){ workOrder(workOrderNumber:$n){ assignedToMemberName vendorNames } }';
@@ -3400,27 +3409,36 @@ if (BWN_MODULES.jobView) BWN.safeModule('jobView', function () {
     });
     var latestNote = notes[0] || null;
 
-    // --- TRIPS (guessed root query + shape). Isolated.
+    // --- TRIPS. Two SEPARATE root fields, both keyed by the INTERNAL job id (woId).
+    // The query that stood here was guessed - it said so - and had never once run.
+    // Measured against the live schema 2026-08-06, it failed validation four ways on
+    // every call: workOrderTrips has NO `workOrderId` argument (only `jobId: Int!`),
+    // and type WorkOrderTrip has exactly four fields - trips, clientId, clientName,
+    // hasActiveUsers - so neither `workOrderTrips` nor `purchaseOrderTrips` can be
+    // selected inside it. purchaseOrderTrips is its own ROOT field. gql() throws on
+    // errors[], the catch turned that into [], and every draft ever written has had
+    // zero trips and zero PO vendors while reading as "this WO has no trips".
+    // Same class as the 2026-07-23 notes bug (a6fed23): wrong argument, throws,
+    // swallowed to empty.
+    // Reads are separate so a drift in one cannot empty the other, and a failure is
+    // LOGGED with the WO number. An empty trips list must never again be able to mean
+    // "the query is broken" - if these lines are silent, the WO really has no trips.
     var trips = [], poVendors = [];
     if (woId != null) {
-      try {
-        var T_Q =
-          'query($id:Int!){ workOrderTrips(workOrderId:$id){ ' +
-          '  workOrderTrips{ trips{ onSiteDate completedDate canceledDate status } } ' +
-          '  purchaseOrderTrips{ vendorName trips{ onSiteDate completedDate canceledDate status } } ' +
-          '} }';
-        var tr = await gql(T_Q, { id: woId });
-        var td = (tr && tr.workOrderTrips) || null;
-        if (td) {
-          var inner = td.workOrderTrips && td.workOrderTrips.trips;
-          if (Array.isArray(inner)) inner.forEach(function (t) { trips.push(t); });
-          var pot = td.purchaseOrderTrips;
-          if (Array.isArray(pot)) pot.forEach(function (po) {
-            if (po && po.vendorName) poVendors.push(po.vendorName);
-            ((po && po.trips) || []).forEach(function (t) { trips.push(t); });
-          });
-        }
-      } catch (e) { trips = []; poVendors = []; }
+      var WT_Q = 'query($id:Int!){ workOrderTrips(jobId:$id){ trips{ onSiteDate completedDate canceledDate status } } }';
+      var PT_Q = 'query($id:Int!){ purchaseOrderTrips(jobId:$id){ vendorName trips{ onSiteDate completedDate canceledDate status } } }';
+      var wtr = null, ptr = null;
+      try { wtr = await gql(WT_Q, { id: woId }); }
+      catch (e) { console.warn('[BWN SUITE AI] workOrderTrips read FAILED for W-' + n + ' (jobId ' + woId + ') - trips are missing from this draft, not absent:', (e && e.message) || e); }
+      try { ptr = await gql(PT_Q, { id: woId }); }
+      catch (e) { console.warn('[BWN SUITE AI] purchaseOrderTrips read FAILED for W-' + n + ' (jobId ' + woId + ') - PO trips/vendors are missing from this draft, not absent:', (e && e.message) || e); }
+      var wt = wtr && wtr.workOrderTrips;
+      if (wt && Array.isArray(wt.trips)) wt.trips.forEach(function (t) { if (t) trips.push(t); });
+      var pot = (ptr && ptr.purchaseOrderTrips) || null;
+      if (Array.isArray(pot)) pot.forEach(function (po) {
+        if (po && po.vendorName) poVendors.push(po.vendorName);
+        ((po && po.trips) || []).forEach(function (t) { if (t) trips.push(t); });
+      });
     }
 
     // --- derived dates

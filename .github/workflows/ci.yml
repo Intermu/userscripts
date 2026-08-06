@@ -109,6 +109,14 @@ jobs:
       - name: Docs API harness (jobDocuments reader + docs:none gate)
         run: node scripts/test-docs-api.js
 
+      # The AI drafts' trips read was a guessed query that failed validation four ways and
+      # was swallowed to []: every draft ever written had zero trips and zero PO vendors.
+      # Validates the shipped query strings against a RECORDED schema rather than a stub
+      # (a stub agrees with the code by construction - that is how this shipped dead), plus
+      # read isolation and the warn-on-failure that stops an empty list meaning "broken".
+      - name: AI trips-read harness (query vs measured schema + read isolation)
+        run: node scripts/test-ai-trips-read.js
+
   lint:
     name: Lint (advisory)
     runs-on: ubuntu-latest
