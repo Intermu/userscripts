@@ -65,7 +65,7 @@ function slice(start, end, what) {
 }
 
 var S_READER = slice('    var DOCS_CACHE = Object.create(null);', '    // ---- Signals ---', 'DOCS_CACHE+fetchDocs+readDocs');
-var S_GATE = slice("      if (woPhase === 'confirmcomplete' || woPhase === 'costreview') {", '      var noSched =', 'docs:none gate');
+var S_GATE = slice("      if (woPhase === 'confirmcomplete' || woPhase === 'costreview') {", '      // ---- Closure auto-advance:', 'docs:none gate');
 
 function mutate(src, from, to) {
   var i = src.indexOf(from);

@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         BWN Suite - Core (Broadway National)
 // @namespace    broadwaynational.bwn
-// @version      1.66.34
+// @version      1.66.35
 // @downloadURL  https://raw.githubusercontent.com/Intermu/userscripts/main/bwn-suite-core.user.js
 // @updateURL    https://raw.githubusercontent.com/Intermu/userscripts/main/bwn-suite-core.user.js
 // @description  Runs several Umbrava helpers for BWN coordinators, in the browser with no privileged grants. Includes: PO Approval + ETA Builder; WO Assist (GP/ETA, a stall watchdog, DNE calculator, and a next-action playbook); Email Leak Guard (checks recipients against vendor names, PO amounts, and client budget references before an outbound email sends); WO List Heat (a triage overlay + My Day strip on the work-order list, with an optional same-origin Umbrava API scan for deterministic full-board coverage); and the BWN Launcher (opens the Azure Static Web App tools with the current WO's context). Modules share state through sessionStorage/localStorage. The only network calls are same-origin Umbrava GraphQL reads (app.umbrava.com/api/graphql, the app's own session): List Heat's full-board scan and WO Assist's work-order / trip / clock-in / document reads; everything else is offline. Toggle modules in BWN_MODULES below.
@@ -44,7 +44,7 @@
   try { localStorage.setItem('bwn:status:core', JSON.stringify({ ver: BWN_VER, ts: Date.now() })); } catch (e) { /* best-effort */ }
 
   console.info('[BWN SUITE CORE] v' + BWN_VER + ' |',
-    'Shared Core 7 \u00b7 PO Approval 1.13 \u00b7 WO Assist 2.68 \u00b7 Leak Guard 2.0 \u00b7 List Heat 3.24 \u00b7 Launcher 2.0 \u00b7 Views 1.0 \u00b7 Palette 1.1 \u00b7 Visit 1.2 \u00b7 Reminders 1.1 \u00b7 Timeline 1.1 \u00b7 TripCal 1.4 \u00b7 Connector 1.2 |',
+    'Shared Core 7 \u00b7 PO Approval 1.13 \u00b7 WO Assist 2.69 \u00b7 Leak Guard 2.0 \u00b7 List Heat 3.24 \u00b7 Launcher 2.0 \u00b7 Views 1.0 \u00b7 Palette 1.1 \u00b7 Visit 1.2 \u00b7 Reminders 1.1 \u00b7 Timeline 1.1 \u00b7 TripCal 1.4 \u00b7 Connector 1.2 |',
     'enabled:', Object.keys(BWN_MODULES).filter(function (k) { return BWN_MODULES[k]; }).join(', '));
 
   // ===== BWN SHARED CORE v7 - KEEP IN SYNC across both suite scripts =====
@@ -1397,7 +1397,7 @@
   });
 
   // ==========================================================================
-  // MODULE: WO Assist: GP + ETA Watchdog + Playbook v2.68 (Connector 1.2)
+  // MODULE: WO Assist: GP + ETA Watchdog + Playbook v2.69 (Connector 1.2)
   // ==========================================================================
   bwnBoot('woAssist', BWN_MODULES.woAssist, function () {
     'use strict';
@@ -1427,7 +1427,7 @@
     var PANEL_ID = 'bwn-gp-panel';
     var GREEN = BWN.GREEN;
 
-    console.info('[BWN GP] WO Assist v2.68 loaded on', location.href);
+    console.info('[BWN GP] WO Assist v2.69 loaded on', location.href);
 
     // ---- Parsing helpers (shared via BWN core) -----------------------------
     var parseMoney = BWN.parseMoney;
@@ -2574,7 +2574,7 @@
       // Phase 2: docs (missing completion package at closure) sorts just under escalate
       // - closing without the signed ticket/photos is a hard block. intake (unactionable
       // WO at inception) sorts above the generic phase chase so "fix the WO" leads.
-      var base = { noshow: 100, stall: 96, escalate: 94, docs: 92, intake: 90, task: 88, dne: 82, ecd: 78, pocost: 72, poacc: 68, pomat: 66, poconf: 64, eta: 60, phase: 50, clientcad: 46, note: 44, anchor: 12 };
+      var base = { noshow: 100, stall: 96, escalate: 94, docs: 92, intake: 90, task: 88, dne: 82, ecd: 78, pocost: 72, poacc: 68, pomat: 66, poconf: 64, eta: 60, advance: 58, phase: 50, clientcad: 46, note: 44, anchor: 12 };
       var s = base[p]; if (s === undefined) s = 50;
       var cap = function (n) { return Math.max(0, Math.min(30, n || 0)); };
       if (p === 'noshow' && state.noShow) s += cap(Math.round((Date.now() - state.noShow.ms) / 86400000));
@@ -3030,6 +3030,24 @@
         }
       }
 
+      // ---- Closure auto-advance: docs collected, so move it out of confirm-complete ---
+      // The mirror image of the docs:none gate. At confirm-complete, when the completion
+      // package IS confidently on file (jobDocuments returned a non-empty list) and no PO
+      // is still pending confirmation, the WO is ready to be marked Work Complete. Surfacing
+      // this stops jobs ROTTING in confirm-complete after everything needed to close them is
+      // already attached (the lifecycle-gap-map "advance to Work Complete" gate). It is a
+      // SUGGESTION, never an auto-check and never an auto-advance: a "docs present" read must
+      // never move the WO on its own (the docs:none rule, inverted). Self-clears structurally
+      // - once advanced, the phase is no longer confirm-complete so the step stops generating.
+      if (woPhase === 'confirmcomplete' && state.docs && state.docs.count > 0 && !poThemes.confirm) {
+        acts.push({
+          key: 'advance:workcomplete',
+          label: 'Advance to Work Complete - the completion package is on file',
+          why: 'Documents attached (' + state.docs.count + ' on file) and no PO left to confirm' + (state.hrs !== null ? ' - ' + Math.round(state.hrs) + 'h in confirm-complete' : '') + ' - mark the WO Work Complete so it can be invoiced instead of sitting here',
+          text: null
+        });
+      }
+
       var noSched = state.pos.filter(function (p) { return !p.done && p.amount > 0 && !p.schedDate && !p.poStatus; });
       if (noSched.length) {
         acts.push({
@@ -3046,7 +3064,7 @@
       // confirm/accept ask), or when a stall makes the "scheduled" copy contradictory.
       var wa = woActionForStatus(state, ref, woPhase);
       var waTheme = { materials: 'materials', 'materials-client': 'materials', confirmcomplete: 'confirm', accept: 'accept' }[woPhase];
-      if (wa && !((waTheme && poThemes[waTheme]) || (woPhase === 'scheduled' && (state.stall || state.noShow)))) acts.push(wa);
+      if (wa && !((waTheme && poThemes[waTheme]) || (woPhase === 'scheduled' && (state.stall || state.noShow)) || (woPhase === 'confirmcomplete' && state.docs && state.docs.count > 0))) acts.push(wa);
 
       if (woPhase !== 'costreview' && state.due && state.due.kind === 'bad') {   // at Clocked Out: Complete the work is done - confirm costs + complete, don't reset the ECD
         acts.push({
@@ -4033,6 +4051,7 @@
       stall: ['A vendor has gone quiet past the scheduled visit and chasing has not moved it.', 'Purchase Orders section for the vendor, then the Notes tab for your chase history.', 'Either the vendor commits to a date, or the job is reassigned / escalated.'],
       escalate: ['This is past what routine chasing fixes - ownership moves up, it is not another chase.', 'Post the escalation as a WO note so it is attributed to you and visible to the next person.', 'The named tier (supervisor / management) has the job and the note records the handoff.'],
       docs: ['The completion package is missing - a WO should not close without its proof of work.', 'Documents tab on this work order.', 'Signed ticket, sign-in/out, and before/after photos are attached.'],
+      advance: ['Everything needed to close this WO is on file - it just has not been marked Work Complete yet.', 'The status field in the WO header - advance it to Work Complete.', 'The WO is marked Work Complete and can move to billing.'],
       intake: ['The WO is missing fields it needs before it can be scoped, priced, or dispatched.', 'The header fields at the top of this work order (NTE, priority, site, trade).', 'Every required field is filled in, so the job can be assigned cleanly.'],
       task: ['An Umbrava task on this WO is open or overdue.', 'The Open Tasks block on this work order.', 'The task is completed in Umbrava, not just noted.'],
       dne: ['Gross profit is under target for this job - the cost side needs a decision.', 'Compare the Client DNE against the PO totals in the Purchase Orders section.', 'Either the cost comes down, the DNE is increased with client approval, or management accepts the write-down.'],

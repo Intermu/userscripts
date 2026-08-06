@@ -402,12 +402,12 @@ console.log('\n-- the shipped call sites: all five ask the same question --');
   A.ok('and the tint borrows the phase from the API record for the same row',
     core.indexOf('phase: apiRec ? apiRec.phase : undefined') !== -1);
   // Version bumps: without them the fix reaches nobody (Tampermonkey compares versions).
-  // Updated for 1.66.34 (WO Assist reads the Documents list from the API instead of a DOM
-  // scrape that never worked). List Heat itself is unchanged at v3.24. The exact pin is the
+  // Updated for 1.66.35 (WO Assist gained the closure auto-advance step at confirm-complete).
+  // List Heat itself is unchanged at v3.24. The exact pin is the
   // point: it forces a conscious edit on every Core bump, so a version can never ride out
   // attached to an unrelated change. It was red on main from 1.66.33 (the mirror-retirement
   // sweep bumped Core without acknowledging it here) until 2026-08-06.
-  A.ok('Core is bumped past 1.66.33', core.indexOf('// @version      1.66.34') !== -1);
+  A.ok('Core is bumped past 1.66.33', core.indexOf('// @version      1.66.35') !== -1);
   A.ok('and List Heat announces v3.24', core.indexOf("console.info('[BWN HEAT] v3.24 loaded on', location.href);") !== -1);
 })();
 

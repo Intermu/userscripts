@@ -144,6 +144,11 @@ jobs:
       - name: Header-anchor mount harness (tripCal + AI jobView, was orphaned from CI)
         run: node scripts/test-anchor-mounts.js
 
+      # next-actions-overhaul closure gap: docs-present -> advance to Work Complete, so jobs
+      # do not rot in confirm-complete. Mirror of docs:none; a suggestion, never auto-advances.
+      - name: Next Actions closure auto-advance harness (WO Assist 2.69)
+        run: node scripts/test-assist-advance-gate.js
+
   lint:
     name: Lint (advisory)
     runs-on: ubuntu-latest
