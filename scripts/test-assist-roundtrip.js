@@ -329,14 +329,14 @@ async function probeAssist(src) {
   A.ok('render builds the strip from waEscStripText(escSt)', coreFull.indexOf('waEscStripText(escSt)') !== -1, 'call site missing');
   A.ok('tool label rides waEscToolLabel(dk, escSt)', coreFull.indexOf('waEscToolLabel(dk, escSt)') !== -1, 'call site missing');
   A.ok('escalation state is part of the render signature', coreFull.indexOf("escSt.status + '|' + escSt.id") !== -1, 'signature term missing');
-  // Bumped to 1.66.35 / WO Assist 2.69 for the closure auto-advance step (docs-present at
-  // confirm-complete -> "advance to Work Complete"). The pin is deliberate: it forces a conscious
+  // Bumped to 1.66.36 for the List Heat board->dashboard dataset push (swa-dataset-ingest). 1.66.35
+  // added the closure auto-advance step (docs-present at confirm-complete). The pin is deliberate: it forces a conscious
   // update whenever Core moves, so a version bump cannot ride out unnoticed alongside an
   // unrelated change. The step-3 contract itself is untouched.
   // The assist pin was left at 0.3.0 by the mirror-retirement sweep (b24cecc) that patch-bumped
   // every script's @version; the file has read 0.3.1 since, so this pin was red on main until
   // 2026-08-06. Its internal `var VER` still says 0.3.0 - that drift is bwn-wo-assist's to fix.
-  A.ok('core @version is 1.66.35', coreFull.indexOf('// @version      1.66.35') !== -1, 'core version drift');
+  A.ok('core @version is 1.66.36', coreFull.indexOf('// @version      1.66.36') !== -1, 'core version drift');
   A.ok('core banner says WO Assist 2.69', coreFull.indexOf('WO Assist 2.69') !== -1, 'module banner drift');
   A.ok('assist @version is 0.3.1', assistFull.indexOf('// @version      0.3.1') !== -1, 'assist version drift');
   A.ok("assist VER is '0.3.0'", assistFull.indexOf("var VER = '0.3.0';") !== -1, 'assist VER drift');

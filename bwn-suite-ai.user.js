@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         BWN Suite - AI (Broadway National)
 // @namespace    broadwaynational.bwn
-// @version      1.42.8
+// @version      1.42.9
 // @downloadURL  https://raw.githubusercontent.com/Intermu/userscripts/main/bwn-suite-ai.user.js
 // @updateURL    https://raw.githubusercontent.com/Intermu/userscripts/main/bwn-suite-ai.user.js
 // @description  The Umbrava tools that call outside APIs, kept separate from the zero-egress Core script. Client Update and WO Audit drafts (Anthropic Claude; draft-only, scrubbed before sending, you review before posting); Find Techs / Find Suppliers (Google Places; vendor leads near a WO); and Job View (opens the Ops-Dashboard job card on the WO page - WO details from Umbrava plus the authored case file and next actions, read-only). Network access is limited by the browser to the declared API hosts and the BWN Static Web App. API keys are stored in Tampermonkey's storage via the menu commands and never enter the page. Toggle modules in BWN_MODULES below.
@@ -1083,6 +1083,53 @@
   }
   setTimeout(BWN.guard(o30SnapPush, 'o30SnapPush'), 8000);
   setInterval(BWN.guard(o30SnapPush, 'o30SnapPush'), 60000);
+  // Board → dashboard dataset push (swa-dataset-ingest): List Heat writes the whole scanned
+  // board to localStorage 'bwn:datasetq' on a clean full Scan All; drain it to the SWA
+  // wo-dataset slot (key-gated POST /api/dataset-ingest) so the Dashboard shows the live
+  // board on a COLD load with no spreadsheet upload. Deduped by generatedAt (an unchanged
+  // board is not re-sent); the menu command forces a resend. Same kill-switch + clear-on-
+  // real-ok discipline as the other drains - a chased AAD login page is 200 HTML, not ok:true.
+  var DATASET_URL = INGEST_URL.replace(/\/wo-ingest$/, '/dataset-ingest');
+  var datasetBusy = false;
+  function datasetDrain(force) {
+    if (datasetBusy) return;
+    if (!connectorEnabled()) return;                      // kill-switch: Ops Suite toggle
+    var key = GM_getValue('ingest_key', ''); if (!key) return;
+    var ds = BWN.lsGetJSON('bwn:datasetq', null);
+    if (!ds || !Array.isArray(ds.rows) || !ds.rows.length || !ds.generatedAt) return;
+    if (!force && localStorage.getItem('bwn:datasetsent') === ds.generatedAt) return;   // this board already sent
+    var body;
+    try { body = JSON.stringify({ actor: ingestActor(), source: 'board-push', dataset: { generatedAt: ds.generatedAt, rows: ds.rows } }); }
+    catch (e) { return; }                                 // couldn't serialize → don't set busy (would wedge the drain)
+    datasetBusy = true;
+    GM_xmlhttpRequest({
+      method: 'POST', url: DATASET_URL + '?client=' + INGEST_CLIENT,
+      headers: { 'Content-Type': 'application/json', 'x-bwn-key': key },
+      data: body,
+      timeout: 20000,
+      onload: function (r) {
+        datasetBusy = false;
+        var stored = false;
+        if (r.status >= 200 && r.status < 300) { try { stored = JSON.parse(r.responseText).ok === true; } catch (e) { } }
+        // Mark sent only on a REAL ok:true. 400/413 = non-retryable (malformed / over the row
+        // cap) so mark sent to stop head-of-line blocking; 403/timeout/5xx leave it for next tick.
+        if (stored) { try { localStorage.setItem('bwn:datasetsent', ds.generatedAt); } catch (e) { } connOk(); }
+        else if (r.status === 400 || r.status === 413) { try { localStorage.setItem('bwn:datasetsent', ds.generatedAt); } catch (e) { } connFail(r.status); }
+        else connFail(r.status);
+      },
+      onerror: function () { datasetBusy = false; connFail('network'); },
+      ontimeout: function () { datasetBusy = false; connFail('timeout'); }
+    });
+  }
+  setTimeout(BWN.guard(datasetDrain, 'datasetDrain'), 9000);
+  setInterval(BWN.guard(datasetDrain, 'datasetDrain'), 45000);
+  GM_registerMenuCommand('BWN: Sync board to dashboard now', function () {
+    var ds = BWN.lsGetJSON('bwn:datasetq', null);
+    if (!ds || !Array.isArray(ds.rows) || !ds.rows.length) { alert('No board scanned yet. Open the Work Orders list so List Heat scans the board (or press Scan All), then try again.'); return; }
+    if (!GM_getValue('ingest_key', '')) { alert('Set the SWA ingest key first (Tampermonkey menu → "Set SWA ingest key").'); return; }
+    datasetDrain(true);
+    alert('Pushing ' + ds.rows.length + ' board rows to the dashboard…');
+  });
   GM_registerMenuCommand('Set SWA ingest key', function () {
     var cur = GM_getValue('ingest_key', '');
     var v = prompt('Paste the WO_INGEST_KEY (the SWA ingest function key; stored locally in Tampermonkey, never in the page):', cur || '');

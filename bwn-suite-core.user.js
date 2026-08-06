@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         BWN Suite - Core (Broadway National)
 // @namespace    broadwaynational.bwn
-// @version      1.66.35
+// @version      1.66.36
 // @downloadURL  https://raw.githubusercontent.com/Intermu/userscripts/main/bwn-suite-core.user.js
 // @updateURL    https://raw.githubusercontent.com/Intermu/userscripts/main/bwn-suite-core.user.js
 // @description  Runs several Umbrava helpers for BWN coordinators, in the browser with no privileged grants. Includes: PO Approval + ETA Builder; WO Assist (GP/ETA, a stall watchdog, DNE calculator, and a next-action playbook); Email Leak Guard (checks recipients against vendor names, PO amounts, and client budget references before an outbound email sends); WO List Heat (a triage overlay + My Day strip on the work-order list, with an optional same-origin Umbrava API scan for deterministic full-board coverage); and the BWN Launcher (opens the Azure Static Web App tools with the current WO's context). Modules share state through sessionStorage/localStorage. The only network calls are same-origin Umbrava GraphQL reads (app.umbrava.com/api/graphql, the app's own session): List Heat's full-board scan and WO Assist's work-order / trip / clock-in / document reads; everything else is offline. Toggle modules in BWN_MODULES below.
@@ -5838,7 +5838,7 @@
     }
     window.__bwnWoHeat = true;
 
-    console.info('[BWN HEAT] v3.24 loaded on', location.href);
+    console.info('[BWN HEAT] v3.25 loaded on', location.href);
 
     // ---- Config (edit here) ----------------------------------------------
     // Advanced knobs (status-class regexes + priority multipliers) now live in the
@@ -6843,6 +6843,53 @@
       return n;
     }
 
+    // ---- Board -> Dashboard dataset push (freshness path, swa-dataset-ingest) --------
+    // After a clean full-board scan, publish the whole board to a localStorage queue the
+    // bwn-suite-ai connector drains to /api/dataset-ingest, which overwrites the Dashboard's
+    // wo-dataset slot - so the Dashboard shows live board data on a COLD load with no
+    // spreadsheet upload. Pure reader over heatStore: no new scan, no schema guess. Values
+    // are ALREADY in the Dashboard's units - hrs in HOURS (v3.19), dneAmt/nteAmt in DOLLARS
+    // (moneyNum) - so the SWA route only RENAMES these wire keys to canonical df columns and
+    // re-scales nothing. The wire keys are the api/wo-ingest live-jobs allowlist plus
+    // lastNoteDate; keep them a subset of the route's STR/DATE/NUM maps or the route drops them.
+    var HEAT_DATASET_MAX = 5000;
+    function heatDatasetRows(store) {
+      var out = [], keys = Object.keys(store || {});
+      for (var i = 0; i < keys.length && out.length < HEAT_DATASET_MAX; i++) {
+        var r = store[keys[i]];
+        if (!r || !r.id) { continue; }   // braced: keeps the heatPublishVerdicts skip-line unique for its harness
+        var row = { target: r.tracking || '', woNumber: r.wo || '' };
+        if (!row.target && !row.woNumber) continue;   // no identity the Dashboard could key a job on
+        if (r.status) row.status = r.status;
+        if (r.prio) row.priority = r.prio;
+        if (r.client) row.client = r.client;
+        // A resolved human name only - never a GUID, never the "(unresolved member)" placeholder,
+        // which means "could not read who owns this", a different fact from "nobody owns this".
+        if (r.assignee && r.assignee !== '(unresolved member)') row.coordinator = r.assignee;
+        if (r.hrs !== '' && r.hrs != null) row.statusHrs = r.hrs;   // HOURS already (v3.19)
+        if (r.days !== '' && r.days != null) row.aged = r.days;
+        if (r.dneAmt != null) row.amount = r.dneAmt;               // DOLLARS already (moneyNum)
+        if (r.nteAmt != null) row.vendorNte = r.nteAmt;
+        if (r.vendorsKnown && r.vendors) row.vendors = r.vendors;
+        if (r.sched) row.nextOnsiteDate = r.sched;
+        if (r.exp) row.expectedCompletion = r.exp;
+        // (Last Note Date is a valuable staleness column but NOT yet in the committed route's
+        //  DATE_MAP - add it there and here together as a paired change to keep the contract.)
+        out.push(row);
+      }
+      return out;
+    }
+    // END heatDatasetRows
+    function heatQueueDataset(store) {
+      try {
+        var rows = heatDatasetRows(store);
+        if (!rows.length) return;
+        if (Object.keys(store || {}).length > HEAT_DATASET_MAX)
+          console.warn('[BWN HEAT] board over ' + HEAT_DATASET_MAX + ' rows - dataset push capped, some rows omitted');
+        BWN.lsSetJSON('bwn:datasetq', { generatedAt: new Date().toISOString(), rows: rows, by: 'listHeat' });
+      } catch (e) { console.warn('[BWN HEAT] dataset queue failed:', (e && e.message) || e); }
+    }
+
     // ---- Assignee names from GUIDs ------------------------------------------------
     // The board row carries `assignedToMemberName` only when the Assigned To column is in
     // view - the captured query selects what the column chooser asked for. When it is not,
@@ -7768,7 +7815,7 @@
         // Additive fields only and `v` stays 1: busHeatGet rejects any other version outright.
         // Only on a clean finish - a dirty scan drops the store above, and publishing a
         // partial board as if it were the board is the mistake `heatScanClean` exists to stop.
-        if (clean && heatStore) heatPublishVerdicts(heatStore);
+        if (clean && heatStore) { heatPublishVerdicts(heatStore); heatQueueDataset(heatStore); }
         console.info('[BWN HEAT] API scan ' + (clean ? 'complete' : 'incomplete') + ':', n, 'WOs in', pages, 'page(s)' + (note ? ' | ' + note : '') + (target != null ? ' | list total ' + target : ''));
         woListHeat();
         if (clean) heatSnapshot();
@@ -7787,6 +7834,7 @@
             // is not rendering has no other writer, so without this the bus would hold a
             // verdict one signal out of date for most of the board.
             heatPublishVerdicts(store);
+            heatQueueDataset(store);
             woListHeat();
             var pn2 = document.getElementById(PANEL_ID); if (pn2) { pn2.remove(); toggleAuditPanel(); }
           }, function () { /* resolution is best-effort; the ids never reach the panel either way */ });
