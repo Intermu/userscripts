@@ -329,12 +329,16 @@ async function probeAssist(src) {
   A.ok('render builds the strip from waEscStripText(escSt)', coreFull.indexOf('waEscStripText(escSt)') !== -1, 'call site missing');
   A.ok('tool label rides waEscToolLabel(dk, escSt)', coreFull.indexOf('waEscToolLabel(dk, escSt)') !== -1, 'call site missing');
   A.ok('escalation state is part of the render signature', coreFull.indexOf("escSt.status + '|' + escSt.id") !== -1, 'signature term missing');
-  // Bumped to 1.66.19 for the split bus publish (identity ahead of the anchor gate). The pin is
-  // deliberate: it forces a conscious update whenever Core moves, so a version bump cannot ride
-  // out unnoticed alongside an unrelated change. The step-3 contract itself is untouched.
-  A.ok('core @version is 1.66.32', coreFull.indexOf('// @version      1.66.32') !== -1, 'core version drift');
-  A.ok('core banner says WO Assist 2.67', coreFull.indexOf('WO Assist 2.67') !== -1, 'module banner drift');
-  A.ok('assist @version is 0.3.0', assistFull.indexOf('// @version      0.3.0') !== -1, 'assist version drift');
+  // Bumped to 1.66.34 / WO Assist 2.68 for the docs-verify API route (jobDocuments replaces the
+  // DOM reader that returned null on every WO). The pin is deliberate: it forces a conscious
+  // update whenever Core moves, so a version bump cannot ride out unnoticed alongside an
+  // unrelated change. The step-3 contract itself is untouched.
+  // The assist pin was left at 0.3.0 by the mirror-retirement sweep (b24cecc) that patch-bumped
+  // every script's @version; the file has read 0.3.1 since, so this pin was red on main until
+  // 2026-08-06. Its internal `var VER` still says 0.3.0 - that drift is bwn-wo-assist's to fix.
+  A.ok('core @version is 1.66.34', coreFull.indexOf('// @version      1.66.34') !== -1, 'core version drift');
+  A.ok('core banner says WO Assist 2.68', coreFull.indexOf('WO Assist 2.68') !== -1, 'module banner drift');
+  A.ok('assist @version is 0.3.1', assistFull.indexOf('// @version      0.3.1') !== -1, 'assist version drift');
   A.ok("assist VER is '0.3.0'", assistFull.indexOf("var VER = '0.3.0';") !== -1, 'assist VER drift');
   // Step 4 hangs the client-response state read off the SAME tick, deliberately: two queues on
   // one refresh cadence is one thing to reason about, and a second timer would be a second

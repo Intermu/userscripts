@@ -102,6 +102,13 @@ jobs:
       - name: Kanban card harness (status-clock units + verdict publish)
         run: node scripts/test-kanban-card.js
 
+      # Docs-verify via jobDocuments: the DOM reader returned null on every real WO, so the
+      # docs:none closure gate never fired. Pins unknown-vs-confident-empty (a failed read
+      # must NEVER read as "no documents") and the workOrderNumber-not-jobId key. Also the
+      # tripwire for the route going missing again: the slices throw if it is not in source.
+      - name: Docs API harness (jobDocuments reader + docs:none gate)
+        run: node scripts/test-docs-api.js
+
   lint:
     name: Lint (advisory)
     runs-on: ubuntu-latest

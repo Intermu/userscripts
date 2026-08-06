@@ -1,10 +1,10 @@
 // ==UserScript==
 // @name         BWN Suite - Core (Broadway National)
 // @namespace    broadwaynational.bwn
-// @version      1.66.33
+// @version      1.66.34
 // @downloadURL  https://raw.githubusercontent.com/Intermu/userscripts/main/bwn-suite-core.user.js
 // @updateURL    https://raw.githubusercontent.com/Intermu/userscripts/main/bwn-suite-core.user.js
-// @description  Runs several Umbrava helpers for BWN coordinators, in the browser with no privileged grants. Includes: PO Approval + ETA Builder; WO Assist (GP/ETA, a stall watchdog, DNE calculator, and a next-action playbook); Email Leak Guard (checks recipients against vendor names, PO amounts, and client budget references before an outbound email sends); WO List Heat (a triage overlay + My Day strip on the work-order list, with an optional same-origin Umbrava API scan for deterministic full-board coverage); and the BWN Launcher (opens the Azure Static Web App tools with the current WO's context). Modules share state through sessionStorage/localStorage. The only network calls are same-origin Umbrava GraphQL reads (app.umbrava.com/api/graphql, the app's own session): List Heat's full-board scan and WO Assist's work-order / trip / clock-in reads; everything else is offline. Toggle modules in BWN_MODULES below.
+// @description  Runs several Umbrava helpers for BWN coordinators, in the browser with no privileged grants. Includes: PO Approval + ETA Builder; WO Assist (GP/ETA, a stall watchdog, DNE calculator, and a next-action playbook); Email Leak Guard (checks recipients against vendor names, PO amounts, and client budget references before an outbound email sends); WO List Heat (a triage overlay + My Day strip on the work-order list, with an optional same-origin Umbrava API scan for deterministic full-board coverage); and the BWN Launcher (opens the Azure Static Web App tools with the current WO's context). Modules share state through sessionStorage/localStorage. The only network calls are same-origin Umbrava GraphQL reads (app.umbrava.com/api/graphql, the app's own session): List Heat's full-board scan and WO Assist's work-order / trip / clock-in / document reads; everything else is offline. Toggle modules in BWN_MODULES below.
 // @match        https://app.umbrava.com/*
 // @match        https://*.umbrava.com/*
 // @run-at       document-start
@@ -44,7 +44,7 @@
   try { localStorage.setItem('bwn:status:core', JSON.stringify({ ver: BWN_VER, ts: Date.now() })); } catch (e) { /* best-effort */ }
 
   console.info('[BWN SUITE CORE] v' + BWN_VER + ' |',
-    'Shared Core 7 \u00b7 PO Approval 1.13 \u00b7 WO Assist 2.67 \u00b7 Leak Guard 2.0 \u00b7 List Heat 3.24 \u00b7 Launcher 2.0 \u00b7 Views 1.0 \u00b7 Palette 1.1 \u00b7 Visit 1.2 \u00b7 Reminders 1.1 \u00b7 Timeline 1.1 \u00b7 TripCal 1.4 \u00b7 Connector 1.2 |',
+    'Shared Core 7 \u00b7 PO Approval 1.13 \u00b7 WO Assist 2.68 \u00b7 Leak Guard 2.0 \u00b7 List Heat 3.24 \u00b7 Launcher 2.0 \u00b7 Views 1.0 \u00b7 Palette 1.1 \u00b7 Visit 1.2 \u00b7 Reminders 1.1 \u00b7 Timeline 1.1 \u00b7 TripCal 1.4 \u00b7 Connector 1.2 |',
     'enabled:', Object.keys(BWN_MODULES).filter(function (k) { return BWN_MODULES[k]; }).join(', '));
 
   // ===== BWN SHARED CORE v7 - KEEP IN SYNC across both suite scripts =====
@@ -1397,7 +1397,7 @@
   });
 
   // ==========================================================================
-  // MODULE: WO Assist: GP + ETA Watchdog + Playbook v2.67 (Connector 1.2)
+  // MODULE: WO Assist: GP + ETA Watchdog + Playbook v2.68 (Connector 1.2)
   // ==========================================================================
   bwnBoot('woAssist', BWN_MODULES.woAssist, function () {
     'use strict';
@@ -1427,7 +1427,7 @@
     var PANEL_ID = 'bwn-gp-panel';
     var GREEN = BWN.GREEN;
 
-    console.info('[BWN GP] WO Assist v2.67 loaded on', location.href);
+    console.info('[BWN GP] WO Assist v2.68 loaded on', location.href);
 
     // ---- Parsing helpers (shared via BWN core) -----------------------------
     var parseMoney = BWN.parseMoney;
@@ -1838,30 +1838,15 @@
       return keys.length;
     }
 
-    // ---- Documents read (Phase 2, PROVISIONAL) --------------------------------
-    // The Documents-section DOM is NOT yet pinned live (Drop Upload only knows the
-    // split-view buttons, not the doc rows/types). readDocs() therefore returns a
-    // count ONLY when it can read one CONFIDENTLY (a "Documents (N)" header or clear
-    // document-row testids); otherwise null = "unknown". The closure gate treats null
-    // as unknown and does NOT fire - a false zero would nag, and a false "N present"
-    // must never be allowed to auto-complete the WO. Run __bwnDocsRecon() in the
-    // console on a real WO to capture the real testids, then tighten the selectors.
-    function readDocs() {
-      try {
-        var els = document.querySelectorAll('h1,h2,h3,h4,h5,h6,div,span,p,button');
-        for (var i = 0; i < els.length; i++) {
-          var tx = (els[i].textContent || '').replace(/\s+/g, ' ').trim();
-          var m = tx.match(/^documents\s*\((\d+)\)$/i);
-          if (m && els[i].querySelectorAll('*').length <= 3) return { count: parseInt(m[1], 10) };
-        }
-        var rows = document.querySelectorAll('[data-testid^="document-row" i],[data-testid*="document-list-item" i]');
-        if (rows.length) return { count: rows.length };
-        return null;   // cannot tell - do NOT guess zero
-      } catch (e) { return null; }
-    }
-    // Console recon: dump document/attachment testids + any "Documents" header so the
-    // real selectors can be pinned (mirrors tripsRecon). Exposed on window for manual
-    // use; no automatic behavior depends on it.
+    // ---- Documents: the DOM reader is RETIRED (see fetchDocs/readDocs below) ---
+    // The old readDocs() scanned for a "Documents (N)" header or document-row
+    // testids. Neither exists on a real WO - the Documents DOM was never pinned -
+    // so it returned null on EVERY read and the docs:none closure gate has never
+    // once fired in production. Replaced by the jobDocuments API read in the
+    // readWO/fetchTrips cluster below: no selectors, nothing left to pin.
+    // Console recon, RETAINED until the API route is live-verified: dump
+    // document/attachment testids + any "Documents" header (mirrors tripsRecon).
+    // Exposed on window for manual use; no automatic behavior depends on it.
     function docsRecon() {
       var seen = {};
       document.querySelectorAll('[data-testid*="document" i],[data-testid*="attach" i],[data-testid*="file" i]').forEach(function (el) {
@@ -1959,6 +1944,53 @@
         try { BWN.ssSetJSON('bwn:trips:' + woNum, payload); } catch (e) { }
         try { refresh(); } catch (e) { }
       });
+    }
+
+    // ---- Documents via jobDocuments(workOrderNumber) ---------------------------
+    // Third reader in this cluster, same cache shape as readWO/fetchTrips: async
+    // fetch fills DOCS_CACHE, readDocs() is a SYNC cache read so compute() and the
+    // pure engine stay synchronous, and the fetch landing triggers a re-render.
+    //
+    // Keyed by the WO NUMBER, not jobId - the two are different identifiers and
+    // jobDocuments accepts either, so passing the wrong one is a silent wrong
+    // answer rather than an error. workOrderNumber is the confirmed-live arg
+    // (W-370534 returned 21 documents through it, no jobId needed).
+    //
+    // GATE CONTRACT UNCHANGED - the null/value split is the whole point:
+    //   null (off-WO, fetch pending, or the read failed) = UNKNOWN -> docs:none
+    //     stays quiet. A false zero would nag a coordinator who has the package.
+    //   {count:0, docs:[]} = CONFIDENT empty -> docs:none fires.
+    //   docs present still never auto-completes a step: a count can be intake
+    //     paperwork, not the completion package. Per-doc `label` and
+    //     `workOrderDocumentSource` make that refinement possible later; it is
+    //     deliberately NOT in this pass.
+    // A failed read parks at 'error' and is retried on the next render - the same
+    // self-heal readWO/fetchWO use. The cost of a persistent failure is a dormant
+    // gate, which is exactly the behaviour that shipped before this route existed.
+    var DOCS_CACHE = Object.create(null);   // woNum -> {count,docs} | 'pending' | 'error'
+    var JOB_DOCUMENTS_Q = 'query WODocuments($n: Int!) { jobDocuments(workOrderNumber: $n, includeArchived: false) { id label displayFileName description uploadDate fileSize isArchived workOrderDocumentSource purchaseOrderNumber } }';
+    function fetchDocs(woNum) {
+      if (!woNum) return;
+      var c = DOCS_CACHE[woNum];
+      if (c === 'pending' || (c && c !== 'error')) return;
+      DOCS_CACHE[woNum] = 'pending';
+      bwnGql(JOB_DOCUMENTS_Q, { n: Number(woNum) }).then(function (d) {
+        var rows = d && d.jobDocuments;
+        if (!Array.isArray(rows)) { DOCS_CACHE[woNum] = 'error'; return; }   // schema drift = unknown, NEVER empty
+        // includeArchived:false is both ASKED FOR and enforced here - the live
+        // count must not depend on the server honouring the argument.
+        var live = rows.filter(function (r) { return r && !r.isArchived; });
+        DOCS_CACHE[woNum] = { count: live.length, docs: live };
+        try { refresh(); } catch (e) { }
+      }).catch(function () { DOCS_CACHE[woNum] = 'error'; });
+    }
+    function readDocs() {
+      var woNum = currentWOId();
+      if (!woNum) return null;
+      var c = DOCS_CACHE[woNum];
+      if (c && c !== 'pending' && c !== 'error') return c;
+      fetchDocs(woNum);
+      return null;   // pending / errored / just-fired - unknown, never a guessed zero
     }
 
     // ---- Signals --------------------------------------------------------------
@@ -2980,10 +3012,11 @@
       // A WO must not be marked Work Complete without its completion package (signed
       // ticket, sign-in/out, before/after photos). At confirm-complete / cost-review,
       // if we can read the Documents section and it is CONFIDENTLY empty, surface a
-      // blocking step. readDocs() returns null when it cannot tell (Documents DOM not
-      // yet pinned - see readDocs) and we do NOT fire on null: a false zero would nag,
-      // and we never auto-complete on a "docs present" read. A "docs uploaded" note
-      // converges it via ACT_SIGNALS.stall (same signal the confirm steps use).
+      // blocking step. readDocs() returns null when it cannot tell (off-WO, the
+      // jobDocuments read still pending, or it failed - see readDocs) and we do NOT
+      // fire on null: a false zero would nag, and we never auto-complete on a "docs
+      // present" read. A "docs uploaded" note converges it via ACT_SIGNALS.stall
+      // (the same signal the confirm steps use).
       if (woPhase === 'confirmcomplete' || woPhase === 'costreview') {
         var docs = state.docs;
         if (docs && docs.count === 0) {
