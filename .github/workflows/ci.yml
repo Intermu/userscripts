@@ -124,6 +124,26 @@ jobs:
       - name: AI coordinator-read harness (assignedTo + user(id:) two-step)
         run: node scripts/test-ai-coordinator-read.js
 
+      # next-actions-overhaul: the priority clock, intake gate and tiered escalation were
+      # all shipped in WO Assist 2.68 but had no dedicated harness for their decision
+      # logic. These slice the real engine blocks and pin the math, so a drift fails CI
+      # instead of quietly mis-judging a WO. The ECD-notes harness had existed in scripts/
+      # since it was written but was never wired here, so it rotted unrun.
+      - name: Next Actions priority-clock + escalate-math harness
+        run: node scripts/test-assist-priority-clock.js
+
+      - name: Next Actions intake actionability gate harness
+        run: node scripts/test-assist-intake-gate.js
+
+      - name: Next Actions tiered role-aware escalation mapping harness
+        run: node scripts/test-assist-escalation-tier.js
+
+      - name: ECD auto-warm x auto-pop x proposal harness (was orphaned from CI)
+        run: node scripts/test-assist-ecd-notes.js
+
+      - name: Header-anchor mount harness (tripCal + AI jobView, was orphaned from CI)
+        run: node scripts/test-anchor-mounts.js
+
   lint:
     name: Lint (advisory)
     runs-on: ubuntu-latest
