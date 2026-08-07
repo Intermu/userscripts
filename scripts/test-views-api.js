@@ -1,0 +1,268 @@
+// test-views-api.js - node harness for BWN Views v2.0's API column apply
+// (userPreference read + putUserPreference write on tables/masterWOListTable/settings),
+// built into bwn-suite-core 1.66.38 on 2026-08-07.
+//
+// WHAT THE OVERHAUL REPLACED:
+//   Views v1.0 applied a column set by 50 passes of column-chooser checkbox
+//   choreography (open the popover, re-query fresh <li> rows, toggle ONE mismatch,
+//   repeat) plus timing sleeps. v2.0 writes Umbrava's own column preference and
+//   reloads; the chooser path survives only as the fallback.
+//
+// THE CONTRACT, measured live 2026-08-07 (see wiki/umbrava-graphql-operations.md):
+//   read : userPreference(applicationId,key,isTenantSpecific) -> {key,version,value}
+//   write: putUserPreference(data:PutUserPreferenceInput!) -> {success,message}
+//          - the response does NOT echo the pref; selecting key/version/value on it
+//            is a validation error that rejects the whole document (hit live).
+//   value: stringified JSON {hiddenColumnNames,columnWidths,columnSorting} - the
+//          HIDDEN set drives the layout, so a column set = hide everything unwanted.
+//   version: a schema stamp ("2026-07-31-f6c090d"), echoed from the read. Hardcoding
+//          it would break on Umbrava's next deploy.
+//
+// WHAT THIS PROVES against the REAL shipped bytes (sliced from bwn-suite-core.user.js,
+// run in a vm against a deferred-promise bwnGql stub):
+//   - NAME_MAP carries all 30 measured chooser columns, including the traps: the row
+//     titled "Label" is workOrderCategory (a stray `label` id is silently ignored by
+//     the grid - the phantom this session itself wrote once), Status is statusId,
+//     Client is clientTenantProfileId, City/State/money are dotted paths.
+//   - an unmapped title THROWS (never guess an id) and nothing is written.
+//   - hidden = all mapped ids minus the wanted ids; unknown ids already hidden are
+//     PRESERVED (a future Umbrava column must not silently appear); widths and
+//     sorting pass through verbatim.
+//   - the write echoes the READ's version, sends isTenantSpecific:true, and selects
+//     only {success message}; success:false rejects; a null read rejects with NO write.
+//   - the reload continuation stash is consumed BEFORE applying (no reload loops)
+//     and goes stale after 90s.
+//   - applyView orders API-first-then-chooser-fallback, and location.reload() happens
+//     only after stashPending.
+//   - the dock keeps the menu-then-pill child order the command palette depends on,
+//     and the toolbar discovery excludes header/nav (the global "Search Work Orders"
+//     box must never anchor it).
+//
+// WHAT IT DOES NOT PROVE:
+//   - that the live pref write lands (proven once by hand 2026-08-07, and gated on
+//     the TM reinstall) or how DevExpress renders the resulting column set.
+//
+// Every case re-runs against mutated copies of the source; each mutation MUST turn
+// this harness red. mutate() throws if its target is absent or not unique.
+//
+// Run: "/c/Program Files/Adobe/Adobe Creative Cloud Experience/libs/node.exe" scripts/test-views-api.js
+
+var fs = require('fs');
+var path = require('path');
+var vm = require('vm');
+
+var CORE_SRC = path.join(__dirname, '..', 'bwn-suite-core.user.js');
+var coreFull = fs.readFileSync(CORE_SRC, 'utf8').replace(/\r\n/g, '\n');
+
+function slice(start, end, what) {
+  var a = coreFull.indexOf(start);
+  if (a === -1) throw new Error(what + ': START marker not found');
+  if (coreFull.indexOf(start, a + 1) !== -1) throw new Error(what + ': START marker not unique');
+  var b = coreFull.indexOf(end, a);
+  if (b === -1) throw new Error(what + ': END marker not found after start');
+  return coreFull.slice(a, b);
+}
+
+var S_API = slice("    var PREF_APP = 'bn-web-spa';", '    function sleep(ms)', 'Views API block');
+var S_APPLY = slice('    var applying = false;', '    // ---- Post-reload continuation', 'applyView');
+var S_DOCK = slice('    // ---- Dock UI (v2.0: left of the list', '    var deb = null;', 'ensureDock');
+
+function mutate(src, from, to) {
+  var i = src.indexOf(from);
+  if (i === -1) throw new Error('MUTATION TARGET ABSENT: ' + JSON.stringify(from.slice(0, 70)));
+  if (src.indexOf(from, i + 1) !== -1) throw new Error('MUTATION TARGET NOT UNIQUE: ' + JSON.stringify(from.slice(0, 70)));
+  return src.slice(0, i) + to + src.slice(i + from.length);
+}
+
+// ---- Environment ------------------------------------------------------------
+function makeApi(apiSrc) {
+  var env = { calls: [], store: {} };
+  var sandbox = {
+    Object: Object, Array: Array, Number: Number, JSON: JSON, Promise: Promise,
+    Error: Error, Date: Date, console: { info: function () { }, warn: function () { }, error: function () { } },
+    sessionStorage: {
+      getItem: function (k) { return (k in env.store) ? env.store[k] : null; },
+      setItem: function (k, v) { env.store[k] = String(v); },
+      removeItem: function (k) { delete env.store[k]; }
+    },
+    bwnGql: function (query, variables) {
+      var rec = { query: query, vars: variables };
+      rec.p = new Promise(function (res, rej) { rec.resolve = res; rec.reject = rej; });
+      env.calls.push(rec);
+      return rec.p;
+    }
+  };
+  vm.createContext(sandbox);
+  var api = vm.runInContext(
+    '(function () {\n' + apiSrc + '\n' +
+    'return { NAME_MAP: NAME_MAP, buildColumnsValue: buildColumnsValue, apiApplyColumns: apiApplyColumns,\n' +
+    '         stashPending: stashPending, takePending: takePending,\n' +
+    '         PREF_READ_Q: PREF_READ_Q, PREF_WRITE_Q: PREF_WRITE_Q, PREF_KEY: PREF_KEY, PREF_APP: PREF_APP };\n})()',
+    sandbox, { filename: 'views-api.js' });
+  env.api = api;
+  return env;
+}
+
+function tick() { return new Promise(function (r) { setTimeout(r, 0); }); }
+
+var ALL_TITLES = ['Label', 'Phase', 'WO #', 'Tracking #', 'Status', 'Asset', 'Priority', 'City',
+  'State', 'Location #', 'Trades', 'Scope Of Work', 'Time in Status (hrs.)', 'Last Note Date',
+  'Client DNE', 'First Trip Date', '# Days', 'Expected Completion Date', 'Latest Update',
+  'Remaining Days', 'WO Date', 'Vendor(s)', 'Client', 'Created By', 'Assigned To',
+  'Scheduled Date', 'Type', 'Source Job #', 'Source PO #', 'Total Vendor NTE'];
+
+// ---- The cases ----------------------------------------------------------------
+async function runCases(apiSrc) {
+  var out = [];
+  function ok(name, cond, detail) { out.push({ name: name, ok: !!cond, detail: detail }); }
+  function eq(name, got, want) {
+    ok(name, JSON.stringify(got) === JSON.stringify(want), 'got ' + JSON.stringify(got) + ' want ' + JSON.stringify(want));
+  }
+
+  var e;
+  try { e = makeApi(apiSrc); }
+  catch (err) { out.push({ name: 'source loads', ok: false, detail: String(err && err.message || err) }); return out; }
+  var A = e.api;
+
+  // --- NAME_MAP completeness + the measured traps
+  eq('NAME_MAP carries all 30 chooser columns', Object.keys(A.NAME_MAP).length, 30);
+  eq('the chooser row "Label" is workOrderCategory, never `label`', A.NAME_MAP['Label'], 'workOrderCategory');
+  eq('Status is statusId (not statusName)', A.NAME_MAP['Status'], 'statusId');
+  eq('Client is the tenant-profile ID column', A.NAME_MAP['Client'], 'clientTenantProfileId');
+  eq('City is a dotted path', A.NAME_MAP['City'], 'address.city');
+  eq('money columns are dotted .amount paths', A.NAME_MAP['Total Vendor NTE'], 'totalNTE.amount');
+  ok('no mapped id is the phantom `label`',
+    Object.keys(A.NAME_MAP).every(function (k) { return A.NAME_MAP[k] !== 'label'; }));
+
+  // --- buildColumnsValue
+  var cur = {
+    hiddenColumnNames: ['phase', 'future.unknownColumn'],
+    columnWidths: [{ columnName: 'scopeOfWork', width: 189 }],
+    columnSorting: [{ columnName: 'phase', direction: 'desc' }]
+  };
+  var v = A.buildColumnsValue(cur, ALL_TITLES);
+  eq('wanting every column hides only the preserved unknown id', v.hiddenColumnNames, ['future.unknownColumn']);
+  eq('widths pass through verbatim', v.columnWidths, cur.columnWidths);
+  eq('sorting passes through verbatim', v.columnSorting, cur.columnSorting);
+
+  var v2 = A.buildColumnsValue(cur, ['Tracking #', 'Status']);
+  eq('want-2 hides the other 28 mapped ids + 1 preserved unknown', v2.hiddenColumnNames.length, 29);
+  ok('wanted ids are not hidden', v2.hiddenColumnNames.indexOf('trackingNumber') === -1 && v2.hiddenColumnNames.indexOf('statusId') === -1);
+  ok('the Label trap id IS hidden when Label is unwanted', v2.hiddenColumnNames.indexOf('workOrderCategory') !== -1);
+  ok('the unknown already-hidden id is preserved', v2.hiddenColumnNames.indexOf('future.unknownColumn') !== -1);
+
+  var threw = null;
+  try { A.buildColumnsValue(cur, ['Tracking #', 'No Such Column']); } catch (err) { threw = String(err.message); }
+  ok('an unmapped title throws rather than guessing', /unmapped column title/.test(threw || ''), threw);
+
+  // --- apiApplyColumns: full happy path
+  var done = null, failed = null;
+  A.apiApplyColumns(['Tracking #', 'Status']).then(function (r) { done = r; }, function (err) { failed = String(err && err.message); });
+  await tick();
+  eq('one read fired first', e.calls.length, 1);
+  ok('the read targets the measured key', e.calls[0].vars.k === 'tables/masterWOListTable/settings', JSON.stringify(e.calls[0].vars));
+  ok('the read is tenant-specific', e.calls[0].vars.t === true);
+  ok('the read app id is bn-web-spa', e.calls[0].vars.a === 'bn-web-spa');
+  e.calls[0].resolve({ userPreference: { key: 'tables/masterWOListTable/settings', version: '2027-01-15-deadbee', value: JSON.stringify(cur) } });
+  await tick(); await tick();
+  eq('the write fired after the read', e.calls.length, 2);
+  var wd = e.calls[1].vars.d;
+  ok('the write echoes the READ version, not a hardcoded stamp', wd.version === '2027-01-15-deadbee', wd.version);
+  ok('the write is tenant-specific', wd.isTenantSpecific === true);
+  ok('the write value round-trips as the computed JSON', JSON.parse(wd.value).hiddenColumnNames.length === 29, wd.value.slice(0, 80));
+  ok('the write selects only success+message (the response does NOT echo the pref)',
+    /putUserPreference\(data:\$d\)\{\s*success\s+message\s*\}/.test(A.PREF_WRITE_Q), A.PREF_WRITE_Q);
+  e.calls[1].resolve({ putUserPreference: { success: true, message: 'ok' } });
+  await tick(); await tick();
+  eq('the apply resolves true on a verified write', done, true);
+  eq('and did not reject', failed, null);
+
+  // --- null read -> reject, and NO write
+  var e2 = makeApi(apiSrc);
+  var fail2 = null;
+  e2.api.apiApplyColumns(['Tracking #']).then(null, function (err) { fail2 = String(err && err.message); });
+  await tick();
+  e2.calls[0].resolve({ userPreference: null });
+  await tick(); await tick();
+  ok('a never-customized pref rejects (DOM fallback)', /no existing column pref/.test(fail2 || ''), fail2);
+  eq('and no write fired on the null read', e2.calls.length, 1);
+
+  // --- success:false -> reject
+  var e3 = makeApi(apiSrc);
+  var fail3 = null;
+  e3.api.apiApplyColumns(['Tracking #']).then(null, function (err) { fail3 = String(err && err.message); });
+  await tick();
+  e3.calls[0].resolve({ userPreference: { key: 'k', version: 'v', value: JSON.stringify(cur) } });
+  await tick(); await tick();
+  e3.calls[1].resolve({ putUserPreference: { success: false, message: 'nope' } });
+  await tick(); await tick();
+  ok('success:false rejects instead of reading as done', /refused/.test(fail3 || ''), fail3);
+
+  // --- continuation stash
+  var e4 = makeApi(apiSrc);
+  e4.api.stashPending({ name: 'Triage', assignee: { mode: 'me' }, woDateToday: false, reloadAfter: true });
+  var p1 = e4.api.takePending();
+  ok('a fresh stash comes back intact', p1 && p1.name === 'Triage' && p1.assignee.mode === 'me' && p1.reloadAfter === true, JSON.stringify(p1));
+  eq('the stash is consumed BEFORE applying - a second take is null', e4.api.takePending(), null);
+  e4.store['bwn:views:pending'] = JSON.stringify({ name: 'Old', ts: Date.now() - 120000 });
+  eq('a stale stash (>90s) is ignored', e4.api.takePending(), null);
+
+  return out;
+}
+
+// ---- Static pins on the surrounding source (order + contracts) ----------------
+function staticPins() {
+  var out = [];
+  function ok(name, cond, detail) { out.push({ name: name, ok: !!cond, detail: detail }); }
+
+  var iApi = S_APPLY.indexOf('apiApplyColumns');
+  var iDom = S_APPLY.indexOf('await applyColumns(');
+  ok('applyView tries the API before the chooser fallback', iApi !== -1 && iDom !== -1 && iApi < iDom, iApi + ' vs ' + iDom);
+  var iStash = S_APPLY.indexOf('stashPending(');
+  var iReload = S_APPLY.indexOf('location.reload()');
+  ok('the continuation is stashed BEFORE the reload', iStash !== -1 && iReload !== -1 && iStash < iReload, iStash + ' vs ' + iReload);
+
+  var iMenu = S_DOCK.indexOf('wrap.appendChild(menu)');
+  var iPill = S_DOCK.indexOf('wrap.appendChild(pill)');
+  ok('dock keeps menu-then-pill child order (palette contract)', iMenu !== -1 && iPill !== -1 && iMenu < iPill, iMenu + ' vs ' + iPill);
+  ok('toolbar discovery excludes header/nav (global search box must never anchor)',
+    /closest\('header,nav'\)/.test(coreFull.slice(coreFull.indexOf('function pageSearchInput'), coreFull.indexOf('function searchMountRef'))));
+  ok('banner carries Views 2.0', coreFull.indexOf('Views 2.0') !== -1);
+  return out;
+}
+
+// ---- Runner -------------------------------------------------------------------
+function report(label, results) {
+  var bad = results.filter(function (r) { return !r.ok; });
+  bad.forEach(function (r) { console.error('  FAIL: ' + r.name + (r.detail ? ' [' + r.detail + ']' : '')); });
+  console.log(label + ': ' + (results.length - bad.length) + '/' + results.length + (bad.length ? ' <-- RED' : ''));
+  return bad.length;
+}
+
+function expectRed(label, results) {
+  var bad = results.filter(function (r) { return !r.ok; });
+  if (bad.length === 0) { console.error('  MUTATION NOT CAUGHT: ' + label); return 1; }
+  console.log('control ' + label + ': red as required (' + bad.length + ' failing)');
+  return 0;
+}
+
+(async function main() {
+  var failures = 0;
+  failures += report('shipped source', await runCases(S_API));
+  failures += report('static pins', staticPins());
+
+  // Mutation controls - each MUST turn the harness red.
+  failures += expectRed('Label mapped to the phantom `label` id',
+    await runCases(mutate(S_API, "'Label': 'workOrderCategory'", "'Label': 'label'")));
+  failures += expectRed('version hardcoded instead of echoed',
+    await runCases(mutate(S_API, 'version: up.version', "version: '2026-07-31-f6c090d'")));
+  failures += expectRed('success:false read as done',
+    await runCases(mutate(S_API, 'res.success !== true', 'false')));
+  failures += expectRed('stash not consumed before applying',
+    await runCases(mutate(S_API, 'sessionStorage.removeItem(PENDING_KEY);   // remove BEFORE applying - no retry loops', '')));
+  failures += expectRed('unmapped titles silently dropped',
+    await runCases(mutate(S_API, "if (!id) throw new Error('unmapped column title: ' + t);", 'if (!id) return;')));
+
+  if (failures) { console.error('\nRED: ' + failures + ' problem(s).'); process.exit(1); }
+  console.log('\nGREEN: shipped source passes and every mutation control turns red.');
+})().catch(function (e) { console.error('HARNESS CRASH:', e && e.stack || e); process.exit(1); });

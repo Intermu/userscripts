@@ -1,10 +1,10 @@
 // ==UserScript==
 // @name         BWN Suite - Core (Broadway National)
 // @namespace    broadwaynational.bwn
-// @version      1.66.37
+// @version      1.66.38
 // @downloadURL  https://raw.githubusercontent.com/Intermu/userscripts/main/bwn-suite-core.user.js
 // @updateURL    https://raw.githubusercontent.com/Intermu/userscripts/main/bwn-suite-core.user.js
-// @description  Runs several Umbrava helpers for BWN coordinators, in the browser with no privileged grants. Includes: PO Approval + ETA Builder; WO Assist (GP/ETA, a stall watchdog, DNE calculator, and a next-action playbook); Email Leak Guard (checks recipients against vendor names, PO amounts, and client budget references before an outbound email sends); WO List Heat (a triage overlay + My Day strip on the work-order list, with an optional same-origin Umbrava API scan for deterministic full-board coverage); and the BWN Launcher (opens the Azure Static Web App tools with the current WO's context). Modules share state through sessionStorage/localStorage. The only network calls are same-origin Umbrava GraphQL reads (app.umbrava.com/api/graphql, the app's own session): List Heat's full-board scan and WO Assist's work-order / trip / clock-in / document reads; everything else is offline. Toggle modules in BWN_MODULES below.
+// @description  Runs several Umbrava helpers for BWN coordinators, in the browser with no privileged grants. Includes: PO Approval + ETA Builder; WO Assist (GP/ETA, a stall watchdog, DNE calculator, and a next-action playbook); Email Leak Guard (checks recipients against vendor names, PO amounts, and client budget references before an outbound email sends); WO List Heat (a triage overlay + My Day strip on the work-order list, with an optional same-origin Umbrava API scan for deterministic full-board coverage); and the BWN Launcher (opens the Azure Static Web App tools with the current WO's context). Modules share state through sessionStorage/localStorage. The only network calls are same-origin Umbrava GraphQL requests (app.umbrava.com/api/graphql, the app's own session): List Heat's full-board scan and WO Assist's work-order / trip / clock-in / document reads, plus ONE write - BWN Views saves the column layout through Umbrava's own putUserPreference, the same preference the column chooser writes; everything else is offline. Toggle modules in BWN_MODULES below.
 // @match        https://app.umbrava.com/*
 // @match        https://*.umbrava.com/*
 // @run-at       document-start
@@ -44,7 +44,7 @@
   try { localStorage.setItem('bwn:status:core', JSON.stringify({ ver: BWN_VER, ts: Date.now() })); } catch (e) { /* best-effort */ }
 
   console.info('[BWN SUITE CORE] v' + BWN_VER + ' |',
-    'Shared Core 7 \u00b7 PO Approval 1.13 \u00b7 WO Assist 2.69 \u00b7 Leak Guard 2.0 \u00b7 List Heat 3.24 \u00b7 Launcher 2.0 \u00b7 Views 1.0 \u00b7 Palette 1.1 \u00b7 Visit 1.2 \u00b7 Reminders 1.1 \u00b7 Timeline 1.1 \u00b7 TripCal 1.4 \u00b7 Connector 1.2 |',
+    'Shared Core 7 \u00b7 PO Approval 1.13 \u00b7 WO Assist 2.69 \u00b7 Leak Guard 2.0 \u00b7 List Heat 3.24 \u00b7 Launcher 2.0 \u00b7 Views 2.0 \u00b7 Palette 1.1 \u00b7 Visit 1.2 \u00b7 Reminders 1.1 \u00b7 Timeline 1.1 \u00b7 TripCal 1.4 \u00b7 Connector 1.2 |',
     'enabled:', Object.keys(BWN_MODULES).filter(function (k) { return BWN_MODULES[k]; }).join(', '));
 
   // ===== BWN SHARED CORE v7 - KEEP IN SYNC across both suite scripts =====
@@ -9293,8 +9293,16 @@
 
 
   // ==========================================================================
-  // MODULE: BWN Views v1.0  - column + assignee view presets on the WO list
+  // MODULE: BWN Views v2.0  - column + assignee view presets on the WO list
   // ==========================================================================
+  // v2.0 (2026-08-07): columns + sort now apply through Umbrava's OWN persistence
+  // (userPreference / putUserPreference on tables/masterWOListTable/settings) instead
+  // of 50 passes of column-chooser checkbox choreography. One write, one reload,
+  // deterministic columns. Filters (assignee / WO date) are NOT pref-backed - measured:
+  // a live 8-assignee selection coexists with a null masterWOListTable/state - so they
+  // stay DOM-applied, resumed AFTER the reload via a sessionStorage continuation.
+  // The old chooser choreography is kept verbatim as the fallback for when the API
+  // path cannot run (no token, pref never created, write rejected).
   bwnBoot('viewManager', BWN_MODULES.viewManager, function () {
     'use strict';
     console.info('[BWN VIEWS] loaded on', location.href);
@@ -9347,6 +9355,102 @@
         if (c && Array.isArray(c.views) && c.views.length) return c.views;
       } catch (e) { }
       return DEFAULT_VIEWS;
+    }
+
+    // ---- Column preference API (v2.0) ----------------------------------------
+    // Umbrava persists the WO list's column layout server-side per user:
+    //   read : userPreference(applicationId,key,isTenantSpecific) -> {key,version,value}
+    //   write: putUserPreference(data:PutUserPreferenceInput!) -> {success,message}
+    // value is STRINGIFIED JSON {hiddenColumnNames,columnWidths,columnSorting} - columns
+    // are driven by the HIDDEN set, so a column set = hide everything unwanted.
+    // `version` is a schema stamp ("2026-07-31-f6c090d"), echoed from the read, never
+    // hardcoded. The SPA reads this pref at FULL LOAD only, so applying = write + reload.
+    // All of this measured live 2026-08-07; the map below was read off the DevExpress
+    // grid's React columns prop the same day (30/30 chooser columns).
+    var PREF_APP = 'bn-web-spa';
+    var PREF_KEY = 'tables/masterWOListTable/settings';
+    var PENDING_KEY = 'bwn:views:pending';   // sessionStorage continuation across the reload
+    // Chooser TITLE -> pref column id. Traps pinned by measurement: the row titled
+    // "Label" is workOrderCategory (a stray `label` id is accepted and silently
+    // ignored); Status is statusId; Client is the tenant-profile ID column; City/
+    // State/money columns are dotted paths.
+    var NAME_MAP = {
+      'Label': 'workOrderCategory', 'Phase': 'phase', 'WO #': 'formattedJobNumber',
+      'Tracking #': 'trackingNumber', 'Status': 'statusId', 'Asset': 'asset',
+      'Priority': 'priority.label', 'City': 'address.city', 'State': 'address.state',
+      'Location #': 'location', 'Trades': 'trades', 'Scope Of Work': 'scopeOfWork',
+      'Time in Status (hrs.)': 'timeInStatus', 'Last Note Date': 'lastNoteDate',
+      'Client DNE': 'doNotExceed.amount', 'First Trip Date': 'priority.firstTripDate',
+      '# Days': 'numberOfDays', 'Expected Completion Date': 'priority.expectedCompletionDate',
+      'Latest Update': 'lastModifiedDate', 'Remaining Days': 'remainingDays',
+      'WO Date': 'workOrderDate', 'Vendor(s)': 'vendorNames', 'Client': 'clientTenantProfileId',
+      'Created By': 'createdBy_UserProfileId', 'Assigned To': 'assignedTo',
+      'Scheduled Date': 'nextOnsiteDate', 'Type': 'workOrderTypeId',
+      'Source Job #': 'sourceJobNumber', 'Source PO #': 'sourcePurchaseOrderNumber',
+      'Total Vendor NTE': 'totalNTE.amount'
+    };
+    var PREF_READ_Q = 'query($a:String!,$k:String!,$t:Boolean!){ userPreference(applicationId:$a,key:$k,isTenantSpecific:$t){ key version value } }';
+    var PREF_WRITE_Q = 'mutation($d:PutUserPreferenceInput!){ putUserPreference(data:$d){ success message } }';
+
+    // Compute the pref value for a wanted title list. Throws on an unmapped title
+    // (never guess an id) and when the current pref is unreadable (no version to
+    // echo) - both fall back to the DOM chooser. Hidden ids the map does not know
+    // (future Umbrava columns) stay hidden rather than silently appearing.
+    function buildColumnsValue(cur, wantTitles) {
+      var wantIds = {};
+      wantTitles.forEach(function (t) {
+        var id = NAME_MAP[t];
+        if (!id) throw new Error('unmapped column title: ' + t);
+        wantIds[id] = true;
+      });
+      var allIds = Object.keys(NAME_MAP).map(function (k) { return NAME_MAP[k]; });
+      var hidden = allIds.filter(function (id) { return !wantIds[id]; });
+      (cur.hiddenColumnNames || []).forEach(function (id) {
+        if (allIds.indexOf(id) === -1 && hidden.indexOf(id) === -1) hidden.push(id);
+      });
+      return {
+        hiddenColumnNames: hidden,
+        columnWidths: cur.columnWidths || [],
+        columnSorting: cur.columnSorting || []
+      };
+    }
+
+    // Write the column set through the API. Resolves true on a verified write.
+    // Rejects on ANY shortfall (no pref yet, unmapped title, success:false) so the
+    // caller can fall back loudly - a swallowed failure here would read as a fact.
+    function apiApplyColumns(wantTitles) {
+      return bwnGql(PREF_READ_Q, { a: PREF_APP, k: PREF_KEY, t: true }).then(function (d) {
+        var up = d && d.userPreference;
+        if (!up || !up.value) throw new Error('no existing column pref (never customized?) - DOM fallback');
+        var value = buildColumnsValue(JSON.parse(up.value), wantTitles);
+        return bwnGql(PREF_WRITE_Q, {
+          d: { applicationId: PREF_APP, key: PREF_KEY, version: up.version, value: JSON.stringify(value), isTenantSpecific: true }
+        });
+      }).then(function (d) {
+        var res = d && d.putUserPreference;
+        if (!res || res.success !== true) throw new Error('putUserPreference refused: ' + (res && res.message));
+        return true;
+      });
+    }
+
+    function stashPending(v) {
+      try {
+        sessionStorage.setItem(PENDING_KEY, JSON.stringify({
+          name: v.name, assignee: v.assignee || null, woDateToday: !!v.woDateToday,
+          reloadAfter: !!v.reloadAfter, ts: Date.now()
+        }));
+      } catch (e) { /* private mode - filters just won't resume */ }
+    }
+
+    function takePending() {
+      try {
+        var raw = sessionStorage.getItem(PENDING_KEY);
+        if (!raw) return null;
+        sessionStorage.removeItem(PENDING_KEY);   // remove BEFORE applying - no retry loops
+        var p = JSON.parse(raw);
+        if (!p || typeof p.ts !== 'number' || Date.now() - p.ts > 90000) return null;
+        return p;
+      } catch (e) { return null; }
     }
 
     function sleep(ms) { return new Promise(function (r) { setTimeout(r, ms); }); }
@@ -9514,15 +9618,35 @@
       applying = true;
       setStatus('Applying \u201c' + v.name + '\u201d\u2026');
       try {
-        if (v.columns) await applyColumns(v.columns);
+        if (v.columns) {
+          // v2.0: API path first - one exact write into Umbrava's own column pref,
+          // then a reload (the SPA reads the pref at load). Assignee/date resume
+          // after the reload via the sessionStorage continuation. Any API shortfall
+          // falls back LOUDLY to the old chooser choreography below.
+          var wrote = false;
+          try {
+            await apiApplyColumns(v.columns);
+            wrote = true;
+          } catch (apiErr) {
+            console.warn('[BWN VIEWS] API column apply unavailable (' + (apiErr && apiErr.message) + ') - falling back to the chooser.');
+          }
+          if (wrote) {
+            stashPending(v);
+            setStatus('Columns saved \u00b7 reloading\u2026');
+            await sleep(250);
+            location.reload();
+            return;   // page is going away; the continuation finishes the job
+          }
+          await applyColumns(v.columns);
+        }
         if (v.assignee) await applyAssignee(v.assignee);
         if (v.woDateToday) await applyDateFilterToday();
         if (v.reloadAfter) {
-          // Re-mount the heat overlay in place instead of reloading the page.
-          // A full reload drops the just-applied column set (Umbrava keeps column
-          // visibility in client state), leaving List Heat with no "Time in Status"
-          // column to key on - so no coloring and no HEAT banner. Nudging the
-          // overlay directly keeps the Triage columns and re-detects them.
+          // DOM-fallback path only: re-mount the heat overlay in place instead of
+          // reloading. A reload would drop a chooser-applied column set (client
+          // state) - the API path above has no such problem because the columns
+          // are persisted BEFORE its reload. Nudging the overlay re-detects the
+          // Triage columns in place.
           setStatus('Refreshing heat overlay\u2026');
           await sleep(700);
           if (typeof window.__bwnHeatRefresh === 'function') window.__bwnHeatRefresh();
@@ -9538,14 +9662,84 @@
       setTimeout(function () { setStatus(''); }, 2600);
     }
 
-    // ---- Dock UI (bottom-right, list page only) -----------------------------
+    // ---- Post-reload continuation (v2.0) -------------------------------------
+    // The API path persists columns then reloads; filters are session-only and
+    // cannot ride a pref, so they re-apply here through the same DOM paths as
+    // before. The pending stash is consumed BEFORE applying - a failed resume
+    // logs and stops rather than looping the reload.
+    async function resumePending() {
+      var p = takePending();
+      if (!p || !isListPage()) return;
+      for (var i = 0; i < 30; i++) {   // wait for the list toolbar to mount
+        if (document.querySelector('[data-testid="global-filter"]')) break;
+        await sleep(500);
+      }
+      setStatus('Resuming \u201c' + p.name + '\u201d\u2026');
+      try {
+        if (p.assignee) await applyAssignee(p.assignee);
+        if (p.woDateToday) await applyDateFilterToday();
+        if (p.reloadAfter) {
+          await sleep(700);
+          if (typeof window.__bwnHeatRefresh === 'function') window.__bwnHeatRefresh();
+        }
+        setStatus('Applied \u201c' + p.name + '\u201d');
+      } catch (e) {
+        setStatus('Error \u2014 see console');
+        console.error('[BWN VIEWS] pending apply failed', e);
+      }
+      setTimeout(function () { setStatus(''); }, 2600);
+    }
+
+    // ---- Dock UI (v2.0: left of the list's own search box) --------------------
+    // The list toolbar's search box has placeholder exactly "Search" (the global
+    // nav's is "Search Work Orders") - the same discovery bwn-kanban's Board toggle
+    // uses, live-proven. The pill mounts just BEFORE the toolbar child holding that
+    // box, so it reads Views | Search | ... ; the menu drops DOWN from the pill.
+    // No toolbar found (layout change) -> the old fixed bottom-right pill, so the
+    // feature degrades instead of disappearing.
+    function pageSearchInput() {
+      var ins = document.querySelectorAll('input[placeholder]');
+      for (var i = 0; i < ins.length; i++) {
+        var ph = ins[i].getAttribute('placeholder') || '';
+        if (ph.trim().toLowerCase() !== 'search') continue;
+        if (ins[i].closest('header,nav')) continue;
+        if (ins[i].getBoundingClientRect().width === 0) continue;
+        return ins[i];
+      }
+      return null;
+    }
+
+    // The toolbar row and the row-child that contains the search box: walking up
+    // from the input, the first ancestor wider than 300px with siblings is the row;
+    // the node we stopped at is the search box's own subtree - insert before it.
+    function searchMountRef() {
+      var input = pageSearchInput();
+      if (!input) return null;
+      var el = input, hops = 0;
+      while (el.parentElement && hops < 6) {
+        var parent = el.parentElement;
+        if (parent.getBoundingClientRect().width > 300 && parent.children.length > 1) {
+          return { row: parent, before: el };
+        }
+        el = parent; hops++;
+      }
+      return null;
+    }
+
     function ensureDock() {
       if (!isListPage()) { var g = document.getElementById(WRAP_ID); if (g) g.remove(); BWN.beat('viewManager', 'waiting', 'not the WO list'); return; }
-      if (document.getElementById(WRAP_ID)) { BWN.beat('viewManager', 'ok', 'views dock mounted'); return; }
+      var mount = searchMountRef();
+      var existing = document.getElementById(WRAP_ID);
+      if (existing) {
+        // Re-anchor a fixed-fallback pill once the toolbar appears, and re-mount
+        // when React re-renders the row out from under us; otherwise keep it.
+        var needsMove = mount && existing.parentElement !== mount.row;
+        if (!needsMove) { BWN.beat('viewManager', 'ok', 'views dock mounted'); return; }
+        existing.remove();
+      }
 
       var wrap = document.createElement('div');
       wrap.id = WRAP_ID;
-      wrap.style.cssText = 'position:fixed;right:18px;bottom:70px;z-index:99997;font-family:-apple-system,BlinkMacSystemFont,"Segoe UI","Helvetica Neue",Arial,sans-serif;display:flex;flex-direction:column;align-items:flex-end;gap:6px;';
 
       var menu = document.createElement('div');
       menu.style.cssText = 'display:none;flex-direction:column;gap:6px;background:var(--bwn-surface);border:1px solid var(--bwn-border);border-radius:9px;padding:8px;box-shadow:0 8px 24px rgba(13,61,38,.18);min-width:210px;';
@@ -9571,15 +9765,29 @@
 
       var pill = document.createElement('button');
       pill.textContent = 'Views\u25be';
-      pill.style.cssText = 'background:' + GREEN + ';color:#fff;border:none;border-radius:9px;padding:9px 14px;font-size:13px;font-weight:500;cursor:pointer;box-shadow:0 4px 14px rgba(13,61,38,.28);';
       pill.addEventListener('click', function () {
         menu.style.display = (menu.style.display === 'none') ? 'flex' : 'none';
       });
 
+      // Child order menu-then-pill is a CONTRACT: the command palette reads
+      // firstElementChild as the menu and lastElementChild as the pill.
       wrap.appendChild(menu);
       wrap.appendChild(pill);
-      document.body.appendChild(wrap);
-      BWN.beat('viewManager', 'ok', 'views dock mounted');
+
+      if (mount) {
+        wrap.style.cssText = 'position:relative;display:inline-flex;align-items:center;margin-right:10px;z-index:99997;font-family:-apple-system,BlinkMacSystemFont,"Segoe UI","Helvetica Neue",Arial,sans-serif;';
+        menu.style.position = 'absolute';
+        menu.style.top = 'calc(100% + 6px)';
+        menu.style.left = '0';
+        menu.style.zIndex = '99999';
+        pill.style.cssText = 'background:' + GREEN + ';color:#fff;border:none;border-radius:7px;padding:6px 12px;font-size:12.5px;font-weight:600;cursor:pointer;box-shadow:0 2px 8px rgba(13,61,38,.22);white-space:nowrap;';
+        mount.row.insertBefore(wrap, mount.before);
+      } else {
+        wrap.style.cssText = 'position:fixed;right:18px;bottom:70px;z-index:99997;font-family:-apple-system,BlinkMacSystemFont,"Segoe UI","Helvetica Neue",Arial,sans-serif;display:flex;flex-direction:column;align-items:flex-end;gap:6px;';
+        pill.style.cssText = 'background:' + GREEN + ';color:#fff;border:none;border-radius:9px;padding:9px 14px;font-size:13px;font-weight:500;cursor:pointer;box-shadow:0 4px 14px rgba(13,61,38,.28);';
+        document.body.appendChild(wrap);
+      }
+      BWN.beat('viewManager', 'ok', mount ? 'views dock in toolbar' : 'views dock fallback (fixed)');
     }
 
     var deb = null;
@@ -9589,6 +9797,7 @@
     }, 'views:observe'));
     obs.observe(document.body, { childList: true, subtree: true });
     ensureDock();
+    resumePending().catch(function (e) { console.error('[BWN VIEWS] resume crashed', e); });
   });
 
 
