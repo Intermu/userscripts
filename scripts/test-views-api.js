@@ -104,10 +104,19 @@ function makeApi(apiSrc) {
       return rec.p;
     }
   };
+  sandbox.localStorage = {
+    getItem: function (k) { return (k in env.ls) ? env.ls[k] : null; },
+    setItem: function (k, v) { env.ls[k] = String(v); },
+    removeItem: function (k) { delete env.ls[k]; }
+  };
+  env.ls = {};
   vm.createContext(sandbox);
   var api = vm.runInContext(
     '(function () {\n' + apiSrc + '\n' +
-    'return { NAME_MAP: NAME_MAP, buildColumnsValue: buildColumnsValue, apiApplyColumns: apiApplyColumns,\n' +
+    'return { NAME_MAP: NAME_MAP, TITLE_BY_ID: TITLE_BY_ID, buildColumnsValue: buildColumnsValue,\n' +
+    '         apiApplyColumns: apiApplyColumns, apiApplyValue: apiApplyValue, titlesFromValue: titlesFromValue,\n' +
+    '         loadViews: loadViews, saveViews: saveViews, addView: addView, deleteView: deleteView,\n' +
+    '         captureCurrent: captureCurrent,\n' +
     '         stashPending: stashPending, takePending: takePending,\n' +
     '         PREF_READ_Q: PREF_READ_Q, PREF_WRITE_Q: PREF_WRITE_Q, PREF_KEY: PREF_KEY, PREF_APP: PREF_APP };\n})()',
     sandbox, { filename: 'views-api.js' });
@@ -294,6 +303,87 @@ async function runCases(apiSrc) {
   e4.store['bwn:views:pending'] = JSON.stringify({ name: 'Old', ts: Date.now() - 120000 });
   eq('a stale stash (>90s) is ignored', e4.api.takePending(), null);
 
+  // ---- v3.0: unknown-key preservation (the v2.x defect) --------------------
+  // MEASURED 2026-08-07 off the bundle's own settings literal: the payload the SPA
+  // writes is FOUR keys - {hiddenColumnNames, columnWidths, columnOrder,
+  // columnSorting}. `columnOrder` only exists once the user drags a column, so the
+  // first live capture showed three keys and v2.x rebuilt from exactly those three -
+  // meaning the first view applied after any reorder would have WIPED the order.
+  // The value must be copied, not reconstructed.
+  var curPlus = {
+    hiddenColumnNames: ['phase'],
+    columnWidths: [{ columnName: 'scopeOfWork', width: 189 }],
+    columnSorting: [{ columnName: 'phase', direction: 'desc' }],
+    columnOrder: ['statusId', 'trackingNumber', 'address.city'],
+    someFutureUmbravaKey: { nested: true }
+  };
+  var vp = A.buildColumnsValue(curPlus, ['Status', 'Tracking #']);
+  eq('a stored column order survives a view apply', vp.columnOrder, curPlus.columnOrder);
+  eq('an uncatalogued future key survives too', vp.someFutureUmbravaKey, curPlus.someFutureUmbravaKey);
+  eq('widths still survive', vp.columnWidths, curPlus.columnWidths);
+  eq('sorting still survives', vp.columnSorting, curPlus.columnSorting);
+  ok('and the hidden set is still recomputed', vp.hiddenColumnNames.indexOf('workOrderCategory') !== -1);
+
+  // ---- v3.0: the saved-views store ----------------------------------------
+  var e5 = makeApi(apiSrc);
+  eq('NO built-in presets - an untouched install starts empty', e5.api.loadViews(), []);
+  e5.ls['bwn:config'] = JSON.stringify({ over30Days: 30, views: [] });   // a real config with other keys
+  e5.api.addView({ id: 'v1', name: 'Triage', value: '{"hiddenColumnNames":["phase"]}', assignee: { mode: 'me' }, savedAt: 1 });
+  var cfg = JSON.parse(e5.ls['bwn:config']);
+  eq('saving a view preserves other bwn:config keys', cfg.over30Days, 30);
+  eq('the view is stored', cfg.views.length, 1);
+  e5.api.addView({ id: 'v2', name: 'triage', value: '{"hiddenColumnNames":["asset"]}', assignee: null, savedAt: 2 });
+  eq('the same name (any case) OVERWRITES rather than making a twin', e5.api.loadViews().length, 1);
+  eq('and the overwrite keeps the newer value', JSON.parse(e5.ls['bwn:config']).views[0].value, '{"hiddenColumnNames":["asset"]}');
+  e5.api.addView({ id: 'v3', name: 'Dispatch', value: '{}', assignee: null, savedAt: 3 });
+  eq('a different name appends', e5.api.loadViews().length, 2);
+  e5.api.deleteView('v3');
+  var names = e5.api.loadViews().map(function (v) { return v.name; });
+  eq('delete removes only its own view', names, ['triage']);
+
+  // ---- v3.0: capture stores the pref value VERBATIM ------------------------
+  var e6 = makeApi(apiSrc);
+  var liveValue = '{"hiddenColumnNames":["phase"],"columnWidths":[{"columnName":"scopeOfWork","width":189}],"columnOrder":["statusId"]}';
+  var capDone = null, capErr = null;
+  e6.api.captureCurrent('My layout', 'me', 12345).then(function (r) { capDone = r; }, function (err) { capErr = String(err && err.message); });
+  await tick();
+  eq('capture reads the live pref first', e6.calls.length, 1);
+  e6.calls[0].resolve({ userPreference: { key: 'k', version: 'ver-1', value: liveValue } });
+  await tick(); await tick();
+  eq('capture performs NO write', e6.calls.length, 1);
+  var savedView = e6.api.loadViews()[0];
+  ok('the saved view exists', !!savedView, JSON.stringify(capErr));
+  eq('the pref value is stored byte-for-byte', savedView && savedView.value, liveValue);
+  eq('the chosen assignee mode rides along', savedView && savedView.assignee, { mode: 'me' });
+
+  var e7 = makeApi(apiSrc);
+  e7.api.captureCurrent('keeper', 'keep', 7);
+  await tick();
+  e7.calls[0].resolve({ userPreference: { key: 'k', version: 'v', value: '{}' } });
+  await tick(); await tick();
+  eq('keep-mode saves assignee null so filters are untouched', e7.api.loadViews()[0].assignee, null);
+
+  // ---- v3.0: applying a saved value ---------------------------------------
+  var e8 = makeApi(apiSrc);
+  var applyDone = null;
+  e8.api.apiApplyValue(liveValue).then(function (r) { applyDone = r; });
+  await tick();
+  eq('apply reads the pref for a FRESH version', e8.calls.length, 1);
+  e8.calls[0].resolve({ userPreference: { key: 'k', version: 'ver-CURRENT', value: '{"hiddenColumnNames":[]}' } });
+  await tick(); await tick();
+  eq('then writes exactly once', e8.calls.length, 2);
+  eq('the saved value is replayed byte-for-byte', e8.calls[1].vars.d.value, liveValue);
+  eq('with the FRESH version, never the saved one', e8.calls[1].vars.d.version, 'ver-CURRENT');
+  e8.calls[1].resolve({ putUserPreference: { success: true, message: 'ok' } });
+  await tick(); await tick();
+  eq('and resolves true', applyDone, true);
+
+  // reverse map for the chooser fallback
+  var titles = A.titlesFromValue({ hiddenColumnNames: ['phase', 'asset', 'workOrderCategory'] });
+  ok('titlesFromValue omits hidden columns', titles.indexOf('Phase') === -1 && titles.indexOf('Asset') === -1 && titles.indexOf('Label') === -1);
+  ok('and keeps the visible ones', titles.indexOf('Status') !== -1 && titles.indexOf('Priority') !== -1);
+  eq('every mapped id resolves back to a title', Object.keys(A.NAME_MAP).length, Object.keys(A.TITLE_BY_ID).length);
+
   return out;
 }
 
@@ -314,7 +404,19 @@ function staticPins() {
   ok('dock keeps menu-then-pill child order (palette contract)', iMenu !== -1 && iPill !== -1 && iMenu < iPill, iMenu + ' vs ' + iPill);
   ok('toolbar discovery excludes header/nav (global search box must never anchor)',
     /closest\('header,nav'\)/.test(coreFull.slice(coreFull.indexOf('function pageSearchInput'), coreFull.indexOf('function searchMountRef'))));
-  ok('banner carries Views 2.2', coreFull.indexOf('Views 2.2') !== -1);
+  ok('banner carries Views 3.0', coreFull.indexOf('Views 3.0') !== -1);
+  ok('the hardcoded presets are GONE - views are the user\'s own',
+    coreFull.indexOf('DEFAULT_VIEWS') === -1 && coreFull.indexOf("name: 'Triage (heat overlay)'") === -1);
+  ok('the stale "column ORDER is NOT controllable" claim is gone with them',
+    coreFull.indexOf('column ORDER is NOT controllable') === -1);
+  ok('the dock offers a save-current-layout control',
+    S_DOCK.indexOf('Save current layout as') !== -1 && /captureCurrent\(nm, who\.value/.test(S_DOCK));
+  ok('delete is two-click armed, not a single stray click',
+    /if \(!armed\)/.test(S_DOCK) && S_DOCK.indexOf("del.textContent = 'sure?'") !== -1);
+  ok('a saved view applies its verbatim value, legacy title lists still work',
+    /if \(v\.value\) await apiApplyValue\(v\.value\);/.test(S_APPLY) && /else await apiApplyColumns\(v\.columns\);/.test(S_APPLY));
+  ok('the chooser fallback admits it cannot restore widths/order',
+    S_APPLY.indexOf('widths/order not restored') !== -1);
 
   // Lifecycle shape pins. Liveness itself is proven behaviorally in runLifeCases -
   // these only keep the measured v2.0 starvation pattern (clear-and-reset churn)
@@ -366,8 +468,18 @@ function expectRed(label, results) {
   // Mutation controls - each MUST turn the harness red.
   failures += expectRed('Label mapped to the phantom `label` id',
     await runCases(mutate(S_API, "'Label': 'workOrderCategory'", "'Label': 'label'")));
-  failures += expectRed('version hardcoded instead of echoed',
-    await runCases(mutate(S_API, 'version: up.version', "version: '2026-07-31-f6c090d'")));
+  failures += expectRed('version hardcoded instead of echoed from a fresh read',
+    await runCases(mutate(S_API, 'writePref(up.version, valueStr)', "writePref('2026-07-31-f6c090d', valueStr)")));
+  failures += expectRed('v2.x three-key rebuild restored - drops a stored column order',
+    await runCases(mutate(S_API,
+      'var out = {};\n      Object.keys(cur).forEach(function (k) { out[k] = cur[k]; });\n      out.hiddenColumnNames = hidden;',
+      'var out = { hiddenColumnNames: hidden };')));
+  failures += expectRed('capture re-derives the value instead of storing it verbatim',
+    await runCases(mutate(S_API, 'value: up.value,', 'value: JSON.stringify(JSON.parse(up.value).hiddenColumnNames),')));
+  failures += expectRed('addView appends duplicates instead of overwriting by name',
+    await runCases(mutate(S_API, 'if (at >= 0) list[at] = v; else list.push(v);', 'list.push(v);')));
+  failures += expectRed('saveViews clobbers the rest of bwn:config',
+    await runCases(mutate(S_API, 'try { c = JSON.parse(localStorage.getItem(\'bwn:config\') || \'{}\') || {}; } catch (e) { c = {}; }', 'c = {};')));
   failures += expectRed('success:false read as done',
     await runCases(mutate(S_API, 'res.success !== true', 'false')));
   failures += expectRed('stash not consumed before applying',

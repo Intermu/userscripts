@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         BWN Suite - Core (Broadway National)
 // @namespace    broadwaynational.bwn
-// @version      1.66.40
+// @version      1.66.41
 // @downloadURL  https://raw.githubusercontent.com/Intermu/userscripts/main/bwn-suite-core.user.js
 // @updateURL    https://raw.githubusercontent.com/Intermu/userscripts/main/bwn-suite-core.user.js
 // @description  Runs several Umbrava helpers for BWN coordinators, in the browser with no privileged grants. Includes: PO Approval + ETA Builder; WO Assist (GP/ETA, a stall watchdog, DNE calculator, and a next-action playbook); Email Leak Guard (checks recipients against vendor names, PO amounts, and client budget references before an outbound email sends); WO List Heat (a triage overlay + My Day strip on the work-order list, with an optional same-origin Umbrava API scan for deterministic full-board coverage); and the BWN Launcher (opens the Azure Static Web App tools with the current WO's context). Modules share state through sessionStorage/localStorage. The only network calls are same-origin Umbrava GraphQL requests (app.umbrava.com/api/graphql, the app's own session): List Heat's full-board scan and WO Assist's work-order / trip / clock-in / document reads, plus ONE write - BWN Views saves the column layout through Umbrava's own putUserPreference, the same preference the column chooser writes; everything else is offline. Toggle modules in BWN_MODULES below.
@@ -21,7 +21,7 @@
     leakGuard: true,     // outbound email cross-contamination guard
     listHeat: true,      // heat overlay + audit on the Work Orders list
     launcher: true,      // BWN tools dock (left edge)
-    viewManager: true,   // saved column+assignee view presets on the WO list
+    viewManager: true,   // your own saved column layouts on the WO list
     palette: true,       // Ctrl/Cmd-K command palette for the whole suite
     visitLog: true,      // per-WO "what changed" watch strip + end-of-day digest
     reminders: true,     // local time-based follow-up nudges for a WO
@@ -44,7 +44,7 @@
   try { localStorage.setItem('bwn:status:core', JSON.stringify({ ver: BWN_VER, ts: Date.now() })); } catch (e) { /* best-effort */ }
 
   console.info('[BWN SUITE CORE] v' + BWN_VER + ' |',
-    'Shared Core 7 \u00b7 PO Approval 1.13 \u00b7 WO Assist 2.69 \u00b7 Leak Guard 2.0 \u00b7 List Heat 3.24 \u00b7 Launcher 2.0 \u00b7 Views 2.2 \u00b7 Palette 1.1 \u00b7 Visit 1.2 \u00b7 Reminders 1.1 \u00b7 Timeline 1.1 \u00b7 TripCal 1.4 \u00b7 Connector 1.2 |',
+    'Shared Core 7 \u00b7 PO Approval 1.13 \u00b7 WO Assist 2.69 \u00b7 Leak Guard 2.0 \u00b7 List Heat 3.24 \u00b7 Launcher 2.0 \u00b7 Views 3.0 \u00b7 Palette 1.1 \u00b7 Visit 1.2 \u00b7 Reminders 1.1 \u00b7 Timeline 1.1 \u00b7 TripCal 1.4 \u00b7 Connector 1.2 |',
     'enabled:', Object.keys(BWN_MODULES).filter(function (k) { return BWN_MODULES[k]; }).join(', '));
 
   // ===== BWN SHARED CORE v7 - KEEP IN SYNC across both suite scripts =====
@@ -9293,9 +9293,9 @@
 
 
   // ==========================================================================
-  // MODULE: BWN Views v2.2  - column + assignee view presets on the WO list
+  // MODULE: BWN Views v3.0  - the user's OWN saved layouts on the WO list
   // ==========================================================================
-  // v2.0 (2026-08-07): columns + sort now apply through Umbrava's OWN persistence
+  // v2.0 (2026-08-07): columns + sort apply through Umbrava's OWN persistence
   // (userPreference / putUserPreference on tables/masterWOListTable/settings) instead
   // of 50 passes of column-chooser checkbox choreography. One write, one reload,
   // deterministic columns. Filters (assignee / WO date) are NOT pref-backed - measured:
@@ -9303,6 +9303,16 @@
   // stay DOM-applied, resumed AFTER the reload via a sessionStorage continuation.
   // The old chooser choreography is kept verbatim as the fallback for when the API
   // path cannot run (no token, pref never created, write rejected).
+  //
+  // v3.0 (2026-08-07): the three hardcoded presets are GONE. A view is now whatever
+  // the user arranged and named - "Save current layout as" captures the live pref
+  // value VERBATIM, so a view carries every part of the layout Umbrava persists for
+  // that table, including any key this module does not catalogue. That also fixed a
+  // v2.x defect: buildColumnsValue rebuilt the value from three known keys and threw
+  // the rest away, so applying a view could silently discard a stored column
+  // arrangement. It now copies the current value and overrides only the hidden set.
+  // Filters remain deliberately opt-in per view (leave alone / My Work / everyone),
+  // because they are session state, not layout.
   bwnBoot('viewManager', BWN_MODULES.viewManager, function () {
     'use strict';
     console.info('[BWN VIEWS] loaded on', location.href);
@@ -9310,59 +9320,19 @@
     var WRAP_ID = 'bwn-views-dock';
     var GREEN = BWN.GREEN;
 
-    // Two starter presets. Rename, change the column set, or change the
-    // assignee mode freely - these seed the menu until you save your own.
-    //   assignee.mode: 'all'  -> "Clear All" (no restriction = every coordinator)
-    //                  'me'   -> click "My Work"
-    //                  'users'-> "Clear All", then check each name in names[]
-    var DEFAULT_VIEWS = [
-      {
-        id: 'dispatch',
-        name: 'Dispatch (all coordinators)',
-        columns: ['Tracking #', 'Status', 'Priority', 'City', 'State', 'Location #', 'Trades', 'Scope Of Work', 'Client DNE', 'Vendor(s)', 'Assigned To', 'WO Date'],
-        assignee: { mode: 'all' },
-        woDateToday: true
-      },
-      {
-        id: 'myjobs',
-        name: 'My jobs',
-        columns: ['Tracking #', 'Status', 'Priority', 'City', 'State', 'Location #', 'Trades', 'Client DNE', 'Vendor(s)', 'WO Date'],
-        assignee: { mode: 'me' }
-      },
-      {
-        // Enables the triage column SET. List Heat keys on "Time in Status (hrs.)"
-        // at page load, so after applying columns this view nudges the heat overlay
-        // to re-detect them in place (no reload - a reload drops the column set).
-        // NOTE: column ORDER is NOT controllable here --
-        // the chooser only sets visibility; Umbrava renders columns in its own
-        // default order, not a custom drag arrangement (verified: a view switch
-        // does not restore manually-dragged positions). Order is cosmetic anyway:
-        // List Heat resolves columns by header name and the CSV is alias-parsed,
-        // so neither depends on left-to-right position.
-        id: 'triage',
-        name: 'Triage (heat overlay)',
-        columns: ['Status', 'Priority', 'City', 'State', 'Location #', 'Trades', 'Scope Of Work', 'Time in Status (hrs.)', 'Last Note Date', 'Client DNE', 'First Trip Date', '# Days', 'Expected Completion Date', 'Latest Update', 'WO Date', 'Vendor(s)', 'Client', 'Assigned To', 'Scheduled Date', 'Source Job #'],
-        assignee: { mode: 'me' },
-        reloadAfter: true
-      }
-    ];
-
     function isListPage() { return /\/work-orders\/?$/.test(location.pathname); }
-
-    function loadViews() {
-      try {
-        var c = JSON.parse(localStorage.getItem('bwn:config') || '{}');
-        if (c && Array.isArray(c.views) && c.views.length) return c.views;
-      } catch (e) { }
-      return DEFAULT_VIEWS;
-    }
 
     // ---- Column preference API (v2.0) ----------------------------------------
     // Umbrava persists the WO list's column layout server-side per user:
     //   read : userPreference(applicationId,key,isTenantSpecific) -> {key,version,value}
     //   write: putUserPreference(data:PutUserPreferenceInput!) -> {success,message}
-    // value is STRINGIFIED JSON {hiddenColumnNames,columnWidths,columnSorting} - columns
-    // are driven by the HIDDEN set, so a column set = hide everything unwanted.
+    // value is STRINGIFIED JSON. The FULL payload the SPA writes is four keys -
+    // {hiddenColumnNames, columnWidths, columnOrder, columnSorting} - read off the
+    // bundle's own settings literal 2026-08-07. `columnOrder` is absent from a pref
+    // until the user actually drags a column, which is why the first capture showed
+    // only three keys; a view must therefore COPY the value rather than rebuild it
+    // from the keys it happens to know. Columns are driven by the HIDDEN set, so a
+    // column set = hide everything unwanted.
     // `version` is a schema stamp ("2026-07-31-f6c090d"), echoed from the read, never
     // hardcoded. The SPA reads this pref at FULL LOAD only, so applying = write + reload.
     // All of this measured live 2026-08-07; the map below was read off the DevExpress
@@ -9391,11 +9361,53 @@
     };
     var PREF_READ_Q = 'query($a:String!,$k:String!,$t:Boolean!){ userPreference(applicationId:$a,key:$k,isTenantSpecific:$t){ key version value } }';
     var PREF_WRITE_Q = 'mutation($d:PutUserPreferenceInput!){ putUserPreference(data:$d){ success message } }';
+    // Reverse map for the chooser fallback: a saved pref value carries column IDs,
+    // but the fallback drives the chooser, which only knows TITLES.
+    var TITLE_BY_ID = {};
+    Object.keys(NAME_MAP).forEach(function (t) { TITLE_BY_ID[NAME_MAP[t]] = t; });
 
-    // Compute the pref value for a wanted title list. Throws on an unmapped title
-    // (never guess an id) and when the current pref is unreadable (no version to
-    // echo) - both fall back to the DOM chooser. Hidden ids the map does not know
-    // (future Umbrava columns) stay hidden rather than silently appearing.
+    // ---- Saved views store (v3.0) ---------------------------------------------
+    // A saved view is the user's OWN captured layout, not a preset:
+    //   { id, name, value: <the pref value string, VERBATIM>, assignee, savedAt }
+    // Storing the pref value verbatim is what makes a view carry everything
+    // Umbrava persists for that table - hidden columns, widths, sorting, and any
+    // key we have not catalogued (a dragged column ORDER included, if the app
+    // stores one). Nothing is re-derived, so nothing is silently dropped.
+    // Legacy `columns: [titles]` views still apply through buildColumnsValue.
+    // Read-modify-write on bwn:config so other modules' keys survive.
+    function loadViews() {
+      try {
+        var c = JSON.parse(localStorage.getItem('bwn:config') || '{}');
+        if (c && Array.isArray(c.views)) return c.views;
+      } catch (e) { }
+      return [];
+    }
+    function saveViews(list) {
+      var c = {};
+      try { c = JSON.parse(localStorage.getItem('bwn:config') || '{}') || {}; } catch (e) { c = {}; }
+      c.views = list;
+      localStorage.setItem('bwn:config', JSON.stringify(c));
+      return list;
+    }
+    function addView(v) {
+      var list = loadViews();
+      // Same name overwrites rather than silently creating a twin.
+      var at = -1;
+      for (var i = 0; i < list.length; i++) {
+        if (String(list[i].name).toLowerCase() === String(v.name).toLowerCase()) { at = i; break; }
+      }
+      if (at >= 0) list[at] = v; else list.push(v);
+      return saveViews(list);
+    }
+    function deleteView(id) {
+      return saveViews(loadViews().filter(function (v) { return v.id !== id; }));
+    }
+
+    // Compute the pref value for a wanted title list (LEGACY title-based views).
+    // Throws on an unmapped title - never guess an id. Starts from a COPY of the
+    // current value and overrides only hiddenColumnNames, so widths, sorting and
+    // any uncatalogued key (e.g. a stored column order) survive the write; the
+    // v2.x version rebuilt the object from three known keys and dropped the rest.
     function buildColumnsValue(cur, wantTitles) {
       var wantIds = {};
       wantTitles.forEach(function (t) {
@@ -9408,28 +9420,64 @@
       (cur.hiddenColumnNames || []).forEach(function (id) {
         if (allIds.indexOf(id) === -1 && hidden.indexOf(id) === -1) hidden.push(id);
       });
-      return {
-        hiddenColumnNames: hidden,
-        columnWidths: cur.columnWidths || [],
-        columnSorting: cur.columnSorting || []
-      };
+      var out = {};
+      Object.keys(cur).forEach(function (k) { out[k] = cur[k]; });
+      out.hiddenColumnNames = hidden;
+      if (!out.columnWidths) out.columnWidths = [];
+      if (!out.columnSorting) out.columnSorting = [];
+      return out;
     }
 
-    // Write the column set through the API. Resolves true on a verified write.
-    // Rejects on ANY shortfall (no pref yet, unmapped title, success:false) so the
-    // caller can fall back loudly - a swallowed failure here would read as a fact.
-    function apiApplyColumns(wantTitles) {
+    // Titles a saved pref value leaves VISIBLE - the chooser fallback's input.
+    function titlesFromValue(parsed) {
+      var hidden = (parsed && parsed.hiddenColumnNames) || [];
+      return Object.keys(NAME_MAP).filter(function (t) { return hidden.indexOf(NAME_MAP[t]) === -1; });
+    }
+
+    function readPref() {
       return bwnGql(PREF_READ_Q, { a: PREF_APP, k: PREF_KEY, t: true }).then(function (d) {
         var up = d && d.userPreference;
         if (!up || !up.value) throw new Error('no existing column pref (never customized?) - DOM fallback');
-        var value = buildColumnsValue(JSON.parse(up.value), wantTitles);
-        return bwnGql(PREF_WRITE_Q, {
-          d: { applicationId: PREF_APP, key: PREF_KEY, version: up.version, value: JSON.stringify(value), isTenantSpecific: true }
-        });
+        return up;
+      });
+    }
+
+    function writePref(version, valueStr) {
+      return bwnGql(PREF_WRITE_Q, {
+        d: { applicationId: PREF_APP, key: PREF_KEY, version: version, value: valueStr, isTenantSpecific: true }
       }).then(function (d) {
         var res = d && d.putUserPreference;
         if (!res || res.success !== true) throw new Error('putUserPreference refused: ' + (res && res.message));
         return true;
+      });
+    }
+
+    // Apply a SAVED value byte-for-byte. The version comes from a FRESH read, never
+    // from the saved copy - it is Umbrava's schema stamp, and replaying a stale one
+    // would be writing against a schema that may have moved.
+    function apiApplyValue(valueStr) {
+      return readPref().then(function (up) { return writePref(up.version, valueStr); });
+    }
+
+    // Legacy title-list path.
+    function apiApplyColumns(wantTitles) {
+      return readPref().then(function (up) {
+        return writePref(up.version, JSON.stringify(buildColumnsValue(JSON.parse(up.value), wantTitles)));
+      });
+    }
+
+    // Capture what is on screen right now as a named view. Rejects when the pref
+    // cannot be read - saving a view that would apply nothing is worse than
+    // refusing, so the caller reports it.
+    function captureCurrent(name, assigneeMode, idNow) {
+      return readPref().then(function (up) {
+        return addView({
+          id: 'v' + idNow,
+          name: name,
+          value: up.value,
+          assignee: (assigneeMode === 'me' || assigneeMode === 'all') ? { mode: assigneeMode } : null,
+          savedAt: idNow
+        });
       });
     }
 
@@ -9618,14 +9666,16 @@
       applying = true;
       setStatus('Applying \u201c' + v.name + '\u201d\u2026');
       try {
-        if (v.columns) {
-          // v2.0: API path first - one exact write into Umbrava's own column pref,
-          // then a reload (the SPA reads the pref at load). Assignee/date resume
-          // after the reload via the sessionStorage continuation. Any API shortfall
-          // falls back LOUDLY to the old chooser choreography below.
+        // v3.0: a saved view carries the pref value VERBATIM (`v.value`); legacy
+        // views carry a title list (`v.columns`). Either way the API path writes
+        // once and reloads - the SPA reads the pref at load - and assignee/date
+        // resume after the reload via the sessionStorage continuation. Any API
+        // shortfall falls back LOUDLY to the chooser choreography.
+        if (v.value || v.columns) {
           var wrote = false;
           try {
-            await apiApplyColumns(v.columns);
+            if (v.value) await apiApplyValue(v.value);
+            else await apiApplyColumns(v.columns);
             wrote = true;
           } catch (apiErr) {
             console.warn('[BWN VIEWS] API column apply unavailable (' + (apiErr && apiErr.message) + ') - falling back to the chooser.');
@@ -9637,7 +9687,12 @@
             location.reload();
             return;   // page is going away; the continuation finishes the job
           }
-          await applyColumns(v.columns);
+          // Chooser fallback: visibility only. A saved view's widths, sorting and
+          // any stored column order CANNOT be replayed through the chooser - say so
+          // rather than let a partial apply pass for the real thing.
+          var titles = v.columns || titlesFromValue(JSON.parse(v.value));
+          await applyColumns(titles);
+          if (v.value) setStatus('Applied columns only (no API) \u2014 widths/order not restored');
         }
         if (v.assignee) await applyAssignee(v.assignee);
         if (v.woDateToday) await applyDateFilterToday();
@@ -9726,6 +9781,16 @@
       return null;
     }
 
+    // Rebuild in place after the saved-view list changes, and leave the menu OPEN -
+    // a save whose result vanished behind a closed menu reads as a failure.
+    function rebuildDock() {
+      var old = document.getElementById(WRAP_ID);
+      if (old) old.remove();
+      ensureDock();
+      var fresh = document.getElementById(WRAP_ID);
+      if (fresh && fresh.firstElementChild) fresh.firstElementChild.style.display = 'flex';
+    }
+
     function ensureDock() {
       if (!isListPage()) { var g = document.getElementById(WRAP_ID); if (g) g.remove(); BWN.beat('viewManager', 'waiting', 'not the WO list'); return; }
       var mount = searchMountRef();
@@ -9756,19 +9821,104 @@
       menu.style.cssText = 'display:none;flex-direction:column;gap:6px;background:var(--bwn-surface);border:1px solid var(--bwn-border);border-radius:9px;padding:8px;box-shadow:0 8px 24px rgba(13,61,38,.18);min-width:210px;';
 
       var title = document.createElement('div');
-      title.textContent = 'Apply a view';
       title.style.cssText = 'font-size:11px;font-weight:600;letter-spacing:normal;text-transform:none;color:var(--bwn-text-muted);padding:2px 4px 4px;';
       menu.appendChild(title);
 
-      loadViews().forEach(function (v) {
+      var saved = loadViews();
+      title.textContent = saved.length ? 'Apply a view' : 'No saved views yet';
+
+      if (!saved.length) {
+        var hint = document.createElement('div');
+        hint.textContent = 'Arrange the list how you like it - columns, widths, sorting - then save it below.';
+        hint.style.cssText = 'font-size:11px;line-height:1.4;color:var(--bwn-text-muted);padding:0 4px 4px;max-width:230px;';
+        menu.appendChild(hint);
+      }
+
+      saved.forEach(function (v) {
+        var row = document.createElement('div');
+        row.style.cssText = 'display:flex;align-items:stretch;gap:4px;';
         var b = document.createElement('button');
         b.textContent = v.name;
-        b.style.cssText = 'text-align:left;border:1px solid var(--bwn-border);background:var(--bwn-surface-2);color:var(--bwn-green-dk);border-radius:7px;padding:7px 10px;font-size:13px;font-weight:500;cursor:pointer;';
+        b.title = v.assignee ? ('Applies columns + ' + (v.assignee.mode === 'me' ? 'My Work' : 'all coordinators')) : 'Applies the saved columns; leaves your filters alone';
+        b.style.cssText = 'flex:1;text-align:left;border:1px solid var(--bwn-border);background:var(--bwn-surface-2);color:var(--bwn-green-dk);border-radius:7px;padding:7px 10px;font-size:13px;font-weight:500;cursor:pointer;';
         b.addEventListener('mouseenter', function () { b.style.background = 'var(--bwn-surface-3)'; });
         b.addEventListener('mouseleave', function () { b.style.background = 'var(--bwn-surface-2)'; });
         b.addEventListener('click', function () { applyView(v); });
-        menu.appendChild(b);
+        // Two-click delete: the first click arms, the second removes. No modal, and
+        // no single stray click can drop a view the user spent time arranging.
+        var del = document.createElement('button');
+        del.textContent = '×';
+        del.title = 'Delete this view';
+        del.style.cssText = 'border:1px solid var(--bwn-border);background:var(--bwn-surface-2);color:var(--bwn-text-muted);border-radius:7px;padding:0 9px;font-size:14px;line-height:1;cursor:pointer;';
+        var armed = false;
+        del.addEventListener('click', function (ev) {
+          ev.stopPropagation();
+          if (!armed) {
+            armed = true;
+            del.textContent = 'sure?';
+            del.style.color = '#a11';
+            del.style.fontSize = '10px';
+            del.style.fontWeight = '700';
+            setTimeout(function () {
+              if (!armed) return;
+              armed = false; del.textContent = '×'; del.style.color = 'var(--bwn-text-muted)'; del.style.fontSize = '14px'; del.style.fontWeight = '';
+            }, 2600);
+            return;
+          }
+          deleteView(v.id);
+          row.remove();
+          setStatus('Deleted “' + v.name + '”');
+          if (!loadViews().length) title.textContent = 'No saved views yet';
+        });
+        row.appendChild(b);
+        row.appendChild(del);
+        menu.appendChild(row);
       });
+
+      // ---- Save the current layout ------------------------------------------
+      var sep = document.createElement('div');
+      sep.style.cssText = 'border-top:1px solid var(--bwn-border-2);margin:4px 0 2px;';
+      menu.appendChild(sep);
+
+      var saveLabel = document.createElement('div');
+      saveLabel.textContent = 'Save current layout as';
+      saveLabel.style.cssText = 'font-size:11px;font-weight:600;color:var(--bwn-text-muted);padding:2px 4px;';
+      menu.appendChild(saveLabel);
+
+      var nameIn = document.createElement('input');
+      nameIn.type = 'text';
+      nameIn.placeholder = 'view name';
+      nameIn.style.cssText = 'border:1px solid var(--bwn-border);border-radius:7px;padding:6px 8px;font-size:12.5px;background:var(--bwn-surface);color:var(--bwn-text);';
+      menu.appendChild(nameIn);
+
+      var who = document.createElement('select');
+      [['keep', 'Leave my filters alone'], ['me', 'Also set: My Work'], ['all', 'Also set: all coordinators']].forEach(function (o) {
+        var op = document.createElement('option');
+        op.value = o[0]; op.textContent = o[1];
+        who.appendChild(op);
+      });
+      who.style.cssText = 'border:1px solid var(--bwn-border);border-radius:7px;padding:5px 6px;font-size:12px;background:var(--bwn-surface);color:var(--bwn-text);';
+      menu.appendChild(who);
+
+      var saveBtn = document.createElement('button');
+      saveBtn.textContent = 'Save this layout';
+      saveBtn.style.cssText = 'border:1px solid ' + GREEN + ';background:' + GREEN + ';color:#fff;border-radius:7px;padding:7px 10px;font-size:12.5px;font-weight:600;cursor:pointer;';
+      saveBtn.addEventListener('click', function () {
+        var nm = (nameIn.value || '').trim();
+        if (!nm) { setStatus('Name it first'); nameIn.focus(); return; }
+        saveBtn.disabled = true;
+        setStatus('Saving “' + nm + '”…');
+        captureCurrent(nm, who.value, Date.now()).then(function () {
+          setStatus('Saved “' + nm + '”');
+          nameIn.value = '';
+          rebuildDock();   // show it in the list immediately
+        }).catch(function (e) {
+          saveBtn.disabled = false;
+          setStatus('Could not read the layout - see console');
+          console.error('[BWN VIEWS] save failed', e);
+        });
+      });
+      menu.appendChild(saveBtn);
 
       statusEl = document.createElement('div');
       statusEl.style.cssText = 'font-size:11px;color:var(--bwn-green);min-height:14px;padding:0 4px;';
