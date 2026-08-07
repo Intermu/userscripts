@@ -65,7 +65,8 @@ function slice(start, end, what) {
 
 var S_API = slice("    var PREF_APP = 'bn-web-spa';", '    function sleep(ms)', 'Views API block');
 var S_APPLY = slice('    var applying = false;', '    // ---- Post-reload continuation', 'applyView');
-var S_DOCK = slice('    // ---- Dock UI (v2.0: left of the list', '    var deb = null;', 'ensureDock');
+var S_DOCK = slice('    // ---- Dock UI (v2.0: left of the list', '    // ---- Lifecycle (v2.1)', 'ensureDock');
+var S_LIFE = slice('    // ---- Lifecycle (v2.1)', '    resumePending().catch', 'lifecycle');
 
 function mutate(src, from, to) {
   var i = src.indexOf(from);
@@ -227,7 +228,20 @@ function staticPins() {
   ok('dock keeps menu-then-pill child order (palette contract)', iMenu !== -1 && iPill !== -1 && iMenu < iPill, iMenu + ' vs ' + iPill);
   ok('toolbar discovery excludes header/nav (global search box must never anchor)',
     /closest\('header,nav'\)/.test(coreFull.slice(coreFull.indexOf('function pageSearchInput'), coreFull.indexOf('function searchMountRef'))));
-  ok('banner carries Views 2.0', coreFull.indexOf('Views 2.0') !== -1);
+  ok('banner carries Views 2.1', coreFull.indexOf('Views 2.1') !== -1);
+
+  // Lifecycle pins (v2.1). The v2.0 clear-and-reset debounce NEVER fired on the
+  // live list - every mutation reset the pending timer and throttling stretched
+  // the windows, so the boot fallback was permanent. Set-once is the fix; these
+  // pins keep the churn pattern from coming back.
+  ok('schedule is SET-ONCE - a pending check is never reset',
+    /if \(tick\) return;/.test(S_LIFE), S_LIFE.slice(0, 120));
+  ok('no clearTimeout in the lifecycle - clear-and-reset is the measured starvation bug',
+    S_LIFE.indexOf('clearTimeout') === -1);
+  ok('boot retry ladder of independent one-shots covers the load->render gap',
+    /\[0, 1000, 2500, 5000, 10000, 20000\]/.test(S_LIFE));
+  ok('SPA nav hooks: popstate + history patches reschedule the mount',
+    /popstate/.test(S_LIFE) && /pushState.*replaceState|'pushState', 'replaceState'/.test(S_LIFE));
   return out;
 }
 
@@ -262,6 +276,17 @@ function expectRed(label, results) {
     await runCases(mutate(S_API, 'sessionStorage.removeItem(PENDING_KEY);   // remove BEFORE applying - no retry loops', '')));
   failures += expectRed('unmapped titles silently dropped',
     await runCases(mutate(S_API, "if (!id) throw new Error('unmapped column title: ' + t);", 'if (!id) return;')));
+
+  // Static-pin controls: reintroducing the starved debounce must turn the pins red.
+  var churned = mutate(coreFull, 'if (tick) return;', 'clearTimeout(tick);');
+  var pinRed = (function () {
+    var lifeStart = churned.indexOf('    // ---- Lifecycle (v2.1)');
+    var lifeEnd = churned.indexOf('    resumePending().catch', lifeStart);
+    var life = churned.slice(lifeStart, lifeEnd);
+    return !(/if \(tick\) return;/.test(life)) || life.indexOf('clearTimeout') !== -1;
+  })();
+  if (!pinRed) { console.error('  MUTATION NOT CAUGHT: clear-and-reset debounce reintroduced'); failures++; }
+  else console.log('control clear-and-reset debounce reintroduced: red as required');
 
   if (failures) { console.error('\nRED: ' + failures + ' problem(s).'); process.exit(1); }
   console.log('\nGREEN: shipped source passes and every mutation control turns red.');
