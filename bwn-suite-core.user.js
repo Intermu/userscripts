@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         BWN Suite - Core (Broadway National)
 // @namespace    broadwaynational.bwn
-// @version      1.66.39
+// @version      1.66.40
 // @downloadURL  https://raw.githubusercontent.com/Intermu/userscripts/main/bwn-suite-core.user.js
 // @updateURL    https://raw.githubusercontent.com/Intermu/userscripts/main/bwn-suite-core.user.js
 // @description  Runs several Umbrava helpers for BWN coordinators, in the browser with no privileged grants. Includes: PO Approval + ETA Builder; WO Assist (GP/ETA, a stall watchdog, DNE calculator, and a next-action playbook); Email Leak Guard (checks recipients against vendor names, PO amounts, and client budget references before an outbound email sends); WO List Heat (a triage overlay + My Day strip on the work-order list, with an optional same-origin Umbrava API scan for deterministic full-board coverage); and the BWN Launcher (opens the Azure Static Web App tools with the current WO's context). Modules share state through sessionStorage/localStorage. The only network calls are same-origin Umbrava GraphQL requests (app.umbrava.com/api/graphql, the app's own session): List Heat's full-board scan and WO Assist's work-order / trip / clock-in / document reads, plus ONE write - BWN Views saves the column layout through Umbrava's own putUserPreference, the same preference the column chooser writes; everything else is offline. Toggle modules in BWN_MODULES below.
@@ -44,7 +44,7 @@
   try { localStorage.setItem('bwn:status:core', JSON.stringify({ ver: BWN_VER, ts: Date.now() })); } catch (e) { /* best-effort */ }
 
   console.info('[BWN SUITE CORE] v' + BWN_VER + ' |',
-    'Shared Core 7 \u00b7 PO Approval 1.13 \u00b7 WO Assist 2.69 \u00b7 Leak Guard 2.0 \u00b7 List Heat 3.24 \u00b7 Launcher 2.0 \u00b7 Views 2.1 \u00b7 Palette 1.1 \u00b7 Visit 1.2 \u00b7 Reminders 1.1 \u00b7 Timeline 1.1 \u00b7 TripCal 1.4 \u00b7 Connector 1.2 |',
+    'Shared Core 7 \u00b7 PO Approval 1.13 \u00b7 WO Assist 2.69 \u00b7 Leak Guard 2.0 \u00b7 List Heat 3.24 \u00b7 Launcher 2.0 \u00b7 Views 2.2 \u00b7 Palette 1.1 \u00b7 Visit 1.2 \u00b7 Reminders 1.1 \u00b7 Timeline 1.1 \u00b7 TripCal 1.4 \u00b7 Connector 1.2 |',
     'enabled:', Object.keys(BWN_MODULES).filter(function (k) { return BWN_MODULES[k]; }).join(', '));
 
   // ===== BWN SHARED CORE v7 - KEEP IN SYNC across both suite scripts =====
@@ -9293,7 +9293,7 @@
 
 
   // ==========================================================================
-  // MODULE: BWN Views v2.1  - column + assignee view presets on the WO list
+  // MODULE: BWN Views v2.2  - column + assignee view presets on the WO list
   // ==========================================================================
   // v2.0 (2026-08-07): columns + sort now apply through Umbrava's OWN persistence
   // (userPreference / putUserPreference on tables/masterWOListTable/settings) instead
@@ -9731,10 +9731,21 @@
       var mount = searchMountRef();
       var existing = document.getElementById(WRAP_ID);
       if (existing) {
-        // Re-anchor a fixed-fallback pill once the toolbar appears, and re-mount
-        // when React re-renders the row out from under us; otherwise keep it.
-        var needsMove = mount && existing.parentElement !== mount.row;
-        if (!needsMove) { BWN.beat('viewManager', 'ok', 'views dock mounted'); return; }
+        // Re-anchor a fixed-fallback pill once the toolbar appears, re-mount when
+        // React re-renders the row out from under us, and repair in-row ordering
+        // drift (React can replace the search subtree while reusing the row, which
+        // strands the pill on the wrong side - the fresh mount.before detects it).
+        // NEVER move the dock mid-apply or under an open menu: a rebuild destroys
+        // the open-menu state and hides the status line; the set-once schedule +
+        // this page's mutation stream retry the move soon after. The beat reports
+        // the dock's ACTUAL placement - a generic detail here would let a stuck
+        // fallback read as healthy forever (review 2026-08-07).
+        var menuOpen = existing.firstElementChild && existing.firstElementChild.style.display === 'flex';
+        var needsMove = mount && (existing.parentElement !== mount.row || existing.nextElementSibling !== mount.before);
+        if (!needsMove || applying || menuOpen) {
+          BWN.beat('viewManager', 'ok', existing.parentElement === document.body ? 'views dock fallback (fixed)' : 'views dock in toolbar');
+          return;
+        }
         existing.remove();
       }
 
@@ -9790,17 +9801,18 @@
       BWN.beat('viewManager', 'ok', mount ? 'views dock in toolbar' : 'views dock fallback (fixed)');
     }
 
-    // ---- Lifecycle (v2.1) ----------------------------------------------------
+    // ---- Views lifecycle -------------------------------------------------------
     // v2.0 used a clear-and-reset 700ms debounce here and it NEVER fired on the
     // live list: every mutation reset the pending timer, and tab timer throttling
     // stretches each window so the next mutation always won the race. Measured
     // 2026-08-07: the dock sat in its boot fallback for minutes while an identical
     // SET-ONCE timer fired fine - and v1 shipped the same dead debounce all along,
     // invisible only because a body-fixed pill never needs a re-run. This is
-    // bwn-kanban's live-proven lifecycle: a set-once schedule (`if (tick) return`
-    // - a pending check is never reset, so it always lands), history hooks for
-    // SPA nav, and a boot retry ladder of INDEPENDENT one-shots - modules boot at
-    // window load but the toolbar renders seconds later, and unreset one-shots
+    // bwn-kanban's live-proven lifecycle: a set-once schedule (a pending check is
+    // never reset, so it always lands), history hooks for SPA nav, a resize hook
+    // (the mount predicate reads LAYOUT - widths - which a childList observer is
+    // blind to), and a boot retry ladder of INDEPENDENT one-shots - modules boot
+    // at window load but the toolbar renders seconds later, and unreset one-shots
     // are the only timers measured to fire reliably on this page.
     var tick = null;
     function schedule() {
@@ -9810,6 +9822,7 @@
     new MutationObserver(BWN.guard(schedule, 'views:observe'))
       .observe(document.body, { childList: true, subtree: true });
     window.addEventListener('popstate', BWN.guard(schedule, 'views:nav'));
+    window.addEventListener('resize', BWN.guard(schedule, 'views:nav'));
     ['pushState', 'replaceState'].forEach(function (m) {
       var orig = history[m];
       if (typeof orig !== 'function') return;
@@ -9905,8 +9918,12 @@
       var vd = el('bwn-views-dock');
       if (vd && vd.lastElementChild) list.push({
         label: 'Views - apply a preset', hint: 'list', fn: function () {
-          var m = vd.firstElementChild;   // menu is built before the pill; open-only
-          if (!m || m.style.display === 'none' || !m.childElementCount) vd.lastElementChild.click();
+          // Re-resolve at execution time: Views v2+ re-anchors REBUILD the dock, so
+          // the node captured at palette-open can be detached by the time fn runs -
+          // clicking the detached pill toggles a detached menu, a silent no-op.
+          var d = el('bwn-views-dock') || vd;
+          var m = d.firstElementChild;   // menu is built before the pill; open-only
+          if (!m || m.style.display === 'none' || !m.childElementCount) d.lastElementChild.click();
         }
       });
       var dock = el('bwn-launch-dock');

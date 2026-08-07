@@ -1,6 +1,14 @@
-// test-views-api.js - node harness for BWN Views v2.0's API column apply
-// (userPreference read + putUserPreference write on tables/masterWOListTable/settings),
-// built into bwn-suite-core 1.66.38 on 2026-08-07.
+// test-views-api.js - node harness for BWN Views v2.x's API column apply
+// (userPreference read + putUserPreference write on tables/masterWOListTable/settings)
+// and its mount lifecycle. Built into bwn-suite-core 1.66.38-1.66.40 on 2026-08-07.
+//
+// LIFECYCLE (v2.1/v2.2): the v2.0 clear-and-reset debounce NEVER fired on the live
+// list (every mutation reset the pending timer; throttling stretched the windows),
+// so the pill never left its boot fallback. The set-once schedule is the fix. The
+// lifecycle block is EXECUTED here in a vm with stubbed timers - the adversarial
+// review (2026-08-07) proved shape-only regex pins let the nearest-neighbor bug
+// (deleting the `tick = null` re-arm) ship green, so liveness is now behavioral:
+// set-once (1 registration, 0 clears), re-arm after fire, ladder + nav wiring.
 //
 // WHAT THE OVERHAUL REPLACED:
 //   Views v1.0 applied a column set by 50 passes of column-chooser checkbox
@@ -54,19 +62,22 @@ var vm = require('vm');
 var CORE_SRC = path.join(__dirname, '..', 'bwn-suite-core.user.js');
 var coreFull = fs.readFileSync(CORE_SRC, 'utf8').replace(/\r\n/g, '\n');
 
-function slice(start, end, what) {
-  var a = coreFull.indexOf(start);
+// Parameterized so mutation controls can slice a CHURNED copy with the same loud
+// failure contract - a raw indexOf with no -1 guard goes silently vacuous on marker
+// drift (review 2026-08-07).
+function slice(src, start, end, what) {
+  var a = src.indexOf(start);
   if (a === -1) throw new Error(what + ': START marker not found');
-  if (coreFull.indexOf(start, a + 1) !== -1) throw new Error(what + ': START marker not unique');
-  var b = coreFull.indexOf(end, a);
+  if (src.indexOf(start, a + 1) !== -1) throw new Error(what + ': START marker not unique');
+  var b = src.indexOf(end, a);
   if (b === -1) throw new Error(what + ': END marker not found after start');
-  return coreFull.slice(a, b);
+  return src.slice(a, b);
 }
 
-var S_API = slice("    var PREF_APP = 'bn-web-spa';", '    function sleep(ms)', 'Views API block');
-var S_APPLY = slice('    var applying = false;', '    // ---- Post-reload continuation', 'applyView');
-var S_DOCK = slice('    // ---- Dock UI (v2.0: left of the list', '    // ---- Lifecycle (v2.1)', 'ensureDock');
-var S_LIFE = slice('    // ---- Lifecycle (v2.1)', '    resumePending().catch', 'lifecycle');
+var S_API = slice(coreFull, "    var PREF_APP = 'bn-web-spa';", '    function sleep(ms)', 'Views API block');
+var S_APPLY = slice(coreFull, '    var applying = false;', '    // ---- Post-reload continuation', 'applyView');
+var S_DOCK = slice(coreFull, '    // ---- Dock UI (v2.0: left of the list', '    // ---- Views lifecycle ---', 'ensureDock');
+var S_LIFE = slice(coreFull, '    // ---- Views lifecycle ---', '    resumePending().catch', 'lifecycle');
 
 function mutate(src, from, to) {
   var i = src.indexOf(from);
@@ -105,6 +116,81 @@ function makeApi(apiSrc) {
 }
 
 function tick() { return new Promise(function (r) { setTimeout(r, 0); }); }
+
+// ---- Lifecycle runner ---------------------------------------------------------
+// Executes the lifecycle block with stubbed timers so liveness is PROVEN, not
+// pattern-matched (headless harness cannot time, and does not need to - the
+// registrations and clears ARE the behavior).
+function makeLife(lifeSrc) {
+  var env = { timeouts: [], clears: 0, ensureDockCalls: 0, listeners: [] };
+  var idc = 0;
+  var sandbox = {
+    Object: Object, Array: Array, Error: Error, console: console,
+    BWN: { guard: function (fn) { return fn; } },
+    MutationObserver: function (cb) { this.observe = function () { env.observedBody = true; }; },
+    window: { addEventListener: function (ev, fn) { env.listeners.push(ev); } },
+    history: { pushState: function () { }, replaceState: function () { } },
+    document: { body: {} },
+    setTimeout: function (fn, ms) { env.timeouts.push({ fn: fn, ms: ms, id: ++idc }); return idc; },
+    clearTimeout: function () { env.clears++; },
+    ensureDock: function () { env.ensureDockCalls++; },
+    resumePending: function () { return { catch: function () { } }; }
+  };
+  vm.createContext(sandbox);
+  var api = vm.runInContext(
+    '(function () {\n' + lifeSrc + '\nreturn { schedule: schedule };\n})()',
+    sandbox, { filename: 'views-lifecycle.js' });
+  env.schedule = api.schedule;
+  env.history = sandbox.history;
+  env.at = function (ms) { return env.timeouts.filter(function (t) { return t.ms === ms; }); };
+  return env;
+}
+
+function runLifeCases(lifeSrc) {
+  var out = [];
+  function ok(name, cond, detail) { out.push({ name: name, ok: !!cond, detail: detail }); }
+  var e;
+  try { e = makeLife(lifeSrc); }
+  catch (err) { out.push({ name: 'lifecycle loads', ok: false, detail: String(err && err.message || err) }); return out; }
+
+  var ladder = e.timeouts.filter(function (t) { return t.ms !== 250; });
+  ok('boot ladder registers all six one-shots (0..20000ms)',
+    ladder.length === 6 && e.at(0).length === 1 && e.at(1000).length === 1 && e.at(2500).length === 1 &&
+    e.at(5000).length === 1 && e.at(10000).length === 1 && e.at(20000).length === 1,
+    'got ' + ladder.length + ' ladder registrations');
+  var edBefore = e.ensureDockCalls;
+  ladder[0].fn();
+  ok('a ladder one-shot actually runs ensureDock (not a no-op)', e.ensureDockCalls === edBefore + 1);
+  ok('nav + resize listeners wired',
+    e.listeners.indexOf('popstate') !== -1 && e.listeners.indexOf('resize') !== -1, e.listeners.join(','));
+  ok('the body observer is observing', e.observedBody === true);
+
+  // set-once: two schedules, ONE registration, ZERO clears
+  e.schedule(); e.schedule();
+  var s1 = e.at(250);
+  ok('schedule is set-once: two calls, one registration', s1.length === 1, s1.length + ' registrations');
+  ok('and it never clears a pending timer', e.clears === 0, e.clears + ' clears');
+
+  // re-arm after fire: THE liveness property. Deleting `tick = null` kills every
+  // reschedule after the first - the dead-dock class that shipped twice.
+  // A mutant can leave later steps unreachable - record red, never crash.
+  try {
+    var before = e.ensureDockCalls;
+    if (s1.length) s1[0].fn();
+    ok('the fired check runs ensureDock', e.ensureDockCalls === before + 1);
+    e.schedule();
+    var s2 = e.at(250);
+    ok('schedule RE-ARMS after firing (tick reset)', s2.length === 2, s2.length + ' total 250ms registrations');
+
+    // SPA nav wiring: a pushState after the fire must reschedule
+    if (s2.length >= 2) s2[1].fn();
+    e.history.pushState();
+    ok('a history.pushState reschedules the mount check', e.at(250).length === 3, e.at(250).length + ' total');
+  } catch (err) {
+    ok('lifecycle cases completed without crashing', false, String(err && err.message || err));
+  }
+  return out;
+}
 
 var ALL_TITLES = ['Label', 'Phase', 'WO #', 'Tracking #', 'Status', 'Asset', 'Priority', 'City',
   'State', 'Location #', 'Trades', 'Scope Of Work', 'Time in Status (hrs.)', 'Last Note Date',
@@ -228,20 +314,31 @@ function staticPins() {
   ok('dock keeps menu-then-pill child order (palette contract)', iMenu !== -1 && iPill !== -1 && iMenu < iPill, iMenu + ' vs ' + iPill);
   ok('toolbar discovery excludes header/nav (global search box must never anchor)',
     /closest\('header,nav'\)/.test(coreFull.slice(coreFull.indexOf('function pageSearchInput'), coreFull.indexOf('function searchMountRef'))));
-  ok('banner carries Views 2.1', coreFull.indexOf('Views 2.1') !== -1);
+  ok('banner carries Views 2.2', coreFull.indexOf('Views 2.2') !== -1);
 
-  // Lifecycle pins (v2.1). The v2.0 clear-and-reset debounce NEVER fired on the
-  // live list - every mutation reset the pending timer and throttling stretched
-  // the windows, so the boot fallback was permanent. Set-once is the fix; these
-  // pins keep the churn pattern from coming back.
+  // Lifecycle shape pins. Liveness itself is proven behaviorally in runLifeCases -
+  // these only keep the measured v2.0 starvation pattern (clear-and-reset churn)
+  // from being pasted back in a form the vm cases might not reach.
   ok('schedule is SET-ONCE - a pending check is never reset',
     /if \(tick\) return;/.test(S_LIFE), S_LIFE.slice(0, 120));
   ok('no clearTimeout in the lifecycle - clear-and-reset is the measured starvation bug',
     S_LIFE.indexOf('clearTimeout') === -1);
-  ok('boot retry ladder of independent one-shots covers the load->render gap',
-    /\[0, 1000, 2500, 5000, 10000, 20000\]/.test(S_LIFE));
-  ok('SPA nav hooks: popstate + history patches reschedule the mount',
-    /popstate/.test(S_LIFE) && /pushState.*replaceState|'pushState', 'replaceState'/.test(S_LIFE));
+  ok('ladder one-shots are WIRED to ensureDock, not just present as a literal',
+    /forEach\(function \(ms\) \{\s*setTimeout\(BWN\.guard\(ensureDock, 'views:dock'\), ms\);/.test(S_LIFE));
+  ok('history patches call through, reschedule, AND return the result',
+    /var r = orig\.apply\(this, arguments\); schedule\(\); return r;/.test(S_LIFE));
+  ok('resize reschedules - the mount predicate reads layout, which childList observers are blind to',
+    /addEventListener\('resize', BWN\.guard\(schedule/.test(S_LIFE));
+
+  // Dock re-anchor pins (v2.2 review fixes).
+  ok('the health beat reports ACTUAL placement, so a stuck fallback cannot read as mounted',
+    S_DOCK.indexOf("existing.parentElement === document.body ? 'views dock fallback (fixed)' : 'views dock in toolbar'") !== -1);
+  ok('re-anchor defers while applying or while the menu is open',
+    /if \(!needsMove \|\| applying \|\| menuOpen\)/.test(S_DOCK));
+  ok('in-row ordering drift is detected via the fresh insertBefore anchor',
+    /existing\.nextElementSibling !== mount\.before/.test(S_DOCK));
+  ok('the palette re-resolves the dock node at execution time (re-anchors rebuild it)',
+    coreFull.indexOf("var d = el('bwn-views-dock') || vd;") !== -1);
   return out;
 }
 
@@ -263,6 +360,7 @@ function expectRed(label, results) {
 (async function main() {
   var failures = 0;
   failures += report('shipped source', await runCases(S_API));
+  failures += report('lifecycle behavior', runLifeCases(S_LIFE));
   failures += report('static pins', staticPins());
 
   // Mutation controls - each MUST turn the harness red.
@@ -277,16 +375,14 @@ function expectRed(label, results) {
   failures += expectRed('unmapped titles silently dropped',
     await runCases(mutate(S_API, "if (!id) throw new Error('unmapped column title: ' + t);", 'if (!id) return;')));
 
-  // Static-pin controls: reintroducing the starved debounce must turn the pins red.
-  var churned = mutate(coreFull, 'if (tick) return;', 'clearTimeout(tick);');
-  var pinRed = (function () {
-    var lifeStart = churned.indexOf('    // ---- Lifecycle (v2.1)');
-    var lifeEnd = churned.indexOf('    resumePending().catch', lifeStart);
-    var life = churned.slice(lifeStart, lifeEnd);
-    return !(/if \(tick\) return;/.test(life)) || life.indexOf('clearTimeout') !== -1;
-  })();
-  if (!pinRed) { console.error('  MUTATION NOT CAUGHT: clear-and-reset debounce reintroduced'); failures++; }
-  else console.log('control clear-and-reset debounce reintroduced: red as required');
+  // Lifecycle mutation controls - BEHAVIORAL, run through the vm, because the
+  // review proved shape pins alone let the nearest-neighbor bug (deleting the
+  // `tick = null` re-arm) ship green. Both target the shipped bytes via mutate(),
+  // which throws loudly on marker drift.
+  failures += expectRed('tick re-arm deleted - schedule fires once per page load, dead dock returns',
+    runLifeCases(mutate(S_LIFE, 'tick = null; ', '')));
+  failures += expectRed('clear-and-reset debounce reintroduced - the measured v2.0 starvation',
+    runLifeCases(mutate(S_LIFE, 'if (tick) return;', 'clearTimeout(tick);')));
 
   if (failures) { console.error('\nRED: ' + failures + ' problem(s).'); process.exit(1); }
   console.log('\nGREEN: shipped source passes and every mutation control turns red.');
