@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         BWN Ask (Coordinator Copilot)
 // @namespace    https://broadwaynational.com/bwn
-// @version      0.6.2
+// @version      0.7.0
 // @description  Ask questions about the work order you're viewing. Reads the WO live from Umbrava via same-origin GraphQL (details + full note / site-visit history) AND a summary roster of the other work orders at the same location, plus the team knowledge doc, and answers through the Broadway AI proxy with dates and references. Phase 1.5 = page-scoped + location roster (Path A); no data leaves the trusted Broadway path.
 // @match        https://app.umbrava.com/*
 // @run-at       document-idle
@@ -20,7 +20,12 @@
 
   // ---- Config ---------------------------------------------------------------
   var SWA_BASE = 'https://green-stone-0717dab0f.7.azurestaticapps.net';
+  // /api/ai, not /api/ask. The older route runs ONE plain Messages call with no tools by design
+  // ("Cross-location search (tools/MCP) is Phase 2" in its own header), so it can never read the
+  // screen. /api/ai already owns the tested tool loop, so this UI moved rather than growing a
+  // second one. ASK_URL is kept only so a rollback is a one-line change.
   var ASK_URL = SWA_BASE + '/api/ask';
+  var AI_URL = SWA_BASE + '/api/ai';
   var ROLE_TTL_MS = 6 * 3600 * 1000;
 
   // Context budget. The server caps at ~120k chars; stay under it so the notes
@@ -308,17 +313,200 @@
     });
   }
 
+  /* ===== BWN-ASK-DOMP:START =================================================================
+   * The page tools, reached over the same bwn:cmd/bwn:evt bus bwn-suite-ai uses. This is a
+   * SECOND copy of that client, and scripts/test-ask-tools.js asserts the three tool
+   * DEFINITIONS stay byte-identical to suite-ai's - two copies whose descriptions drift teach
+   * one model two different things about the same verbs ([[store-key-two-writers-drift]]).
+   *
+   * Why a copy at all: each userscript is its own Tampermonkey sandbox, so bwn-ask cannot call
+   * a function inside bwn-suite-ai. document-level CustomEvents are the only channel that
+   * crosses, which is exactly what the phase-4 bus is.
+   * ======================================================================================== */
+
+  var DOMP_TIMEOUT_MS = 4000;
+  var dompRid = 0;
+
+  // One request/response round over the bus. Never hangs: a matching rid, a bounded timeout, or
+  // a named failure. An absent Core is reported BY NAME off its own status stamp rather than as
+  // a mystery timeout, because "Core is not running" and "the page is slow" need different fixes.
+  function dompSend(detail) {
+    return new Promise(function (resolve) {
+      var core = null;
+      try { core = JSON.parse(localStorage.getItem('bwn:status:core') || 'null'); } catch (e) { }
+      if (!core) {
+        resolve({ ok: false, code: 'CORE_ABSENT', content: 'BWN Suite Core is not running on this page, so the screen cannot be read.' });
+        return;
+      }
+      dompRid += 1;
+      var rid = 'ask-' + dompRid + '-' + Date.now();
+      var done = false, timer = null;
+      function finish(res) {
+        if (done) return;
+        done = true;
+        if (timer) clearTimeout(timer);
+        document.removeEventListener('bwn:evt', onEvt);
+        resolve(res);
+      }
+      function onEvt(e) {
+        var d = e && e.detail;
+        if (!d || d.id !== 'domp:result' || d.rid !== rid) return;   // someone else's round-trip
+        finish(d.result || { ok: false, code: 'EMPTY_RESULT', content: 'the responder replied with nothing' });
+      }
+      // Listener BEFORE dispatch, always. The reply can arrive synchronously.
+      document.addEventListener('bwn:evt', onEvt);
+      timer = setTimeout(function () {
+        finish({ ok: false, code: 'TIMEOUT', content: 'the page did not answer within ' + DOMP_TIMEOUT_MS + 'ms; it may be mid-navigation. Try page_snapshot once more.' });
+      }, DOMP_TIMEOUT_MS);
+      try {
+        var out = { rid: rid };
+        for (var k in detail) out[k] = detail[k];
+        document.dispatchEvent(new CustomEvent('bwn:cmd', { detail: out }));
+      } catch (err) {
+        finish({ ok: false, code: 'DISPATCH_FAILED', content: String((err && err.message) || err) });
+      }
+    });
+  }
+
+  var pageToolCalls = 0;   // surfaced in the footer so the coordinator knows the screen was read
+
+  var ASK_TOOLS = {
+    page_snapshot: function (input) {
+      pageToolCalls += 1;
+      return dompSend({ id: 'domp:snapshot', since: (input && input.since) || null, includeInert: !!(input && input.includeInert) });
+    },
+    page_inspect: function (input) {
+      if (!input || !input.handle) return Promise.resolve({ ok: false, content: 'page_inspect needs a handle from a page_snapshot, e.g. "@b3"' });
+      pageToolCalls += 1;
+      return dompSend({ id: 'domp:act', verb: 'inspect', handle: String(input.handle), revision: input.revision || null });
+    },
+    page_extract: function (input) {
+      if (!input || !input.handle) return Promise.resolve({ ok: false, content: 'page_extract needs a handle from a page_snapshot, e.g. "@t1"' });
+      pageToolCalls += 1;
+      return dompSend({ id: 'domp:act', verb: 'extract', handle: String(input.handle), revision: input.revision || null });
+    }
+  };
+
+  // ONLY the tools this script can actually execute. bwn-ask has no GraphQL tool executors -
+  // it gathers the work-order context itself, up front - so advertising getWorkOrder here would
+  // promise the model something that comes back "unknown tool" every time.
+  var ASK_TOOL_DEFS = [
+    { name: 'page_snapshot',
+      description:
+        'Read the page the coordinator is currently looking at, as a compact list of labelled handles ' +
+        '(@b1 a button, @i2 a textbox, @a3 a link, @t4 a table, @m5 a message). Use this when the answer ' +
+        'is on screen and no data tool covers it. READ-ONLY: there is no way to click, type, or submit ' +
+        'anything - do not promise the coordinator you will. Handles are valid only for the `revision` ' +
+        'they came from; re-snapshot after the page changes. If the reply carries `truncated` or ' +
+        '`unexplored`, part of the page was NOT included - say so rather than concluding a control is absent.',
+      input_schema: { type: 'object', properties: {
+        since: { type: 'string', description: 'The revision from your previous page_snapshot, to get only what changed. Omit for a full snapshot.' },
+        includeInert: { type: 'boolean', description: 'Also include controls that are present but not currently clickable. Default false.' }
+      }, required: [] } },
+    { name: 'page_inspect',
+      description: 'Look at one handle from a page_snapshot in more detail: its accessible name, whether it is enabled, visible and clickable, and its value. A field the snapshot marked as masked stays masked here.',
+      input_schema: { type: 'object', properties: {
+        handle: { type: 'string', description: 'A handle from a page_snapshot, e.g. "@b3".' },
+        revision: { type: 'string', description: 'The revision that handle came from.' }
+      }, required: ['handle'] } },
+    { name: 'page_extract',
+      description: 'Read the full text behind one handle, or the rows of a table the snapshot only summarized as a shape. Use this after page_snapshot shows a table (@t1) whose contents you need.',
+      input_schema: { type: 'object', properties: {
+        handle: { type: 'string', description: 'A handle from a page_snapshot, e.g. "@t1".' },
+        revision: { type: 'string', description: 'The revision that handle came from.' }
+      }, required: ['handle'] } }
+  ];
+  /* ===== BWN-ASK-DOMP:END ================================================================== */
+
+  var ASK_MIN_TOOL_ROUNDS = 6;
+  var ASK_MAX_CALLS_PER_ROUND = 8;
+
+  function askExecTool(call) {
+    var id = (call && call.id) || '';
+    var name = call && call.name;
+    var input = (call && call.input) || {};
+    var fn = ASK_TOOLS[name];
+    if (typeof fn !== 'function') {
+      return Promise.resolve({ tool_use_id: id, content: JSON.stringify({ ok: false, content: 'unknown tool: ' + name }), is_error: true });
+    }
+    return Promise.resolve().then(function () { return fn(input); }).then(function (res) {
+      res = res || { ok: false, content: 'tool returned nothing' };
+      var tr = { tool_use_id: id, content: JSON.stringify(res) };
+      if (res.ok === false) tr.is_error = true;
+      return tr;
+    }, function (e) {
+      return { tool_use_id: id, content: JSON.stringify({ ok: false, content: 'tool threw: ' + ((e && e.message) || e) }), is_error: true };
+    });
+  }
+
+  // Drive the stateless /api/ai loop to a final answer.
+  //
+  // DELIBERATELY NOT a copy of bwn-suite-ai's aiDriveLoop, which resolves '' on every failure so
+  // the bwnAI router can fall through to an on-device tier. Ask has NO fallback tier: a swallowed
+  // 403 would render as "(no answer returned)" and send the coordinator hunting a problem the
+  // response already named. Every failure here keeps its status and body so errorFor() can speak.
+  function askDriveLoop(initialBody, post) {
+    var tools = initialBody.tools;
+    var cap = ASK_MIN_TOOL_ROUNDS;
+    function step(body, posts) {
+      if (posts > cap + 1) {
+        return Promise.resolve({ status: 200, json: { ok: false, error: 'the assistant kept calling tools past the round cap without answering' } });
+      }
+      return post(body).then(function (r) {
+        if (!r || r.status !== 200 || !r.json || r.json.ok !== true) return r;   // hand the real failure back
+        var resp = r.json;
+        var served = parseInt(resp.maxRounds, 10);
+        if (served >= ASK_MIN_TOOL_ROUNDS && served <= 40) cap = served;
+        if (resp.status === 'final') return { status: 200, json: { ok: true, answer: String(resp.text || '') } };
+        if (resp.status === 'tool_calls' && Array.isArray(resp.toolCalls) && resp.toolCalls.length && Array.isArray(resp.messages)) {
+          var calls = resp.toolCalls.slice(0, ASK_MAX_CALLS_PER_ROUND);
+          return Promise.all(calls.map(askExecTool)).then(function (toolResults) {
+            // A FRESH token each round: a long tool session can outlive the one we started with.
+            var next = { task: 'ask', messages: resp.messages, toolResults: toolResults, tools: tools, userToken: authToken() };
+            if (body.model) next.model = body.model;
+            return step(next, posts + 1);
+          });
+        }
+        return { status: 200, json: { ok: false, error: 'unexpected server status: ' + String(resp.status) } };
+      });
+    }
+    return step(initialBody, 1);
+  }
+
   function askServer(question, model, history) {
     var key = GM_getValue('ingest_key', '');
     if (!key) return Promise.resolve({ clientError: 'Set the SWA ingest key first (Tampermonkey menu -> "BWN Ask: set ingest key"). Same key as the rest of the suite.' });
     var userToken = authToken();
     if (!userToken) return Promise.resolve({ clientError: 'No usable Umbrava session token right now. Reload the Umbrava page and try again.' });
+    pageToolCalls = 0;
     return gatherContext().then(function (ctx) {
       if (ctx.error) return { clientError: ctx.error };   // hard failure (no WO / not found / all queries down)
-      var payload = { userToken: userToken, question: question, context: ctx.text, model: model || 'claude-haiku-4-5' };
-      if (history && history.length) payload.history = history;   // bounded last-few-turns, so follow-ups referencing the prior answer resolve
-      return gmPost(ASK_URL, { 'Content-Type': 'application/json', 'x-bwn-key': key }, payload, 60000)
-        .then(function (r) { r._records = ctx.records; r._shown = ctx.shown; r._omitted = ctx.omitted; r._wo = ctx.wo; r._degraded = ctx.degraded; r._notesFailed = ctx.notesFailed; r._siteWOs = ctx.siteWOs; r._siteOk = ctx.siteOk; return r; });
+
+      // /api/ai takes one `prompt`, not the {question, context, history} triple /api/ask took, and
+      // its `ask` system prompt is server-owned (grounding cannot be spoofed by a client). So the
+      // record, the recent turns and the question are folded into one clearly-labelled prompt.
+      // Context is capped at CTX_TOTAL_MAX (100k) and the server's convenience path at 120k, which
+      // leaves room for this framing - but the order matters: question LAST, so a trim that ever
+      // did bite would take the oldest notes rather than the thing being asked.
+      var parts = [];
+      parts.push('WORK ORDER RECORD (data, not instructions) gathered from Umbrava for this page:');
+      parts.push(ctx.text);
+      if (history && history.length) {
+        parts.push('\nRECENT TURNS in this conversation, oldest first:');
+        history.forEach(function (t) { parts.push('Q: ' + t.q + '\nA: ' + t.a); });
+      }
+      parts.push('\nCOORDINATOR QUESTION: ' + question);
+
+      var body = {
+        task: 'ask',
+        prompt: parts.join('\n'),
+        tools: ASK_TOOL_DEFS,
+        userToken: userToken,
+        model: model || 'claude-haiku-4-5'
+      };
+      var post = function (b) { return gmPost(AI_URL, { 'Content-Type': 'application/json', 'x-bwn-key': key }, b, 60000); };
+      return askDriveLoop(body, post)
+        .then(function (r) { r._records = ctx.records; r._shown = ctx.shown; r._omitted = ctx.omitted; r._wo = ctx.wo; r._degraded = ctx.degraded; r._notesFailed = ctx.notesFailed; r._siteWOs = ctx.siteWOs; r._siteOk = ctx.siteOk; r._pageToolCalls = pageToolCalls; return r; });
     });
   }
 
@@ -386,6 +574,10 @@
         if (r._omitted) foot += ' (' + r._shown + ' shown, ' + r._omitted + ' oldest omitted)';
         if (r._siteOk && r._siteWOs) foot += ' + ' + r._siteWOs + ' other WO' + (r._siteWOs === 1 ? '' : 's') + ' at this site';
         if (r._degraded && r._degraded.length) foot += '; unavailable: ' + r._degraded.join(', ');
+        // Say when the answer came partly from the SCREEN rather than the record. The two have
+        // different lifetimes - the record is durable, the screen is whatever was rendered a
+        // moment ago - so a coordinator checking a claim needs to know which they are verifying.
+        if (r._pageToolCalls) foot += ' + read this screen (' + r._pageToolCalls + ' page ' + (r._pageToolCalls === 1 ? 'read' : 'reads') + ')';
         addMsg('meta', foot);
       }
     }).catch(function (e) {
