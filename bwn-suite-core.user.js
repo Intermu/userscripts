@@ -11099,6 +11099,15 @@
     ensureBtn();
   });
 
+  // The two pasted blocks below run at Core's TOP LEVEL, not inside a bwnBoot module, because
+  // they must define their globals before any module asks for them. That places them outside
+  // BWN.safeModule's net: a load-time throw in either one would take down PO Approval, WO Assist,
+  // List Heat, the launcher and everything else on the page, for a feature that is read-only and
+  // optional. This try/catch is that net. It sits OUTSIDE the sentinels on purpose - the bytes
+  // between them are paste-identical with the other repo and scripts/test-domproj-parity.js
+  // asserts it, so nothing inside may be touched, including to add a guard.
+  try {
+
 /* BWN-DOM:START | DOM handle protocol L0, PASTE-IDENTICAL with bwn-domproj.js in broadway-internal-ops.
    Column 0 and unindented on purpose: scripts/test-domproj-parity.js asserts these bytes against that
    repo, and re-indenting to match Core would break the check that keeps the two copies honest. Edit the
@@ -12375,6 +12384,13 @@
   }
 })(typeof window !== "undefined" ? window : null);
 /* BWN-DOMC:END */
+
+  } catch (e) {
+    // The responder module checks for the globals and beats 'fail' when they are absent, so the
+    // page ends up with the rest of the suite working and DOM handles reported as unavailable -
+    // which is what the AI script's NO_RESPONDER path is for.
+    try { console.error('[BWN SUITE CORE] DOM handle protocol blocks failed to load:', e); } catch (e2) { }
+  }
 
   // ==========================================================================
   // MODULE: DOM handle protocol responder 1.0  (phase 4, READ-ONLY)

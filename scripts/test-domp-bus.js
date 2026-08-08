@@ -452,6 +452,28 @@ function withMutatedClient(w, src) {
   return w.sandbox.PAGE_TOOLS;
 }
 
+test('a failed protocol load degrades to "unavailable", it does not kill Core', function () {
+  // The blocks run at Core's top level, outside BWN.safeModule's net, so a throw in either one
+  // would take the whole suite down with it for an optional read-only feature.
+  var head = CORE.slice(0, CORE.indexOf('/* BWN-DOM:START'));
+  var tail = CORE.slice(CORE.indexOf('/* BWN-DOMC:END */'));
+  A.ok('the pasted blocks are wrapped in a try', /\btry \{\s*$/m.test(head.slice(-400)), 'no guard before BWN-DOM');
+  A.ok('and the catch follows BWN-DOMC', /\} catch \(e\) \{/.test(tail.slice(0, 400)), 'no catch after BWN-DOMC');
+  A.ok('the guard is OUTSIDE the sentinels (bytes stay paste-identical)',
+    head.slice(-400).indexOf('BWN-DOM:START') === -1);
+
+  // And the responder handles the aftermath: globals absent -> it beats fail and answers nothing,
+  // which is the state the AI client reports as NO_RESPONDER rather than hanging.
+  var w = makeWorld();
+  vm.runInContext('window.BWNDOMC = null; window.BWNDOM = null;', w.sandbox);
+  var beats = bootCore(w);
+  A.ok('the responder reports itself unavailable', beats.length === 1 && beats[0][1] === 'fail', JSON.stringify(beats));
+  var replies = 0;
+  w.doc.addEventListener('bwn:evt', function (e) { if (e.detail && e.detail.id === 'domp:result') replies++; });
+  w.doc.dispatchEvent(new w.sandbox.CustomEvent('bwn:cmd', { detail: { id: 'domp:snapshot', rid: 'r1' } }));
+  A.ok('and does not answer at all', replies === 0);
+});
+
 test('M1 dropping the rid check lets a foreign reply be accepted', function () {
   var w = makeWorld(); poisonFirst(w); bootCore(w);
   var tools = withMutatedClient(w, mutate(AI_CLIENT,
