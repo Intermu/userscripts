@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         BWN Suite - Core (Broadway National)
 // @namespace    broadwaynational.bwn
-// @version      1.67.0
+// @version      1.67.1
 // @downloadURL  https://raw.githubusercontent.com/Intermu/userscripts/main/bwn-suite-core.user.js
 // @updateURL    https://raw.githubusercontent.com/Intermu/userscripts/main/bwn-suite-core.user.js
 // @description  Runs several Umbrava helpers for BWN coordinators, in the browser with no privileged grants. Includes: PO Approval + ETA Builder; WO Assist (GP/ETA, a stall watchdog, DNE calculator, and a next-action playbook); Email Leak Guard (checks recipients against vendor names, PO amounts, and client budget references before an outbound email sends); WO List Heat (a triage overlay + My Day strip on the work-order list, with an optional same-origin Umbrava API scan for deterministic full-board coverage); and the BWN Launcher (opens the Azure Static Web App tools with the current WO's context). Modules share state through sessionStorage/localStorage. The only network calls are same-origin Umbrava GraphQL requests (app.umbrava.com/api/graphql, the app's own session): List Heat's full-board scan and WO Assist's work-order / trip / clock-in / document reads, plus ONE write - BWN Views saves the column layout through Umbrava's own putUserPreference, the same preference the column chooser writes; everything else is offline. Toggle modules in BWN_MODULES below.
@@ -11429,7 +11429,12 @@
     // entry.baseFp is STORED, never parsed back out of the key - see collisionKey.
     var amb = registry.ambiguous[entry.baseFp];
     if (amb && amb.count > 1) {
-      return { ok: false, code: DP.ERROR.AMBIGUOUS, candidates: amb.handles.slice() };
+      // A recovery string, because there now IS one. L2 overrides this refusal whenever it still
+      // holds the bound element, so reaching a caller at all means the element is gone - and a
+      // fresh snapshot re-mints the collision and re-binds every handle to a live element, which
+      // resolves it. Before L2 deferred to its binding this path had no recovery field, and the
+      // advice would have been a loop: refreshing reproduced the same ambiguity every time.
+      return { ok: false, code: DP.ERROR.AMBIGUOUS, candidates: amb.handles.slice(), recovery: "refresh_snapshot" };
     }
     return { ok: true, fp: entry.fp, kind: entry.kind };
   };
@@ -12219,14 +12224,33 @@
   };
 
   // Handle -> live element, in two halves. The pure half (epoch, unknown, ambiguous) is L0's and
-  // is asked first. The browser half is: is the bound element still in the document, and if not,
-  // does its fingerprint still match exactly one element on the page?
+  // is asked first - with ONE exception, below: L0 cannot settle ambiguity, but L2 usually can.
+  // The browser half is: is the bound element still in the document, and if not, does its
+  // fingerprint still match exactly one element on the page?
   DC.resolve = function (s, handle, fromRevision) {
     var pure = DP.resolve(s.registry, handle, fromRevision);
-    if (!pure.ok) return pure;
+    // STALE is final. A wrong epoch or an unknown handle is not something a live binding can
+    // rescue - the handle does not belong to this projection at all.
+    if (!pure.ok && pure.code !== DP.ERROR.AMBIGUOUS) return pure;
+
     var bound = s.byHandle[handle];
     if (!bound) return { ok: false, code: DC.ERROR.STALE, recovery: "refresh_snapshot" };
+
+    // AMBIGUOUS from L0 means "this FINGERPRINT matched several records this round". It does not
+    // mean this HANDLE is unidentified: minting already separated the collision into distinct
+    // handles (collisionKey ordinals) and L2 bound each one to its own element. While that element
+    // is still in the document, identity is a fact we hold, not a guess we would be making.
+    //
+    // Refusing here anyway cost 6 of 85 handles on a live WO page (measured 2026-08-08) - every
+    // one a nameless control, on a page where nothing had re-rendered in 25s - and the candidate
+    // list it offered instead was a closed loop, since every candidate shares the colliding
+    // fingerprint and failed identically. Read-only verbs had no way forward at all.
     if (bound.el && bound.el.isConnected) return { ok: true, el: bound.el, rec: bound.rec, policy: bound.policy };
+
+    // The element is gone, so the collision is now REAL: re-finding it would mean choosing among
+    // identical fingerprints, which is the one thing this must never do. Hand back L0's refusal
+    // with its candidate list rather than the sweep below, which would only reach the same answer.
+    if (!pure.ok) return pure;
 
     // Re-render replaced the node. Re-resolve by the fingerprint that minted the handle.
     var got = DC.collect(s.doc, s.win, { root: s.opts.root });
