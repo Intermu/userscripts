@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         BWN Suite - AI (Broadway National)
 // @namespace    broadwaynational.bwn
-// @version      1.43.0
+// @version      1.44.0
 // @downloadURL  https://raw.githubusercontent.com/Intermu/userscripts/main/bwn-suite-ai.user.js
 // @updateURL    https://raw.githubusercontent.com/Intermu/userscripts/main/bwn-suite-ai.user.js
 // @description  The Umbrava tools that call outside APIs, kept separate from the zero-egress Core script. Client Update and WO Audit drafts (Anthropic Claude; draft-only, scrubbed before sending, you review before posting); Find Techs / Find Suppliers (Google Places; vendor leads near a WO); and Job View (opens the Ops-Dashboard job card on the WO page - WO details from Umbrava plus the authored case file and next actions, read-only). Network access is limited by the browser to the declared API hosts and the BWN Static Web App. API keys are stored in Tampermonkey's storage via the menu commands and never enter the page. Toggle modules in BWN_MODULES below.
@@ -1354,6 +1354,92 @@
   function aiDate(v) { if (!v) return null; var d = new Date(v); return isNaN(+d) ? null : d; }
   function aiStripHtml(s) { return String(s || '').replace(/<[^>]*>/g, ' ').replace(/\s+/g, ' ').trim(); }
 
+  // ---- DOM handle protocol bus client (phase 4) ----------------------------------------
+  // This script is GM-granted, so it lives in the Tampermonkey sandbox and cannot see the page's
+  // globals - window.BWNDOMC is invisible from here even when Core has it loaded and working.
+  // The collector therefore stays in Core (@grant none, page context) and this side only speaks
+  // to it over document CustomEvents:
+  //   out  bwn:cmd  { id:'domp:snapshot'|'domp:act', rid, ... }
+  //   in   bwn:evt  { id:'domp:result', rid, result }
+  //
+  // NEVER HANGS. Every path resolves: a matching reply, a bounded timeout, or a dispatch that
+  // threw. A tool that never settles wedges the whole server tool-loop, and a backgrounded tab
+  // throttles timers rather than cancelling them, so the timeout is a floor on lateness, not a
+  // guarantee of promptness - which is exactly why the loop must not depend on it being quick.
+  var DOMP_TIMEOUT_MS = 5000;
+  var _dompSeq = 0;
+
+  // Is Core's responder able to answer right now? Core cannot be called into from the sandbox,
+  // but both scripts share localStorage: the bwn:modules kill switch and the bwn:status:core
+  // stamp written at page load. Without this a page where Core is off or too old costs a full
+  // timeout per tool call and reports it as a timeout - a slow, wrong diagnosis. The bus timeout
+  // stays as the backstop for everything this cannot see.
+  function dompCoreLive() {
+    try {
+      var mp = JSON.parse(localStorage.getItem('bwn:modules') || '{}');
+      if (mp && typeof mp.domHandle === 'boolean' && !mp.domHandle) return 'the DOM handle module is switched off in the Ops Suite panel';
+    } catch (e) { /* defaults on */ }
+    try {
+      var core = JSON.parse(localStorage.getItem('bwn:status:core') || 'null');
+      var ai = JSON.parse(localStorage.getItem('bwn:status:ai') || 'null');
+      if (!core || !core.ver) return 'the Core suite script is not running on this page';
+      if (!(ai && Math.abs((core.ts || 0) - (ai.ts || 0)) < 60000)) return 'the Core suite script did not load in this session';
+    } catch (e) { return 'the Core suite script status could not be read'; }
+    return null;
+  }
+
+  function dompReq(detail) {
+    return new Promise(function (resolve) {
+      var why = dompCoreLive();
+      if (why) return resolve({ ok: false, code: 'NO_RESPONDER', recovery: why });
+      var rid = 'domp-' + Date.now().toString(36) + '-' + (++_dompSeq);
+      var settled = false, timer = null;
+      function finish(result) {
+        if (settled) return;
+        settled = true;
+        try { document.removeEventListener('bwn:evt', onEvt); } catch (e) { }
+        if (timer) clearTimeout(timer);
+        resolve(result);
+      }
+      function onEvt(e) {
+        var d = e && e.detail;
+        if (!d || d.id !== 'domp:result' || d.rid !== rid) return;   // someone else's round-trip
+        finish(d.result || { ok: false, code: 'EMPTY_RESULT', recovery: 'the responder replied with nothing' });
+      }
+      timer = setTimeout(function () {
+        finish({ ok: false, code: 'TIMEOUT', recovery: 'the page did not answer within ' + DOMP_TIMEOUT_MS + 'ms; it may be mid-navigation. Try page_snapshot once more.' });
+      }, DOMP_TIMEOUT_MS);
+      try {
+        document.addEventListener('bwn:evt', onEvt);
+        detail.rid = rid;
+        document.dispatchEvent(new CustomEvent('bwn:cmd', { detail: detail }));
+      } catch (x) {
+        finish({ ok: false, code: 'BUS_FAILED', recovery: 'could not reach the page: ' + ((x && x.message) || x) });
+      }
+    });
+  }
+
+  // Shape the responder's answer into a tool_result. A refusal is NOT an error the loop should
+  // retry blindly - it carries a code and a recovery the model can act on - so the reason is
+  // always passed through rather than flattened into "the tool failed".
+  function dompTool(detail) {
+    return dompReq(detail).then(function (r) {
+      r = r || {};
+      if (r.ok === true) {
+        var out = { revision: r.revision || null };
+        if (r.snapshot) out.snapshot = r.snapshot;
+        if (r.delta) out.delta = r.delta;
+        if (r.detail) out.detail = r.detail;
+        if (r.extract) out.extract = r.extract;
+        if (r.code) out.notice = r.code;         // e.g. REVISION_GAP: a full snapshot came back instead
+        return { ok: true, content: out };
+      }
+      return { ok: false, content: { code: r.code || 'UNKNOWN', recovery: r.recovery || null, candidates: r.candidates || undefined } };
+    }, function (e) {
+      return { ok: false, content: 'page read failed: ' + ((e && e.message) || e) };
+    });
+  }
+
   var AI_TOOLS = {
     getWorkOrder: function (input) {
       var n = aiWoNum(input && input.workOrderNumber);
@@ -1400,6 +1486,20 @@
         'getLocationWorkOrders is not yet wired - the location-to-work-orders selector is ' +
         'unconfirmed and will not be guessed. Ask the coordinator for a specific work-order ' +
         'number and use getWorkOrder / getJobNotes instead.' });
+    },
+    // The three READ-ONLY page verbs. This is the unlock the protocol was built for: a surface
+    // with no confirmed GraphQL selector can still be read, because the coordinator is already
+    // looking at it. No selector is guessed and nothing is written.
+    page_snapshot: function (input) {
+      return dompTool({ id: 'domp:snapshot', since: (input && input.since) || null, includeInert: !!(input && input.includeInert) });
+    },
+    page_inspect: function (input) {
+      if (!input || !input.handle) return Promise.resolve({ ok: false, content: 'page_inspect needs a handle from a page_snapshot, e.g. "@b3"' });
+      return dompTool({ id: 'domp:act', verb: 'inspect', handle: String(input.handle), revision: input.revision || null });
+    },
+    page_extract: function (input) {
+      if (!input || !input.handle) return Promise.resolve({ ok: false, content: 'page_extract needs a handle from a page_snapshot, e.g. "@t1"' });
+      return dompTool({ id: 'domp:act', verb: 'extract', handle: String(input.handle), revision: input.revision || null });
     }
   };
 
@@ -1421,7 +1521,33 @@
       description: 'List the work orders at a location. NOTE: not yet available - the selector is unconfirmed and this returns an unavailable notice. Prefer getWorkOrder with a specific work-order number.',
       input_schema: { type: 'object', properties: {
         locationId: { type: 'string', description: 'The Umbrava location id.' }
-      }, required: ['locationId'] } }
+      }, required: ['locationId'] } },
+    // The descriptions below carry three facts the model gets wrong without them: handles expire,
+    // an omission is reported rather than implied, and nothing here can act on the page.
+    { name: 'page_snapshot',
+      description:
+        'Read the page the coordinator is currently looking at, as a compact list of labelled handles ' +
+        '(@b1 a button, @i2 a textbox, @a3 a link, @t4 a table, @m5 a message). Use this when the answer ' +
+        'is on screen and no data tool covers it. READ-ONLY: there is no way to click, type, or submit ' +
+        'anything - do not promise the coordinator you will. Handles are valid only for the `revision` ' +
+        'they came from; re-snapshot after the page changes. If the reply carries `truncated` or ' +
+        '`unexplored`, part of the page was NOT included - say so rather than concluding a control is absent.',
+      input_schema: { type: 'object', properties: {
+        since: { type: 'string', description: 'The revision from your previous page_snapshot, to get only what changed. Omit for a full snapshot.' },
+        includeInert: { type: 'boolean', description: 'Also include controls that are present but not currently clickable. Default false.' }
+      }, required: [] } },
+    { name: 'page_inspect',
+      description: 'Look at one handle from a page_snapshot in more detail: its accessible name, whether it is enabled, visible and clickable, and its value. A field the snapshot marked as masked stays masked here.',
+      input_schema: { type: 'object', properties: {
+        handle: { type: 'string', description: 'A handle from a page_snapshot, e.g. "@b3".' },
+        revision: { type: 'string', description: 'The revision that handle came from.' }
+      }, required: ['handle'] } },
+    { name: 'page_extract',
+      description: 'Read the full text behind one handle, or the rows of a table the snapshot only summarized as a shape. Use this after page_snapshot shows a table (@t1) whose contents you need.',
+      input_schema: { type: 'object', properties: {
+        handle: { type: 'string', description: 'A handle from a page_snapshot, e.g. "@t1".' },
+        revision: { type: 'string', description: 'The revision that handle came from.' }
+      }, required: ['handle'] } }
   ];
 
   // ---- Same-origin bearer read + GraphQL -----------------------------------------------

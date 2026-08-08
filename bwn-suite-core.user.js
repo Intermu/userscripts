@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         BWN Suite - Core (Broadway National)
 // @namespace    broadwaynational.bwn
-// @version      1.66.41
+// @version      1.67.0
 // @downloadURL  https://raw.githubusercontent.com/Intermu/userscripts/main/bwn-suite-core.user.js
 // @updateURL    https://raw.githubusercontent.com/Intermu/userscripts/main/bwn-suite-core.user.js
 // @description  Runs several Umbrava helpers for BWN coordinators, in the browser with no privileged grants. Includes: PO Approval + ETA Builder; WO Assist (GP/ETA, a stall watchdog, DNE calculator, and a next-action playbook); Email Leak Guard (checks recipients against vendor names, PO amounts, and client budget references before an outbound email sends); WO List Heat (a triage overlay + My Day strip on the work-order list, with an optional same-origin Umbrava API scan for deterministic full-board coverage); and the BWN Launcher (opens the Azure Static Web App tools with the current WO's context). Modules share state through sessionStorage/localStorage. The only network calls are same-origin Umbrava GraphQL requests (app.umbrava.com/api/graphql, the app's own session): List Heat's full-board scan and WO Assist's work-order / trip / clock-in / document reads, plus ONE write - BWN Views saves the column layout through Umbrava's own putUserPreference, the same preference the column chooser writes; everything else is offline. Toggle modules in BWN_MODULES below.
@@ -26,7 +26,8 @@
     visitLog: true,      // per-WO "what changed" watch strip + end-of-day digest
     reminders: true,     // local time-based follow-up nudges for a WO
     notesTimeline: true, // read-only chronological notes overlay with gap markers
-    tripCal: true        // export a WO's scheduled trips to .ics (Trips tab)
+    tripCal: true,       // export a WO's scheduled trips to .ics (Trips tab)
+    domHandle: true      // read-only page snapshots for Ask, over the bwn:cmd/bwn:evt bus
   };
 
   var BWN_VER = (typeof GM_info !== 'undefined' && GM_info.script && GM_info.script.version) || '1.51.2';
@@ -44,7 +45,7 @@
   try { localStorage.setItem('bwn:status:core', JSON.stringify({ ver: BWN_VER, ts: Date.now() })); } catch (e) { /* best-effort */ }
 
   console.info('[BWN SUITE CORE] v' + BWN_VER + ' |',
-    'Shared Core 7 \u00b7 PO Approval 1.13 \u00b7 WO Assist 2.69 \u00b7 Leak Guard 2.0 \u00b7 List Heat 3.24 \u00b7 Launcher 2.0 \u00b7 Views 3.0 \u00b7 Palette 1.1 \u00b7 Visit 1.2 \u00b7 Reminders 1.1 \u00b7 Timeline 1.1 \u00b7 TripCal 1.4 \u00b7 Connector 1.2 |',
+    'Shared Core 7 \u00b7 DOM Handles 1.0 \u00b7 PO Approval 1.13 \u00b7 WO Assist 2.69 \u00b7 Leak Guard 2.0 \u00b7 List Heat 3.24 \u00b7 Launcher 2.0 \u00b7 Views 3.0 \u00b7 Palette 1.1 \u00b7 Visit 1.2 \u00b7 Reminders 1.1 \u00b7 Timeline 1.1 \u00b7 TripCal 1.4 \u00b7 Connector 1.2 |',
     'enabled:', Object.keys(BWN_MODULES).filter(function (k) { return BWN_MODULES[k]; }).join(', '));
 
   // ===== BWN SHARED CORE v7 - KEEP IN SYNC across both suite scripts =====
@@ -11096,6 +11097,1348 @@
     var obs = new MutationObserver(BWN.guard(function () { clearTimeout(deb); deb = setTimeout(BWN.guard(ensureBtn, 'tripCal:btn'), 500); }, 'tripCal:observe'));
     obs.observe(document.body, { childList: true, subtree: true });
     ensureBtn();
+  });
+
+/* BWN-DOM:START | DOM handle protocol L0, PASTE-IDENTICAL with bwn-domproj.js in broadway-internal-ops.
+   Column 0 and unindented on purpose: scripts/test-domproj-parity.js asserts these bytes against that
+   repo, and re-indenting to match Core would break the check that keeps the two copies honest. Edit the
+   source there, run node sync-theme.js, then re-paste - never edit this region. */
+/* bwn-domproj.js -- DOM handle protocol, layer L0: the pure projector.
+ *
+ * SINGLE SOURCE OF TRUTH for everything between "node records" (plain objects the L1 collector
+ * reads out of a live DOM) and the compact payload a text-only model acts on: inclusion rules,
+ * accessible names, handle minting, ordering, masking, truncation, revisions, and deltas.
+ * Spec: outputs/specs/2026-08-08-dom-handle-protocol-architecture.md in the vault.
+ *
+ * PURE ON PURPOSE. This file never touches a DOM API, never reads a clock, never draws a random
+ * number. Everything a browser must answer (visibility, geometry, labels) arrives already
+ * answered inside the node records, because there is no jsdom on this machine and a hand-written
+ * DOM shim cannot compute layout - the [hidden]-vs-class-display bug shipped through 130 green
+ * headless tests exactly that way. Purity is what makes every rule below unit-testable with
+ * plain fixtures on the bundled node.
+ *
+ * Loaded the same three ways as watchtower-rules.js:
+ *   1. scripts/test-domproj.js and scripts/bench-domproj.js  ->  require() the real file
+ *   2. SWA tool pages, inlined by sync-theme.js into a BWN-DOM sentinel region (phase 3)
+ *   3. bwn-suite-core.user.js, as a paste-identical block (phase 3/4)
+ *
+ * NODE RECORD CONTRACT (what L1 must supply; L0 treats absent fields as empty):
+ *   tag, type, role, ariaLabel, labelText, placeholder, title, text, value, name, id, testid,
+ *   href, external, download, autocomplete,
+ *   disabled, checked, required, expanded, msgType ('error'|'status'|'alert'),
+ *   visible, interactable   (COMPUTED by the browser - checkVisibility + elementFromPoint),
+ *   rect {x,y,w,h}, domIndex (unique, document order), groupPath [landmark, section, ...],
+ *   options [{value,label}] (selects), table {rows, cols, headers[]} (tables), level (headings)
+ */
+(function (root) {
+  "use strict";
+
+  var DP = { VERSION: "0.1.0" };
+
+  /* ============================ vocabulary ============================ */
+
+  // Handle kind letters. One letter per kind so a handle stays 3-4 chars.
+  DP.KINDS = {
+    a: "link", b: "button", i: "textbox", s: "select", c: "checkable",
+    d: "dialog", t: "table", h: "heading", m: "message",
+  };
+
+  // Emitted roles per kind (what the model reads). checkable emits its concrete role.
+  var EMIT_ROLE = { a: "link", b: "button", i: "textbox", s: "select", d: "dialog", t: "table", h: "heading" };
+
+  DP.ERROR = {
+    STALE: "HANDLE_STALE",
+    AMBIGUOUS: "HANDLE_AMBIGUOUS",
+  };
+
+  /* ============================ small helpers ============================ */
+
+  function str(v) { return (v == null) ? "" : String(v); }
+  function trimText(v, max) {
+    var out = str(v).replace(/\s+/g, " ").trim();
+    if (max && out.length > max) out = out.slice(0, max);
+    return out;
+  }
+
+  // Deterministic JSON: keys sorted at every level. This is the hashing form AND the byte form
+  // the determinism tests compare, so "same content" always means "same bytes".
+  function stableStringify(v) {
+    if (v === null || typeof v !== "object") return JSON.stringify(v);
+    if (Array.isArray(v)) {
+      var parts = [];
+      for (var i = 0; i < v.length; i++) parts.push(stableStringify(v[i] === undefined ? null : v[i]));
+      return "[" + parts.join(",") + "]";
+    }
+    var keys = Object.keys(v).sort();
+    var kv = [];
+    for (var k = 0; k < keys.length; k++) {
+      if (v[keys[k]] === undefined) continue;
+      kv.push(JSON.stringify(keys[k]) + ":" + stableStringify(v[keys[k]]));
+    }
+    return "{" + kv.join(",") + "}";
+  }
+  DP.stableStringify = stableStringify;
+
+  // FNV-1a 32-bit. Not cryptographic and does not need to be: it detects "did the projected
+  // content change between rounds", nothing adversarial rides on it.
+  function fnv1a(s) {
+    var h = 0x811c9dc5;
+    for (var i = 0; i < s.length; i++) {
+      h ^= s.charCodeAt(i);
+      h = (h + ((h << 1) + (h << 4) + (h << 7) + (h << 8) + (h << 24))) >>> 0;
+    }
+    return ("0000000" + h.toString(16)).slice(-8);
+  }
+  DP.hash = function (payload) { return fnv1a(stableStringify(payload)); };
+
+  // chars/4 is an ESTIMATE and is labelled as one everywhere it surfaces. The real numbers are
+  // the `usage` fields api/ai now forwards; this exists only for offline benchmarks.
+  DP.estimateTokens = function (chars) { return Math.ceil(Math.max(0, chars | 0) / 4); };
+
+  /* ============================ accessible name ============================ */
+
+  // A documented, constrained SUBSET of the accname algorithm - not the spec algorithm, and the
+  // README says so. Order: aria-labelledby (L1 resolves it into ariaLabel), aria-label, bound
+  // <label>, placeholder, title, trimmed text content. Claiming full accname compliance we have
+  // not implemented is how a projection quietly disagrees with what the operator sees.
+  DP.accName = function (rec) {
+    return trimText(rec.ariaLabel, 120) || trimText(rec.labelText, 120)
+      || trimText(rec.placeholder, 120) || trimText(rec.title, 120)
+      || trimText(rec.text, 120);
+  };
+
+  /* ============================ kind classification ============================ */
+
+  var INPUT_TEXT_TYPES = { text: 1, search: 1, email: 1, tel: 1, url: 1, number: 1, password: 1, date: 1, time: 1, "datetime-local": 1, month: 1, week: 1, "": 1 };
+
+  DP.kindOf = function (rec) {
+    var tag = str(rec.tag).toLowerCase();
+    var role = str(rec.role).toLowerCase();
+    var type = str(rec.type).toLowerCase();
+    if (rec.msgType || role === "alert" || role === "status") return "m";
+    if (role === "dialog" || role === "alertdialog") return "d";
+    if (tag === "table" || role === "table" || role === "grid") return "t";
+    if (tag === "h1" || tag === "h2" || tag === "h3" || (role === "heading" && (rec.level == null || rec.level <= 3))) return "h";
+    if (tag === "select" || role === "listbox" || role === "combobox") return "s";
+    if (role === "checkbox" || role === "radio" || role === "switch") return "c";
+    if (tag === "input" && (type === "checkbox" || type === "radio")) return "c";
+    if (role === "button") return "b";
+    if (tag === "button") return "b";
+    if (tag === "input" && (type === "button" || type === "submit" || type === "reset")) return "b";
+    if (tag === "input" && type === "file") return "b";     // acted on like a button; policy denies it
+    if (role === "link") return "a";
+    if (tag === "a" && (rec.href != null && rec.href !== "")) return "a";
+    if (tag === "textarea" || role === "textbox" || role === "searchbox" || role === "spinbutton") return "i";
+    if (tag === "input" && INPUT_TEXT_TYPES[type] === 1) return "i";
+    return null;                                            // everything else never projects
+  };
+
+  // Which kinds require interactability vs mere visibility. `disabled` is deliberately NOT an
+  // exclusion: a disabled Save button is exactly the state a model must see (and the delta's
+  // {enabled:false} could not exist if disabling removed the element). Interactability excludes
+  // the OTHER cases - obscured, pointer-events:none, inert subtree - which L1 folds into
+  // rec.interactable.
+  var ACTIONABLE = { a: 1, b: 1, i: 1, s: 1, c: 1 };
+  DP.includeRec = function (rec, opts) {
+    var kind = DP.kindOf(rec);
+    if (!kind) return false;
+    if (!rec.visible) return false;
+    if (ACTIONABLE[kind] === 1 && !rec.interactable && !rec.disabled && !(opts && opts.includeInert)) return false;
+    return true;
+  };
+
+  /* ============================ policy classification ============================ */
+
+  // Classified at PROJECTION time so the model is told up front which handles will demand a
+  // human confirm and which are refused outright - it must not plan a route through a denied
+  // handle. Enforcement is L4's job, in Core, outside the model's reach; this is the label.
+  // Matched against a NORMALIZED haystack (camelCase split, _/- to space, lowercased), because
+  // the real spellings of a card field are `cardNumber`, `card_number` and `cardnumber` far more
+  // often than `card number`. A bare `card\b` alternative matched none of those three: `_` and
+  // letters are word characters, so the trailing boundary never landed. Each keyword therefore
+  // carries its own optional num/no tail rather than relying on a separator being present.
+  var SENSITIVE_RE = /\b(card(?:num(?:ber)?|no)?|cc(?:num(?:ber)?|no)?|cvv|cvc|routing|account(?:num(?:ber)?|no)?|ssn|social security|tin|tax id|passport|iban|sort code)\b/;
+  var DESTRUCTIVE_RE = /\b(delete|remove|void|cancel|submit|approve|dispatch|send|pay|reject|close)\b/i;
+
+  function normalizeHay(parts) {
+    return parts.map(str).join(" ")
+      .replace(/([a-z0-9])([A-Z])/g, "$1 $2")     // cardNumber -> card Number
+      .replace(/[_\-]+/g, " ")                    // card_number / card-number -> card number
+      .toLowerCase();
+  }
+
+  // Any run of 4+ digits, separators allowed inside. Used to strip a secret that arrived in the
+  // LABEL rather than the value ("SSN 123-45-6789"), which masking the value alone left exposed.
+  var DIGIT_RUN_RE = /[0-9](?:[0-9 \-\/.]*[0-9]){3,}/g;
+  DP.redactDigits = function (s) { return str(s).replace(DIGIT_RUN_RE, "[redacted]"); };
+
+  DP.policyOf = function (rec) {
+    var kind = DP.kindOf(rec);
+    var type = str(rec.type).toLowerCase();
+    if (type === "password" || type === "file") return "deny";
+    if (rec.download || rec.external) return "deny";
+    // placeholder/title/text are IN the haystack because accName already treats them as label
+    // sources: a field the model is shown as "Card number" must not be classified allow just
+    // because that string arrived via placeholder instead of labelText.
+    if (SENSITIVE_RE.test(normalizeHay([rec.name, rec.id, rec.autocomplete, rec.labelText, rec.ariaLabel, rec.placeholder, rec.title, rec.text]))) return "deny";
+    if ((kind === "b" || kind === "a") && DESTRUCTIVE_RE.test(DP.accName(rec))) return "confirm";
+    return "allow";
+  };
+
+  /* ============================ fingerprint - ONE producer ============================ */
+
+  // The stable identity a handle is minted from and re-resolved against. There is exactly one
+  // function computing it, called by minting and by resolution alike: two writers computing a
+  // key from the same input and drifting is how a 217-row board opened at 221 rows.
+  //
+  // Locator ladder: data-testid, then a non-volatile id, then role + accessible name + name
+  // attribute + group path. Checkables add their value (a radio group shares everything else).
+  // Volatile ids (React useId ':r1:', uuids, long digit runs) are skipped so a re-render that
+  // regenerates them does not churn every handle on the page.
+  function volatileId(id) {
+    return /^:r|[0-9a-f]{8}-[0-9a-f]{4}-|\d{4,}/i.test(id);
+  }
+  DP.fingerprint = function (rec) {
+    if (rec.testid) return "tid:" + trimText(rec.testid, 80);
+    if (rec.id && !volatileId(str(rec.id))) return "id:" + trimText(rec.id, 80);
+    var kind = DP.kindOf(rec) || "x";
+    var fp = "k:" + kind
+      + "|r:" + (str(rec.role).toLowerCase() || str(rec.tag).toLowerCase())
+      + "|n:" + DP.accName(rec).toLowerCase()
+      + "|nm:" + trimText(rec.name, 40)
+      + "|g:" + (Array.isArray(rec.groupPath) ? rec.groupPath.join(">") : "");
+    if (kind === "c") fp += "|v:" + trimText(rec.value, 40);
+    return fp;
+  };
+
+  /* ============================ handle registry ============================ */
+
+  // The registry is DATA, not live element references (those are L2's, in the browser). It
+  // carries everything L0 needs to keep handles stable across re-projections and to answer
+  // staleness/ambiguity without touching a DOM: epoch, per-kind counters, fingerprint->handle.
+  DP.newRegistry = function (epoch) {
+    return { epoch: (epoch >= 1 ? epoch : 1), counters: {}, byFp: {}, byHandle: {}, ambiguous: {} };
+  };
+
+  // Navigation / SPA route change: every handle from the old epoch is invalid, no exceptions,
+  // and the registry starts clean. Counters reset too - the epoch prefix in the revision is
+  // what prevents an @b1 from the old page acting on the new one.
+  DP.newEpoch = function (registry) {
+    return DP.newRegistry((registry && registry.epoch ? registry.epoch : 0) + 1);
+  };
+
+  // Carries handle identity forward; starts `ambiguous` EMPTY on purpose.
+  //
+  // Ambiguity is a property of ONE round's projection, not of the epoch. Carrying it forward
+  // made a handle permanently unresolvable: two "Remove" buttons in round 1, one of them gone
+  // by round 2, and resolve() still refused the survivor - citing a candidate handle that no
+  // longer existed. It also shared the {count,handles} objects by reference, so minting round 2
+  // rewrote round 1's registry under a client holding it. Rebuilding per round fixes both.
+  function cloneRegistry(reg) {
+    var out = DP.newRegistry(reg.epoch);
+    var k;
+    for (k in reg.counters) out.counters[k] = reg.counters[k];
+    for (k in reg.byFp) out.byFp[k] = reg.byFp[k];
+    for (k in reg.byHandle) out.byHandle[k] = { fp: reg.byHandle[k].fp, baseFp: reg.byHandle[k].baseFp, kind: reg.byHandle[k].kind };
+    return out;
+  }
+
+  // Registry key for the Nth record sharing one fingerprint.
+  //
+  // NOT string concatenation with an in-band marker. '#' was used here and it is legal INSIDE a
+  // fingerprint - accessible names on these very pages read "Store #4412" and "PO #118871", and
+  // a testid may contain anything. Two failures came out of that: slicing at the first '#'
+  // truncated a genuine name and orphaned the ambiguity marker (so resolve() happily returned a
+  // guess between two identical buttons), and a testid of literally "row#2" aliased onto the
+  // suffixed key of a DIFFERENT element, putting one handle on two elements in one snapshot.
+  //
+  // Ordinal-first is provably disjoint: every fingerprint starts with "tid:", "id:" or "k:", so
+  // no genuine fingerprint can begin with a digit. The base is also stored on the entry, so no
+  // code path ever parses it back out of the key.
+  function collisionKey(baseFp, ord) {
+    return ord === 1 ? baseFp : (ord + " " + baseFp);
+  }
+
+  // Mint handles for this round's included records, reusing the handle of every fingerprint the
+  // registry has seen this epoch (that continuity is what makes a delta meaningful - the same
+  // Save button is @b1 in round 1 and round 9). Counters only ever grow, so a retired handle is
+  // never reissued to a different element within an epoch.
+  //
+  // COLLISIONS: two records with the same fingerprint get distinct handles via a deterministic
+  // '#2' suffix on the fingerprint (assigned in the caller's sorted order), and the base
+  // fingerprint is marked ambiguous. Resolution against an ambiguous fingerprint refuses with
+  // HANDLE_AMBIGUOUS and both candidates - it never picks the first.
+  DP.mintHandles = function (records, prevRegistry) {
+    var reg = cloneRegistry(prevRegistry || DP.newRegistry(1));
+    var seenThisRound = {};
+    var handles = [];
+    var byBase = {};                 // baseFp -> handles minted for it THIS round
+    var i;
+    for (i = 0; i < records.length; i++) {
+      var rec = records[i];
+      var kind = DP.kindOf(rec) || "x";
+      var baseFp = DP.fingerprint(rec);
+      var ord = (seenThisRound[baseFp] = (seenThisRound[baseFp] || 0) + 1);
+      var key = collisionKey(baseFp, ord);
+      var h = reg.byFp[key];
+      if (!h) {
+        var n = (reg.counters[kind] || 0) + 1;
+        reg.counters[kind] = n;
+        h = "@" + kind + n;
+        reg.byFp[key] = h;
+        reg.byHandle[h] = { fp: key, baseFp: baseFp, kind: kind };
+      }
+      (byBase[baseFp] = byBase[baseFp] || []).push(h);
+      handles.push(h);
+    }
+    // Ambiguity is recomputed from THIS round only: a fingerprint that matched 2+ records now.
+    for (var b in byBase) {
+      if (byBase[b].length > 1) reg.ambiguous[b] = { count: byBase[b].length, handles: byBase[b].slice() };
+    }
+    return { registry: reg, handles: handles };
+  };
+
+  /* ============================ staleness + ambiguity (pure halves) ============================ */
+
+  DP.parseRevision = function (rev) {
+    var m = /^e(\d+)\.r(\d+)$/.exec(str(rev));
+    return m ? { epoch: parseInt(m[1], 10), r: parseInt(m[2], 10) } : null;
+  };
+
+  // Resolve a handle presented with the revision it came from. An epoch mismatch is STALE
+  // before the registry is even consulted; an unknown handle is STALE; a handle whose base
+  // fingerprint matched 2+ elements is AMBIGUOUS with every candidate listed. The browser-side
+  // half (does the element still exist, is it still unique in the live DOM) is L2's; this half
+  // is everything that can be answered from data alone.
+  DP.resolve = function (registry, handle, fromRevision) {
+    var rev = DP.parseRevision(fromRevision);
+    if (!rev || rev.epoch !== registry.epoch) {
+      return { ok: false, code: DP.ERROR.STALE, recovery: "refresh_snapshot" };
+    }
+    var entry = registry.byHandle[handle];
+    if (!entry) return { ok: false, code: DP.ERROR.STALE, recovery: "refresh_snapshot" };
+    // entry.baseFp is STORED, never parsed back out of the key - see collisionKey.
+    var amb = registry.ambiguous[entry.baseFp];
+    if (amb && amb.count > 1) {
+      return { ok: false, code: DP.ERROR.AMBIGUOUS, candidates: amb.handles.slice() };
+    }
+    return { ok: true, fp: entry.fp, kind: entry.kind };
+  };
+
+  /* ============================ ordering ============================ */
+
+  // Deterministic or nothing: a payload that reorders between rounds destroys the prompt cache
+  // and makes deltas meaningless. Landmark group (ranked by the group's first appearance in
+  // document order), then reading order - rect.y banded to 8px so sub-pixel jitter cannot
+  // reorder, then rect.x - then domIndex, which is unique, as the total tiebreak.
+  var Y_BAND = 8;
+
+  // Every comparison below is subtraction-free where an Infinity could meet an Infinity.
+  // `Infinity - Infinity` is NaN, V8 reads a NaN comparator result as "equal", and the sort
+  // silently falls back to INPUT ORDER - which is the one thing this function exists to remove.
+  // It fired whenever two groups both contained only records with no domIndex, and the
+  // determinism test never saw it because its fixtures always carry one.
+  function cmpNum(a, b) { return a === b ? 0 : (a < b ? -1 : 1); }
+  function cmpStr(a, b) { return a === b ? 0 : (a < b ? -1 : 1); }
+
+  DP.orderRecords = function (records) {
+    var groupFirst = {};
+    var i, g;
+    for (i = 0; i < records.length; i++) {
+      g = Array.isArray(records[i].groupPath) && records[i].groupPath.length ? str(records[i].groupPath[0]) : "";
+      var d = records[i].domIndex == null ? Infinity : records[i].domIndex;
+      if (groupFirst[g] == null || d < groupFirst[g]) groupFirst[g] = d;
+    }
+    var sorted = records.slice();
+    sorted.sort(function (p, q) {
+      var gp = Array.isArray(p.groupPath) && p.groupPath.length ? str(p.groupPath[0]) : "";
+      var gq = Array.isArray(q.groupPath) && q.groupPath.length ? str(q.groupPath[0]) : "";
+      if (gp !== gq) {
+        // Group rank, then the group NAME as a total tiebreak so two ranks of Infinity
+        // (both groups made of records with no domIndex) still order deterministically.
+        var c = cmpNum(groupFirst[gp], groupFirst[gq]);
+        return c !== 0 ? c : cmpStr(gp, gq);
+      }
+      var yp = p.rect ? Math.floor(p.rect.y / Y_BAND) : Infinity;
+      var yq = q.rect ? Math.floor(q.rect.y / Y_BAND) : Infinity;
+      if (yp !== yq) return cmpNum(yp, yq);
+      var xp = p.rect ? p.rect.x : Infinity, xq = q.rect ? q.rect.x : Infinity;
+      if (xp !== xq) return cmpNum(xp, xq);
+      var dp = p.domIndex == null ? Infinity : p.domIndex;
+      var dq = q.domIndex == null ? Infinity : q.domIndex;
+      if (dp !== dq) return cmpNum(dp, dq);
+      // Last resort when a record carries no geometry AND no domIndex: order by projected
+      // identity. Without it two such records sort "equal" and input order leaks back in.
+      return cmpStr(DP.fingerprint(p), DP.fingerprint(q));
+    });
+    return sorted;
+  };
+
+  /* ============================ emission ============================ */
+
+  // Fixed field order per kind (JSON.stringify preserves insertion order; determinism tests
+  // compare bytes). Only fields that carry signal are emitted - absent is absent, not null.
+  function emitElement(rec, h, policy) {
+    var kind = DP.kindOf(rec);
+    var name = DP.accName(rec);
+    // A deny field's LABEL is a leak path too. Masking only rec.value left an aria-label of
+    // "SSN 123-45-6789" flowing straight through on a field the payload simultaneously reported
+    // as masked. The label still reads "SSN [redacted]", so the model knows what the field is.
+    if (policy === "deny") name = DP.redactDigits(name);
+    var el = { h: h };
+    if (kind === "c") {
+      el.role = str(rec.role).toLowerCase() || (str(rec.type).toLowerCase() === "radio" ? "radio" : "checkbox");
+    } else {
+      el.role = EMIT_ROLE[kind];
+    }
+    if (kind === "h") {
+      el.level = rec.level || ({ h1: 1, h2: 2, h3: 3 })[str(rec.tag).toLowerCase()] || 2;
+      el.text = name;
+      return el;
+    }
+    if (kind === "t") {
+      if (name) el.name = name;
+      if (rec.table) {
+        el.shape = { rows: rec.table.rows | 0, cols: rec.table.cols | 0 };
+        if (Array.isArray(rec.table.headers) && rec.table.headers.length) {
+          el.headers = rec.table.headers.map(function (x) { return trimText(x, 40); });
+        }
+      }
+      return el;
+    }
+    if (kind === "i" || kind === "s") el.label = name;
+    else el.name = name;
+    if (kind === "i") {
+      // MASKING: a deny-classified field's value never leaves the projector - not here, not in
+      // a delta, not in a log line. The element itself stays (empty and hidden are different
+      // facts) and its handle is announced in masked[], which is how the model learns the field
+      // exists and is off limits.
+      if (policy !== "deny") { if (rec.value != null && rec.value !== "") el.value = trimText(rec.value, 200); }
+      if (rec.placeholder && !rec.value) el.placeholder = policy === "deny" ? DP.redactDigits(trimText(rec.placeholder, 80)) : trimText(rec.placeholder, 80);
+      if (rec.required) el.required = true;
+    }
+    if (kind === "s") {
+      if (policy !== "deny" && rec.value != null && rec.value !== "") el.value = trimText(rec.value, 120);
+      // Options are withheld on a deny select for the same reason its value is: the option
+      // labels of a "pay from account" dropdown ARE the account numbers. Withholding the value
+      // while listing every option was masking in name only. The count still ships, so the
+      // model can see a choice exists and report that it cannot make it.
+      if (Array.isArray(rec.options) && rec.options.length) {
+        if (policy === "deny") {
+          el.optionsWithheld = rec.options.length;
+        } else {
+          el.options = rec.options.slice(0, 30).map(function (o) { return trimText(o && (o.label != null ? o.label : o.value), 60); });
+          if (rec.options.length > 30) el.optionsTruncated = rec.options.length - 30;
+        }
+      }
+    }
+    if (kind === "c") el.checked = !!rec.checked;
+    if (ACTIONABLE[kind] === 1) el.enabled = !rec.disabled;
+    if (rec.expanded != null && kind !== "i") el.expanded = !!rec.expanded;
+    return el;
+  }
+
+  /* ============================ projection ============================ */
+
+  var DEFAULT_MAX_ELEMENTS = 150;
+  var DEFAULT_MAX_MESSAGES = 20;
+
+  // project(records, page, opts, prev) -> { snapshot, registry, hash, bindings }
+  //   records: node records from L1 (order irrelevant - ordering is ours)
+  //   page:    { url, title }
+  //   opts:    { maxElements?, maxMessages?, includeInert? }
+  //   prev:    { registry, revision, hash } from the previous projection, or null for the first
+  //
+  // The registry rides OUTSIDE the snapshot: the snapshot is what the model sees, the registry
+  // is what the client keeps. Never send the registry to the model - it carries fingerprints,
+  // and fingerprints carry field names the masking rules may have hidden.
+  DP.project = function (records, page, opts, prev) {
+    opts = opts || {};
+    var maxEl = opts.maxElements >= 1 ? opts.maxElements : DEFAULT_MAX_ELEMENTS;
+    var maxMsg = opts.maxMessages >= 1 ? opts.maxMessages : DEFAULT_MAX_MESSAGES;
+    var prevReg = prev && prev.registry ? prev.registry : DP.newRegistry(1);
+
+    // 1. include + order (deterministically) over ALL candidates, then truncate.
+    var included = [];
+    for (var i = 0; i < (records || []).length; i++) {
+      var rec = records[i];
+      if (rec && typeof rec === "object" && DP.includeRec(rec, opts)) included.push(rec);
+    }
+    included = DP.orderRecords(included);
+
+    var msgs = [], els = [];
+    for (var j = 0; j < included.length; j++) {
+      (DP.kindOf(included[j]) === "m" ? msgs : els).push(included[j]);
+    }
+
+    var truncated = null;
+    if (els.length > maxEl) { truncated = truncated || {}; truncated.elements = els.length - maxEl; els = els.slice(0, maxEl); }
+    if (msgs.length > maxMsg) { truncated = truncated || {}; truncated.messages = msgs.length - maxMsg; msgs = msgs.slice(0, maxMsg); }
+    if (truncated) truncated.reason = "cap";
+
+    // 2. mint handles over the SURVIVING records (elements first, then messages, one counter
+    //    space) so a capped-away record spends no handle.
+    var mint = DP.mintHandles(els.concat(msgs), prevReg);
+    var registry = mint.registry;
+
+    // 3. emit.
+    //
+    // `bindings` pairs each EMITTED handle with the record it came from. It is how L2 binds a
+    // handle to a live element without recomputing the include/order/mint chain - a second
+    // producer of that ordering is exactly the two-writers-drift shape, and it would drift
+    // silently because both copies would look right in isolation. It never enters the snapshot
+    // (the record carries locator metadata masking may have hidden) and never enters the hash.
+    var policy = {}, masked = [], elements = [], bindings = [];
+    for (var e = 0; e < els.length; e++) {
+      var pol = DP.policyOf(els[e]);
+      var h = mint.handles[e];
+      elements.push(emitElement(els[e], h, pol));
+      bindings.push({ h: h, rec: els[e], policy: pol });
+      if (pol !== "allow") policy[h] = pol;
+      var kind = DP.kindOf(els[e]);
+      if (pol === "deny" && (kind === "i" || kind === "s") && els[e].value != null && els[e].value !== "") masked.push(h);
+    }
+
+    var seenMsg = {}, messages = [];
+    for (var m = 0; m < msgs.length; m++) {
+      var mt = str(msgs[m].msgType) || (str(msgs[m].role).toLowerCase() === "alert" ? "alert" : "status");
+      var text = trimText(msgs[m].text, 300);
+      var dk = mt + "|" + text;
+      if (seenMsg[dk]) continue;               // exact duplicates carry no extra signal
+      seenMsg[dk] = 1;
+      var mh = mint.handles[els.length + m];
+      messages.push({ h: mh, type: mt, text: text });
+      bindings.push({ h: mh, rec: msgs[m], policy: "allow" });
+    }
+
+    // 4. landmarks: unique top-level groups in rank order; text = the group's first heading.
+    var landmarks = [], seenG = {};
+    for (var g = 0; g < els.concat(msgs).length; g++) {
+      var r2 = g < els.length ? els[g] : msgs[g - els.length];
+      var gname = Array.isArray(r2.groupPath) && r2.groupPath.length ? str(r2.groupPath[0]) : "";
+      if (!gname || seenG[gname]) continue;
+      seenG[gname] = 1;
+      var lm = { role: gname };
+      for (var hh = 0; hh < els.length; hh++) {
+        if (DP.kindOf(els[hh]) === "h" && Array.isArray(els[hh].groupPath) && str(els[hh].groupPath[0]) === gname) {
+          lm.text = DP.accName(els[hh]); break;
+        }
+      }
+      landmarks.push(lm);
+    }
+
+    // 5. hash EVERYTHING the payload carries, then bump r only when it really changed.
+    //    `page` is in the hash: url and title are part of the payload, so leaving them out let a
+    //    title change ship a different snapshot under an unchanged revision - and a client that
+    //    caches by revision would keep serving the old one.
+    // UNEXPLORED: regions L1 reached but could not walk into - closed/open shadow roots, custom
+    // elements. Reported for the same reason `truncated` is: a projection that silently omits
+    // part of the page reads to the model as "that is everything", which is how an agent
+    // concludes a control does not exist and starts inventing a workaround. L1 counts them; L0
+    // only decides whether the counts are worth carrying, so it stays pure.
+    var unexplored = null;
+    if (page && page.unexplored) {
+      var uk = ["shadowRoots", "customElements"], ui;
+      for (ui = 0; ui < uk.length; ui++) {
+        var uv = page.unexplored[uk[ui]] | 0;
+        if (uv > 0) { unexplored = unexplored || {}; unexplored[uk[ui]] = uv; }
+      }
+    }
+
+    var body = {
+      page: { url: trimText(page && page.url, 300), title: trimText(page && page.title, 120) },
+      landmarks: landmarks, elements: elements, messages: messages, policy: policy, masked: masked,
+    };
+    if (truncated) body.truncated = truncated;
+    // In the HASH, so a page that grows a shadow root bumps the revision instead of changing
+    // what the model is looking at under an unchanged one.
+    if (unexplored) body.unexplored = unexplored;
+    var hash = DP.hash(body);
+    var revision;
+    // `prev` is normally the previous project() RESULT, whose revision lives on the snapshot;
+    // a hand-built {registry, revision, hash} (the epoch-bump path) carries it top-level.
+    var prevRevStr = prev ? (prev.revision != null ? prev.revision
+      : (prev.snapshot && prev.snapshot.page ? prev.snapshot.page.revision : null)) : null;
+    var prevRev = DP.parseRevision(prevRevStr);
+    if (prev && prev.hash === hash && prevRev && prevRev.epoch === registry.epoch) {
+      revision = prevRevStr;
+    } else if (prevRev && prevRev.epoch === registry.epoch) {
+      revision = "e" + registry.epoch + ".r" + (prevRev.r + 1);
+    } else {
+      revision = "e" + registry.epoch + ".r1";
+    }
+
+    var snapshot = {
+      page: { url: trimText(page && page.url, 300), title: trimText(page && page.title, 120), revision: revision },
+      landmarks: landmarks,
+      elements: elements,
+      messages: messages,
+    };
+    if (truncated) snapshot.truncated = truncated;   // NEVER truncate silently - an unreported
+    if (unexplored) snapshot.unexplored = unexplored;          // cap reads as "that is the whole page",
+    if (Object.keys(policy).length) snapshot.policy = policy;  // and so does an unreported shadow root
+    if (masked.length) snapshot.masked = masked;
+
+    return { snapshot: snapshot, registry: registry, hash: hash, bindings: bindings };
+  };
+
+  /* ============================ deltas ============================ */
+
+  function indexByHandle(snap) {
+    var map = {};
+    var i;
+    for (i = 0; i < snap.elements.length; i++) map[snap.elements[i].h] = snap.elements[i];
+    for (i = 0; i < snap.messages.length; i++) map[snap.messages[i].h] = snap.messages[i];
+    return map;
+  }
+
+  // diff(prevSnapshot, nextSnapshot) -> delta, or { full: nextSnapshot } when the epochs differ
+  // (a delta over an epoch boundary would describe changes to handles that no longer exist).
+  // A delta is only ever emitted against the immediately preceding revision; the CLIENT enforces
+  // that (REVISION_GAP -> ask for a full snapshot) - this function just refuses the epoch case.
+  DP.diff = function (prevSnap, nextSnap) {
+    var pe = DP.parseRevision(prevSnap.page.revision), ne = DP.parseRevision(nextSnap.page.revision);
+    if (!pe || !ne || pe.epoch !== ne.epoch) return { full: nextSnap };
+    var prevMap = indexByHandle(prevSnap), nextMap = indexByHandle(nextSnap);
+    var changed = [], removed = [], added = [];
+    var h;
+    for (h in prevMap) { if (!nextMap[h]) removed.push(h); }
+    removed.sort();
+    // added in NEXT order (elements then messages), so the model reads them in reading order.
+    var nextAll = nextSnap.elements.concat(nextSnap.messages);
+    for (var i = 0; i < nextAll.length; i++) {
+      h = nextAll[i].h;
+      if (!prevMap[h]) { added.push(nextAll[i]); continue; }
+      var was = prevMap[h], is = nextAll[i];
+      var ch = null, k;
+      for (k in is) {
+        if (k === "h") continue;
+        if (stableStringify(is[k]) !== stableStringify(was[k])) { ch = ch || { h: h }; ch[k] = is[k]; }
+      }
+      for (k in was) {
+        if (k === "h" || is[k] !== undefined) continue;
+        ch = ch || { h: h }; ch[k] = null;                 // field disappeared -> explicit null
+      }
+      if (ch) changed.push(ch);
+    }
+
+    var delta = { page_revision: nextSnap.page.revision, changed: changed, removed: removed, added: added };
+
+    // Carry policy and masked forward for every handle the delta introduces or re-labels.
+    // Without this a newly appeared password field arrived in `added` with no policy entry and
+    // no masked entry, so a model reading deltas saw an unrestricted textbox - the snapshot's
+    // safety labels applied only to the round that happened to be a full snapshot.
+    var nextPolicy = nextSnap.policy || {}, prevPolicy = prevSnap.policy || {};
+    var polDelta = {}, polChanged = false, hh;
+    for (hh in nextPolicy) {
+      if (nextPolicy[hh] !== prevPolicy[hh]) { polDelta[hh] = nextPolicy[hh]; polChanged = true; }
+    }
+    for (hh in prevPolicy) {
+      if (!(hh in nextPolicy) && nextMap[hh]) { polDelta[hh] = "allow"; polChanged = true; }
+    }
+    if (polChanged) delta.policy = polDelta;
+
+    var nextMasked = nextSnap.masked || [], prevMasked = prevSnap.masked || [];
+    if (stableStringify(nextMasked.slice().sort()) !== stableStringify(prevMasked.slice().sort())) {
+      delta.masked = nextMasked.slice();
+    }
+    return delta;
+  };
+
+  // Rebuild the handle->object maps a delta implies, for round-trip verification: applying
+  // diff(prev, next) onto prev must yield exactly next's content. This is the test's tool, but
+  // it ships in the module because the client-side delta consumer (phase 4) is the same code.
+  DP.applyDelta = function (prevSnap, delta) {
+    if (delta.full) return { revision: delta.full.page.revision, byHandle: indexByHandle(delta.full) };
+    var map = indexByHandle(prevSnap);
+    var out = {}, h, k;
+    for (h in map) out[h] = map[h];
+    for (var r = 0; r < delta.removed.length; r++) delete out[delta.removed[r]];
+    for (var a = 0; a < delta.added.length; a++) out[delta.added[a].h] = delta.added[a];
+    for (var c = 0; c < delta.changed.length; c++) {
+      var ch = delta.changed[c];
+      var base = {};
+      for (k in out[ch.h]) base[k] = out[ch.h][k];
+      for (k in ch) {
+        if (k === "h") continue;
+        if (ch[k] === null) delete base[k]; else base[k] = ch[k];
+      }
+      out[ch.h] = base;
+    }
+    return { revision: delta.page_revision, byHandle: out };
+  };
+
+  /* ============================ exports ============================ */
+
+  if (typeof module !== "undefined" && module.exports) module.exports = DP;
+  if (root) {
+    root.BWNDOM = DP;
+    if (root.BN) root.BN.domproj = DP;   // when inlined after a BN-CORE region
+  }
+})(typeof window !== "undefined" ? window : null);
+/* BWN-DOM:END */
+/* BWN-DOMC:START | DOM handle protocol L1/L2, PASTE-IDENTICAL with bwn-domcollect.js. Reads window.BWNDOM
+   at load, so it MUST stay after BWN-DOM. Same no-edit rule. */
+/* bwn-domcollect.js -- DOM handle protocol, layers L1 (collector) and L2 (handle registry).
+ *
+ * The browser half. It walks a live DOM into the plain node records bwn-domproj.js (L0) projects,
+ * binds each minted handle to the live element it came from, re-resolves a handle whose element
+ * was replaced by a re-render, and answers the READ-ONLY verbs. Write verbs are declared here and
+ * refused here: this is the read-only release, and a disarmed verb that returns VERB_DISABLED is
+ * how the model learns the capability exists rather than concluding the page has no Save button.
+ * Spec: outputs/specs/2026-08-08-dom-handle-protocol-architecture.md in the vault (phase 3).
+ *
+ * IMPURE ON PURPOSE, and thin for exactly that reason. Everything a hand-written DOM shim cannot
+ * answer - layout, cascade, stacking, hit-testing - is asked of the real browser HERE and nowhere
+ * else, so L0 stays unit-testable and this file's own headless tests never pretend to have
+ * measured a rendered page. What the headless suite does and does not prove is written down in
+ * scripts/test-domcollect.js and in docs/dom-handle-protocol.md; the rest is a live-browser gate.
+ *
+ * Loaded three ways, like bwn-domproj.js:
+ *   1. scripts/test-domcollect.js  ->  require() the real file, against a DOM shim
+ *   2. SWA tool pages, inlined by sync-theme.js into a BWN-DOMC region (must follow BWN-DOM)
+ *   3. bwn-suite-core.user.js, as a paste-identical block (phase 4 - @grant none, page context)
+ *
+ * NEVER READS: localStorage, sessionStorage, cookies, or data-* in bulk. `data-testid` is read by
+ * name, never by sweeping the dataset - a swept dataset is how a bearer token or a client id ends
+ * up in a fingerprint, and a fingerprint is not covered by the masking rules.
+ */
+(function (root) {
+  "use strict";
+
+  var DP = (root && root.BWNDOM)
+    || ((typeof module !== "undefined" && module.exports && typeof require === "function") ? require("./bwn-domproj.js") : null);
+
+  var DC = { VERSION: "0.1.0" };
+
+  DC.ERROR = {
+    STALE: "HANDLE_STALE",
+    AMBIGUOUS: "HANDLE_AMBIGUOUS",
+    POLICY_DENIED: "POLICY_DENIED",
+    REVISION_GAP: "REVISION_GAP",
+    VERB_DISABLED: "VERB_DISABLED",
+    UNKNOWN_VERB: "UNKNOWN_VERB",
+    NO_DOCUMENT: "NO_DOCUMENT",
+  };
+
+  /* ============================ small helpers ============================ */
+
+  function str(v) { return (v == null) ? "" : String(v); }
+  function trimText(v, max) {
+    var out = str(v).replace(/\s+/g, " ").trim();
+    if (max && out.length > max) out = out.slice(0, max);
+    return out;
+  }
+  function attr(el, name) {
+    try { return el.getAttribute ? el.getAttribute(name) : null; } catch (e) { return null; }
+  }
+  function lower(v) { return str(v).toLowerCase(); }
+
+  /* ============================ the walk ============================ */
+
+  // Never entered at all. `svg` and `template` are pruned WITH their subtrees: svg internals are
+  // hundreds of nodes carrying no accessible control, and a template's contents are not rendered.
+  var PRUNE_TAGS = {
+    script: 1, style: 1, noscript: 1, template: 1, svg: 1, head: 1, link: 1, meta: 1,
+    iframe: 1, object: 1, embed: 1, datalist: 1,
+  };
+
+  // Landmark containers open a group. The group NAME prefers the accessible label, because a page
+  // with three <section>s all named "region" collapses into one landmark and the model loses the
+  // only structure it had.
+  var LANDMARK_TAGS = {
+    main: "main", nav: "nav", header: "banner", footer: "contentinfo",
+    aside: "complementary", form: "form", section: "region", dialog: "dialog",
+  };
+  var LANDMARK_ROLES = {
+    main: 1, navigation: 1, banner: 1, contentinfo: 1, complementary: 1, form: 1,
+    region: 1, search: 1, dialog: 1, alertdialog: 1,
+  };
+
+  // Kinds whose own text is their name. A dialog is deliberately NOT here: its textContent is the
+  // whole modal body, which would put the entire page back into the payload one level down.
+  var TEXT_KINDS = { b: 1, a: 1, h: 1, m: 1 };
+
+  // Kinds that are leaves for the purposes of the walk. Descending into a button to find the span
+  // inside it produces two records for one control; descending into a table or a dialog is
+  // mandatory, because the controls the model needs live inside them.
+  var LEAF_KINDS = { b: 1, a: 1, h: 1, m: 1, s: 1, c: 1, i: 1 };
+
+  function accessibleLabelOf(el, doc) {
+    var lb = attr(el, "aria-labelledby");
+    if (lb) {
+      var parts = [], ids = lb.split(/\s+/), i, ref;
+      for (i = 0; i < ids.length; i++) {
+        ref = doc.getElementById ? doc.getElementById(ids[i]) : null;
+        if (ref) parts.push(trimText(ref.textContent, 120));
+      }
+      var joined = trimText(parts.join(" "), 120);
+      if (joined) return joined;            // resolved here so L0 stays DOM-free
+    }
+    return trimText(attr(el, "aria-label"), 120);
+  }
+
+  function boundLabelText(el, doc) {
+    // The real DOM gives HTMLInputElement.labels; the shim path and exotic elements fall back to
+    // label[for=id] and then an ancestor <label>.
+    try {
+      if (el.labels && el.labels.length) return trimText(el.labels[0].textContent, 120);
+    } catch (e) { /* not a labelable element */ }
+    var id = attr(el, "id");
+    if (id && doc.querySelector) {
+      var lab = null;
+      try { lab = doc.querySelector('label[for="' + String(id).replace(/"/g, '\\"') + '"]'); } catch (e2) { lab = null; }
+      if (lab) return trimText(lab.textContent, 120);
+    }
+    if (el.closest) {
+      var anc = null;
+      try { anc = el.closest("label"); } catch (e3) { anc = null; }
+      if (anc) return trimText(anc.textContent, 120);
+    }
+    return "";
+  }
+
+  var ERROR_CLASS_RE = /(^|[\s_-])(error|invalid|danger|validation)([\s_-]|$)/i;
+
+  function msgTypeOf(el, role) {
+    if (role === "alert") return "alert";
+    var live = lower(attr(el, "aria-live"));
+    if (role === "status" || live === "polite" || live === "assertive") return "status";
+    var cls = str(el.className && el.className.baseVal != null ? el.className.baseVal : el.className);
+    if (ERROR_CLASS_RE.test(cls)) {
+      // A class alone is weak evidence. Require it to read like a message rather than a wrapper:
+      // short text, and not a container full of other elements. An "error-boundary" div wrapping
+      // half the page is not a message and must not be projected as one.
+      var t = trimText(el.textContent, 400);
+      if (t && t.length <= 300) return "error";
+    }
+    return null;
+  }
+
+  function optionsOf(el) {
+    var out = [], opts = el.options, i;
+    if (!opts) return null;
+    for (i = 0; i < opts.length; i++) {
+      out.push({ value: str(opts[i].value), label: trimText(opts[i].label || opts[i].textContent, 60) });
+    }
+    return out.length ? out : null;
+  }
+
+  function tableShapeOf(el) {
+    var rows = [], i;
+    try { rows = el.querySelectorAll ? el.querySelectorAll("tr") : []; } catch (e) { rows = []; }
+    var nRows = rows.length || 0;
+    var headers = [], nCols = 0;
+    var ths = [];
+    try { ths = el.querySelectorAll ? el.querySelectorAll("th") : []; } catch (e2) { ths = []; }
+    for (i = 0; i < ths.length && i < 20; i++) headers.push(trimText(ths[i].textContent, 40));
+    if (nRows) {
+      var first = rows[0];
+      var cells = [];
+      try { cells = first.querySelectorAll ? first.querySelectorAll("td,th") : []; } catch (e3) { cells = []; }
+      nCols = cells.length;
+    }
+    return { rows: nRows, cols: nCols, headers: headers };
+  }
+
+  function rectOf(el) {
+    var r = null;
+    try { r = el.getBoundingClientRect ? el.getBoundingClientRect() : null; } catch (e) { r = null; }
+    if (!r) return null;
+    return { x: r.left || 0, y: r.top || 0, w: r.width || 0, h: r.height || 0 };
+  }
+
+  // VISIBILITY IS COMPUTED. `el.hidden` is never read, anywhere in this file, on purpose: a
+  // class-level `display:flex` beats the UA `[hidden]{display:none}` rule, so an element carrying
+  // the attribute can be plainly on screen. The projection reports what the operator SEES - which
+  // means such an element is visible:true, not visible:false. Reporting it hidden would hide a
+  // real, clickable modal from the agent, which is the same failure wearing the other hat.
+  DC.isVisible = function (el, rect, win) {
+    if (typeof el.checkVisibility === "function") {
+      var ok;
+      try { ok = el.checkVisibility({ checkOpacity: true, checkVisibilityCSS: true }); }
+      catch (e) { ok = el.checkVisibility(); }
+      if (!ok) return false;
+    } else if (win && typeof win.getComputedStyle === "function") {
+      var cs = win.getComputedStyle(el);
+      if (!cs) return false;
+      if (cs.display === "none" || cs.visibility === "hidden" || cs.visibility === "collapse") return false;
+      if (cs.opacity !== "" && parseFloat(cs.opacity) === 0) return false;
+    } else {
+      return false;                 // no way to compute it: refuse rather than guess visible
+    }
+    return !!rect && rect.w > 0 && rect.h > 0;
+  };
+
+  // Interactability, with an explicit "could not test" answer.
+  //
+  // The topmost check needs document.elementFromPoint, which only answers for points inside the
+  // VIEWPORT and returns null outside it. Rows below the fold - the 219-card board, the queue's
+  // 30th row - have centres far outside it, and reading that null as "obscured" would report every
+  // one of them non-interactable and drop them from the projection entirely. A miss is therefore
+  // ok:true, tested:false, and the record SAYS it was never tested; L3 re-tests at execution time,
+  // when it can scroll first. The viewport bounds check above the call is the same answer reached
+  // without paying for thousands of hit tests on a long board; the null guard is the correctness
+  // half and must not be folded into it.
+  DC.interactabilityOf = function (el, rect, win, doc) {
+    if (win && typeof win.getComputedStyle === "function") {
+      var cs = win.getComputedStyle(el);
+      if (cs && cs.pointerEvents === "none") return { ok: false, tested: true };
+    }
+    if (el.closest) {
+      var inert = null;
+      try { inert = el.closest("[inert]"); } catch (e) { inert = null; }
+      if (inert) return { ok: false, tested: true };
+    }
+    if (!rect || !doc || typeof doc.elementFromPoint !== "function") return { ok: true, tested: false };
+    var cx = rect.x + rect.w / 2, cy = rect.y + rect.h / 2;
+    var vw = (win && win.innerWidth) || 0, vh = (win && win.innerHeight) || 0;
+    if (!vw || !vh || cx < 0 || cy < 0 || cx >= vw || cy >= vh) return { ok: true, tested: false };
+    var top = doc.elementFromPoint(cx, cy);
+    if (!top) return { ok: true, tested: false };
+    if (top === el) return { ok: true, tested: true };
+    if (el.contains && el.contains(top)) return { ok: true, tested: true };   // own child took the hit
+    if (top.contains && top.contains(el)) return { ok: true, tested: true };  // wrapping <label>
+    return { ok: false, tested: true };
+  };
+
+  // collect(doc, win, opts) -> { records, page }
+  //
+  // opts: { root?: Element, maxNodes?: number }
+  DC.collect = function (doc, win, opts) {
+    opts = opts || {};
+    if (!doc) return { records: [], page: { url: "", title: "" } };
+    var start = opts.root || doc.body || doc.documentElement;
+    var records = [];
+    var domIndex = 0;
+    var maxNodes = opts.maxNodes >= 1 ? opts.maxNodes : 20000;
+    var nodes = 0;
+    // Regions the walk reached but could not enter. This walk does not cross shadow boundaries,
+    // and it never will for a CLOSED root - `el.shadowRoot` reads null for those exactly as it
+    // does for an element with no root at all, which is why custom-element tags are counted
+    // separately: they are the usual carrier of a closed root, so "0 open roots" cannot quietly
+    // mean "every root is closed". The counts ride in the payload; see the note in L0.
+    var unexplored = { shadowRoots: 0, customElements: 0 };
+
+    function visit(el, groupPath) {
+      if (!el || el.nodeType !== 1) return;
+      if (++nodes > maxNodes) return;
+      var tag = lower(el.tagName);
+      if (PRUNE_TAGS[tag] === 1) return;
+      if (lower(attr(el, "aria-hidden")) === "true") return;   // subtree too: it is hidden from AT
+
+      var idx = domIndex++;
+      try { if (el.shadowRoot) unexplored.shadowRoots++; } catch (e) { /* not a host */ }
+      if (tag.indexOf("-") > 0) unexplored.customElements++;
+      var role = lower(attr(el, "role"));
+      var type = lower(attr(el, "type"));
+      var href = attr(el, "href");
+      var level = (tag === "h1" ? 1 : tag === "h2" ? 2 : tag === "h3" ? 3
+        : tag === "h4" ? 4 : tag === "h5" ? 5 : tag === "h6" ? 6 : null);
+      if (level == null) {
+        var al = attr(el, "aria-level");
+        if (al != null && al !== "") level = parseInt(al, 10) || null;
+      }
+      var msgType = msgTypeOf(el, role);
+
+      // Cheap candidacy probe first. Everything below this line costs layout, and a 219-card
+      // board has thousands of nodes that are never projected.
+      var probe = { tag: tag, type: type, role: role, href: href, level: level, msgType: msgType };
+      var kind = DP.kindOf(probe);
+
+      var childGroup = groupPath;
+      if (LANDMARK_TAGS[tag] || LANDMARK_ROLES[role] === 1) {
+        var gname = accessibleLabelOf(el, doc) || LANDMARK_TAGS[tag] || role || tag;
+        childGroup = groupPath.concat([trimText(gname, 60)]);
+      }
+
+      if (kind) {
+        var rect = rectOf(el);
+        var visible = DC.isVisible(el, rect, win);
+        var inter = DC.interactabilityOf(el, rect, win, doc);
+        var ariaLabel = accessibleLabelOf(el, doc);
+        var labelText = (kind === "i" || kind === "s" || kind === "c") ? boundLabelText(el, doc) : "";
+        var rec = {
+          tag: tag, type: type, role: role,
+          ariaLabel: ariaLabel,
+          labelText: labelText,
+          placeholder: trimText(attr(el, "placeholder"), 120),
+          title: trimText(attr(el, "title"), 120),
+          text: TEXT_KINDS[kind] === 1 ? trimText(el.textContent, 300) : "",
+          value: (kind === "i" || kind === "s" || kind === "c") ? str(el.value) : "",
+          name: attr(el, "name"),
+          id: attr(el, "id"),
+          testid: attr(el, "data-testid"),          // BY NAME. The dataset is never swept.
+          href: href,
+          external: false,
+          download: attr(el, "download") != null,
+          autocomplete: attr(el, "autocomplete"),
+          disabled: !!el.disabled || lower(attr(el, "aria-disabled")) === "true",
+          checked: (kind === "c") ? (el.checked != null ? !!el.checked : lower(attr(el, "aria-checked")) === "true") : null,
+          required: !!el.required || lower(attr(el, "aria-required")) === "true",
+          expanded: attr(el, "aria-expanded") == null ? null : lower(attr(el, "aria-expanded")) === "true",
+          msgType: msgType,
+          visible: visible,
+          interactable: inter.ok,
+          obscuredTested: inter.tested,             // honesty flag; L0 ignores unknown fields
+          rect: rect,
+          domIndex: idx,
+          depth: groupPath.length,
+          groupPath: groupPath.slice(),
+          level: level,
+        };
+        if (kind === "a" && href) {
+          var origin = (win && win.location && win.location.origin) || "";
+          try {
+            var abs = el.href != null ? String(el.href) : String(href);
+            rec.external = /^[a-z]+:\/\//i.test(abs) && origin !== "" && abs.indexOf(origin) !== 0;
+          } catch (e) { rec.external = false; }
+        }
+        if (kind === "s") rec.options = optionsOf(el);
+        if (kind === "t") rec.table = tableShapeOf(el);
+        rec._el = el;                                // L2's binding. NEVER serialized - see below.
+        records.push(rec);
+        if (LEAF_KINDS[kind] === 1) return;          // a button's inner span is not a second control
+      }
+
+      var kids = el.children || [];
+      for (var i = 0; i < kids.length; i++) visit(kids[i], childGroup);
+    }
+
+    visit(start, []);
+
+    // The query string is dropped from the projected url. Ids and tokens ride in query params on
+    // these apps, and a url is the one field that goes to the model verbatim. Epoch detection
+    // still uses the FULL href internally, where it never leaves the browser.
+    var loc = (win && win.location) || {};
+    var url = str(loc.pathname) + str(loc.hash);
+    return {
+      records: records,
+      page: { url: url || str(loc.href), title: trimText(doc.title, 120), unexplored: unexplored },
+    };
+  };
+
+  /* ============================ L2: session + handle binding ============================ */
+
+  // A session is the client-side state the model never sees: the registry, the live element for
+  // each handle, and the revision trail. `byHandle[h].rec` carries raw values - including the ones
+  // masking withheld from the payload - so it is never logged, never posted, never serialized.
+  DC.createSession = function (o) {
+    o = o || {};
+    var win = o.window || root;
+    var doc = o.document || (win && win.document) || null;
+    return {
+      doc: doc, win: win,
+      opts: { maxElements: o.maxElements, maxMessages: o.maxMessages, includeInert: !!o.includeInert, root: o.root },
+      registry: DP.newRegistry(1),
+      prev: null,           // previous project() result, handed straight back to project()
+      snapshot: null,
+      byHandle: {},
+      lastHref: null,
+      epochChanged: false,
+      mutations: 0,
+      _quiet: null,
+      _obs: null,
+    };
+  };
+
+  function hrefOf(s) {
+    return (s.win && s.win.location) ? str(s.win.location.href) : "";
+  }
+
+  // Full re-projection. Bumps the epoch first when the location changed, which invalidates every
+  // handle from the old page before a single one can be rebound to a same-looking element on the
+  // new one.
+  DC.refresh = function (s, o) {
+    if (!s.doc) return { ok: false, code: DC.ERROR.NO_DOCUMENT };
+    o = o || {};
+    var href = hrefOf(s);
+    s.epochChanged = false;
+    if (s.lastHref !== null && href !== s.lastHref) {
+      s.registry = DP.newEpoch(s.registry);
+      s.prev = { registry: s.registry, revision: null, hash: null };
+      s.snapshot = null;
+      s.byHandle = {};
+      s.epochChanged = true;
+    }
+    s.lastHref = href;
+
+    var projOpts = {
+      maxElements: s.opts.maxElements, maxMessages: s.opts.maxMessages,
+      includeInert: o.includeInert != null ? !!o.includeInert : s.opts.includeInert,
+    };
+    var got = DC.collect(s.doc, s.win, { root: s.opts.root });
+    var res = DP.project(got.records, got.page, projOpts, s.prev);
+
+    s.registry = res.registry;
+    s.prev = res;
+    s.byHandle = {};
+    for (var i = 0; i < res.bindings.length; i++) {
+      var b = res.bindings[i];
+      var entry = res.registry.byHandle[b.h];
+      s.byHandle[b.h] = {
+        el: b.rec._el || null,
+        rec: b.rec,
+        policy: b.policy,
+        // The fingerprint is READ off the registry entry the minting pass stored, not recomputed.
+        // One producer: a second call site computing the same key from the same input is how a
+        // 217-row board opened at 221.
+        fp: entry ? entry.baseFp : null,
+      };
+    }
+    var prevSnap = s.snapshot;
+    s.snapshot = res.snapshot;
+    return { ok: true, snapshot: res.snapshot, prevSnapshot: prevSnap, epochChanged: s.epochChanged };
+  };
+
+  // Snapshot, or a delta when the caller can prove which revision it is holding.
+  //
+  // `since` must be the revision of the IMMEDIATELY preceding projection. Anything else is a gap
+  // over an unknown base: a delta computed against it would describe changes the caller cannot
+  // apply, so the full snapshot ships instead and the gap is reported rather than papered over.
+  DC.snapshotOrDelta = function (s, since, o) {
+    var prevSnap = s.snapshot;
+    var r = DC.refresh(s, o);
+    if (!r.ok) return r;
+    if (!since) return { ok: true, revision: r.snapshot.page.revision, snapshot: r.snapshot };
+    if (!prevSnap || prevSnap.page.revision !== since) {
+      return { ok: true, code: DC.ERROR.REVISION_GAP, revision: r.snapshot.page.revision, snapshot: r.snapshot };
+    }
+    var d = DP.diff(prevSnap, r.snapshot);
+    if (d.full) return { ok: true, revision: d.full.page.revision, snapshot: d.full, epochChanged: true };
+    return { ok: true, revision: d.page_revision, delta: d };
+  };
+
+  // Handle -> live element, in two halves. The pure half (epoch, unknown, ambiguous) is L0's and
+  // is asked first. The browser half is: is the bound element still in the document, and if not,
+  // does its fingerprint still match exactly one element on the page?
+  DC.resolve = function (s, handle, fromRevision) {
+    var pure = DP.resolve(s.registry, handle, fromRevision);
+    if (!pure.ok) return pure;
+    var bound = s.byHandle[handle];
+    if (!bound) return { ok: false, code: DC.ERROR.STALE, recovery: "refresh_snapshot" };
+    if (bound.el && bound.el.isConnected) return { ok: true, el: bound.el, rec: bound.rec, policy: bound.policy };
+
+    // Re-render replaced the node. Re-resolve by the fingerprint that minted the handle.
+    var got = DC.collect(s.doc, s.win, { root: s.opts.root });
+    var matches = [], i;
+    for (i = 0; i < got.records.length; i++) {
+      if (!DP.includeRec(got.records[i], s.opts)) continue;
+      if (DP.fingerprint(got.records[i]) === bound.fp) matches.push(got.records[i]);
+    }
+    if (matches.length === 0) return { ok: false, code: DC.ERROR.STALE, recovery: "refresh_snapshot" };
+    if (matches.length > 1) {
+      // NEVER pick one. These matches carry no handles yet (they are from an unprojected
+      // collection), so the honest answer names the count and sends the caller back for a
+      // snapshot in which the collision is minted and labelled.
+      return { ok: false, code: DC.ERROR.AMBIGUOUS, candidates: [], matched: matches.length, recovery: "refresh_snapshot" };
+    }
+    bound.el = matches[0]._el;
+    bound.rec = matches[0];
+    return { ok: true, el: bound.el, rec: bound.rec, policy: bound.policy, rebound: true };
+  };
+
+  /* ============================ verbs ============================ */
+
+  // The closed verb set. `readonly:false` entries exist so the model is told the verb exists and
+  // is disarmed - deleting them would read as "this page cannot be acted on" and send the agent
+  // looking for a workaround, which is the behaviour a disarmed release is trying to prevent.
+  DC.VERBS = {
+    inspect: { readonly: true },
+    extract: { readonly: true },
+    refresh_snapshot: { readonly: true },
+    click: { readonly: false },
+    fill: { readonly: false },
+    select: { readonly: false },
+    check: { readonly: false },
+    press: { readonly: false },
+    wait_for: { readonly: false },
+    scroll: { readonly: false },
+  };
+
+  var EXTRACT_MAX_CHARS = 4000;
+  var EXTRACT_MAX_ROWS = 50;
+  var EXTRACT_MAX_COLS = 12;
+
+  function extractTable(el) {
+    var rows = [];
+    var trs = [];
+    try { trs = el.querySelectorAll ? el.querySelectorAll("tr") : []; } catch (e) { trs = []; }
+    for (var i = 0; i < trs.length && i < EXTRACT_MAX_ROWS; i++) {
+      var cells = [];
+      try { cells = trs[i].querySelectorAll ? trs[i].querySelectorAll("td,th") : []; } catch (e2) { cells = []; }
+      var row = [];
+      for (var j = 0; j < cells.length && j < EXTRACT_MAX_COLS; j++) row.push(trimText(cells[j].textContent, 120));
+      rows.push(row);
+    }
+    var out = { rows: rows };
+    if (trs.length > EXTRACT_MAX_ROWS) out.rowsTruncated = trs.length - EXTRACT_MAX_ROWS;
+    return out;
+  }
+
+  // act(session, req) -> result. Read-only verbs only in this release.
+  //   req: { verb, handle?, revision?, since?, includeInert? }
+  DC.act = function (s, req) {
+    req = req || {};
+    var verb = str(req.verb);
+    var def = DC.VERBS[verb];
+    if (!def) return { ok: false, code: DC.ERROR.UNKNOWN_VERB, verbs: Object.keys(DC.VERBS) };
+    if (!def.readonly) {
+      return {
+        ok: false, code: DC.ERROR.VERB_DISABLED,
+        recovery: "read-only release: " + verb + " is implemented in a later phase and is disarmed here",
+      };
+    }
+    if (!s.doc) return { ok: false, code: DC.ERROR.NO_DOCUMENT };
+
+    if (verb === "refresh_snapshot") return DC.snapshotOrDelta(s, req.since, { includeInert: req.includeInert });
+
+    if (verb === "inspect") {
+      if (!req.handle) return DC.snapshotOrDelta(s, req.since, { includeInert: req.includeInert });
+      var ri = DC.resolve(s, req.handle, req.revision || (s.snapshot && s.snapshot.page.revision));
+      if (!ri.ok) return ri;
+      var rec = ri.rec, kind = DP.kindOf(rec);
+      var detail = {
+        h: req.handle, kind: kind, role: rec.role || rec.tag, policy: ri.policy,
+        name: ri.policy === "deny" ? DP.redactDigits(DP.accName(rec)) : DP.accName(rec),
+        enabled: !rec.disabled, visible: !!rec.visible, interactable: !!rec.interactable,
+        obscuredTested: !!rec.obscuredTested,
+        groupPath: rec.groupPath || [],
+      };
+      // A deny field's value is withheld here for the same reason it is withheld from the
+      // snapshot. `inspect` would otherwise be the hole in masking: same field, same session,
+      // different verb.
+      if (ri.policy !== "deny" && rec.value != null && rec.value !== "") detail.value = trimText(rec.value, 200);
+      if (ri.policy === "deny") detail.masked = true;
+      return { ok: true, revision: s.snapshot ? s.snapshot.page.revision : null, detail: detail };
+    }
+
+    if (verb === "extract") {
+      if (!req.handle) return { ok: false, code: DC.ERROR.UNKNOWN_VERB, recovery: "extract requires a handle" };
+      var re = DC.resolve(s, req.handle, req.revision || (s.snapshot && s.snapshot.page.revision));
+      if (!re.ok) return re;
+      if (re.policy === "deny") {
+        return { ok: false, code: DC.ERROR.POLICY_DENIED, recovery: null, reason: "handle is policy-denied; its content never leaves the page" };
+      }
+      var k = DP.kindOf(re.rec);
+      var payload = (k === "t")
+        ? extractTable(re.el)
+        : { text: trimText(re.el && re.el.textContent, EXTRACT_MAX_CHARS) };
+      payload.h = req.handle;
+      return { ok: true, revision: s.snapshot ? s.snapshot.page.revision : null, extract: payload };
+    }
+
+    return { ok: false, code: DC.ERROR.UNKNOWN_VERB, verbs: Object.keys(DC.VERBS) };
+  };
+
+  /* ============================ revision-bump watcher ============================ */
+
+  var DEFAULT_QUIET_MS = 250;
+
+  // SET-ONCE TRAILING TIMER, never clear-and-reset.
+  //
+  // A clear-and-reset debounce inside a MutationObserver measurably NEVER fires on a busy SPA -
+  // the next mutation always lands before the window elapses, so the timer is cancelled forever
+  // and the snapshot silently stops refreshing. A stale snapshot the model believes is current is
+  // worse than no snapshot: it acts on a page that has moved. The `if (s._quiet) return` below is
+  // the whole difference and must not be "improved" into a reset.
+  DC.watch = function (s, onChange, quietMs) {
+    if (s._obs) return false;
+    if (!s.win || typeof s.win.MutationObserver !== "function" || !s.doc) return false;
+    var quiet = quietMs >= 1 ? quietMs : DEFAULT_QUIET_MS;
+    var setT = (s.win.setTimeout || setTimeout);
+    s._obs = new s.win.MutationObserver(function () {
+      s.mutations++;
+      if (s._quiet) return;                       // SET ONCE. Do not clearTimeout here. Ever.
+      s._quiet = setT(function () {
+        s._quiet = null;
+        try { onChange(); } catch (e) { /* a consumer throw must not kill the watcher */ }
+      }, quiet);
+    });
+    s._obs.observe(s.doc.body || s.doc, { subtree: true, childList: true, attributes: true, characterData: true });
+    return true;
+  };
+
+  DC.unwatch = function (s) {
+    if (s._obs && s._obs.disconnect) s._obs.disconnect();
+    s._obs = null;
+    if (s._quiet && s.win && s.win.clearTimeout) s.win.clearTimeout(s._quiet);
+    s._quiet = null;
+  };
+
+  /* ============================ exports ============================ */
+
+  if (typeof module !== "undefined" && module.exports) module.exports = DC;
+  if (root) {
+    root.BWNDOMC = DC;
+    if (root.BN) root.BN.domcollect = DC;
+  }
+})(typeof window !== "undefined" ? window : null);
+/* BWN-DOMC:END */
+
+  // ==========================================================================
+  // MODULE: DOM handle protocol responder 1.0  (phase 4, READ-ONLY)
+  // ==========================================================================
+  // Core is the only realm that can do this. It is @grant none, so it runs in PAGE context and
+  // sees the real window and the real DOM; the AI script is GM-granted and lives in the
+  // Tampermonkey sandbox, where the page's globals are invisible to it. So the collector lives
+  // here and the transport lives there, and they speak only over document CustomEvents.
+  //
+  // BUS CONTRACT (new - bwn:cmd was fire-and-forget with no reply channel):
+  //   request   bwn:cmd  { id:'domp:snapshot'|'domp:act', rid:'<unique>', ... }
+  //   response  bwn:evt  { id:'domp:result',              rid:'<same>', result:{...} }
+  // The caller resolves on the rid match and gives up on its own bounded timeout. Every detail
+  // that crosses is plain JSON: the session holds live element references and raw field values -
+  // including ones masking withheld - and none of that is ever put on the bus.
+  bwnBoot('domHandle', BWN_MODULES.domHandle, function () {
+    'use strict';
+
+    var DC = window.BWNDOMC, DP = window.BWNDOM;
+    if (!DC || !DP) { BWN.beat('domHandle', 'fail', 'BWN-DOM / BWN-DOMC block missing'); return; }
+
+    // A SECOND read-only gate, deliberately redundant with the one inside DC.act. That one is a
+    // property of the collector; this one is a property of what Umbrava is willing to expose over
+    // the bus. When phase 5 arms the write verbs it must be a deliberate edit HERE too, rather
+    // than write access arriving on a live FSM as a side effect of a change in another file.
+    var BUS_VERBS = { inspect: 1, extract: 1, refresh_snapshot: 1 };
+
+    var session = null;
+    function ensure() {
+      if (!session) session = DC.createSession({ window: window, document: document });
+      return session;
+    }
+
+    function reply(rid, result) {
+      try {
+        document.dispatchEvent(new CustomEvent('bwn:evt', { detail: { id: 'domp:result', rid: rid, result: result } }));
+      } catch (e) { /* a failed reply is indistinguishable from silence; the caller times out */ }
+    }
+
+    document.addEventListener('bwn:cmd', BWN.guard(function (e) {
+      var d = e && e.detail;
+      if (!d || (d.id !== 'domp:snapshot' && d.id !== 'domp:act')) return;
+      if (!d.rid) return;                       // unaddressed request: nothing to answer to
+      var verb = (d.id === 'domp:snapshot') ? 'refresh_snapshot' : String(d.verb || '');
+      if (BUS_VERBS[verb] !== 1) {
+        reply(d.rid, { ok: false, code: 'VERB_DISABLED',
+          recovery: 'read-only release: ' + (verb || '(none)') + ' is not exposed over the bus' });
+        return;
+      }
+      var res;
+      try {
+        res = DC.act(ensure(), {
+          verb: verb, handle: d.handle, revision: d.revision, since: d.since,
+          includeInert: !!d.includeInert
+        });
+      } catch (x) {
+        // A throw here would leave the caller waiting out its whole timeout for nothing. Answer
+        // with the fault instead - a named failure the model can report beats a silent stall.
+        res = { ok: false, code: 'RESPONDER_THREW', recovery: String((x && x.message) || x) };
+      }
+      reply(d.rid, res);
+    }, 'domHandle:cmd'));
+
+    BWN.beat('domHandle', 'ok', 'read-only responder listening');
   });
 
   // ---- Flush the module queue -------------------------------------------------

@@ -177,9 +177,15 @@ function run() {
   chain = chain.then(function () {
     var T = loadTransport();
     var defs = T.AI_TOOL_DEFS;
-    ok('AI_TOOL_DEFS count = 3', defs.length === 3);
+    // Three data tools + the three READ-ONLY page verbs added by DOM handle protocol phase 4.
+    // The list is pinned rather than counted so a tool arriving by accident - especially a write
+    // verb, which this release does not have - fails here instead of reaching a model.
+    ok('AI_TOOL_DEFS count = 6', defs.length === 6);
     var names = defs.map(function (d) { return d.name; }).sort();
-    eq('AI_TOOL_DEFS names', names, ['getJobNotes', 'getLocationWorkOrders', 'getWorkOrder']);
+    eq('AI_TOOL_DEFS names', names, ['getJobNotes', 'getLocationWorkOrders', 'getWorkOrder', 'page_extract', 'page_inspect', 'page_snapshot']);
+    ok('no write verb is exposed as a tool', !names.some(function (n) {
+      return /^page_(click|fill|select|check|press|scroll|wait_for)$/.test(n);
+    }));
     ok('every def matches a registry key', defs.every(function (d) { return typeof T.AI_TOOLS[d.name] === 'function'; }));
     ok('every def has object input_schema + required[]', defs.every(function (d) {
       return d.input_schema && d.input_schema.type === 'object' && Array.isArray(d.input_schema.required);
@@ -320,7 +326,7 @@ function run() {
       eq('sender end-to-end reaches final', text, 'Final answer from sender.');
       ok('sender initial body task', gm.sent[0].task === 'ask');
       ok('sender initial body prompt', gm.sent[0].prompt === 'what WOs at loc l?');
-      ok('sender initial body carries tools', Array.isArray(gm.sent[0].tools) && gm.sent[0].tools.length === 3);
+      ok('sender initial body carries tools', Array.isArray(gm.sent[0].tools) && gm.sent[0].tools.length === 6);
       ok('sender initial body carries userToken in BODY (SEC-002)', typeof gm.sent[0].userToken === 'string' && gm.sent[0].userToken.length > 0);
       ok('sender follow-up carries toolResults', Array.isArray(gm.sent[1].toolResults) && gm.sent[1].toolResults[0].tool_use_id === 'tu');
     });

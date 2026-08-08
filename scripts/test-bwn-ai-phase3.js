@@ -190,7 +190,7 @@ function run() {
     var gm = makeGM([{ ok: true, status: 'final', text: 'answer' }]);
     var T = loadSuiteTransport({ GM_xmlhttpRequest: gm.fn });
     return T.aiProxySend({ task: 'ask', prompt: 'what WOs?', system: 'IGNORED' }).then(function () {
-      ok('ask POST DOES carry the tool registry', Array.isArray(gm.sent[0].tools) && gm.sent[0].tools.length === 3);
+      ok('ask POST DOES carry the tool registry', Array.isArray(gm.sent[0].tools) && gm.sent[0].tools.length === 6);
     });
   });
 
