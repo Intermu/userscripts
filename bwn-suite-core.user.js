@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         BWN Suite - Core (Broadway National)
 // @namespace    broadwaynational.bwn
-// @version      1.67.2
+// @version      1.68.0
 // @downloadURL  https://raw.githubusercontent.com/Intermu/userscripts/main/bwn-suite-core.user.js
 // @updateURL    https://raw.githubusercontent.com/Intermu/userscripts/main/bwn-suite-core.user.js
 // @description  Runs several Umbrava helpers for BWN coordinators, in the browser with no privileged grants. Includes: PO Approval + ETA Builder; WO Assist (GP/ETA, a stall watchdog, DNE calculator, and a next-action playbook); Email Leak Guard (checks recipients against vendor names, PO amounts, and client budget references before an outbound email sends); WO List Heat (a triage overlay + My Day strip on the work-order list, with an optional same-origin Umbrava API scan for deterministic full-board coverage); and the BWN Launcher (opens the Azure Static Web App tools with the current WO's context). Modules share state through sessionStorage/localStorage. The only network calls are same-origin Umbrava GraphQL requests (app.umbrava.com/api/graphql, the app's own session): List Heat's full-board scan and WO Assist's work-order / trip / clock-in / document reads, plus ONE write - BWN Views saves the column layout through Umbrava's own putUserPreference, the same preference the column chooser writes; everything else is offline. Toggle modules in BWN_MODULES below.
@@ -11806,16 +11806,28 @@
   }
 })(typeof window !== "undefined" ? window : null);
 /* BWN-DOM:END */
-/* BWN-DOMC:START | DOM handle protocol L1/L2, PASTE-IDENTICAL with bwn-domcollect.js. Reads window.BWNDOM
-   at load, so it MUST stay after BWN-DOM. Same no-edit rule. */
-/* bwn-domcollect.js -- DOM handle protocol, layers L1 (collector) and L2 (handle registry).
+/* BWN-DOMC:START | DOM handle protocol L1/L2/L3/L4, PASTE-IDENTICAL with bwn-domcollect.js. Reads
+   window.BWNDOM at load, so it MUST stay after BWN-DOM. Same no-edit rule. The write verbs it now
+   carries are inert on this surface: DC.WRITE_SURFACES holds the SWA only, so on app.umbrava.com
+   these same bytes refuse with SURFACE_NOT_ARMED. Arming Umbrava is phase 6. */
+/* bwn-domcollect.js -- DOM handle protocol, layers L1 (collector), L2 (handle registry),
+ * L3 (action executor) and L4 (policy gate).
  *
  * The browser half. It walks a live DOM into the plain node records bwn-domproj.js (L0) projects,
  * binds each minted handle to the live element it came from, re-resolves a handle whose element
- * was replaced by a re-render, and answers the READ-ONLY verbs. Write verbs are declared here and
- * refused here: this is the read-only release, and a disarmed verb that returns VERB_DISABLED is
- * how the model learns the capability exists rather than concluding the page has no Save button.
- * Spec: outputs/specs/2026-08-08-dom-handle-protocol-architecture.md in the vault (phase 3).
+ * was replaced by a re-render, answers the read-only verbs, and - phase 5 - executes the write
+ * verbs behind three independent gates.
+ * Spec: outputs/specs/2026-08-08-dom-handle-protocol-architecture.md in the vault (phases 3+5).
+ *
+ * WRITE ACCESS IS OFF UNLESS THREE SEPARATE THINGS ARE TRUE, and no single edit turns it on:
+ *   1. the session was built with `write:true` - a caller opting in by name, not a default;
+ *   2. the page's origin is in DC.WRITE_SURFACES, which holds this suite's own SWA and nothing
+ *      else. Core pastes this file byte-identically onto app.umbrava.com, where the same bytes
+ *      therefore refuse. Umbrava write verbs are phase 6 and need this list edited deliberately;
+ *   3. every MUTATING verb needs a grant the operator minted by clicking a confirm strip, and
+ *      DC.grant refuses any event whose isTrusted is not true - so a click the protocol itself
+ *      synthesized can never approve anything. The model cannot satisfy its own confirm.
+ * Core's bus responder carries a fourth gate of its own (BUS_VERBS), still read-only in phase 5.
  *
  * IMPURE ON PURPOSE, and thin for exactly that reason. Everything a hand-written DOM shim cannot
  * answer - layout, cascade, stacking, hit-testing - is asked of the real browser HERE and nowhere
@@ -11838,7 +11850,7 @@
   var DP = (root && root.BWNDOM)
     || ((typeof module !== "undefined" && module.exports && typeof require === "function") ? require("./bwn-domproj.js") : null);
 
-  var DC = { VERSION: "0.1.0" };
+  var DC = { VERSION: "0.2.0" };
 
   DC.ERROR = {
     STALE: "HANDLE_STALE",
@@ -11848,7 +11860,35 @@
     VERB_DISABLED: "VERB_DISABLED",
     UNKNOWN_VERB: "UNKNOWN_VERB",
     NO_DOCUMENT: "NO_DOCUMENT",
+    // phase 5
+    SURFACE_NOT_ARMED: "SURFACE_NOT_ARMED",
+    CONFIRM_REQUIRED: "CONFIRM_REQUIRED",
+    ELEMENT_DISABLED: "ELEMENT_DISABLED",
+    ELEMENT_OBSCURED: "ELEMENT_OBSCURED",
+    NOT_A_SELECT: "NOT_A_SELECT",
+    OPTION_NOT_FOUND: "OPTION_NOT_FOUND",
+    WRONG_KIND: "WRONG_KIND",
+    UNKNOWN_KEY: "UNKNOWN_KEY",
+    ASYNC_VERB: "ASYNC_VERB",
+    EVENTS_UNSUPPORTED: "EVENTS_UNSUPPORTED",
+    TIMEOUT: "TIMEOUT",
   };
+
+  // Gate 2. The origins where write verbs may run at all, hard-coded in the SHARED source rather
+  // than left to the caller, because this file is pasted byte-identically into bwn-suite-core
+  // (which runs on app.umbrava.com) and inlined into the SWA's own tools. Phase 5 is "SWA pages
+  // only": a live work order is a live FSM, and a wrong click there is a real edit to a real
+  // record. Frozen so a stray page script cannot widen it at runtime; widening it for phase 6 is
+  // a source edit, reviewed with the rest of the diff.
+  DC.WRITE_SURFACES = { "https://green-stone-0717dab0f.7.azurestaticapps.net": 1 };
+  if (Object.freeze) Object.freeze(DC.WRITE_SURFACES);
+
+  // Marks the confirm strip's own subtree. The walk skips it, so the operator's Approve button is
+  // never projected, never gets a handle, and can never be the target of a verb. Belt and braces
+  // with the isTrusted check in DC.grant - either alone would do, and neither is load-bearing on
+  // the other. A data-* marker rather than aria-hidden: the strip is a real control a real screen
+  // reader user has to be able to reach.
+  DC.UI_MARK = "data-bwn-domp-ui";
 
   /* ============================ small helpers ============================ */
 
@@ -12055,6 +12095,7 @@
       var tag = lower(el.tagName);
       if (PRUNE_TAGS[tag] === 1) return;
       if (lower(attr(el, "aria-hidden")) === "true") return;   // subtree too: it is hidden from AT
+      if (attr(el, DC.UI_MARK) != null) return;                // the protocol's own confirm strip
 
       var idx = domIndex++;
       try { if (el.shadowRoot) unexplored.shadowRoots++; } catch (e) { /* not a host */ }
@@ -12168,6 +12209,20 @@
       mutations: 0,
       _quiet: null,
       _obs: null,
+      // ---- phase 5 -------------------------------------------------------------------------
+      // Gate 1. Absent means read-only, which is what every caller written before phase 5 gets
+      // without changing a line: Core's responder, the phase-3 gate, every existing test.
+      write: !!o.write,
+      // A clock, injectable so the headless suite can drive expiry by node identity and explicit
+      // ticks instead of by elapsed milliseconds - a hidden pane clamps setTimeout and a harness
+      // that measures a real rate measures the harness.
+      now: typeof o.now === "function" ? o.now : function () { return Date.now(); },
+      // Replaceable so a host page can style its own strip. It does NOT replace the isTrusted
+      // check: whatever draws the strip still has to hand DC.grant a real user event.
+      confirmUI: typeof o.confirmUI === "function" ? o.confirmUI : null,
+      pending: {},          // confirmId -> the request awaiting an operator
+      grants: {},           // grant key -> { exp, epoch }, single use
+      confirmSeq: 0,
     };
   };
 
@@ -12189,6 +12244,10 @@
       s.snapshot = null;
       s.byHandle = {};
       s.epochChanged = true;
+      // An approval was given for a control on the page the operator was looking at. That page is
+      // gone, and every handle with it, so the approval goes too rather than waiting to be spent
+      // on a same-looking button somewhere else.
+      DC.clearConfirms(s);
     }
     s.lastHref = href;
 
@@ -12288,20 +12347,40 @@
 
   /* ============================ verbs ============================ */
 
-  // The closed verb set. `readonly:false` entries exist so the model is told the verb exists and
-  // is disarmed - deleting them would read as "this page cannot be acted on" and send the agent
-  // looking for a workaround, which is the behaviour a disarmed release is trying to prevent.
+  // The closed verb set, and the whole security boundary: handles only, no selector parameter, no
+  // JavaScript execution, no `evaluate`. A verb that is not here does not exist.
+  //
+  //   readonly  answerable without touching the page. Always available.
+  //   mutates   changes the record the operator is looking at, so it needs an operator's approval
+  //             on top of arming. `scroll` and `wait_for` are write-gated but NOT mutating: they
+  //             move the viewport and watch the clock. Asking a human to approve a scroll trains
+  //             them to approve without reading, which is how a confirm strip stops working.
+  //   async     settles over time, so it cannot be answered by the synchronous DC.act.
   DC.VERBS = {
     inspect: { readonly: true },
     extract: { readonly: true },
     refresh_snapshot: { readonly: true },
-    click: { readonly: false },
-    fill: { readonly: false },
-    select: { readonly: false },
-    check: { readonly: false },
-    press: { readonly: false },
-    wait_for: { readonly: false },
-    scroll: { readonly: false },
+    click: { readonly: false, mutates: true },
+    fill: { readonly: false, mutates: true },
+    select: { readonly: false, mutates: true },
+    check: { readonly: false, mutates: true },
+    press: { readonly: false, mutates: true },
+    scroll: { readonly: false, mutates: false },
+    wait_for: { readonly: false, mutates: false, async: true },
+  };
+
+  // The keys `press` will send. Closed on purpose: printable characters are `fill`'s job, and a
+  // press verb that forwards any string is a text-injection channel wearing a keyboard's clothes.
+  DC.PRESS_KEYS = {
+    Enter: { key: "Enter", code: "Enter", keyCode: 13 },
+    Escape: { key: "Escape", code: "Escape", keyCode: 27 },
+    Tab: { key: "Tab", code: "Tab", keyCode: 9 },
+    ArrowUp: { key: "ArrowUp", code: "ArrowUp", keyCode: 38 },
+    ArrowDown: { key: "ArrowDown", code: "ArrowDown", keyCode: 40 },
+    ArrowLeft: { key: "ArrowLeft", code: "ArrowLeft", keyCode: 37 },
+    ArrowRight: { key: "ArrowRight", code: "ArrowRight", keyCode: 39 },
+    Home: { key: "Home", code: "Home", keyCode: 36 },
+    End: { key: "End", code: "End", keyCode: 35 },
   };
 
   var EXTRACT_MAX_CHARS = 4000;
@@ -12324,18 +12403,54 @@
     return out;
   }
 
-  // act(session, req) -> result. Read-only verbs only in this release.
-  //   req: { verb, handle?, revision?, since?, includeInert? }
+  function originOf(s) {
+    return (s.win && s.win.location) ? str(s.win.location.origin) : "";
+  }
+
+  // Gates 1 and 2, in that order on purpose. An unarmed session gets exactly the answer it got
+  // before phase 5 existed - VERB_DISABLED - on every surface, so nothing that never opted in can
+  // notice this release at all. Only a caller that DID opt in can reach the surface refusal, and
+  // it wants to know which of the two stopped it.
+  DC.writeGate = function (s, verb) {
+    if (!s.write) {
+      return {
+        ok: false, code: DC.ERROR.VERB_DISABLED,
+        recovery: "read-only session: " + verb + " exists but this session was not armed for writes",
+      };
+    }
+    var origin = originOf(s);
+    if (DC.WRITE_SURFACES[origin] !== 1) {
+      return {
+        ok: false, code: DC.ERROR.SURFACE_NOT_ARMED,
+        recovery: "write verbs are armed on this suite's own pages only; this page is "
+          + (origin || "(no origin)"),
+      };
+    }
+    return null;
+  };
+
+  // act(session, req) -> result, synchronously.
+  //   req: { verb, handle?, revision?, since?, includeInert?, value?, option?, checked?, key?, ... }
   DC.act = function (s, req) {
     req = req || {};
     var verb = str(req.verb);
     var def = DC.VERBS[verb];
     if (!def) return { ok: false, code: DC.ERROR.UNKNOWN_VERB, verbs: Object.keys(DC.VERBS) };
     if (!def.readonly) {
-      return {
-        ok: false, code: DC.ERROR.VERB_DISABLED,
-        recovery: "read-only release: " + verb + " is implemented in a later phase and is disarmed here",
-      };
+      // The write gates come FIRST, ahead of the async complaint. An unarmed session must hear
+      // exactly what it heard before phase 5 existed - VERB_DISABLED - for every write verb
+      // including wait_for; telling it to go and call actAsync instead would describe a door it
+      // is not allowed through.
+      var gate = DC.writeGate(s, verb);
+      if (gate) return gate;
+      if (def.async) {
+        return {
+          ok: false, code: DC.ERROR.ASYNC_VERB,
+          recovery: verb + " settles over time and cannot be answered synchronously; call actAsync",
+        };
+      }
+      if (!s.doc) return { ok: false, code: DC.ERROR.NO_DOCUMENT };
+      return DC.execute(s, verb, def, req);
     }
     if (!s.doc) return { ok: false, code: DC.ERROR.NO_DOCUMENT };
 
@@ -12377,6 +12492,604 @@
     }
 
     return { ok: false, code: DC.ERROR.UNKNOWN_VERB, verbs: Object.keys(DC.VERBS) };
+  };
+
+  /* ============================ L4: confirm grants ============================ */
+
+  DC.CONFIRM_TTL_MS = 120000;
+  DC.MAX_PENDING = 3;
+
+  // The arguments go into the grant key VERBATIM, not as a hash of themselves. An operator who
+  // approved `fill @i2 with 250` must not have approved `fill @i2 with 25000`, and a 32-bit hash
+  // is a small space to be careless in when the only cost of exactness is a longer string sitting
+  // in memory that never leaves the page.
+  function grantKeyOf(verb, handle, args) {
+    return verb + "|" + str(handle) + "|" + DP.stableStringify(args);
+  }
+
+  function argsOf(verb, req) {
+    if (verb === "fill") return { value: str(req.value) };
+    if (verb === "select") return { option: str(req.option != null ? req.option : req.value) };
+    if (verb === "check") return { checked: req.checked === false ? false : true };
+    if (verb === "press") return { key: str(req.key) };
+    return {};
+  }
+
+  // What the operator reads on the strip. It has to name the actual change, including the text
+  // that will be typed - a strip that says "the agent wants to do something" trains people to
+  // approve without reading, and then the gate is decoration. Deny-classified handles never reach
+  // here (POLICY_DENIED fires first), so no masked value can be spelled out on screen.
+  function describeAction(verb, handle, args, rec) {
+    var name = DP.accName(rec) || handle;
+    if (verb === "fill") return 'type "' + trimText(args.value, 120) + '" into ' + name;
+    if (verb === "select") return 'choose "' + trimText(args.option, 80) + '" in ' + name;
+    if (verb === "check") return (args.checked ? "tick " : "untick ") + name;
+    if (verb === "press") return "press " + args.key + " on " + name;
+    return "click " + name;
+  }
+
+  function takeDownUI(p) {
+    var el = p && p.el;
+    if (el && el.parentNode && el.parentNode.removeChild) {
+      try { el.parentNode.removeChild(el); } catch (e) { /* already gone */ }
+    }
+    if (p) p.el = null;
+  }
+
+  DC.clearConfirms = function (s) {
+    var id;
+    for (id in s.pending) takeDownUI(s.pending[id]);
+    s.pending = {};
+    s.grants = {};
+  };
+
+  // GATE 3, and the whole of "the model can never satisfy its own confirm".
+  //
+  // A click this protocol dispatched - including one its own `click` verb just fired - carries
+  // isTrusted:false. Only a gesture the user agent itself generated carries true, and no page
+  // script can forge it. That is why the check lives HERE, on the grant, rather than inside the
+  // default strip: a host page may draw its own confirm UI, and it still cannot approve anything
+  // without a real human event in its hand.
+  DC.grant = function (s, confirmId, ev) {
+    if (!ev || ev.isTrusted !== true) {
+      return {
+        ok: false, code: DC.ERROR.CONFIRM_REQUIRED,
+        recovery: "a confirm is granted by an operator's own click; a synthesized event cannot",
+      };
+    }
+    var p = s.pending[str(confirmId)];
+    if (!p) {
+      return {
+        ok: false, code: DC.ERROR.CONFIRM_REQUIRED,
+        recovery: "no such pending confirm - it was already answered, or the page navigated",
+      };
+    }
+    delete s.pending[p.id];
+    takeDownUI(p);
+    s.grants[p.key] = { exp: s.now() + DC.CONFIRM_TTL_MS, epoch: s.registry.epoch };
+    return { ok: true, verb: p.verb, handle: p.handle };
+  };
+
+  // Deliberately NOT isTrusted-gated. Withdrawing permission is the safe direction, and a reject
+  // that could itself be refused would leave a strip on screen with no way to dismiss it.
+  DC.reject = function (s, confirmId) {
+    var p = s.pending[str(confirmId)];
+    if (!p) return { ok: false };
+    delete s.pending[p.id];
+    takeDownUI(p);
+    return { ok: true };
+  };
+
+  function takeGrant(s, key) {
+    var g = s.grants[key];
+    if (!g) return false;
+    // Deleted BEFORE the action runs, not after: single use has to survive an action that throws
+    // half way, or a failure leaves a spendable approval lying about.
+    delete s.grants[key];
+    if (g.epoch !== s.registry.epoch) return false;
+    if (s.now() > g.exp) return false;
+    return true;
+  }
+
+  DC.defaultConfirmUI = function (s, p) {
+    var doc = s.doc;
+    if (!doc || typeof doc.createElement !== "function") return;   // no DOM: no strip, no approval
+    var host = doc.createElement("div");
+    host.setAttribute(DC.UI_MARK, "confirm");
+    host.setAttribute("role", "alertdialog");
+    host.setAttribute("aria-label", "Approve an agent action");
+    host.style.cssText = "position:fixed;left:16px;right:16px;bottom:16px;z-index:2147483647;"
+      + "background:#191919;color:#fff;font:14px/1.45 system-ui,-apple-system,Segoe UI,sans-serif;"
+      + "padding:12px 14px;border-radius:10px;box-shadow:0 8px 28px rgba(0,0,0,.38);"
+      + "display:flex;gap:12px;align-items:center;flex-wrap:wrap";
+    var text = doc.createElement("span");
+    text.style.cssText = "flex:1 1 260px";
+    // textContent, never innerHTML. The summary carries the page's own accessible names, which on
+    // these surfaces are written by vendors and clients and are untrusted input.
+    text.textContent = "The agent wants to " + p.summary + ".";
+    var no = doc.createElement("button");
+    no.textContent = "Reject";
+    no.style.cssText = "padding:6px 14px;border-radius:6px;border:1px solid #666;background:transparent;color:#fff;cursor:pointer";
+    var yes = doc.createElement("button");
+    yes.textContent = "Approve";
+    yes.style.cssText = "padding:6px 14px;border-radius:6px;border:0;background:#2ECC71;color:#0d3d26;font-weight:600;cursor:pointer";
+    if (yes.addEventListener) {
+      yes.addEventListener("click", function (ev) { DC.grant(s, p.id, ev); });
+      no.addEventListener("click", function (ev) { DC.reject(s, p.id, ev); });
+    }
+    host.appendChild(text);
+    host.appendChild(no);
+    host.appendChild(yes);
+    var mount = doc.body || doc.documentElement;
+    if (mount && mount.appendChild) mount.appendChild(host);
+    p.el = host;
+  };
+
+  function requestConfirm(s, verb, handle, args, rec) {
+    // A model that keeps asking must not paper the screen with strips. Oldest out first, so the
+    // one the operator is currently reading is the newest.
+    var ids = Object.keys(s.pending);
+    while (ids.length >= DC.MAX_PENDING) {
+      var oldest = ids.shift();
+      takeDownUI(s.pending[oldest]);
+      delete s.pending[oldest];
+    }
+    var p = {
+      id: "c" + (++s.confirmSeq), key: grantKeyOf(verb, handle, args),
+      verb: verb, handle: handle, args: args,
+      summary: describeAction(verb, handle, args, rec), el: null,
+    };
+    s.pending[p.id] = p;
+    try { (s.confirmUI || DC.defaultConfirmUI)(s, p); }
+    catch (e) { /* a strip that fails to draw must not turn a refusal into a throw */ }
+    return {
+      ok: false, code: DC.ERROR.CONFIRM_REQUIRED, confirmId: p.id,
+      verb: verb, handle: handle, summary: p.summary,
+      recovery: "the operator has to approve this on the page, then you retry the identical action;"
+        + " you cannot approve it yourself",
+    };
+  }
+
+  /* ============================ L3: the action executor ============================ */
+
+  // A shallow copy of the bound record with every field that can change between the snapshot and
+  // the click re-read off the live element. Policy and executability are decided from THIS, never
+  // from the projection: a snapshot is a photograph, and between the photograph and the click an
+  // input's type can flip to password or a link can grow a download attribute.
+  function readVolatile(s, el, rec) {
+    var out = {}, k;
+    for (k in rec) { if (k !== "_el") out[k] = rec[k]; }
+    out._el = el;
+    out.tag = lower(el.tagName) || rec.tag;
+    out.type = lower(attr(el, "type"));
+    out.role = lower(attr(el, "role"));
+    out.name = attr(el, "name");
+    out.id = attr(el, "id");
+    out.testid = attr(el, "data-testid");
+    out.href = attr(el, "href");
+    out.download = attr(el, "download") != null;
+    out.autocomplete = attr(el, "autocomplete");
+    out.placeholder = trimText(attr(el, "placeholder"), 120);
+    out.title = trimText(attr(el, "title"), 120);
+    out.ariaLabel = accessibleLabelOf(el, s.doc);
+    out.disabled = !!el.disabled || lower(attr(el, "aria-disabled")) === "true";
+    out.rect = rectOf(el);
+    var kind = DP.kindOf(out);
+    out.text = TEXT_KINDS[kind] === 1 ? trimText(el.textContent, 300) : "";
+    if (kind === "i" || kind === "s" || kind === "c") {
+      out.labelText = boundLabelText(el, s.doc);
+      out.value = str(el.value);
+    }
+    if (kind === "c") {
+      out.checked = (el.checked != null) ? !!el.checked : lower(attr(el, "aria-checked")) === "true";
+    }
+    if (kind === "s") out.options = optionsOf(el);
+    if (kind === "a" && out.href) {
+      var origin = (s.win && s.win.location && s.win.location.origin) || "";
+      try {
+        var abs = el.href != null ? String(el.href) : String(out.href);
+        out.external = /^[a-z]+:\/\//i.test(abs) && origin !== "" && abs.indexOf(origin) !== 0;
+      } catch (e) { out.external = false; }
+    }
+    return out;
+  }
+
+  function fireEvent(s, el, type) {
+    if (!el.dispatchEvent) return false;
+    var win = s.win || {};
+    var ev = null;
+    if (typeof win.Event === "function") {
+      try { ev = new win.Event(type, { bubbles: true, cancelable: true }); } catch (e) { ev = null; }
+    }
+    if (!ev && s.doc && typeof s.doc.createEvent === "function") {
+      try { ev = s.doc.createEvent("Event"); ev.initEvent(type, true, true); } catch (e2) { ev = null; }
+    }
+    if (!ev) return false;
+    try { el.dispatchEvent(ev); } catch (e3) { return false; }
+    return true;
+  }
+
+  // The PROTOTYPE's value setter, not the element's own.
+  //
+  // React installs its own setter on the DOM node and tracks the last value it wrote there. An
+  // ordinary `el.value = x` goes through that setter, so React believes it already knows the
+  // value, ignores the input event as a no-change, and reverts the write on the next render - the
+  // fill silently no-ops and the page keeps whatever was there before. Going through the
+  // prototype descriptor writes underneath React's tracker, and the input event it then sees
+  // carries a value it does not recognise, which is what makes the state update happen.
+  function nativeValueSetter(s, el) {
+    if (typeof Object.getOwnPropertyDescriptor !== "function") return null;
+    var win = s.win || {};
+    var names = ["HTMLInputElement", "HTMLTextAreaElement", "HTMLSelectElement"], i, ctor, proto, d;
+    for (i = 0; i < names.length; i++) {
+      ctor = win[names[i]];
+      proto = ctor && ctor.prototype;
+      if (!proto) continue;
+      // Only the prototype this element actually inherits from. Calling a setter lifted off an
+      // unrelated interface throws (illegal invocation) on a real element.
+      try { if (typeof proto.isPrototypeOf !== "function" || !proto.isPrototypeOf(el)) continue; }
+      catch (e) { continue; }
+      d = Object.getOwnPropertyDescriptor(proto, "value");
+      if (d && typeof d.set === "function") return d.set;
+    }
+    return null;
+  }
+
+  // The topmost re-test, at execution time, with ONE scroll.
+  //
+  // The collector's answer was measured when the snapshot was taken and may be several seconds
+  // old; more importantly it is `tested:false` for everything below the fold, because
+  // elementFromPoint only answers inside the viewport. Scrolling the element into view is what
+  // converts "could not test" into an answer, so it happens before the verdict rather than being
+  // offered to the model as a recovery it would have to spend a round on.
+  function ensureTopmost(s, el) {
+    var first = DC.interactabilityOf(el, rectOf(el), s.win, s.doc);
+    if (first.ok && first.tested) return { ok: true, tested: true, scrolled: false };
+    var scrolled = false;
+    if (typeof el.scrollIntoView === "function") {
+      try { el.scrollIntoView({ block: "center", inline: "nearest" }); scrolled = true; }
+      catch (e) { try { el.scrollIntoView(); scrolled = true; } catch (e2) { scrolled = false; } }
+    }
+    if (!scrolled) return { ok: first.ok, tested: first.tested, scrolled: false };
+    var again = DC.interactabilityOf(el, rectOf(el), s.win, s.doc);
+    return { ok: again.ok, tested: again.tested, scrolled: true };
+  }
+
+  function optionLabel(o) { return trimText(o && (o.label != null ? o.label : o.textContent), 120); }
+
+  // Per-verb static checks: the wrong kind of element, an option that is not there, a key that is
+  // not in the closed set. All of them run BEFORE the operator is asked to approve anything -
+  // asking a human to sign off on something that was going to be refused anyway is how a confirm
+  // strip becomes noise.
+  function validateVerb(s, verb, kind, fresh, el, args) {
+    if (verb === "fill") {
+      if (kind !== "i") {
+        return { ok: false, code: DC.ERROR.WRONG_KIND, kind: kind,
+          recovery: "fill needs a textbox; this handle is a " + (DP.KINDS[kind] || "non-input") };
+      }
+      return null;
+    }
+    if (verb === "select") {
+      if (kind !== "s") {
+        return { ok: false, code: DC.ERROR.WRONG_KIND, kind: kind,
+          recovery: "select needs a select control; this handle is a " + (DP.KINDS[kind] || "non-select") };
+      }
+      if (str(fresh.tag) !== "select" || !el.options) {
+        // A role=combobox built out of divs has no options to set. Say so and name the route that
+        // does work, rather than firing events at it and reporting a success nothing happened for.
+        return { ok: false, code: DC.ERROR.NOT_A_SELECT,
+          recovery: "this is a custom listbox, not a <select>: click it to open, then click the option" };
+      }
+      if (findOption(el, args.option) < 0) {
+        var labels = [], i;
+        for (i = 0; i < el.options.length && i < 30; i++) labels.push(optionLabel(el.options[i]));
+        return { ok: false, code: DC.ERROR.OPTION_NOT_FOUND, options: labels,
+          recovery: "choose one of the listed options" };
+      }
+      return null;
+    }
+    if (verb === "check") {
+      if (kind !== "c") {
+        return { ok: false, code: DC.ERROR.WRONG_KIND, kind: kind,
+          recovery: "check needs a checkbox or radio; this handle is a " + (DP.KINDS[kind] || "non-checkable") };
+      }
+      var isRadio = str(fresh.type) === "radio" || str(fresh.role) === "radio";
+      if (isRadio && args.checked === false) {
+        return { ok: false, code: DC.ERROR.WRONG_KIND,
+          recovery: "a radio is not cleared directly; check another option in the same group" };
+      }
+      return null;
+    }
+    if (verb === "press") {
+      if (!DC.PRESS_KEYS[args.key]) {
+        return { ok: false, code: DC.ERROR.UNKNOWN_KEY, keys: Object.keys(DC.PRESS_KEYS),
+          recovery: "press sends only the listed navigation keys; use fill to enter text" };
+      }
+      return null;
+    }
+    return null;
+  }
+
+  function findOption(el, wanted) {
+    var opts = el.options || [], i, w = str(wanted), lw = w.toLowerCase();
+    for (i = 0; i < opts.length; i++) { if (str(opts[i].value) === w) return i; }
+    for (i = 0; i < opts.length; i++) { if (optionLabel(opts[i]) === w) return i; }
+    for (i = 0; i < opts.length; i++) { if (optionLabel(opts[i]).toLowerCase() === lw) return i; }
+    return -1;
+  }
+
+  // Already in the requested state? Answer without touching the page and without spending an
+  // operator's attention on a confirm for a change that is not one.
+  function noopReason(verb, kind, fresh, args) {
+    if (verb === "check" && (fresh.checked === true) === (args.checked === true)) {
+      return "the control was already " + (args.checked ? "checked" : "unchecked");
+    }
+    if (verb === "fill" && str(fresh.value) === str(args.value)) {
+      return "the field already held that value";
+    }
+    return null;
+  }
+
+  function perform(s, verb, el, fresh, args) {
+    if (verb === "click") {
+      if (typeof el.click === "function") { el.click(); return { ok: true }; }
+      if (fireEvent(s, el, "click")) return { ok: true };
+      return { ok: false, code: DC.ERROR.EVENTS_UNSUPPORTED,
+        recovery: "this element has no click() and the page has no Event constructor" };
+    }
+    if (verb === "check") {
+      // A click, not a checked= assignment. React wires a checkbox's onChange to the click event,
+      // so setting the property directly updates the box and never tells the app.
+      if (typeof el.click === "function") { el.click(); return { ok: true }; }
+      if (fireEvent(s, el, "click")) return { ok: true };
+      return { ok: false, code: DC.ERROR.EVENTS_UNSUPPORTED, recovery: "this element cannot be clicked" };
+    }
+    if (verb === "fill") {
+      var setter = nativeValueSetter(s, el);
+      if (setter) { try { setter.call(el, args.value); } catch (e) { el.value = args.value; } }
+      else el.value = args.value;
+      if (!fireEvent(s, el, "input") || !fireEvent(s, el, "change")) {
+        return { ok: false, code: DC.ERROR.EVENTS_UNSUPPORTED,
+          recovery: "the value was written but no input/change event could be dispatched, so the app was not told" };
+      }
+      return { ok: true, nativeSetter: !!setter };
+    }
+    if (verb === "select") {
+      var idx = findOption(el, args.option);
+      var value = str(el.options[idx].value);
+      var setter2 = nativeValueSetter(s, el);
+      if (setter2) { try { setter2.call(el, value); } catch (e) { el.value = value; } }
+      else el.value = value;
+      if (el.selectedIndex != null) { try { el.selectedIndex = idx; } catch (e2) { /* read-only shim */ } }
+      if (!fireEvent(s, el, "input") || !fireEvent(s, el, "change")) {
+        return { ok: false, code: DC.ERROR.EVENTS_UNSUPPORTED,
+          recovery: "the option was set but no input/change event could be dispatched" };
+      }
+      return { ok: true, nativeSetter: !!setter2 };
+    }
+    if (verb === "press") {
+      var spec = DC.PRESS_KEYS[args.key];
+      var win = s.win || {};
+      if (typeof win.KeyboardEvent !== "function" || !el.dispatchEvent) {
+        return { ok: false, code: DC.ERROR.EVENTS_UNSUPPORTED,
+          recovery: "this page has no KeyboardEvent constructor" };
+      }
+      if (typeof el.focus === "function") { try { el.focus(); } catch (e) { /* not focusable */ } }
+      var init = { key: spec.key, code: spec.code, keyCode: spec.keyCode, which: spec.keyCode, bubbles: true, cancelable: true };
+      try {
+        el.dispatchEvent(new win.KeyboardEvent("keydown", init));
+        el.dispatchEvent(new win.KeyboardEvent("keyup", init));
+      } catch (e3) {
+        return { ok: false, code: DC.ERROR.EVENTS_UNSUPPORTED, recovery: String((e3 && e3.message) || e3) };
+      }
+      return { ok: true };
+    }
+    if (verb === "scroll") {
+      if (typeof el.scrollIntoView === "function") {
+        try { el.scrollIntoView({ block: "center", inline: "nearest" }); } catch (e) { el.scrollIntoView(); }
+        return { ok: true };
+      }
+      return { ok: false, code: DC.ERROR.EVENTS_UNSUPPORTED, recovery: "this element cannot be scrolled into view" };
+    }
+    return { ok: false, code: DC.ERROR.UNKNOWN_VERB, verbs: Object.keys(DC.VERBS) };
+  }
+
+  function pageScroll(s, req) {
+    var win = s.win, doc = s.doc;
+    var dir = lower(req.direction) || "down";
+    var vh = (win && win.innerHeight) || 0;
+    var step = Math.max(1, Math.round(vh * 0.8));
+    var body = (doc && (doc.scrollingElement || doc.documentElement || doc.body)) || null;
+    var height = (body && body.scrollHeight) || 0;
+    if (dir === "top" && win.scrollTo) win.scrollTo(0, 0);
+    else if (dir === "bottom" && win.scrollTo) win.scrollTo(0, height);
+    else if (dir === "up" && win.scrollBy) win.scrollBy(0, -step);
+    else if (dir === "down" && win.scrollBy) win.scrollBy(0, step);
+    else {
+      return { ok: false, code: DC.ERROR.EVENTS_UNSUPPORTED,
+        recovery: "this page exposes no scroll method; scroll a handle into view instead" };
+    }
+    return afterAction(s, { verb: "scroll", direction: dir });
+  }
+
+  // Every successful action answers with the delta, per the protocol's one-shape rule.
+  //
+  // HONESTY: the delta is measured the instant the event was dispatched. A React app re-renders in
+  // a microtask or on the next frame, so the consequence of a click is usually NOT in it. An empty
+  // delta therefore says "nothing had changed yet", never "nothing happened", and it says so in
+  // the payload rather than in this comment - a model that reads an empty delta as failure retries
+  // the click, and a retried click is a second real edit.
+  function afterAction(s, extra) {
+    var since = s.snapshot ? s.snapshot.page.revision : null;
+    var r = DC.snapshotOrDelta(s, since);
+    var out = { ok: true, code: null, recovery: null, revision: r.revision || null };
+    if (r.delta) {
+      out.delta = r.delta;
+      if (!r.delta.changed.length && !r.delta.removed.length && !r.delta.added.length) {
+        out.note = "the page had not changed yet when this was measured, which is normal for an "
+          + "app that re-renders asynchronously; take another snapshot before concluding anything";
+      }
+    } else if (r.snapshot) {
+      out.snapshot = r.snapshot;
+    }
+    if (r.code) out.deltaCode = r.code;
+    for (var k in extra) out[k] = extra[k];
+    return out;
+  }
+
+  // execute(session, verb, def, req) -> result. Reached only after both write gates passed.
+  //
+  // Order matters and is not arbitrary: everything that can refuse for a mechanical reason runs
+  // before the operator is asked for anything, so a confirm strip only ever appears for an action
+  // that was actually going to run.
+  DC.execute = function (s, verb, def, req) {
+    if (verb === "scroll" && !req.handle) return pageScroll(s, req);
+    if (!req.handle) {
+      return { ok: false, code: DC.ERROR.UNKNOWN_VERB,
+        recovery: verb + " needs a handle from a page snapshot" };
+    }
+
+    var r = DC.resolve(s, req.handle, req.revision || (s.snapshot && s.snapshot.page.revision));
+    if (!r.ok) return r;
+
+    var el = r.el;
+    var fresh = readVolatile(s, el, r.rec);
+    var kind = DP.kindOf(fresh);
+
+    // L4 against the element as it is NOW, not against the label the snapshot carried.
+    if (DP.policyOf(fresh) === "deny") {
+      return { ok: false, code: DC.ERROR.POLICY_DENIED, recovery: null,
+        reason: "this handle is policy-denied; explain that to the operator rather than routing around it" };
+    }
+
+    var args = argsOf(verb, req);
+    var bad = validateVerb(s, verb, kind, fresh, el, args);
+    if (bad) return bad;
+
+    if (fresh.disabled) {
+      return { ok: false, code: DC.ERROR.ELEMENT_DISABLED,
+        recovery: "wait_for this handle to become enabled, then retry" };
+    }
+
+    var noop = noopReason(verb, kind, fresh, args);
+    if (noop) return afterAction(s, { verb: verb, handle: req.handle, noop: true, note: noop });
+
+    var top = { ok: true, tested: false, scrolled: false };
+    if (def.mutates) {
+      top = ensureTopmost(s, el);
+      if (top.tested && !top.ok) {
+        return { ok: false, code: DC.ERROR.ELEMENT_OBSCURED, scrolled: !!top.scrolled,
+          recovery: "something is drawn on top of it; close the overlay or scroll, then retry once" };
+      }
+      if (!takeGrant(s, grantKeyOf(verb, req.handle, args))) {
+        return requestConfirm(s, verb, req.handle, args, fresh);
+      }
+    }
+
+    var done = perform(s, verb, el, fresh, args);
+    if (!done.ok) return done;
+    var extra = {
+      verb: verb, handle: req.handle,
+      // Carried because an untested topmost check is a real gap, not a pass: it means the browser
+      // could not answer, which is the same honesty rule the collector's records carry.
+      obscuredTested: !!top.tested, scrolled: !!top.scrolled,
+    };
+    // Whether the prototype value setter was actually found. On a page where it is missing the
+    // fill fell back to a plain assignment, which a React-controlled input silently reverts - so
+    // this is the difference between "typed" and "appeared to type", and the live gate reads it.
+    if (done.nativeSetter != null) extra.nativeSetter = done.nativeSetter;
+    return afterAction(s, extra);
+  };
+
+  /* ============================ wait_for (the one asynchronous verb) ============================ */
+
+  DC.WAIT_DEFAULT_MS = 5000;
+  DC.WAIT_MAX_MS = 15000;
+  DC.WAIT_POLL_MS = 150;
+
+  DC.WAIT_CONDITIONS = { enabled: 1, disabled: 1, visible: 1, gone: 1, text: 1 };
+
+  function waitSatisfied(s, req, cond) {
+    var r = DC.resolve(s, req.handle, req.revision || (s.snapshot && s.snapshot.page.revision));
+    if (!r.ok) {
+      // A handle that stopped resolving IS the answer for `gone`. For every other condition it is
+      // still a refusal, and it is returned as one rather than being retried until the timeout.
+      if (cond === "gone" && r.code === DC.ERROR.STALE) return { done: true, result: null };
+      if (cond === "gone") return { done: false };
+      return { done: true, result: r };
+    }
+    var fresh = readVolatile(s, r.el, r.rec);
+    var visible = DC.isVisible(r.el, fresh.rect, s.win);
+    if (cond === "enabled" && !fresh.disabled) return { done: true, result: null };
+    if (cond === "disabled" && fresh.disabled) return { done: true, result: null };
+    if (cond === "visible" && visible) return { done: true, result: null };
+    if (cond === "gone" && (!r.el.isConnected || !visible)) return { done: true, result: null };
+    if (cond === "text") {
+      var hay = trimText(r.el.textContent, 4000).toLowerCase();
+      if (hay.indexOf(trimText(req.text, 200).toLowerCase()) >= 0) return { done: true, result: null };
+    }
+    return { done: false };
+  }
+
+  // actAsync(session, req, cb) -> void. Every non-async verb is handed straight to DC.act and its
+  // answer passed on, so a caller can route everything through one entry point.
+  //
+  // The callback fires EXACTLY ONCE on every path - satisfied, refused, or timed out. A tool that
+  // never settles wedges the whole server tool loop, which is worse than any wrong answer.
+  DC.actAsync = function (s, req, cb) {
+    req = req || {};
+    var done = false;
+    var finish = function (res) { if (done) return; done = true; try { cb(res); } catch (e) { /* consumer's problem */ } };
+    if (typeof cb !== "function") return;
+
+    var verb = str(req.verb);
+    var def = DC.VERBS[verb];
+    if (!def || !def.async) { finish(DC.act(s, req)); return; }
+
+    var gate = DC.writeGate(s, verb);
+    if (gate) { finish(gate); return; }
+    if (!s.doc) { finish({ ok: false, code: DC.ERROR.NO_DOCUMENT }); return; }
+
+    var cond = lower(req.condition) || "enabled";
+    if (DC.WAIT_CONDITIONS[cond] !== 1) {
+      finish({ ok: false, code: DC.ERROR.UNKNOWN_VERB, conditions: Object.keys(DC.WAIT_CONDITIONS),
+        recovery: "wait_for takes one of the listed conditions" });
+      return;
+    }
+    if (!req.handle) {
+      finish({ ok: false, code: DC.ERROR.UNKNOWN_VERB, recovery: "wait_for needs a handle" });
+      return;
+    }
+    if (cond === "text" && !str(req.text)) {
+      finish({ ok: false, code: DC.ERROR.UNKNOWN_VERB, recovery: "wait_for text needs the text to wait for" });
+      return;
+    }
+
+    var budget = req.timeoutMs >= 1 ? Math.min(req.timeoutMs | 0, DC.WAIT_MAX_MS) : DC.WAIT_DEFAULT_MS;
+    var deadline = s.now() + budget;
+    var setT = (s.win && s.win.setTimeout) || (typeof setTimeout === "function" ? setTimeout : null);
+
+    function poll() {
+      var got;
+      try { got = waitSatisfied(s, req, cond); }
+      catch (e) { finish({ ok: false, code: "RESPONDER_THREW", recovery: String((e && e.message) || e) }); return; }
+      if (got.done) {
+        finish(got.result || afterAction(s, { verb: "wait_for", handle: req.handle, condition: cond, waited: true }));
+        return;
+      }
+      if (s.now() >= deadline || !setT) {
+        // The delta ships anyway. The model asked what the page is doing, and "it did not reach
+        // that state" plus the current state is a far more useful answer than a bare TIMEOUT.
+        var out = afterAction(s, { verb: "wait_for", handle: req.handle, condition: cond });
+        out.ok = false;
+        out.code = DC.ERROR.TIMEOUT;
+        out.recovery = "the condition was not met within " + budget + "ms; the state as it stands is attached";
+        finish(out);
+        return;
+      }
+      setT(poll, DC.WAIT_POLL_MS);
+    }
+    poll();
   };
 
   /* ============================ revision-bump watcher ============================ */
@@ -12453,12 +13166,19 @@
 
     // A SECOND read-only gate, deliberately redundant with the one inside DC.act. That one is a
     // property of the collector; this one is a property of what Umbrava is willing to expose over
-    // the bus. When phase 5 arms the write verbs it must be a deliberate edit HERE too, rather
-    // than write access arriving on a live FSM as a side effect of a change in another file.
+    // the bus.
+    //
+    // PHASE 5 HAS SHIPPED AND THIS LINE IS UNCHANGED, on purpose. The pasted block above now
+    // carries a working action executor, and on this surface it is inert three times over: the
+    // list below does not name a write verb, the session below is not armed, and the block's own
+    // WRITE_SURFACES allowlist holds the SWA and not app.umbrava.com. Arming Umbrava is phase 6
+    // and takes three separate deliberate edits, which is the whole point of there being three.
     var BUS_VERBS = { inspect: 1, extract: 1, refresh_snapshot: 1 };
 
     var session = null;
     function ensure() {
+      // No `write: true`. A live work order is a live FSM and a wrong click there is a real edit
+      // to a real record; the read-only default is what keeps that off the table here.
       if (!session) session = DC.createSession({ window: window, document: document });
       return session;
     }

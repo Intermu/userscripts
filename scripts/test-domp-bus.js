@@ -508,12 +508,31 @@ test('M3 dropping the bus verb gate lets a write verb through to the collector',
   var got = null;
   w.doc.addEventListener('bwn:evt', function (e) { if (e.detail && e.detail.id === 'domp:result') got = e.detail.result; });
   w.doc.dispatchEvent(new w.sandbox.CustomEvent('bwn:cmd', { detail: { id: 'domp:act', rid: 'r1', verb: 'click', handle: '@b1' } }));
-  // It reaches the collector, which has its OWN read-only gate - so the answer is still a refusal,
-  // but it is now the collector's refusal rather than the bus's. That is the whole point of the
-  // second gate: neither one alone is the thing keeping writes off a live work order.
+  // It reaches the collector, which has its OWN gate - so the answer is still a refusal, but it is
+  // now the collector's refusal rather than the bus's, which is what makes this a control rather
+  // than a coincidence. Phase 5 gave the collector a working executor; what stops it here is that
+  // the responder's session was never armed for writes.
   A.ok('M3 the mutant forwards it to the collector (so the bus gate is doing work)',
-    got && got.ok === false && got.code === 'VERB_DISABLED' && /later phase/.test(got.recovery || ''),
+    got && got.ok === false && got.code === 'VERB_DISABLED' && /not armed for writes/.test(got.recovery || ''),
     JSON.stringify(got));
+});
+
+test('M3b even an ARMED session refuses to write on this origin - the third gate', function () {
+  // The bus gate and the arming gate are both bypassed here: a session built with write:true, on
+  // the collector directly, no bus in the way. What is left is the origin allowlist compiled into
+  // the shared source, and on app.umbrava.com it refuses. That is the gate a phase-6 edit has to
+  // move, and it is the reason a mistake in Core's responder cannot by itself put write access on
+  // a live work order.
+  var w = makeWorld();
+  var DC = w.sandbox.window.BWNDOMC;
+  var s = DC.createSession({ window: w.win, document: w.doc, write: true });
+  var snap = DC.refresh(s).snapshot;
+  var h = (snap.elements[0] || {}).h;
+  var r = DC.act(s, { verb: 'click', handle: h, revision: snap.page.revision });
+  A.ok('M3b an armed session on app.umbrava.com is SURFACE_NOT_ARMED',
+    r && r.ok === false && r.code === 'SURFACE_NOT_ARMED', JSON.stringify(r));
+  A.ok('M3b and the refusal names the origin it refused',
+    (r.recovery || '').indexOf('https://app.umbrava.com') !== -1, r.recovery);
 });
 
 test('M4 mutate() throws on a missing target', function () {
