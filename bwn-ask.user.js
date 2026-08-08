@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         BWN Ask (Coordinator Copilot)
 // @namespace    https://broadwaynational.com/bwn
-// @version      0.7.0
+// @version      0.7.1
 // @description  Ask questions about the work order you're viewing. Reads the WO live from Umbrava via same-origin GraphQL (details + full note / site-visit history) AND a summary roster of the other work orders at the same location, plus the team knowledge doc, and answers through the Broadway AI proxy with dates and references. Phase 1.5 = page-scoped + location roster (Path A); no data leaves the trusted Broadway path.
 // @match        https://app.umbrava.com/*
 // @run-at       document-idle
@@ -684,6 +684,25 @@
       if (v != null) { GM_setValue('ingest_key', v.trim()); }
     });
   } catch (e) { }
+
+  // ---- Status stamp ---------------------------------------------------------
+  // Mirrors bwn:status:core / bwn:status:ai. This script is GM-granted, so its window
+  // globals are invisible to page-context JS ([[gm-sandbox-hides-page-globals]]) - without a
+  // stamp there is no way to tell 0.6.2 from 0.7.0 except by asking a question and reading the
+  // answer. That cost a live verification cycle on 2026-08-08.
+  //
+  // Carries the two facts that were actually unanswerable that day, not just the version:
+  // WHICH route this build posts to, and whether the page tools are wired at all. `ingest` is a
+  // boolean - the key itself never goes in here, same rule as every other status stamp.
+  try {
+    localStorage.setItem('bwn:status:ask', JSON.stringify({
+      ver: (typeof GM_info !== 'undefined' && GM_info.script && GM_info.script.version) || '0.0.0',
+      route: 'ai',                      // '/api/ai' with tools; 'ask' was the toolless route
+      pageTools: ASK_TOOL_DEFS.length,  // 0 here would mean the tool wiring is missing
+      ingest: !!GM_getValue('ingest_key', ''),
+      ts: Date.now()
+    }));
+  } catch (e) { /* best-effort: a private-mode storage refusal must not stop the panel loading */ }
 
   // ---- Boot -----------------------------------------------------------------
   // Register into the shared dock (covers a host already up); the host heartbeat

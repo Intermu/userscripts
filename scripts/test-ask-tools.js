@@ -261,6 +261,25 @@ console.log('\nbus client');
 
   // Ask must not have kept a second, toolless path to the old route for live traffic.
   A.ok('askServer posts to /api/ai, not /api/ask', /askDriveLoop\(body, post\)/.test(ASK) && /var post = function \(b\) \{ return gmPost\(AI_URL/.test(ASK));
+
+  /* ---- the status stamp ---- */
+  var stamp = slice(ASK, "    localStorage.setItem('bwn:status:ask'", '\n  } catch (e) {', 'status stamp');
+  A.ok('a bwn:status:ask stamp is written', stamp.length > 40);
+  A.ok('the stamp carries the version', /ver:/.test(stamp) && /GM_info\.script\.version/.test(stamp));
+  // The two facts that were unanswerable on 2026-08-08. A stamp with only a version would have
+  // told me the build number and still not whether the tools were wired.
+  A.ok('the stamp names the ROUTE this build posts to', /route: 'ai'/.test(stamp));
+  A.ok('the stamp reports whether the page tools are wired', /pageTools: ASK_TOOL_DEFS\.length/.test(stamp));
+
+  // The ingest key is a shared secret; localStorage is readable by any page script. This is the
+  // same rule the vault enforces on settings.json - a boolean, never the value.
+  A.ok('the stamp records the key as a BOOLEAN, never the key itself',
+    /ingest: !!GM_getValue\('ingest_key', ''\)/.test(stamp) && !/ingest: GM_getValue/.test(stamp), stamp.slice(0, 200));
+
+  // A storage refusal (private mode, quota) must not take the panel down with it.
+  A.ok('the stamp write is wrapped so a storage refusal cannot stop the panel loading',
+    /try \{\s*\n\s*localStorage\.setItem\('bwn:status:ask'/.test(ASK));
+
   A.finish();
 })
 
