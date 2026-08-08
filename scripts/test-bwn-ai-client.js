@@ -379,6 +379,60 @@ function run() {
     });
   });
 
+  // ---- server-published round cap (maxRounds) --------------------------------------------
+  // The client used to hold its own copy of the server's tool-round limit (AI_MAX_TOOL_ROUNDS
+  // = 6, "match the server default"). That is two writers owning one number: the page-driving
+  // `operate` task runs a far higher cap, and a hard-coded 6 would kill the session at round 7
+  // no matter what the server allowed. The server now publishes `maxRounds` and this loop
+  // adopts it. See outputs/specs/2026-08-08-dom-handle-protocol-architecture.md in the vault.
+
+  // A post() that answers tool_calls forever, so the ONLY thing that ends the loop is the cap.
+  function endlessTools(maxRounds) {
+    var posts = [];
+    function post() {
+      posts.push(1);
+      var r = { ok: true, status: 'tool_calls', toolCalls: [{ id: 'r' + posts.length, name: 'getWorkOrder', input: { workOrderNumber: '1' } }], messages: [{ role: 'user', content: 'q' }] };
+      if (maxRounds != null) r.maxRounds = maxRounds;
+      return Promise.resolve(r);
+    }
+    return { post: post, posts: posts };
+  }
+
+  // No maxRounds (an older deployment) -> the floor still bounds the loop exactly as before.
+  chain = chain.then(function () {
+    var T = loadTransport();
+    var h = endlessTools(null);
+    return T.aiDriveLoop({ task: 'ask', prompt: 'q', tools: T.AI_TOOL_DEFS, userToken: 'x' }, h.post).then(function (text) {
+      eq('no maxRounds -> falls back to the floor', h.posts.length, 7);   // cap 6 + 1 backstop
+      eq('runaway still resolves empty, never hangs', text, '');
+    });
+  });
+
+  // maxRounds: 20 -> the loop runs to the SERVER's cap, not the old client constant. This is
+  // the differential: if the client still owned the number, both cases would stop at 7.
+  chain = chain.then(function () {
+    var T = loadTransport();
+    var h = endlessTools(20);
+    return T.aiDriveLoop({ task: 'operate', prompt: 'click save', tools: T.AI_TOOL_DEFS, userToken: 'x' }, h.post).then(function () {
+      eq('maxRounds 20 is adopted', h.posts.length, 21);
+    });
+  });
+
+  // A hostile or wrong value cannot turn the backstop into an unbounded loop, and cannot drop
+  // the loop below the floor either.
+  chain = chain.then(function () {
+    var T = loadTransport();
+    var h = endlessTools(9999);
+    return T.aiDriveLoop({ task: 'operate', prompt: 'q', tools: T.AI_TOOL_DEFS, userToken: 'x' }, h.post).then(function () {
+      eq('out-of-range maxRounds ignored', h.posts.length, 7);
+      var T2 = loadTransport();
+      var h2 = endlessTools(1);
+      return T2.aiDriveLoop({ task: 'ask', prompt: 'q', tools: T2.AI_TOOL_DEFS, userToken: 'x' }, h2.post).then(function () {
+        eq('maxRounds below the floor ignored', h2.posts.length, 7);
+      });
+    });
+  });
+
   return chain;
 }
 

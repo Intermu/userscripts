@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         BWN Suite - AI (Broadway National)
 // @namespace    broadwaynational.bwn
-// @version      1.42.9
+// @version      1.43.0
 // @downloadURL  https://raw.githubusercontent.com/Intermu/userscripts/main/bwn-suite-ai.user.js
 // @updateURL    https://raw.githubusercontent.com/Intermu/userscripts/main/bwn-suite-ai.user.js
 // @description  The Umbrava tools that call outside APIs, kept separate from the zero-egress Core script. Client Update and WO Audit drafts (Anthropic Claude; draft-only, scrubbed before sending, you review before posting); Find Techs / Find Suppliers (Google Places; vendor leads near a WO); and Job View (opens the Ops-Dashboard job card on the WO page - WO details from Umbrava plus the authored case file and next actions, read-only). Network access is limited by the browser to the declared API hosts and the BWN Static Web App. API keys are stored in Tampermonkey's storage via the menu commands and never enter the page. Toggle modules in BWN_MODULES below.
@@ -1467,7 +1467,16 @@
 
   // ---- Driver + POST transport (TASK-008) ----------------------------------------------
   var AI_URL = 'https://green-stone-0717dab0f.7.azurestaticapps.net/api/ai';
-  var AI_MAX_TOOL_ROUNDS = 6;        // match the server default (BWN_AI_MAX_TOOL_ITERS)
+  // FLOOR only, not the cap. The server owns the tool-round limit and publishes it as
+  // `maxRounds` on every tool_calls response; the loop below adopts that number the moment it
+  // arrives. This constant is what the loop runs on before the first response and against an
+  // older deployment that does not send the field.
+  //
+  // It is deliberately NOT a second copy of the server's default. The page-driving `operate`
+  // task runs a far higher cap than `ask`, and a client constant hard-coded to 6 would kill an
+  // operate session at round 7 no matter what the server allowed - a limit enforced by two
+  // writers that each think they own it, which is how a 217-row board opened at 221.
+  var AI_MIN_TOOL_ROUNDS = 6;
   var AI_MAX_CALLS_PER_ROUND = 8;    // backstop on a single over-eager assistant turn
   var AI_REQ_TIMEOUT_MS = 60000;     // per round-trip; the loop count bounds total time
 
@@ -1526,10 +1535,15 @@
   function aiDriveLoop(initialBody, post) {
     post = post || aiPost;
     var tools = initialBody.tools;
+    var cap = AI_MIN_TOOL_ROUNDS;      // raised to the server's published maxRounds on round 1
     function step(body, posts) {
-      if (posts > AI_MAX_TOOL_ROUNDS + 1) return Promise.resolve('');   // backstop; server finalizes at its own cap first
+      if (posts > cap + 1) return Promise.resolve('');                  // backstop; server finalizes at its own cap first
       return post(body).then(function (resp) {
         if (!resp || resp.ok !== true) return '';                       // miss / handled failure -> fall through
+        // Adopt the server's cap. Clamped to a sane ceiling so a wrong or hostile value cannot
+        // turn the backstop into an unbounded loop, and never lowered below the floor.
+        var served = parseInt(resp.maxRounds, 10);
+        if (served >= AI_MIN_TOOL_ROUNDS && served <= 40) cap = served;
         if (resp.status === 'final') return String(resp.text || '');
         if (resp.status === 'tool_calls' && Array.isArray(resp.toolCalls) && resp.toolCalls.length && Array.isArray(resp.messages)) {
           var calls = resp.toolCalls.slice(0, AI_MAX_CALLS_PER_ROUND);
