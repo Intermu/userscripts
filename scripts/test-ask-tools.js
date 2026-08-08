@@ -280,6 +280,15 @@ console.log('\nbus client');
   A.ok('the stamp write is wrapped so a storage refusal cannot stop the panel loading',
     /try \{\s*\n\s*localStorage\.setItem\('bwn:status:ask'/.test(ASK));
 
+  // A stamp nobody reads is a diagnostic that does not exist. Tie the producer to its consumer:
+  // Core's health report is the surface an operator actually looks at.
+  var CORE = fs.readFileSync(path.join(__dirname, '..', 'bwn-suite-core.user.js'), 'utf8').replace(/\r\n/g, '\n');
+  A.ok('Core reads bwn:status:ask into the health panel', /ask: lsGet\('bwn:status:ask'/.test(CORE));
+  A.ok('Core prints Ask status in the copyable report', /rep\.push\('Ask status: '/.test(CORE));
+  A.ok('the panel flags an UNWIRED Ask rather than only showing a version',
+    /NOT wired/.test(CORE) && /status\.ask\.pageTools > 0/.test(CORE));
+  A.ok('Ask gets the same staleness check as the AI script', /askFresh/.test(CORE));
+
   A.finish();
 })
 

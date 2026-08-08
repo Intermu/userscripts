@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         BWN Suite - Core (Broadway National)
 // @namespace    broadwaynational.bwn
-// @version      1.67.1
+// @version      1.67.2
 // @downloadURL  https://raw.githubusercontent.com/Intermu/userscripts/main/bwn-suite-core.user.js
 // @updateURL    https://raw.githubusercontent.com/Intermu/userscripts/main/bwn-suite-core.user.js
 // @description  Runs several Umbrava helpers for BWN coordinators, in the browser with no privileged grants. Includes: PO Approval + ETA Builder; WO Assist (GP/ETA, a stall watchdog, DNE calculator, and a next-action playbook); Email Leak Guard (checks recipients against vendor names, PO amounts, and client budget references before an outbound email sends); WO List Heat (a triage overlay + My Day strip on the work-order list, with an optional same-origin Umbrava API scan for deterministic full-board coverage); and the BWN Launcher (opens the Azure Static Web App tools with the current WO's context). Modules share state through sessionStorage/localStorage. The only network calls are same-origin Umbrava GraphQL requests (app.umbrava.com/api/graphql, the app's own session): List Heat's full-board scan and WO Assist's work-order / trip / clock-in / document reads, plus ONE write - BWN Views saves the column layout through Umbrava's own putUserPreference, the same preference the column chooser writes; everything else is offline. Toggle modules in BWN_MODULES below.
@@ -8498,7 +8498,7 @@
 
       // Status
       section('Status', 'versions · API keys');
-      var status = { core: lsGet('bwn:status:core', {}) || {}, ai: lsGet('bwn:status:ai', {}) || {} };
+      var status = { core: lsGet('bwn:status:core', {}) || {}, ai: lsGet('bwn:status:ai', {}) || {}, ask: lsGet('bwn:status:ask', {}) || {} };
       function kv(k, v, cls) {
         var r = document.createElement('div'); r.className = 'bwn-ops-kv';
         var a = document.createElement('span'); a.textContent = k;
@@ -8514,6 +8514,20 @@
         kv('Anthropic key', status.ai.anthropic ? 'set' : 'not set', status.ai.anthropic ? 'ok' : 'no');
         kv('Google Places key', status.ai.places ? 'set' : 'not set', status.ai.places ? 'ok' : 'no');
         kv('SWA ingest key', status.ai.ingest ? 'set' : 'not set', status.ai.ingest ? 'ok' : 'no');
+      }
+      // Ask is its own script and can be disabled on its own, so it gets the same freshness
+      // treatment as AI rather than being assumed present.
+      var askFresh = !!status.ask.ver && !!status.core.ts && Math.abs((status.core.ts || 0) - (status.ask.ts || 0)) < 60000;
+      kv('Ask script', status.ask.ver ? ('v' + status.ask.ver + (askFresh ? '' : ' · stale (not loaded this session)')) : 'not loaded');
+      if (askFresh) {
+        // The line that would have saved a verification cycle on 2026-08-08. Ask shipped for
+        // months posting a route with no tools, and a toolless build is indistinguishable from a
+        // wired one until you ask it a question about the screen and read the answer.
+        var askWired = status.ask.route === 'ai' && status.ask.pageTools > 0;
+        kv('Ask page tools', askWired
+          ? (status.ask.pageTools + ' wired · /api/ai')
+          : ('NOT wired · /api/' + (status.ask.route || '?') + ' · ' + (status.ask.pageTools || 0) + ' tools'),
+          askWired ? 'ok' : 'no');
       }
       // AI usage ledger (bwn:ai:usage, written by the AI script per generation).
       // Tokens are the real number; the $ figure is a list-price estimate.
@@ -8621,6 +8635,7 @@
         var rep = [];
         rep.push('BWN SUITE HEALTH REPORT · ' + new Date().toString());
         rep.push('Core status: ' + JSON.stringify(lsGet('bwn:status:core', {})) + ' | AI status: ' + JSON.stringify(lsGet('bwn:status:ai', {})));
+        rep.push('Ask status: ' + JSON.stringify(lsGet('bwn:status:ask', {})));
         rep.push('Shared core: core=' + JSON.stringify(lsGet('bwn:corever:core', null)));
         rep.push('             ai=' + JSON.stringify(lsGet('bwn:corever:ai', null)));
         rep.push('Module toggles: ' + JSON.stringify(lsGet('bwn:modules', {})));
