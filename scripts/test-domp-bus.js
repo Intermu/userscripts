@@ -529,12 +529,16 @@ test('M3b even an ARMED session refuses to write on a live WO - the phase-6 regi
   var snap = DC.refresh(s).snapshot;
   var h = (snap.elements[0] || {}).h;
   var r = DC.act(s, { verb: 'click', handle: h, revision: snap.page.revision });
-  A.ok('M3b an armed rank-5 session on a live WO route is NO_WORKFLOW',
-    r && r.ok === false && r.code === 'NO_WORKFLOW', JSON.stringify(r));
-  A.ok('M3b and the refusal names the route it refused',
-    (r.recovery || '').indexOf('/work-orders/375038') !== -1, r.recovery);
+  // wo-add-note is now ARMED and covers this route, so the refusal moved one gate inward: the
+  // route no longer refuses, the control scope does. That is the correct answer and a stronger one
+  // - it says a real control on a real work order is out of scope while a workflow is live, which
+  // is exactly the claim phase 6 makes. It used to read NO_WORKFLOW.
+  A.ok('M3b an armed rank-5 session cannot touch an unnamed control on a live WO',
+    r && r.ok === false && r.code === 'OUT_OF_WORKFLOW_SCOPE', JSON.stringify(r));
   var on = DC.WORKFLOWS.filter(function (x) { return x.enabled; }).map(function (x) { return x.id; });
-  A.ok('M3b nothing in the shipped registry is switched on', on.length === 0, on.join(','));
+  // A pinned inventory rather than an emptiness check: this still goes red the day a SECOND
+  // workflow arrives switched on, which is the change actually worth catching.
+  A.ok('M3b the enabled set is exactly [wo-add-note]', on.join(',') === 'wo-add-note', on.join(','));
   A.ok('M3b and app.umbrava.com is not in the blanket surface allowlist',
     DC.WRITE_SURFACES['https://app.umbrava.com'] === undefined);
 });

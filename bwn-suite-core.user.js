@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         BWN Suite - Core (Broadway National)
 // @namespace    broadwaynational.bwn
-// @version      1.72.0
+// @version      1.73.0
 // @downloadURL  https://raw.githubusercontent.com/Intermu/userscripts/main/bwn-suite-core.user.js
 // @updateURL    https://raw.githubusercontent.com/Intermu/userscripts/main/bwn-suite-core.user.js
 // @description  Runs several Umbrava helpers for BWN coordinators, in the browser with no privileged grants. Includes: PO Approval + ETA Builder; WO Assist (GP/ETA, a stall watchdog, DNE calculator, and a next-action playbook); Email Leak Guard (checks recipients against vendor names, PO amounts, and client budget references before an outbound email sends); WO List Heat (a triage overlay + My Day strip on the work-order list, with an optional same-origin Umbrava API scan for deterministic full-board coverage); and the BWN Launcher (opens the Azure Static Web App tools with the current WO's context). Modules share state through sessionStorage/localStorage. The only network calls are same-origin Umbrava GraphQL requests (app.umbrava.com/api/graphql, the app's own session): List Heat's full-board scan and WO Assist's work-order / trip / clock-in / document reads, plus ONE write - BWN Views saves the column layout through Umbrava's own putUserPreference, the same preference the column chooser writes; everything else is offline. Toggle modules in BWN_MODULES below.
@@ -11920,15 +11920,23 @@
     {
       id: "wo-add-note",
       title: "Add a note to a work order",
-      // STILL FALSE, and it is the only thing left. `controlsVerified` below is now true - the
-      // controls are measured and real - so this flag is the decision, not the homework: switching
-      // it on lets an agent write a note on a live work order, behind the confirm strip. It is
-      // deliberately not something a session that got this far can flip for itself.
+      // ON, by Mike's decision, 2026-08-08. The first workflow this protocol has ever armed on a
+      // live record.
       //
-      // The pair is the point. `enabled` is a DECISION; `controlsVerified` is a MEASUREMENT. Both
-      // are required, so neither one alone arms anything, and each is wrong in a way the other
-      // cannot cover.
-      enabled: false,
+      // WHAT THIS DOES AND DOES NOT TURN ON, because the distinction matters more than the flag:
+      //   IT DOES  let a page-context caller holding an ARMED session drive the add-note flow on a
+      //            real work order - the console path, and the one the phase-6 gate uses. Every
+      //            mutating step still raises a confirm strip the operator has to approve, and the
+      //            scope still refuses every control the entry does not name.
+      //   IT DOES NOT reach the Ask window, the bus, or anything the model drives on its own. Two
+      //            further gates are untouched and both live in Core: BUS_VERBS exposes no write
+      //            verb, and the responder's session is not armed. Turning THOSE on is a separate
+      //            decision, and it is the one that hands the capability to an agent rather than
+      //            to a person at a keyboard.
+      //
+      // The pair is still the point. `enabled` is a DECISION; `controlsVerified` is a MEASUREMENT.
+      // Neither alone arms anything, and each is wrong in a way the other cannot cover.
+      enabled: true,
       origin: "https://app.umbrava.com",
       // NO `$` anchor. The live route measured 2026-08-08 is `/work-orders/371126/details`, not
       // `/work-orders/371126` - an anchored pattern would have matched nothing, forever, and the
