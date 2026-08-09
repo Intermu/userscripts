@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         BWN Suite - Core (Broadway National)
 // @namespace    broadwaynational.bwn
-// @version      1.70.0
+// @version      1.71.0
 // @downloadURL  https://raw.githubusercontent.com/Intermu/userscripts/main/bwn-suite-core.user.js
 // @updateURL    https://raw.githubusercontent.com/Intermu/userscripts/main/bwn-suite-core.user.js
 // @description  Runs several Umbrava helpers for BWN coordinators, in the browser with no privileged grants. Includes: PO Approval + ETA Builder; WO Assist (GP/ETA, a stall watchdog, DNE calculator, and a next-action playbook); Email Leak Guard (checks recipients against vendor names, PO amounts, and client budget references before an outbound email sends); WO List Heat (a triage overlay + My Day strip on the work-order list, with an optional same-origin Umbrava API scan for deterministic full-board coverage); and the BWN Launcher (opens the Azure Static Web App tools with the current WO's context). Modules share state through sessionStorage/localStorage. The only network calls are same-origin Umbrava GraphQL requests (app.umbrava.com/api/graphql, the app's own session): List Heat's full-board scan and WO Assist's work-order / trip / clock-in / document reads, plus ONE write - BWN Views saves the column layout through Umbrava's own putUserPreference, the same preference the column chooser writes; everything else is offline. Toggle modules in BWN_MODULES below.
@@ -11937,23 +11937,37 @@
       // (The one rank measured so far is 4, on 2026-08-08. That is one user, not the population,
       // and it is a reason the floor is not load-bearing rather than a reason to raise it.)
       minRank: 1,
-      // MEASURED 2026-08-08 by the phase-6 live gate on WO #371126: **1 of these 4 exists.**
-      //   present: /^add note$/i as a button  -> @b23
-      //   absent:  the note textbox, the save/post control, cancel
-      // The three absent ones live inside the editor that Add Note opens, and the page was never
-      // snapshotted with it open - they were written from the shape such a flow usually has, which
-      // is a guess wearing a regex. As declared, this workflow would approve the first click and
-      // then refuse every control in the editor it just opened: a dead end, mid-flow, on a live
-      // work order, with the operator watching.
+      // REWRITTEN 2026-08-08 against a probe of the editor actually open, on WO #371126. The first
+      // version was written from the shape such a flow usually has and was wrong in a way that
+      // mattered: it named a `Note` textbox and a `Save`/`Post` button. Neither exists. What the
+      // page really carries, with the dialog open (20 addressable controls, down from 74):
       //
-      // That is why `controlsVerified` exists above. To finish this: open the editor by hand and
-      // run outputs/bwn-domp-controls-probe.js, paste the real names in here, then set the flag.
+      //   @d1  dialog   "Add Note"     the editor itself
+      //   @i1  textbox  (NO NAME)      the note body - the one field this workflow must type into
+      //   @b13 button   "Add"          submit. Not "Save", not "Post"
+      //   @b12 button   "Cancel"       policy-classified `confirm` by its own name
+      //   @b1..@b11, @s1, @s2          eleven nameless buttons and two nameless selects - a rich
+      //                                text toolbar. Formatting is not part of writing a note, and
+      //                                each of them is unidentifiable anyway. Deliberately OUT.
+      //
+      // FOURTEEN of the twenty carry no accessible name. That is a finding about the page, not
+      // about this list, and it is the same root cause as the fingerprint collisions measured in
+      // August - see the note on `group` in controlAllowed for why scoping had to grow past names.
+      //
+      // The body is scoped by CONTAINMENT (`kind:i` inside the `Add Note` group) because there is
+      // no name to scope it by. Submit and cancel are pinned to the same group so that an `Add`
+      // button elsewhere on a work order can never satisfy this workflow.
       controls: [
-        { name: /^add note$/i, kind: "b" },
-        { name: /^note$/i, kind: "i" },
-        { name: /^(save|post|add)$/i, kind: "b" },
-        { name: /^cancel$/i, kind: "b" },
+        { name: /^add note$/i, kind: "b" },                  // the opener, on the WO page itself
+        { kind: "i", group: /^Add Note$/ },                  // the note body: no name, so by group
+        { name: /^Add$/, kind: "b", group: /^Add Note$/ },   // submit
+        { name: /^Cancel$/, kind: "b", group: /^Add Note$/ },
       ],
+      // STILL FALSE, and deliberately. The names above are measured, but the `group` matchers rest
+      // on the dialog's accessible label reaching groupPath, and the probe that produced this list
+      // did not report groupPath - it was built to ask "what are the names", and the answer turned
+      // out to be "there aren't any". The probe now reports it; one more run settles this. Setting
+      // the flag on an unmeasured assumption is the exact thing the flag exists to prevent.
       // Why a note and not something larger: it is additive, it is visible to the humans who
       // read the WO, and a wrong one is corrected by writing another. Nothing in this workflow
       // changes a status, an amount, or a vendor assignment.
@@ -12524,11 +12538,32 @@
     return out;
   };
 
-  function controlAllowed(w, name, kind) {
+  // A matcher may constrain any combination of kind, accessible name, data-testid and enclosing
+  // group. ALL the constraints it states must hold; a matcher that states none matches anything.
+  //
+  // `group` exists because name-only scoping does not survive contact with a real page. Measured
+  // on WO #371126 with the Add Note editor open: 14 of 20 addressable controls carry NO accessible
+  // name, and one of them is the note body itself - the single field the workflow has to type
+  // into. There is no name to scope it by, and putting a handle in a registry is meaningless
+  // (handles are minted per session). "The textbox inside the Add Note dialog" is precise, stable
+  // and readable, and it is expressible from data the collector already produces.
+  //
+  // `group` is tested against EACH SEGMENT of groupPath, so it matches on containment at any
+  // depth rather than only on the innermost landmark. That is the more permissive reading, which
+  // is why it is meant to be paired with `kind` - and why a matcher that is only `{group: ...}`
+  // gives a whole dialog away.
+  function controlAllowed(w, rec, name, kind) {
+    var path = Array.isArray(rec.groupPath) ? rec.groupPath : [];
     for (var i = 0; i < w.controls.length; i++) {
       var c = w.controls[i];
       if (c.kind && c.kind !== kind) continue;
       if (c.name && !c.name.test(name)) continue;
+      if (c.testid && !c.testid.test(str(rec.testid))) continue;
+      if (c.group) {
+        var hit = false;
+        for (var j = 0; j < path.length; j++) { if (c.group.test(str(path[j]))) { hit = true; break; } }
+        if (!hit) continue;
+      }
       return true;
     }
     return false;
@@ -12546,7 +12581,7 @@
     var considered = [];
     for (var i = 0; i < here.length; i++) {
       if (rank === null || rank < here[i].minRank) continue;
-      if (controlAllowed(here[i], name, kind)) return { workflow: here[i] };
+      if (controlAllowed(here[i], fresh, name, kind)) return { workflow: here[i] };
       considered.push(here[i].id);
     }
     return {
@@ -12705,8 +12740,27 @@
   // that will be typed - a strip that says "the agent wants to do something" trains people to
   // approve without reading, and then the gate is decoration. Deny-classified handles never reach
   // here (POLICY_DENIED fires first), so no masked value can be spelled out on screen.
+  // How the operator is told what they are approving.
+  //
+  // The fallback is not cosmetic. Measured on WO #371126: 14 of 20 controls inside the Add Note
+  // editor have no accessible name, the note body among them - so on the page this workflow is
+  // FOR, the strip would have read `type "..." into @i1`. Asking a human to approve a handle is
+  // asking them to approve nothing they can check against the screen, and a confirm nobody can
+  // evaluate is a click-through by another name. Falling back to the role and the enclosing group
+  // gives them "the textbox in Add Note", which they can.
+  function describeTarget(rec, handle) {
+    var name = DP.accName(rec);
+    if (name) return name;
+    var kind = DP.kindOf(rec);
+    var what = DP.KINDS[kind] || "control";
+    var path = Array.isArray(rec.groupPath) ? rec.groupPath : [];
+    var where = path.length ? path[path.length - 1] : "";
+    return where ? ("the unnamed " + what + " in " + where + " (" + handle + ")")
+      : ("an unnamed " + what + " (" + handle + ")");
+  }
+
   function describeAction(verb, handle, args, rec) {
-    var name = DP.accName(rec) || handle;
+    var name = describeTarget(rec, handle);
     if (verb === "fill") return 'type "' + trimText(args.value, 120) + '" into ' + name;
     if (verb === "select") return 'choose "' + trimText(args.option, 80) + '" in ' + name;
     if (verb === "check") return (args.checked ? "tick " : "untick ") + name;
