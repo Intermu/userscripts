@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         BWN Suite - Core (Broadway National)
 // @namespace    broadwaynational.bwn
-// @version      1.68.0
+// @version      1.69.0
 // @downloadURL  https://raw.githubusercontent.com/Intermu/userscripts/main/bwn-suite-core.user.js
 // @updateURL    https://raw.githubusercontent.com/Intermu/userscripts/main/bwn-suite-core.user.js
 // @description  Runs several Umbrava helpers for BWN coordinators, in the browser with no privileged grants. Includes: PO Approval + ETA Builder; WO Assist (GP/ETA, a stall watchdog, DNE calculator, and a next-action playbook); Email Leak Guard (checks recipients against vendor names, PO amounts, and client budget references before an outbound email sends); WO List Heat (a triage overlay + My Day strip on the work-order list, with an optional same-origin Umbrava API scan for deterministic full-board coverage); and the BWN Launcher (opens the Azure Static Web App tools with the current WO's context). Modules share state through sessionStorage/localStorage. The only network calls are same-origin Umbrava GraphQL requests (app.umbrava.com/api/graphql, the app's own session): List Heat's full-board scan and WO Assist's work-order / trip / clock-in / document reads, plus ONE write - BWN Views saves the column layout through Umbrava's own putUserPreference, the same preference the column chooser writes; everything else is offline. Toggle modules in BWN_MODULES below.
@@ -11872,6 +11872,11 @@
     ASYNC_VERB: "ASYNC_VERB",
     EVENTS_UNSUPPORTED: "EVENTS_UNSUPPORTED",
     TIMEOUT: "TIMEOUT",
+    // phase 6
+    NO_WORKFLOW: "NO_WORKFLOW",
+    OUT_OF_WORKFLOW_SCOPE: "OUT_OF_WORKFLOW_SCOPE",
+    RANK_TOO_LOW: "RANK_TOO_LOW",
+    RANK_UNKNOWN: "RANK_UNKNOWN",
   };
 
   // Gate 2. The origins where write verbs may run at all, hard-coded in the SHARED source rather
@@ -11882,6 +11887,63 @@
   // a source edit, reviewed with the rest of the diff.
   DC.WRITE_SURFACES = { "https://green-stone-0717dab0f.7.azurestaticapps.net": 1 };
   if (Object.freeze) Object.freeze(DC.WRITE_SURFACES);
+
+  /* ---------------------------- phase 6: the workflow registry ----------------------------
+   *
+   * A surface that is NOT in WRITE_SURFACES gets in only one way: a named workflow that is
+   * enabled, matches this exact route, clears a rank floor, and names the controls it is allowed
+   * to touch. `app.umbrava.com` is deliberately NOT in the allowlist above and never will be -
+   * a blanket write on a live work order is the thing this whole design exists to avoid. That is
+   * what the spec's "one workflow at a time" means: each entry below is a separate reviewed
+   * capability, and turning one on is a one-line diff someone signs off.
+   *
+   * A workflow is NARROWER than the surface allowlist in three ways at once:
+   *   route     - the pathname it applies to, so a WO-notes workflow is inert on the board;
+   *   controls  - the accessible names and kinds it may act on. Anything else on the page is
+   *               OUT_OF_WORKFLOW_SCOPE even mid-workflow. The failure direction is "refuses too
+   *               much", which on a live FSM is the only acceptable direction to be wrong in;
+   *   minRank   - who may drive it at all.
+   *
+   * RANK IS A POLICY GATE, NOT A SECURITY BOUNDARY, and calling it one would be a lie worth
+   * catching here. The number arrives over a document CustomEvent and a localStorage slot, both
+   * of which any script on the page can write. It decides which humans may point the agent at a
+   * workflow; it does not decide what Umbrava will accept. The things actually holding the line
+   * are the closed verb set, the control scope, the operator's own confirm (isTrusted), and
+   * Umbrava's server-side permissions against the operator's own bearer token.
+   *
+   * SHIPPED DISABLED. Every entry below has enabled:false, so the deployed bytes refuse every
+   * write on Umbrava exactly as they did in phase 5. Phase 5 has not yet been verified in a
+   * browser; arming a live FSM on top of an executor no browser has run is not a thing to do by
+   * momentum. Flipping a flag here is the deliberate act, and it is reviewable on its own.
+   */
+  DC.WORKFLOWS = [
+    {
+      id: "wo-add-note",
+      title: "Add a note to a work order",
+      enabled: false,
+      origin: "https://app.umbrava.com",
+      route: /^\/work-orders\/\d+/,
+      // Rank 1 (staff) on purpose. The coordinator who lives on this page all day is the person
+      // this is for, and a floor above them would ship a feature nobody holds the rank to use -
+      // which is how the SWA's ops_* gates ended up deny-for-all for every signed-in user.
+      minRank: 1,
+      // Names OBSERVED on a real WO page (#371126, 2026-08-08), not guessed. `Add Note` came
+      // back in a live snapshot alongside Tasks / Proposals / Copy From. The rest of the flow -
+      // whatever editor and save control the button opens - is UNOBSERVED, which is why the live
+      // gate's first job is to snapshot the opened editor and report what is actually there
+      // rather than to assume these names are right.
+      controls: [
+        { name: /^add note$/i, kind: "b" },
+        { name: /^note$/i, kind: "i" },
+        { name: /^(save|post|add)$/i, kind: "b" },
+        { name: /^cancel$/i, kind: "b" },
+      ],
+      // Why a note and not something larger: it is additive, it is visible to the humans who
+      // read the WO, and a wrong one is corrected by writing another. Nothing in this workflow
+      // changes a status, an amount, or a vendor assignment.
+      rationale: "additive, human-visible, and wrong is fixed by writing another",
+    },
+  ];
 
   // Marks the confirm strip's own subtree. The walk skips it, so the operator's Approve button is
   // never projected, never gets a handle, and can never be the target of a verb. Belt and braces
@@ -12220,6 +12282,11 @@
       // Replaceable so a host page can style its own strip. It does NOT replace the isTrusted
       // check: whatever draws the strip still has to hand DC.grant a real user event.
       confirmUI: typeof o.confirmUI === "function" ? o.confirmUI : null,
+      // The caller's rank on the ladder /api/user-role computes (1 staff .. 5 director), as a
+      // number or a function returning one. Core reads it off the `bwn:role` bus; the SWA has no
+      // use for it and passes nothing. Unknown is RANK_UNKNOWN and refuses - a workflow gate that
+      // waves through the case it could not evaluate is not a gate.
+      rank: (typeof o.rank === "function" || typeof o.rank === "number") ? o.rank : null,
       pending: {},          // confirmId -> the request awaiting an operator
       grants: {},           // grant key -> { exp, epoch }, single use
       confirmSeq: 0,
@@ -12406,6 +12473,65 @@
   function originOf(s) {
     return (s.win && s.win.location) ? str(s.win.location.origin) : "";
   }
+  function routeOf(s) {
+    return (s.win && s.win.location) ? str(s.win.location.pathname) : "";
+  }
+
+  // The caller's rank on the ladder /api/user-role computes (1 staff .. 5 director). A reader
+  // that throws yields an unknown rank, never a pass.
+  DC.rankOf = function (s) {
+    var r = s.rank;
+    if (typeof r === "function") { try { r = r(); } catch (e) { return null; } }
+    return (typeof r === "number" && isFinite(r)) ? r : null;
+  };
+
+  // Every ENABLED workflow whose origin and route match where we are standing.
+  DC.workflowsHere = function (s) {
+    var origin = originOf(s), route = routeOf(s), out = [], i, w;
+    for (i = 0; i < DC.WORKFLOWS.length; i++) {
+      w = DC.WORKFLOWS[i];
+      if (!w.enabled) continue;
+      if (w.origin !== origin) continue;
+      if (w.route && !w.route.test(route)) continue;
+      out.push(w);
+    }
+    return out;
+  };
+
+  function controlAllowed(w, name, kind) {
+    for (var i = 0; i < w.controls.length; i++) {
+      var c = w.controls[i];
+      if (c.kind && c.kind !== kind) continue;
+      if (c.name && !c.name.test(name)) continue;
+      return true;
+    }
+    return false;
+  }
+
+  // The control scope, asked once the element is resolved. On a WRITE_SURFACES page there is
+  // nothing to ask - those are our own tools. On a workflow surface, a control the workflow did
+  // not name is refused even in the middle of that workflow: the registry entry is the boundary,
+  // not a hint about where to start.
+  DC.scopeGate = function (s, fresh) {
+    if (DC.WRITE_SURFACES[originOf(s)] === 1) return null;
+    var here = DC.workflowsHere(s);
+    var rank = DC.rankOf(s);
+    var name = DP.accName(fresh), kind = DP.kindOf(fresh);
+    var considered = [];
+    for (var i = 0; i < here.length; i++) {
+      if (rank === null || rank < here[i].minRank) continue;
+      if (controlAllowed(here[i], name, kind)) return { workflow: here[i] };
+      considered.push(here[i].id);
+    }
+    return {
+      refusal: {
+        ok: false, code: DC.ERROR.OUT_OF_WORKFLOW_SCOPE,
+        workflows: considered,
+        recovery: "this control is not one the workflow named" + (considered.length ? " (" + considered.join(", ") + ")" : "")
+          + "; write access on this surface is scoped to the controls the workflow declares",
+      },
+    };
+  };
 
   // Gates 1 and 2, in that order on purpose. An unarmed session gets exactly the answer it got
   // before phase 5 existed - VERB_DISABLED - on every surface, so nothing that never opted in can
@@ -12419,14 +12545,48 @@
       };
     }
     var origin = originOf(s);
-    if (DC.WRITE_SURFACES[origin] !== 1) {
+    if (DC.WRITE_SURFACES[origin] === 1) return null;
+
+    // Phase 6 widens this gate by exactly one route and no more: an origin also qualifies if at
+    // least one ENABLED workflow matches this pathname. That route then owes two further answers
+    // - the rank floor here, and whether the specific control is in scope, which DC.execute asks
+    // once it has resolved an element.
+    var here = DC.workflowsHere(s);
+    if (!here.length) {
+      // Two different facts, kept apart: "this surface is never writable" and "this surface is
+      // writable but not on this page" send a caller to different places.
+      var known = false, i;
+      for (i = 0; i < DC.WORKFLOWS.length; i++) if (DC.WORKFLOWS[i].origin === origin) known = true;
+      if (!known) {
+        return {
+          ok: false, code: DC.ERROR.SURFACE_NOT_ARMED,
+          recovery: "write verbs are armed on this suite's own pages only; this page is "
+            + (origin || "(no origin)"),
+        };
+      }
       return {
-        ok: false, code: DC.ERROR.SURFACE_NOT_ARMED,
-        recovery: "write verbs are armed on this suite's own pages only; this page is "
-          + (origin || "(no origin)"),
+        ok: false, code: DC.ERROR.NO_WORKFLOW,
+        recovery: "no enabled workflow covers " + (routeOf(s) || "this route") + " on this surface;"
+          + " write access here is granted one named workflow at a time",
       };
     }
-    return null;
+    var rank = DC.rankOf(s);
+    if (rank === null) {
+      return {
+        ok: false, code: DC.ERROR.RANK_UNKNOWN,
+        recovery: "the workflows on this page are rank-gated and no rank has been resolved for the"
+          + " current user, so nothing is permitted",
+      };
+    }
+    var floor = null;
+    for (var j = 0; j < here.length; j++) {
+      if (rank >= here[j].minRank) return null;
+      if (floor === null || here[j].minRank < floor) floor = here[j].minRank;
+    }
+    return {
+      ok: false, code: DC.ERROR.RANK_TOO_LOW,
+      recovery: "the workflows on this page need rank " + floor + " and this user is " + rank,
+    };
   };
 
   // act(session, req) -> result, synchronously.
@@ -12625,7 +12785,7 @@
     p.el = host;
   };
 
-  function requestConfirm(s, verb, handle, args, rec) {
+  function requestConfirm(s, verb, handle, args, rec, wf) {
     // A model that keeps asking must not paper the screen with strips. Oldest out first, so the
     // one the operator is currently reading is the newest.
     var ids = Object.keys(s.pending);
@@ -12636,8 +12796,12 @@
     }
     var p = {
       id: "c" + (++s.confirmSeq), key: grantKeyOf(verb, handle, args),
-      verb: verb, handle: handle, args: args,
-      summary: describeAction(verb, handle, args, rec), el: null,
+      verb: verb, handle: handle, args: args, workflow: wf ? wf.id : null,
+      // On a workflow surface the strip names the capability as well as the action. "Click Save"
+      // on a live work order is not enough for an operator to judge; "click Save, for Add a note
+      // to a work order" is, and it is also how they notice if the agent has wandered.
+      summary: describeAction(verb, handle, args, rec) + (wf ? " - for: " + wf.title : ""),
+      el: null,
     };
     s.pending[p.id] = p;
     try { (s.confirmUI || DC.defaultConfirmUI)(s, p); }
@@ -12962,6 +13126,16 @@
         reason: "this handle is policy-denied; explain that to the operator rather than routing around it" };
     }
 
+    // Phase 6's control scope. Only for a verb that actually changes something: `scroll` moves
+    // the viewport and refusing it would leave a workflow unable to reach its own controls, so it
+    // is bounded by the route gate above and no further.
+    var wf = null;
+    if (def.mutates) {
+      var scoped = DC.scopeGate(s, fresh);
+      if (scoped && scoped.refusal) return scoped.refusal;
+      wf = scoped && scoped.workflow;
+    }
+
     var args = argsOf(verb, req);
     var bad = validateVerb(s, verb, kind, fresh, el, args);
     if (bad) return bad;
@@ -12982,7 +13156,7 @@
           recovery: "something is drawn on top of it; close the overlay or scroll, then retry once" };
       }
       if (!takeGrant(s, grantKeyOf(verb, req.handle, args))) {
-        return requestConfirm(s, verb, req.handle, args, fresh);
+        return requestConfirm(s, verb, req.handle, args, fresh, wf);
       }
     }
 
@@ -12998,6 +13172,9 @@
     // fill fell back to a plain assignment, which a React-controlled input silently reverts - so
     // this is the difference between "typed" and "appeared to type", and the live gate reads it.
     if (done.nativeSetter != null) extra.nativeSetter = done.nativeSetter;
+    // Which named capability authorised this, so an audit of what the agent did on a live record
+    // reads as a workflow rather than as a list of loose clicks.
+    if (wf) extra.workflow = wf.id;
     return afterAction(s, extra);
   };
 
@@ -13175,11 +13352,42 @@
     // and takes three separate deliberate edits, which is the whole point of there being three.
     var BUS_VERBS = { inspect: 1, extract: 1, refresh_snapshot: 1 };
 
+    // ---- Rank, for phase 6's workflow gate -------------------------------------------------
+    // The same server-computed ladder the escalation wording already uses (bwn-suite-ai resolves
+    // it against /api/user-role, which vouches the operator's Umbrava token; 1 staff .. 5
+    // director). Core is @grant none and cannot fetch it, so it only CONSUMES: a live `bwn:role`
+    // bus event, or the `bwn:role:last` slot when it is marked ok and still fresh.
+    //
+    // THIS IS NOT A SECURITY BOUNDARY and phase 6 does not pretend it is. Both the event and the
+    // slot are writable by any script on the page. It decides which humans may point the agent at
+    // a workflow; what Umbrava will actually accept is decided by Umbrava, server-side, against
+    // the operator's own bearer. Unknown rank is RANK_UNKNOWN and refuses.
+    //
+    // Supplied as a FUNCTION, not a number: the session is built once and the rank often arrives
+    // later, when the AI script finishes resolving it. A number captured at session-build time
+    // would pin "unknown" for the life of the page.
+    var _dompRank = null;
+    var DOMP_ROLE_TTL_MS = 6 * 3600 * 1000;
+    document.addEventListener('bwn:evt', BWN.guard(function (e) {
+      var d = e && e.detail;
+      if (d && d.id === 'bwn:role' && typeof d.rank === 'number') _dompRank = d.rank;
+    }, 'domHandle:role'));
+    function dompRank() {
+      if (typeof _dompRank === 'number') return _dompRank;
+      try {
+        var r = JSON.parse(localStorage.getItem('bwn:role:last') || 'null');
+        if (r && r.ok && typeof r.rank === 'number' && r.ts && (Date.now() - r.ts) < DOMP_ROLE_TTL_MS) return r.rank;
+      } catch (e) { }
+      return null;
+    }
+
     var session = null;
     function ensure() {
       // No `write: true`. A live work order is a live FSM and a wrong click there is a real edit
-      // to a real record; the read-only default is what keeps that off the table here.
-      if (!session) session = DC.createSession({ window: window, document: document });
+      // to a real record; the read-only default is what keeps that off the table here. The rank
+      // reader is wired anyway, so that arming this is one flag rather than a flag plus a piece
+      // of plumbing nobody remembers is missing.
+      if (!session) session = DC.createSession({ window: window, document: document, rank: dompRank });
       return session;
     }
 

@@ -517,22 +517,26 @@ test('M3 dropping the bus verb gate lets a write verb through to the collector',
     JSON.stringify(got));
 });
 
-test('M3b even an ARMED session refuses to write on this origin - the third gate', function () {
+test('M3b even an ARMED session refuses to write on a live WO - the phase-6 registry', function () {
   // The bus gate and the arming gate are both bypassed here: a session built with write:true, on
-  // the collector directly, no bus in the way. What is left is the origin allowlist compiled into
-  // the shared source, and on app.umbrava.com it refuses. That is the gate a phase-6 edit has to
-  // move, and it is the reason a mistake in Core's responder cannot by itself put write access on
-  // a live work order.
+  // the collector directly, no bus in the way. What is left is phase 6's workflow registry, and
+  // this world sits on `/work-orders/375038` - the exact route the shipped wo-add-note entry
+  // names. It still refuses, because that entry is disabled. This is the assertion that would go
+  // red the day someone flips a flag without meaning to.
   var w = makeWorld();
   var DC = w.sandbox.window.BWNDOMC;
-  var s = DC.createSession({ window: w.win, document: w.doc, write: true });
+  var s = DC.createSession({ window: w.win, document: w.doc, write: true, rank: 5 });
   var snap = DC.refresh(s).snapshot;
   var h = (snap.elements[0] || {}).h;
   var r = DC.act(s, { verb: 'click', handle: h, revision: snap.page.revision });
-  A.ok('M3b an armed session on app.umbrava.com is SURFACE_NOT_ARMED',
-    r && r.ok === false && r.code === 'SURFACE_NOT_ARMED', JSON.stringify(r));
-  A.ok('M3b and the refusal names the origin it refused',
-    (r.recovery || '').indexOf('https://app.umbrava.com') !== -1, r.recovery);
+  A.ok('M3b an armed rank-5 session on a live WO route is NO_WORKFLOW',
+    r && r.ok === false && r.code === 'NO_WORKFLOW', JSON.stringify(r));
+  A.ok('M3b and the refusal names the route it refused',
+    (r.recovery || '').indexOf('/work-orders/375038') !== -1, r.recovery);
+  var on = DC.WORKFLOWS.filter(function (x) { return x.enabled; }).map(function (x) { return x.id; });
+  A.ok('M3b nothing in the shipped registry is switched on', on.length === 0, on.join(','));
+  A.ok('M3b and app.umbrava.com is not in the blanket surface allowlist',
+    DC.WRITE_SURFACES['https://app.umbrava.com'] === undefined);
 });
 
 test('M4 mutate() throws on a missing target', function () {
