@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         BWN Suite - Core (Broadway National)
 // @namespace    broadwaynational.bwn
-// @version      1.71.0
+// @version      1.72.0
 // @downloadURL  https://raw.githubusercontent.com/Intermu/userscripts/main/bwn-suite-core.user.js
 // @updateURL    https://raw.githubusercontent.com/Intermu/userscripts/main/bwn-suite-core.user.js
 // @description  Runs several Umbrava helpers for BWN coordinators, in the browser with no privileged grants. Includes: PO Approval + ETA Builder; WO Assist (GP/ETA, a stall watchdog, DNE calculator, and a next-action playbook); Email Leak Guard (checks recipients against vendor names, PO amounts, and client budget references before an outbound email sends); WO List Heat (a triage overlay + My Day strip on the work-order list, with an optional same-origin Umbrava API scan for deterministic full-board coverage); and the BWN Launcher (opens the Azure Static Web App tools with the current WO's context). Modules share state through sessionStorage/localStorage. The only network calls are same-origin Umbrava GraphQL requests (app.umbrava.com/api/graphql, the app's own session): List Heat's full-board scan and WO Assist's work-order / trip / clock-in / document reads, plus ONE write - BWN Views saves the column layout through Umbrava's own putUserPreference, the same preference the column chooser writes; everything else is offline. Toggle modules in BWN_MODULES below.
@@ -11920,12 +11920,15 @@
     {
       id: "wo-add-note",
       title: "Add a note to a work order",
+      // STILL FALSE, and it is the only thing left. `controlsVerified` below is now true - the
+      // controls are measured and real - so this flag is the decision, not the homework: switching
+      // it on lets an agent write a note on a live work order, behind the confirm strip. It is
+      // deliberately not something a session that got this far can flip for itself.
+      //
+      // The pair is the point. `enabled` is a DECISION; `controlsVerified` is a MEASUREMENT. Both
+      // are required, so neither one alone arms anything, and each is wrong in a way the other
+      // cannot cover.
       enabled: false,
-      // A SECOND flag, and it is not ceremony. `enabled` is a decision; this is a MEASUREMENT -
-      // "somebody has snapshotted this flow and the control list below matches what is really on
-      // the page". Both are required, so flipping `enabled` alone cannot arm a flow nobody has
-      // looked at. See the note on `controls`: the phase-6 gate measured 1 of 4 present.
-      controlsVerified: false,
       origin: "https://app.umbrava.com",
       // NO `$` anchor. The live route measured 2026-08-08 is `/work-orders/371126/details`, not
       // `/work-orders/371126` - an anchored pattern would have matched nothing, forever, and the
@@ -11937,37 +11940,53 @@
       // (The one rank measured so far is 4, on 2026-08-08. That is one user, not the population,
       // and it is a reason the floor is not load-bearing rather than a reason to raise it.)
       minRank: 1,
-      // REWRITTEN 2026-08-08 against a probe of the editor actually open, on WO #371126. The first
-      // version was written from the shape such a flow usually has and was wrong in a way that
-      // mattered: it named a `Note` textbox and a `Save`/`Post` button. Neither exists. What the
-      // page really carries, with the dialog open (20 addressable controls, down from 74):
+      // MEASURED on WO #371126, 2026-08-08, with the editor open. Twenty addressable controls,
+      // down from 74 - an open dialog excludes the page behind it. The first version of this list
+      // was written from the shape such a flow usually has and was wrong where it mattered: it
+      // named a `Note` textbox and a `Save`/`Post` button, neither of which exists.
       //
-      //   @d1  dialog   "Add Note"     the editor itself
-      //   @i1  textbox  (NO NAME)      the note body - the one field this workflow must type into
-      //   @b13 button   "Add"          submit. Not "Save", not "Post"
-      //   @b12 button   "Cancel"       policy-classified `confirm` by its own name
-      //   @b1..@b11, @s1, @s2          eleven nameless buttons and two nameless selects - a rich
-      //                                text toolbar. Formatting is not part of writing a note, and
-      //                                each of them is unidentifiable anyway. Deliberately OUT.
+      //   @i1  textbox  no name, no testid   the note body. Addressable ONLY by containment.
+      //   @b13 button   "Add", no testid     submit. Not "Save", not "Post".
+      //   @b12 button   "Cancel"             + testid add-project-note-modal-cancel-button
+      //   groupPath on all three: ["Add Note", "form"]
       //
-      // FOURTEEN of the twenty carry no accessible name. That is a finding about the page, not
-      // about this list, and it is the same root cause as the fingerprint collisions measured in
-      // August - see the note on `group` in controlAllowed for why scoping had to grow past names.
+      // DELIBERATELY OUT OF SCOPE, and the reasons matter more than the list:
+      //   @s2  share-with-field-autocomplete   WHO THE NOTE IS SHARED WITH. This is the highest
+      //        blast radius in the dialog by a distance: it decides whether an internal note is
+      //        visible to a client or a vendor. An agent must not be able to touch it, and the
+      //        fact that it sits one control away from the field the agent DOES need is the best
+      //        argument in this file for scoping per control rather than per dialog.
+      //   @s1  add-wo-note-modal-type-field    the note's TYPE. Categorisation is a judgement
+      //        with downstream effects on who reads it; the UI default is fine.
+      //   @b1..@b11  the rich-text toolbar     bold/italic/lists are not part of writing a note.
+      //        Two of them are worse than merely useless: -link-button and -mention-button, and a
+      //        mention notifies a human.
       //
-      // The body is scoped by CONTAINMENT (`kind:i` inside the `Add Note` group) because there is
-      // no name to scope it by. Submit and cancel are pinned to the same group so that an `Add`
-      // button elsewhere on a work order can never satisfy this workflow.
+      // Fourteen of the twenty carry no accessible name. That is a finding about the page rather
+      // than about this list, and it is the same root cause as the August fingerprint collisions.
+      // Fourteen DO carry a data-testid, which is why scoping grew a `testid` matcher.
       controls: [
-        { name: /^add note$/i, kind: "b" },                  // the opener, on the WO page itself
-        { kind: "i", group: /^Add Note$/ },                  // the note body: no name, so by group
-        { name: /^Add$/, kind: "b", group: /^Add Note$/ },   // submit
+        // The opener, on the WO page with the dialog closed. `kind: "b"` matters: with the dialog
+        // open there is also a HEADING and a DIALOG both named "Add Note".
+        { name: /^add note$/i, kind: "b" },
+        // The note body. No name and no testid, so containment is the only handle on it. Matched
+        // per groupPath SEGMENT, which is what makes this work - the innermost segment is the
+        // generic "form", and only "Add Note" identifies anything.
+        { kind: "i", group: /^Add Note$/ },
+        // Submit. Pinned to the group so an "Add" button elsewhere on a work order - and there are
+        // several - can never satisfy this workflow.
+        { name: /^Add$/, kind: "b", group: /^Add Note$/ },
+        // Cancel, by name+group rather than by its testid: that testid reads
+        // `add-project-note-modal-cancel-button`, which is a shared component from a different
+        // modal and so is the likelier of the two to be renamed out from under us.
         { name: /^Cancel$/, kind: "b", group: /^Add Note$/ },
       ],
-      // STILL FALSE, and deliberately. The names above are measured, but the `group` matchers rest
-      // on the dialog's accessible label reaching groupPath, and the probe that produced this list
-      // did not report groupPath - it was built to ask "what are the names", and the answer turned
-      // out to be "there aren't any". The probe now reports it; one more run settles this. Setting
-      // the flag on an unmeasured assumption is the exact thing the flag exists to prevent.
+      // TRUE as of 2026-08-08: every matcher above was checked against a probe of the real page
+      // with the editor open, including the groupPath the `group` matchers depend on. What this
+      // flag asserts is only that - that the controls are real and reachable. It says nothing
+      // about whether the flow should be switched on, which is `enabled`, and which is a decision
+      // rather than a measurement.
+      controlsVerified: true,
       // Why a note and not something larger: it is additive, it is visible to the humans who
       // read the WO, and a wrong one is corrected by writing another. Nothing in this workflow
       // changes a status, an amount, or a vendor assignment.
@@ -12748,13 +12767,30 @@
   // asking them to approve nothing they can check against the screen, and a confirm nobody can
   // evaluate is a click-through by another name. Falling back to the role and the enclosing group
   // gives them "the textbox in Add Note", which they can.
+  // Landmark names that identify NOTHING. They come from the tag when an element carries no
+  // accessible label, so they say "this is a form" rather than which form. Measured case: the note
+  // body's groupPath is ["Add Note", "form"], and naming its innermost segment would tell the
+  // operator "the unnamed textbox in form" - true, useless, and indistinguishable from every other
+  // form on the page.
+  var GENERIC_GROUPS = {
+    form: 1, region: 1, main: 1, nav: 1, banner: 1, contentinfo: 1, complementary: 1,
+    search: 1, group: 1, dialog: 1, section: 1, div: 1,
+  };
+  DC.distinctiveGroup = function (path) {
+    if (!Array.isArray(path)) return "";
+    for (var i = path.length - 1; i >= 0; i--) {
+      if (!GENERIC_GROUPS[lower(path[i])]) return str(path[i]);
+    }
+    return path.length ? path.join(" > ") : "";
+  };
+
   function describeTarget(rec, handle) {
     var name = DP.accName(rec);
     if (name) return name;
     var kind = DP.kindOf(rec);
     var what = DP.KINDS[kind] || "control";
-    var path = Array.isArray(rec.groupPath) ? rec.groupPath : [];
-    var where = path.length ? path[path.length - 1] : "";
+    // Innermost DISTINCTIVE segment, not innermost segment.
+    var where = DC.distinctiveGroup(rec.groupPath);
     return where ? ("the unnamed " + what + " in " + where + " (" + handle + ")")
       : ("an unnamed " + what + " (" + handle + ")");
   }
