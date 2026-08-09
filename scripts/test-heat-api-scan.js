@@ -90,6 +90,10 @@ var SRC_BOOTQ = slice(core,
   '  var BWN_BOOTED = false;',
   '  // ===== BEGIN bwnNotesApi =====',
   'bwnBoot + bwnBootAll');
+var SRC_BACKOFF = slice(core,
+  '    // Failure backoff for the auto scan (2026-08-09).',
+  '    function heatAutoScan(vars) {',
+  'heatAutoBackoff');
 var SRC_SCAN = slice(core,
   '    function apiScanAll(btn) {',
   '    // ---- Scan All (scroll fallback) ---',
@@ -173,6 +177,7 @@ var PRELUDE = [
   '  warn: function () { __log.push("WARN " + Array.prototype.slice.call(arguments).join(" ")); }',
   '};',
   'var apiList = null, apiCapTs = 0, heatApiTotal = null;',
+  'var heatAutoSig = null, heatAutoTs = 0;',
   'var heatReplaying = false, heatScanning = false, heatScanClean = false;',
   'var heatScanNote = null, heatScanAbort = false, heatStore = null;',
   'var PANEL_ID = "bwn-heat-panel";',
@@ -398,7 +403,7 @@ function build(opts) {
   var o = opts || {};
   // computeVerdict stays STUBBED here (see PRELUDE): these tests assert which facts the scan
   // hands the engine. The real engine is exercised by buildVerdict() below.
-  var src = [PRELUDE, SRC_KEY, SRC_PAGING, SRC_FIND, SRC_MAP, SRC_CAPTURE, SRC_TOTAL, SRC_MARSHAL, SRC_USERS, SRC_NEXTSTEP, SRC_SCAN].join('\n\n');
+  var src = [PRELUDE, SRC_KEY, SRC_PAGING, SRC_FIND, SRC_MAP, SRC_CAPTURE, SRC_BACKOFF, SRC_TOTAL, SRC_MARSHAL, SRC_USERS, SRC_NEXTSTEP, SRC_SCAN].join('\n\n');
   (o.mutations || []).forEach(function (m) { src = mutate(src, m[0], m[1]); });
   var sandbox = sandboxFor(o);
   vm.runInNewContext(src, sandbox, { filename: 'heat-slice.js' });
@@ -1624,6 +1629,123 @@ function main() {
     A.eq('M18 control: and the row that should be red is only amber',
       s18.computeVerdict({ status: 'Scheduled', prio: 'P2 Next Day', phase: 'Open', ageDays: 10, hrs: 25, expTs: null, schedTs: null, lastNoteTs: null, sla: { responseMinutes: 480 } }, s18.__cfg).sev,
       1);
+  }).then(function () {
+    // =========================================================================================
+    // THE DIRTY-SCAN RETRY LOOP (2026-08-09). Measured live: a zero-result filter drove a
+    // sustained replay every ~770ms against the vendor API, forever, with no visible symptom.
+    // Proven board-independent on the shipped build, with a positive control.
+    //
+    // Two independent defects, both asserted here. Either one alone closes the loop; both are
+    // wrong on their own terms, so both are fixed.
+    //
+    //   (1) The document-start hook calls its sink TWICE per request - once with the request
+    //       body, once when the response resolves. `heatReplaying` gates only the first, and by
+    //       the response call finishApi has already cleared it. So Core re-captures its OWN
+    //       replay, matches `body.query === apiList.query`, and re-arms heatAutoScanSoon.
+    //   (2) The auto-scan guard suppressed on `heatStore`, which a dirty finish had just nulled.
+    //       A retry whose suppression depends on the success it never achieves.
+    //
+    // These run against the REAL heatRecordCapture and apiScanAll slices; heatAutoScanSoon is
+    // the prelude's recorder, so "did it re-arm" is observed, not inferred.
+    console.log('\n--- dirty-scan retry loop: replay identity + failure backoff ---');
+
+    // ---- (1) a replay's own body must never be treated as a new list query -----------------
+    var sOwn = build({});
+    sOwn.apiList = { query: 'query PagedWorkOrders { x }', variables: { page: { skip: 0, take: 50 } }, proven: true };
+    sOwn.__autoScans.length = 0;
+    // Exactly what heatGql puts on the wire.
+    var ownBody = JSON.stringify({ query: 'query PagedWorkOrders { x }', variables: { page: { skip: 0, take: 200 } } });
+    sOwn.heatNoteOwnBody(ownBody);
+    A.ok('a body this module issued is recognised as its own', sOwn.heatIsOwnBody(ownBody));
+    A.ok('a body it did not issue is not', !sOwn.heatIsOwnBody(JSON.stringify({ query: 'query Other { y }', variables: {} })));
+    // THE LOOP: the response leg, arriving after finishApi cleared heatReplaying.
+    sOwn.heatReplaying = false;
+    sOwn.heatRecordCapture(ownBody, { listWorkOrdersPaginated: { items: [], rowCount: 0 } });
+    A.eq('the replay response does NOT re-arm the auto scan - this is the loop', sOwn.__autoScans.length, 0);
+    // ...while a genuine filter change from the SPA still must.
+    sOwn.__autoScans.length = 0;
+    sOwn.heatRecordCapture(JSON.stringify({ query: 'query PagedWorkOrders { x }', variables: { page: { skip: 0, take: 50 }, search: 'abc' } }), null);
+    A.eq('a real SPA filter change still re-arms it', sOwn.__autoScans.length, 1);
+    // Bounded: a long-lived page must not grow this registry forever.
+    var sCap = build({});
+    for (var i = 0; i < 300; i++) sCap.heatNoteOwnBody('body-' + i);
+    A.ok('the own-body registry is bounded', sCap.heatOwnBodyQ.length <= 64);
+    A.ok('and it evicts oldest-first, so the newest replay is still recognised', sCap.heatIsOwnBody('body-299'));
+
+    // ---- (2) a failed scan must back off, not retry at the debounce interval ---------------
+    // The guard's own bytes, lifted from the shipped file rather than paraphrased.
+    var gm = core.match(/\n\s*(if \(sig && sig === heatAutoFailSig[^\n]*?\) return;)/);
+    A.ok('the failure-backoff guard is present in the shipped file', !!gm);
+    function backoffFires(o) {
+      var f = new Function('sig', 'heatAutoFailSig', 'heatAutoFailTs', 'heatAutoBackoffMs', 'Date',
+        'return !!(' + gm[1].replace(/^if \(/, '').replace(/\) return;$/, '') + ');');
+      return f(o.sig, o.failSig, o.failTs, function () { return o.backoff; }, Date);
+    }
+    A.ok('right after a failure on the same filter, a retry is SUPPRESSED',
+      backoffFires({ sig: 'a', failSig: 'a', failTs: Date.now() - 500, backoff: 2000 }) === true);
+    A.ok('once the backoff has elapsed it is allowed again',
+      backoffFires({ sig: 'a', failSig: 'a', failTs: Date.now() - 5000, backoff: 2000 }) === false);
+    A.ok('a DIFFERENT filter is never held back by another filter\'s failure',
+      backoffFires({ sig: 'b', failSig: 'a', failTs: Date.now(), backoff: 60000 }) === false);
+    // The backoff must actually grow, or "backoff" is just a rename of the debounce.
+    var sB = build({});
+    sB.heatAutoFailN = 1; var b1 = sB.heatAutoBackoffMs();
+    sB.heatAutoFailN = 2; var b2 = sB.heatAutoBackoffMs();
+    sB.heatAutoFailN = 3; var b3 = sB.heatAutoBackoffMs();
+    sB.heatAutoFailN = 99; var bMax = sB.heatAutoBackoffMs();
+    A.ok('the backoff grows with consecutive failures', b2 > b1 && b3 > b2);
+    A.ok('and is capped, so a permanently-dirty filter still retries eventually', bMax <= 60000 && bMax >= b3);
+
+    // ---- and the dirty finish must actually ARM that backoff --------------------------------
+    // capAt: a query that can only ever see 5 of 213 rows, so the coverage gate finishes it
+    // DIRTY - which is the case the backoff exists for.
+    var sD = build({ transport: makeTransport({ capAt: 5, total: 213 }) });
+    sD.apiList = { query: 'q', variables: boardVars(), proven: true };
+    sD.heatAutoSig = 'sig-under-test';
+    return sD.apiScanAll({}).then(function () {
+      A.ok('a dirty finish records WHICH filter failed', sD.heatAutoFailSig === 'sig-under-test');
+      A.ok('and when', sD.heatAutoFailTs > 0);
+      A.ok('and counts it, so the next failure waits longer', sD.heatAutoFailN >= 1);
+
+      // ---- MUTATION CONTROLS: each reverts one half of the fix and must reopen the loop ----
+      // Without these the assertions above are decoration - they would pass just as happily
+      // against code that never had the bug. See negative-control-silent-noop.
+      console.log('\n-- retry-loop mutation controls (each must REOPEN the loop) --');
+
+      // ML1: drop the identity check and the replay's own response is treated as a new list
+      // query again - which is the re-arm that closed the loop.
+      var m1 = build({ mutations: [[
+        "      if (heatIsOwnBody(typeof reqBody === 'string' ? reqBody : null)) return;", '']] });
+      m1.apiList = { query: 'query PagedWorkOrders { x }', variables: { page: { skip: 0, take: 50 } }, proven: true };
+      var b1 = JSON.stringify({ query: 'query PagedWorkOrders { x }', variables: { page: { skip: 0, take: 200 } } });
+      m1.heatNoteOwnBody(b1);
+      m1.heatReplaying = false;
+      m1.__autoScans.length = 0;
+      m1.heatRecordCapture(b1, { listWorkOrdersPaginated: { items: [], rowCount: 0 } });
+      A.eq('ML1 control: without the identity check the replay re-arms the scan', m1.__autoScans.length, 1);
+
+      // ML2: drop the failure arming in finishApi and the guard has nothing to back off from,
+      // so a permanently-failing filter is retried at the debounce interval forever.
+      var m2 = build({
+        transport: makeTransport({ capAt: 5, total: 213 }),
+        mutations: [['        else { heatAutoFailSig = heatAutoSig; heatAutoFailTs = Date.now(); heatAutoFailN++; }', '']]
+      });
+      m2.apiList = { query: 'q', variables: boardVars(), proven: true };
+      m2.heatAutoSig = 'sig-under-test';
+      return m2.apiScanAll({}).then(function () {
+        A.eq('ML2 control: without the arming, a dirty finish leaves no failure record', m2.heatAutoFailSig, null);
+        A.ok('ML2 control: so the backoff window is zero and the retry is immediate',
+          !(m2.heatAutoFailSig === 'sig-under-test'));
+
+        // ML3: the guard line itself. Strip it from the shipped bytes and the suppression is
+        // gone even with a fresh failure recorded.
+        var stripped = core.replace(/\n\s*if \(sig && sig === heatAutoFailSig[^\n]*?\) return;/, '');
+        A.ok('ML3 control: the mutation actually removed the guard',
+          stripped.indexOf('heatAutoFailSig && (Date.now()') === -1 && stripped !== core);
+        A.ok('ML3 control: and nothing else in the file re-implements it',
+          (stripped.match(/heatAutoFailTs\) </g) || []).length === 0);
+      });
+    });
   }).then(function () {
     A.finish();
   }, function (err) {

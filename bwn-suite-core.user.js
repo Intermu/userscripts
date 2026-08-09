@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         BWN Suite - Core (Broadway National)
 // @namespace    broadwaynational.bwn
-// @version      1.75.1
+// @version      1.76.0
 // @downloadURL  https://raw.githubusercontent.com/Intermu/userscripts/main/bwn-suite-core.user.js
 // @updateURL    https://raw.githubusercontent.com/Intermu/userscripts/main/bwn-suite-core.user.js
 // @description  Runs several Umbrava helpers for BWN coordinators, in the browser with no privileged grants. Includes: PO Approval + ETA Builder; WO Assist (GP/ETA, a stall watchdog, DNE calculator, and a next-action playbook); Email Leak Guard (checks recipients against vendor names, PO amounts, and client budget references before an outbound email sends); WO List Heat (a triage overlay + My Day strip on the work-order list, with an optional same-origin Umbrava API scan for deterministic full-board coverage); and the BWN Launcher (opens the Azure Static Web App tools with the current WO's context). Modules share state through sessionStorage/localStorage. The only network calls are same-origin Umbrava GraphQL requests (app.umbrava.com/api/graphql, the app's own session): List Heat's full-board scan and WO Assist's work-order / trip / clock-in / document reads, plus ONE write - BWN Views saves the column layout through Umbrava's own putUserPreference, the same preference the column chooser writes; everything else is offline. Toggle modules in BWN_MODULES below.
@@ -5996,10 +5996,14 @@
     // Same-origin GraphQL POST → resolves to `data`, throws on errors[].
     function heatGql(query, variables) {
       var tok = heatAuthToken();
+      // Serialised ONCE and remembered, so the hook's response leg can recognise this exact
+      // body as ours rather than as a fresh list query - see heatNoteOwnBody.
+      var payload = JSON.stringify({ query: query, variables: variables || {} });
+      heatNoteOwnBody(payload);
       return fetch('/api/graphql', {
         method: 'POST',
         headers: { 'Authorization': 'Bearer ' + tok, 'Content-Type': 'application/json' },
-        body: JSON.stringify({ query: query, variables: variables || {} })
+        body: payload
       }).then(function (r) { return r.json(); }).then(function (j) {
         if (j && j.errors && j.errors.length) throw new Error(j.errors[0].message || 'GraphQL error');
         return j && j.data;
@@ -6261,6 +6265,10 @@
     // either way, so a wrong guess falls back honestly instead of reporting a partial board.
     function heatRecordCapture(reqBody, data) {
       if (heatReplaying) return;   // don't re-capture our own enlarged replay pages
+      // ...and the same again by IDENTITY, because the line above is not enough: the hook
+      // fires a second time when the response resolves, by which point finishApi has already
+      // set heatReplaying = false. That second call is what closed the retry loop.
+      if (heatIsOwnBody(typeof reqBody === 'string' ? reqBody : null)) return;
       // (v3.16) The board query only fires on the WO-list route. A WO-details page fires
       // reads like purchaseOrders(workOrderNumber) whose PO rows carry a numeric `number`
       // and so masquerade as WO rows; gate to the list route so a details read can never
@@ -6316,6 +6324,28 @@
         heatAutoScanSoon(apiList.variables);
       } catch (e) { /* capture is best-effort */ }
     }
+
+    // ---- Requests this module put on the wire (2026-08-09) --------------------------
+    // WHY THIS EXISTS. The document-start hook calls its sink TWICE per request: once with
+    // the request body, and again when the response resolves. `heatReplaying` gates only the
+    // first - by the time the RESPONSE call arrives, finishApi has already cleared it. So the
+    // scan's own replay came back through heatRecordCapture, matched
+    // `body.query === apiList.query`, and re-armed heatAutoScanSoon. Paired with a dirty
+    // finish (which nulls heatStore, the thing the auto-scan guard used to suppress on) that
+    // is an unbounded retry loop: MEASURED live 2026-08-09 at one replay every ~770ms,
+    // indefinitely, with no visible symptom on the page. See wiki/dirty-scan-retry-loop.md.
+    //
+    // A flag cannot fix this, because the flag is legitimately false by then. Identity can:
+    // remember the exact bodies we sent and never treat one as a new list query.
+    var heatOwnBodies = Object.create(null), heatOwnBodyQ = [];
+    var HEAT_OWN_BODIES_MAX = 64;   // a few pages per scan; bounded so a long-lived tab cannot grow it
+    function heatNoteOwnBody(s) {
+      if (typeof s !== 'string' || heatOwnBodies[s]) return;
+      heatOwnBodies[s] = 1;
+      heatOwnBodyQ.push(s);
+      while (heatOwnBodyQ.length > HEAT_OWN_BODIES_MAX) delete heatOwnBodies[heatOwnBodyQ.shift()];
+    }
+    function heatIsOwnBody(s) { return typeof s === 'string' && !!heatOwnBodies[s]; }
 
     // Attach to the hook (v3.21). The fetch/XHR wrap itself moved to the top of this
     // file and runs at document-start, because installing it here - at module-init
@@ -7712,10 +7742,31 @@
     // Auto-run of the API scan only (v3.17). Called when a board query is captured, which
     // is also exactly when a filter change lands, so the board-wide numbers follow the
     // filters the same way the list does. Silent on every refusal - this must never nag.
+    // Failure backoff for the auto scan (2026-08-09). The guard below used to suppress a
+    // repeat on `heatStore` - which a DIRTY finish had just nulled. So a scan that kept
+    // failing kept retrying, at the debounce interval, forever: a retry whose suppression
+    // depends on the success it never achieves. Measured live at one replay every ~770ms
+    // until the user changed the filter. See wiki/dirty-scan-retry-loop.md.
+    //
+    // `heatStore &&` STAYS, because it does a different and still-correct job: a route change
+    // nulls the store without any failure, and coming back to the same filter must rescan
+    // rather than sit on a store that no longer exists. What was missing is a record of the
+    // last failed ATTEMPT, which is what actually bounds a failing retry.
+    var heatAutoFailSig = null, heatAutoFailTs = 0, heatAutoFailN = 0;
+    var HEAT_FAIL_BACKOFF_MIN = 2000, HEAT_FAIL_BACKOFF_MAX = 60000;
+    function heatAutoBackoffMs() {
+      // 2s, 4s, 8s, ... capped at 60s. Capped rather than unbounded so a filter that is
+      // permanently dirty (a search matching nothing, left open) still re-checks occasionally
+      // instead of going silent for the rest of the session.
+      return Math.min(HEAT_FAIL_BACKOFF_MAX, HEAT_FAIL_BACKOFF_MIN * Math.pow(2, Math.max(0, heatAutoFailN - 1)));
+    }
     function heatAutoScan(vars) {
       if (!heatAutoOn() || heatScanning || heatReplaying || !isListPage()) return;
       if (!apiList || !apiList.query || !heatAuthToken()) return;   // manual button still covers these
       var sig = heatFilterSig(vars || (apiList && apiList.variables));
+      // Back off from a filter whose last scan FAILED. Keyed on the failing signature, so a
+      // different filter is never held back by another one's failure.
+      if (sig && sig === heatAutoFailSig && (Date.now() - heatAutoFailTs) < heatAutoBackoffMs()) return;
       if (sig && sig === heatAutoSig && heatStore && (Date.now() - heatAutoTs) < HEAT_AUTO_TTL) return;
       heatAutoSig = sig;
       heatAutoTs = Date.now();
@@ -7806,6 +7857,11 @@
         // "of 0 open - full board" off a scan that actually failed. No store = the strip
         // falls back to the loaded rows and still says "Scan All for full board".
         if (!clean) heatStore = null;
+        // Arm (or clear) the failure backoff. This is the record the auto-scan guard needs:
+        // WHICH filter failed and WHEN, kept separately from the success bookkeeping above,
+        // because the failure is exactly the case where the success record is unavailable.
+        if (clean) { heatAutoFailSig = null; heatAutoFailN = 0; }
+        else { heatAutoFailSig = heatAutoSig; heatAutoFailTs = Date.now(); heatAutoFailN++; }
         // v3.24: publish EVERY scanned row's verdict to the per-WO bus slot, not just the rows
         // the virtualizer happened to render. `bwn:heat:{id}` is an existing contract already
         // read through BWN.busHeatGet (WO Assist's "Flagged on WO list"), so this is the same
