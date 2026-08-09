@@ -95,12 +95,8 @@ function readersCtx(src, opts) {
     Date: Date, Math: Math, JSON: JSON, String: String, Number: Number, Array: Array,
     isFinite: isFinite, parseFloat: parseFloat, parseInt: parseInt, isNaN: isNaN,
     sessionStorage: opts.storage || makeStorage(),
-    // heatCount() walks `rows`; heatOf reads `heatMap`; snapAgeMin reads `pullState`. All three
-    // are file-level in the script. 0.5.0: heatOf no longer touches sessionStorage at all -
-    // rows and verdicts arrive together from bwn-suite-core's snapshot.
+    // heatCount() walks `rows`; HEAT_MAX_AGE gates heatOf. Both are file-level in the script.
     rows: opts.rows || [],
-    heatMap: opts.heatMap || {},
-    pullState: opts.pullState || { running: false, ok: true, reason: null, ts: null },
     HEAT_MAX_AGE: opts.maxAge === undefined ? 30 * 60000 : opts.maxAge,
     group: 'status',
     CARD_SCOPE_CHARS: 140,
@@ -117,7 +113,7 @@ function readersCtx(src, opts) {
     }
   };
   vm.createContext(sandbox);
-  vm.runInContext(src + '\nthis.__api = { statusHours: statusHours, dayDelta: dayDelta, fmtDate: fmtDate, firstVal: firstVal, moneyAmt: moneyAmt, fmtMoney: fmtMoney, heatOf: heatOf, heatCount: heatCount, prioClass: prioClass, expectedOf: expectedOf, nameList: nameList, snapAgeMin: snapAgeMin };', sandbox);
+  vm.runInContext(src + '\nthis.__api = { statusHours: statusHours, dayDelta: dayDelta, fmtDate: fmtDate, firstVal: firstVal, moneyAmt: moneyAmt, fmtMoney: fmtMoney, heatOf: heatOf, heatCount: heatCount, prioClass: prioClass, expectedOf: expectedOf, nameList: nameList };', sandbox);
   return sandbox.__api;
 }
 
@@ -277,38 +273,19 @@ A.eq('null counts as absent', R.firstVal({ a: null }, ['a']), null);
 A.eq('a real zero is NOT absent', R.firstVal({ a: 0 }, ['a']), 0);
 A.eq('nothing found -> null', R.firstVal({ z: 1 }, ['a', 'b']), null);
 
-console.log('\n--- 5. heatOf: severity is READ, never computed here (0.5.0: off the snapshot) ---');
-var HMAP = {
-  '326938': { sev: 2, reasons: ['215h in "Scheduled" (limit 120h)', 'complete-by overdue 5d'], kinds: ['clock'], acked: false, warn: 60, bad: 120, id: '326938' },
-  '327076': { sev: 1, reasons: ['c'], kinds: ['note'], acked: true, warn: 60, bad: 120, id: '327076' }
-};
-var R2 = readersCtx(S_READERS, { heatMap: HMAP, rows: [{ number: 326938 }, { number: 327076 }, { number: 777777 }] });
-A.eq('a verdict from the snapshot is read back', R2.heatOf(326938).sev, 2);
+console.log('\n--- 5. heatOf: severity is READ, never computed here ---');
+var st = makeStorage();
+st.setItem('bwn:heat:326938', JSON.stringify({ v: 1, ts: Date.now(), sev: 2, reasons: ['215h in "Scheduled" (limit 120h)', 'complete-by overdue 5d'], acked: false, hrs: 215.5, warn: 60, bad: 120 }));
+st.setItem('bwn:heat:999001', JSON.stringify({ v: 2, ts: Date.now(), sev: 2, reasons: [] }));
+st.setItem('bwn:heat:999002', JSON.stringify({ v: 1, ts: Date.now() - 3 * 3600000, sev: 2, reasons: [] }));
+var R2 = readersCtx(S_READERS, { storage: st, rows: [{ number: 326938 }, { number: 999001 }, { number: 999002 }, { number: 777777 }] });
+A.eq('a published verdict is read back', R2.heatOf(326938).sev, 2);
 A.eq('with the limits the row was judged against', [R2.heatOf(326938).warn, R2.heatOf(326938).bad], [60, 120]);
-A.eq('a W-prefixed number resolves to the same entry', R2.heatOf('W-326938').sev, 2);
+A.eq('a W-prefixed number resolves to the same slot', R2.heatOf('W-326938').sev, 2);
+A.eq('a record of another version is refused, not coerced', R2.heatOf(999001), null);
+A.eq('a stale record is refused - an old scan is not this board', R2.heatOf(999002), null);
 A.eq('a WO with no record has no severity, which is not sev 0', R2.heatOf(777777), null);
-A.eq('heatCount reports only the rows severity is actually known for', R2.heatCount(), 2);
-// The staleness read: the board shows the AUTHORITY's scan time, not its own render time.
-var R2b = readersCtx(S_READERS, { pullState: { running: false, ok: true, reason: null, ts: Date.now() - 7 * 60000 } });
-A.eq('snapshot age is read off the scan timestamp', R2b.snapAgeMin(), 7);
-A.eq('no timestamp means no age claim, not "0m ago"',
-  readersCtx(S_READERS, { pullState: { running: false, ok: false, reason: 'never scanned', ts: null } }).snapAgeMin(), null);
-// 0.5.0 contract: the per-WO bus slot is no longer this file's input. It could never have been
-// the board's input - it carries a verdict and no row - so a read of it here would mean rows and
-// verdicts came from two different scans.
-A.ok('the kanban no longer reads the bwn:heat: slot directly',
-  kbFull.indexOf("sessionStorage.getItem('bwn:heat:") === -1);
-// Targets the READ, not the word: the op name still appears in comments and in OP, because the
-// capture that feeds the status write is keyed on it.
-A.ok('and no longer replays a list query of its own',
-  !/data\.listWorkOrdersPaginated/.test(kbFull) && !/function\s+replayPage/.test(kbFull));
-A.ok('the only /api/graphql fetch left in the board is the status write',
-  (kbFull.match(/fetch\('\/api\/graphql'/g) || []).length === 1);
-// ...but the CAPTURE must survive, because the drag write's auth headers come from it. This is
-// the trap: deleting the scan and the hook together silently kills the only write path.
-A.ok('the capture hook is still installed', /function\s+noteRequest/.test(kbFull) && /window\.fetch = function/.test(kbFull));
-A.ok('and the patch write still replays the captured headers',
-  /headers: lastReq\.headers/.test(kbFull) && /operationName: PATCH_OP/.test(kbFull));
+A.eq('heatCount reports only the rows severity is actually known for', R2.heatCount(), 1);
 // The architectural guard: the board must not be able to reach its own opinion.
 A.ok('the kanban file contains no threshold model at all',
   !/hrsWarn|hrsBad|activeMult|thresholdsFor|PRIO_MULT|RESP_BASE_MIN/.test(kbFull));
@@ -348,105 +325,6 @@ var Q = publishCtx(S_PUBLISH, qst);
 A.eq('a full quota stops the publish at the row that failed', Q.pub(store), 2);
 A.ok('and says so out loud', Q.warns.length === 1 && /stopped after 2 of 4/.test(Q.warns[0]));
 
-console.log('\n--- 6b. the fold: Core hands rows over, and force bypasses the TTL guard ---');
-// THE DEFECT THIS SECTION EXISTS FOR. Core's auto-scan early-returns when the filter signature
-// is unchanged and its 3-minute TTL has not expired. A status write changes NO filter, so a
-// second after a drag both conditions hold: without a force flag Core does nothing, the board
-// reads back the PRE-WRITE snapshot, and a write that was never re-read reports as verified.
-// On the suite's only Umbrava write mutation.
-//
-// The guard's own bytes are lifted out of the shipped file and evaluated - not a paraphrase of
-// it, because a paraphrase would pass while the file said something else.
-var guardM = coreFull.match(/\n\s*if \((!force && [^\n]*?)\) return;\n\s*heatAutoSig = sig;/);
-A.ok('the TTL guard is present and takes a force argument', !!guardM);
-var guardCond = guardM[1];
-function guardFires(o) {
-  var f = new Function('force', 'sig', 'heatAutoSig', 'heatStore', 'heatAutoTs', 'HEAT_AUTO_TTL', 'Date',
-    'return !!(' + guardCond + ');');
-  return f(o.force, o.sig, o.heatAutoSig, o.heatStore, o.heatAutoTs, 3 * 60 * 1000, Date);
-}
-var SAME = { sig: 'phase=open|status=all', heatAutoSig: 'phase=open|status=all', heatStore: {}, heatAutoTs: Date.now() - 1000 };
-function withForce(f) { var o = JSON.parse(JSON.stringify(SAME)); o.heatStore = {}; o.heatAutoTs = SAME.heatAutoTs; o.force = f; return o; }
-A.ok('UNFORCED, same filters, inside the TTL: the guard fires and no scan runs - this is the bug',
-  guardFires(withForce(false)) === true);
-A.ok('FORCED, all else identical: the guard does NOT fire, so the write gets re-read',
-  guardFires(withForce(true)) === false);
-A.ok('a changed filter still scans without force, as it always did',
-  guardFires({ force: false, sig: 'phase=closed', heatAutoSig: 'phase=open', heatStore: {}, heatAutoTs: Date.now() }) === false);
-A.ok('an expired TTL still scans without force',
-  guardFires({ force: false, sig: 'a', heatAutoSig: 'a', heatStore: {}, heatAutoTs: Date.now() - 10 * 60000 }) === false);
-// And the caller: the drag path must ask for force. This is the line a future edit is most
-// likely to "simplify" back into the bug.
-A.ok('the kanban drag re-read asks for a FORCED scan', /requestScan\(true\);/.test(kbFull));
-A.ok('and it is the post-write path that does so',
-  /Always re-read from the API rather than trusting the optimistic move[\s\S]{0,900}?requestScan\(true\);/.test(kbFull));
-
-// Core's row snapshot, on the shipped bytes.
-var S_ROWS = sliceCore('    function heatRowsBuild() {', '    // Rebuild the cache and announce it', 'heatRowsBuild');
-var S_WHY = sliceCore('    function heatRowsWhy() {', '\n    // ---- Board -> Dashboard dataset push', 'heatRowsWhy');
-function rowsCtx(src, env) {
-  var sandbox = {
-    Object: Object, Date: Date, JSON: JSON, String: String, Number: Number, Array: Array,
-    heatStore: env.heatStore, heatRaw: env.heatRaw, heatScanClean: env.heatScanClean,
-    heatScanning: !!env.heatScanning,
-    heatReplaying: !!env.heatReplaying, heatScanNote: env.heatScanNote || null,
-    apiList: env.apiList === undefined ? { query: 'q' } : env.apiList
-  };
-  vm.createContext(sandbox);
-  vm.runInContext(src + '\nthis.__f = typeof heatRowsBuild === "function" ? heatRowsBuild : heatRowsWhy;', sandbox);
-  return sandbox.__f;
-}
-var RAW1 = { number: 326938, statusId: 77, statusName: 'Scheduled', clientName: 'ACME', trades: [{ name: 'HVAC' }] };
-var okBuild = rowsCtx(S_ROWS, {
-  heatScanClean: true,
-  heatStore: { '/work-orders/326938': { id: '326938', wo: 'W-326938', sev: 2, reasons: ['a'], kinds: ['clock'], acked: false, warn: 60, bad: 120, status: 'Scheduled', hrs: '215.5' } },
-  heatRaw: { '/work-orders/326938': RAW1 }
-})();
-A.eq('a clean scan yields a row', okBuild.rows.length, 1);
-A.ok('the RAW api row rides along - without it the card has no statusId and the drag is dead',
-  okBuild.rows[0].raw === RAW1 && okBuild.rows[0].raw.statusId === 77);
-A.eq('the authority\'s verdict rides beside it', [okBuild.rows[0].sev, okBuild.rows[0].bad], [2, 120]);
-A.ok('the result is frozen', Object.isFrozen(okBuild) && Object.isFrozen(okBuild.rows) && Object.isFrozen(okBuild.rows[0]));
-// Object.freeze is SHALLOW. reasons and kinds are the arrays a consumer is most likely to sort
-// or splice in place, so they are frozen individually - asserted, not assumed.
-A.ok('and so are the nested reasons/kinds arrays',
-  Object.isFrozen(okBuild.rows[0].reasons) && Object.isFrozen(okBuild.rows[0].kinds));
-A.eq('a DIRTY scan yields nothing at all, however full the store is', rowsCtx(S_ROWS, {
-  heatScanClean: false,
-  heatStore: { '/work-orders/1': { id: '1', sev: 2, reasons: [] } },
-  heatRaw: { '/work-orders/1': RAW1 }
-})(), null);
-A.eq('a row with no raw row behind it is dropped rather than rendered half-blank', rowsCtx(S_ROWS, {
-  heatScanClean: true,
-  heatStore: { '/work-orders/1': { id: '1', sev: 2, reasons: [] } },
-  heatRaw: {}
-})().rows.length, 0);
-// The reasons are distinguishable ON PURPOSE - each names a different operator action.
-A.eq('no capture -> reload the list', rowsCtx(S_WHY, { apiList: null, heatStore: null, heatRaw: null, heatScanClean: false })(), 'no capture yet');
-A.eq('mid-scan says so rather than "never scanned"', rowsCtx(S_WHY, { heatScanning: true, heatStore: null, heatRaw: null, heatScanClean: false })(), 'scan in progress');
-A.eq('a store that never went clean reads as degraded', rowsCtx(S_WHY, { heatStore: {}, heatRaw: {}, heatScanClean: false })(), 'scan degraded to scroll');
-A.eq('and nothing at all reads as never scanned', rowsCtx(S_WHY, { heatStore: null, heatRaw: null, heatScanClean: false })(), 'never scanned');
-// The board must render the reason, not invent one.
-A.ok('the board renders Core\'s reason string', /pullState\.reason/.test(kbFull));
-A.ok('and distinguishes an absent Core from an unscanned one',
-  /core unavailable/.test(kbFull) && /Reinstall bwn-suite-core/.test(kbFull));
-A.ok('an empty board only claims "no work orders" when the pull actually succeeded',
-  /!pullState\.running && pullState\.ok\) lanes\.appendChild/.test(kbFull));
-// Ack is read LIVE, not off the frozen snapshot - Core does the same for its own rows.
-A.ok('the board reads ack state live rather than trusting the snapshot',
-  /__bwnHeatAck/.test(kbFull) && /function\s+liveAcked/.test(kbFull));
-A.ok('and Core exposes exactly that', /window\.__bwnHeatAck = function/.test(coreFull));
-A.ok('Core exposes the row accessor and the scan control', /window\.__bwnHeatRows = function/.test(coreFull) && /window\.__bwnHeatScan = function/.test(coreFull));
-// heatRaw must be cleared everywhere heatStore is, or one scan's severity renders against
-// another scan's rows.
-// Excludes the `var heatStore = null` DECLARATION, which is paired with its own
-// `var heatRaw = null` two lines down rather than on the same statement.
-A.eq('every heatStore RESET clears heatRaw with it',
-  (coreFull.match(/(?<!var )heatStore = null/g) || []).length,
-  (coreFull.match(/heatStore = null; heatRaw = null|\{ heatStore = null; heatRaw = null/g) || []).length);
-A.ok('and heatRaw is declared alongside heatStore, so the declaration site is covered too',
-  /var heatStore = null;[\s\S]{0,1400}?var heatRaw = null;/.test(coreFull));
-
 console.log('\n--- 7. source pins: the two writers on bwn:heat, and the version drift ---');
 // Same key, two writers - the v3.20 fault. The DOM tinting pass runs on every virtualizer
 // tick, so a leaner payload there would silently overwrite the richer API record for exactly
@@ -484,7 +362,7 @@ A.ok('the confirm dialog quotes corrected hours too', /statusHours\(row\)/.test(
 var mVer = kbFull.match(/@version\s+(\S+)/);
 var mConst = kbFull.match(/var VER = '([^']+)'/);
 A.ok('the metadata @version and the VER constant agree', !!(mVer && mConst) && mVer[1] === mConst[1]);
-A.eq('and this is the version under test', mVer && mVer[1], '0.5.0');
+A.eq('and this is the version under test', mVer && mVer[1], '0.4.1');
 // The mirror (Intermu/userscripts-public) is being retired now that the source repo is public
 // again; raw URLs must point at the SOURCE repo or auto-update dies with the mirror.
 A.ok('the script points at the source repo raw URL, so it can auto-update at all',
@@ -539,24 +417,9 @@ var m4 = readersCtx(mutate(S_READERS, 'return m.amount / Math.pow(10, p);', 'ret
 A.eq('M4 control: unscaled minor units print 100x over',
   m4.fmtMoney(m4.moneyAmt({ amount: 5560948, precision: 2 })), '$5,560,948');
 
-// M5: RETARGETED for 0.5.0. The old control gated the bus slot's `v` field, which this file no
-// longer reads at all - it went with the sessionStorage read when rows and verdicts merged into
-// one snapshot. mutate() threw rather than silently no-opping when it went, which is the whole
-// point of that guard. The equivalent risk now is the digit-normalising key: drop it and a
-// 'W-326938' row stops resolving to its own verdict, so every card silently loses severity.
-var m5 = readersCtx(mutate(S_READERS,
-  "var k = String(num == null ? '' : num).replace(/\\D/g, '');", "var k = String(num == null ? '' : num);"),
-  { heatMap: HMAP, rows: [{ number: 'W-326938' }] });
-A.eq('M5 control: without digit-normalising, a W-prefixed row loses its verdict', m5.heatOf('W-326938'), null);
-A.eq('M5 control: and the board would report severity known for none of its rows', m5.heatCount(), 0);
-
-// M5b: THE FOLD'S OWN CONTROL. Remove the force bypass and the guard fires on a forced call -
-// which is the pre-fix behaviour: a drag write verified against the pre-write store.
-var guardNoForce = guardCond.replace('!force && ', '');
-A.ok('M5b control: the mutation actually changed the guard', guardNoForce !== guardCond);
-A.ok('M5b control: without the force bypass, a forced re-read after a write does NOT scan',
-  (new Function('force', 'sig', 'heatAutoSig', 'heatStore', 'heatAutoTs', 'HEAT_AUTO_TTL', 'Date',
-    'return !!(' + guardNoForce + ');'))(true, 'a', 'a', {}, Date.now() - 1000, 3 * 60 * 1000, Date) === true);
+// M5: accept any version and a future payload shape is read as if it were v1.
+var m5 = readersCtx(mutate(S_READERS, 'if (!d || d.v !== 1) return null;', 'if (!d) return null;'), { storage: st, rows: [] });
+A.ok('M5 control: without the version gate a v2 record is wrongly accepted', !!m5.heatOf(999001));
 
 // M6: publish only the flagged rows and the quiet majority loses its record - which is exactly
 // the 22-of-219 coverage the DOM-only writer produced before v3.24.
