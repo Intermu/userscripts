@@ -1463,7 +1463,10 @@ function main() {
     A.eq('M3 control: response-only capture leaves apiList null', s.apiList, null);
   }).then(function () {
     // M4: a dirty finish that KEEPS the empty store - the banner would claim "full board".
-    var m4 = [['        if (!clean) heatStore = null;', '        if (!clean) { /* kept */ }']];
+    // Core 1.75.0 added heatRaw beside heatStore on this line (the kanban fold). The mutation
+    // must match the SHIPPED text, so it moved with it - and mutate() threw rather than
+    // silently no-opping when it did not, which is the only reason this was noticed.
+    var m4 = [['        if (!clean) { heatStore = null; heatRaw = null; }', '        if (!clean) { /* kept */ }']];
     var tx = makeTransport({ total: 213, capAt: 100 });
     return runScan({ transport: tx, mutations: m4 }).then(function (r) {
       A.ok('M4 control: without the drop, a failed scan leaves a truthy store',

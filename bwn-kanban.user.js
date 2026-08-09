@@ -1,8 +1,8 @@
 // ==UserScript==
 // @name         BWN WO Kanban (Broadway National)
 // @namespace    broadwaynational.bwn
-// @version      0.4.1
-// @description  Turns Umbrava's Work Orders list into a kanban board without leaving the page. A Board/List toggle sits next to the list's own search box; switching to Board hides the table (the toolbar stays, so the app's own filtering still drives everything) and lays the same work orders out as cards in lanes. Lanes are WO Status by default and regroup to Priority, Assignee, Client or Age from a dropdown. The board never invents its own filter system - it captures the SPA's own PagedWorkOrders request (query, variables AND auth headers) off the wire and replays it with a larger page size, so whatever the list is filtered to (phase, statuses, search, assignee chips, sort) is exactly what the board shows, and changing a filter re-scans. Cards carry the triage picture: the status clock against the limit that WO was actually judged against, the reasons it is flagged, whether its onsite date has already passed, DNE vs vendor NTE with GP, vendors and trades. Severity is never computed here - it is read from the verdicts List Heat publishes in bwn-suite-core, so the board and the list can never disagree. Dragging a card between status lanes DOES change the work order, through Umbrava's own captured PatchWorkOrder mutation - it asks first, states that the WO's time-in-status clock will reset, verifies the server reported success, re-scans rather than trusting the optimistic move, and leaves the card where it was if anything fails. Everything is same-origin using the page's own session: no @connect, no keys, nothing leaves the browser.
+// @version      0.5.0
+// @description  Turns Umbrava's Work Orders list into a kanban board without leaving the page. A Board/List toggle sits next to the list's own search box; switching to Board hides the table (the toolbar stays, so the app's own filtering still drives everything) and lays the same work orders out as cards in lanes. Lanes are WO Status by default and regroup to Priority, Assignee, Client or Age from a dropdown. The board never invents its own filter system, and as of 0.5.0 it does not query at all: it reads both rows and verdicts from the full-board scan bwn-suite-core's List Heat already runs on the same page, so whatever the list is filtered to (phase, statuses, search, assignee chips, sort) is exactly what the board shows, and one list page now costs one full-board query instead of two. It still captures the SPA's own PagedWorkOrders request off the wire, because that capture is where the auth headers for the status write come from. Cards carry the triage picture: the status clock against the limit that WO was actually judged against, the reasons it is flagged, whether its onsite date has already passed, DNE vs vendor NTE with GP, vendors and trades. Severity is never computed here - it is read from the verdicts List Heat publishes in bwn-suite-core, so the board and the list can never disagree. Dragging a card between status lanes DOES change the work order, through Umbrava's own captured PatchWorkOrder mutation - it asks first, states that the WO's time-in-status clock will reset, verifies the server reported success, re-scans rather than trusting the optimistic move, and leaves the card where it was if anything fails. Everything is same-origin using the page's own session: no @connect, no keys, nothing leaves the browser.
 // @downloadURL  https://raw.githubusercontent.com/Intermu/userscripts/main/bwn-kanban.user.js
 // @updateURL    https://raw.githubusercontent.com/Intermu/userscripts/main/bwn-kanban.user.js
 // @match        https://app.umbrava.com/*
@@ -26,24 +26,29 @@
   // update check another. There is no GM_info without a grant (and a grant would sandbox the
   // script away from the page's fetch - see the header note), so the fallback is a literal
   // that must be bumped WITH @version; the harness pins the two together.
-  var VER = '0.4.1';
-  console.info('[BWN KANBAN] v' + VER + ' - board view over the captured PagedWorkOrders query; severity read from List Heat verdicts; drag between status lanes writes via captured PatchWorkOrder');
+  var VER = '0.5.0';
+  console.info('[BWN KANBAN] v' + VER + ' - board rows AND verdicts read from bwn-suite-core\'s List Heat scan (no second full-board query); drag between status lanes writes via captured PatchWorkOrder');
 
   // ---------------------------------------------------------------------------
   // 0. Constants, measured 2026-08-04 against the live board
   // ---------------------------------------------------------------------------
-  // The board query is `PagedWorkOrders` -> `listWorkOrdersPaginated`. Its variables carry
-  // every filter the list UI applies (phase, statuses, statusesInclusive, search, assignedTo,
-  // onlyUnassigned, sortBy, locationIds, regionIds, regionPrefixes), so replaying the captured
-  // variables with a bigger `page.take` IS "inherit the list's filters" - there is no second
-  // filter system to keep in sync, by design.
+  // The list's board query is named `PagedWorkOrders`. Its variables carry every filter the
+  // list UI applies (phase, statuses, statusesInclusive, search, assignedTo, onlyUnassigned,
+  // sortBy, locationIds, regionIds, regionPrefixes) - which is why "inherit the list's filters"
+  // has never needed a second filter system here.
+  //
+  // 0.5.0: this file no longer REPLAYS that query. bwn-suite-core's List Heat replays it for
+  // its own full-board scan on the same page, and the board now reads that scan's result. OP
+  // below still matches the request so the capture below can keep the auth headers the status
+  // write needs.
   //
   // /api/graphql rejects a bare same-origin fetch with "No authentication method provided."
   // (measured), so the captured request's HEADERS are replayed too - that is where the Auth0
   // bearer lives. The bearer never leaves the page: same origin, no @connect, no GM_xhr.
+  // OP still gates the CAPTURE (noteRequest), which the drag write needs for its headers.
+  // PAGE_TAKE and MAX_ROWS went with the scan in 0.5.0 - paging and the row ceiling are
+  // bwn-suite-core's problem now (its own CAP and HEAT_DATASET_MAX).
   var OP = 'PagedWorkOrders';
-  var PAGE_TAKE = 200;        // per replayed page
-  var MAX_ROWS = 2000;        // hard ceiling, so a bad filter cannot walk forever
   var CARD_SCOPE_CHARS = 140;
   var LS_VIEW = 'bwn:kanban:view';      // 'board' | 'list'
   var LS_GROUP = 'bwn:kanban:group';
@@ -103,7 +108,6 @@
   // 1. Capture. Installed at document-start so the list's FIRST board request is seen.
   // ---------------------------------------------------------------------------
   var lastReq = null;   // { query, variables, headers, ts }
-  var scanSeq = 0;
 
   function headersToObject(src) {
     var h = {};
@@ -163,63 +167,99 @@
   try { installHooks(); } catch (e) { console.warn('[BWN KANBAN] request hooks failed to install:', e); }
 
   // ---------------------------------------------------------------------------
-  // 2. Scan - replay the captured request, paging until rowCount is covered
+  // 2. Pull - read the board off bwn-suite-core's scan (v0.5.0)
   // ---------------------------------------------------------------------------
-  var rows = [], scanState = { running: false, got: 0, total: null, error: null };
+  // THIS FILE NO LONGER SCANS. Until 0.4.1 it replayed the captured query across the whole
+  // board while bwn-suite-core's List Heat replayed the SAME query for its own scan - two
+  // full-board reads per list page, because heat's apiScanAll is operation-agnostic and
+  // replays whatever list query it captured, which on this page is this same PagedWorkOrders.
+  //
+  // Now Core owns the scan and this file reads the result through window.__bwnHeatRows().
+  // That works only because both scripts are `@grant none` and therefore share the PAGE's
+  // window - a GM_* grant on either side would put one of them in a sandbox where the other's
+  // globals are invisible, which is a fault this suite has already shipped once.
+  //
+  // What did NOT go: the capture hook above. `lastReq.headers` is where the Auth0 bearer for
+  // the PatchWorkOrder drag write comes from, so the hook, `@run-at document-start` and
+  // `@grant none` are all still load-bearing for the WRITE path even though nothing here
+  // reads for the board any more.
+  var rows = [], heatMap = {};
+  var pullState = { running: false, ok: false, reason: null, ts: null };
 
-  function replayPage(skip, take) {
-    var vars = JSON.parse(JSON.stringify(lastReq.variables));
-    vars.page = { skip: skip, take: take };
-    return fetch('/api/graphql', {
-      method: 'POST',
-      credentials: 'include',
-      headers: lastReq.headers,
-      body: JSON.stringify({ operationName: OP, query: lastReq.query, variables: vars })
-    }).then(function (r) { return r.json(); }).then(function (j) {
-      if (j && j.errors && j.errors.length) throw new Error(j.errors[0].message || 'GraphQL error');
-      var p = j && j.data && j.data.listWorkOrdersPaginated;
-      if (!p) throw new Error('no listWorkOrdersPaginated in response');
-      return p;
-    });
+  function coreRows() {
+    try { return (typeof window.__bwnHeatRows === 'function') ? window.__bwnHeatRows() : null; }
+    catch (e) { return null; }
   }
 
-  function scan() {
-    if (!lastReq) {
-      scanState = { running: false, got: 0, total: null, error: 'waiting for the list to run its own query' };
+  // Live ack, never the snapshot's. Core's own panel reads the ack store at render time for
+  // exactly this reason: `acked` is captured when the scan ran and goes stale the moment
+  // anyone snoozes a WO from the list. Reading it live is what keeps the board and the list
+  // from disagreeing, which is the whole promise of sharing one verdict.
+  function liveAcked(entry) {
+    try {
+      if (typeof window.__bwnHeatAck === 'function') return !!window.__bwnHeatAck(entry.id, entry.kinds || []);
+    } catch (e) { }
+    return !!entry.acked;
+  }
+
+  function pullRows() {
+    var snap = coreRows();
+    if (!snap) {
+      // No accessor at all: Core is absent, or older than 1.75.0. A DIFFERENT failure from
+      // "Core is here but has not scanned", because the fix is different - reinstall versus
+      // reload - so it must not collapse into the same message.
+      rows = []; heatMap = {};
+      pullState = { running: false, ok: false, reason: 'core unavailable', ts: null };
       render();
       return;
     }
-    var seq = ++scanSeq;
-    scanState = { running: true, got: 0, total: null, error: null };
-    rows = [];
-    render();
-
-    function step(skip) {
-      return replayPage(skip, PAGE_TAKE).then(function (p) {
-        if (seq !== scanSeq) return;                 // a newer scan started - abandon this one
-        rows = rows.concat(p.items || []);
-        scanState.got = rows.length;
-        scanState.total = p.rowCount;
-        render();
-        var more = (p.items || []).length === PAGE_TAKE && rows.length < Math.min(p.rowCount || 0, MAX_ROWS);
-        if (more) return step(skip + PAGE_TAKE);
-        scanState.running = false;
-        render();
-      });
-    }
-
-    step(0).catch(function (err) {
-      if (seq !== scanSeq) return;
-      scanState.running = false;
-      scanState.error = (err && err.message) || String(err);
+    if (!snap.ok) {
+      rows = []; heatMap = {};
+      pullState = { running: /in progress/.test(snap.reason || ''), ok: false, reason: snap.reason || 'no rows', ts: snap.ts || null };
       render();
-    });
+      return;
+    }
+    var next = [], map = {};
+    for (var i = 0; i < snap.rows.length; i++) {
+      var e = snap.rows[i];
+      if (!e || !e.raw) continue;
+      next.push(e.raw);
+      // Keyed on digits so a card can look its verdict up by the row's own WO number,
+      // whatever shape that field arrives in.
+      var k = String(e.id == null ? '' : e.id).replace(/\D/g, '');
+      if (k) map[k] = { sev: e.sev || 0, reasons: e.reasons || [], kinds: e.kinds || [], warn: e.warn, bad: e.bad, acked: liveAcked(e), id: e.id };
+    }
+    rows = next; heatMap = map;
+    pullState = { running: false, ok: true, reason: null, ts: snap.ts || null };
+    render();
+  }
+
+  // Ask Core to scan, then read what it produced. `force` is ONLY for reading back a write -
+  // see writeStatus. An unforced call honours Core's own 3-minute TTL, so a board toggle on a
+  // freshly-scanned list costs nothing.
+  function requestScan(force) {
+    if (typeof window.__bwnHeatScan !== 'function') { pullRows(); return; }
+    pullState = { running: true, ok: false, reason: 'scan in progress', ts: null };
+    render();
+    var p;
+    try { p = window.__bwnHeatScan(force ? { force: true } : {}); } catch (e) { p = null; }
+    if (!p || typeof p.then !== 'function') { pullRows(); return; }
+    p.then(function () { pullRows(); }, function () { pullRows(); });
   }
 
   var rescanTimer = null;
+  // A filter change means Core's own capture hook will re-scan under its changed signature.
+  // This file does not race that: it nudges (a no-op if Core is already scanning) and then
+  // re-reads on the bwn:heat:rows event. The 400ms debounce is kept because the SPA fires
+  // several requests per filter interaction.
   function scheduleRescan() {
     if (rescanTimer) clearTimeout(rescanTimer);
-    rescanTimer = setTimeout(function () { rescanTimer = null; if (view === 'board') scan(); }, 400);
+    rescanTimer = setTimeout(function () {
+      rescanTimer = null;
+      if (view !== 'board') return;
+      if (typeof window.__bwnHeatScan === 'function') { try { window.__bwnHeatScan({}); } catch (e) { } }
+      pullRows();
+    }, 400);
   }
 
   // ---------------------------------------------------------------------------
@@ -442,22 +482,26 @@
   }
   // The verdict bwn-suite-core published for this WO, or null. Never a fallback computation:
   // no record means no severity is known, and the card says nothing about severity.
+  // 0.5.0: this reads the snapshot Core handed over, not the per-WO sessionStorage slot. The
+  // slot (`bwn:heat:{id}`) carried only a VERDICT - sev, reasons, acked, hrs, warn, bad,
+  // status - so it could never have fed the card's client, assignee, money, dates, vendors or
+  // trades, and above all not statusId, which the drag needs to resolve a drop target. Rows
+  // and verdicts now arrive together from one source, which also removes the window where the
+  // two could describe different scans.
   function heatOf(num) {
-    try {
-      var raw = sessionStorage.getItem('bwn:heat:' + String(num).replace(/\D/g, ''));
-      if (!raw) return null;
-      var d = JSON.parse(raw);
-      if (!d || d.v !== 1) return null;
-      if (HEAT_MAX_AGE && Date.now() - (d.ts || 0) > HEAT_MAX_AGE) return null;
-      return d;
-    } catch (e) { return null; }
+    var k = String(num == null ? '' : num).replace(/\D/g, '');
+    return (k && heatMap[k]) ? heatMap[k] : null;
   }
   function heatCount() {
     var n = 0;
-    try {
-      for (var i = 0; i < rows.length; i++) if (heatOf(rows[i].number)) n++;
-    } catch (e) { /* storage disabled - treat as none */ }
+    for (var i = 0; i < rows.length; i++) if (heatOf(rows[i].number)) n++;
     return n;
+  }
+  // How old the board on screen is. Core's scan carries its own timestamp, so staleness is a
+  // read of that rather than a guess from when this file last rendered.
+  function snapAgeMin() {
+    if (!pullState.ts) return null;
+    return Math.max(0, Math.round((Date.now() - pullState.ts) / 60000));
   }
   function el(tag, cls, text) {
     var e = document.createElement(tag);
@@ -670,7 +714,14 @@
     }).then(function (moved) {
       writing = false;
       // Always re-read from the API rather than trusting the optimistic move.
-      scan();
+      //
+      // `force` IS THE WHOLE POINT AND MUST NOT BE REMOVED. Core's auto-scan early-returns
+      // when the filter signature is unchanged and its 3-minute TTL has not expired - and a
+      // status write changes NO filter, so both conditions hold a second after the drag.
+      // Without force, Core does nothing, this file reads back the PRE-WRITE snapshot, and
+      // the board reports a write verified that it never re-read. Measured 2026-08-09; the
+      // harness pins it with a control that goes red if this is ever flipped to false.
+      requestScan(true);
       return moved;
     });
   }
@@ -733,28 +784,45 @@
     bar.appendChild(sel);
 
     var note = el('div', 'kb-note');
-    if (scanState.error) {
+    if (pullState.running) {
+      note.textContent = 'List Heat is scanning the board...';
+    } else if (!pullState.ok) {
+      // The empty state NAMES ITS CAUSE. Core supplies the reason string rather than this file
+      // guessing, because the operator action is different for each: reinstall, reload, or
+      // press Scan All. An unexplained empty board reads as "no work orders", which is a claim
+      // this file has no evidence for.
       note.className = 'kb-err';
-      note.textContent = 'Scan failed: ' + scanState.error + (lastReq ? '' : ' - change a filter or reload the list so the board can capture its query.');
-    } else if (scanState.running) {
-      note.textContent = 'Scanning the board... ' + scanState.got + (scanState.total ? ' of ' + scanState.total : '');
+      var why = pullState.reason || 'no rows';
+      var fix = (why === 'core unavailable')
+        ? ' Reinstall bwn-suite-core (1.75.0+) - this board reads its scan and no longer runs its own.'
+        : (why === 'no capture yet')
+          ? ' Reload the list so List Heat can capture its query.'
+          : (/degraded/.test(why))
+            ? ' Switch to List and press Scan All for the scroll sweep.'
+            : ' Press Rescan, or switch to List and press Scan All.';
+      note.textContent = 'No board to show (' + why + ').' + fix;
     } else {
       note.innerHTML = '';
       note.appendChild(el('b', null, String(rows.length)));
-      note.appendChild(document.createTextNode(' work orders' + (scanState.total && scanState.total > rows.length ? ' of ' + scanState.total + ' (capped)' : '') + ' - same filters as the list.' + (group === 'status' ? ' Drag a card to another lane to change its status (asks first, and resets that WO\'s time-in-status).' : ' Dragging only changes status when lanes are WO Status.')));
-      // Say so when there is no heat to show. Severity comes from the verdicts List Heat
-      // publishes, so on a board where that has not run the cards carry facts and no
-      // severity - and silence about that would read as "nothing here is in trouble".
+      var age = snapAgeMin();
+      note.appendChild(document.createTextNode(' work orders - same filters as the list'
+        + (age !== null ? ', scanned ' + (age < 1 ? 'just now' : age + 'm ago') : '') + '.'
+        + (group === 'status' ? ' Drag a card to another lane to change its status (asks first, and resets that WO\'s time-in-status).' : ' Dragging only changes status when lanes are WO Status.')));
+      // Severity coverage. Rows and verdicts now arrive in one snapshot, so a row without a
+      // verdict is rarer than it was - but it is still possible (a row heat could not map),
+      // and silence about it would read as "nothing here is in trouble".
       if (rows.length) {
         var hn = heatCount();
-        if (!hn) note.appendChild(el('div', 'kb-err', 'No List Heat verdicts on the bus - cards show facts but no severity. Switch to List and press Scan All (needs bwn-suite-core 1.66.31+).'));
+        if (!hn) note.appendChild(el('div', 'kb-err', 'No verdicts in the snapshot - cards show facts but no severity.'));
         else if (hn < rows.length) note.appendChild(el('div', 'kb-note', 'Severity known for ' + hn + ' of ' + rows.length + ' - the rest show facts only.'));
       }
     }
     bar.appendChild(note);
 
+    // Rescan FORCES: the operator pressed it because they believe the board is stale, so
+    // honouring the TTL here would silently do nothing and look broken.
     var rescan = el('button', 'bwn-kb-btn', 'Rescan');
-    rescan.addEventListener('click', scan);
+    rescan.addEventListener('click', function () { requestScan(true); });
     bar.appendChild(rescan);
     root.appendChild(bar);
 
@@ -804,7 +872,10 @@
       rolled.sort(worstFirst);
       lanes.appendChild(buildLane(OTHER_LANE, rolled, true));
     }
-    if (!order.length && !rolled.length && !scanState.running) lanes.appendChild(el('div', 'kb-note', 'No work orders in the current filter.'));
+    // Only claim an EMPTY FILTER when the pull actually succeeded. A failed or in-flight pull
+    // also produces zero lanes, and "No work orders in the current filter" would then be a
+    // statement about the data made off no data at all - the bar above says the real reason.
+    if (!order.length && !rolled.length && !pullState.running && pullState.ok) lanes.appendChild(el('div', 'kb-note', 'No work orders in the current filter.'));
     root.appendChild(lanes);
     return root;
   }
@@ -853,7 +924,7 @@
     b.addEventListener('click', function () {
       view = (view === 'board') ? 'list' : 'board';
       storeSet(LS_VIEW, view);
-      if (view === 'board' && !rows.length && !scanState.running) scan();
+      if (view === 'board' && !rows.length && !pullState.running) requestScan(false);
       else render();
     });
     anchor.appendChild(b);
@@ -890,11 +961,32 @@
       if (typeof orig !== 'function') return;
       history[m] = function () { var r = orig.apply(this, arguments); schedule(); return r; };
     });
-    if (view === 'board' && isListPage()) scan();
+    // Core announces a rebuilt snapshot; this is the only push in the contract and it carries
+    // no payload, so a missed event costs nothing - the next render pulls anyway.
+    document.addEventListener('bwn:evt', function (ev) {
+      var d = ev && ev.detail;
+      if (!d || d.id !== 'bwn:heat:rows') return;
+      if (view === 'board' && isListPage()) pullRows();
+    });
+    if (view === 'board' && isListPage()) requestScan(false);
     // No GM_registerMenuCommand: that API needs a grant, and a grant would sandbox the script
     // away from the page's fetch (see the header note). The toggle button IS the entry point,
     // and window.bwnKanban below is the escape hatch if it ever fails to mount.
-    try { window.bwnKanban = { scan: scan, render: render, state: function () { return { view: view, group: group, rows: rows.length, scan: scanState, captured: !!lastReq }; } }; } catch (e) { }
+    try {
+      window.bwnKanban = {
+        pull: pullRows,
+        scan: function (force) { requestScan(!!force); },   // scan(true) forces, as the drag does
+        render: render,
+        state: function () {
+          return {
+            view: view, group: group, rows: rows.length, pull: pullState, captured: !!lastReq,
+            // Which side a problem is on, without opening either file.
+            core: (typeof window.__bwnHeatRows === 'function') ? 'present' : 'absent',
+            heatKnown: heatCount()
+          };
+        }
+      };
+    } catch (e) { }
   }
 
   if (document.readyState === 'loading') document.addEventListener('DOMContentLoaded', boot);
