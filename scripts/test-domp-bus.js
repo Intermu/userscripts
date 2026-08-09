@@ -148,7 +148,7 @@ function makeWorld(o) {
   };
   var store = o.store || {
     'bwn:status:core': JSON.stringify({ ver: '1.67.0', ts: 1000 }),
-    'bwn:status:ai': JSON.stringify({ ver: '1.44.0', ts: 1000 }),
+    'bwn:status:ai': JSON.stringify({ ver: '1.45.0', ts: 1000 }),
   };
   var win = {
     document: doc, innerWidth: 1280, innerHeight: 800,
@@ -329,7 +329,7 @@ test('an unaddressed request is ignored rather than answered to nobody', functio
 test('Core switched off is reported fast and by NAME, not as a timeout', function () {
   var w = makeWorld({ store: {
     'bwn:status:core': JSON.stringify({ ver: '1.67.0', ts: 1000 }),
-    'bwn:status:ai': JSON.stringify({ ver: '1.44.0', ts: 1000 }),
+    'bwn:status:ai': JSON.stringify({ ver: '1.45.0', ts: 1000 }),
     'bwn:modules': JSON.stringify({ domHandle: false }),
   } });
   bootCore(w, false); var ai = bootAI(w);
@@ -352,7 +352,7 @@ test('Core absent from the page is reported as absent', function () {
 test('a stale Core stamp (previous page load) is not treated as live', function () {
   var w = makeWorld({ store: {
     'bwn:status:core': JSON.stringify({ ver: '1.67.0', ts: 1000 }),
-    'bwn:status:ai': JSON.stringify({ ver: '1.44.0', ts: 9000000 }),   // different session
+    'bwn:status:ai': JSON.stringify({ ver: '1.45.0', ts: 9000000 }),   // different session
   } });
   bootCore(w); var ai = bootAI(w);
   return ai.tools.page_snapshot({}).then(function (res) {

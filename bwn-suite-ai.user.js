@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         BWN Suite - AI (Broadway National)
 // @namespace    broadwaynational.bwn
-// @version      1.44.0
+// @version      1.45.0
 // @downloadURL  https://raw.githubusercontent.com/Intermu/userscripts/main/bwn-suite-ai.user.js
 // @updateURL    https://raw.githubusercontent.com/Intermu/userscripts/main/bwn-suite-ai.user.js
 // @description  The Umbrava tools that call outside APIs, kept separate from the zero-egress Core script. Client Update and WO Audit drafts (Anthropic Claude; draft-only, scrubbed before sending, you review before posting); Find Techs / Find Suppliers (Google Places; vendor leads near a WO); and Job View (opens the Ops-Dashboard job card on the WO page - WO details from Umbrava plus the authored case file and next actions, read-only). Network access is limited by the browser to the declared API hosts and the BWN Static Web App. API keys are stored in Tampermonkey's storage via the menu commands and never enter the page. Toggle modules in BWN_MODULES below.
@@ -24,7 +24,8 @@
     clientUpdate: true,   // Client Update + WO Audit buttons on the notes view
     findTechs: true,      // Find Techs + Find Suppliers buttons by Purchase Orders
     jobView: true,        // Job View: pop the Ops-Dashboard job modal on a WO page
-    serviceRequest: true  // Augment Umbrava's Build Requests modal (NTE preset + team inbox)
+    serviceRequest: true, // Augment Umbrava's Build Requests modal (NTE preset + team inbox)
+    operate: true         // Operate: watch an agent read the page through the DOM handle protocol
   };
 
   var BWN_VER = (typeof GM_info !== 'undefined' && GM_info.script && GM_info.script.version) || '1.34.2';
@@ -6153,6 +6154,230 @@ if (BWN_MODULES.jobView) BWN.safeModule('jobView', function () {
     }, 'serviceRequest:observe'));
     obs.observe(document.body, { childList: true, subtree: true });
     scan();
+  });
+
+  // ==========================================================================
+  // MODULE: Operate 1.0  -  the surface an agent drives the page from
+  // ==========================================================================
+  // The DOM handle protocol had tools registered on a path no coordinator-facing UI invoked once
+  // already (phase 4, bwn-ask). This is the surface, built BEFORE the write tools on purpose: with
+  // only the three read verbs registered there is nothing here that can change a record, so the
+  // loop, the round cap, the stop button and the action log can all be gated live at zero risk.
+  //
+  // It is NOT Ask. Ask answers a question about the record and is deliberately read-only forever;
+  // this drives the page and will one day act on it. Keeping them apart means neither inherits a
+  // capability by accident, and it is why this posts `task:'operate'` - the server task that
+  // already exists with its own 20-round cap and its own system prompt.
+  //
+  // THE ACTION LOG IS THE FEATURE. An agent driving a live work-order page is only acceptable if a
+  // human can see what it did, step by step, while it happens. Every tool call and every result is
+  // appended as it lands, not summarised at the end.
+  if (BWN_MODULES.operate) BWN.safeModule('operate', function () {
+    'use strict';
+
+    var DOCK_KEY = 'operate';
+    var OP_MIN_ROUNDS = 6;            // floor; the server publishes the real cap as maxRounds
+    var OP_MAX_CALLS_PER_ROUND = 4;
+    var panel = null, logEl = null, taskEl = null, runBtn = null, stopBtn = null, statusEl = null;
+    var running = false, stopped = false;
+
+    // ---- POST that keeps the failure ---------------------------------------------------------
+    // Deliberately not aiPost, which resolves null on every failure so the bwnAI router can fall
+    // through to an on-device tier. This surface has no other tier: a swallowed 403 would render
+    // as an empty panel and send the operator hunting for a problem the response already named.
+    function opPost(body) {
+      return new Promise(function (resolve) {
+        var key = GM_getValue('ingest_key', '');
+        if (!connectorEnabled()) return resolve({ clientError: 'The AI connector is switched off in the Ops Suite panel.' });
+        if (!key) return resolve({ clientError: 'Set the shared SWA ingest key first (Tampermonkey menu).' });
+        try {
+          GM_xmlhttpRequest({
+            method: 'POST', url: AI_URL, timeout: AI_REQ_TIMEOUT_MS,
+            headers: { 'Content-Type': 'application/json', 'x-bwn-key': key },
+            data: JSON.stringify(body),
+            onload: function (r) {
+              var j = null; try { j = JSON.parse(r.responseText); } catch (e) { }
+              resolve({ status: r.status, json: j, body: String(r.responseText || '').slice(0, 400) });
+            },
+            onerror: function () { resolve({ clientError: 'The request to the BWN app failed (network or connector).' }); },
+            ontimeout: function () { resolve({ clientError: 'The BWN app did not answer in time.' }); }
+          });
+        } catch (e) { resolve({ clientError: 'Could not send the request: ' + ((e && e.message) || e) }); }
+      });
+    }
+
+    // ---- UI ----------------------------------------------------------------------------------
+    function row(cls, html) {
+      var d = document.createElement('div');
+      d.className = cls;
+      d.style.cssText = 'padding:6px 8px;border-bottom:1px solid #eee;font:12px/1.45 ui-monospace,Consolas,monospace;white-space:pre-wrap;word-break:break-word';
+      d.textContent = html;
+      logEl.appendChild(d);
+      logEl.scrollTop = logEl.scrollHeight;
+      return d;
+    }
+    function setStatus(t) { if (statusEl) statusEl.textContent = t; }
+
+    function buildPanel() {
+      if (panel) { panel.style.display = 'flex'; return; }
+      panel = document.createElement('div');
+      // The SAME marker the confirm strip carries, for the same reason: the collector prunes this
+      // subtree, so an agent snapshotting the page never sees its own control window and never
+      // reasons about the buttons driving it.
+      panel.setAttribute('data-bwn-domp-ui', 'operate');
+      panel.setAttribute('role', 'region');
+      panel.setAttribute('aria-label', 'BWN Operate');
+      panel.style.cssText = 'position:fixed;right:16px;bottom:16px;width:440px;max-height:70vh;z-index:2147482000;'
+        + 'background:#fff;border:1px solid #cbd5e1;border-radius:10px;box-shadow:0 10px 30px rgba(0,0,0,.22);'
+        + 'display:flex;flex-direction:column;font:13px/1.45 system-ui,-apple-system,Segoe UI,sans-serif';
+
+      var head = document.createElement('div');
+      head.style.cssText = 'padding:10px 12px;border-bottom:1px solid #e2e8f0;display:flex;align-items:center;gap:8px';
+      var title = document.createElement('strong');
+      title.textContent = 'Operate';
+      title.style.cssText = 'flex:1';
+      var close = document.createElement('button');
+      close.textContent = '×';
+      close.style.cssText = 'border:0;background:transparent;font-size:18px;cursor:pointer;line-height:1';
+      close.addEventListener('click', function () { panel.style.display = 'none'; });
+      head.appendChild(title); head.appendChild(close);
+
+      // States the capability plainly, and is generated from the registry rather than written as
+      // a sentence somebody has to remember to update: the day write tools are advertised this
+      // line changes by itself.
+      var caps = document.createElement('div');
+      var writeNames = Object.keys(AI_TOOLS).filter(function (n) {
+        return n.indexOf('page_') === 0 && ['page_snapshot', 'page_inspect', 'page_extract'].indexOf(n) < 0;
+      });
+      caps.style.cssText = 'padding:8px 12px;background:' + (writeNames.length ? '#fff8e6' : '#f8fafc')
+        + ';border-bottom:1px solid #e2e8f0;color:#475569';
+      caps.textContent = writeNames.length
+        ? 'This agent CAN act on the page (' + writeNames.join(', ') + '). Every change asks you to approve it first.'
+        : 'Read-only: this agent can read the page you are looking at and cannot click, type or submit anything.';
+
+      taskEl = document.createElement('textarea');
+      taskEl.rows = 3;
+      taskEl.placeholder = 'What should it do on this page? e.g. "list the tasks section and tell me which are outstanding"';
+      taskEl.style.cssText = 'margin:10px 12px 6px;padding:8px;border:1px solid #cbd5e1;border-radius:6px;font:inherit;resize:vertical';
+
+      var bar = document.createElement('div');
+      bar.style.cssText = 'padding:0 12px 10px;display:flex;gap:8px;align-items:center';
+      runBtn = document.createElement('button');
+      runBtn.textContent = 'Run';
+      runBtn.style.cssText = 'padding:6px 16px;border:0;border-radius:6px;background:#1a5f3e;color:#fff;font-weight:600;cursor:pointer';
+      stopBtn = document.createElement('button');
+      stopBtn.textContent = 'Stop';
+      stopBtn.disabled = true;
+      stopBtn.style.cssText = 'padding:6px 14px;border:1px solid #cbd5e1;border-radius:6px;background:#fff;cursor:pointer';
+      statusEl = document.createElement('span');
+      statusEl.style.cssText = 'color:#64748b;flex:1';
+      bar.appendChild(runBtn); bar.appendChild(stopBtn); bar.appendChild(statusEl);
+
+      logEl = document.createElement('div');
+      logEl.style.cssText = 'flex:1;overflow:auto;border-top:1px solid #e2e8f0;background:#fafafa;min-height:120px';
+
+      panel.appendChild(head); panel.appendChild(caps); panel.appendChild(taskEl);
+      panel.appendChild(bar); panel.appendChild(logEl);
+      document.body.appendChild(panel);
+
+      runBtn.addEventListener('click', BWN.guard(start, 'operate:run'));
+      // A human watching an agent has to be able to halt it. The flag is checked between rounds,
+      // so a stop lands before the next tool call rather than after the loop finishes.
+      stopBtn.addEventListener('click', function () { stopped = true; setStatus('stopping after this round…'); });
+    }
+
+    // ---- the loop ----------------------------------------------------------------------------
+    function execOne(call) {
+      var name = call && call.name;
+      var input = (call && call.input) || {};
+      var fn = AI_TOOLS[name];
+      row('op-call', '▸ ' + name + ' ' + JSON.stringify(input).slice(0, 180));
+      if (typeof fn !== 'function') {
+        row('op-res', '  ✗ unknown tool');
+        return Promise.resolve({ tool_use_id: (call && call.id) || '', content: JSON.stringify({ ok: false, content: 'unknown tool: ' + name }), is_error: true });
+      }
+      return Promise.resolve().then(function () { return fn(input); }).then(function (res) {
+        res = res || { ok: false, content: 'tool returned nothing' };
+        var brief = typeof res.content === 'string' ? res.content : JSON.stringify(res.content);
+        row('op-res', (res.ok ? '  ✓ ' : '  ✗ ') + String(brief).slice(0, 300));
+        var tr = { tool_use_id: (call && call.id) || '', content: JSON.stringify(res) };
+        if (res.ok === false) tr.is_error = true;
+        return tr;
+      }, function (e) {
+        row('op-res', '  ✗ ' + ((e && e.message) || e));
+        return { tool_use_id: (call && call.id) || '', content: JSON.stringify({ ok: false, content: String((e && e.message) || e) }), is_error: true };
+      });
+    }
+
+    function drive(body) {
+      var cap = OP_MIN_ROUNDS;
+      function step(b, posts) {
+        if (stopped) return Promise.resolve({ stopped: true });
+        if (posts > cap + 1) return Promise.resolve({ error: 'it kept calling tools past the round cap (' + cap + ') without finishing.' });
+        setStatus('round ' + posts + ' of ' + cap + '…');
+        return opPost(b).then(function (r) {
+          if (r.clientError) return { error: r.clientError };
+          if (!r.json || r.status !== 200 || r.json.ok !== true) {
+            // Keeps the status AND the body. The whole reason this loop is not aiDriveLoop.
+            return { error: 'the BWN app answered ' + r.status + ': ' + (r.json && r.json.error ? r.json.error : r.body) };
+          }
+          var resp = r.json;
+          // The cap is the SERVER's number, adopted rather than copied - two writers computing the
+          // same limit is the drift that let a 217-row board open at 221.
+          var served = parseInt(resp.maxRounds, 10);
+          if (served >= OP_MIN_ROUNDS && served <= 40) cap = served;
+          if (resp.status === 'final') return { answer: String(resp.text || '') };
+          if (resp.status === 'tool_calls' && Array.isArray(resp.toolCalls) && resp.toolCalls.length && Array.isArray(resp.messages)) {
+            var calls = resp.toolCalls.slice(0, OP_MAX_CALLS_PER_ROUND);
+            return Promise.all(calls.map(execOne)).then(function (results) {
+              if (stopped) return { stopped: true };
+              return step({
+                task: 'operate', messages: resp.messages, toolResults: results,
+                tools: body.tools, userToken: aiUserToken()      // fresh: a long session outlives one token
+              }, posts + 1);
+            });
+          }
+          return { error: 'unexpected server status: ' + String(resp.status) };
+        });
+      }
+      return step(body, 1);
+    }
+
+    function start() {
+      if (running) return;
+      var task = String(taskEl.value || '').trim();
+      if (!task) { setStatus('type what it should do first'); return; }
+      var userToken = aiUserToken();
+      if (!userToken) { setStatus('no usable Umbrava session token - reload the page'); return; }
+      running = true; stopped = false;
+      runBtn.disabled = true; stopBtn.disabled = false;
+      logEl.innerHTML = '';
+      row('op-task', 'TASK: ' + task);
+      drive({ task: 'operate', prompt: task, tools: AI_TOOL_DEFS, userToken: userToken })
+        .then(function (out) {
+          if (out.stopped) { row('op-end', '■ stopped by you'); setStatus('stopped'); }
+          else if (out.error) { row('op-end', '✗ ' + out.error); setStatus('failed'); }
+          else { row('op-end', '◆ ' + (out.answer || '(it finished without saying anything)')); setStatus('done'); }
+        })
+        .then(null, function (e) { row('op-end', '✗ ' + ((e && e.message) || e)); setStatus('failed'); })
+        .then(function () { running = false; runBtn.disabled = false; stopBtn.disabled = true; });
+    }
+
+    // ---- dock ---------------------------------------------------------------------------------
+    function dockRegister() {
+      try {
+        document.dispatchEvent(new CustomEvent('bwn:evt', { detail: {
+          id: 'bwn:dock:register', key: DOCK_KEY, label: 'Operate', icon: '⚙️', weight: 35,
+          title: 'Watch an agent read the page you are on'
+        } }));
+      } catch (e) { }
+    }
+    document.addEventListener('bwn:evt', BWN.guard(function (e) {
+      var d = e && e.detail; if (!d) return;
+      if (d.id === 'bwn:dock:host' || d.id === 'bwn:dock:ping') dockRegister();
+      if (d.id === 'bwn:dock:open' && d.key === DOCK_KEY) buildPanel();
+    }, 'operate:dock'));
+    dockRegister();
   });
 
 })();
