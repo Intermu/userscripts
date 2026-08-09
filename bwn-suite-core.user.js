@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         BWN Suite - Core (Broadway National)
 // @namespace    broadwaynational.bwn
-// @version      1.69.0
+// @version      1.70.0
 // @downloadURL  https://raw.githubusercontent.com/Intermu/userscripts/main/bwn-suite-core.user.js
 // @updateURL    https://raw.githubusercontent.com/Intermu/userscripts/main/bwn-suite-core.user.js
 // @description  Runs several Umbrava helpers for BWN coordinators, in the browser with no privileged grants. Includes: PO Approval + ETA Builder; WO Assist (GP/ETA, a stall watchdog, DNE calculator, and a next-action playbook); Email Leak Guard (checks recipients against vendor names, PO amounts, and client budget references before an outbound email sends); WO List Heat (a triage overlay + My Day strip on the work-order list, with an optional same-origin Umbrava API scan for deterministic full-board coverage); and the BWN Launcher (opens the Azure Static Web App tools with the current WO's context). Modules share state through sessionStorage/localStorage. The only network calls are same-origin Umbrava GraphQL requests (app.umbrava.com/api/graphql, the app's own session): List Heat's full-board scan and WO Assist's work-order / trip / clock-in / document reads, plus ONE write - BWN Views saves the column layout through Umbrava's own putUserPreference, the same preference the column chooser writes; everything else is offline. Toggle modules in BWN_MODULES below.
@@ -11921,17 +11921,33 @@
       id: "wo-add-note",
       title: "Add a note to a work order",
       enabled: false,
+      // A SECOND flag, and it is not ceremony. `enabled` is a decision; this is a MEASUREMENT -
+      // "somebody has snapshotted this flow and the control list below matches what is really on
+      // the page". Both are required, so flipping `enabled` alone cannot arm a flow nobody has
+      // looked at. See the note on `controls`: the phase-6 gate measured 1 of 4 present.
+      controlsVerified: false,
       origin: "https://app.umbrava.com",
+      // NO `$` anchor. The live route measured 2026-08-08 is `/work-orders/371126/details`, not
+      // `/work-orders/371126` - an anchored pattern would have matched nothing, forever, and the
+      // failure would have looked like "the workflow is off" rather than "the route is wrong".
       route: /^\/work-orders\/\d+/,
       // Rank 1 (staff) on purpose. The coordinator who lives on this page all day is the person
       // this is for, and a floor above them would ship a feature nobody holds the rank to use -
       // which is how the SWA's ops_* gates ended up deny-for-all for every signed-in user.
+      // (The one rank measured so far is 4, on 2026-08-08. That is one user, not the population,
+      // and it is a reason the floor is not load-bearing rather than a reason to raise it.)
       minRank: 1,
-      // Names OBSERVED on a real WO page (#371126, 2026-08-08), not guessed. `Add Note` came
-      // back in a live snapshot alongside Tasks / Proposals / Copy From. The rest of the flow -
-      // whatever editor and save control the button opens - is UNOBSERVED, which is why the live
-      // gate's first job is to snapshot the opened editor and report what is actually there
-      // rather than to assume these names are right.
+      // MEASURED 2026-08-08 by the phase-6 live gate on WO #371126: **1 of these 4 exists.**
+      //   present: /^add note$/i as a button  -> @b23
+      //   absent:  the note textbox, the save/post control, cancel
+      // The three absent ones live inside the editor that Add Note opens, and the page was never
+      // snapshotted with it open - they were written from the shape such a flow usually has, which
+      // is a guess wearing a regex. As declared, this workflow would approve the first click and
+      // then refuse every control in the editor it just opened: a dead end, mid-flow, on a live
+      // work order, with the operator watching.
+      //
+      // That is why `controlsVerified` exists above. To finish this: open the editor by hand and
+      // run outputs/bwn-domp-controls-probe.js, paste the real names in here, then set the flag.
       controls: [
         { name: /^add note$/i, kind: "b" },
         { name: /^note$/i, kind: "i" },
@@ -12491,6 +12507,16 @@
     for (i = 0; i < DC.WORKFLOWS.length; i++) {
       w = DC.WORKFLOWS[i];
       if (!w.enabled) continue;
+      // A workflow whose control list nobody has checked against the real page is not usable, even
+      // switched on. Measured on 2026-08-08: wo-add-note declared four controls and one of them
+      // existed, so arming it would have approved the opening click and then refused every control
+      // in the editor that click opened. `enabled` is a decision; this is a measurement; requiring
+      // both means one flag cannot arm a flow nobody has looked at.
+      //
+      // `!== true`, not `=== false`: a new entry that simply forgets the field is unverified, not
+      // trusted. Every other unknown in this file refuses (RANK_UNKNOWN, an untested topmost, an
+      // unresolvable handle) and this one does too.
+      if (w.controlsVerified !== true) continue;
       if (w.origin !== origin) continue;
       if (w.route && !w.route.test(route)) continue;
       out.push(w);
