@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         BWN CC Request (Broadway National)
 // @namespace    broadwaynational.bwn
-// @version      0.4.3
+// @version      0.4.4
 // @downloadURL  https://raw.githubusercontent.com/Intermu/userscripts/main/bwn-cc-auth.user.js
 // @updateURL    https://raw.githubusercontent.com/Intermu/userscripts/main/bwn-cc-auth.user.js
 // @description  Replaces the "CC Authorization Form" Microsoft Form with an in-page CC Request modal. Requesting a card purchase is a coordinator action (any vouched Broadway Umbrava user): fill the fields and submit; it POSTs to the broadway-internal-ops SWA proxy (x-bwn-key gated) which proves your Umbrava session token with Umbrava's own current-user API, injects your verified email as the Requester, and forwards to the HTTP-triggered Power Automate flow "CC Authorization (HTTP)". That flow starts an approval (mnajarro@, GKohlmann@, LPorzelt@) and, on approve, emails you back that the order will be placed. This script OWNS the single Credit Card entry in the shared dock tab: coordinators and leads see just "CC Request"; supervisors and above get a dropdown that also opens the Supervisor-only "Log CC Purchase" modal (provided by bwn-cc-purchase, driven over the bwn:evt bus so there is only ever one button). Opened on a work order it prefills the Tracking # and drops the client/location into the description, and defaults Supplier to whichever PO line you flipped to "Supplier" in the BWN Ops Suite. The flow's secret URL stays server-side; nothing sensitive lives in this script.
@@ -60,9 +60,24 @@
   function toast(msg, ms, bg) {
     var t = document.createElement('div');
     t.textContent = msg;
-    t.style.cssText = 'position:fixed;z-index:2147483647;left:50%;bottom:26px;transform:translateX(-50%);background:' + (bg || GREEN) + ';color:#fff;font:400 14px ' + FONT + ';padding:11px 16px;border-radius:9px;max-width:74vw;box-shadow:0 6px 24px rgba(0,0,0,.3);line-height:1.5;';
+    t.style.cssText = 'position:fixed;z-index:2147483647;left:50%;bottom:26px;transform:translate(-50%,10px);opacity:0;background:' + (bg || GREEN) + ';color:#fff;font:400 14px ' + FONT + ';padding:11px 16px;border-radius:9px;max-width:74vw;box-shadow:0 6px 24px rgba(0,0,0,.3);line-height:1.5;';
     document.body.appendChild(t);
-    setTimeout(function () { t.style.transition = 'opacity .4s'; t.style.opacity = '0'; setTimeout(function () { t.remove(); }, 420); }, ms || 6000);
+    // The suite's shared toast motion (animation review 2026-08-10, five identical copies - the
+    // sandboxes cannot share one). It used to pop in and fade out; it now enters the way it
+    // leaves, on transitions so a replacement retargets, with reduced motion keeping the fade
+    // and dropping the travel. Full rationale sits at the same block in bwn-dispatch.user.js.
+    var reduce = false;
+    try { reduce = !!(window.matchMedia && window.matchMedia('(prefers-reduced-motion: reduce)').matches); } catch (e) { }
+    void t.offsetHeight;                                   // flush the start state or the transition never runs
+    t.style.transition = reduce ? 'opacity .3s ease' : 'opacity .3s ease, transform .3s ease';
+    t.style.opacity = '1';
+    t.style.transform = 'translate(-50%,0)';
+    setTimeout(function () {
+      t.style.transition = reduce ? 'opacity .4s ease' : 'opacity .4s ease, transform .4s ease';
+      t.style.opacity = '0';
+      if (!reduce) t.style.transform = 'translate(-50%,10px)';
+      setTimeout(function () { t.remove(); }, 420);
+    }, ms || 6000);
   }
 
   // ---- Who's signed in (Umbrava Auth0 session) ----------------------------

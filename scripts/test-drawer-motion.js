@@ -212,6 +212,89 @@ A.ok('the media query names .bwn-ops-card, the gap this fix closed', rmQuery.ind
 A.ok('and .bwn-ops-overlay, so the rail slide stops too', rmQuery.indexOf('.bwn-ops-overlay') !== -1, rmQuery);
 A.ok('and it kills the transition, not only the old animation', rmQuery.indexOf('transition:none') !== -1, rmQuery);
 
+// ---- 3b. the shared toast: five identical copies, so drift is the risk ------------------------
+// The toast used to POP in and fade out - half an animation, missing the half the eye catches.
+// Five modules carry a byte-identical copy (sandboxes cannot share one), so these probes RUN each
+// module's toast against a fake element and require all five to behave the same, in both media
+// states. A copy that drifts is the failure this section exists to catch.
+console.log('\n-- shared toast motion, per module --');
+var TOAST_MODULES = ['bwn-dispatch.user.js', 'bwn-cc-auth.user.js', 'bwn-cc-purchase.user.js',
+  'bwn-wo-assist.user.js', 'bwn-wo-intake.user.js'];
+
+function runToast(src, reduce) {
+  var styleWrites = [];
+  var el = {
+    textContent: '', offsetHeight: 1, removed: false,
+    style: {
+      _t: '', _o: '', _tr: '',
+      set cssText(v) { styleWrites.push(['cssText', v]); this._css = v; },
+      get cssText() { return this._css || ''; },
+      set transition(v) { styleWrites.push(['transition', v]); this._t = v; },
+      get transition() { return this._t; },
+      set opacity(v) { styleWrites.push(['opacity', v]); this._o = v; },
+      get opacity() { return this._o; },
+      set transform(v) { styleWrites.push(['transform', v]); this._tr = v; },
+      get transform() { return this._tr; }
+    },
+    remove: function () { this.removed = true; }
+  };
+  var timers = [];
+  var ctx = {
+    document: { createElement: function () { return el; }, body: { appendChild: function () { } } },
+    window: { matchMedia: function (q) { return { matches: reduce && /reduced-motion/.test(q) }; } },
+    setTimeout: function (fn, ms) { timers.push({ fn: fn, ms: ms }); return timers.length; },
+    console: console, GREEN: '#0d3d26', FONT: 'sans-serif'
+  };
+  vm.createContext(ctx);
+  vm.runInContext(src + '\n__toast = toast;', ctx);
+  ctx.__toast('hello');
+  return {
+    el: el, writes: styleWrites, timers: timers,
+    // Fire the dismissal timer, then its nested removal timer.
+    dismiss: function () {
+      var outer = timers.shift(); if (outer) outer.fn();
+      var inner = timers.shift(); if (inner) inner.fn();
+      return inner ? inner.ms : null;
+    }
+  };
+}
+
+TOAST_MODULES.forEach(function (m) {
+  var src = sliceFn(read(m), 'function toast(');
+  var r = runToast(src, false);
+  A.ok(m + ': starts hidden and offset, so there is something to animate FROM',
+    /opacity:0/.test(r.el.style.cssText) && /translate\(-50%,10px\)/.test(r.el.style.cssText), r.el.style.cssText.slice(0, 90));
+  A.ok(m + ': enters on a transition, not a keyframe',
+    /opacity \.3s ease, transform \.3s ease/.test(r.el.style.transition) || r.writes.some(function (w) { return w[0] === 'transition' && /transform \.3s/.test(w[1]); }),
+    JSON.stringify(r.writes.filter(function (w) { return w[0] === 'transition'; })));
+  A.ok(m + ': ends up visible and settled', r.el.style.opacity === '1' || r.writes.some(function (w) { return w[0] === 'opacity' && w[1] === '1'; }));
+  A.ok(m + ': the entry composes with the centring translate (both axes in one transform)',
+    r.writes.some(function (w) { return w[0] === 'transform' && w[1] === 'translate(-50%,0)'; }),
+    'a bare translateY would throw away the -50% centring');
+  var removalMs = r.dismiss();
+  A.ok(m + ': leaves the way it came - fades AND travels back', r.el.style.opacity === '0' && r.el.style.transform === 'translate(-50%,10px)',
+    'opacity=' + r.el.style.opacity + ' transform=' + r.el.style.transform);
+  A.ok(m + ': removal waits out the 400ms exit', removalMs === 420, 'got ' + removalMs);
+  A.ok(m + ': and the node is gone', r.el.removed === true);
+
+  var rr = runToast(src, true);
+  A.ok(m + ': under reduced motion the fade stays', /opacity \.3s ease$/.test(rr.el.style.transition) ||
+    rr.writes.some(function (w) { return w[0] === 'transition' && w[1] === 'opacity .3s ease'; }),
+    JSON.stringify(rr.writes.filter(function (w) { return w[0] === 'transition'; })));
+  A.ok(m + ': ...and no transform is animated', !rr.writes.some(function (w) { return w[0] === 'transition' && /transform/.test(w[1]); }));
+  rr.dismiss();
+  A.ok(m + ': ...and it does not jerk 10px on the way out', rr.el.style.transform === 'translate(-50%,0)',
+    'transform=' + rr.el.style.transform);
+});
+
+// Control: revert ONE copy to the old pop-in/fade-out form and require the probes to catch it.
+var toastOld = mutate(sliceFn(read('bwn-dispatch.user.js'), 'function toast('),
+  "t.style.transition = reduce ? 'opacity .3s ease' : 'opacity .3s ease, transform .3s ease';", '');
+var tc = runToast(toastOld, false);
+A.ok('control: a copy that never runs the entry transition is caught',
+  !tc.writes.some(function (w) { return w[0] === 'transition' && /\.3s/.test(w[1]); }),
+  'the entry probe would have passed a toast that pops in');
+
 // ---- 4. suite-wide invariant: every animation answers prefers-reduced-motion ------------------
 // This section exists because the same hole shipped FOUR separate times in this one file
 // (.bwn-ops-card, .bwn-ecd-savepulse, .bwn-wa-card, #bwn-heat-set) and each was found by hand,
