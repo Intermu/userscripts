@@ -551,8 +551,12 @@ A.ok('M2 control: and an hours-only row falls to null instead of reading',
 // M3: drop the year and a last-year onsite date is indistinguishable from an upcoming one.
 var m3 = readersCtx(mutate(S_READERS,
   "+ (t.getFullYear() !== now.getFullYear() ? '/' + String(t.getFullYear()).slice(-2) : '')", ''));
+// Compare against the unmutated reader, not a trailing-/dd regex: a two-digit DAY (e.g. the
+// 10th -> "8/10") also ends in /dd, so the old check went red on every day 10-31 regardless of
+// the code - a clock-dependent false failure. Dropping the year clause must simply CHANGE a
+// cross-year date's rendering; R is the shipped reader, m3 is it with the year clause removed.
 A.ok('M3 control: without the year clause a date from another year loses it',
-  !/\/\d\d$/.test(m3.fmtDate(lastYear.toISOString())));
+  m3.fmtDate(lastYear.toISOString()) !== R.fmtDate(lastYear.toISOString()));
 
 // M4: stop scaling minor units and money is 100x, the v3.19 DNE fault.
 var m4 = readersCtx(mutate(S_READERS, 'return m.amount / Math.pow(10, p);', 'return m.amount;'));
