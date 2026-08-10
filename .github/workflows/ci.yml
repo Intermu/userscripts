@@ -157,6 +157,14 @@ jobs:
       - name: Next Actions closure auto-advance harness (WO Assist 2.69)
         run: node scripts/test-assist-advance-gate.js
 
+      # UI-contract completeness ledger: names every bwn-*.user.js and forces each into a classified
+      # row per shared UI contract (drawer exit / toast motion / reduced-motion / rail anchor), tied
+      # to test-drawer-motion.js so neither harness can quietly omit a script. Green == the recorded
+      # 2026-08-10 scope; red == a script silently grew, dropped, or regressed a shared primitive.
+      # Closes the "quietly dropped" gap the animation review left when its fixes landed unevenly.
+      - name: UI-contract completeness ledger harness
+        run: node scripts/test-ui-contract-ledger.js
+
   lint:
     name: Lint (advisory)
     runs-on: ubuntu-latest
