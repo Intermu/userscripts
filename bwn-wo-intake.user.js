@@ -1,10 +1,10 @@
 // ==UserScript==
 // @name         BWN WO Intake (Broadway National)
 // @namespace    broadwaynational.bwn
-// @version      0.9.8
+// @version      0.9.9
 // @downloadURL  https://raw.githubusercontent.com/Intermu/userscripts/main/bwn-wo-intake.user.js
 // @updateURL    https://raw.githubusercontent.com/Intermu/userscripts/main/bwn-wo-intake.user.js
-// @description  Drop a client PO/WO email (.msg or .eml) onto the Create Work Order modal and it prefills the fields. Pilot Travel Centers: from the email body. Caleres (Famous Footwear / Corrigo): reads the attached WO PDF on-device for Trade, Scope, Priority, Due-By, Store, NTE. If a Caleres request has no WO PDF (image-only), it reads Store, City/State and Trade from the subject and the scope from the body (NTE + Priority stay manual - they live only in the images). Amazon (Fairmarkit RFQ): the buyer is Amazon.com, Inc. but the sender is the Fairmarkit e-bidding platform - reads the RFQ body (no PDF) for Site (matched by the Amazon site code e.g. PIT2/STL3, else the shipping address), RFQ #, Trade, Scope + line items; NTE and Priority stay manual because an RFQ carries no ceiling yet (we are the quoting supplier). The email carries no attachment - the full scope / any 'see attached file' lives on the Fairmarkit bid page - so it surfaces that RFQ link and warns you when the body defers to it. Per Amazon (Amanda Murtha, Mgr): Source PO # is set to N/A (these are quote requests), Client DNE is set to 0.00, WO Type is selected as Proposal in the create modal, and Source Job # is prefilled Q/R ("") then rewritten to Q/R (<the new WO's tracking #>) on the new WO page after the document + note are added (best-effort; copies the value + prompts if it can't write the field). Selects Client, Location (address-verified), Trade and Priority by clicking the real dropdown option; fills Client DNE, Source Job # and Source PO #; warns you if the WO PDF shows a cancel/flag note. Then, after you Create the WO, it hands the email to BWN Drop Upload to attach it to the new WO's Documents. Reads everything in the browser; nothing is uploaded to any server. Best-effort: review every field before you click Create.
+// @description  Drop a client PO/WO email (.msg or .eml) onto the Create Work Order modal and it prefills the fields. Pilot Travel Centers: from the email body. Caleres (Famous Footwear / Corrigo): reads the attached WO PDF on-device for Trade, Scope, Priority, Due-By, Store, NTE. If a Caleres request has no WO PDF (image-only), it reads Store, City/State and Trade from the subject and the scope from the body (NTE + Priority stay manual - they live only in the images). Amazon (Fairmarkit RFQ): the buyer is Amazon.com, Inc. but the sender is the Fairmarkit e-bidding platform - reads the RFQ body (no PDF) for Site (matched by the Amazon site code e.g. PIT2/STL3, else the shipping address), RFQ #, Trade, Scope + line items; NTE and Priority stay manual because an RFQ carries no ceiling yet (we are the quoting supplier). The email carries no attachment - the full scope / any 'see attached file' lives on the Fairmarkit bid page - so it surfaces that RFQ link and warns you when the body defers to it. Per Amazon (Amanda Murtha, Mgr): Source PO # is set to N/A (these are quote requests), Client DNE is set to 0.00, WO Type is selected as Proposal in the create modal, and Source Job # is prefilled Q/R ("") then rewritten to Q/R (<the new WO's tracking #>) on the new WO page after the document + note are added, and the WO is auto-saved (best-effort; prompts you to type it if it can't read/write the field - it never touches the clipboard, which BWN Drop Upload uses to hand you the email note for Ctrl+V). Selects Client, Location (address-verified), Trade and Priority by clicking the real dropdown option; fills Client DNE, Source Job # and Source PO #; warns you if the WO PDF shows a cancel/flag note. Then, after you Create the WO, it hands the email to BWN Drop Upload to attach it to the new WO's Documents. Reads everything in the browser; nothing is uploaded to any server. Best-effort: review every field before you click Create.
 // @match        https://app.umbrava.com/*
 // @run-at       document-idle
 // @noframes
@@ -13,7 +13,7 @@
 
 (function () {
   'use strict';
-  var VER = '0.9.8';
+  var VER = '0.9.9';
   var FONT = "-apple-system,BlinkMacSystemFont,'Segoe UI','Helvetica Neue',Arial,sans-serif";
   console.info('[BWN WO INTAKE] v' + VER + ' - drop a PO / Amazon RFQ email (.msg/.eml) on Create Work Order to prefill + auto-attach to the new WO Documents (via Drop Upload); reads locally, nothing leaves the browser');
 
@@ -737,17 +737,30 @@
       // ("Type" / "WO Type" / "Work Order Type"); selected like the other autocompletes. Done last so
       // that if choosing it re-shapes the form, the known cascade above has already run.
       if (wo._woType) {
-        var typeEl = inputByLabel(root, /^(wo |work order )?type\b/i);
+        // Type is a typeable combobox that defaults to "Reactive" (options incl. Proposal - screenshot).
+        // Locate by label; if that misses, find the input whose current value is the "Reactive" default.
+        var typeEl = inputByLabel(root, /^(wo\s*|work\s*order\s*)?type\b/i);
+        if (!typeEl) {
+          typeEl = [].slice.call(root.querySelectorAll('input, [role="combobox"]'))
+            .filter(function (x) { return /^reactive$/i.test(normText(x.value || x.getAttribute('value') || '')); })[0] || null;
+        }
+        // Ground-truth diagnostic (read the console if the auto-select ever misses live).
+        try { console.info('[BWN WO INTAKE] WO Type target:', typeEl ? (typeEl.id || typeEl.name || typeEl.className || typeEl.tagName) : 'NOT FOUND - "Type" label not matched', '| value:', typeEl ? (typeEl.value || '') : ''); } catch (e) { }
         var rwt = await selectAC(typeEl, wo._woType, wo._woType);
-        // Type is a typeable combobox that defaults to "Reactive" (Proposal is a real option). If the
-        // option-click did not commit, a typed value + Enter selects the highlighted match.
+        // If the option-click did not commit: type the value, click a matching option (role=option /
+        // menuitem / li), then Enter, and verify the field actually shows the value.
         if (rwt !== 'selected' && typeEl && normText(typeEl.value) !== normText(wo._woType)) {
           try {
             acType(typeEl, wo._woType);
-            ['keydown', 'keyup'].forEach(function (k) { typeEl.dispatchEvent(new KeyboardEvent(k, { bubbles: true, key: 'Enter', code: 'Enter', keyCode: 13, which: 13 })); });
+            await new Promise(function (r) { setTimeout(r, 300); });
+            var opt = [].slice.call(document.querySelectorAll('[role="option"], [role="menuitem"], li'))
+              .filter(function (o) { return normText(o.textContent).toLowerCase() === wo._woType.toLowerCase(); })[0];
+            if (opt) ['pointerdown', 'mousedown', 'mouseup', 'click'].forEach(function (t) { opt.dispatchEvent(new MouseEvent(t, { bubbles: true, cancelable: true, view: window })); });
+            if (normText(typeEl.value) !== normText(wo._woType)) ['keydown', 'keyup'].forEach(function (k) { typeEl.dispatchEvent(new KeyboardEvent(k, { bubbles: true, key: 'Enter', code: 'Enter', keyCode: 13, which: 13 })); });
+            if (normText(typeEl.value) === normText(wo._woType)) rwt = 'selected';
           } catch (e) { }
         }
-        if (rwt === 'selected') picked.push('WO Type "' + wo._woType + '"'); else hint.push('WO Type: set ' + wo._woType);
+        if (rwt === 'selected') picked.push('WO Type "' + wo._woType + '"'); else hint.push('WO Type: set ' + wo._woType + ' manually (auto-select missed - see console)');
       }
       var parts = [];
       if (done.length) parts.push('Filled ' + done.join(', '));
@@ -829,9 +842,23 @@
       return m ? m[1] : '';
     } catch (e) { return ''; }
   }
+  // After the stamp, click the WO's edit-mode Save (header "Save" beside "Cancel"). Auto-save was
+  // explicitly requested. Guarded: only a visible, enabled button whose text is exactly "Save";
+  // prompts if none renders within the window.
+  function amazonClickSave(val) {
+    var t0 = Date.now();
+    (function poll() {
+      var save = [].slice.call(document.querySelectorAll('button')).filter(function (b) {
+        return /^save$/i.test(normText(b.textContent)) && !b.disabled && b.offsetParent !== null;
+      })[0];
+      if (save) { try { save.click(); } catch (e) { } toast('Amazon RFQ: Source Job # ' + val + ' saved.', 9000); return; }
+      if (Date.now() - t0 > 3500) { toast('Amazon RFQ: Source Job # set to ' + val + ' - click Save to persist.', 13000, '#8b1a1a'); return; }
+      setTimeout(poll, 150);
+    })();
+  }
   function amazonStampSourceJob() {
     var tracking = amazonReadTracking();
-    var val = tracking ? ('Q/R (' + tracking + ')') : '';   // Q/R (1269746) - replaces the Q/R ("") template
+    var val = tracking ? ('Q/R (' + tracking + ')') : '';   // Q/R (1282870) - replaces the Q/R ("") template
     var el = document.querySelector('input#sourceJobNumber');
     if (!el) {
       var labs = [].slice.call(document.querySelectorAll('label, .MuiInputLabel-root'));
@@ -839,14 +866,16 @@
       if (lab) { var fc = lab.closest('.MuiFormControl-root, .MuiTextField-root') || lab.parentElement; el = fc ? fc.querySelector('input, textarea') : null; }
     }
     // Overwrite ONLY the Q/R ("") placeholder or an empty field - never a value that already carries
-    // digits (an already-stamped or human-entered job #). setNativeValue dispatches blur, which is how
-    // Umbrava's inline fields commit; the toast prompts a review + Save.
+    // digits (an already-stamped or human-entered job #). setNativeValue dispatches blur (how Umbrava's
+    // inline fields commit); then auto-click Save.
     if (val && el && !/\d/.test(String(el.value || ''))) {
-      try { setNativeValue(el, val); toast('Amazon RFQ: Source Job # set to ' + val + ' - review + Save the WO.', 15000); return; }
+      try { setNativeValue(el, val); setTimeout(function () { amazonClickSave(val); }, 700); return; }
       catch (e) { }
     }
-    if (val) { try { if (navigator.clipboard && navigator.clipboard.writeText) navigator.clipboard.writeText(val); } catch (e) { } }
-    toast('Amazon RFQ - set Source Job # to ' + (val ? val + ' (copied to clipboard)' : 'Q/R (<this WO\'s tracking #>)') + ' and Save.', 16000, '#8b1a1a');
+    // Fallback: DO NOT touch the clipboard. BWN Drop Upload puts the email note on the clipboard for a
+    // one-tap Ctrl+V into the WO note (Umbrava's note field rejects programmatic fills); writing the
+    // Q/R value here would clobber it and leave the note empty. Just show the value to type in.
+    toast('Amazon RFQ - set Source Job # to ' + (val || 'Q/R (<this WO\'s tracking #>)') + ' and Save (could not write the field).', 16000, '#8b1a1a');
   }
 
   var _consuming = false;
