@@ -434,6 +434,17 @@ A.ok('and distinguishes an absent Core from an unscanned one',
   /core unavailable/.test(kbFull) && /Reinstall bwn-suite-core/.test(kbFull));
 A.ok('an empty board only claims "no work orders" when the pull actually succeeded',
   /!pullState\.running && pullState\.ok\) lanes\.appendChild/.test(kbFull));
+// 0.6.1: render() must NOT bail out when the anchor is unfindable while a board is already
+// mounted. An empty result set has no WO links, so findBodyTable returns null - and the bare
+// `return` that used to be here left the PREVIOUS board on screen. Measured live: one stale card
+// under a bar reading "1 work orders - scanned just now" while the state said 0 rows and a failed
+// scan. Source pin, because render needs a real DOM.
+A.ok('render updates an already-mounted board even when the table anchor is gone',
+  /if \(!block \|\| !block\.parentElement\) \{[\s\S]{0,220}?existing\.replaceWith\(boardNode\(\)\)/.test(kbFull));
+A.ok('and removes it instead when the board is toggled off',
+  /if \(!block \|\| !block\.parentElement\) \{[\s\S]{0,320}?else existing\.remove\(\);/.test(kbFull));
+A.ok('the bare early return that caused the stale render is gone',
+  kbFull.indexOf('    if (!block || !block.parentElement) return;') === -1);
 // Ack is read LIVE, not off the frozen snapshot - Core does the same for its own rows.
 A.ok('the board reads ack state live rather than trusting the snapshot',
   /__bwnHeatAck/.test(kbFull) && /function\s+liveAcked/.test(kbFull));
@@ -486,7 +497,7 @@ A.ok('the confirm dialog quotes corrected hours too', /statusHours\(row\)/.test(
 var mVer = kbFull.match(/@version\s+(\S+)/);
 var mConst = kbFull.match(/var VER = '([^']+)'/);
 A.ok('the metadata @version and the VER constant agree', !!(mVer && mConst) && mVer[1] === mConst[1]);
-A.eq('and this is the version under test', mVer && mVer[1], '0.6.0');
+A.eq('and this is the version under test', mVer && mVer[1], '0.6.1');
 // The mirror (Intermu/userscripts-public) is being retired now that the source repo is public
 // again; raw URLs must point at the SOURCE repo or auto-update dies with the mirror.
 A.ok('the script points at the source repo raw URL, so it can auto-update at all',
