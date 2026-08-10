@@ -1,10 +1,10 @@
 // ==UserScript==
 // @name         BWN Drop Upload (Broadway National)
 // @namespace    broadwaynational.bwn
-// @version      1.10.1
+// @version      1.10.2
 // @downloadURL  https://raw.githubusercontent.com/Intermu/userscripts/main/bwn-drop-upload.user.js
 // @updateURL    https://raw.githubusercontent.com/Intermu/userscripts/main/bwn-drop-upload.user.js
-// @description  Drop files anywhere on an Umbrava work order to upload them. Opens the Documents tab and upload dialog, hands over the files, and builds each file's description from its contents. Emails are parsed locally (.msg via an OLE/MAPI reader, .eml via RFC822) into an Outlook-style block - From/Sent/To/Cc/Subject and the body - that becomes the WO note, led by a one-line summary from Chrome's on-device built-in AI (zero cost, zero egress, nothing leaves the browser), falling back to local WO-field extraction (store, city/state, priority, PO, NTE, problem, requester) when the on-device model is unavailable. That same summary fills each file's Description. The WO note's Type is chosen from the email's parties: inbound is typed by the sender (client -> Client, else Vendor); outbound from Broadway is typed by the recipients (a client recipient -> Client, any vendor recipient -> Vendor, all-internal -> Internal). Umbrava's Description field is a locked react-aria combobox that rejects programmatic fills, so the description goes on your clipboard for a one-tap Ctrl+V. When WO Intake hands off a just-created WO's request email, each uploaded file's Label (document type) is set to "Work Order Request". You review and Save everything. Runs in the browser only: no network access, no grants.
+// @description  Drop files anywhere on an Umbrava work order to upload them. Opens the Documents tab and upload dialog, hands over the files, and builds each file's description from its contents. Emails are parsed locally (.msg via an OLE/MAPI reader, .eml via RFC822) into an Outlook-style block - From/Sent/To/Cc/Subject and the body - that becomes the WO note, led by a one-line summary from Chrome's on-device built-in AI (zero cost, zero egress, nothing leaves the browser), falling back to local WO-field extraction (store, city/state, priority, PO, NTE, problem, requester) when the on-device model is unavailable. That same summary fills each file's Description. The WO note's Type is chosen from the email's parties: inbound is typed by the sender (client -> Client, else Vendor); outbound from Broadway is typed by the recipients (a client recipient -> Client, any vendor recipient -> Vendor, all-internal -> Internal). Umbrava's Description field is a locked react-aria combobox that rejects programmatic fills, so the description goes on your clipboard for a one-tap Ctrl+V. If BOTH the auto-fill and the automatic clipboard write are blocked (the latter needs a user gesture, which the WO Intake auto-handoff doesn't have), a "Copy the WO note" button appears - clicking it supplies the gesture so the copy lands, then Ctrl+V works. When WO Intake hands off a just-created WO's request email, each uploaded file's Label (document type) is set to "Work Order Request". You review and Save everything. Runs in the browser only: no network access, no grants.
 // @match        https://app.umbrava.com/*
 // @match        https://*.umbrava.com/*
 // @run-at       document-idle
@@ -15,7 +15,7 @@
 (function () {
   'use strict';
 
-  var VER = '1.10.0';   // was '1.8.0' while @version read 1.9.1 - the console banner had been two releases stale
+  var VER = '1.10.2';   // keep in step with @version (drift caught earlier: banner had lagged two releases)
   console.info('[BWN DROP UPLOAD] v' + VER + ' · Email→note: real .msg (OLE/MAPI) + .eml parsing · on-device AI one-line summary (Chrome built-in, zero egress) leads the note + fills Description, local field-extraction fallback · note Type by parties (inbound=sender, outbound=recipient) · document Label + note Type selectors both target their stable testids · WO Intake handoff sets Label=Work Order Request · bwn:cmd dropupload:files bridge');
 
   // Active only on WO pages; checked at drag time so SPA navigation needs no watcher.
@@ -1257,15 +1257,19 @@
         }
         return null;
       }, 5000).then(function (ed) {
-        if (!ed) { copied.then(function (ok) { toast(ok ? 'Upload note copied to clipboard - the note composer didn’t open.' : 'The note composer didn’t open.'); }); return; }
+        if (!ed) { copied.then(function () { toast('The note composer didn’t open - use the Copy button to grab the note, then paste it in.'); copyNoteButton(text); }); return; }
         setEditorValue(ed, text).then(function (filled) {
           // Note Type is chosen from the email's parties (noteTypeForFiles -> noteTypeForEmail:
           // inbound by sender, outbound by recipient). Scope to the just-opened composer so we
           // never touch an unrelated dropdown. Best-effort; posts regardless.
           try { var comp = (ed.closest && ed.closest('[role="dialog"],.MuiDialog-root,form,.MuiPaper-root')) || document; setTimeout(function () { setNoteType(noteType, comp); }, 80); } catch (e) { }
           copied.then(function (ok) {
-            if (filled) toast('Upload note drafted (Type: ' + noteType + ') - review and Save.' + (ok ? ' (Also on your clipboard.)' : ''));
-            else toast(ok ? 'Note composer opened but it blocked auto-fill - press Ctrl+V to paste the note.' : 'Note composer opened but auto-fill was blocked.');
+            if (filled) { toast('Upload note drafted (Type: ' + noteType + ') - review and Save.' + (ok ? ' (Also on your clipboard.)' : '')); return; }
+            // Editor rejected the fill. Always offer the Copy button: the auto clipboard write has no
+            // user gesture and can silently no-op even when it reports success, leaving Ctrl+V empty.
+            toast(ok ? 'Note composer opened - press Ctrl+V, or use the Copy button below first.'
+                     : 'Note auto-fill + clipboard were blocked - click the Copy button, then Ctrl+V into Description.');
+            copyNoteButton(text);
           });
         });
       });
@@ -1520,5 +1524,31 @@
     el.textContent = 'BWN Drop Upload: ' + msg;
     document.body.appendChild(el);
     setTimeout(function () { el.remove(); }, 4500);
+  }
+
+  // When the note composer opens but Umbrava's editor rejects the programmatic fill AND the automatic
+  // clipboard write had no user gesture to ride on (this whole flow is auto-triggered by WO Intake, so
+  // the drop/create gesture's transient activation has long expired), the coordinator is left with a
+  // blank note and an empty clipboard - Ctrl+V pastes nothing. This button supplies the missing
+  // gesture: the click IS a user activation, so copyText() lands, and their Ctrl+V into the Description
+  // then works. No animation (the no-motion UI contract for this module).
+  function copyNoteButton(text) {
+    try {
+      var old = document.getElementById('bwn-du-copynote'); if (old) old.remove();
+      var b = document.createElement('button');
+      b.id = 'bwn-du-copynote'; b.type = 'button';
+      b.textContent = '📋 Copy the WO note, then Ctrl+V into Description';
+      b.style.cssText = 'position:fixed;bottom:70px;left:50%;transform:translateX(-50%);z-index:2147483002;' +
+        'background:#1a5f3e;color:#fff;border:none;padding:12px 18px;border-radius:9px;cursor:pointer;' +
+        'font:600 13px/1.4 -apple-system,BlinkMacSystemFont,\'Segoe UI\',\'Helvetica Neue\',Arial,sans-serif;box-shadow:0 6px 24px rgba(0,0,0,.35);';
+      b.addEventListener('click', function () {
+        copyText(text).then(function (ok) {
+          if (ok) { b.textContent = '✓ Copied - click the Description field and press Ctrl+V'; setTimeout(function () { if (b.parentNode) b.remove(); }, 8000); }
+          else { try { console.info('[BWN DROP UPLOAD] WO note (copy blocked; select it from here):\n\n' + text); } catch (e) { } b.textContent = 'Copy blocked by the browser - the note is in the console (F12)'; }
+        });
+      });
+      document.body.appendChild(b);
+      setTimeout(function () { if (document.getElementById('bwn-du-copynote') === b) b.remove(); }, 90000);
+    } catch (e) { }
   }
 })();
