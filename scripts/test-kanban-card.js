@@ -446,6 +446,13 @@ A.ok('and removes it instead when the board is toggled off',
 A.ok('the bare early return that caused the stale render is gone',
   kbFull.indexOf('    if (!block || !block.parentElement) return;') === -1);
 // Ack is read LIVE, not off the frozen snapshot - Core does the same for its own rows.
+// 0.6.2: a snooze made from List Heat's audit panel changes no ROWS, so no pull happens. Reading
+// ack at pull time therefore left the card drawing a stale severity edge - MEASURED at the live
+// gate, ack store said snoozed and the card was still red. It has to be re-read per RENDER.
+A.ok('ack is refreshed at RENDER time, not only at pull time',
+  /function\s+refreshAcks\s*\(/.test(kbFull) && /function boardNode\(\)\s*\{\s*\n\s*refreshAcks\(\);/.test(kbFull));
+A.ok('and pull time is no longer the only place it is read',
+  (kbFull.match(/liveAcked\(/g) || []).length >= 2);
 A.ok('the board reads ack state live rather than trusting the snapshot',
   /__bwnHeatAck/.test(kbFull) && /function\s+liveAcked/.test(kbFull));
 A.ok('and Core exposes exactly that', /window\.__bwnHeatAck = function/.test(coreFull));
@@ -497,7 +504,7 @@ A.ok('the confirm dialog quotes corrected hours too', /statusHours\(row\)/.test(
 var mVer = kbFull.match(/@version\s+(\S+)/);
 var mConst = kbFull.match(/var VER = '([^']+)'/);
 A.ok('the metadata @version and the VER constant agree', !!(mVer && mConst) && mVer[1] === mConst[1]);
-A.eq('and this is the version under test', mVer && mVer[1], '0.6.1');
+A.eq('and this is the version under test', mVer && mVer[1], '0.6.2');
 // The mirror (Intermu/userscripts-public) is being retired now that the source repo is public
 // again; raw URLs must point at the SOURCE repo or auto-update dies with the mirror.
 A.ok('the script points at the source repo raw URL, so it can auto-update at all',
