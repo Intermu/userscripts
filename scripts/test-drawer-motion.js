@@ -1,5 +1,5 @@
 // test-drawer-motion.js - node harness for the drawer motion fixes shipped 2026-08-10 after an
-// animation review of the launcher dock drawers (Core 1.78.0 + six drawer modules).
+// animation review of the launcher dock drawers (shipped as Core 1.78.0 + six drawer modules).
 //
 // WHAT SHIPPED, and what each half of this harness proves:
 //   1. EXIT. A drawer used to vanish on a bare .remove() while the next one faded in, so a tool

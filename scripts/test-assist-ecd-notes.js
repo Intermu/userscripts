@@ -347,6 +347,47 @@ var t8 = t7.then(function () {
   A.ok('...but never over an edit the coordinator made', coreFull.indexOf('if (touched || document.getElementById(\'bwn-ecd-overlay\') !== ov') !== -1, 'touched guard missing');
   A.ok('the shared bwnNotesApi block is still the one Deep Scan uses', coreFull.indexOf('  // ===== BEGIN bwnNotesApi =====') !== -1, 'transport block missing');
 
+  // ---- The Save-button attention ring (animation review 2026-08-10) ---------------------
+  // It points at Umbrava's own Save button because the Complete-By date does not autosave, so
+  // this is a data-loss guard: the probes are about what it COSTS and whether it respects a
+  // reduced-motion user, never about removing it. It ran 1.2s x 4 = 4.8s of continuous repaint
+  // and was not covered by any reduced-motion query.
+  console.log('\nECD save-button attention ring (cost + accessibility)');
+  function pulseRuleOf(src) {
+    var i = src.indexOf("'.bwn-ecd-savepulse{animation:");
+    if (i === -1) throw new Error('the .bwn-ecd-savepulse rule is gone');
+    return src.slice(i, src.indexOf('\n', i));
+  }
+  // Total motion = one pass x iteration count, read out of the shipped rule rather than assumed.
+  function pulseMs(rule) {
+    var m = rule.match(/animation:bwnEcdPulse\s+([\d.]+)s\s+[^;]*?\s(\d+);/);
+    return m ? Math.round(parseFloat(m[1]) * 1000) * parseInt(m[2], 10) : null;
+  }
+  var pulseRule = pulseRuleOf(coreFull);
+  A.ok('one pass is 420ms', /animation:bwnEcdPulse \.42s /.test(pulseRule), pulseRule);
+  A.ok('it pulses twice - enough to catch an eye that was elsewhere, not a loop',
+    / 2;/.test(pulseRule), pulseRule);
+  A.ok('total motion is under a second (it was 4800ms)', pulseMs(pulseRule) === 840, 'got ' + pulseMs(pulseRule));
+  A.ok('the static outline stays, because that is the actual affordance',
+    pulseRule.indexOf('outline:2px solid var(--bwn-green)!important') !== -1, pulseRule);
+  A.ok('reduced motion drops the pulse',
+    coreFull.indexOf("'@media (prefers-reduced-motion:reduce){.bwn-ecd-savepulse{animation:none;}}'") !== -1,
+    'the ring animates for a user who asked for no motion');
+  A.ok('...and drops ONLY the animation, so the outline still guards the unsaved date',
+    coreFull.indexOf('{.bwn-ecd-savepulse{animation:none;}}') !== -1 &&
+    coreFull.indexOf('{.bwn-ecd-savepulse{display:none') === -1);
+  A.ok('the keyframe no longer holds a dead tail at 0 opacity',
+    coreFull.indexOf('@keyframes bwnEcdPulse{from{box-shadow:0 0 0 0 rgba(46,160,90,.75);}to{box-shadow:0 0 0 9px rgba(46,160,90,0);}}') !== -1,
+    'the 70%-to-100% hold is back');
+  A.ok('the class is still removed on a timer, so nothing outlives the edit',
+    coreFull.indexOf("el.classList.remove('bwn-ecd-savepulse');") !== -1);
+
+  // Control: put the 4.8s version back and require the cost probe to go red. Mutating the real
+  // rule is the point - a control against a hand-written string would pass on deleted source.
+  var oldForm = pulseRule.replace('animation:bwnEcdPulse .42s cubic-bezier(.23,1,.32,1) 2;', 'animation:bwnEcdPulse 1.2s ease-out 4;');
+  if (oldForm === pulseRule) throw new Error('MUTATION TARGET ABSENT: the pulse rule did not change');
+  A.ok('control: the pre-fix 4.8s form is caught by the cost probe', pulseMs(oldForm) === 4800, 'got ' + pulseMs(oldForm));
+
   console.log('\n(auto-warm x auto-pop gate x proposal, real source, 4 mutations. Nothing here proves');
   console.log(' the popup renders, that Umbrava answers in a real tab, or that the proposed date is');
   console.log(' the one the coordinator wanted - the live test on a WO with a noted ETA covers that.)');
