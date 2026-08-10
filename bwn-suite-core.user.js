@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         BWN Suite - Core (Broadway National)
 // @namespace    broadwaynational.bwn
-// @version      1.76.1
+// @version      1.77.0
 // @downloadURL  https://raw.githubusercontent.com/Intermu/userscripts/main/bwn-suite-core.user.js
 // @updateURL    https://raw.githubusercontent.com/Intermu/userscripts/main/bwn-suite-core.user.js
 // @description  Runs several Umbrava helpers for BWN coordinators, in the browser with no privileged grants. Includes: PO Approval + ETA Builder; WO Assist (GP/ETA, a stall watchdog, DNE calculator, and a next-action playbook); Email Leak Guard (checks recipients against vendor names, PO amounts, and client budget references before an outbound email sends); WO List Heat (a triage overlay + My Day strip on the work-order list, with an optional same-origin Umbrava API scan for deterministic full-board coverage); and the BWN Launcher (opens the Azure Static Web App tools with the current WO's context). Modules share state through sessionStorage/localStorage. The only network calls are same-origin Umbrava GraphQL requests (app.umbrava.com/api/graphql, the app's own session): List Heat's full-board scan and WO Assist's work-order / trip / clock-in / document reads, plus ONE write - BWN Views saves the column layout through Umbrava's own putUserPreference, the same preference the column chooser writes; everything else is offline. Toggle modules in BWN_MODULES below.
@@ -6882,6 +6882,74 @@
       return n;
     }
 
+    // ---- Row snapshot for out-of-module renderers (kanban fold) ----------------------
+    // Built ONCE per API scan and cached; every reader gets the same frozen object. Rebuilding
+    // per read was rejected because the board asks from several call sites, and handing out the
+    // live store was rejected outright - a mutable handle on the authority's own state is the
+    // two-writers-drift shape this module already carries scars from.
+    //
+    //   __bwnHeatRows() -> { ok:true, ts, rows:[ {raw, id, wo, sev, reasons, kinds, acked,
+    //                        warn, bad, status, hrs} ] }   (frozen)
+    //                   -> { ok:false, reason, ts }        (no clean store)
+    //
+    // `raw` is the API row exactly as the wire returned it, so a renderer keeps reading the
+    // field names it already reads. Everything beside it is the AUTHORITY's judgement, so a
+    // consumer never computes a verdict.
+    //
+    // `acked` is a SNAPSHOT-TIME value and goes stale the moment anyone snoozes from the audit
+    // panel. A live consumer should call __bwnHeatAck instead.
+    function heatRowsBuild() {
+      if (!heatStore || !heatScanClean) return null;
+      var keys = Object.keys(heatStore), out = [];
+      for (var i = 0; i < keys.length; i++) {
+        var r = heatStore[keys[i]];
+        if (!r || !r.id) { continue; }   // braced: keeps the heatPublishVerdicts skip-line unique for its harness
+        var raw = heatRaw ? heatRaw[keys[i]] : null;
+        if (!raw) continue;            // no raw row = nothing an out-of-module renderer can draw
+        out.push(Object.freeze({
+          raw: raw,
+          id: r.id, wo: r.wo, status: r.status, hrs: r.hrs,
+          sev: r.sev || 0,
+          reasons: Object.freeze((r.reasons || []).slice()),
+          kinds: Object.freeze((r.kinds || []).slice()),
+          acked: !!r.acked,
+          warn: (typeof r.warn === 'number') ? r.warn : null,
+          bad: (typeof r.bad === 'number') ? r.bad : null
+        }));
+      }
+      // Object.freeze is SHALLOW, which is why reasons and kinds are frozen individually above
+      // and the array itself below. `raw` is deliberately NOT frozen: it is the wire's own
+      // nested object graph, a deep freeze would cost a walk per scan, and no consumer writes
+      // to it. No filter signature rides on the payload - heatAutoSig is in a different scope,
+      // and reaching across for a field nobody reads is how a cheap nicety became a
+      // ReferenceError at scan time on the first attempt at this.
+      return Object.freeze({ ok: true, ts: Date.now(), rows: Object.freeze(out) });
+    }
+    // Why there is no clean store to hand over. The caller RENDERS this string, so the reasons
+    // are distinguishable on purpose: each implies a different operator action.
+    function heatRowsWhy() {
+      if (!apiList || !apiList.query) return 'no capture yet';
+      if (heatScanning || heatReplaying) return 'scan in progress';
+      if (heatStore && !heatScanClean) return 'scan degraded to scroll';
+      if (!heatStore) return heatScanNote ? ('last scan failed: ' + heatScanNote) : 'never scanned';
+      return 'no rows mapped';
+    }
+    // Rebuild the cache and announce that a scan FINISHED - clean or not.
+    //
+    // The first version of this only announced on a CLEAN finish, and that was a real defect:
+    // a consumer that had pulled mid-scan sat on `running: true` forever, because the only
+    // event that could correct it never fired. Measured live - the board showed a stale card
+    // from the previous filter while claiming to be scanning. A finish is a finish; whether it
+    // produced rows is what __bwnHeatRows reports, not what decides who gets told.
+    //
+    // Fire-and-forget with NO payload, so a listener that misses it loses nothing - it pulls on
+    // its next render. Push is for timing only; __bwnHeatRows is the only way to get data.
+    function heatRowsAnnounce() {
+      heatRowsCache = heatRowsBuild();
+      try { document.dispatchEvent(new CustomEvent('bwn:evt', { detail: { id: 'bwn:heat:rows' } })); } catch (e) { }
+      return heatRowsCache ? heatRowsCache.rows.length : 0;
+    }
+
     // ---- Board -> Dashboard dataset push (freshness path, swa-dataset-ingest) --------
     // After a clean full-board scan, publish the whole board to a localStorage queue the
     // bwn-suite-ai connector drains to /api/dataset-ingest, which overwrites the Dashboard's
@@ -7086,6 +7154,21 @@
 
     // ---- Heat pass ----------------------------------------------------------------
     var heatStore = null;     // { heatKey(href): {sev, reasons[], wo, client, status, assignee, prio, hrs, days, dne, sched, lastNote, exp} }
+    // The RAW API rows behind an API scan, parallel to heatStore and keyed the same way.
+    // Kept SEPARATE from heatStore on purpose: heatStore entries are consumed by
+    // heatPublishVerdicts, heatDatasetRows and the audit panel, all of which read named fields,
+    // and hanging an unbounded row off each entry puts a payload nobody asked for in front of
+    // three consumers - one of which posts to the SWA. This map has one consumer, heatRowsBuild.
+    //
+    // WHY the raw row is kept at all: heatApiRowToEntry NORMALIZES (it flattens the row and
+    // picks fields by regex synonym, keeping no reference to the original), so an entry has no
+    // statusId, locationName, locationNumber, scopeOfWork, numberOfDays, priority object or
+    // vendorNames. The kanban board renders all of those, and without statusId it cannot resolve
+    // a drop target and its drag write refuses every card. Measured 2026-08-09.
+    var heatRaw = null;
+    // Frozen row snapshot for out-of-module consumers, rebuilt once per API scan and cached -
+    // never rebuilt per read, because the board asks from several call sites.
+    var heatRowsCache = null;
     // The DOM tinting pass's write into heatStore. Two rules, both learned the hard way:
     //   - the key comes from heatKey, never from the raw href (see there);
     //   - a row the API scan already read is NOT overwritten. The API record carries facts
@@ -7723,7 +7806,7 @@
       if (sig9 === heatCfgSig) { woListHeat(); return; }   // nothing heat-relevant changed
       heatCfgSig = sig9;
       if (heatStore) {
-        heatStore = null;
+        heatStore = null; heatRaw = null; heatRowsCache = null;
         console.info('[BWN HEAT] config changed \u2014 scan results invalidated, run Scan All for fresh book-wide numbers');
       }
       woListHeat();
@@ -7768,14 +7851,18 @@
       // instead of going silent for the rest of the session.
       return Math.min(HEAT_FAIL_BACKOFF_MAX, HEAT_FAIL_BACKOFF_MIN * Math.pow(2, Math.max(0, heatAutoFailN - 1)));
     }
-    function heatAutoScan(vars) {
+    function heatAutoScan(vars, force) {
       if (!heatAutoOn() || heatScanning || heatReplaying || !isListPage()) { heatDiag.autoNoGate++; return; }
       if (!apiList || !apiList.query || !heatAuthToken()) { heatDiag.autoNoGate++; return; }   // manual button still covers these
       var sig = heatFilterSig(vars || (apiList && apiList.variables));
-      // Back off from a filter whose last scan FAILED. Keyed on the failing signature, so a
-      // different filter is never held back by another one's failure.
-      if (sig && sig === heatAutoFailSig && (Date.now() - heatAutoFailTs) < heatAutoBackoffMs()) { heatDiag.autoNoBackoff++; return; }
-      if (sig && sig === heatAutoSig && heatStore && (Date.now() - heatAutoTs) < HEAT_AUTO_TTL) { heatDiag.autoNoTtl++; return; }
+      // `force` bypasses BOTH throttles below and nothing else. It is for a caller that must
+      // READ BACK A WRITE it just made: a status change alters no filter, so the signature is
+      // unchanged and neither throttle would let a scan through - and the caller would then
+      // read the PRE-WRITE store and call the write verified. The gates above still apply,
+      // because they are correctness conditions (no token, wrong route, scan already running),
+      // not throttles.
+      if (!force && sig && sig === heatAutoFailSig && (Date.now() - heatAutoFailTs) < heatAutoBackoffMs()) { heatDiag.autoNoBackoff++; return; }
+      if (!force && sig && sig === heatAutoSig && heatStore && (Date.now() - heatAutoTs) < HEAT_AUTO_TTL) { heatDiag.autoNoTtl++; return; }
       heatDiag.autoRan++;
       heatAutoSig = sig;
       heatAutoTs = Date.now();
@@ -7783,15 +7870,52 @@
       // rather than numbers changing on their own; a bare object keeps apiScanAll happy if
       // the strip has not rendered yet.
       var btn = document.getElementById('bwn-heat-scan') || { };
-      apiScanAll(btn).then(function (ok) {
+      // Returned so a FORCED caller can await the finish rather than poll for it.
+      return apiScanAll(btn).then(function (ok) {
         if (!ok) console.info('[BWN HEAT] auto API scan was low-confidence - press Scan All for the scroll sweep.');
+        return !!ok;
       }, function (err) {
         // heatReplaying MUST be cleared here: left true, the net hook ignores every later
         // request and capture is dead for the rest of the page's life.
-        heatScanning = false; heatReplaying = false; heatStore = null;
+        heatScanning = false; heatReplaying = false; heatStore = null; heatRaw = null; heatRowsCache = null;
         try { btn.disabled = false; btn.textContent = 'Scan All'; } catch (e) { }
         console.warn('[BWN HEAT] auto API scan errored - press Scan All to sweep manually:', (err && err.message) || err);
+        // An errored scan still ENDED. Tell the consumers, or one that pulled mid-scan sits on
+        // "scan in progress" for the rest of the page's life.
+        heatRowsAnnounce();
+        return false;
       });
+    }
+    // Forced scan for a caller that must READ BACK a write it just made. Resolves when the
+    // scan has finished and the row snapshot has been rebuilt, so an awaiting caller cannot
+    // observe the pre-write store.
+    //
+    // An in-flight scan is AWAITED, never duplicated: two concurrent replays writing one store
+    // is the drift shape, and the running scan is already going to produce the fresh read the
+    // caller wants. Resolves false when no scan is possible at all (no capture, not a list
+    // page, auto-heat off) so the caller can say so rather than hang.
+    var heatForceWait = null;
+    function heatForceScan() {
+      if (heatScanning || heatReplaying) {
+        if (heatForceWait) return heatForceWait;
+        // A scan started by someone else, with no promise to join: poll the flags rather than
+        // duplicate it. Bounded, because a wedged scan must not hang the caller.
+        return new Promise(function (resolve) {
+          var tries = 0;
+          var iv = setInterval(function () {
+            if (!heatScanning && !heatReplaying) { clearInterval(iv); resolve(!!heatScanClean); return; }
+            if (++tries > 120) { clearInterval(iv); resolve(false); }   // ~60s ceiling
+          }, 500);
+        });
+      }
+      var p = heatAutoScan(null, true);
+      // heatAutoScan returns undefined when it refuses outright (not a list page, no capture,
+      // auto-heat off). Normalising here keeps every caller on one promise contract.
+      heatForceWait = Promise.resolve(p === undefined ? false : p).then(function (ok) {
+        heatForceWait = null;
+        return !!ok;
+      }, function () { heatForceWait = null; return false; });
+      return heatForceWait;
     }
     function heatAutoScanSoon(vars) {
       if (heatAutoTimer) clearTimeout(heatAutoTimer);
@@ -7803,7 +7927,7 @@
     // board (heatStore filled, snapshot written); false to hand off to the scroll scan.
     function apiScanAll(btn) {
       if (!apiList || !apiList.query) return Promise.resolve(false);
-      heatScanning = true; heatScanClean = false; heatScanAbort = false; heatStore = {}; heatReplaying = true;
+      heatScanning = true; heatScanClean = false; heatScanAbort = false; heatStore = {}; heatRaw = {}; heatRowsCache = null; heatReplaying = true;
       btn.disabled = true; btn.textContent = 'Scanning (API)…';
       var progEl = document.getElementById('bwn-heat-prog');
       var target = umbravaTotal();
@@ -7835,6 +7959,9 @@
           if (!mapped) { badRows++; continue; }
           if (seen[mapped.href]) continue;
           seen[mapped.href] = 1;
+          // Raw row kept beside the mapped entry - see the heatRaw declaration for why the
+          // normalized entry is not enough for an out-of-module renderer.
+          if (heatRaw) heatRaw[mapped.href] = rows[i];
           // Compute the verdict now so heatStore carries sev/reasons/kinds like the DOM path.
           var C = bwnConfig();
           var e = mapped.entry;
@@ -7865,7 +7992,7 @@
         // `!!heatStore`, so an empty-but-present store would have the strip announce
         // "of 0 open - full board" off a scan that actually failed. No store = the strip
         // falls back to the loaded rows and still says "Scan All for full board".
-        if (!clean) heatStore = null;
+        if (!clean) { heatStore = null; heatRaw = null; }
         // Arm (or clear) the failure backoff. This is the record the auto-scan guard needs:
         // WHICH filter failed and WHEN, kept separately from the success bookkeeping above,
         // because the failure is exactly the case where the success record is unavailable.
@@ -7881,6 +8008,10 @@
         // Only on a clean finish - a dirty scan drops the store above, and publishing a
         // partial board as if it were the board is the mistake `heatScanClean` exists to stop.
         if (clean && heatStore) { heatPublishVerdicts(heatStore); heatQueueDataset(heatStore); }
+        // Announce on EVERY finish, clean or dirty - see heatRowsAnnounce for why. A consumer
+        // that pulled mid-scan is stuck on "scan in progress" until something tells it the scan
+        // ended, and a dirty finish is exactly when that matters most.
+        heatRowsAnnounce();
         console.info('[BWN HEAT] API scan ' + (clean ? 'complete' : 'incomplete') + ':', n, 'WOs in', pages, 'page(s)' + (note ? ' | ' + note : '') + (target != null ? ' | list total ' + target : ''));
         woListHeat();
         if (clean) heatSnapshot();
@@ -7900,6 +8031,10 @@
             // verdict one signal out of date for most of the board.
             heatPublishVerdicts(store);
             heatQueueDataset(store);
+            // Rebuild and re-announce for the same reason the bus is re-published: name
+            // resolution can ADD an orphan amber, so a consumer holding the first snapshot
+            // would render a verdict one signal out of date for most of the board.
+            heatRowsAnnounce();
             woListHeat();
             var pn2 = document.getElementById(PANEL_ID); if (pn2) { pn2.remove(); toggleAuditPanel(); }
           }, function () { /* resolution is best-effort; the ids never reach the panel either way */ });
@@ -7993,6 +8128,10 @@
       heatScanning = true;
       heatScanClean = false;   // trend/snapshot writes unlock only on a clean finish
       heatStore = {};
+      // The scroll sweep reads the DOM, so there are no raw API rows behind it. Null rather than
+      // left over: joining heatStore to a PREVIOUS scan's raw rows would render one scan's
+      // severity against another scan's row data.
+      heatRaw = null; heatRowsCache = null;
       btn.disabled = true;
       // Coverage-driven sweep: passes alternate direction (down, then up) because
       // virtualizers can systematically skip the same offsets in one direction.
@@ -8309,6 +8448,37 @@
     // so the overlay re-detects the heat columns in place (no page reload needed).
     window.__bwnHeatRefresh = function () { diagFor = ''; woListHeat(); };
 
+    // ---- Row surface for out-of-module renderers -------------------------------------
+    // Consumers are in OTHER Tampermonkey scripts, which is only possible because every
+    // participant is `@grant none` and therefore shares the page's window - a GM_* grant on
+    // either side puts it in a sandbox where these are invisible.
+    //
+    // Pull, never push: the bwn:heat:rows event carries no payload, so a consumer that loads
+    // late, misses it, or re-renders for its own reasons always gets the current answer by
+    // asking.
+    window.__bwnHeatRows = function () {
+      if (heatRowsCache) return heatRowsCache;
+      // No cache does not always mean no data - a caller can arrive between a clean scan and
+      // the announce. Build once on demand rather than reporting empty.
+      var built = heatRowsBuild();
+      if (built) { heatRowsCache = built; return built; }
+      return { ok: false, reason: heatRowsWhy(), ts: Date.now() };
+    };
+    // Force a fresh scan and resolve when its snapshot is ready. For READ-BACK AFTER A WRITE.
+    // Do not call this to refresh a view - that is what the auto-scan TTL is for, and forcing
+    // on every render would put a duplicate full-board scan straight back.
+    window.__bwnHeatScan = function (opts) {
+      if (opts && opts.force) return heatForceScan();
+      var p = heatAutoScan(null, false);
+      return Promise.resolve(p === undefined ? false : p);
+    };
+    // LIVE ack state. The snapshot's `acked` is a scan-time value; this reads the ack store
+    // itself, which is what this module does for its own rows (see addSnooze). A consumer that
+    // renders `acked` off the snapshot will disagree with the list the moment anyone snoozes.
+    window.__bwnHeatAck = function (id, kinds) {
+      try { return ackGet(id, kinds || []); } catch (e) { return false; }
+    };
+
     // Read-only diagnostic for the auto-scan trigger path (2026-08-09). Answers exactly one
     // question that black-box testing could not: when a filter change does NOT scan, is it
     // because the capture never reached the re-arm, or because a guard refused it?
@@ -8358,7 +8528,7 @@
       if (location.pathname !== lastPath) {
         lastPath = location.pathname;
         if (heatScanning) heatScanAbort = true;   // an in-flight scan must not write into a nulled store
-        heatStore = null;
+        heatStore = null; heatRaw = null; heatRowsCache = null;
         heatScanClean = false;
         heatFilter = null;
         heatDim = null;

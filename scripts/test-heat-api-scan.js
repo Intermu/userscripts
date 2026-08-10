@@ -92,7 +92,7 @@ var SRC_BOOTQ = slice(core,
   'bwnBoot + bwnBootAll');
 var SRC_BACKOFF = slice(core,
   '    // Failure backoff for the auto scan (2026-08-09).',
-  '    function heatAutoScan(vars) {',
+  '    function heatAutoScan(vars, force) {',
   'heatAutoBackoff');
 var SRC_SCAN = slice(core,
   '    function apiScanAll(btn) {',
@@ -185,7 +185,9 @@ var PRELUDE = [
   'var location = { pathname: "/work-orders", href: "https://app.umbrava.com/work-orders" };',
   // No DOM badge to read: the live list header logged "list badge total: not found", which
   // is precisely the case where the API total has to carry the coverage gate.
-  'var document = { getElementById: function () { return null; }, querySelectorAll: function () { return []; } };',
+  'var __events = [];',
+  'function CustomEvent(t, o) { this.type = t; this.detail = o && o.detail; }',
+  'var document = { getElementById: function () { return null; }, querySelectorAll: function () { return []; }, dispatchEvent: function (e) { __events.push(e && e.detail && e.detail.id); return true; } };',
   'var totCache = { path: "", v: null };',
   'function isListPage() { var p = location.pathname; return p.indexOf("/work-orders") === 0 && !/\\/work-orders\\/\\d/.test(p); }',
   'function heatAutoScanSoon(v) { __autoScans.push(v); }',
@@ -1468,7 +1470,7 @@ function main() {
     A.eq('M3 control: response-only capture leaves apiList null', s.apiList, null);
   }).then(function () {
     // M4: a dirty finish that KEEPS the empty store - the banner would claim "full board".
-    var m4 = [['        if (!clean) heatStore = null;', '        if (!clean) { /* kept */ }']];
+    var m4 = [['        if (!clean) { heatStore = null; heatRaw = null; }', '        if (!clean) { /* kept */ }']];
     var tx = makeTransport({ total: 213, capAt: 100 });
     return runScan({ transport: tx, mutations: m4 }).then(function (r) {
       A.ok('M4 control: without the drop, a failed scan leaves a truthy store',
@@ -1676,12 +1678,15 @@ function main() {
     // The guard's own bytes, lifted from the shipped file rather than paraphrased.
     // Captures the CONDITION only, so the counter that 1.76.1 added inside the block cannot
     // break the match again.
-    var gm = core.match(/\n\s*if \((sig && sig === heatAutoFailSig[^\n]*?)\) \{ heatDiag\.autoNoBackoff/);
+    // The `!force && ` prefix is optional in the pattern because the kanban fold added it. It is
+    // captured too, so backoffFires evaluates the guard EXACTLY as shipped rather than a
+    // paraphrase of it - and `force` is passed explicitly below.
+    var gm = core.match(/\n\s*if \(((?:!force && )?sig && sig === heatAutoFailSig[^\n]*?)\) \{ heatDiag\.autoNoBackoff/);
     A.ok('the failure-backoff guard is present in the shipped file', !!gm);
     function backoffFires(o) {
-      var f = new Function('sig', 'heatAutoFailSig', 'heatAutoFailTs', 'heatAutoBackoffMs', 'Date',
+      var f = new Function('force', 'sig', 'heatAutoFailSig', 'heatAutoFailTs', 'heatAutoBackoffMs', 'Date',
         'return !!(' + gm[1] + ');');
-      return f(o.sig, o.failSig, o.failTs, function () { return o.backoff; }, Date);
+      return f(!!o.force, o.sig, o.failSig, o.failTs, function () { return o.backoff; }, Date);
     }
     A.ok('right after a failure on the same filter, a retry is SUPPRESSED',
       backoffFires({ sig: 'a', failSig: 'a', failTs: Date.now() - 500, backoff: 2000 }) === true);
@@ -1708,6 +1713,41 @@ function main() {
       A.ok('a dirty finish records WHICH filter failed', sD.heatAutoFailSig === 'sig-under-test');
       A.ok('and when', sD.heatAutoFailTs > 0);
       A.ok('and counts it, so the next failure waits longer', sD.heatAutoFailN >= 1);
+
+      // ---- the kanban fold's OWN defect: a dirty finish must still announce ------------------
+      // The first version of the fold announced only on a CLEAN finish, so a consumer that had
+      // pulled mid-scan sat on "scan in progress" forever - measured live as the board showing a
+      // stale card from the previous filter while claiming to be scanning. A finish is a finish.
+      console.log('\n-- fold: the announce must fire on a DIRTY finish too --');
+      var sDirty = build({ transport: makeTransport({ capAt: 5, total: 213 }) });
+      sDirty.apiList = { query: 'q', variables: boardVars(), proven: true };
+      return sDirty.apiScanAll({}).then(function () {
+        A.eq('the dirty scan really did finish dirty', sDirty.heatScanClean, false);
+        A.ok('and it STILL announced, so a mid-scan consumer is corrected',
+          sDirty.__events.indexOf('bwn:heat:rows') !== -1);
+        A.eq('while the row snapshot is empty, because a dirty scan has no rows to hand over',
+          sDirty.heatRowsCache, null);
+
+        var sClean = build({ transport: makeTransport({ total: 8 }) });
+        sClean.apiList = { query: 'q', variables: boardVars(), proven: true };
+        return sClean.apiScanAll({}).then(function () {
+          A.eq('a clean scan announces too', sClean.__events.indexOf('bwn:heat:rows') !== -1, true);
+          A.ok('and hands over rows', sClean.heatRowsCache && sClean.heatRowsCache.rows.length > 0);
+          A.ok('each carrying the RAW api row, without which the board loses statusId',
+            !!(sClean.heatRowsCache.rows[0] && sClean.heatRowsCache.rows[0].raw));
+
+          // Control: announce only on clean, which is the defect this rebuild fixed.
+          var mA = build({
+            transport: makeTransport({ capAt: 5, total: 213 }),
+            mutations: [['        heatRowsAnnounce();\n        console.info', '        if (clean) heatRowsAnnounce();\n        console.info']]
+          });
+          mA.apiList = { query: 'q', variables: boardVars(), proven: true };
+          return mA.apiScanAll({}).then(function () {
+            A.eq('MLA control: announcing only on clean leaves a dirty finish silent',
+              mA.__events.indexOf('bwn:heat:rows'), -1);
+          });
+        });
+      }).then(function () {
 
       // ---- MUTATION CONTROLS: each reverts one half of the fix and must reopen the loop ----
       // Without these the assertions above are decoration - they would pass just as happily
@@ -1741,11 +1781,12 @@ function main() {
 
         // ML3: the guard line itself. Strip it from the shipped bytes and the suppression is
         // gone even with a fresh failure recorded.
-        var stripped = core.replace(/\n\s*if \(sig && sig === heatAutoFailSig[^\n]*?\) \{ heatDiag\.autoNoBackoff\+\+; return; \}/, '');
+        var stripped = core.replace(/\n\s*if \((?:!force && )?sig && sig === heatAutoFailSig[^\n]*?\) \{ heatDiag\.autoNoBackoff\+\+; return; \}/, '');
         A.ok('ML3 control: the mutation actually removed the guard',
           stripped.indexOf('heatAutoFailSig && (Date.now()') === -1 && stripped !== core);
         A.ok('ML3 control: and nothing else in the file re-implements it',
           (stripped.match(/heatAutoFailTs\) </g) || []).length === 0);
+      });
       });
     });
   }).then(function () {
