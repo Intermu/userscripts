@@ -1,10 +1,10 @@
 // ==UserScript==
 // @name         BWN WO Intake (Broadway National)
 // @namespace    broadwaynational.bwn
-// @version      0.9.6
+// @version      0.9.7
 // @downloadURL  https://raw.githubusercontent.com/Intermu/userscripts/main/bwn-wo-intake.user.js
 // @updateURL    https://raw.githubusercontent.com/Intermu/userscripts/main/bwn-wo-intake.user.js
-// @description  Drop a client PO/WO email (.msg or .eml) onto the Create Work Order modal and it prefills the fields. Pilot Travel Centers: from the email body. Caleres (Famous Footwear / Corrigo): reads the attached WO PDF on-device for Trade, Scope, Priority, Due-By, Store, NTE. If a Caleres request has no WO PDF (image-only), it reads Store, City/State and Trade from the subject and the scope from the body (NTE + Priority stay manual - they live only in the images). Amazon (Fairmarkit RFQ): the buyer is Amazon.com, Inc. but the sender is the Fairmarkit e-bidding platform - reads the RFQ body (no PDF) for Site (matched by the Amazon site code e.g. PIT2/STL3, else the shipping address), RFQ #, Trade, Scope + line items; NTE and Priority stay manual because an RFQ carries no ceiling yet (we are the quoting supplier). The email carries no attachment - the full scope / any 'see attached file' lives on the Fairmarkit bid page - so it surfaces that RFQ link and warns you when the body defers to it. Per Amazon (Amanda Murtha, Mgr): Source PO # is set to N/A (these are quote requests), Client DNE stays 0, WO Type should be Proposal (a post-create step - not in the create modal), and Source Job # follows the convention Q/R "<the new WO's tracking #>" - which only exists after Create, so the script stamps it on the new WO page (best-effort; copies the value + prompts if it can't write the field). Selects Client, Location (address-verified), Trade and Priority by clicking the real dropdown option; fills Client DNE, Source Job # and Source PO #; warns you if the WO PDF shows a cancel/flag note. Then, after you Create the WO, it hands the email to BWN Drop Upload to attach it to the new WO's Documents. Reads everything in the browser; nothing is uploaded to any server. Best-effort: review every field before you click Create.
+// @description  Drop a client PO/WO email (.msg or .eml) onto the Create Work Order modal and it prefills the fields. Pilot Travel Centers: from the email body. Caleres (Famous Footwear / Corrigo): reads the attached WO PDF on-device for Trade, Scope, Priority, Due-By, Store, NTE. If a Caleres request has no WO PDF (image-only), it reads Store, City/State and Trade from the subject and the scope from the body (NTE + Priority stay manual - they live only in the images). Amazon (Fairmarkit RFQ): the buyer is Amazon.com, Inc. but the sender is the Fairmarkit e-bidding platform - reads the RFQ body (no PDF) for Site (matched by the Amazon site code e.g. PIT2/STL3, else the shipping address), RFQ #, Trade, Scope + line items; NTE and Priority stay manual because an RFQ carries no ceiling yet (we are the quoting supplier). The email carries no attachment - the full scope / any 'see attached file' lives on the Fairmarkit bid page - so it surfaces that RFQ link and warns you when the body defers to it. Per Amazon (Amanda Murtha, Mgr): Source PO # is set to N/A (these are quote requests), Client DNE stays 0, WO Type is selected as Proposal in the create modal, and Source Job # follows the convention Q/R "<the new WO's tracking #>" - which only exists after Create, so the script stamps it on the new WO page (best-effort; copies the value + prompts if it can't write the field). Selects Client, Location (address-verified), Trade and Priority by clicking the real dropdown option; fills Client DNE, Source Job # and Source PO #; warns you if the WO PDF shows a cancel/flag note. Then, after you Create the WO, it hands the email to BWN Drop Upload to attach it to the new WO's Documents. Reads everything in the browser; nothing is uploaded to any server. Best-effort: review every field before you click Create.
 // @match        https://app.umbrava.com/*
 // @run-at       document-idle
 // @noframes
@@ -13,7 +13,7 @@
 
 (function () {
   'use strict';
-  var VER = '0.9.6';
+  var VER = '0.9.7';
   var FONT = "-apple-system,BlinkMacSystemFont,'Segoe UI','Helvetica Neue',Arial,sans-serif";
   console.info('[BWN WO INTAKE] v' + VER + ' - drop a PO / Amazon RFQ email (.msg/.eml) on Create Work Order to prefill + auto-attach to the new WO Documents (via Drop Upload); reads locally, nothing leaves the browser');
 
@@ -733,6 +733,13 @@
         var rp = await selectAC(inputByLabel(root, /^priority/i), wo.priorityLevel, wo.priorityLevel);
         if (rp === 'selected') picked.push('Priority ' + wo.priorityLevel); else hint.push('Priority: set ' + wo.priorityLevel);
       }
+      // WO Type - a real create-modal dropdown (Amazon RFQs -> "Proposal"). Found by its label
+      // ("Type" / "WO Type" / "Work Order Type"); selected like the other autocompletes. Done last so
+      // that if choosing it re-shapes the form, the known cascade above has already run.
+      if (wo._woType) {
+        var rwt = await selectAC(inputByLabel(root, /^(wo |work order )?type\b/i), wo._woType, wo._woType);
+        if (rwt === 'selected') picked.push('WO Type "' + wo._woType + '"'); else hint.push('WO Type: set ' + wo._woType);
+      }
       var parts = [];
       if (done.length) parts.push('Filled ' + done.join(', '));
       if (picked.length) parts.push('selected ' + picked.join(' / '));
@@ -741,7 +748,7 @@
       if (wo._note) parts.push(wo._note);
       var nAtt = (wo._attachments || []).length;
       if (nAtt) parts.push('the email + ' + nAtt + ' attachment' + (nAtt === 1 ? '' : 's') + ' will attach to Documents after Create');
-      if (wo._amazon) parts.push('Amazon: Source PO # set to N/A; after Create set WO Type = ' + (wo._woType || 'Proposal') + ' and Source Job # will auto-fill as Q/R "<tracking>"');
+      if (wo._amazon) parts.push('Amazon: Source PO # = N/A, WO Type = ' + (wo._woType || 'Proposal') + '; Source Job # auto-fills as Q/R "<tracking>" after Create');
       parts.push('review before Create');
       toast('From the PO email - ' + parts.join(' · '), 15000);
     })();
@@ -795,7 +802,7 @@
   // LIVE-UNVERIFIED: the WO-detail-page selectors below (where Tracking # renders, and the Source Job #
   // field) have NOT been confirmed on a real page. The write only fires into a clearly-matched EMPTY
   // field; otherwise the value is copied to the clipboard and shown, so a wrong/missing selector never
-  // writes garbage. WO Type = Proposal is a manual step (not in the create modal per Amanda Murtha).
+  // writes garbage. (WO Type = Proposal is handled in the create modal, not here.)
   function amazonReadTracking() {
     try {
       var nodes = [].slice.call(document.querySelectorAll('span, div, td, dt, label, p'));
@@ -821,11 +828,11 @@
       if (lab) { var fc = lab.closest('.MuiFormControl-root, .MuiTextField-root') || lab.parentElement; el = fc ? fc.querySelector('input, textarea') : null; }
     }
     if (val && el && !String(el.value || '').trim()) {
-      try { setNativeValue(el, val); toast('Amazon RFQ: set Source Job # = ' + val + ' · also set WO Type = Proposal (Source PO # is N/A). Review + Save.', 16000); return; }
+      try { setNativeValue(el, val); toast('Amazon RFQ: set Source Job # = ' + val + '. Review + Save.', 15000); return; }
       catch (e) { }
     }
     if (val) { try { if (navigator.clipboard && navigator.clipboard.writeText) navigator.clipboard.writeText(val); } catch (e) { } }
-    toast('Amazon RFQ - set manually: Source Job # = ' + (val ? val + ' (copied)' : 'Q/R "<this WO\'s tracking #>"') + ' · WO Type = Proposal · Source PO # = N/A.', 18000, '#8b1a1a');
+    toast('Amazon RFQ - set Source Job # manually: ' + (val ? val + ' (copied to clipboard)' : 'Q/R "<this WO\'s tracking #>"') + '.', 16000, '#8b1a1a');
   }
 
   var _consuming = false;
