@@ -212,6 +212,57 @@ A.ok('the media query names .bwn-ops-card, the gap this fix closed', rmQuery.ind
 A.ok('and .bwn-ops-overlay, so the rail slide stops too', rmQuery.indexOf('.bwn-ops-overlay') !== -1, rmQuery);
 A.ok('and it kills the transition, not only the old animation', rmQuery.indexOf('transition:none') !== -1, rmQuery);
 
+// ---- 4. suite-wide invariant: every animation answers prefers-reduced-motion ------------------
+// This section exists because the same hole shipped FOUR separate times in this one file
+// (.bwn-ops-card, .bwn-ecd-savepulse, .bwn-wa-card, #bwn-heat-set) and each was found by hand,
+// one at a time. Enumerating the declarations finds them all at once, and the count pin makes a
+// NEW animation a conscious edit rather than a silent fifth.
+console.log('\n-- every animating selector honours reduced motion --');
+
+// Every non-"none" animation shorthand in Core, with the selector that carries it. Verified
+// against the shipped file 2026-08-10; add a row when you add an animation, and the count
+// assertion below is what forces you to.
+var ANIMATED = [
+  { sel: '#bwn-heat-panel', keyframe: 'bwnPanelIn' },
+  { sel: '#bwn-heat-set', keyframe: 'bwnPanelIn' },
+  { sel: '#bwn-heat-prog.indet .fill', keyframe: 'bwnIndet' },
+  { sel: '.bwn-wa-card', keyframe: 'bwnWaIn' },
+  { sel: '.bwn-ecd-savepulse', keyframe: 'bwnEcdPulse' },
+  { sel: '.bwn-eg.flash', keyframe: 'bwnEgFlash' }
+];
+
+// Pull the reduced-motion blocks out of the shipped strings and collect every selector each one
+// switches off. Selector lists are split, so `#a,#b{animation:none}` covers both.
+var rmBlocks = CORE.match(/@media \(prefers-reduced-motion:\s*reduce\)\{[^']*/g) || [];
+var rmCovered = {};
+rmBlocks.forEach(function (block) {
+  (block.match(/([^{}]+)\{([^{}]*)\}/g) || []).forEach(function (rule) {
+    var m = rule.match(/^([^{]+)\{([^}]*)\}$/);
+    if (!m || !/animation:\s*none/.test(m[2])) return;
+    m[1].split(',').forEach(function (s) { rmCovered[s.trim()] = true; });
+  });
+});
+
+A.ok('the file still has reduced-motion blocks to read', rmBlocks.length >= 4, 'found ' + rmBlocks.length);
+ANIMATED.forEach(function (a) {
+  A.ok(a.sel + ' (' + a.keyframe + ') is switched off under reduced motion', rmCovered[a.sel] === true,
+    'covered: ' + Object.keys(rmCovered).join(' | '));
+  A.ok(a.sel + ' still actually animates ' + a.keyframe + ' (the row is not stale)',
+    CORE.indexOf('animation:' + a.keyframe) !== -1);
+});
+
+// Count pin, same discipline as this repo's @version pins: a new animation must be added to
+// ANIMATED above, which is where somebody notices it needs a reduced-motion rule.
+var animDecls = (CORE.match(/animation:(?!none)[a-zA-Z]/g) || []).length;
+A.ok('exactly ' + ANIMATED.length + ' animation declarations in Core (add yours to ANIMATED above)',
+  animDecls === ANIMATED.length, 'found ' + animDecls);
+
+// No animation may ride on a keyframe that no longer exists - a renamed keyframe leaves the
+// selector silently static, which is how a dead entrance hides.
+ANIMATED.forEach(function (a) {
+  A.ok('@keyframes ' + a.keyframe + ' is defined', CORE.indexOf('@keyframes ' + a.keyframe + '{') !== -1);
+});
+
 // ---- negative controls -----------------------------------------------------------------------
 // Each reverts ONE piece of the real source and requires the matching probe above to go red.
 console.log('\n-- negative controls (each must catch its own regression) --');
@@ -257,6 +308,28 @@ A.ok('C6 control: an ask reopen that never clears .bwn-closing is caught',
 var c7 = mutate(ASK, 'clearTimeout(fadeTimer); fadeTimer = null;', '');
 A.ok('C7 control: an ask reopen that leaves the removal armed is caught',
   c7.indexOf('clearTimeout(fadeTimer); fadeTimer = null;') === -1);
+
+// C8: the reduced-motion sweep must actually catch an uncovered selector. Reverting the
+// #bwn-heat-set fix reproduces the exact defect that shipped four times, and the coverage map
+// built from the mutated source has to lose that selector.
+var c8 = mutate(CORE, '#bwn-heat-panel,#bwn-heat-set{animation:none;}', '#bwn-heat-panel{animation:none;}');
+var c8covered = {};
+(c8.match(/@media \(prefers-reduced-motion:\s*reduce\)\{[^']*/g) || []).forEach(function (block) {
+  (block.match(/([^{}]+)\{([^{}]*)\}/g) || []).forEach(function (rule) {
+    var m = rule.match(/^([^{]+)\{([^}]*)\}$/);
+    if (!m || !/animation:\s*none/.test(m[2])) return;
+    m[1].split(',').forEach(function (s) { c8covered[s.trim()] = true; });
+  });
+});
+A.ok('C8 control: an animating selector missing from the query is caught',
+  c8covered['#bwn-heat-set'] !== true && c8covered['#bwn-heat-panel'] === true,
+  'the sweep would have passed the defect it exists to find');
+
+// C9: and the count pin must fire when an animation is added without a row in ANIMATED.
+var c9 = mutate(CORE, "'.bwn-eg.flash{animation:bwnEgFlash .24s cubic-bezier(.23,1,.32,1);}'",
+  "'.bwn-eg.flash{animation:bwnEgFlash .24s cubic-bezier(.23,1,.32,1);}' + '.bwn-fake{animation:bwnFake 1s linear;}'");
+A.ok('C9 control: a new undeclared animation trips the count pin',
+  (c9.match(/animation:(?!none)[a-zA-Z]/g) || []).length === ANIMATED.length + 1);
 
 console.log('\n(ran ' + (MODULES.length + 1) + ' drawer owners + 5 negative controls. Nothing here renders a pixel:');
 console.log(' the fade, the swap crossfade and the collapse slide are owed a live Chrome check.)');

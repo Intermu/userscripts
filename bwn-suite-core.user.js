@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         BWN Suite - Core (Broadway National)
 // @namespace    broadwaynational.bwn
-// @version      1.78.1
+// @version      1.78.2
 // @downloadURL  https://raw.githubusercontent.com/Intermu/userscripts/main/bwn-suite-core.user.js
 // @updateURL    https://raw.githubusercontent.com/Intermu/userscripts/main/bwn-suite-core.user.js
 // @description  Runs several Umbrava helpers for BWN coordinators, in the browser with no privileged grants. Includes: PO Approval + ETA Builder; WO Assist (GP/ETA, a stall watchdog, DNE calculator, and a next-action playbook); Email Leak Guard (checks recipients against vendor names, PO amounts, and client budget references before an outbound email sends); WO List Heat (a triage overlay + My Day strip on the work-order list, with an optional same-origin Umbrava API scan for deterministic full-board coverage); and the BWN Launcher (opens the Azure Static Web App tools with the current WO's context). Modules share state through sessionStorage/localStorage. The only network calls are same-origin Umbrava GraphQL requests (app.umbrava.com/api/graphql, the app's own session): List Heat's full-board scan and WO Assist's work-order / trip / clock-in / document reads, plus ONE write - BWN Views saves the column layout through Umbrava's own putUserPreference, the same preference the column chooser writes; everything else is offline. Toggle modules in BWN_MODULES below.
@@ -2344,8 +2344,24 @@
       var st = document.createElement('style');
       st.id = WA_STYLE_ID;
       st.textContent =
+        // RETIRED SURFACE - read before changing this (animation review 2026-08-10).
+        // openPanel() is reachable only from renderPill()'s click handler and from its own
+        // Set DNE / Rescan buttons, and renderPill runs only behind `SHOW_WO_DOCK`, which is
+        // hardcoded false; the else branch removes both the pill and this panel on every engine
+        // pass. So nothing can open it today and no motion here is observable.
+        //
+        // Two safe things were done anyway, so a flag flip inherits correct motion: the built-in
+        // ease-out became the strong curve the rest of the suite uses, and reduced motion is
+        // honoured (it was covered by no query at all).
+        //
+        // NOT done, deliberately: this panel did not get the .bwn-drawer exit treatment. Its
+        // close() is called as `close(); openPanel();` from two of its own footer buttons, so a
+        // deferred removal would leave the old node under the same id and the toggle at the top
+        // of openPanel would then close the fresh panel instead of opening it. Wiring an exit
+        // here needs that reentry fixed first, and it cannot be tested while the surface is dark.
         '@keyframes bwnWaIn{from{transform:translateY(8px);opacity:0}to{transform:translateY(0);opacity:1}}' +
-        '.bwn-wa-card{background:var(--bwn-surface);border-radius:14px;overflow:hidden;font-family:-apple-system,BlinkMacSystemFont,"Segoe UI","Helvetica Neue",Arial,sans-serif;box-shadow:0 18px 60px rgba(0,0,0,.35);animation:bwnWaIn .18s ease-out;display:flex;flex-direction:column;}' +
+        '.bwn-wa-card{background:var(--bwn-surface);border-radius:14px;overflow:hidden;font-family:-apple-system,BlinkMacSystemFont,"Segoe UI","Helvetica Neue",Arial,sans-serif;box-shadow:0 18px 60px rgba(0,0,0,.35);animation:bwnWaIn .18s cubic-bezier(.23,1,.32,1);display:flex;flex-direction:column;}' +
+        '@media (prefers-reduced-motion:reduce){.bwn-wa-card{animation:none;}}' +
         '.bwn-wa-head{background:linear-gradient(135deg,var(--bwn-green),var(--bwn-green-dk));color:#fff;padding:14px 18px;display:flex;align-items:center;gap:12px;}' +
         '.bwn-wa-head .t{font-weight:500;font-size:15px;line-height:1.2;}' +
         '.bwn-wa-head .s{font:500 11px ui-monospace,"Segoe UI Mono","SF Mono",monospace;color:rgba(255,255,255,.75);margin-top:3px;}' +
@@ -5521,8 +5537,24 @@
         '.bwn-eg .it[role="button"]{cursor:pointer;}' +
         '.bwn-eg .it[role="button"]:hover{text-decoration:underline;}' +
         '.bwn-eg .it[role="button"]:focus-visible{outline:2px solid var(--bwn-accent);outline-offset:1px;}' +
-        '.bwn-eg.flash{animation:bwnEgFlash .5s ease-in-out 2;}' +
-        '@keyframes bwnEgFlash{50%{filter:brightness(.85)}}';
+        // Rejection cue on a BLOCKED send (animation review 2026-08-10; was .5s ease-in-out x 2,
+        // so 1000ms). One 240ms pass now, and shaped as an attack-then-decay rather than a
+        // symmetric dip: the darkening lands on the first frame, where the eye already is,
+        // instead of easing in and delaying the moment being watched.
+        //
+        // Why it stayed short rather than long: confirmSend() opens a dialog in the same tick
+        // (see the send interceptor), so anything past a couple of hundred milliseconds is
+        // animating behind a surface that has already taken over the screen.
+        //
+        // Deleting it outright is defensible and was NOT done unilaterally - the dialog carries
+        // the actual message, so this only buys the sub-second "something stopped that" beat
+        // before the dialog paints. Say the word and it goes.
+        //
+        // Reduced motion drops it entirely, which costs nothing: the strip keeps its warn/bad
+        // colour and border, and the dialog still explains the block.
+        '.bwn-eg.flash{animation:bwnEgFlash .24s cubic-bezier(.23,1,.32,1);}' +
+        '@keyframes bwnEgFlash{from{filter:brightness(.85)}to{filter:none}}' +
+        '@media (prefers-reduced-motion:reduce){.bwn-eg.flash{animation:none;}}';
       document.head.appendChild(st);
     }
 
@@ -5769,7 +5801,7 @@
         e.preventDefault();
         e.stopImmediatePropagation();
         strip.classList.add('flash');
-        setTimeout(function () { strip.classList.remove('flash'); }, 1100);
+        setTimeout(function () { strip.classList.remove('flash'); }, 300);   // just past the 240ms pass; the class must not outlive the cue
         confirmSend(modal, hard, function () {
           // Re-query first: React may have remounted (or torn down) the button
           // while the dialog was open \u2014 never log an override that didn't send.
@@ -6489,7 +6521,11 @@
         '#bwn-heat-set .pf .hint{margin-right:auto;font:10px ui-monospace,"Segoe UI Mono","SF Mono",monospace;color:var(--bwn-text-faint);align-self:center;}' +
         '#bwn-heat-set button{padding:7px 14px;border:none;border-radius:8px;cursor:pointer;font:500 12px -apple-system,BlinkMacSystemFont,"Segoe UI","Helvetica Neue",Arial,sans-serif;color:var(--bwn-green);background:var(--bwn-tint);}' +
         '#bwn-heat-set button.primary{color:#fff;background:linear-gradient(135deg,var(--bwn-green),var(--bwn-green-dk));}' +
-        '@media (prefers-reduced-motion: reduce){#bwn-heat-sum .ratio span,#bwn-heat-prog .fill{transition:none;}#bwn-heat-panel{animation:none;}#bwn-heat-prog.indet .fill{animation:none;width:100%;}}' +
+        // #bwn-heat-set was added 2026-08-10: it runs the SAME bwnPanelIn entrance as
+        // #bwn-heat-panel and this query had only ever named the panel, so the settings card
+        // animated for a reduced-motion user. Found by enumerating every animation: declaration
+        // in this file rather than by looking - the same hole had shipped in three other places.
+        '@media (prefers-reduced-motion: reduce){#bwn-heat-sum .ratio span,#bwn-heat-prog .fill{transition:none;}#bwn-heat-panel,#bwn-heat-set{animation:none;}#bwn-heat-prog.indet .fill{animation:none;width:100%;}}' +
         '#bwn-myday{display:flex;gap:8px;align-items:center;flex-wrap:wrap;margin:0 0 8px;padding:8px 12px;border:1px solid var(--bwn-border);border-radius:10px;background:var(--bwn-surface);font-family:-apple-system,BlinkMacSystemFont,"Segoe UI","Helvetica Neue",Arial,sans-serif;}' +
         '#bwn-myday .md-t{font:500 11px -apple-system,BlinkMacSystemFont,"Segoe UI","Helvetica Neue",Arial,sans-serif;color:var(--bwn-green);letter-spacing:.5px;}' +
         '#bwn-myday .md-c{display:inline-flex;align-items:center;gap:6px;padding:3px 10px;border-radius:10px;font:500 10px ui-monospace,"Segoe UI Mono","SF Mono",monospace;}' +
