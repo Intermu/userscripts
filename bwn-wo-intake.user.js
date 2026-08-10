@@ -1,10 +1,10 @@
 // ==UserScript==
 // @name         BWN WO Intake (Broadway National)
 // @namespace    broadwaynational.bwn
-// @version      0.9.4
+// @version      0.9.5
 // @downloadURL  https://raw.githubusercontent.com/Intermu/userscripts/main/bwn-wo-intake.user.js
 // @updateURL    https://raw.githubusercontent.com/Intermu/userscripts/main/bwn-wo-intake.user.js
-// @description  Drop a client PO/WO email (.msg or .eml) onto the Create Work Order modal and it prefills the fields. Pilot Travel Centers: from the email body. Caleres (Famous Footwear / Corrigo): reads the attached WO PDF on-device for Trade, Scope, Priority, Due-By, Store, NTE. If a Caleres request has no WO PDF (image-only), it reads Store, City/State and Trade from the subject and the scope from the body (NTE + Priority stay manual - they live only in the images). Amazon (Fairmarkit RFQ): the buyer is Amazon.com, Inc. but the sender is the Fairmarkit e-bidding platform - reads the RFQ body (no PDF) for Site (matched by the Amazon site code e.g. PIT2/STL3, else the shipping address), RFQ #, Trade, Scope + line items; NTE and Priority stay manual because an RFQ carries no ceiling yet (we are the quoting supplier). Selects Client, Location (address-verified), Trade and Priority by clicking the real dropdown option; fills Client DNE, Source Job # and Source PO #; warns you if the WO PDF shows a cancel/flag note. Then, after you Create the WO, it hands the email to BWN Drop Upload to attach it to the new WO's Documents. Reads everything in the browser; nothing is uploaded to any server. Best-effort: review every field before you click Create.
+// @description  Drop a client PO/WO email (.msg or .eml) onto the Create Work Order modal and it prefills the fields. Pilot Travel Centers: from the email body. Caleres (Famous Footwear / Corrigo): reads the attached WO PDF on-device for Trade, Scope, Priority, Due-By, Store, NTE. If a Caleres request has no WO PDF (image-only), it reads Store, City/State and Trade from the subject and the scope from the body (NTE + Priority stay manual - they live only in the images). Amazon (Fairmarkit RFQ): the buyer is Amazon.com, Inc. but the sender is the Fairmarkit e-bidding platform - reads the RFQ body (no PDF) for Site (matched by the Amazon site code e.g. PIT2/STL3, else the shipping address), RFQ #, Trade, Scope + line items; NTE and Priority stay manual because an RFQ carries no ceiling yet (we are the quoting supplier). The email carries no attachment - the full scope / any 'see attached file' lives on the Fairmarkit bid page - so it surfaces that RFQ link and warns you when the body defers to it. Selects Client, Location (address-verified), Trade and Priority by clicking the real dropdown option; fills Client DNE, Source Job # and Source PO #; warns you if the WO PDF shows a cancel/flag note. Then, after you Create the WO, it hands the email to BWN Drop Upload to attach it to the new WO's Documents. Reads everything in the browser; nothing is uploaded to any server. Best-effort: review every field before you click Create.
 // @match        https://app.umbrava.com/*
 // @run-at       document-idle
 // @noframes
@@ -13,7 +13,7 @@
 
 (function () {
   'use strict';
-  var VER = '0.9.4';
+  var VER = '0.9.5';
   var FONT = "-apple-system,BlinkMacSystemFont,'Segoe UI','Helvetica Neue',Arial,sans-serif";
   console.info('[BWN WO INTAKE] v' + VER + ' - drop a PO / Amazon RFQ email (.msg/.eml) on Create Work Order to prefill + auto-attach to the new WO Documents (via Drop Upload); reads locally, nothing leaves the browser');
 
@@ -444,7 +444,7 @@
   function extractAmazon(subject, body) {
     subject = String(subject || ''); body = String(body || '');
     var B = body.replace(/\s+/g, ' ').trim();
-    var out = { po: '', location: '', trade: '', scope: '', _siteCode: '', _addr: null, _dueBy: '', _note: '' };
+    var out = { po: '', location: '', trade: '', scope: '', _siteCode: '', _addr: null, _dueBy: '', _note: '', _bidUrl: '', _seeAttached: false };
     // RFQ ID -> Source PO # (7-8 digits; do not assume length). Body first, subject as fallback.
     var mid = B.match(/RFQ ID:\s*(\d+)/i) || subject.match(/#\s*(\d+)/); if (mid) out.po = mid[1];
     // Title sits between "Invitation to Quote" and "You have been invited".
@@ -484,10 +484,19 @@
     if (mpd) out._dueBy = mpd[1].replace(/\s+/g, ' ').trim();
     // Buyer + close date are reference only. The Close date is the QUOTE deadline, NOT the work due
     // date - label it so nobody sets Complete-By to it by mistake.
+    // The full scope / any "attached file" lives on the Fairmarkit BID PAGE, not in this email - the
+    // .msg carries no attachment (verified across the sample corpus). Reconstruct the clean bid URL
+    // from bid_uuid (the JSON tail's uuid == the uuid inside the Quote-button link, 10/10) so the
+    // estimator can open the real RFQ, and flag the RFQs whose body defers to that page.
+    var mu = B.match(/"bid_uuid":\s*"([0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12})"/i)
+      || B.match(/bid(?:%252F|%2F|\/)([0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12})/i);
+    out._bidUrl = mu ? 'https://app.fairmarkit.com/bid/' + mu[1] : '';
+    out._seeAttached = /see\s+(the\s+)?attach|attach(ed|ment)?\s+(file|document|drawing|scope|sow|spec|pdf)|see\s+rfq|full scope of work|refer to the attach|see drawing|per attach/i.test(body);
     var refs = [], mbuy = B.match(/Buyer:\s*(.+?)\s*Close date:/i), mclose = B.match(/Close date:\s*(.+?)\s*RFQ ID:/i);
     if (mbuy) refs.push('Buyer ' + mbuy[1].replace(/\s+/g, ' ').trim());
     if (mclose) refs.push('RFQ closes ' + mclose[1].replace(/\s+/g, ' ').trim() + ' (quote deadline, not the work due date)');
     if (out.po) refs.push('RFQ #' + out.po);
+    if (out._bidUrl) refs.push('Fairmarkit RFQ: ' + out._bidUrl);
     out._note = refs.join(' · ');
     return out;
   }
@@ -853,7 +862,9 @@
           wo = {
             client: 'Amazon', location: ax.location, po: ax.po, sourceJob: '',
             trade: ax.trade, scope: ax.scope,
-            _amazon: true, _siteCode: ax._siteCode, _addr: ax._addr, _dueBy: ax._dueBy, _note: ax._note
+            _amazon: true, _siteCode: ax._siteCode, _addr: ax._addr, _dueBy: ax._dueBy, _note: ax._note,
+            // No attachment in the email - if the RFQ defers to one, warn and point at the bid page.
+            _warn: ax._seeAttached ? 'this Amazon RFQ defers to an attached file / full scope that is NOT in the email - open the Fairmarkit RFQ link (in the details below) to get it' : ''
           };
         }
       }
