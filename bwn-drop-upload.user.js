@@ -4,7 +4,7 @@
 // @version      1.10.5
 // @downloadURL  https://raw.githubusercontent.com/Intermu/userscripts/main/bwn-drop-upload.user.js
 // @updateURL    https://raw.githubusercontent.com/Intermu/userscripts/main/bwn-drop-upload.user.js
-// @description  Drop files anywhere on an Umbrava work order to upload them. Opens the Documents tab and upload dialog, hands over the files, and builds each file's description from its contents. Emails are parsed locally (.msg via an OLE/MAPI reader, .eml via RFC822) into an Outlook-style block - From/Sent/To/Cc/Subject and the body - that becomes the WO note, led by a one-line summary from Chrome's on-device built-in AI (zero cost, zero egress, nothing leaves the browser), falling back to local WO-field extraction (store, city/state, priority, PO, NTE, problem, requester) when the on-device model is unavailable. That same summary fills each file's Description. The WO note's Type is chosen from the email's parties: inbound is typed by the sender (client -> Client, else Vendor); outbound from Broadway is typed by the recipients (a client recipient -> Client, any vendor recipient -> Vendor, all-internal -> Internal). Umbrava's Description field is a TipTap/ProseMirror rich-text editor. It rejects synthetic paste, beforeinput, insertHTML and raw innerHTML, but honours execCommand('insertText') plus a synthetic Enter keydown - so the note is filled line by line (Enter between lines to keep paragraphs), paced ~12ms/line so ProseMirror's async commit doesn't drop lines (measured live 2026-08-10). The text is also placed on your clipboard as a backup, and if every fill method fails a "Copy the WO note" button appears (its click supplies the gesture for a reliable copy, then Ctrl+V). A console diagnostic reports which editor was found and which fill method stuck. When WO Intake hands off a just-created WO's request email, each uploaded file's Label (document type) is set to "Work Order Request" and the note Type is forced to Client (a WO Intake handoff is a client's request, even when the sender is a broker like Fairmarkit that reads as a Vendor domain). Fairmarkit / bulk-email footer boilerplate (FAQ / Privacy / Terms / Unsubscribe, the -----!{...}!----- machine tail) and safelinks/awstrack tracking URLs are stripped from the note body. You review and Save everything. Runs in the browser only: no network access, no grants.
+// @description  Drop files anywhere on an Umbrava work order to upload them. Opens the Documents tab and upload dialog, hands over the files, and builds each file's description from its contents. Emails are parsed locally (.msg via an OLE/MAPI reader, .eml via RFC822) into an Outlook-style block - From/Sent/To/Cc/Subject and the body - that becomes the WO note, led by a one-line summary from Chrome's on-device built-in AI (zero cost, zero egress, nothing leaves the browser), falling back to local WO-field extraction (store, city/state, priority, PO, NTE, problem, requester) when the on-device model is unavailable. That same summary fills each file's Description. The WO note's Type is chosen from the email's parties: inbound is typed by the sender (client -> Client, else Vendor); outbound from Broadway is typed by the recipients (a client recipient -> Client, any vendor recipient -> Vendor, all-internal -> Internal). Umbrava's Description field is a TipTap/ProseMirror rich-text editor. It rejects synthetic paste, beforeinput, insertHTML and raw innerHTML, but honours execCommand('insertText') plus a synthetic Enter keydown - so the note is filled line by line (Enter between lines to keep paragraphs), paced ~12ms/line so ProseMirror's async commit doesn't drop lines (measured live 2026-08-10). The text is also placed on your clipboard as a backup, and if every fill method fails a "Copy the WO note" button appears (its click supplies the gesture for a reliable copy, then Ctrl+V). A console diagnostic reports which editor was found and which fill method stuck. When WO Intake hands off a just-created WO's request email, each uploaded file's Label (document type) is set to "Work Order Request" and the note Type is forced to Client (a WO Intake handoff is a client's request, even when the sender is a broker like Fairmarkit that reads as a Vendor domain). Fairmarkit / bulk-email footer boilerplate (the Fairmarkit company block: tagline + Boston address + FAQ/Privacy/Terms/Unsubscribe, and the -----!{...}!----- machine tail) plus ALL tracking URLs (safelinks/awstrack/logo) are stripped from the note body, keeping content through the suppliers@ email. A Fairmarkit RFQ body is also condensed to one line per entry - single-spaced, with each line-item rejoined to its QTY and each Details label (Buyer/Close date/RFQ ID/Shipping address) rejoined to its value. You review and Save everything. Runs in the browser only: no network access, no grants.
 // @match        https://app.umbrava.com/*
 // @match        https://*.umbrava.com/*
 // @run-at       document-idle
@@ -15,7 +15,7 @@
 (function () {
   'use strict';
 
-  var VER = '1.10.5';   // keep in step with @version (drift caught earlier: banner had lagged two releases)
+  var VER = '1.10.6';   // keep in step with @version (drift caught earlier: banner had lagged two releases)
   console.info('[BWN DROP UPLOAD] v' + VER + ' · Email→note: real .msg (OLE/MAPI) + .eml parsing · on-device AI one-line summary (Chrome built-in, zero egress) leads the note + fills Description, local field-extraction fallback · note Type by parties (inbound=sender, outbound=recipient) · document Label + note Type selectors both target their stable testids · WO Intake handoff sets Label=Work Order Request · bwn:cmd dropupload:files bridge');
 
   // Active only on WO pages; checked at drag time so SPA navigation needs no watcher.
@@ -300,16 +300,19 @@
   // note carries what was actually written, not the whole reply chain.
   var BODY_MAX = 20000;   // bound regex work on pathological bodies (real plain-text email bodies are tiny)
   function tidyBody(raw) {
-    var body = String(raw || '').slice(0, BODY_MAX).replace(/\r\n/g, '\n').replace(/\r/g, '\n');
+    var rawStr = String(raw || '');
+    // Fairmarkit RFQ bodies come through the plain-text stream double-spaced with every table cell on
+    // its own line; they also carry a company footer + tracking URLs. Detect so the extra cleanup is
+    // scoped to them and ordinary client/vendor emails keep their existing formatting.
+    var fm = /Fairmarkit/i.test(rawStr) && /Invitation to Quote|e-bidding platform|Request for Quote/i.test(rawStr);
+    var body = rawStr.slice(0, BODY_MAX).replace(/\r\n/g, '\n').replace(/\r/g, '\n');
     body = body.replace(/ ?<(?:mailto:|https?:\/\/)[^>]*>/gi, '');
-    // Drop bulk-email / Fairmarkit footer boilerplate + tracking tails: the machine tail
-    // -----!{...}!----- and safelinks/awstrack redirect URLs, then cut everything from the footer
-    // banner onward (FAQ / Privacy / Terms / Unsubscribe all sit below these markers). All markers
-    // are Fairmarkit-specific, so ordinary client/vendor emails are untouched.
-    body = body.replace(/-----!\{[\s\S]*?\}!-----/g, '');
-    body = body.replace(/https?:\/\/\S*(?:safelinks\.protection\.outlook\.com|awstrack\.me)\S*/gi, '');
-    var fcut = body.search(/\n?\s*(?:Keep an eye on all of your opportunities|Reach our supplier relations|Don'?t have an account yet|Autonomous sourcing for all spend|Fairmarkit,\s*1 Beacon)/i);
-    if (fcut > 0) body = body.slice(0, fcut);
+    body = body.replace(/-----!\{[\s\S]*?\}!-----/g, '');      // the machine tail
+    body = body.replace(/https?:\/\/\S+/gi, '');               // ALL URLs (safelinks/awstrack/s3 logo); bare emails stay
+    // Cut the Fairmarkit COMPANY footer (tagline + Boston address + FAQ/Privacy/Terms/Unsubscribe),
+    // keeping "Keep an eye..." / "Reach our supplier relations" / the suppliers@ email above it.
+    var fcut = body.search(/Autonomous sourcing for all spend|Fairmarkit,\s*1 Beacon/i);
+    if (fcut > 0) body = body.slice(0, fcut).replace(/\n[ \t]*Fairmarkit[ \t]*\s*$/i, '\n');
     var lines = body.split('\n');
     for (var i = 0; i < lines.length; i++) {
       // Only treat a "From:" line as the start of the quoted reply thread if it
@@ -324,7 +327,16 @@
         if (hits >= 2) { lines = lines.slice(0, i); break; }
       }
     }
-    return lines.join('\n').split('\n').map(function (l) { return l.replace(/\s+$/, ''); }).join('\n').replace(/\n{3,}/g, '\n\n').trim();
+    body = lines.map(function (l) { return l.replace(/\s+$/, ''); }).join('\n');
+    if (fm) {
+      // Condense to one line per entry: single-space it, then rejoin a line-item to its QTY and each
+      // Details label to its value (the plain-text flattening split those onto separate lines).
+      body = body.replace(/\n{2,}/g, '\n');
+      body = body.replace(/\n(\d+\.\d{2})\b[ \t]*/g, '\t$1');
+      body = body.replace(/\n(Buyer:|Close date:|RFQ ID:|Shipping address:)[ \t]*\n[ \t]*/gi, '\n$1\t');
+      return body.trim();
+    }
+    return body.replace(/\n{3,}/g, '\n\n').trim();
   }
   // Generated lead line for a client WO-request email: "<Sender> sent in WO Request for <problem>".
   // The problem text is the email's Description: section (the real scope). Added only when BOTH a
