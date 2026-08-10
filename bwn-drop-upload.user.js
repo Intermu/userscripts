@@ -1,10 +1,10 @@
 // ==UserScript==
 // @name         BWN Drop Upload (Broadway National)
 // @namespace    broadwaynational.bwn
-// @version      1.10.3
+// @version      1.10.4
 // @downloadURL  https://raw.githubusercontent.com/Intermu/userscripts/main/bwn-drop-upload.user.js
 // @updateURL    https://raw.githubusercontent.com/Intermu/userscripts/main/bwn-drop-upload.user.js
-// @description  Drop files anywhere on an Umbrava work order to upload them. Opens the Documents tab and upload dialog, hands over the files, and builds each file's description from its contents. Emails are parsed locally (.msg via an OLE/MAPI reader, .eml via RFC822) into an Outlook-style block - From/Sent/To/Cc/Subject and the body - that becomes the WO note, led by a one-line summary from Chrome's on-device built-in AI (zero cost, zero egress, nothing leaves the browser), falling back to local WO-field extraction (store, city/state, priority, PO, NTE, problem, requester) when the on-device model is unavailable. That same summary fills each file's Description. The WO note's Type is chosen from the email's parties: inbound is typed by the sender (client -> Client, else Vendor); outbound from Broadway is typed by the recipients (a client recipient -> Client, any vendor recipient -> Vendor, all-internal -> Internal). Umbrava's Description field is a TipTap/ProseMirror rich-text editor; the note is filled by a synthetic paste (matches a real Ctrl+V) with insertHTML/insertText/innerHTML fallbacks, and each attempt is verified. The text is also placed on your clipboard as a backup. If the fill doesn't stick AND the automatic clipboard write is blocked (the latter needs a user gesture, which the WO Intake auto-handoff doesn't have), a "Copy the WO note" button appears - clicking it supplies the gesture so the copy lands, then Ctrl+V works. A console diagnostic reports which editor was found and which fill method stuck. When WO Intake hands off a just-created WO's request email, each uploaded file's Label (document type) is set to "Work Order Request". You review and Save everything. Runs in the browser only: no network access, no grants.
+// @description  Drop files anywhere on an Umbrava work order to upload them. Opens the Documents tab and upload dialog, hands over the files, and builds each file's description from its contents. Emails are parsed locally (.msg via an OLE/MAPI reader, .eml via RFC822) into an Outlook-style block - From/Sent/To/Cc/Subject and the body - that becomes the WO note, led by a one-line summary from Chrome's on-device built-in AI (zero cost, zero egress, nothing leaves the browser), falling back to local WO-field extraction (store, city/state, priority, PO, NTE, problem, requester) when the on-device model is unavailable. That same summary fills each file's Description. The WO note's Type is chosen from the email's parties: inbound is typed by the sender (client -> Client, else Vendor); outbound from Broadway is typed by the recipients (a client recipient -> Client, any vendor recipient -> Vendor, all-internal -> Internal). Umbrava's Description field is a TipTap/ProseMirror rich-text editor. It rejects synthetic paste, beforeinput, insertHTML and raw innerHTML, but honours execCommand('insertText') plus a synthetic Enter keydown - so the note is filled line by line (Enter between lines to keep paragraphs), paced ~12ms/line so ProseMirror's async commit doesn't drop lines (measured live 2026-08-10). The text is also placed on your clipboard as a backup, and if every fill method fails a "Copy the WO note" button appears (its click supplies the gesture for a reliable copy, then Ctrl+V). A console diagnostic reports which editor was found and which fill method stuck. When WO Intake hands off a just-created WO's request email, each uploaded file's Label (document type) is set to "Work Order Request". You review and Save everything. Runs in the browser only: no network access, no grants.
 // @match        https://app.umbrava.com/*
 // @match        https://*.umbrava.com/*
 // @run-at       document-idle
@@ -15,7 +15,7 @@
 (function () {
   'use strict';
 
-  var VER = '1.10.3';   // keep in step with @version (drift caught earlier: banner had lagged two releases)
+  var VER = '1.10.4';   // keep in step with @version (drift caught earlier: banner had lagged two releases)
   console.info('[BWN DROP UPLOAD] v' + VER + ' · Email→note: real .msg (OLE/MAPI) + .eml parsing · on-device AI one-line summary (Chrome built-in, zero egress) leads the note + fills Description, local field-extraction fallback · note Type by parties (inbound=sender, outbound=recipient) · document Label + note Type selectors both target their stable testids · WO Intake handoff sets Label=Work Order Request · bwn:cmd dropupload:files bridge');
 
   // Active only on WO pages; checked at drag time so SPA navigation needs no watcher.
@@ -1102,16 +1102,42 @@
     }
     function tryText() { clear(); try { document.execCommand('insertText', false, text); } catch (e) { } }
     function tryInner() { try { ed.innerHTML = blockHtml; ed.dispatchEvent(new Event('input', { bubbles: true })); } catch (e) { } }
+    // PRIMARY for Umbrava's TipTap/ProseMirror note editor. MEASURED live on a real WO 2026-08-10:
+    // ProseMirror rejects synthetic paste, beforeinput, execCommand insertHTML and raw innerHTML, but
+    // it DOES honour execCommand('insertText') and a synthetic Enter keydown (PM binds keydown on the
+    // editable directly, so an untrusted keydown still runs its keymap). So: hard-clear via a Range,
+    // then per line insert the text and press Enter between lines - the only method that both sticks
+    // AND preserves paragraphs (a plain insertText of the whole string flattens every newline).
+    // PACED: a tight synchronous loop outruns ProseMirror's async commit and drops/merges lines on a
+    // long note (measured); a ~12ms gap per line lands every line cleanly. Returns a Promise.
+    function tryPmType() {
+      return new Promise(function (resolve) {
+        try {
+          ed.focus();
+          var sel = window.getSelection(), r = document.createRange();
+          r.selectNodeContents(ed); sel.removeAllRanges(); sel.addRange(r);
+          document.execCommand('delete', false, null);
+          var ls = String(text).replace(/\r\n/g, '\n').split('\n'), i = 0;
+          (function stepLine() {
+            if (i >= ls.length) { resolve(); return; }
+            if (i > 0) ['keydown', 'keyup'].forEach(function (ty) { ed.dispatchEvent(new KeyboardEvent(ty, { key: 'Enter', code: 'Enter', keyCode: 13, which: 13, bubbles: true, cancelable: true })); });
+            if (ls[i]) document.execCommand('insertText', false, ls[i]);
+            i++;
+            setTimeout(stepLine, 12);
+          })();
+        } catch (e) { resolve(); }
+      });
+    }
     function settle() { return new Promise(function (r) { setTimeout(function () { r(stuck()); }, 250); }); }
-    var steps = [tryPaste, tryHtml, trySoftLines, tryText, tryInner], stepNames = ['paste', 'insertHTML', 'softLines', 'insertText', 'innerHTML'];
+    var steps = [tryPmType, tryPaste, tryHtml, trySoftLines, tryText, tryInner], stepNames = ['pmType', 'paste', 'insertHTML', 'softLines', 'insertText', 'innerHTML'];
     // Diagnostic: which editor we grabbed and which fill method (if any) actually stuck. The note
     // came up blank once live even though the synthetic paste is "verified" - this tells us WHERE it
     // fails (wrong editor element, or every method silently no-ops) instead of guessing.
     try { console.info('[BWN DROP UPLOAD] note editor:', (ed.tagName || '?') + (ed.id ? '#' + ed.id : '') + (ed.className ? '.' + String(ed.className).split(/\s+/)[0] : ''), '| contenteditable=', ed.getAttribute && ed.getAttribute('contenteditable'), '| role=', ed.getAttribute && ed.getAttribute('role')); } catch (e) { }
     function run(i) {
       if (i >= steps.length) { try { console.warn('[BWN DROP UPLOAD] note fill: NONE of the methods stuck - editor rejected all'); } catch (e) { } return Promise.resolve(stuck()); }
-      steps[i]();
-      return settle().then(function (ok) { try { console.info('[BWN DROP UPLOAD] note fill step "' + stepNames[i] + '":', ok ? 'STUCK' : 'no'); } catch (e) { } return ok ? true : run(i + 1); });
+      // A step may be async (tryPmType paces itself) or sync - Promise.resolve handles both.
+      return Promise.resolve(steps[i]()).then(function () { return settle(); }).then(function (ok) { try { console.info('[BWN DROP UPLOAD] note fill step "' + stepNames[i] + '":', ok ? 'STUCK' : 'no'); } catch (e) { } return ok ? true : run(i + 1); });
     }
     return run(0);
   }
