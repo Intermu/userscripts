@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         BWN Suite - Core (Broadway National)
 // @namespace    broadwaynational.bwn
-// @version      1.76.0
+// @version      1.76.1
 // @downloadURL  https://raw.githubusercontent.com/Intermu/userscripts/main/bwn-suite-core.user.js
 // @updateURL    https://raw.githubusercontent.com/Intermu/userscripts/main/bwn-suite-core.user.js
 // @description  Runs several Umbrava helpers for BWN coordinators, in the browser with no privileged grants. Includes: PO Approval + ETA Builder; WO Assist (GP/ETA, a stall watchdog, DNE calculator, and a next-action playbook); Email Leak Guard (checks recipients against vendor names, PO amounts, and client budget references before an outbound email sends); WO List Heat (a triage overlay + My Day strip on the work-order list, with an optional same-origin Umbrava API scan for deterministic full-board coverage); and the BWN Launcher (opens the Azure Static Web App tools with the current WO's context). Modules share state through sessionStorage/localStorage. The only network calls are same-origin Umbrava GraphQL requests (app.umbrava.com/api/graphql, the app's own session): List Heat's full-board scan and WO Assist's work-order / trip / clock-in / document reads, plus ONE write - BWN Views saves the column layout through Umbrava's own putUserPreference, the same preference the column chooser writes; everything else is offline. Toggle modules in BWN_MODULES below.
@@ -6264,11 +6264,12 @@
     // UPGRADES the capture with the row path and a sample. The replay validates the shape
     // either way, so a wrong guess falls back honestly instead of reporting a partial board.
     function heatRecordCapture(reqBody, data) {
-      if (heatReplaying) return;   // don't re-capture our own enlarged replay pages
+      heatDiag.seen++;
+      if (heatReplaying) { heatDiag.replaySkip++; return; }   // don't re-capture our own enlarged replay pages
       // ...and the same again by IDENTITY, because the line above is not enough: the hook
       // fires a second time when the response resolves, by which point finishApi has already
       // set heatReplaying = false. That second call is what closed the retry loop.
-      if (heatIsOwnBody(typeof reqBody === 'string' ? reqBody : null)) return;
+      if (heatIsOwnBody(typeof reqBody === 'string' ? reqBody : null)) { heatDiag.ownSkip++; return; }
       // (v3.16) The board query only fires on the WO-list route. A WO-details page fires
       // reads like purchaseOrders(workOrderNumber) whose PO rows carry a numeric `number`
       // and so masquerade as WO rows; gate to the list route so a details read can never
@@ -6300,6 +6301,7 @@
             apiList.path = found.path; apiList.conn = found.conn;
             apiList.sample = pe; apiList._rows = found.rows.length; apiList.proven = true;
           } else if (!sameVars) apiList._rows = 0;
+          heatDiag.rearm++;
           heatAutoScanSoon(apiList.variables);
           return;
         }
@@ -6321,6 +6323,7 @@
             : 'request-only, row path resolved on the first replay page') + ') - API scan available.');
         // A capture is also the moment a filter change lands, so this is the one trigger
         // that keeps the book-wide numbers in step with the list without a click (v3.17).
+        heatDiag.rearm++;
         heatAutoScanSoon(apiList.variables);
       } catch (e) { /* capture is best-effort */ }
     }
@@ -6337,6 +6340,11 @@
     //
     // A flag cannot fix this, because the flag is legitimately false by then. Identity can:
     // remember the exact bodies we sent and never treat one as a new list query.
+    // Read-only instrumentation for the auto-scan trigger path (2026-08-09). Exists because
+    // black-box testing could eliminate stuck flags and a lost capture, but could NOT separate
+    // "the capture never fired" from "the guard suppressed the scan" - and the failure is
+    // intermittent, so guessing was not going to settle it. Counters only; see __bwnHeatDiag.
+    var heatDiag = { seen: 0, replaySkip: 0, ownSkip: 0, rearm: 0, autoRan: 0, autoNoBackoff: 0, autoNoTtl: 0, autoNoGate: 0 };
     var heatOwnBodies = Object.create(null), heatOwnBodyQ = [];
     var HEAT_OWN_BODIES_MAX = 64;   // a few pages per scan; bounded so a long-lived tab cannot grow it
     function heatNoteOwnBody(s) {
@@ -7761,13 +7769,14 @@
       return Math.min(HEAT_FAIL_BACKOFF_MAX, HEAT_FAIL_BACKOFF_MIN * Math.pow(2, Math.max(0, heatAutoFailN - 1)));
     }
     function heatAutoScan(vars) {
-      if (!heatAutoOn() || heatScanning || heatReplaying || !isListPage()) return;
-      if (!apiList || !apiList.query || !heatAuthToken()) return;   // manual button still covers these
+      if (!heatAutoOn() || heatScanning || heatReplaying || !isListPage()) { heatDiag.autoNoGate++; return; }
+      if (!apiList || !apiList.query || !heatAuthToken()) { heatDiag.autoNoGate++; return; }   // manual button still covers these
       var sig = heatFilterSig(vars || (apiList && apiList.variables));
       // Back off from a filter whose last scan FAILED. Keyed on the failing signature, so a
       // different filter is never held back by another one's failure.
-      if (sig && sig === heatAutoFailSig && (Date.now() - heatAutoFailTs) < heatAutoBackoffMs()) return;
-      if (sig && sig === heatAutoSig && heatStore && (Date.now() - heatAutoTs) < HEAT_AUTO_TTL) return;
+      if (sig && sig === heatAutoFailSig && (Date.now() - heatAutoFailTs) < heatAutoBackoffMs()) { heatDiag.autoNoBackoff++; return; }
+      if (sig && sig === heatAutoSig && heatStore && (Date.now() - heatAutoTs) < HEAT_AUTO_TTL) { heatDiag.autoNoTtl++; return; }
+      heatDiag.autoRan++;
       heatAutoSig = sig;
       heatAutoTs = Date.now();
       // Use the real Scan All button when the strip is up so the user sees "Scanning (API)…"
@@ -8299,6 +8308,49 @@
     // Cross-module refresh hook: BWN Views calls this after switching column sets
     // so the overlay re-detects the heat columns in place (no page reload needed).
     window.__bwnHeatRefresh = function () { diagFor = ''; woListHeat(); };
+
+    // Read-only diagnostic for the auto-scan trigger path (2026-08-09). Answers exactly one
+    // question that black-box testing could not: when a filter change does NOT scan, is it
+    // because the capture never reached the re-arm, or because a guard refused it?
+    //
+    // DELIBERATELY carries no signatures, variables or query text. A filter signature encodes
+    // the list's search box and filter values, which on this tenant can be client-identifying,
+    // and this is a page-context global any script on the origin can read. Booleans, counts and
+    // ages only - enough to attribute a fault, useless to an onlooker.
+    window.__bwnHeatDiag = function () {
+      var v = null;
+      try { v = apiList && apiList.variables; } catch (e) { }
+      return {
+        counts: {
+          captureSeen: heatDiag.seen,          // heatRecordCapture entered
+          skippedAsReplay: heatDiag.replaySkip, // ...refused by the heatReplaying flag
+          skippedAsOwnBody: heatDiag.ownSkip,   // ...refused by replay identity (the 1.76.0 fix)
+          reArmed: heatDiag.rearm,              // ...reached heatAutoScanSoon
+          autoScanRan: heatDiag.autoRan,
+          autoRefusedByBackoff: heatDiag.autoNoBackoff,
+          autoRefusedByTtl: heatDiag.autoNoTtl,
+          autoRefusedByGate: heatDiag.autoNoGate
+        },
+        flags: {
+          scanning: !!heatScanning, replaying: !!heatReplaying, abort: !!heatScanAbort,
+          lastScanClean: !!heatScanClean, hasStore: !!heatStore,
+          storeRows: heatStore ? Object.keys(heatStore).length : 0,
+          hasCapture: !!(apiList && apiList.query), captureProven: !!(apiList && apiList.proven),
+          autoOn: (function () { try { return !!heatAutoOn(); } catch (e) { return null; } })(),
+          onListRoute: (function () { try { return !!isListPage(); } catch (e) { return null; } })()
+        },
+        backoff: {
+          armed: !!heatAutoFailSig,
+          // Whether the ARMED failure is for the filter currently on screen - the thing that
+          // decides if this backoff is the reason a rescan is not happening right now.
+          matchesCurrentFilter: !!(heatAutoFailSig && v && heatAutoFailSig === heatFilterSig(v)),
+          ageMs: heatAutoFailTs ? (Date.now() - heatAutoFailTs) : null,
+          windowMs: heatAutoBackoffMs(),
+          consecutiveFailures: heatAutoFailN
+        },
+        ownBodiesRemembered: heatOwnBodyQ.length
+      };
+    };
 
     var debounce = null;
     var lastPath = location.pathname;

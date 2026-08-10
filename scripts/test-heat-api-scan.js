@@ -1674,11 +1674,13 @@ function main() {
 
     // ---- (2) a failed scan must back off, not retry at the debounce interval ---------------
     // The guard's own bytes, lifted from the shipped file rather than paraphrased.
-    var gm = core.match(/\n\s*(if \(sig && sig === heatAutoFailSig[^\n]*?\) return;)/);
+    // Captures the CONDITION only, so the counter that 1.76.1 added inside the block cannot
+    // break the match again.
+    var gm = core.match(/\n\s*if \((sig && sig === heatAutoFailSig[^\n]*?)\) \{ heatDiag\.autoNoBackoff/);
     A.ok('the failure-backoff guard is present in the shipped file', !!gm);
     function backoffFires(o) {
       var f = new Function('sig', 'heatAutoFailSig', 'heatAutoFailTs', 'heatAutoBackoffMs', 'Date',
-        'return !!(' + gm[1].replace(/^if \(/, '').replace(/\) return;$/, '') + ');');
+        'return !!(' + gm[1] + ');');
       return f(o.sig, o.failSig, o.failTs, function () { return o.backoff; }, Date);
     }
     A.ok('right after a failure on the same filter, a retry is SUPPRESSED',
@@ -1715,7 +1717,7 @@ function main() {
       // ML1: drop the identity check and the replay's own response is treated as a new list
       // query again - which is the re-arm that closed the loop.
       var m1 = build({ mutations: [[
-        "      if (heatIsOwnBody(typeof reqBody === 'string' ? reqBody : null)) return;", '']] });
+        "      if (heatIsOwnBody(typeof reqBody === 'string' ? reqBody : null)) { heatDiag.ownSkip++; return; }", '']] });
       m1.apiList = { query: 'query PagedWorkOrders { x }', variables: { page: { skip: 0, take: 50 } }, proven: true };
       var b1 = JSON.stringify({ query: 'query PagedWorkOrders { x }', variables: { page: { skip: 0, take: 200 } } });
       m1.heatNoteOwnBody(b1);
@@ -1739,7 +1741,7 @@ function main() {
 
         // ML3: the guard line itself. Strip it from the shipped bytes and the suppression is
         // gone even with a fresh failure recorded.
-        var stripped = core.replace(/\n\s*if \(sig && sig === heatAutoFailSig[^\n]*?\) return;/, '');
+        var stripped = core.replace(/\n\s*if \(sig && sig === heatAutoFailSig[^\n]*?\) \{ heatDiag\.autoNoBackoff\+\+; return; \}/, '');
         A.ok('ML3 control: the mutation actually removed the guard',
           stripped.indexOf('heatAutoFailSig && (Date.now()') === -1 && stripped !== core);
         A.ok('ML3 control: and nothing else in the file re-implements it',
