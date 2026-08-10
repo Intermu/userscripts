@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         BWN Bid-Out (Broadway National)
 // @namespace    broadwaynational.bwn
-// @version      0.26.1
+// @version      0.26.2
 // @downloadURL  https://raw.githubusercontent.com/Intermu/userscripts/main/bwn-bid-out.user.js
 // @updateURL    https://raw.githubusercontent.com/Intermu/userscripts/main/bwn-bid-out.user.js
 // @description  Email RFP to outside / net-new vendors, launched from a caret on Umbrava's own "See Who Is Available" button (network-vendor bidding stays native - no separate Bid-Out button). The caret menu opens the tracked email RFP wizard: finds net-new vendors nearby through Google Places, looks up their emails via the BWN scrape-contacts function, takes pasted outside addresses, and can still include assignable Umbrava vendors in the same email. You pick who's included, then review the exact recipient list and the rendered email before anything sends. Send from your own mailbox via the SWA send-bid function (Microsoft Graph), or open a plain Outlook draft. Vendors are BCC'd; nothing sends until you click Send. Network access is limited to Umbrava (same-origin), Google Places, and your SWA host.
@@ -828,8 +828,16 @@
       '.bwn-bo-dditem:hover{background:#eef3f0;}' +
       // Suite drawer geometry: the wizard rides the dock rail edge like every other
       // tool, so there is no centred overlay and no backdrop over the work order.
-      '#bwn-bidout-ov{position:fixed;top:0;bottom:0;left:var(--bwn-dock-w,158px);z-index:2147483001;display:flex;font-family:' + FONT + ';}' +
-      '.bwn-bo{width:560px;max-width:calc(100vw - var(--bwn-dock-w,158px) - 8px);display:flex;flex-direction:column;overflow:auto;background:#fff;border-radius:0 14px 14px 0;box-shadow:10px 0 34px rgba(13,38,26,.22);color:#1f2a24;font-size:16px;}' +
+      // Rail geometry, matching Core's .bwn-drawer (animation review 2026-08-10). `left` is
+      // PINNED to the expanded rail width and the rail's real position arrives as a transform on
+      // --bwn-dock-shift, which Core publishes on documentElement alongside --bwn-dock-w. Reading
+      // the width straight into `left` (and into max-width) is what made this panel teleport 126px
+      // sideways and reflow when the rail collapsed. 158 is hardcoded here on purpose: this
+      // sandbox cannot see Core's DOCK_RAIL_W, and the old var fallback said 158 too.
+      '#bwn-bidout-ov{position:fixed;top:0;bottom:0;left:158px;z-index:2147483001;display:flex;font-family:' + FONT + ';' +
+      'transform:translateX(var(--bwn-dock-shift,0px));transition:transform .2s cubic-bezier(.23,1,.32,1);}' +
+      '@media (prefers-reduced-motion:reduce){#bwn-bidout-ov{transition:none;}}' +
+      '.bwn-bo{width:560px;max-width:calc(100vw - 166px);display:flex;flex-direction:column;overflow:auto;background:#fff;border-radius:0 14px 14px 0;box-shadow:10px 0 34px rgba(13,38,26,.22);color:#1f2a24;font-size:16px;}' +
       '.bwn-bo-hd{background:linear-gradient(135deg,#1a5f3e,#0d3d26);color:#fff;padding:15px 16px 14px 18px;font:600 16px/24px ' + FONT + ';display:flex;align-items:center;gap:10px;border-radius:0 14px 0 0;position:sticky;top:0;z-index:1;}' +
       '.bwn-bo-hd .x{margin-left:auto;background:transparent;border:none;color:#fff;font-size:20px;line-height:1;cursor:pointer;}' +
       '.bwn-bo-bd{padding:14px 18px;}' +

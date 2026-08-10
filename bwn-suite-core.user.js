@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         BWN Suite - Core (Broadway National)
 // @namespace    broadwaynational.bwn
-// @version      1.78.3
+// @version      1.78.4
 // @downloadURL  https://raw.githubusercontent.com/Intermu/userscripts/main/bwn-suite-core.user.js
 // @updateURL    https://raw.githubusercontent.com/Intermu/userscripts/main/bwn-suite-core.user.js
 // @description  Runs several Umbrava helpers for BWN coordinators, in the browser with no privileged grants. Includes: PO Approval + ETA Builder; WO Assist (GP/ETA, a stall watchdog, DNE calculator, and a next-action playbook); Email Leak Guard (checks recipients against vendor names, PO amounts, and client budget references before an outbound email sends); WO List Heat (a triage overlay + My Day strip on the work-order list, with an optional same-origin Umbrava API scan for deterministic full-board coverage); and the BWN Launcher (opens the Azure Static Web App tools with the current WO's context). Modules share state through sessionStorage/localStorage. The only network calls are same-origin Umbrava GraphQL requests (app.umbrava.com/api/graphql, the app's own session): List Heat's full-board scan and WO Assist's work-order / trip / clock-in / document reads, plus ONE write - BWN Views saves the column layout through Umbrava's own putUserPreference, the same preference the column chooser writes; everything else is offline. Toggle modules in BWN_MODULES below.
@@ -9173,9 +9173,13 @@
         // Exit contract for modules: strip the id, add .bwn-closing, remove after DRAWER_EXIT_MS
         // (170). Sits UNDER the incoming panel and stops taking clicks the moment it starts to go.
         '.bwn-drawer.bwn-closing{opacity:0;z-index:99996;pointer-events:none;}' +
-        // Kept even though .bwn-drawer no longer uses it: bwn-suite-ai's Job View card
-        // (#bwn-jv-card) animates with this keyframe by name across the sandbox boundary.
-        // Deleting it here would silently kill that entrance.
+        // Kept, but NOT for the reason first written here. The claim was that bwn-suite-ai's Job
+        // View card depends on this definition across the sandbox boundary; it does not -
+        // bwn-suite-ai declares its own identical @keyframes bwn-drawer-in three lines under the
+        // rule that uses it, deliberately, "so the slide-in survives when Core is off" (its
+        // comment). Nothing in this file references this keyframe any more, so it is inert CSS.
+        // It stays because the two copies are a documented no-host fallback pair and removing
+        // either half buys nothing; do not cite it as a dependency.
         '@keyframes bwn-drawer-in{from{transform:translateX(-14px);opacity:.4;}to{transform:none;opacity:1;}}' +
         // Gentler, not zero: the panel still appears and disappears, it just does not move or
         // fade. Covers the settings card too - it rides the same motion and was NOT covered

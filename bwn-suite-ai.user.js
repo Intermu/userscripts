@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         BWN Suite - AI (Broadway National)
 // @namespace    broadwaynational.bwn
-// @version      1.45.0
+// @version      1.45.1
 // @downloadURL  https://raw.githubusercontent.com/Intermu/userscripts/main/bwn-suite-ai.user.js
 // @updateURL    https://raw.githubusercontent.com/Intermu/userscripts/main/bwn-suite-ai.user.js
 // @description  The Umbrava tools that call outside APIs, kept separate from the zero-egress Core script. Client Update and WO Audit drafts (Anthropic Claude; draft-only, scrubbed before sending, you review before posting); Find Techs / Find Suppliers (Google Places; vendor leads near a WO); and Job View (opens the Ops-Dashboard job card on the WO page - WO details from Umbrava plus the authored case file and next actions, read-only). Network access is limited by the browser to the declared API hosts and the BWN Static Web App. API keys are stored in Tampermonkey's storage via the menu commands and never enter the page. Toggle modules in BWN_MODULES below.
@@ -2216,11 +2216,19 @@
       var st = document.createElement('style');
       st.id = STYLE_ID;
       st.textContent =
-        '#bwn-cu-overlay{position:fixed;top:0;bottom:0;left:var(--bwn-dock-w,158px);z-index:100000;display:flex;font-family:-apple-system,BlinkMacSystemFont,"Segoe UI","Helvetica Neue",Arial,sans-serif;animation:bwnFade .2s ease-out;}' +
+        // Rail geometry, matching Core's .bwn-drawer (animation review 2026-08-10). `left` is
+        // PINNED to the expanded rail width and the rail's real position arrives as a transform on
+        // --bwn-dock-shift, which Core publishes on documentElement next to --bwn-dock-w. Reading
+        // the width into `left` and max-width is what teleported this panel 126px sideways and
+        // reflowed it when the rail collapsed. The overlay owns the shift, the card owns its own
+        // entry animation, so nothing contends for one transform. 158/166 are hardcoded because
+        // this sandbox cannot see Core's DOCK_RAIL_W - the var fallback said 158 too.
+        '#bwn-cu-overlay{position:fixed;top:0;bottom:0;left:158px;z-index:100000;display:flex;font-family:-apple-system,BlinkMacSystemFont,"Segoe UI","Helvetica Neue",Arial,sans-serif;animation:bwnFade .2s ease-out;' +
+        'transform:translateX(var(--bwn-dock-shift,0px));transition:transform .2s cubic-bezier(.23,1,.32,1);}' +
         '@keyframes bwnFade{from{opacity:0}to{opacity:1}}' +
         '@keyframes bwnUp{from{transform:translateX(-14px);opacity:.4}to{transform:none;opacity:1}}' +
         '@keyframes bwnSpin{to{transform:rotate(360deg)}}' +
-        '#bwn-cu-card{width:920px;max-width:calc(100vw - var(--bwn-dock-w,158px) - 8px);height:100%;display:flex;flex-direction:column;background:var(--bwn-surface);border-radius:0 14px 14px 0;overflow:hidden;box-shadow:10px 0 34px rgba(13,38,26,.2);animation:bwnUp .18s ease-out;}' +
+        '#bwn-cu-card{width:920px;max-width:calc(100vw - 166px);height:100%;display:flex;flex-direction:column;background:var(--bwn-surface);border-radius:0 14px 14px 0;overflow:hidden;box-shadow:10px 0 34px rgba(13,38,26,.2);animation:bwnUp .18s ease-out;}' +
         '.bwn-cu-head{position:relative;background:linear-gradient(135deg,var(--bwn-green),var(--bwn-green-dk));color:#fff;padding:18px 22px;display:flex;align-items:center;gap:14px;}' +
         '.bwn-cu-head::after{content:"";position:absolute;left:0;right:0;bottom:0;height:1px;background:linear-gradient(90deg,transparent,rgba(46,204,113,.5),transparent);}' +
         '.bwn-cu-head .t{font-weight:500;font-size:17px;line-height:1.15;letter-spacing:-.01em;}' +
@@ -2334,7 +2342,11 @@
         '.nd-table th{text-align:left;background:var(--bwn-surface-3);color:var(--bwn-green);font:500 9.5px ui-monospace,"Segoe UI Mono","SF Mono",monospace;text-transform:none;letter-spacing:normal;padding:6px 9px;border:1px solid var(--bwn-tint);}' +
         '.nd-table td{padding:6px 9px;border:1px solid var(--bwn-tint);vertical-align:top;}' +
         '.nd-table tr:nth-child(even) td{background:var(--bwn-surface-2);}' +
-        '@media (prefers-reduced-motion: reduce){#bwn-cu-overlay,#bwn-cu-card{animation:none;}.bwn-cu-spin{animation-duration:1.2s;}.bwn-cu-btn:active{transform:none;}}';
+        // transition:none was added 2026-08-10 with the rail shift: killing `animation` alone left
+        // the overlay sliding 126px on a rail collapse for a user who asked for no motion. The
+        // spinner is deliberately SLOWED rather than stopped - it reports that work is in flight,
+        // which is the comprehension aid the rule says to keep.
+        '@media (prefers-reduced-motion: reduce){#bwn-cu-overlay,#bwn-cu-card{animation:none;transition:none;}.bwn-cu-spin{animation-duration:1.2s;}.bwn-cu-btn:active{transform:none;}}';
       document.head.appendChild(st);
     }
 
@@ -3046,8 +3058,11 @@
       var st = document.createElement('style');
       st.id = O30B_STYLE_ID;
       st.textContent =
-        '#bwn-o30b-overlay{position:fixed;top:0;bottom:0;left:var(--bwn-dock-w,158px);z-index:100000;display:flex;font-family:-apple-system,BlinkMacSystemFont,"Segoe UI","Helvetica Neue",Arial,sans-serif;animation:bwnFade .2s ease-out;}' +
-        '.bwn-o30b{width:780px;max-width:calc(100vw - var(--bwn-dock-w,158px) - 8px);height:100%;display:flex;flex-direction:column;background:var(--bwn-surface);border-radius:0 14px 14px 0;overflow:hidden;box-shadow:10px 0 34px rgba(0,0,0,.2);}' +
+        // Rail geometry + reduced motion, as on #bwn-cu-overlay above.
+        '#bwn-o30b-overlay{position:fixed;top:0;bottom:0;left:158px;z-index:100000;display:flex;font-family:-apple-system,BlinkMacSystemFont,"Segoe UI","Helvetica Neue",Arial,sans-serif;animation:bwnFade .2s ease-out;' +
+        'transform:translateX(var(--bwn-dock-shift,0px));transition:transform .2s cubic-bezier(.23,1,.32,1);}' +
+        '@media (prefers-reduced-motion:reduce){#bwn-o30b-overlay{animation:none;transition:none;}}' +
+        '.bwn-o30b{width:780px;max-width:calc(100vw - 166px);height:100%;display:flex;flex-direction:column;background:var(--bwn-surface);border-radius:0 14px 14px 0;overflow:hidden;box-shadow:10px 0 34px rgba(0,0,0,.2);}' +
         '.bwn-o30b-hd{background:linear-gradient(135deg,var(--bwn-green),var(--bwn-green-dk));color:#fff;padding:15px 20px;}' +
         '.bwn-o30b-hd .t{font:600 16px -apple-system,BlinkMacSystemFont,"Segoe UI","Helvetica Neue",Arial,sans-serif;}' +
         '.bwn-o30b-hd .s{font:500 11px ui-monospace,"Segoe UI Mono","SF Mono",monospace;color:rgba(255,255,255,.72);margin-top:3px;}' +
@@ -4427,7 +4442,12 @@ if (BWN_MODULES.jobView) BWN.safeModule('jobView', function () {
   // MODAL SHELL  (mirrors the Client Update overlay pattern)
   // ====================================================================
   var JV_CSS = `
-#bwn-jv-overlay{position:fixed;top:0;bottom:0;left:var(--bwn-dock-w,158px);z-index:100000;display:flex;overflow:hidden;font-variant-numeric:tabular-nums;font-family:-apple-system,BlinkMacSystemFont,'Segoe UI','Helvetica Neue',Arial,sans-serif;
+/* Rail geometry (animation review 2026-08-10): the left offset is PINNED to the expanded rail
+   width and the rail's real position arrives as a transform on --bwn-dock-shift. Reading the live
+   width into the left offset teleported this overlay 126px sideways on a rail collapse. The
+   overlay owns the shift; #bwn-jv-card keeps its own bwn-drawer-in entrance, so the two never
+   contend for one transform. NB this whole block is a template literal - no backticks in here. */
+#bwn-jv-overlay{position:fixed;top:0;bottom:0;left:158px;z-index:100000;display:flex;overflow:hidden;font-variant-numeric:tabular-nums;transform:translateX(var(--bwn-dock-shift,0px));transition:transform .2s cubic-bezier(.23,1,.32,1);font-family:-apple-system,BlinkMacSystemFont,'Segoe UI','Helvetica Neue',Arial,sans-serif;
   --color-bg:#f0f4f8;--color-surface:#ffffff;--color-surface-alt:#f8fafc;--color-surface-faint:#fafffe;
   --color-text:#1e293b;--color-text-muted:#64748b;--color-text-ghost:#94a3b8;
   --color-border:#e2e8f0;--color-border-strong:#cbd5e1;
@@ -4446,10 +4466,14 @@ if (BWN_MODULES.jobView) BWN.safeModule('jobView', function () {
    wider than the form drawers (1100px) because the two-column layout needs the room; it
    clamps to whatever the rail leaves, and the max-width:900px rule at the bottom of this
    sheet stacks the columns once that clamp gets tight. */
-#bwn-jv-card{background:var(--color-surface);border:none;border-radius:0 14px 14px 0;width:1100px;max-width:calc(100vw - var(--bwn-dock-w,158px) - 8px);height:100%;display:flex;flex-direction:column;box-shadow:10px 0 34px rgba(11,40,26,0.22);font-family:-apple-system,BlinkMacSystemFont,'Segoe UI','Helvetica Neue',Arial,sans-serif;overflow:hidden;color:var(--text);animation:bwn-drawer-in .16s ease-out;}
+#bwn-jv-card{background:var(--color-surface);border:none;border-radius:0 14px 14px 0;width:1100px;max-width:calc(100vw - 166px);height:100%;display:flex;flex-direction:column;box-shadow:10px 0 34px rgba(11,40,26,0.22);font-family:-apple-system,BlinkMacSystemFont,'Segoe UI','Helvetica Neue',Arial,sans-serif;overflow:hidden;color:var(--text);animation:bwn-drawer-in .16s ease-out;}
 /* Core also defines these keyframes (drawer host); duplicated here so the slide-in
    survives when Core is off - same no-host fallback rule as the launch button. */
 @keyframes bwn-drawer-in{from{transform:translateX(-14px);opacity:.4;}to{transform:none;opacity:1;}}
+/* This stylesheet had no reduced-motion rule at all until 2026-08-10: the card slid in and, once
+   the rail shift landed above, the overlay slid sideways too, for a user who had asked for
+   neither. Gentler, not gone - the panel still appears, it just does not travel. */
+@media (prefers-reduced-motion: reduce){#bwn-jv-overlay,#bwn-jv-card{animation:none;transition:none;}}
 #bwn-jv-overlay .badge{display:inline-block;font-size:9px;font-weight:600;padding:2px 7px;border-radius:99px;letter-spacing:normal;text-transform:none;}
 #bwn-jv-overlay .badge.b-red{background:var(--color-danger-bg-alt);color:var(--color-danger-text);}
 #bwn-jv-overlay .badge.b-amber{background:var(--color-warning-bg);color:var(--color-warning-text);}
@@ -5327,10 +5351,13 @@ if (BWN_MODULES.jobView) BWN.safeModule('jobView', function () {
       var st = document.createElement('style');
       st.id = STYLE_ID;
       st.textContent =
-        '.bwn-ft-overlay{position:fixed;top:0;bottom:0;left:var(--bwn-dock-w,158px);z-index:100000;display:flex;font-family:-apple-system,BlinkMacSystemFont,"Segoe UI","Helvetica Neue",Arial,sans-serif;animation:bwnFtFade .2s ease-out;}' +
+        // Rail geometry + reduced motion, as on #bwn-cu-overlay.
+        '.bwn-ft-overlay{position:fixed;top:0;bottom:0;left:158px;z-index:100000;display:flex;font-family:-apple-system,BlinkMacSystemFont,"Segoe UI","Helvetica Neue",Arial,sans-serif;animation:bwnFtFade .2s ease-out;' +
+        'transform:translateX(var(--bwn-dock-shift,0px));transition:transform .2s cubic-bezier(.23,1,.32,1);}' +
+        '@media (prefers-reduced-motion:reduce){.bwn-ft-overlay,.bwn-ft-card{animation:none;transition:none;}}' +
         '@keyframes bwnFtFade{from{opacity:0}to{opacity:1}}' +
         '@keyframes bwnFtUp{from{transform:translateX(-14px);opacity:.4}to{transform:none;opacity:1}}' +
-        '.bwn-ft-card{width:560px;max-width:calc(100vw - var(--bwn-dock-w,158px) - 8px);display:flex;flex-direction:column;background:var(--bwn-surface);border-radius:0 14px 14px 0;overflow:hidden;box-shadow:10px 0 34px rgba(13,38,26,.2);animation:bwnFtUp .18s ease-out;}' +
+        '.bwn-ft-card{width:560px;max-width:calc(100vw - 166px);display:flex;flex-direction:column;background:var(--bwn-surface);border-radius:0 14px 14px 0;overflow:hidden;box-shadow:10px 0 34px rgba(13,38,26,.2);animation:bwnFtUp .18s ease-out;}' +
         '.bwn-ft-head{position:relative;background:linear-gradient(135deg,var(--bwn-green),var(--bwn-green-dk));color:#fff;padding:18px 22px;display:flex;align-items:center;gap:14px;}' +
         '.bwn-ft-head::after{content:"";position:absolute;left:0;right:0;bottom:0;height:1px;background:linear-gradient(90deg,transparent,rgba(46,204,113,.5),transparent);}' +
         '.bwn-ft-head .t{font-weight:500;font-size:17px;line-height:1.15;letter-spacing:-.01em;}' +

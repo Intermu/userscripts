@@ -190,8 +190,10 @@ var collapsed = runPublish(pubSrc); collapsed.pub(32);
 A.ok('collapsed rail: the drawer is shifted, not repositioned', collapsed.set['--bwn-dock-shift'] === '-126px', JSON.stringify(collapsed.set));
 var gone = runPublish(pubSrc); gone.pub(0);
 A.ok('no rail at all: shifted flush to the edge', gone.set['--bwn-dock-shift'] === '-158px', JSON.stringify(gone.set));
-A.ok('--bwn-dock-w is still published (bid-out and the AI overlays read it)',
-  collapsed.set['--bwn-dock-w'] === '32px', JSON.stringify(collapsed.set));
+// Still published even though no panel reads it into `left`/`max-width` any more: it is the
+// rail's actual width, other code may want it, and removing a published variable is a contract
+// change nothing here needs.
+A.ok('--bwn-dock-w is still published', collapsed.set['--bwn-dock-w'] === '32px', JSON.stringify(collapsed.set));
 
 A.ok('.bwn-drawer pins left to the expanded rail rather than the live var',
   CORE.indexOf("'.bwn-drawer{position:fixed;top:0;bottom:0;left:' + DOCK_RAIL_W + 'px;z-index:99997;'") !== -1,
@@ -200,9 +202,16 @@ A.ok('and moves on transform', CORE.indexOf('transform:translateX(var(--bwn-dock
 A.ok('entry and exit are transitions, not a keyframe', CORE.indexOf("'opacity:1;transform:translateX(var(--bwn-dock-shift,0px));' +\n        'transition:opacity .16s cubic-bezier(.23,1,.32,1),transform .2s cubic-bezier(.23,1,.32,1);}'") !== -1);
 A.ok('the exit state sits under the incoming panel and stops taking clicks',
   CORE.indexOf("'.bwn-drawer.bwn-closing{opacity:0;z-index:99996;pointer-events:none;}'") !== -1);
-A.ok('the bwn-drawer-in keyframe is KEPT for bwn-suite-ai Job View, which animates by name',
-  CORE.indexOf('@keyframes bwn-drawer-in{') !== -1 && read('bwn-suite-ai.user.js').indexOf('animation:bwn-drawer-in .16s ease-out') !== -1,
-  'deleting the keyframe silently kills #bwn-jv-card');
+// Corrected 2026-08-10: this used to assert that Core's copy of the keyframe was load-bearing for
+// bwn-suite-ai's Job View card. It is not - suite-ai declares its OWN identical copy three lines
+// below the rule that uses it, deliberately, so the slide-in survives with Core switched off.
+// Both halves are asserted so neither can quietly disappear, but Core's copy is inert CSS and must
+// not be cited as a dependency again.
+A.ok("Core still carries the bwn-drawer-in keyframe (inert, half of a documented fallback pair)",
+  CORE.indexOf('@keyframes bwn-drawer-in{') !== -1);
+A.ok('and bwn-suite-ai carries its OWN copy, which is the one #bwn-jv-card actually needs',
+  read('bwn-suite-ai.user.js').indexOf('@keyframes bwn-drawer-in{') !== -1,
+  'the no-Core fallback is gone: the Job View entrance now depends on Core being installed');
 
 // ---- 3. reduced motion covers the settings card too ------------------------------------------
 console.log('\n-- reduced motion --');
@@ -302,16 +311,39 @@ A.ok('control: a copy that never runs the entry transition is caught',
 // NEW animation a conscious edit rather than a silent fifth.
 console.log('\n-- every animating selector honours reduced motion --');
 
-// Every non-"none" animation shorthand in Core, with the selector that carries it. Verified
-// against the shipped file 2026-08-10; add a row when you add an animation, and the count
-// assertion below is what forces you to.
-var ANIMATED = [
-  { sel: '#bwn-heat-panel', keyframe: 'bwnPanelIn' },
-  { sel: '#bwn-heat-set', keyframe: 'bwnPanelIn' },
-  { sel: '#bwn-heat-prog.indet .fill', keyframe: 'bwnIndet' },
-  { sel: '.bwn-wa-card', keyframe: 'bwnWaIn' },
-  { sel: '.bwn-ecd-savepulse', keyframe: 'bwnEcdPulse' }
-];
+// Every non-"none" animation shorthand in the suite's animating files, with the selector that
+// carries it. Verified against the shipped files 2026-08-10; add a row when you add an animation,
+// and the per-file count assertions below are what force you to.
+//   slowed: covered by animation-duration rather than animation:none - correct for a spinner,
+//   which reports that work is in flight and is the comprehension aid the rule says to keep.
+var ANIMATED_BY_FILE = {
+  'bwn-suite-core.user.js': [
+    { sel: '#bwn-heat-panel', keyframe: 'bwnPanelIn' },
+    { sel: '#bwn-heat-set', keyframe: 'bwnPanelIn' },
+    { sel: '#bwn-heat-prog.indet .fill', keyframe: 'bwnIndet' },
+    { sel: '.bwn-wa-card', keyframe: 'bwnWaIn' },
+    { sel: '.bwn-ecd-savepulse', keyframe: 'bwnEcdPulse' }
+  ],
+  'bwn-suite-ai.user.js': [
+    { sel: '#bwn-cu-overlay', keyframe: 'bwnFade' },
+    { sel: '#bwn-cu-card', keyframe: 'bwnUp' },
+    { sel: '.bwn-cu-spin', keyframe: 'bwnSpin', slowed: true },
+    { sel: '#bwn-o30b-overlay', keyframe: 'bwnFade' },
+    { sel: '#bwn-jv-card', keyframe: 'bwn-drawer-in' },
+    { sel: '.bwn-ft-overlay', keyframe: 'bwnFtFade' },
+    { sel: '.bwn-ft-card', keyframe: 'bwnFtUp' }
+  ]
+};
+var ANIMATED = ANIMATED_BY_FILE['bwn-suite-core.user.js'];   // the Core-only probes below still read this
+
+// Panels anchored to the dock rail: `left` must be PINNED and the rail's position must arrive as a
+// transform on --bwn-dock-shift. Reading --bwn-dock-w into `left` or `max-width` is what teleported
+// and reflowed a panel on every rail collapse, and it shipped in three files.
+var RAIL_ANCHORED = {
+  'bwn-suite-core.user.js': ['.bwn-drawer', '.bwn-ops-overlay'],
+  'bwn-suite-ai.user.js': ['#bwn-cu-overlay', '#bwn-o30b-overlay', '#bwn-jv-overlay', '.bwn-ft-overlay'],
+  'bwn-bid-out.user.js': ['#bwn-bidout-ov']
+};
 
 // The email-guard strip's flash (.bwn-eg.flash / bwnEgFlash) was DELETED 2026-08-10, not fixed:
 // confirmSend() opens a dialog in the same tick and the strip is already coloured, so the pulse
@@ -363,6 +395,75 @@ ANIMATED.forEach(function (a) {
 var animDecls = (CORE.match(/animation:(?!none)[a-zA-Z]/g) || []).length;
 A.ok('exactly ' + ANIMATED.length + ' animation declarations in Core (add yours to ANIMATED above)',
   animDecls === ANIMATED.length, 'found ' + animDecls);
+
+// ---- 4b. the same sweep across the OTHER animating modules -----------------------------------
+// Core is not the only file with animations, and bwn-suite-ai had exactly ONE reduced-motion block
+// covering one of its seven. Same map-building code, run per file.
+function rmCoverageOf(src) {
+  var covered = {}, slowed = {};
+  (src.match(/@media \(prefers-reduced-motion:\s*reduce\)\{[^']*/g) || []).forEach(function (block) {
+    (block.match(/([^{}]+)\{([^{}]*)\}/g) || []).forEach(function (rule) {
+      var m = rule.match(/^([^{]+)\{([^}]*)\}$/);
+      if (!m) return;
+      var body = m[2];
+      m[1].split(',').forEach(function (s) {
+        s = s.trim();
+        if (/animation:\s*none/.test(body)) covered[s] = true;
+        if (/animation-duration:/.test(body)) slowed[s] = true;
+      });
+    });
+  });
+  return { covered: covered, slowed: slowed };
+}
+
+Object.keys(ANIMATED_BY_FILE).forEach(function (file) {
+  if (file === 'bwn-suite-core.user.js') return;             // covered above with its own probes
+  var src = read(file);
+  var cov = rmCoverageOf(src);
+  console.log('\n-- ' + file + ': reduced motion --');
+  ANIMATED_BY_FILE[file].forEach(function (a) {
+    if (a.slowed) {
+      A.ok(file + ' ' + a.sel + ' is SLOWED under reduced motion (a spinner reports work in flight)',
+        cov.slowed[a.sel] === true, 'slowed: ' + Object.keys(cov.slowed).join(' | '));
+    } else {
+      A.ok(file + ' ' + a.sel + ' (' + a.keyframe + ') is switched off under reduced motion',
+        cov.covered[a.sel] === true, 'covered: ' + Object.keys(cov.covered).join(' | '));
+    }
+    A.ok(file + ' ' + a.sel + ' still animates ' + a.keyframe + ' (the row is not stale)',
+      src.indexOf('animation:' + a.keyframe) !== -1);
+  });
+  var n = (src.match(/animation:(?!none)[a-zA-Z]/g) || []).length;
+  A.ok(file + ': exactly ' + ANIMATED_BY_FILE[file].length + ' animation declarations',
+    n === ANIMATED_BY_FILE[file].length, 'found ' + n);
+});
+
+// ---- 4c. rail-anchored geometry: transform, never left ----------------------------------------
+// Three files pinned their panels to the LIVE rail width, so collapsing the rail teleported them
+// 126px sideways and reflowed max-width. Nothing may read --bwn-dock-w into either property again.
+console.log('\n-- rail-anchored panels move on transform, in every module --');
+Object.keys(RAIL_ANCHORED).forEach(function (file) {
+  var src = read(file);
+  A.ok(file + ': nothing reads --bwn-dock-w into `left`',
+    !/left:\s*var\(--bwn-dock-w/.test(src), 'a live-width left offset teleports on collapse');
+  A.ok(file + ': nothing reads --bwn-dock-w into `max-width`',
+    !/max-width:calc\(100vw - var\(--bwn-dock-w/.test(src), 'a live-width max-width reflows on collapse');
+  RAIL_ANCHORED[file].forEach(function (sel) {
+    var i = src.indexOf(sel + '{');
+    A.ok(file + ' ' + sel + ' still exists', i !== -1);
+    if (i === -1) return;
+    var rule = src.slice(i, i + 900);
+    A.ok(file + ' ' + sel + ' rides --bwn-dock-shift on transform',
+      /transform:translateX\(var\(--bwn-dock-shift,0px\)\)/.test(rule), rule.slice(0, 120));
+    A.ok(file + ' ' + sel + ' transitions that shift rather than jumping',
+      /transition:[^;}]*transform \.2s cubic-bezier\(\.23,1,\.32,1\)/.test(rule), rule.slice(0, 200));
+  });
+  // --bwn-dock-w must still be PUBLISHED by Core and may still be read for other purposes; what
+  // must not come back is reading it into the two layout properties above.
+  if (file === 'bwn-suite-core.user.js') {
+    A.ok(file + ": still publishes --bwn-dock-w for anyone else's use",
+      src.indexOf("setProperty('--bwn-dock-w'") !== -1);
+  }
+});
 
 // No animation may ride on a keyframe that no longer exists - a renamed keyframe leaves the
 // selector silently static, which is how a dead entrance hides.
