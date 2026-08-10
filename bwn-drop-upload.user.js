@@ -1,10 +1,10 @@
 // ==UserScript==
 // @name         BWN Drop Upload (Broadway National)
 // @namespace    broadwaynational.bwn
-// @version      1.10.2
+// @version      1.10.3
 // @downloadURL  https://raw.githubusercontent.com/Intermu/userscripts/main/bwn-drop-upload.user.js
 // @updateURL    https://raw.githubusercontent.com/Intermu/userscripts/main/bwn-drop-upload.user.js
-// @description  Drop files anywhere on an Umbrava work order to upload them. Opens the Documents tab and upload dialog, hands over the files, and builds each file's description from its contents. Emails are parsed locally (.msg via an OLE/MAPI reader, .eml via RFC822) into an Outlook-style block - From/Sent/To/Cc/Subject and the body - that becomes the WO note, led by a one-line summary from Chrome's on-device built-in AI (zero cost, zero egress, nothing leaves the browser), falling back to local WO-field extraction (store, city/state, priority, PO, NTE, problem, requester) when the on-device model is unavailable. That same summary fills each file's Description. The WO note's Type is chosen from the email's parties: inbound is typed by the sender (client -> Client, else Vendor); outbound from Broadway is typed by the recipients (a client recipient -> Client, any vendor recipient -> Vendor, all-internal -> Internal). Umbrava's Description field is a locked react-aria combobox that rejects programmatic fills, so the description goes on your clipboard for a one-tap Ctrl+V. If BOTH the auto-fill and the automatic clipboard write are blocked (the latter needs a user gesture, which the WO Intake auto-handoff doesn't have), a "Copy the WO note" button appears - clicking it supplies the gesture so the copy lands, then Ctrl+V works. When WO Intake hands off a just-created WO's request email, each uploaded file's Label (document type) is set to "Work Order Request". You review and Save everything. Runs in the browser only: no network access, no grants.
+// @description  Drop files anywhere on an Umbrava work order to upload them. Opens the Documents tab and upload dialog, hands over the files, and builds each file's description from its contents. Emails are parsed locally (.msg via an OLE/MAPI reader, .eml via RFC822) into an Outlook-style block - From/Sent/To/Cc/Subject and the body - that becomes the WO note, led by a one-line summary from Chrome's on-device built-in AI (zero cost, zero egress, nothing leaves the browser), falling back to local WO-field extraction (store, city/state, priority, PO, NTE, problem, requester) when the on-device model is unavailable. That same summary fills each file's Description. The WO note's Type is chosen from the email's parties: inbound is typed by the sender (client -> Client, else Vendor); outbound from Broadway is typed by the recipients (a client recipient -> Client, any vendor recipient -> Vendor, all-internal -> Internal). Umbrava's Description field is a TipTap/ProseMirror rich-text editor; the note is filled by a synthetic paste (matches a real Ctrl+V) with insertHTML/insertText/innerHTML fallbacks, and each attempt is verified. The text is also placed on your clipboard as a backup. If the fill doesn't stick AND the automatic clipboard write is blocked (the latter needs a user gesture, which the WO Intake auto-handoff doesn't have), a "Copy the WO note" button appears - clicking it supplies the gesture so the copy lands, then Ctrl+V works. A console diagnostic reports which editor was found and which fill method stuck. When WO Intake hands off a just-created WO's request email, each uploaded file's Label (document type) is set to "Work Order Request". You review and Save everything. Runs in the browser only: no network access, no grants.
 // @match        https://app.umbrava.com/*
 // @match        https://*.umbrava.com/*
 // @run-at       document-idle
@@ -15,7 +15,7 @@
 (function () {
   'use strict';
 
-  var VER = '1.10.2';   // keep in step with @version (drift caught earlier: banner had lagged two releases)
+  var VER = '1.10.3';   // keep in step with @version (drift caught earlier: banner had lagged two releases)
   console.info('[BWN DROP UPLOAD] v' + VER + ' · Email→note: real .msg (OLE/MAPI) + .eml parsing · on-device AI one-line summary (Chrome built-in, zero egress) leads the note + fills Description, local field-extraction fallback · note Type by parties (inbound=sender, outbound=recipient) · document Label + note Type selectors both target their stable testids · WO Intake handoff sets Label=Work Order Request · bwn:cmd dropupload:files bridge');
 
   // Active only on WO pages; checked at drag time so SPA navigation needs no watcher.
@@ -1103,11 +1103,15 @@
     function tryText() { clear(); try { document.execCommand('insertText', false, text); } catch (e) { } }
     function tryInner() { try { ed.innerHTML = blockHtml; ed.dispatchEvent(new Event('input', { bubbles: true })); } catch (e) { } }
     function settle() { return new Promise(function (r) { setTimeout(function () { r(stuck()); }, 250); }); }
-    var steps = [tryPaste, tryHtml, trySoftLines, tryText, tryInner];
+    var steps = [tryPaste, tryHtml, trySoftLines, tryText, tryInner], stepNames = ['paste', 'insertHTML', 'softLines', 'insertText', 'innerHTML'];
+    // Diagnostic: which editor we grabbed and which fill method (if any) actually stuck. The note
+    // came up blank once live even though the synthetic paste is "verified" - this tells us WHERE it
+    // fails (wrong editor element, or every method silently no-ops) instead of guessing.
+    try { console.info('[BWN DROP UPLOAD] note editor:', (ed.tagName || '?') + (ed.id ? '#' + ed.id : '') + (ed.className ? '.' + String(ed.className).split(/\s+/)[0] : ''), '| contenteditable=', ed.getAttribute && ed.getAttribute('contenteditable'), '| role=', ed.getAttribute && ed.getAttribute('role')); } catch (e) { }
     function run(i) {
-      if (i >= steps.length) return Promise.resolve(stuck());
+      if (i >= steps.length) { try { console.warn('[BWN DROP UPLOAD] note fill: NONE of the methods stuck - editor rejected all'); } catch (e) { } return Promise.resolve(stuck()); }
       steps[i]();
-      return settle().then(function (ok) { return ok ? true : run(i + 1); });
+      return settle().then(function (ok) { try { console.info('[BWN DROP UPLOAD] note fill step "' + stepNames[i] + '":', ok ? 'STUCK' : 'no'); } catch (e) { } return ok ? true : run(i + 1); });
     }
     return run(0);
   }
