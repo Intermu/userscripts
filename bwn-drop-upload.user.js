@@ -800,7 +800,7 @@
     var proto = el.tagName === 'TEXTAREA' ? HTMLTextAreaElement.prototype : HTMLInputElement.prototype;
     // Reset React's value tracker so it registers a change (else a controlled input
     // whose cached value already matches skips its onChange and never updates state).
-    try { if (el._valueTracker) el._valueTracker.setValue(' ' + val); } catch (e) { }
+    try { if (el._valueTracker) el._valueTracker.setValue('\u0000' + val); } catch (e) { }
     try { Object.getOwnPropertyDescriptor(proto, 'value').set.call(el, val); } catch (e2) { el.value = val; }
     el.dispatchEvent(new Event('input', { bubbles: true }));
     el.dispatchEvent(new Event('change', { bubbles: true }));
