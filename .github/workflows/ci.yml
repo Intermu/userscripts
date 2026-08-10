@@ -19,6 +19,21 @@ jobs:
       - name: Checkout repository
         uses: actions/checkout@v7
 
+      # test-domproj-parity.js compares Core's pasted BWN-DOM / BWN-DOMC blocks against their source
+      # in the SIBLING repo Intermu/broadway-internal-ops, and exits NON-ZERO when that checkout is
+      # absent (a parity test that can only see one of the two sides is worse than none). The default
+      # GITHUB_TOKEN is scoped to THIS repo only, so a PAT with read access to broadway-internal-ops
+      # must be stored as the BWN_OPS_REPO_TOKEN secret. The parity step below sets BWN_OPS_REPO to
+      # this path — the harness's relative-path fallback resolves outside the Actions workspace.
+      - name: Checkout broadway-internal-ops (sibling repo, for the DOM-protocol parity check)
+        uses: actions/checkout@v7
+        with:
+          repository: Intermu/broadway-internal-ops
+          ref: main
+          path: broadway-internal-ops
+          token: ${{ secrets.BWN_OPS_REPO_TOKEN }}
+          persist-credentials: false
+
       - name: Setup Node.js
         uses: actions/setup-node@v6
         with:
@@ -164,6 +179,51 @@ jobs:
       # Closes the "quietly dropped" gap the animation review left when its fixes landed unevenly.
       - name: UI-contract completeness ledger harness
         run: node scripts/test-ui-contract-ledger.js
+
+      # These six harnesses were committed to scripts/ but never wired here, so CI ran a green check
+      # that said nothing about them — the exact "committed but never executed" rot the 2026-07-31
+      # audit closed for the four steps near the top. All six pass a local sweep; wired here so a
+      # regression fails CI instead of waiting for someone to run node by hand.
+
+      # Tonight's animation review, made behavioural: RUNS each drawer module's drawerDismiss() and
+      # the real publishDockWidth in a vm under both media states — exit path, rail geometry, and the
+      # .bwn-ops-card reduced-motion gap — rather than grepping for the fix. Pairs with the ledger above.
+      - name: Drawer + toast motion behavioural harness (Core 1.78.0 animation review)
+        run: node scripts/test-drawer-motion.js
+
+      # BWN Ask reaches the page tools and reports failure instead of eating it. Pins Ask's tool
+      # definitions byte-identical to bwn-suite-ai (one model, one truth about the three verbs) and
+      # drives the sliced tool loop: /api/ai not /api/ask, fresh token per round, round cap, status stamp.
+      - name: BWN Ask page-tools + tool-loop harness (route + def parity)
+        run: node scripts/test-ask-tools.js
+
+      # The phase-4 DOM bus contract driven end to end with BOTH real halves — Core's responder and
+      # suite-ai's client/tools sliced from shipped bytes. rid correlation, timeout-never-hangs, the
+      # write-verb gate AT THE BUS, listener cleanup on both paths, NO_RESPONDER named not timed out.
+      - name: DOM handle bus harness (phase-4 request/response contract)
+        run: node scripts/test-domp-bus.js
+
+      # The two shared DOM-protocol blocks (BWN-DOM / BWN-DOMC) are PASTE-IDENTICAL across this repo
+      # and Intermu/broadway-internal-ops — a paste has no mechanism behind it, so two copies drift.
+      # Needs the sibling checkout above; BWN_OPS_REPO points the harness at it (the relative fallback
+      # lands outside the workspace). Exits non-zero rather than skipping if the source is unreachable.
+      - name: DOM-protocol parity harness (Core paste vs broadway-internal-ops source)
+        env:
+          BWN_OPS_REPO: ${{ github.workspace }}/broadway-internal-ops
+        run: node scripts/test-domproj-parity.js
+
+      # The board -> Dashboard dataset producer (heatDatasetRows), sliced from Core and run in a vm.
+      # Pins the heat-record -> wire-row map, UNITS pass through unchanged (no re-introduced 60x/100x),
+      # "(unresolved member)" never sent as a coordinator, and the cross-file key contract with the SWA route.
+      - name: Heat dataset push harness (board -> Dashboard producer + wire-key contract)
+        run: node scripts/test-heat-dataset-push.js
+
+      # The Operate panel — the seam an agent drives the page from, the code path that once had page
+      # tools registered where no coordinator-facing UI invoked them. Sliced from bwn-suite-ai: panel
+      # unprojectable, capability line derived, posts `operate` never `ask`, adopts the SERVER's round
+      # cap, keeps a failure's status AND body, Stop halts before the next round.
+      - name: Operate surface harness (agent drive seam + loop contract)
+        run: node scripts/test-operate-surface.js
 
   lint:
     name: Lint (advisory)
