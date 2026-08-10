@@ -1,10 +1,10 @@
 // ==UserScript==
 // @name         BWN Drop Upload (Broadway National)
 // @namespace    broadwaynational.bwn
-// @version      1.10.4
+// @version      1.10.5
 // @downloadURL  https://raw.githubusercontent.com/Intermu/userscripts/main/bwn-drop-upload.user.js
 // @updateURL    https://raw.githubusercontent.com/Intermu/userscripts/main/bwn-drop-upload.user.js
-// @description  Drop files anywhere on an Umbrava work order to upload them. Opens the Documents tab and upload dialog, hands over the files, and builds each file's description from its contents. Emails are parsed locally (.msg via an OLE/MAPI reader, .eml via RFC822) into an Outlook-style block - From/Sent/To/Cc/Subject and the body - that becomes the WO note, led by a one-line summary from Chrome's on-device built-in AI (zero cost, zero egress, nothing leaves the browser), falling back to local WO-field extraction (store, city/state, priority, PO, NTE, problem, requester) when the on-device model is unavailable. That same summary fills each file's Description. The WO note's Type is chosen from the email's parties: inbound is typed by the sender (client -> Client, else Vendor); outbound from Broadway is typed by the recipients (a client recipient -> Client, any vendor recipient -> Vendor, all-internal -> Internal). Umbrava's Description field is a TipTap/ProseMirror rich-text editor. It rejects synthetic paste, beforeinput, insertHTML and raw innerHTML, but honours execCommand('insertText') plus a synthetic Enter keydown - so the note is filled line by line (Enter between lines to keep paragraphs), paced ~12ms/line so ProseMirror's async commit doesn't drop lines (measured live 2026-08-10). The text is also placed on your clipboard as a backup, and if every fill method fails a "Copy the WO note" button appears (its click supplies the gesture for a reliable copy, then Ctrl+V). A console diagnostic reports which editor was found and which fill method stuck. When WO Intake hands off a just-created WO's request email, each uploaded file's Label (document type) is set to "Work Order Request". You review and Save everything. Runs in the browser only: no network access, no grants.
+// @description  Drop files anywhere on an Umbrava work order to upload them. Opens the Documents tab and upload dialog, hands over the files, and builds each file's description from its contents. Emails are parsed locally (.msg via an OLE/MAPI reader, .eml via RFC822) into an Outlook-style block - From/Sent/To/Cc/Subject and the body - that becomes the WO note, led by a one-line summary from Chrome's on-device built-in AI (zero cost, zero egress, nothing leaves the browser), falling back to local WO-field extraction (store, city/state, priority, PO, NTE, problem, requester) when the on-device model is unavailable. That same summary fills each file's Description. The WO note's Type is chosen from the email's parties: inbound is typed by the sender (client -> Client, else Vendor); outbound from Broadway is typed by the recipients (a client recipient -> Client, any vendor recipient -> Vendor, all-internal -> Internal). Umbrava's Description field is a TipTap/ProseMirror rich-text editor. It rejects synthetic paste, beforeinput, insertHTML and raw innerHTML, but honours execCommand('insertText') plus a synthetic Enter keydown - so the note is filled line by line (Enter between lines to keep paragraphs), paced ~12ms/line so ProseMirror's async commit doesn't drop lines (measured live 2026-08-10). The text is also placed on your clipboard as a backup, and if every fill method fails a "Copy the WO note" button appears (its click supplies the gesture for a reliable copy, then Ctrl+V). A console diagnostic reports which editor was found and which fill method stuck. When WO Intake hands off a just-created WO's request email, each uploaded file's Label (document type) is set to "Work Order Request" and the note Type is forced to Client (a WO Intake handoff is a client's request, even when the sender is a broker like Fairmarkit that reads as a Vendor domain). Fairmarkit / bulk-email footer boilerplate (FAQ / Privacy / Terms / Unsubscribe, the -----!{...}!----- machine tail) and safelinks/awstrack tracking URLs are stripped from the note body. You review and Save everything. Runs in the browser only: no network access, no grants.
 // @match        https://app.umbrava.com/*
 // @match        https://*.umbrava.com/*
 // @run-at       document-idle
@@ -15,7 +15,7 @@
 (function () {
   'use strict';
 
-  var VER = '1.10.4';   // keep in step with @version (drift caught earlier: banner had lagged two releases)
+  var VER = '1.10.5';   // keep in step with @version (drift caught earlier: banner had lagged two releases)
   console.info('[BWN DROP UPLOAD] v' + VER + ' · Email→note: real .msg (OLE/MAPI) + .eml parsing · on-device AI one-line summary (Chrome built-in, zero egress) leads the note + fills Description, local field-extraction fallback · note Type by parties (inbound=sender, outbound=recipient) · document Label + note Type selectors both target their stable testids · WO Intake handoff sets Label=Work Order Request · bwn:cmd dropupload:files bridge');
 
   // Active only on WO pages; checked at drag time so SPA navigation needs no watcher.
@@ -302,6 +302,14 @@
   function tidyBody(raw) {
     var body = String(raw || '').slice(0, BODY_MAX).replace(/\r\n/g, '\n').replace(/\r/g, '\n');
     body = body.replace(/ ?<(?:mailto:|https?:\/\/)[^>]*>/gi, '');
+    // Drop bulk-email / Fairmarkit footer boilerplate + tracking tails: the machine tail
+    // -----!{...}!----- and safelinks/awstrack redirect URLs, then cut everything from the footer
+    // banner onward (FAQ / Privacy / Terms / Unsubscribe all sit below these markers). All markers
+    // are Fairmarkit-specific, so ordinary client/vendor emails are untouched.
+    body = body.replace(/-----!\{[\s\S]*?\}!-----/g, '');
+    body = body.replace(/https?:\/\/\S*(?:safelinks\.protection\.outlook\.com|awstrack\.me)\S*/gi, '');
+    var fcut = body.search(/\n?\s*(?:Keep an eye on all of your opportunities|Reach our supplier relations|Don'?t have an account yet|Autonomous sourcing for all spend|Fairmarkit,\s*1 Beacon)/i);
+    if (fcut > 0) body = body.slice(0, fcut);
     var lines = body.split('\n');
     for (var i = 0; i < lines.length; i++) {
       // Only treat a "From:" line as the start of the quoted reply thread if it
@@ -1536,7 +1544,9 @@
       var fresh = pending && (Date.now() - pending.ts < PENDING_TTL);
       var merged = fresh ? pending.files.concat(files) : files;
       var origin = (fresh && pending.originTab) ? pending.originTab : originTab;
-      pending = { ts: Date.now(), files: merged, noteText: buildNoteText(merged), originTab: origin, noteType: noteTypeForFiles(merged) };
+      // WO Intake handoff = a just-created WO's CLIENT request email, so the note is always a
+      // Client note (the sender is often a broker like Fairmarkit that classifyDomain reads as Vendor).
+      pending = { ts: Date.now(), files: merged, noteText: buildNoteText(merged), originTab: origin, noteType: 'Client' };
     });
     // WO Intake handoff = a just-created WO's client request email, so label the uploaded
     // document(s) "Work Order Request". Manual drops (the overlay path) keep the default Label.
