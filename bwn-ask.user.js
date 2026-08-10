@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         BWN Ask (Coordinator Copilot)
 // @namespace    https://broadwaynational.com/bwn
-// @version      0.7.1
+// @version      0.7.2
 // @description  Ask questions about the work order you're viewing. Reads the WO live from Umbrava via same-origin GraphQL (details + full note / site-visit history) AND a summary roster of the other work orders at the same location, plus the team knowledge doc, and answers through the Broadway AI proxy with dates and references. Phase 1.5 = page-scoped + location roster (Path A); no data leaves the trusted Broadway path.
 // @match        https://app.umbrava.com/*
 // @run-at       document-idle
@@ -593,13 +593,34 @@
   // Core's page-wide .bwn-drawer sheet, so every tool in the suite looks the same when
   // you click into it. Hiding detaches the node instead of destroying it, which keeps
   // the conversation thread across open/close.
-  function hidePanel() { if (panelEl && panelEl.parentNode) panelEl.remove(); }
+  // Suite drawer exit, per the contract in Core's ensureStyle - Core's stylesheet owns the fade.
+  // This module's variant is REVERSIBLE, unlike every other drawer module's: the node is kept
+  // alive to preserve the conversation, so the exit state has to come back off on reopen and the
+  // pending removal has to be cancellable. It also keeps its id for the same reason - a reused
+  // node cannot collide with itself.
+  var fadeTimer = null;
+  function hidePanel() {
+    if (!panelEl || !panelEl.parentNode) return;
+    var reduce = false;
+    try { reduce = !!(window.matchMedia && window.matchMedia('(prefers-reduced-motion: reduce)').matches); } catch (e) { }
+    if (reduce) { panelEl.remove(); return; }
+    panelEl.setAttribute('aria-hidden', 'true');
+    panelEl.classList.add('bwn-closing');
+    clearTimeout(fadeTimer);
+    fadeTimer = setTimeout(function () { if (panelEl) { try { panelEl.remove(); } catch (e) { } } }, 170);
+  }
   function buildPanel() {
-    if (panelEl && panelEl.isConnected) { hidePanel(); return; }   // dock entry toggles
+    if (panelEl && panelEl.isConnected && !panelEl.classList.contains('bwn-closing')) { hidePanel(); return; }   // dock entry toggles
     try {
       document.dispatchEvent(new CustomEvent('bwn:evt', { detail: { id: 'bwn:drawer:open', key: DOCK_KEY } }));
     } catch (e) { }
-    if (panelEl) { document.body.appendChild(panelEl); inputEl && inputEl.focus(); return; }
+    if (panelEl) {
+      // Reopening mid-fade cancels the removal and lets the opacity transition retarget from
+      // wherever it got to, which is the whole reason the exit is a transition and not a keyframe.
+      clearTimeout(fadeTimer); fadeTimer = null;
+      panelEl.classList.remove('bwn-closing'); panelEl.removeAttribute('aria-hidden');
+      document.body.appendChild(panelEl); inputEl && inputEl.focus(); return;
+    }
 
     panelEl = document.createElement('aside');
     panelEl.id = 'bwn-drawer-ask'; panelEl.className = 'bwn-drawer';

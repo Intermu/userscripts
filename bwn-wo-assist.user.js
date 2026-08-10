@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         BWN WO Assist (Broadway National)
 // @namespace    broadwaynational.bwn
-// @version      0.3.1
+// @version      0.3.2
 // @downloadURL  https://raw.githubusercontent.com/Intermu/userscripts/main/bwn-wo-assist.user.js
 // @updateURL    https://raw.githubusercontent.com/Intermu/userscripts/main/bwn-wo-assist.user.js
 // @description  Escalate a work order to management from inside Umbrava, and round-trip its state back onto the page. Pick why and say what you need; it POSTs to the broadway-internal-ops SWA proxy (x-bwn-key gated) which proves your Umbrava session token, injects your verified email as the requester, works out WHO it goes to from your rank (a coordinator escalates to a supervisor, a supervisor to management, a director owns the call), sets a due clock scaled by the job's priority, records the item in the shared assist queue, and only then sends the notify. Escalating the same work order twice while the first is still open is rejected server-side, so two tabs cannot double-fire. While an escalation is open, this script also reads its state back (op:'status') and publishes it on the suite bus, so the WO Assist checklist shows "Escalated - awaiting mgmt" and the drawer becomes an acknowledge/resolve panel instead of a duplicate form. Registers one "Escalate" entry in the shared dock tab and adds an Escalate button to the WO Assist checklist's escalation step; a Tampermonkey menu item opens it too, so it is never stranded. The flow's secret URL stays server-side; nothing sensitive lives in this script.
@@ -383,11 +383,23 @@
   // ---- Drawer ---------------------------------------------------------------
   var openEl = null;
   var openStateEvt = null;   // the open drawer's bwn:assist:state listener, removed on close
+  // Suite drawer exit, per the contract in Core's ensureStyle. Core's stylesheet owns the fade;
+  // sandboxes cannot share the helper, so these five lines are duplicated in every drawer module.
+  function drawerDismiss(el) {
+    var reduce = false;
+    try { reduce = !!(window.matchMedia && window.matchMedia('(prefers-reduced-motion: reduce)').matches); } catch (e) { }
+    if (reduce) { el.remove(); return; }
+    el.removeAttribute('id'); el.setAttribute('aria-hidden', 'true');   // id freed now: a reopen builds a fresh node
+    el.classList.add('bwn-closing');
+    setTimeout(function () { try { el.remove(); } catch (e) { } }, 170);
+  }
   function closeModal() {
     if (openEl) {
-      openEl.remove(); openEl = null;
+      // Both listeners come off BEFORE the fade - the node outlives the tool by 170ms, and a
+      // state event answered by a dying drawer would write into a node nobody will ever see.
       document.removeEventListener('keydown', onKey);
       if (openStateEvt) { document.removeEventListener('bwn:evt', openStateEvt); openStateEvt = null; }
+      drawerDismiss(openEl); openEl = null;
     }
   }
   function onKey(e) { if (e.key === 'Escape') closeModal(); }

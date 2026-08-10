@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         BWN Suite - Core (Broadway National)
 // @namespace    broadwaynational.bwn
-// @version      1.77.0
+// @version      1.78.0
 // @downloadURL  https://raw.githubusercontent.com/Intermu/userscripts/main/bwn-suite-core.user.js
 // @updateURL    https://raw.githubusercontent.com/Intermu/userscripts/main/bwn-suite-core.user.js
 // @description  Runs several Umbrava helpers for BWN coordinators, in the browser with no privileged grants. Includes: PO Approval + ETA Builder; WO Assist (GP/ETA, a stall watchdog, DNE calculator, and a next-action playbook); Email Leak Guard (checks recipients against vendor names, PO amounts, and client budget references before an outbound email sends); WO List Heat (a triage overlay + My Day strip on the work-order list, with an optional same-origin Umbrava API scan for deterministic full-board coverage); and the BWN Launcher (opens the Azure Static Web App tools with the current WO's context). Modules share state through sessionStorage/localStorage. The only network calls are same-origin Umbrava GraphQL requests (app.umbrava.com/api/graphql, the app's own session): List Heat's full-board scan and WO Assist's work-order / trip / clock-in / document reads, plus ONE write - BWN Views saves the column layout through Umbrava's own putUserPreference, the same preference the column chooser writes; everything else is offline. Toggle modules in BWN_MODULES below.
@@ -8951,7 +8951,10 @@
       function close() {
         document.removeEventListener('keydown', onKeyP, true);
         document.removeEventListener('bwn:evt', onSlotTaken);
-        ov.remove();
+        // Fade out instead of vanishing. Listeners come off FIRST, so the 170ms the node is
+        // still in the DOM cannot answer a key or a bus event. Focus returns immediately -
+        // waiting for the fade would leave the keyboard on a dying node.
+        drawerDismiss(ov, card);
         try { if (prevFocus && prevFocus.focus && prevFocus.isConnected) prevFocus.focus(); } catch (e) { }
       }
       // Announcing on open is only half of the shared slot - without this we sat there
@@ -9034,7 +9037,7 @@
         // right-edge Tasks tabs; the rail then opens from where the tab was, no jump.
         '#' + DOCK_STACK_ID + '{position:fixed;left:0;top:50%;transform:translateY(-50%);z-index:99998;' +
         'font-family:-apple-system,BlinkMacSystemFont,"Segoe UI","Helvetica Neue",Arial,sans-serif;}' +
-        '#' + DOCK_STACK_ID + '.bwn-dock-rail{width:158px;background:var(--bwn-green-dk);border-radius:0 14px 14px 0;' +
+        '#' + DOCK_STACK_ID + '.bwn-dock-rail{width:' + DOCK_RAIL_W + 'px;background:var(--bwn-green-dk);border-radius:0 14px 14px 0;' +
         'box-shadow:2px 4px 22px rgba(0,0,0,.28);overflow:hidden;}' +
         '#' + DOCK_STACK_ID + ' .bwn-dock-hd{padding:13px 13px 11px;border-bottom:1px solid rgba(255,255,255,.14);}' +
         '#' + DOCK_STACK_ID + ' .bwn-dock-hd img{display:block;width:100%;height:auto;user-select:none;}' +
@@ -9065,7 +9068,7 @@
         // pull-out) carrying the company logo mark. The mark is cropped out of the shared
         // wordmark PNG so there is one logo asset, not a second cut kept in sync by hand.
         '#' + DOCK_STACK_ID + ' .bwn-dock-tab{display:flex;align-items:center;justify-content:center;' +
-        'width:32px;height:72px;border:none;padding:0;background:var(--bwn-green-dk);cursor:pointer;' +
+        'width:' + DOCK_TAB_W + 'px;height:72px;border:none;padding:0;background:var(--bwn-green-dk);cursor:pointer;' +
         'border-radius:0 12px 12px 0;box-shadow:2px 3px 14px rgba(0,0,0,.28);overflow:hidden;}' +
         '#' + DOCK_STACK_ID + ' .bwn-dock-tab:hover{filter:brightness(1.14);}' +
         '#' + DOCK_STACK_ID + ' .bwn-dock-tab:focus-visible{outline:2px solid var(--bwn-accent);outline-offset:2px;}' +
@@ -9092,13 +9095,52 @@
         //   </aside>
         // Announce with bwn:drawer:open {key} before mounting; every other module drops
         // its own drawer when it sees a key that is not its own (see the bus below).
-        '.bwn-drawer{position:fixed;top:0;bottom:0;left:var(--bwn-dock-w,158px);z-index:99997;' +
-        'width:420px;max-width:calc(100vw - var(--bwn-dock-w,158px) - 8px);display:flex;flex-direction:column;' +
+        //
+        // Dropping it means FADING it, not removing it. A bare .remove() is what made a tool
+        // swap read as two objects - one panel popped out of existence while the next faded in.
+        // Modules are in their own sandboxes and cannot call Core's helper, so each carries:
+        //
+        //   function drawerDismiss(el) {
+        //     var reduce = false;
+        //     try { reduce = !!(window.matchMedia && window.matchMedia('(prefers-reduced-motion: reduce)').matches); } catch (e) { }
+        //     if (reduce) { el.remove(); return; }
+        //     el.removeAttribute('id'); el.setAttribute('aria-hidden', 'true');
+        //     el.classList.add('bwn-closing');
+        //     setTimeout(function () { el.remove(); }, 170);
+        //   }
+        //
+        // Detach key and bus listeners BEFORE calling it - the node lives 170ms longer than the
+        // tool does and must not answer anything during the fade.
+        // Motion, three deliberate choices (animation review 2026-08-10):
+        //  - `left` is PINNED to the expanded rail width and the rail's real position arrives as
+        //    a transform. Collapsing the rail used to retarget `left` and `max-width` from
+        //    --bwn-dock-w, which teleported an open drawer 126px sideways and reflowed it.
+        //    Transform and opacity only; nothing here touches layout.
+        //  - Entry and exit are TRANSITIONS, not keyframes. Opening one tool closes another
+        //    (see the bwn:drawer:open contract above), so the two panels cross in the same slot
+        //    and a transition retargets from wherever it is - a keyframe restarts from zero.
+        //  - The entry is an honest fade. The old keyframe slid 14px on a 420px panel, which
+        //    read as a fade with a twitch rather than the slide its comment claimed; the
+        //    transform axis now belongs to the rail shift alone.
+        '.bwn-drawer{position:fixed;top:0;bottom:0;left:' + DOCK_RAIL_W + 'px;z-index:99997;' +
+        'width:420px;max-width:calc(100vw - ' + (DOCK_RAIL_W + 8) + 'px);display:flex;flex-direction:column;' +
         'background:var(--bwn-surface);border-radius:0 14px 14px 0;box-shadow:10px 0 34px rgba(0,0,0,.2);' +
         'font-family:-apple-system,BlinkMacSystemFont,"Segoe UI","Helvetica Neue",Arial,sans-serif;' +
-        'animation:bwn-drawer-in .16s ease-out;}' +
+        'opacity:1;transform:translateX(var(--bwn-dock-shift,0px));' +
+        'transition:opacity .16s cubic-bezier(.23,1,.32,1),transform .2s cubic-bezier(.23,1,.32,1);}' +
+        '@starting-style{.bwn-drawer{opacity:.4;}}' +
+        // Exit contract for modules: strip the id, add .bwn-closing, remove after DRAWER_EXIT_MS
+        // (170). Sits UNDER the incoming panel and stops taking clicks the moment it starts to go.
+        '.bwn-drawer.bwn-closing{opacity:0;z-index:99996;pointer-events:none;}' +
+        // Kept even though .bwn-drawer no longer uses it: bwn-suite-ai's Job View card
+        // (#bwn-jv-card) animates with this keyframe by name across the sandbox boundary.
+        // Deleting it here would silently kill that entrance.
         '@keyframes bwn-drawer-in{from{transform:translateX(-14px);opacity:.4;}to{transform:none;opacity:1;}}' +
-        '@media (prefers-reduced-motion:reduce){.bwn-drawer{animation:none;}}' +
+        // Gentler, not zero: the panel still appears and disappears, it just does not move or
+        // fade. Covers the settings card too - it rides the same motion and was NOT covered
+        // before, so a reduced-motion user got an animation they had asked not to have.
+        '@media (prefers-reduced-motion:reduce){.bwn-drawer,.bwn-drawer.bwn-closing,.bwn-ops-overlay,.bwn-ops-card{animation:none;transition:none;}' +
+        '.bwn-drawer{opacity:1;}}' +
         '.bwn-drawer-hd{display:flex;align-items:flex-start;gap:10px;padding:15px 16px 14px 18px;' +
         'background:linear-gradient(135deg,var(--bwn-green),var(--bwn-green-dk));color:#fff;border-radius:0 14px 0 0;}' +
         '.bwn-drawer-hd .t{font:600 15px -apple-system,BlinkMacSystemFont,"Segoe UI","Helvetica Neue",Arial,sans-serif;}' +
@@ -9112,8 +9154,16 @@
         '.bwn-drawer-ft{display:flex;gap:8px;justify-content:flex-end;align-items:center;padding:12px 18px;' +
         'border-top:1px solid var(--bwn-border-2);background:var(--bwn-surface-2);border-radius:0 0 14px 0;}' +
         // Suite settings rides the same drawer geometry as the rest of the tools.
-        '.bwn-ops-overlay{position:fixed;top:0;bottom:0;left:var(--bwn-dock-w,158px);z-index:100001;display:flex;font-family:-apple-system,BlinkMacSystemFont,"Segoe UI","Helvetica Neue",Arial,sans-serif;}' +
-        '.bwn-ops-card{width:540px;max-width:calc(100vw - var(--bwn-dock-w,158px) - 8px);height:100%;display:flex;flex-direction:column;background:var(--bwn-surface);border-radius:0 14px 14px 0;overflow:hidden;box-shadow:10px 0 34px rgba(0,0,0,.2);animation:bwn-drawer-in .16s ease-out;}' +
+        // Same geometry and the same motion split as .bwn-drawer: the overlay owns the rail
+        // shift (transform), the card owns the fade (opacity). Two elements here, so the two
+        // never contend for one transform.
+        '.bwn-ops-overlay{position:fixed;top:0;bottom:0;left:' + DOCK_RAIL_W + 'px;z-index:100001;display:flex;font-family:-apple-system,BlinkMacSystemFont,"Segoe UI","Helvetica Neue",Arial,sans-serif;' +
+        'transform:translateX(var(--bwn-dock-shift,0px));transition:transform .2s cubic-bezier(.23,1,.32,1);}' +
+        '.bwn-ops-overlay.bwn-closing{pointer-events:none;}' +
+        '.bwn-ops-card{width:540px;max-width:calc(100vw - ' + (DOCK_RAIL_W + 8) + 'px);height:100%;display:flex;flex-direction:column;background:var(--bwn-surface);border-radius:0 14px 14px 0;overflow:hidden;box-shadow:10px 0 34px rgba(0,0,0,.2);' +
+        'opacity:1;transition:opacity .16s cubic-bezier(.23,1,.32,1);}' +
+        '@starting-style{.bwn-ops-card{opacity:.4;}}' +
+        '.bwn-ops-card.bwn-closing{opacity:0;}' +
         '.bwn-ops-hd{background:linear-gradient(135deg,var(--bwn-green),var(--bwn-green-dk));color:#fff;padding:16px 20px;border-radius:0 14px 0 0;}' +
         '.bwn-ops-hd .t{font:600 16px -apple-system,BlinkMacSystemFont,"Segoe UI","Helvetica Neue",Arial,sans-serif;}' +
         '.bwn-ops-hd .s{font:500 11px ui-monospace,"Segoe UI Mono","SF Mono",monospace;color:rgba(255,255,255,.7);margin-top:3px;}' +
@@ -9252,6 +9302,16 @@
     }
 
     // ---- Shared launcher dock (bwn:dock:* host) --------------------------------
+    // Geometry constants live INSIDE this marker on purpose: scripts/test-dock-latent-fixes.js
+    // slices from here to the command-palette bridge and runs the shipped bytes in a vm, so a
+    // constant declared above the marker is `not defined` in the harness. `var` hoists to the
+    // module either way, so ensureStyle above still sees these.
+    //   DOCK_RAIL_W  - the expanded rail width, in ONE place. The drawer pins `left` to it and
+    //                  rides a transform to wherever the rail actually is; the stylesheet and
+    //                  publishDockWidth must agree or a collapsed rail leaves the drawer 126px off.
+    var DOCK_RAIL_W = 158;
+    var DOCK_TAB_W = 32;        // collapsed pull tab, .bwn-dock-tab
+    var DRAWER_EXIT_MS = 170;   // .bwn-closing fade (160ms) + 10ms slack before removal
     // Generalizes the CC pair's two-party bwn:cc:* coordination into an N-party dock:
     // any suite module registers ONE launcher over the document-level bwn:evt bus and
     // this host renders them as ONE dark rail card on the left edge (logo header,
@@ -9427,8 +9487,34 @@
     }
     // Drawers open flush against whatever the dock is currently showing, so the rail's
     // own width is published as a CSS variable rather than hard-coded in every module.
+    // Shared drawer exit. Modules cannot call this (separate Tampermonkey sandboxes - only the
+    // bus crosses), so each one carries the same five lines; the CSS that does the actual work
+    // lives in ensureStyle above and IS shared. Keep the two in step.
+    //   node  - the element to remove (the overlay, if there is one)
+    //   fader - the element that carries .bwn-closing's opacity (the card); defaults to node
+    function drawerDismiss(node, fader) {
+      if (!node) return;
+      var reduce = false;
+      try { reduce = !!(window.matchMedia && window.matchMedia('(prefers-reduced-motion: reduce)').matches); } catch (e) { }
+      if (reduce) { node.remove(); return; }   // no transition to wait for, so do not leave it up for 170ms
+      try {
+        node.removeAttribute('id');            // frees the id immediately - reopening the same tool must not duplicate it
+        node.setAttribute('aria-hidden', 'true');
+        node.classList.add('bwn-closing');
+        if (fader && fader !== node) fader.classList.add('bwn-closing');
+      } catch (e) { node.remove(); return; }
+      setTimeout(function () { try { node.remove(); } catch (e) { } }, DRAWER_EXIT_MS);
+    }
     function publishDockWidth(px) {
-      try { document.documentElement.style.setProperty('--bwn-dock-w', px + 'px'); } catch (e) { }
+      try {
+        var d = document.documentElement.style;
+        d.setProperty('--bwn-dock-w', px + 'px');
+        // --bwn-dock-shift is the SAME fact expressed as a delta from the expanded rail, so a
+        // drawer can follow the rail on the compositor instead of having its `left` retargeted.
+        // --bwn-dock-w stays published unchanged: bwn-bid-out and bwn-suite-ai pin their own
+        // overlays to it and would break if it vanished.
+        d.setProperty('--bwn-dock-shift', (px - DOCK_RAIL_W) + 'px');
+      } catch (e) { }
     }
     function renderDock() {
       // Above EVERY early return, not just the signature check. The stylesheet is what makes the
@@ -9458,7 +9544,7 @@
       stack.textContent = '';
       if (dockIsCollapsed()) {
         stack.className = '';
-        publishDockWidth(32);
+        publishDockWidth(DOCK_TAB_W);
         var tab = document.createElement('button');
         tab.type = 'button'; tab.className = 'bwn-dock-tab';
         tab.title = 'BWN tools'; tab.setAttribute('aria-label', 'Expand BWN tools');
@@ -9478,7 +9564,7 @@
         return;
       }
       stack.className = 'bwn-dock-rail';
-      publishDockWidth(158);
+      publishDockWidth(DOCK_RAIL_W);
       // Header: company logo (white wordmark, built for the dark rail). Text fallback if
       // the page blocks the cross-origin image.
       var hd = document.createElement('div'); hd.className = 'bwn-dock-hd';

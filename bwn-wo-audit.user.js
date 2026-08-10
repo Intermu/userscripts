@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         BWN WO Audit (Broadway National)
 // @namespace    broadwaynational.bwn
-// @version      0.7.2
+// @version      0.7.3
 // @downloadURL  https://raw.githubusercontent.com/Intermu/userscripts/main/bwn-wo-audit.user.js
 // @updateURL    https://raw.githubusercontent.com/Intermu/userscripts/main/bwn-wo-audit.user.js
 // @description  Batch WO-audit tool. Upload a WO audit .xlsx; for each work order this reads its two most recent notes DIRECTLY from Umbrava's GraphQL API in-page (using your live Umbrava session - the same read the BWN Ops Suite AI drafts use), then asks the broadway-internal-ops SWA summarize route (x-bwn-key gated, Anthropic key server-side) to write a 1-3 sentence client-ready status note. Fills the audit's notes column and downloads the workbook, preserving every other cell and formula. Runs entirely in the app.umbrava.com page so it inherits your Umbrava auth - no MCP, no pasted keys, nothing sensitive in this script. This replaces the old standalone WO_Audit_Automation.html SWA tool, whose server-side MCP path could not authenticate to Umbrava.
@@ -21,6 +21,18 @@
 
   var VER = '0.7.1';
   var FONT = "-apple-system,BlinkMacSystemFont,'Segoe UI','Helvetica Neue',Arial,sans-serif";
+
+  // Suite drawer exit, per the contract in Core's ensureStyle. Core's stylesheet owns the fade;
+  // sandboxes cannot share the helper, so these five lines are duplicated in every drawer module.
+  // Module scope on purpose - both the close button and the drawer-slot bus listener call it.
+  function drawerDismiss(el) {
+    var reduce = false;
+    try { reduce = !!(window.matchMedia && window.matchMedia('(prefers-reduced-motion: reduce)').matches); } catch (e) { }
+    if (reduce) { el.remove(); return; }
+    el.removeAttribute('id'); el.setAttribute('aria-hidden', 'true');   // id freed now: a reopen builds a fresh node
+    el.classList.add('bwn-closing');
+    setTimeout(function () { try { el.remove(); } catch (e) { } }, 170);
+  }
   var SWA_BASE = 'https://green-stone-0717dab0f.7.azurestaticapps.net';
   var GREEN = '#0d3d26';
   var MS_DAY = 86400000;
@@ -760,7 +772,7 @@
     // backoff would otherwise orphan the workbook in memory with no route to Download.
     function tryClose() {
       if (_running) { logln('  (still running - press Cancel first if you want to stop)'); return; }
-      ov.remove();
+      drawerDismiss(ov);
     }
     ov.addEventListener('click', function (e) { if (e.target === ov) tryClose(); });
     $('bwn-woaudit-x').onclick = tryClose;
@@ -1061,7 +1073,7 @@
       // Another tool took the drawer slot - close ours, UNLESS a batch is in flight (a run can
       // span minutes of rate-limit backoff, and evicting it would discard the written rows).
       if (d.id === 'bwn:drawer:open' && d.key !== DOCK_KEY && !_running) {
-        var o = document.getElementById('bwn-woaudit-ov'); if (o) o.remove();
+        var o = document.getElementById('bwn-woaudit-ov'); if (o) drawerDismiss(o);
       }
     });
   } catch (e) { }
