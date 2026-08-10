@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         BWN Suite - Core (Broadway National)
 // @namespace    broadwaynational.bwn
-// @version      1.78.2
+// @version      1.78.3
 // @downloadURL  https://raw.githubusercontent.com/Intermu/userscripts/main/bwn-suite-core.user.js
 // @updateURL    https://raw.githubusercontent.com/Intermu/userscripts/main/bwn-suite-core.user.js
 // @description  Runs several Umbrava helpers for BWN coordinators, in the browser with no privileged grants. Includes: PO Approval + ETA Builder; WO Assist (GP/ETA, a stall watchdog, DNE calculator, and a next-action playbook); Email Leak Guard (checks recipients against vendor names, PO amounts, and client budget references before an outbound email sends); WO List Heat (a triage overlay + My Day strip on the work-order list, with an optional same-origin Umbrava API scan for deterministic full-board coverage); and the BWN Launcher (opens the Azure Static Web App tools with the current WO's context). Modules share state through sessionStorage/localStorage. The only network calls are same-origin Umbrava GraphQL requests (app.umbrava.com/api/graphql, the app's own session): List Heat's full-board scan and WO Assist's work-order / trip / clock-in / document reads, plus ONE write - BWN Views saves the column layout through Umbrava's own putUserPreference, the same preference the column chooser writes; everything else is offline. Toggle modules in BWN_MODULES below.
@@ -5536,25 +5536,14 @@
         '.bwn-eg .it{margin-top:3px;}' +
         '.bwn-eg .it[role="button"]{cursor:pointer;}' +
         '.bwn-eg .it[role="button"]:hover{text-decoration:underline;}' +
-        '.bwn-eg .it[role="button"]:focus-visible{outline:2px solid var(--bwn-accent);outline-offset:1px;}' +
-        // Rejection cue on a BLOCKED send (animation review 2026-08-10; was .5s ease-in-out x 2,
-        // so 1000ms). One 240ms pass now, and shaped as an attack-then-decay rather than a
-        // symmetric dip: the darkening lands on the first frame, where the eye already is,
-        // instead of easing in and delaying the moment being watched.
-        //
-        // Why it stayed short rather than long: confirmSend() opens a dialog in the same tick
-        // (see the send interceptor), so anything past a couple of hundred milliseconds is
-        // animating behind a surface that has already taken over the screen.
-        //
-        // Deleting it outright is defensible and was NOT done unilaterally - the dialog carries
-        // the actual message, so this only buys the sub-second "something stopped that" beat
-        // before the dialog paints. Say the word and it goes.
-        //
-        // Reduced motion drops it entirely, which costs nothing: the strip keeps its warn/bad
-        // colour and border, and the dialog still explains the block.
-        '.bwn-eg.flash{animation:bwnEgFlash .24s cubic-bezier(.23,1,.32,1);}' +
-        '@keyframes bwnEgFlash{from{filter:brightness(.85)}to{filter:none}}' +
-        '@media (prefers-reduced-motion:reduce){.bwn-eg.flash{animation:none;}}';
+        '.bwn-eg .it[role="button"]:focus-visible{outline:2px solid var(--bwn-accent);outline-offset:1px;}';
+        // There is no `.bwn-eg.flash` any more. It pulsed the strip when a send was blocked
+        // (bwnEgFlash, 1.2s of brightness dips originally, trimmed to 240ms, then removed at
+        // Mike's call 2026-08-10). It was redundant: confirmSend() opens a dialog in the SAME
+        // tick that names the bad recipients, and the strip already carries its warn/bad colour
+        // and left border from the scan that found them - both of those are on screen before the
+        // click. The flash only animated behind a dialog that had already taken the screen.
+        // Do not add it back without a reason the dialog cannot serve.
       document.head.appendChild(st);
     }
 
@@ -5800,8 +5789,8 @@
         }
         e.preventDefault();
         e.stopImmediatePropagation();
-        strip.classList.add('flash');
-        setTimeout(function () { strip.classList.remove('flash'); }, 300);   // just past the 240ms pass; the class must not outlive the cue
+        // No visual cue fires here on purpose: confirmSend() below opens a dialog naming the bad
+        // recipients in this same tick, and the strip is already coloured from the scan.
         confirmSend(modal, hard, function () {
           // Re-query first: React may have remounted (or torn down) the button
           // while the dialog was open \u2014 never log an override that didn't send.

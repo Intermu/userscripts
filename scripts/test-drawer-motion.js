@@ -227,9 +227,33 @@ var ANIMATED = [
   { sel: '#bwn-heat-set', keyframe: 'bwnPanelIn' },
   { sel: '#bwn-heat-prog.indet .fill', keyframe: 'bwnIndet' },
   { sel: '.bwn-wa-card', keyframe: 'bwnWaIn' },
-  { sel: '.bwn-ecd-savepulse', keyframe: 'bwnEcdPulse' },
-  { sel: '.bwn-eg.flash', keyframe: 'bwnEgFlash' }
+  { sel: '.bwn-ecd-savepulse', keyframe: 'bwnEcdPulse' }
 ];
+
+// The email-guard strip's flash (.bwn-eg.flash / bwnEgFlash) was DELETED 2026-08-10, not fixed:
+// confirmSend() opens a dialog in the same tick and the strip is already coloured, so the pulse
+// animated behind a surface that had taken the screen. Asserted gone, both halves, because a
+// revert would otherwise quietly reintroduce an animation with no row above and no rule.
+// These match the RULE forms, not the bare names: the deletion left a comment explaining why the
+// flash is gone, and that comment names it. A probe on the bare token went red against the very
+// note that documents the fix - so it asserts the declarations are gone, which is the real claim.
+var EG_RULE = '.bwn-eg.flash{';
+var EG_KEYFRAME = '@keyframes bwnEgFlash';
+var EG_USE = 'animation:bwnEgFlash';
+A.ok('the eg strip flash rule is gone from the stylesheet', CORE.indexOf(EG_RULE) === -1,
+  'the flash rule is back without a row in ANIMATED');
+A.ok('...and its keyframe went with it', CORE.indexOf(EG_KEYFRAME) === -1, 'orphan keyframe left behind');
+A.ok('...and nothing declares the animation', CORE.indexOf(EG_USE) === -1);
+A.ok('...and nothing still adds the class', CORE.indexOf("classList.add('flash')") === -1,
+  'the JS still flashes a class the CSS no longer defines');
+// Control: the three probes must actually fire on the bytes that shipped in 1.78.2, or they are
+// asserting nothing. Prose mentioning the flash must NOT trip them.
+var egOld = "'.bwn-eg.flash{animation:bwnEgFlash .24s cubic-bezier(.23,1,.32,1);}' + '@keyframes bwnEgFlash{from{filter:brightness(.85)}to{filter:none}}'";
+var egProse = '// There is no .bwn-eg.flash any more (bwnEgFlash, removed 2026-08-10).';
+A.ok('control: the probes catch the 1.78.2 rule',
+  egOld.indexOf(EG_RULE) !== -1 && egOld.indexOf(EG_KEYFRAME) !== -1 && egOld.indexOf(EG_USE) !== -1);
+A.ok('control: and a comment naming the flash does not trip them',
+  egProse.indexOf(EG_RULE) === -1 && egProse.indexOf(EG_KEYFRAME) === -1 && egProse.indexOf(EG_USE) === -1);
 
 // Pull the reduced-motion blocks out of the shipped strings and collect every selector each one
 // switches off. Selector lists are split, so `#a,#b{animation:none}` covers both.
@@ -325,11 +349,13 @@ A.ok('C8 control: an animating selector missing from the query is caught',
   c8covered['#bwn-heat-set'] !== true && c8covered['#bwn-heat-panel'] === true,
   'the sweep would have passed the defect it exists to find');
 
-// C9: and the count pin must fire when an animation is added without a row in ANIMATED.
-var c9 = mutate(CORE, "'.bwn-eg.flash{animation:bwnEgFlash .24s cubic-bezier(.23,1,.32,1);}'",
-  "'.bwn-eg.flash{animation:bwnEgFlash .24s cubic-bezier(.23,1,.32,1);}' + '.bwn-fake{animation:bwnFake 1s linear;}'");
+// C9: and the count pin must fire when an animation is added without a row in ANIMATED. Anchored
+// on the ECD ring because the eg flash this used to hang off no longer exists.
+var c9 = mutate(CORE, "'.bwn-ecd-savepulse{animation:bwnEcdPulse",
+  "'.bwn-fake{animation:bwnFake 1s linear;}' + '.bwn-ecd-savepulse{animation:bwnEcdPulse");
 A.ok('C9 control: a new undeclared animation trips the count pin',
-  (c9.match(/animation:(?!none)[a-zA-Z]/g) || []).length === ANIMATED.length + 1);
+  (c9.match(/animation:(?!none)[a-zA-Z]/g) || []).length === ANIMATED.length + 1,
+  'found ' + (c9.match(/animation:(?!none)[a-zA-Z]/g) || []).length + ' want ' + (ANIMATED.length + 1));
 
 console.log('\n(ran ' + (MODULES.length + 1) + ' drawer owners + 5 negative controls. Nothing here renders a pixel:');
 console.log(' the fade, the swap crossfade and the collapse slide are owed a live Chrome check.)');
