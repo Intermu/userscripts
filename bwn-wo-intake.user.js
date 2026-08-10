@@ -1,10 +1,10 @@
 // ==UserScript==
 // @name         BWN WO Intake (Broadway National)
 // @namespace    broadwaynational.bwn
-// @version      0.9.3
+// @version      0.9.4
 // @downloadURL  https://raw.githubusercontent.com/Intermu/userscripts/main/bwn-wo-intake.user.js
 // @updateURL    https://raw.githubusercontent.com/Intermu/userscripts/main/bwn-wo-intake.user.js
-// @description  Drop a client PO/WO email (.msg or .eml) onto the Create Work Order modal and it prefills the fields. Pilot Travel Centers: from the email body. Caleres (Famous Footwear / Corrigo): reads the attached WO PDF on-device for Trade, Scope, Priority, Due-By, Store, NTE. If a Caleres request has no WO PDF (image-only), it reads Store, City/State and Trade from the subject and the scope from the body (NTE + Priority stay manual - they live only in the images). Selects Client, Location (address-verified), Trade and Priority by clicking the real dropdown option; fills Client DNE, Source Job # and Source PO #; warns you if the WO PDF shows a cancel/flag note. Then, after you Create the WO, it hands the email to BWN Drop Upload to attach it to the new WO's Documents. Reads everything in the browser; nothing is uploaded to any server. Best-effort: review every field before you click Create.
+// @description  Drop a client PO/WO email (.msg or .eml) onto the Create Work Order modal and it prefills the fields. Pilot Travel Centers: from the email body. Caleres (Famous Footwear / Corrigo): reads the attached WO PDF on-device for Trade, Scope, Priority, Due-By, Store, NTE. If a Caleres request has no WO PDF (image-only), it reads Store, City/State and Trade from the subject and the scope from the body (NTE + Priority stay manual - they live only in the images). Amazon (Fairmarkit RFQ): the buyer is Amazon.com, Inc. but the sender is the Fairmarkit e-bidding platform - reads the RFQ body (no PDF) for Site (matched by the Amazon site code e.g. PIT2/STL3, else the shipping address), RFQ #, Trade, Scope + line items; NTE and Priority stay manual because an RFQ carries no ceiling yet (we are the quoting supplier). Selects Client, Location (address-verified), Trade and Priority by clicking the real dropdown option; fills Client DNE, Source Job # and Source PO #; warns you if the WO PDF shows a cancel/flag note. Then, after you Create the WO, it hands the email to BWN Drop Upload to attach it to the new WO's Documents. Reads everything in the browser; nothing is uploaded to any server. Best-effort: review every field before you click Create.
 // @match        https://app.umbrava.com/*
 // @run-at       document-idle
 // @noframes
@@ -13,9 +13,9 @@
 
 (function () {
   'use strict';
-  var VER = '0.9.0';
+  var VER = '0.9.4';
   var FONT = "-apple-system,BlinkMacSystemFont,'Segoe UI','Helvetica Neue',Arial,sans-serif";
-  console.info('[BWN WO INTAKE] v' + VER + ' - drop a PO email (.msg/.eml) on Create Work Order to prefill + auto-attach to the new WO Documents (via Drop Upload); reads locally, nothing leaves the browser');
+  console.info('[BWN WO INTAKE] v' + VER + ' - drop a PO / Amazon RFQ email (.msg/.eml) on Create Work Order to prefill + auto-attach to the new WO Documents (via Drop Upload); reads locally, nothing leaves the browser');
 
   function toast(msg, ms, bg) {
     var t = document.createElement('div');
@@ -385,6 +385,113 @@
     };
   }
 
+  // ---- Amazon (Fairmarkit RFQ) extractor -----------------------------------
+  // These arrive from the Fairmarkit e-bidding platform (sender info@m.fairmarkit.com), NOT from
+  // Amazon directly - the buyer named in the body is "Amazon.com, Inc.". Broadway is the QUOTING
+  // supplier here, so the RFQ carries no NTE/ceiling and no work priority: Client DNE and Priority
+  // are left blank on purpose (see fillWo - they stay manual). The detail is a clean plain-text
+  // body block (stream 1000001F), so there is no PDF to read. Grounded on 10 real RFQs 2026-08.
+  function isAmazon(senderEmail, subject, body) {
+    var d = String(senderEmail || '').split('@')[1] || '';
+    var fromFairmarkit = /(^|\.)fairmarkit\.com$/i.test(d);   // m.fairmarkit.com etc.
+    var mentionsAmazon = /Amazon\.com,?\s*Inc\.?/i.test(String(subject || '') + ' ' + String(body || ''));
+    return (fromFairmarkit && mentionsAmazon) ||
+      /Amazon\.com,?\s*Inc\.?\s*-\s*Request for Quote\s*#\d+/i.test(String(subject || ''));
+  }
+  // Parse the RFQ "Shipping address:" line into scoring tokens. Formats vary across the corpus:
+  //  "3200 E. Sawyer Road, Republic, MO, 65738, US"
+  //  "Amazon.com Services LLC (PIT2), 1200 Westport Rd, Imperial, PA, 15126, US"  (company + code prefix)
+  //  "1610 Van Buren Rd, Easton, PA 18045, Easton, PA, 18045, US"                 (duplicated segments)
+  //  "3500 Wilson Road, Bakersfield, 93309, US"                                    (NO state)
+  // We only rely on street # + city + state for the Location match - the ZIP is deliberately NOT
+  // used, because the RFQ ZIP and Umbrava's ZIP disagree for real sites (e.g. STL3: RFQ 65738 vs
+  // Umbrava 65619). Street # is the strongest disambiguator when a city holds two Amazon sites.
+  function parseAmazonAddr(a) {
+    a = String(a || '').replace(/\s+/g, ' ').trim().replace(/,?\s*US\.?$/i, '').replace(/,\s*$/, '');
+    a = a.replace(/^[^,]*\([A-Z]{3}\d\)\s*,\s*/, '');           // strip leading "Company (CODE), "
+    var streetNum = ''; var mS = a.match(/^\s*(\d{1,6})\b/); if (mS) streetNum = mS[1];
+    var street = ''; var mStr = a.match(/^[^,]+/); if (mStr) street = mStr[0].trim();
+    var zip = ''; var mZ = a.match(/(\d{5})(?:-\d{4})?(?!.*\d{5})/); if (mZ) zip = mZ[1];   // last 5-digit run
+    var state = ''; var reSt = /[,\s]([A-Z]{2})[,\s]+\d{5}\b/g, ms2, lastSt = null;
+    while ((ms2 = reSt.exec(a))) lastSt = ms2; if (lastSt) state = lastSt[1];
+    var parts = a.split(',').map(function (s) { return s.trim(); }).filter(Boolean), city = '';
+    for (var i = parts.length - 1; i >= 1; i--) {               // scan from the end; skip zip/state/US
+      var p = parts[i];
+      if (/^\d{5}(-\d{4})?$/.test(p) || /^[A-Z]{2}$/.test(p) || /^US$/i.test(p)) continue;
+      if (/[A-Za-z]/.test(p)) { city = p.replace(/\s+\d{5}(-\d{4})?$/, '').replace(/\s+[A-Z]{2}$/, '').trim(); break; }
+    }
+    return { streetNum: streetNum, street: street, city: city, state: state, zip: zip };
+  }
+  // Best-effort Trade from the RFQ wording; blank when unsure so the user picks (many Amazon RFQs are
+  // sweeping / janitorial / low-voltage AV / IT work, which have no confident Umbrava trade). Kept
+  // self-contained with WORD-BOUNDARIED keywords rather than delegating to the shared assetToTrade
+  // map, whose unanchored terms substring-false-positive on Amazon's noisier text (e.g. "beam clamps"
+  // -> "lamp" -> Lighting). A wrong confident trade is worse than a blank one here.
+  function amazonTrade(text) {
+    var s = ' ' + String(text || '').toLowerCase() + ' ';
+    if (/concrete|asphalt|\bcurb\b|\bslab\b|sidewalk|bollard/.test(s)) return 'Concrete and Asphalt';
+    if (/\blvp\b|carpet|\bvct\b|\btile\b|\bfloor(ing)?\b/.test(s)) return 'Flooring';
+    if (/\bpaint(ing)?\b/.test(s)) return 'Painting';
+    if (/\bhvac\b|\brtu\b|rooftop unit|furnace|condenser|air handler|\bac unit\b/.test(s)) return 'HVAC';
+    if (/plumb|toilet|\bdrain\b|water heater|faucet|urinal|\bsewer\b/.test(s)) return 'Plumbing';
+    if (/electric|conduit|\bwiring\b|breaker|\bpanel\b|\boutlet\b|receptacle|transformer|generator|power drop/.test(s)) return 'Electrical';
+    if (/\broof|gutter|downspout|fascia|soffit|siding/.test(s)) return 'Roofing and Siding';
+    if (/overhead door|dock door|roll-?up door|\bman door\b|door hardware/.test(s)) return 'Doors and Hardware';
+    if (/\bsignage\b|\bsigns?\b|marquee|reader ?board/.test(s)) return 'Signage';
+    if (/\blight\b|\blamp\b|luminaire|\bbulb\b|light fixture/.test(s)) return 'Lighting';
+    return '';   // sweeping / janitorial / AV / IT cage etc. - no confident trade, user picks
+  }
+  function extractAmazon(subject, body) {
+    subject = String(subject || ''); body = String(body || '');
+    var B = body.replace(/\s+/g, ' ').trim();
+    var out = { po: '', location: '', trade: '', scope: '', _siteCode: '', _addr: null, _dueBy: '', _note: '' };
+    // RFQ ID -> Source PO # (7-8 digits; do not assume length). Body first, subject as fallback.
+    var mid = B.match(/RFQ ID:\s*(\d+)/i) || subject.match(/#\s*(\d+)/); if (mid) out.po = mid[1];
+    // Title sits between "Invitation to Quote" and "You have been invited".
+    var mt = B.match(/Invitation to Quote\s+(.+?)\s+You have been invited/i);
+    var title = mt ? mt[1].trim() : '';
+    // Site code = 3 letters + 1 digit. Read it ONLY from the (short) title - the body has decoys like
+    // "AFE1"/"AF2". Fall back to the shipping-address parenthetical "(PIT2)".
+    var mc = title.match(/\b([A-Z]{3}\d)\b/);
+    var maddr = B.match(/Shipping address:\s*(.+?)(?:\s*Preferred delivery date:|$)/i);
+    var addrStr = maddr ? maddr[1].trim().replace(/,\s*$/, '') : '';
+    if (!mc) { var mcp = addrStr.match(/\(([A-Z]{3}\d)\)/); if (mcp) mc = [null, mcp[1]]; }
+    out._siteCode = mc ? mc[1].toUpperCase() : '';
+    out._addr = parseAmazonAddr(addrStr);
+    out.location = out._siteCode || (out._addr && out._addr.city) || '';   // search term for the Location field
+    // Line items: between the table header ("Internal part # QTY") and the Notes/actions that follow.
+    // Each row is "<n>. <desc> <qty>.00"; a lone item may be a long spec block (RDU9) - the scope cap
+    // handles that, and the full text still rides along as the attached email.
+    var itemList = [];
+    var mi = B.match(/Internal part #\s*QTY\s*(.+?)\s*(?:Notes to supplier:|View more|Quote Message Buyer)/i);
+    if (mi) {
+      var region = mi[1], reItem = /(\d+)\.\s+([\s\S]*?)\s+(\d+)\.\d{2}(?=\s+\d+\.\s|\s*$)/g, mm;
+      while ((mm = reItem.exec(region))) {
+        var desc = mm[2].replace(/\s+/g, ' ').trim(), q = parseInt(mm[3], 10);
+        if (desc) itemList.push(desc + (q > 1 ? (' (x' + q + ')') : ''));
+      }
+      if (!itemList.length) itemList.push(region.replace(/\s+\d+\.\d{2}\b/g, '').replace(/\s+/g, ' ').trim());
+    }
+    var mnotes = B.match(/Notes to supplier:\s*(.+?)\s*(?:View more|Quote Message Buyer|Quote\b|$)/i);
+    var notes = mnotes ? mnotes[1].replace(/\s+/g, ' ').trim() : '';
+    out.trade = amazonTrade(title + ' ' + itemList.join(' ') + ' ' + notes);
+    var scope = title;
+    if (itemList.length) scope += '\n' + itemList.map(function (d, i) { return (i + 1) + '. ' + d; }).join('\n');
+    if (notes) scope += '\nNotes: ' + notes;
+    out.scope = scope.replace(/\n{2,}/g, '\n').trim().slice(0, 600);
+    // Preferred delivery date (rare) is the closest thing to a work due date -> Complete-By hint.
+    var mpd = B.match(/Preferred delivery date:\s*([A-Za-z]{3,9}\.?\s+\d{1,2},?\s*\d{4})/i);
+    if (mpd) out._dueBy = mpd[1].replace(/\s+/g, ' ').trim();
+    // Buyer + close date are reference only. The Close date is the QUOTE deadline, NOT the work due
+    // date - label it so nobody sets Complete-By to it by mistake.
+    var refs = [], mbuy = B.match(/Buyer:\s*(.+?)\s*Close date:/i), mclose = B.match(/Close date:\s*(.+?)\s*RFQ ID:/i);
+    if (mbuy) refs.push('Buyer ' + mbuy[1].replace(/\s+/g, ' ').trim());
+    if (mclose) refs.push('RFQ closes ' + mclose[1].replace(/\s+/g, ' ').trim() + ' (quote deadline, not the work due date)');
+    if (out.po) refs.push('RFQ #' + out.po);
+    out._note = refs.join(' · ');
+    return out;
+  }
+
   // ---- Create WO modal --------------------------------------------------------
   function woModal() {
     var s = document.querySelector('textarea#scopeOfWork') || document.querySelector('input#client-dropdown');
@@ -513,6 +620,48 @@
       })();
     });
   }
+  // Location picker for Amazon RFQs. Amazon's Umbrava Locations are keyed by the SITE CODE
+  // (locationNumber, e.g. "PIT2") - locationName is just "AMAZON" and there are 100+ of them, so the
+  // code is the unique key. Type the code and click the option that shows it. When the RFQ carried no
+  // code (title had none, e.g. "Parking Lot/Trailer Yard Sweeping"), fall back to the shipping
+  // ADDRESS: type the city, then score options by street # + city + state (NOT ZIP - RFQ vs Umbrava
+  // ZIPs disagree). A city can hold two Amazon sites (ALB1 and ALB5 are both in Castleton NY); the
+  // street # disambiguates, and we need >=2 tokens before clicking so a same-city sibling isn't
+  // picked. Returns 'selected' | 'typed' | 'ambiguous' | 'disabled' | 'skip'.
+  function selectAmazonLocation(el, code, addr) {
+    return new Promise(function (resolve) {
+      if (!el) return resolve('skip');
+      if (el.disabled || el.getAttribute('aria-disabled') === 'true') return resolve('disabled');
+      el.focus();
+      el.dispatchEvent(new MouseEvent('mousedown', { bubbles: true, cancelable: true, view: window }));
+      var cd = String(code || '').toUpperCase();
+      var streetNum = addr && addr.streetNum ? String(addr.streetNum) : '';
+      var city = addr && addr.city ? String(addr.city).toLowerCase() : '';
+      var state = addr && addr.state ? String(addr.state) : '';
+      if (cd) acType(el, cd); else if (city) acType(el, addr.city); else if (streetNum) acType(el, streetNum);
+      var reCode = cd ? new RegExp('\\b' + cd + '\\b', 'i') : null;
+      function score(txt) {
+        var s = 0, lo = txt.toLowerCase();
+        if (reCode && reCode.test(txt)) s += 2;                                        // the code alone is decisive
+        if (streetNum && new RegExp('\\b' + streetNum + '\\b').test(txt)) s++;
+        if (city && lo.indexOf(city) >= 0) s++;
+        if (state && new RegExp(',\\s*' + state + '\\b', 'i').test(txt)) s++;
+        return s;
+      }
+      var t0 = Date.now();
+      (function poll() {
+        var opts = [].slice.call(document.querySelectorAll('[role="option"]'));
+        var best = null, bestScore = 0;
+        for (var i = 0; i < opts.length; i++) { var sc = score(normText(opts[i].textContent)); if (sc > bestScore) { bestScore = sc; best = opts[i]; } }
+        if (best && bestScore >= 2) {
+          ['pointerdown', 'mousedown', 'mouseup', 'click'].forEach(function (t) { best.dispatchEvent(new MouseEvent(t, { bubbles: true, cancelable: true, view: window })); });
+          return resolve('selected');
+        }
+        if (Date.now() - t0 > 3500) return resolve(cd ? 'typed' : 'ambiguous');
+        setTimeout(poll, 70);
+      })();
+    });
+  }
   function fillWo(root, wo) {
     var done = [], picked = [], hint = [];
     if (wo._warn) toast('⚠ Heads up: ' + wo._warn, 18000, '#8b1a1a');   // cancel/flag on the WO PDF - warn before Create
@@ -539,21 +688,32 @@
       }
       if (wo.location) {
         await waitEnabled(root, 'input#location-dropdown', 3000);
-        var store = wo.location.replace(/\D/g, '') || wo.location;   // search by the store number
         var locEl = root.querySelector('input#location-dropdown');
-        var addrHas = wo._addr && (wo._addr.streetNum || wo._addr.city || wo._addr.state || wo._addr.zip);
-        // Address-verified pick when the feed carries the site address (Caleres); the bare store
-        // number is not unique. Pilot / generic keep the simple "match the option" behaviour.
-        var rl = addrHas
-          ? await selectLocation(locEl, store, wo._addr)
-          : await selectAC(locEl, store, wo.location);
-        if (rl === 'selected') {
-          picked.push('Location ' + store + (addrHas ? ' (' + [wo._addr.streetNum, wo._addr.city, wo._addr.state, wo._addr.zip].filter(Boolean).join(' ') + ')' : ''));
-        } else if (rl === 'ambiguous') {
-          var where = wo._addr ? [wo._addr.street || wo._addr.streetNum, wo._addr.city, wo._addr.state, wo._addr.zip].filter(Boolean).join(' ') : '';
-          hint.push('Location: store ' + store + ' has multiple matches - pick the one at ' + where + ' manually');
+        if (wo._amazon) {
+          // Amazon: match by SITE CODE (locationNumber), else by the shipping address. See selectAmazonLocation.
+          var ra = await selectAmazonLocation(locEl, wo._siteCode, wo._addr);
+          var label = wo._siteCode || wo.location;
+          if (ra === 'selected') picked.push('Location ' + label + (wo._addr && wo._addr.city ? ' (' + [wo._addr.streetNum, wo._addr.city, wo._addr.state].filter(Boolean).join(' ') + ')' : ''));
+          else if (ra === 'ambiguous') {
+            var whereA = wo._addr ? [wo._addr.street || wo._addr.streetNum, wo._addr.city, wo._addr.state].filter(Boolean).join(' ') : '';
+            hint.push('Location: no site code in the RFQ - pick the Amazon site at ' + whereA + ' manually');
+          } else hint.push('Location: pick the Amazon site ' + label);
         } else {
-          hint.push('Location: pick ' + (wo.location || store));
+          var store = wo.location.replace(/\D/g, '') || wo.location;   // search by the store number
+          var addrHas = wo._addr && (wo._addr.streetNum || wo._addr.city || wo._addr.state || wo._addr.zip);
+          // Address-verified pick when the feed carries the site address (Caleres); the bare store
+          // number is not unique. Pilot / generic keep the simple "match the option" behaviour.
+          var rl = addrHas
+            ? await selectLocation(locEl, store, wo._addr)
+            : await selectAC(locEl, store, wo.location);
+          if (rl === 'selected') {
+            picked.push('Location ' + store + (addrHas ? ' (' + [wo._addr.streetNum, wo._addr.city, wo._addr.state, wo._addr.zip].filter(Boolean).join(' ') + ')' : ''));
+          } else if (rl === 'ambiguous') {
+            var where = wo._addr ? [wo._addr.street || wo._addr.streetNum, wo._addr.city, wo._addr.state, wo._addr.zip].filter(Boolean).join(' ') : '';
+            hint.push('Location: store ' + store + ' has multiple matches - pick the one at ' + where + ' manually');
+          } else {
+            hint.push('Location: pick ' + (wo.location || store));
+          }
         }
       }
       if (wo.trade) {
@@ -681,6 +841,19 @@
           wo = {
             client: 'Caleres Inc', location: cs.store, trade: cs.trade, scope: cs.scope, _addr: cs.addr,
             _note: 'image WO - NTE + Priority are in the attached image(s), enter them manually'
+          };
+        }
+      }
+      // Amazon (Fairmarkit RFQ): buyer is Amazon.com, Inc. but the sender is Fairmarkit. Detail is a
+      // clean plain-text body block (no PDF). We are the quoting supplier, so Client DNE + Priority
+      // stay manual (an RFQ has no ceiling/priority yet - see extractAmazon).
+      if (!wo && isAmazon(parsed.senderEmail, parsed.subject, parsed.body)) {
+        var ax = extractAmazon(parsed.subject, parsed.body);
+        if (ax && (ax.po || ax._siteCode || ax.location)) {
+          wo = {
+            client: 'Amazon', location: ax.location, po: ax.po, sourceJob: '',
+            trade: ax.trade, scope: ax.scope,
+            _amazon: true, _siteCode: ax._siteCode, _addr: ax._addr, _dueBy: ax._dueBy, _note: ax._note
           };
         }
       }
