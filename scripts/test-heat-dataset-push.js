@@ -57,7 +57,8 @@ function rec(over) {
     id: '344409', wo: '344409', tracking: '1120182', status: 'Recruiting Vendor', prio: 'SEV 4',
     client: 'Pilot Client', assignee: 'Jane Doe', hrs: '1350', days: '137', dneAmt: 14485.64,
     nteAmt: 12000, vendors: 'Acme, Bolt', vendorsKnown: true, sched: '08/10/2026',
-    exp: '05/01/2026', lastNote: '08/05/2026', phase: 'Open'
+    exp: '05/01/2026', lastNote: '08/05/2026', phase: 'Open',
+    sourceJob: 'J-5567', sourcePo: 'PO-8890', projectType: 'Service', woDate: '01/15/2026'
   }, over || {});
 }
 function store(recs) { var s = {}; recs.forEach(function (r, i) { s['/work-orders/' + (r.wo || ('x' + i))] = r; }); return s; }
@@ -78,6 +79,13 @@ A.eq('vendors carried when known', w.vendors, 'Acme, Bolt');
 A.eq('nextOnsiteDate = sched', w.nextOnsiteDate, '08/10/2026');
 A.eq('expectedCompletion = exp', w.expectedCompletion, '05/01/2026');
 A.eq('lastNoteDate = lastNote', w.lastNoteDate, '08/05/2026');
+// v2 dataset fields (Job ID / Source PO # / WO Date / Project Type) - route maps sourceJob/sourcePo/
+// projectType (STR_MAP) and woDate (DATE_MAP); the cross-file guard below re-checks all four.
+A.eq('sourceJob -> Job ID', w.sourceJob, 'J-5567');
+A.eq('sourcePo -> Source PO #', w.sourcePo, 'PO-8890');
+A.eq('projectType -> Project Type', w.projectType, 'Service');
+A.eq('woDate -> WO Date', w.woDate, '01/15/2026');
+A.ok('empty v2 field is omitted, not sent blank', !('sourceJob' in heatDatasetRows(store([rec({ sourceJob: '' })]))[0]));
 
 // ---- skips / drops -----------------------------------------------------------------------
 A.ok('"(unresolved member)" is NOT a coordinator', !('coordinator' in heatDatasetRows(store([rec({ assignee: '(unresolved member)' })]))[0]));

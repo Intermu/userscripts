@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         BWN Suite - Core (Broadway National)
 // @namespace    broadwaynational.bwn
-// @version      1.78.4
+// @version      1.78.5
 // @downloadURL  https://raw.githubusercontent.com/Intermu/userscripts/main/bwn-suite-core.user.js
 // @updateURL    https://raw.githubusercontent.com/Intermu/userscripts/main/bwn-suite-core.user.js
 // @description  Runs several Umbrava helpers for BWN coordinators, in the browser with no privileged grants. Includes: PO Approval + ETA Builder; WO Assist (GP/ETA, a stall watchdog, DNE calculator, and a next-action playbook); Email Leak Guard (checks recipients against vendor names, PO amounts, and client budget references before an outbound email sends); WO List Heat (a triage overlay + My Day strip on the work-order list, with an optional same-origin Umbrava API scan for deterministic full-board coverage); and the BWN Launcher (opens the Azure Static Web App tools with the current WO's context). Modules share state through sessionStorage/localStorage. The only network calls are same-origin Umbrava GraphQL requests (app.umbrava.com/api/graphql, the app's own session): List Heat's full-board scan and WO Assist's work-order / trip / clock-in / document reads, plus ONE write - BWN Views saves the column layout through Umbrava's own putUserPreference, the same preference the column chooser writes; everything else is offline. Toggle modules in BWN_MODULES below.
@@ -5876,7 +5876,7 @@
     }
     window.__bwnWoHeat = true;
 
-    console.info('[BWN HEAT] v3.26 loaded on', location.href);
+    console.info('[BWN HEAT] v3.27 loaded on', location.href);
 
     // ---- Config (edit here) ----------------------------------------------
     // Advanced knobs (status-class regexes + priority multipliers) now live in the
@@ -6264,6 +6264,11 @@
       var respMin = g(/responseminutes/i);
       var slaMin = g(/servicelevelagreementminutes|slaminutes/i);
       var prioCat = String(g(/priority.*category|(^|\.)prioritycategory$/i) || '');
+      // v2 dataset fields (board push -> dashboard): identity + type. Column/field-dependent like
+      // assignee/lastNote - captured when the wire carries them, omitted (honest) otherwise.
+      var sourceJob = String(g(/(^|\.)sourcejobnumber$|(^|\.)sourcejob$|(^|\.)jobid$|(^|\.)jobnumber$/i) || '');
+      var sourcePo = String(g(/(^|\.)sourcepurchaseordernumber$|(^|\.)sourcepo$|(^|\.)purchaseordernumber$|(^|\.)ponumber$/i) || '');
+      var projectType = String(g(/(^|\.)projecttypename$|(^|\.)projecttype$|(^|\.)project\.type$/i) || '');
       var dneAmt = moneyNum(dne, g(/donotexceed.*precision/i));
       var nteAmt = moneyNum(nte, g(/totalnte.*precision/i));
       return {
@@ -6283,7 +6288,9 @@
             slaMinutes: (slaMin !== '' && !isNaN(parseFloat(slaMin))) ? parseFloat(slaMin) : null,
             category: prioCat
           },
-          sched: heatDateStr(sched), lastNote: heatDateStr(lastNote), exp: heatDateStr(exp)
+          sched: heatDateStr(sched), lastNote: heatDateStr(lastNote), exp: heatDateStr(exp),
+          // v2 dataset fields - carried into heatStore by absorb() and emitted by heatDatasetRows.
+          sourceJob: sourceJob, sourcePo: sourcePo, projectType: projectType, woDate: heatDateStr(created)
         }
       };
     }
@@ -6612,12 +6619,16 @@
         sched: find(function (n) { return n.indexOf('scheduled date') !== -1 || n.indexOf('schedule date') !== -1 || n.indexOf('next onsite') !== -1; }),
         lastNote: find(function (n) { return n.indexOf('last note') !== -1; }),
         created: find(function (n) { return n === 'wo date' || n === 'created' || n.indexOf('date created') !== -1; }),
+        // v2 dataset columns (board push -> dashboard). WO Date reuses `created`.
+        sourceJob: find(function (n) { return n === 'job id' || n === 'job #' || n.indexOf('source job') !== -1; }),
+        sourcePo: find(function (n) { return n.indexOf('source po') !== -1 || n === 'po #' || n.indexOf('purchase order') !== -1; }),
+        projectType: find(function (n) { return n === 'project type' || n === 'service type'; }),
         names: names
       };
     }
     // Anchor the header indices to the BODY rows: the cell that holds the WO link is
     // ground truth for where "WO #" actually renders; shift every index by the delta.
-    var HDR_FIELDS = ['wo', 'tracking', 'status', 'client', 'assignee', 'days', 'hrs', 'dne', 'prio', 'exp', 'sched', 'lastNote', 'created'];
+    var HDR_FIELDS = ['wo', 'tracking', 'status', 'client', 'assignee', 'days', 'hrs', 'dne', 'prio', 'exp', 'sched', 'lastNote', 'created', 'sourceJob', 'sourcePo', 'projectType'];
     function alignMap(H, table) {
       if (!H || !table || H.wo < 0) return H;
       var delta = 0, rows = table.querySelectorAll('tbody tr');
@@ -7022,6 +7033,12 @@
         if (r.sched) row.nextOnsiteDate = r.sched;
         if (r.exp) row.expectedCompletion = r.exp;
         if (r.lastNote) row.lastNoteDate = r.lastNote;   // the primary staleness signal; paired with the route's DATE_MAP entry
+        // v2 dataset fields - emitted when the scan captured them (column/field dependent); the
+        // route maps sourceJob/sourcePo/projectType (STR_MAP) and woDate (DATE_MAP).
+        if (r.sourceJob) row.sourceJob = r.sourceJob;
+        if (r.sourcePo) row.sourcePo = r.sourcePo;
+        if (r.projectType) row.projectType = r.projectType;
+        if (r.woDate) row.woDate = r.woDate;
         out.push(row);
       }
       return out;
@@ -7194,7 +7211,7 @@
     var heatActsWarned = false;
 
     // ---- Heat pass ----------------------------------------------------------------
-    var heatStore = null;     // { heatKey(href): {sev, reasons[], wo, client, status, assignee, prio, hrs, days, dne, sched, lastNote, exp} }
+    var heatStore = null;     // { heatKey(href): {sev, reasons[], wo, client, status, assignee, prio, hrs, days, dne, sched, lastNote, exp, sourceJob, sourcePo, projectType, woDate} }
     // The RAW API rows behind an API scan, parallel to heatStore and keyed the same way.
     // Kept SEPARATE from heatStore on purpose: heatStore entries are consumed by
     // heatPublishVerdicts, heatDatasetRows and the audit panel, all of which read named fields,
@@ -7382,7 +7399,9 @@
             // over-30 batch, trend) re-parses this string, so persisting the raw empty
             // cell would zero the over-30 signal everywhere except the row tint (review).
             hrs: cellText(tr, H.hrs), days: cellText(tr, H.days) || (!isNaN(ageDays) ? String(Math.round(ageDays)) : ''), dne: cellText(tr, H.dne),
-            sched: cellText(tr, H.sched), lastNote: cellText(tr, H.lastNote), exp: cellText(tr, H.exp)
+            sched: cellText(tr, H.sched), lastNote: cellText(tr, H.lastNote), exp: cellText(tr, H.exp),
+            // v2 dataset fields - same shape as the API writer emits (drift guard, v3.24).
+            sourceJob: cellText(tr, H.sourceJob), sourcePo: cellText(tr, H.sourcePo), projectType: cellText(tr, H.projectType), woDate: cellText(tr, H.created)
           });
         }
       });
@@ -8012,6 +8031,9 @@
             id: e.id, kinds: vf.kinds.slice(), acked: acked, sev: vf.sev, reasons: vf.reasons.slice(),
             wo: e.wo, tracking: e.tracking, status: e.status, prio: e.prio, client: e.client,
             assignee: e.assignee, hrs: e.hrs, days: e.days, dne: e.dne, sched: e.sched, lastNote: e.lastNote, exp: e.exp,
+            // v2 dataset fields - present from BOTH scan paths (DOM columns or wire), so they sit in
+            // the shared block, not the API-only one below.
+            sourceJob: e.sourceJob, sourcePo: e.sourcePo, projectType: e.projectType, woDate: e.woDate,
             // API-only facts. The DOM scan leaves these undefined and every consumer
             // treats undefined as "not read" rather than as a zero.
             assigneeId: e.assigneeId, nte: e.nte, dneAmt: e.dneAmt, nteAmt: e.nteAmt,
