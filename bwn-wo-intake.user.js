@@ -1,10 +1,10 @@
 // ==UserScript==
 // @name         BWN WO Intake (Broadway National)
 // @namespace    broadwaynational.bwn
-// @version      0.9.9
+// @version      0.9.10
 // @downloadURL  https://raw.githubusercontent.com/Intermu/userscripts/main/bwn-wo-intake.user.js
 // @updateURL    https://raw.githubusercontent.com/Intermu/userscripts/main/bwn-wo-intake.user.js
-// @description  Drop a client PO/WO email (.msg or .eml) onto the Create Work Order modal and it prefills the fields. Pilot Travel Centers: from the email body. Caleres (Famous Footwear / Corrigo): reads the attached WO PDF on-device for Trade, Scope, Priority, Due-By, Store, NTE. If a Caleres request has no WO PDF (image-only), it reads Store, City/State and Trade from the subject and the scope from the body (NTE + Priority stay manual - they live only in the images). Amazon (Fairmarkit RFQ): the buyer is Amazon.com, Inc. but the sender is the Fairmarkit e-bidding platform - reads the RFQ body (no PDF) for Site (matched by the Amazon site code e.g. PIT2/STL3, else the shipping address), RFQ #, Trade, Scope + line items; NTE and Priority stay manual because an RFQ carries no ceiling yet (we are the quoting supplier). The email carries no attachment - the full scope / any 'see attached file' lives on the Fairmarkit bid page - so it surfaces that RFQ link and warns you when the body defers to it. Per Amazon (Amanda Murtha, Mgr): Source PO # is set to N/A (these are quote requests), Client DNE is set to 0.00, WO Type is selected as Proposal in the create modal, and Source Job # is prefilled Q/R ("") then rewritten to Q/R (<the new WO's tracking #>) on the new WO page after the document + note are added, and the WO is auto-saved (best-effort; prompts you to type it if it can't read/write the field - it never touches the clipboard, which BWN Drop Upload uses to hand you the email note for Ctrl+V). Selects Client, Location (address-verified), Trade and Priority by clicking the real dropdown option; fills Client DNE, Source Job # and Source PO #; warns you if the WO PDF shows a cancel/flag note. Then, after you Create the WO, it hands the email to BWN Drop Upload to attach it to the new WO's Documents. Reads everything in the browser; nothing is uploaded to any server. Best-effort: review every field before you click Create.
+// @description  Drop a client PO/WO email (.msg or .eml) onto the Create Work Order modal and it prefills the fields. Pilot Travel Centers: from the email body. Caleres (Famous Footwear / Corrigo): reads the attached WO PDF on-device for Trade, Scope, Priority, Due-By, Store, NTE. If a Caleres request has no WO PDF (image-only), it reads Store, City/State and Trade from the subject and the scope from the body (NTE + Priority stay manual - they live only in the images). Amazon (Fairmarkit RFQ): the buyer is Amazon.com, Inc. but the sender is the Fairmarkit e-bidding platform - reads the RFQ body (no PDF) for Site (matched by the Amazon site code e.g. PIT2/STL3, else the shipping address), RFQ #, Trade, Scope + line items; NTE and Priority stay manual because an RFQ carries no ceiling yet (we are the quoting supplier). The email carries no attachment - the full scope / any 'see attached file' lives on the Fairmarkit bid page - so it surfaces that RFQ link and warns you when the body defers to it. Per Amazon (Amanda Murtha, Mgr): Source PO # is set to N/A (these are quote requests), Client DNE is set to 0.00, WO Type is selected as Proposal in the create modal, and Source Job # is prefilled Q/R ("") then rewritten to Q/R (<the new WO's tracking #>) on the new WO page after the document + note are added, and the WO is auto-saved (best-effort; prompts you to type it if it can't read/write the field - it never touches the clipboard, which BWN Drop Upload uses to hand you the email note for Ctrl+V). Selects Client, Location (address-verified), Trade and Priority by clicking the real dropdown option; fills Client DNE, Source Job # and Source PO #; warns you if the WO PDF shows a cancel/flag note. CW-Amazon (Cushman & Wakefield / FAMIS 360, from amazon@ilrs.360facility.net - a separate feed from Fairmarkit, so the client is "CW-Amazon"): reads the plain-text Case Summary for Site (matched by the exact site code = Umbrava locationNumber), Request ID (-> Source Job #; Source PO # is left blank per the client convention), Trade, Scope, Client DNE (from the PO/NTE amount in the Statement of Work, else 0.00) and Priority (the FAMIS P-code -> the client's "P<n> - ..." priority, or Scheduled PPM); it sets WO Type from the Type|Sub-Type line - a Request for Proposal -> Proposal, a preventive/PPM job -> Preventative, everything else -> Reactive. Then, after you Create the WO, it hands the email to BWN Drop Upload to attach it to the new WO's Documents. Reads everything in the browser; nothing is uploaded to any server. Best-effort: review every field before you click Create.
 // @match        https://app.umbrava.com/*
 // @run-at       document-idle
 // @noframes
@@ -13,7 +13,7 @@
 
 (function () {
   'use strict';
-  var VER = '0.9.9';
+  var VER = '0.9.10';
   var FONT = "-apple-system,BlinkMacSystemFont,'Segoe UI','Helvetica Neue',Arial,sans-serif";
   console.info('[BWN WO INTAKE] v' + VER + ' - drop a PO / Amazon RFQ email (.msg/.eml) on Create Work Order to prefill + auto-attach to the new WO Documents (via Drop Upload); reads locally, nothing leaves the browser');
 
@@ -501,6 +501,131 @@
     return out;
   }
 
+  // ---- CW-Amazon (Cushman & Wakefield / FAMIS 360) extractor ----------------
+  // A SECOND, unrelated Amazon feed: Amazon sites managed by Cushman & Wakefield through the
+  // FAMIS 360 CMMS. These arrive from amazon@ilrs.360facility.net (logo cw_logo.jpg, links to
+  // amazon.famis360.com), NOT from Fairmarkit - so the client is "CW-Amazon" (#20432), never the
+  // Fairmarkit "Amazon" (#20321). The body is a clean label/value "Case Summary" block (plain
+  // text) - no PDF, no attachment. Grounded on 5 real emails + the live CW-Amazon WO history:
+  //   - Locations are keyed by the exact SITE CODE (Umbrava locationNumber = PNA1 / FTY4 /
+  //     IAD228D / PKG_BLAUVELT1_DXY4); the code is the middle segment of the "AMAZON - <code> -
+  //     <street>" Location line and is a unique 1:1 key, so no address disambiguation is needed.
+  //   - Source Job # = the FAMIS Request ID; Source PO # stays blank (client convention).
+  //   - WO Type is chosen from the "Type | Sub-Type" line: a Request-for-Proposal -> Proposal, a
+  //     preventive/PPM job -> Preventative, everything else -> Reactive (all three are real
+  //     Umbrava WO types for this client - Reactive id 8, Preventative id 6, Proposal).
+  //   - Priority maps the FAMIS P-code to the client's "P<n> - ..." Umbrava priority (or
+  //     "Scheduled PPM" for a preventive job with no P-code).
+  //   - Client DNE is read from the PO/NTE amount in the Statement of Work, else 0.00.
+  function isCwAmazon(senderEmail, subject, body) {
+    var d = String(senderEmail || '').split('@')[1] || '';
+    var fromFamis = /(^|\.)360facility\.net$/i.test(d);              // amazon@ilrs.360facility.net
+    var b = String(body || '');
+    var famisBody = /famis360\.com/i.test(b) && /Request ID:/i.test(b);
+    var newAmazonSubj = /^\s*NEW AMAZON\b/i.test(String(subject || '')) && /Request ID:/i.test(b);
+    return fromFamis || famisBody || newAmazonSubj;
+  }
+  // WO Type from the FAMIS Type | Sub-Type (+ priority/SOW as a preventive backstop).
+  function cwAmazonWoType(famisType, subType, priorityRaw, sow) {
+    var s = (String(famisType || '') + ' | ' + String(subType || '')).toLowerCase();
+    if (/proposal|request for proposal|\brfp\b|\bquote\b/.test(s)) return 'Proposal';
+    if (/prevent|\bppm\b|planned maintenance|planned prevent/.test(s)) return 'Preventative';
+    var extra = (String(priorityRaw || '') + ' ' + String(sow || '')).toLowerCase();
+    if (/\bppm\b|scheduled ppm|preventive maintenance|preventative maintenance/.test(extra)) return 'Preventative';
+    return 'Reactive';
+  }
+  // FAMIS P-code -> the client's Umbrava priority. Labels are "P<n> - <text>" (e.g. "P5 -
+  // Low-Minor Issues"), so match on the "P<n>" prefix; a preventive job with no P-code targets
+  // "Scheduled PPM". Blank when neither is present (user picks).
+  function cwAmazonPriority(priorityRaw) {
+    var p = String(priorityRaw || '');
+    var mp = p.match(/\bP([1-5])\b/i);
+    if (mp) return 'P' + mp[1];
+    if (/\bppm\b|scheduled|preventive|preventative/i.test(p)) return 'Scheduled PPM';
+    return '';
+  }
+  // Client DNE from the Statement of Work's PO/NTE ceiling. Handles "PO Amount: 2000.00",
+  // "PO/NTE Amount: $2000" and "NTE: $1,414.71"; 0.00 when the SOW carries none (quote requests).
+  function cwAmazonDne(sow) {
+    var s = String(sow || '');
+    var m = s.match(/PO\s*\/?\s*(?:NTE\s*)?Amount\s*:?\s*\$?\s*([\d,]+(?:\.\d{1,2})?)/i)
+         || s.match(/\bNTE\s*:?\s*\$?\s*([\d,]+(?:\.\d{1,2})?)/i);
+    return m ? m[1].replace(/,/g, '') : '0.00';
+  }
+  // Best-effort Trade. The FAMIS Type token is usually the trade; when it is generic (e.g.
+  // "Request for Proposal") fall back to keywords in the sub-type + SOW. Blank when unsure.
+  function cwAmazonTrade(famisType, subType, sow) {
+    var t = ' ' + String(famisType || '').toLowerCase() + ' ';
+    if (/dock door|overhead door|roll-?up|man door|dock leveler|\bdoor\b|hardware/.test(t)) return 'Doors and Hardware';
+    if (/plumb/.test(t)) return 'Plumbing';
+    if (/electric/.test(t)) return 'Electrical';
+    if (/hvac|mechanical|air cond|refriger|\bheating\b|\bcooling\b/.test(t)) return 'HVAC';
+    if (/fire|life safety|sprinkler|extinguisher|\balarm\b/.test(t)) return 'Fire Life Safety';
+    if (/light/.test(t)) return 'Lighting';
+    if (/paint/.test(t)) return 'Painting';
+    if (/access control|badge|card reader/.test(t)) return 'Access Control';
+    if (/janitor|\bclean|sweep|porter/.test(t)) return 'Handyman';
+    var blob = ' ' + (String(subType || '') + ' ' + String(sow || '')).toLowerCase() + ' ';
+    if (/backflow|plumb|toilet|\bdrain\b|water heater|faucet|urinal|\bsewer\b|\bpipe\b|shut ?off valve|\bvalve\b|\bleak/.test(blob)) return 'Plumbing';
+    if (/electric|breaker|\bpanel\b|\bwiring\b|\boutlet\b|no power|transformer|generator/.test(blob)) return 'Electrical';
+    if (/hvac|\brtu\b|rooftop|condenser|furnace|air handler/.test(blob)) return 'HVAC';
+    if (/dock door|overhead door|roll-?up|\bdoor\b/.test(blob)) return 'Doors and Hardware';
+    if (/fire|sprinkler|extinguisher/.test(blob)) return 'Fire Life Safety';
+    if (/\blight|\blamp|fixture|\bbulb/.test(blob)) return 'Lighting';
+    return '';
+  }
+  // Pull a labelled value out of the flattened FAMIS Case Summary: the text after `label` up to
+  // the next known label (or end). Labels appear once each, in a fixed order.
+  function cwField(flat, label, stops) {
+    var re = new RegExp(label + '\\s*[:\\t]?\\s*([\\s\\S]*?)\\s*(?:' + stops + '|$)', 'i');
+    var m = flat.match(re);
+    return m ? m[1].replace(/\s+/g, ' ').trim() : '';
+  }
+  function extractCwAmazon(subject, body) {
+    subject = String(subject || ''); body = String(body || '');
+    var flat = body.replace(/ /g, ' ').replace(/\s+/g, ' ').trim();   // single-space, newlines folded in (\s covers NBSP)
+    var out = { requestId: '', siteCode: '', addrRaw: '', famisType: '', subType: '', sow: '',
+                priorityRaw: '', completeBy: '', requestedBy: '', url: '', dne: '0.00', trade: '',
+                woType: 'Reactive', scope: '', _addr: null, _note: '', _warn: '' };
+    // The label boundaries that bound each field's value.
+    var STOP = 'Request ID:|Location\\b|Address\\b|Type \\| Sub-?Type|Statement of Work|Priority\\b|Assigned To|Complete By|Requested By|URL\\b';
+    var mid = flat.match(/Request ID:\s*(\d+)/i); if (mid) out.requestId = mid[1];
+    // Site code = the middle segment of "AMAZON - <code> - <street>" (letters/digits/underscore).
+    var mc = flat.match(/AMAZON\s*-\s*([A-Za-z0-9_]+)\s*-\s*/i) || subject.match(/AMAZON\s*-\s*([A-Za-z0-9_]+)\s*-/i);
+    if (mc) out.siteCode = mc[1].toUpperCase();
+    out.addrRaw = cwField(flat, 'Address', STOP);
+    var ts = cwField(flat, 'Type \\| Sub-?Type', STOP);
+    if (ts) { var pp = ts.split('|'); out.famisType = (pp[0] || '').trim(); out.subType = (pp[1] || '').trim(); }
+    out.sow = cwField(flat, 'Statement of Work', STOP);
+    out.priorityRaw = cwField(flat, 'Priority', STOP);
+    out.completeBy = cwField(flat, 'Complete By', STOP);
+    out.requestedBy = cwField(flat, 'Requested By', STOP);
+    var mu = flat.match(/URL\s*:?\s*(https?:\/\/\S+)/i); if (mu) out.url = mu[1].replace(/[.,;]+$/, '');
+    out.dne = cwAmazonDne(out.sow);
+    out.trade = cwAmazonTrade(out.famisType, out.subType, out.sow);
+    out.woType = cwAmazonWoType(out.famisType, out.subType, out.priorityRaw, out.sow);
+    // Scope: the Statement of Work, led by the Type | Sub-Type for context.
+    var scope = out.sow || '';
+    if (out.famisType || out.subType) scope = (out.famisType + (out.subType ? ' | ' + out.subType : '')).trim() + (scope ? '\n' + scope : '');
+    out.scope = scope.replace(/\n{2,}/g, '\n').trim().slice(0, 600);
+    // Address parse (secondary Location score + toast). Location itself matches by code.
+    var addr = { streetNum: '', street: '', city: '', state: '', zip: '' };
+    var ma = out.addrRaw.match(/^\s*(\d{1,6})\b/); if (ma) addr.streetNum = ma[1];
+    var mcity = out.addrRaw.match(/([A-Za-z][A-Za-z .'\-]+?),\s*([A-Z]{2})\s+(\d{5})/);
+    if (mcity) { addr.city = mcity[1].trim(); addr.state = mcity[2]; addr.zip = mcity[3]; }
+    var mstreet = out.addrRaw.match(/^\s*(\d{1,6}[^,]*?)(?:\s+[A-Za-z][A-Za-z .'\-]+?,\s*[A-Z]{2}\s+\d{5}|$)/);
+    if (mstreet) addr.street = mstreet[1].trim();
+    out._addr = addr;
+    var refs = [];
+    if (out.requestId) refs.push('FAMIS Request ID ' + out.requestId);
+    if (out.priorityRaw) refs.push('Priority ' + out.priorityRaw);
+    if (out.completeBy) refs.push('Complete by ' + out.completeBy + ' (client target)');
+    if (out.requestedBy) refs.push('Requested by ' + out.requestedBy);
+    if (out.url) refs.push('FAMIS: ' + out.url);
+    out._note = refs.join(' · ');
+    return out;
+  }
+
   // ---- Create WO modal --------------------------------------------------------
   function woModal() {
     var s = document.querySelector('textarea#scopeOfWork') || document.querySelector('input#client-dropdown');
@@ -698,15 +823,15 @@
       if (wo.location) {
         await waitEnabled(root, 'input#location-dropdown', 3000);
         var locEl = root.querySelector('input#location-dropdown');
-        if (wo._amazon) {
-          // Amazon: match by SITE CODE (locationNumber), else by the shipping address. See selectAmazonLocation.
+        if (wo._amazon || wo._cwAmazon) {
+          // Amazon / CW-Amazon: match by SITE CODE (locationNumber), else by the address. See selectAmazonLocation.
           var ra = await selectAmazonLocation(locEl, wo._siteCode, wo._addr);
           var label = wo._siteCode || wo.location;
           if (ra === 'selected') picked.push('Location ' + label + (wo._addr && wo._addr.city ? ' (' + [wo._addr.streetNum, wo._addr.city, wo._addr.state].filter(Boolean).join(' ') + ')' : ''));
           else if (ra === 'ambiguous') {
             var whereA = wo._addr ? [wo._addr.street || wo._addr.streetNum, wo._addr.city, wo._addr.state].filter(Boolean).join(' ') : '';
-            hint.push('Location: no site code in the RFQ - pick the Amazon site at ' + whereA + ' manually');
-          } else hint.push('Location: pick the Amazon site ' + label);
+            hint.push('Location: no site code in the email - pick the site at ' + whereA + ' manually');
+          } else hint.push('Location: pick the site ' + label);
         } else {
           var store = wo.location.replace(/\D/g, '') || wo.location;   // search by the store number
           var addrHas = wo._addr && (wo._addr.streetNum || wo._addr.city || wo._addr.state || wo._addr.zip);
@@ -771,6 +896,7 @@
       var nAtt = (wo._attachments || []).length;
       if (nAtt) parts.push('the email + ' + nAtt + ' attachment' + (nAtt === 1 ? '' : 's') + ' will attach to Documents after Create');
       if (wo._amazon) parts.push('Amazon: Source PO # = N/A, DNE 0.00, WO Type = ' + (wo._woType || 'Proposal') + ', Source Job # = Q/R (""); after Create + upload + note it becomes Q/R (<tracking>)');
+      if (wo._cwAmazon) parts.push('CW-Amazon: Source Job # = ' + (wo.sourceJob || 'Request ID') + ', Source PO # blank, WO Type = ' + (wo._woType || 'Reactive') + ', Client DNE $' + (wo.clientDne || '0.00'));
       parts.push('review before Create');
       toast('From the PO email - ' + parts.join(' · '), 15000);
     })();
@@ -959,6 +1085,27 @@
             _amazon: true, _woType: 'Proposal', _siteCode: ax._siteCode, _addr: ax._addr, _dueBy: ax._dueBy, _note: ax._note,
             // No attachment in the email - if the RFQ defers to one, warn and point at the bid page.
             _warn: ax._seeAttached ? 'this Amazon RFQ defers to an attached file / full scope that is NOT in the email - open the Fairmarkit RFQ link (in the details below) to get it' : ''
+          };
+        }
+      }
+      // CW-Amazon (Cushman & Wakefield / FAMIS 360): a distinct Amazon feed from
+      // amazon@ilrs.360facility.net - the CLIENT is "CW-Amazon", not Fairmarkit's "Amazon".
+      if (!wo && isCwAmazon(parsed.senderEmail, parsed.subject, parsed.body)) {
+        var cw = extractCwAmazon(parsed.subject, parsed.body);
+        if (cw && (cw.requestId || cw.siteCode)) {
+          var refAttach = /attach|see report|failed report/i.test(cw.sow) && !((parsed.attachments || []).length);
+          wo = {
+            client: 'CW-Amazon',
+            location: cw.siteCode,             // Umbrava locationNumber = the site code
+            po: '',                            // Source PO # stays blank (client convention)
+            sourceJob: cw.requestId,           // Source Job # = FAMIS Request ID
+            clientDne: cw.dne,                 // PO/NTE amount from the SOW, else 0.00
+            trade: cw.trade,
+            scope: cw.scope,
+            priorityLevel: cwAmazonPriority(cw.priorityRaw),   // "P<n>" prefix or "Scheduled PPM"
+            _cwAmazon: true, _woType: cw.woType, _siteCode: cw.siteCode, _addr: cw._addr,
+            _dueBy: cw.completeBy, _note: cw._note,
+            _warn: refAttach ? 'the Statement of Work references an attached report/document that is NOT in this email - open the FAMIS request (link in the details) to get it' : ''
           };
         }
       }
