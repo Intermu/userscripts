@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         BWN WO Intake (Broadway National)
 // @namespace    broadwaynational.bwn
-// @version      0.9.11
+// @version      0.9.12
 // @downloadURL  https://raw.githubusercontent.com/Intermu/userscripts/main/bwn-wo-intake.user.js
 // @updateURL    https://raw.githubusercontent.com/Intermu/userscripts/main/bwn-wo-intake.user.js
 // @description  Drop a client PO/WO email (.msg or .eml) onto the Create Work Order modal and it prefills the fields. Pilot Travel Centers: from the email body. Caleres (Famous Footwear / Corrigo): reads the attached WO PDF on-device for Trade, Scope, Priority, Due-By, Store, NTE. If a Caleres request has no WO PDF (image-only), it reads Store, City/State and Trade from the subject and the scope from the body (NTE + Priority stay manual - they live only in the images). Amazon (Fairmarkit RFQ): the buyer is Amazon.com, Inc. but the sender is the Fairmarkit e-bidding platform - reads the RFQ body (no PDF) for Site (matched by the Amazon site code e.g. PIT2/STL3, else the shipping address), RFQ #, Trade, Scope + line items; NTE and Priority stay manual because an RFQ carries no ceiling yet (we are the quoting supplier). The email carries no attachment - the full scope / any 'see attached file' lives on the Fairmarkit bid page - so it surfaces that RFQ link and warns you when the body defers to it. Per Amazon (Amanda Murtha, Mgr): Source PO # is set to N/A (these are quote requests), Client DNE is set to 0.00, WO Type is selected as Proposal in the create modal, and Source Job # is prefilled Q/R ("") then rewritten to Q/R (<the new WO's tracking #>) on the new WO page after the document + note are added, and the WO is auto-saved (best-effort; prompts you to type it if it can't read/write the field - it never touches the clipboard, which BWN Drop Upload uses to hand you the email note for Ctrl+V). Selects Client, Location (address-verified), Trade and Priority by clicking the real dropdown option; fills Client DNE, Source Job # and Source PO #; warns you if the WO PDF shows a cancel/flag note. CW-Amazon (Cushman & Wakefield / FAMIS 360, from amazon@ilrs.360facility.net - a separate feed from Fairmarkit, so the client is "CW-Amazon"): reads the plain-text Case Summary for Site (matched by the exact site code = Umbrava locationNumber), Request ID (-> Source Job #; Source PO # is left blank per the client convention), Trade, Scope, Client DNE (from the PO/NTE amount in the Statement of Work, else 0.00) and Priority (the FAMIS P-code -> the client's "P<n> - ..." priority, or Scheduled PPM); it sets WO Type from the Type|Sub-Type line - a Request for Proposal -> Proposal, a preventive/PPM job -> Preventative, everything else -> Reactive. Then, after you Create the WO, it hands the email to BWN Drop Upload to attach it to the new WO's Documents. JLL-Amazon (Jones Lang LaSalle / CorrigoPro, from alerts@am.corrigopro.com - a separate feed again, so the client is "JLL-Amazon"): reads the "WORK ORDER #..." body for Site (matched by the exact property/site code = Umbrava locationNumber, e.g. BNA12/ATL11/DEN17), the CorrigoPro WO number (set as BOTH Source Job # and Source PO # per the client convention), Scope, Client DNE (the NTE, else 0.00) and Priority (the email's priority IS the Umbrava label - a PM job is "PM (Scheduled)"); it sets WO Type from the job kind - a PM (Scheduled) job -> Preventative, everything else -> Reactive. Reads everything in the browser; nothing is uploaded to any server. Best-effort: review every field before you click Create.
@@ -1241,17 +1241,18 @@
     if (!root || root.querySelector('#bwn-wo-drop')) return;
     var dz = document.createElement('div');
     dz.id = 'bwn-wo-drop';
-    dz.style.cssText = 'margin:14px 0 0;padding:16px;border:2px dashed #1a5f3e;border-radius:10px;background:#f3f7f5;color:#0d3d26;font:500 14px ' + FONT + ';text-align:center;cursor:pointer;line-height:1.5;';
-    dz.innerHTML = '📧 Drop the PO email here to prefill<div style="font:400 12px ' + FONT + ';color:#5a6b62;margin-top:4px;">saved .msg or .eml file - read locally, nothing leaves your browser</div>';
+    dz.style.cssText = 'flex:1 1 100%;width:100%;box-sizing:border-box;margin:16px 0 4px;padding:18px 20px;border:1.5px dashed #c2d8cd;border-radius:12px;background:#f4f9f6;color:#0d3d26;font:600 13.5px ' + FONT + ';text-align:center;cursor:pointer;line-height:1.45;transition:border-color .15s,background-color .15s;';
+    dz.innerHTML = '<div style="display:flex;align-items:center;justify-content:center;gap:8px;"><span style="font-size:18px;line-height:1;">📧</span><span>Drop the PO email to prefill</span></div><div style="font:400 12px ' + FONT + ';color:#6a7d73;margin-top:5px;">.msg or .eml, read locally &mdash; nothing leaves your browser</div>';
     var file = document.createElement('input'); file.type = 'file'; file.accept = '.msg,.eml,message/rfc822,application/vnd.ms-outlook'; file.style.display = 'none';
     dz.appendChild(file);
     dz.addEventListener('click', function (e) { if (e.target !== file) { file.value = ''; file.click(); } });
     file.addEventListener('change', function () { if (file.files && file.files[0]) handleDrop(file.files[0], woModal() || root); });
     function stop(e) { e.preventDefault(); e.stopPropagation(); }
-    dz.addEventListener('dragover', function (e) { stop(e); dz.style.background = '#e2efe9'; });
-    dz.addEventListener('dragleave', function (e) { stop(e); dz.style.background = '#f3f7f5'; });
+    function resetDz() { dz.style.background = '#f4f9f6'; dz.style.borderColor = '#c2d8cd'; }
+    dz.addEventListener('dragover', function (e) { stop(e); dz.style.background = '#e6f1eb'; dz.style.borderColor = '#1a5f3e'; });
+    dz.addEventListener('dragleave', function (e) { stop(e); resetDz(); });
     dz.addEventListener('drop', function (e) {
-      stop(e); dz.style.background = '#f3f7f5';
+      stop(e); resetDz();
       var f = e.dataTransfer && e.dataTransfer.files && e.dataTransfer.files[0];
       if (f) handleDrop(f, woModal() || root);
       else toast('No file came through. Dragging directly from Outlook often does not - save the email as a .msg first, then drag that file (or click the box to pick it).', 12000);
