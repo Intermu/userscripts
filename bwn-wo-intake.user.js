@@ -1,10 +1,10 @@
 // ==UserScript==
 // @name         BWN WO Intake (Broadway National)
 // @namespace    broadwaynational.bwn
-// @version      0.9.10
+// @version      0.9.11
 // @downloadURL  https://raw.githubusercontent.com/Intermu/userscripts/main/bwn-wo-intake.user.js
 // @updateURL    https://raw.githubusercontent.com/Intermu/userscripts/main/bwn-wo-intake.user.js
-// @description  Drop a client PO/WO email (.msg or .eml) onto the Create Work Order modal and it prefills the fields. Pilot Travel Centers: from the email body. Caleres (Famous Footwear / Corrigo): reads the attached WO PDF on-device for Trade, Scope, Priority, Due-By, Store, NTE. If a Caleres request has no WO PDF (image-only), it reads Store, City/State and Trade from the subject and the scope from the body (NTE + Priority stay manual - they live only in the images). Amazon (Fairmarkit RFQ): the buyer is Amazon.com, Inc. but the sender is the Fairmarkit e-bidding platform - reads the RFQ body (no PDF) for Site (matched by the Amazon site code e.g. PIT2/STL3, else the shipping address), RFQ #, Trade, Scope + line items; NTE and Priority stay manual because an RFQ carries no ceiling yet (we are the quoting supplier). The email carries no attachment - the full scope / any 'see attached file' lives on the Fairmarkit bid page - so it surfaces that RFQ link and warns you when the body defers to it. Per Amazon (Amanda Murtha, Mgr): Source PO # is set to N/A (these are quote requests), Client DNE is set to 0.00, WO Type is selected as Proposal in the create modal, and Source Job # is prefilled Q/R ("") then rewritten to Q/R (<the new WO's tracking #>) on the new WO page after the document + note are added, and the WO is auto-saved (best-effort; prompts you to type it if it can't read/write the field - it never touches the clipboard, which BWN Drop Upload uses to hand you the email note for Ctrl+V). Selects Client, Location (address-verified), Trade and Priority by clicking the real dropdown option; fills Client DNE, Source Job # and Source PO #; warns you if the WO PDF shows a cancel/flag note. CW-Amazon (Cushman & Wakefield / FAMIS 360, from amazon@ilrs.360facility.net - a separate feed from Fairmarkit, so the client is "CW-Amazon"): reads the plain-text Case Summary for Site (matched by the exact site code = Umbrava locationNumber), Request ID (-> Source Job #; Source PO # is left blank per the client convention), Trade, Scope, Client DNE (from the PO/NTE amount in the Statement of Work, else 0.00) and Priority (the FAMIS P-code -> the client's "P<n> - ..." priority, or Scheduled PPM); it sets WO Type from the Type|Sub-Type line - a Request for Proposal -> Proposal, a preventive/PPM job -> Preventative, everything else -> Reactive. Then, after you Create the WO, it hands the email to BWN Drop Upload to attach it to the new WO's Documents. Reads everything in the browser; nothing is uploaded to any server. Best-effort: review every field before you click Create.
+// @description  Drop a client PO/WO email (.msg or .eml) onto the Create Work Order modal and it prefills the fields. Pilot Travel Centers: from the email body. Caleres (Famous Footwear / Corrigo): reads the attached WO PDF on-device for Trade, Scope, Priority, Due-By, Store, NTE. If a Caleres request has no WO PDF (image-only), it reads Store, City/State and Trade from the subject and the scope from the body (NTE + Priority stay manual - they live only in the images). Amazon (Fairmarkit RFQ): the buyer is Amazon.com, Inc. but the sender is the Fairmarkit e-bidding platform - reads the RFQ body (no PDF) for Site (matched by the Amazon site code e.g. PIT2/STL3, else the shipping address), RFQ #, Trade, Scope + line items; NTE and Priority stay manual because an RFQ carries no ceiling yet (we are the quoting supplier). The email carries no attachment - the full scope / any 'see attached file' lives on the Fairmarkit bid page - so it surfaces that RFQ link and warns you when the body defers to it. Per Amazon (Amanda Murtha, Mgr): Source PO # is set to N/A (these are quote requests), Client DNE is set to 0.00, WO Type is selected as Proposal in the create modal, and Source Job # is prefilled Q/R ("") then rewritten to Q/R (<the new WO's tracking #>) on the new WO page after the document + note are added, and the WO is auto-saved (best-effort; prompts you to type it if it can't read/write the field - it never touches the clipboard, which BWN Drop Upload uses to hand you the email note for Ctrl+V). Selects Client, Location (address-verified), Trade and Priority by clicking the real dropdown option; fills Client DNE, Source Job # and Source PO #; warns you if the WO PDF shows a cancel/flag note. CW-Amazon (Cushman & Wakefield / FAMIS 360, from amazon@ilrs.360facility.net - a separate feed from Fairmarkit, so the client is "CW-Amazon"): reads the plain-text Case Summary for Site (matched by the exact site code = Umbrava locationNumber), Request ID (-> Source Job #; Source PO # is left blank per the client convention), Trade, Scope, Client DNE (from the PO/NTE amount in the Statement of Work, else 0.00) and Priority (the FAMIS P-code -> the client's "P<n> - ..." priority, or Scheduled PPM); it sets WO Type from the Type|Sub-Type line - a Request for Proposal -> Proposal, a preventive/PPM job -> Preventative, everything else -> Reactive. Then, after you Create the WO, it hands the email to BWN Drop Upload to attach it to the new WO's Documents. JLL-Amazon (Jones Lang LaSalle / CorrigoPro, from alerts@am.corrigopro.com - a separate feed again, so the client is "JLL-Amazon"): reads the "WORK ORDER #..." body for Site (matched by the exact property/site code = Umbrava locationNumber, e.g. BNA12/ATL11/DEN17), the CorrigoPro WO number (set as BOTH Source Job # and Source PO # per the client convention), Scope, Client DNE (the NTE, else 0.00) and Priority (the email's priority IS the Umbrava label - a PM job is "PM (Scheduled)"); it sets WO Type from the job kind - a PM (Scheduled) job -> Preventative, everything else -> Reactive. Reads everything in the browser; nothing is uploaded to any server. Best-effort: review every field before you click Create.
 // @match        https://app.umbrava.com/*
 // @run-at       document-idle
 // @noframes
@@ -13,7 +13,7 @@
 
 (function () {
   'use strict';
-  var VER = '0.9.10';
+  var VER = '0.9.11';
   var FONT = "-apple-system,BlinkMacSystemFont,'Segoe UI','Helvetica Neue',Arial,sans-serif";
   console.info('[BWN WO INTAKE] v' + VER + ' - drop a PO / Amazon RFQ email (.msg/.eml) on Create Work Order to prefill + auto-attach to the new WO Documents (via Drop Upload); reads locally, nothing leaves the browser');
 
@@ -626,6 +626,104 @@
     return out;
   }
 
+  // ---- JLL-Amazon (Jones Lang LaSalle / CorrigoPro) extractor ----------------
+  // A THIRD Amazon-adjacent feed: Amazon sites managed by JLL (Jones Lang LaSalle) through the
+  // CorrigoPro Work Order Network. These arrive from alerts@am.corrigopro.com (subject "The new
+  // ... work order #<WO#> received from JLL Amazon", body a "WORK ORDER #..." label/value block,
+  // links to support.jllt.com) - NOT Fairmarkit and NOT FAMIS, so the client is "JLL-Amazon"
+  // (#20394), never the Fairmarkit "Amazon" (#20321) or "CW-Amazon" (#20432). Same CorrigoPro
+  // platform as Caleres, but a different sender domain and no "Caleres/<store>/XX" marker, so the
+  // two never collide. Grounded on 5 real emails + the live JLL-Amazon WO history (1,277 WOs):
+  //   - Location is keyed by the exact SITE / PROPERTY code (Umbrava locationNumber = BNA12 /
+  //     ATL11 / DEN17), read from the "Property:" line; it is the WO#'s prefix too. The same code
+  //     can exist under another client ("AMAZON"), so the Location list must be client-scoped -
+  //     which it is, because the modal's Location field unlocks only after Client is chosen.
+  //   - Source Job # AND Source PO # are BOTH the CorrigoPro WO number (per Mike) - e.g. BNA1233423.
+  //   - WO Type: a PM (Scheduled) job -> Preventative, everything else -> Reactive (both are real
+  //     JLL-Amazon workOrderTypeName values; Proposal also exists but is not auto-set here).
+  //   - Priority: the email's "Priority:" value IS the Umbrava priority label verbatim - a PM job
+  //     carries "PM (Scheduled)" (a real priority for this client), a reactive job a time window
+  //     (e.g. "2 Days (48h)"), so it passes straight through to the Priority dropdown.
+  //   - Client DNE = the NTE amount ("NTE: $0.00 USD"), else 0.00.
+  function isJllAmazon(senderEmail, subject, body) {
+    var d = String(senderEmail || '').split('@')[1] || '';
+    var fromCorrigoPro = /(^|\.)corrigopro\.com$/i.test(d);        // alerts@am.corrigopro.com
+    var s = String(subject || ''), b = String(body || '');
+    var mentionsJll = /\bJLL[\s\-]?Amazon\b/i.test(s + ' ' + b) || /For JLL Amazon/i.test(b);
+    var subjMatch = /work order\s*#\s*[A-Za-z0-9\-]+\s*received from JLL Amazon/i.test(s);
+    return (fromCorrigoPro && mentionsJll) || subjMatch;
+  }
+  // WO Type: PM (Scheduled) -> Preventative, else Reactive. "Type: PM/RM" rides on EVERY email
+  // (PM and reactive alike), so it is NOT a discriminator; the PM signal is the "PM (Scheduled)"
+  // priority / subject, or a "Preventive" marker in the Problem / Expanded Work Description.
+  function jllWoType(priorityRaw, problem, expandedDesc, subject) {
+    var pm = /PM\s*\(Scheduled\)/i.test(String(priorityRaw || ''))
+          || /PM\s*\(Scheduled\)/i.test(String(subject || ''))
+          || /\bpreventive\b|\bpreventative\b/i.test(String(problem || '') + ' ' + String(expandedDesc || ''));
+    return pm ? 'Preventative' : 'Reactive';
+  }
+  // Client DNE from the NTE line ("NTE: $0.00 USD"); 0.00 when absent.
+  function jllDne(flat) {
+    var m = String(flat || '').match(/\bNTE:\s*\$?\s*([\d,]+(?:\.\d{1,2})?)/i);
+    return m ? m[1].replace(/,/g, '') : '0.00';
+  }
+  function extractJllAmazon(subject, body) {
+    subject = String(subject || ''); body = String(body || '');
+    var F = body.replace(/ /g, ' ').replace(/\s+/g, ' ').trim();   // flattened; NBSP folded in
+    var out = { woNumber: '', siteCode: '', addrRaw: '', priorityRaw: '', typeRaw: '', problem: '',
+                expandedDesc: '', completeBy: '', scheduledStart: '', asset: '', dne: '0.00',
+                trade: '', woType: 'Reactive', scope: '', _addr: null, _note: '', _warn: '' };
+    var m;
+    // WO number -> Source Job # AND Source PO #. Body "WORK ORDER #BNA1233423", subject as fallback.
+    m = F.match(/WORK ORDER\s*#\s*([A-Za-z0-9\-]+)/i) || subject.match(/work order\s*#\s*([A-Za-z0-9\-]+)/i) || subject.match(/#\s*([A-Za-z0-9\-]+)/);
+    if (m) out.woNumber = m[1];
+    // Site / property code = Umbrava locationNumber. "Property:" is the clean unique label
+    // ("Property Phone:" does not match because the colon is not adjacent); "Requested By:" repeats it.
+    m = F.match(/\bProperty:\s*([A-Za-z0-9_]+)/i) || F.match(/Requested By:\s*([A-Za-z0-9_]+)/i);
+    if (m) out.siteCode = m[1].toUpperCase();
+    // Site address (secondary Location score + toast). Stops before the next label.
+    m = F.match(/Site Address:\s*(.+?)\s*(?:WO check in|IVR code|Problem\b)/i);
+    if (m) out.addrRaw = m[1].replace(/,\s*US\.?$/i, '').replace(/,\s*$/, '').trim();
+    out.dne = jllDne(F);
+    // The Details-block bare priority sits between "Priority:" and "Type:" (the footer copy has a
+    // trailing " - Please schedule..." clause; the first pairing is the clean one).
+    m = F.match(/Priority:\s*(.+?)\s*Type:/i); if (m) out.priorityRaw = m[1].trim();
+    m = F.match(/\bType:\s*(.+?)\s*Accept\/Reject By:/i); if (m) out.typeRaw = m[1].trim();
+    m = F.match(/Complete By:\s*(.+?)\s*Appointment Type:/i) || F.match(/Work Completion Due By:\s*(.+?)\s*(?:Expanded Work Description|Check-in|$)/i);
+    if (m) out.completeBy = m[1].trim();
+    m = F.match(/Scheduled Start:\s*(.+?)\s*Execution Plan:/i); if (m) out.scheduledStart = m[1].trim();
+    m = F.match(/Expanded Work Description:\s*(.+?)\s*(?:Check-in|$)/i); if (m) out.expandedDesc = m[1].trim();
+    // Problem block: "Equipment > <asset> Preventive <task>" between "Problem" and "Details".
+    m = F.match(/Problem\s*_+\s*(.+?)\s*Details\b/i);
+    if (m) out.problem = m[1].replace(/_+/g, ' ').replace(/\s+/g, ' ').trim();
+    var ma = out.expandedDesc.match(/^([A-Za-z0-9._\-]+):/) || out.problem.match(/Equipment\s*>\s*([A-Za-z0-9._\-]+)/i);
+    if (ma) out.asset = ma[1];
+    out.woType = jllWoType(out.priorityRaw, out.problem, out.expandedDesc, subject);
+    // Scope = the Problem block (matches the client's live scope wording), else the Expanded desc.
+    out.scope = (out.problem || out.expandedDesc || '').replace(/\n{2,}/g, '\n').trim().slice(0, 600);
+    // Address parse (street # / city / state break any same-code tie; Location matches by code).
+    var addr = { streetNum: '', street: '', city: '', state: '', zip: '' };
+    var a = out.addrRaw;
+    var mS = a.match(/^\s*(\d{1,6})\b/); if (mS) addr.streetNum = mS[1];
+    var mcity = a.match(/([A-Za-z][A-Za-z .'\-]+?),\s*([A-Z]{2})\s+(\d{5})/);
+    if (mcity) { addr.city = mcity[1].trim(); addr.state = mcity[2]; addr.zip = mcity[3]; }
+    var mstreet = a.match(/^\s*(\d{1,6}[^,]*)/); if (mstreet) addr.street = mstreet[1].trim();
+    out._addr = addr;
+    var refs = [];
+    if (out.woNumber) refs.push('CorrigoPro WO #' + out.woNumber);
+    if (out.priorityRaw) refs.push('Priority ' + out.priorityRaw);
+    if (out.scheduledStart) refs.push('Scheduled start ' + out.scheduledStart);
+    if (out.completeBy) refs.push('Complete by ' + out.completeBy + ' (client target)');
+    var mfm = F.match(/Call\s+([\d\-().\s]{7,14}\d)\s+to schedule/i); if (mfm) refs.push('Schedule with FM ' + mfm[1].replace(/\s+/g, ' ').trim());
+    out._note = refs.join(' · ');
+    // The PM procedures are attached in CorrigoPro, not in this email - flag it so nobody looks for
+    // a scope that is not here.
+    out._warn = /attached procedure|complete the attached|see attached/i.test(out.problem + ' ' + out.expandedDesc)
+      ? 'this PM references procedure(s) that are NOT in this email - they live in CorrigoPro; accept the WO there to get them'
+      : '';
+    return out;
+  }
+
   // ---- Create WO modal --------------------------------------------------------
   function woModal() {
     var s = document.querySelector('textarea#scopeOfWork') || document.querySelector('input#client-dropdown');
@@ -823,8 +921,8 @@
       if (wo.location) {
         await waitEnabled(root, 'input#location-dropdown', 3000);
         var locEl = root.querySelector('input#location-dropdown');
-        if (wo._amazon || wo._cwAmazon) {
-          // Amazon / CW-Amazon: match by SITE CODE (locationNumber), else by the address. See selectAmazonLocation.
+        if (wo._amazon || wo._cwAmazon || wo._jllAmazon) {
+          // Amazon / CW-Amazon / JLL-Amazon: match by SITE CODE (locationNumber), else by the address. See selectAmazonLocation.
           var ra = await selectAmazonLocation(locEl, wo._siteCode, wo._addr);
           var label = wo._siteCode || wo.location;
           if (ra === 'selected') picked.push('Location ' + label + (wo._addr && wo._addr.city ? ' (' + [wo._addr.streetNum, wo._addr.city, wo._addr.state].filter(Boolean).join(' ') + ')' : ''));
@@ -897,6 +995,7 @@
       if (nAtt) parts.push('the email + ' + nAtt + ' attachment' + (nAtt === 1 ? '' : 's') + ' will attach to Documents after Create');
       if (wo._amazon) parts.push('Amazon: Source PO # = N/A, DNE 0.00, WO Type = ' + (wo._woType || 'Proposal') + ', Source Job # = Q/R (""); after Create + upload + note it becomes Q/R (<tracking>)');
       if (wo._cwAmazon) parts.push('CW-Amazon: Source Job # = ' + (wo.sourceJob || 'Request ID') + ', Source PO # blank, WO Type = ' + (wo._woType || 'Reactive') + ', Client DNE $' + (wo.clientDne || '0.00'));
+      if (wo._jllAmazon) parts.push('JLL-Amazon: Source Job # + Source PO # = WO ' + (wo.sourceJob || '') + ', WO Type = ' + (wo._woType || 'Preventative') + ', Client DNE $' + (wo.clientDne || '0.00'));
       parts.push('review before Create');
       toast('From the PO email - ' + parts.join(' · '), 15000);
     })();
@@ -1106,6 +1205,26 @@
             _cwAmazon: true, _woType: cw.woType, _siteCode: cw.siteCode, _addr: cw._addr,
             _dueBy: cw.completeBy, _note: cw._note,
             _warn: refAttach ? 'the Statement of Work references an attached report/document that is NOT in this email - open the FAMIS request (link in the details) to get it' : ''
+          };
+        }
+      }
+      // JLL-Amazon (Jones Lang LaSalle / CorrigoPro): a distinct Amazon feed from
+      // alerts@am.corrigopro.com - the CLIENT is "JLL-Amazon", not Fairmarkit's "Amazon" or
+      // FAMIS's "CW-Amazon". Source Job # AND Source PO # are both the CorrigoPro WO number.
+      if (!wo && isJllAmazon(parsed.senderEmail, parsed.subject, parsed.body)) {
+        var jx = extractJllAmazon(parsed.subject, parsed.body);
+        if (jx && (jx.woNumber || jx.siteCode)) {
+          wo = {
+            client: 'JLL-Amazon',
+            location: jx.siteCode,             // Umbrava locationNumber = the property / site code
+            po: jx.woNumber,                   // Source PO # = the CorrigoPro WO number (per Mike)
+            sourceJob: jx.woNumber,            // Source Job # = the same WO number
+            clientDne: jx.dne,                 // NTE amount, else 0.00
+            trade: jx.trade,                   // left blank (this client does not carry a trade)
+            scope: jx.scope,
+            priorityLevel: jx.priorityRaw,     // the email's priority IS the Umbrava label ("PM (Scheduled)")
+            _jllAmazon: true, _woType: jx.woType, _siteCode: jx.siteCode, _addr: jx._addr,
+            _dueBy: jx.completeBy, _note: jx._note, _warn: jx._warn
           };
         }
       }
