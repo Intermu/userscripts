@@ -1257,10 +1257,16 @@
       if (f) handleDrop(f, woModal() || root);
       else toast('No file came through. Dragging directly from Outlook often does not - save the email as a .msg first, then drag that file (or click the box to pick it).', 12000);
     });
+    // Span the full Vendor Priority -> Vendor NTE width: drop into the grid *container*
+    // that holds both cells (as a full-width wrapped line), not the NTE cell itself.
     var anchor = root.querySelector('input#vendorNotToExceed');
-    var col = anchor ? (anchor.closest('.MuiGrid-item, .MuiGrid-root, [class*="col"]') || anchor.parentElement) : null;
-    if (col && col.parentElement) col.parentElement.appendChild(dz);
-    else { (root.querySelector('.MuiDialogContent-root') || root.querySelector('form') || root).appendChild(dz); }
+    var grid = anchor ? anchor.closest('.MuiGrid-container') : null;
+    if (grid) grid.appendChild(dz);
+    else {
+      var col = anchor ? (anchor.closest('.MuiGrid-item, .MuiGrid-root, [class*="col"]') || anchor.parentElement) : null;
+      if (col && col.parentElement) col.parentElement.appendChild(dz);
+      else (root.querySelector('.MuiDialogContent-root') || root.querySelector('form') || root).appendChild(dz);
+    }
   }
 
   var obs = new MutationObserver(function () { injectDropZone(); });
