@@ -1,10 +1,10 @@
 // ==UserScript==
 // @name         BWN WO Intake (Broadway National)
 // @namespace    broadwaynational.bwn
-// @version      0.9.12
+// @version      0.9.14
 // @downloadURL  https://raw.githubusercontent.com/Intermu/userscripts/main/bwn-wo-intake.user.js
 // @updateURL    https://raw.githubusercontent.com/Intermu/userscripts/main/bwn-wo-intake.user.js
-// @description  Drop a client PO/WO email (.msg or .eml) onto the Create Work Order modal and it prefills the fields. Pilot Travel Centers: from the email body. Caleres (Famous Footwear / Corrigo): reads the attached WO PDF on-device for Trade, Scope, Priority, Due-By, Store, NTE. If a Caleres request has no WO PDF (image-only), it reads Store, City/State and Trade from the subject and the scope from the body (NTE + Priority stay manual - they live only in the images). Amazon (Fairmarkit RFQ): the buyer is Amazon.com, Inc. but the sender is the Fairmarkit e-bidding platform - reads the RFQ body (no PDF) for Site (matched by the Amazon site code e.g. PIT2/STL3, else the shipping address), RFQ #, Trade, Scope + line items; NTE and Priority stay manual because an RFQ carries no ceiling yet (we are the quoting supplier). The email carries no attachment - the full scope / any 'see attached file' lives on the Fairmarkit bid page - so it surfaces that RFQ link and warns you when the body defers to it. Per Amazon (Amanda Murtha, Mgr): Source PO # is set to N/A (these are quote requests), Client DNE is set to 0.00, WO Type is selected as Proposal in the create modal, and Source Job # is prefilled Q/R ("") then rewritten to Q/R (<the new WO's tracking #>) on the new WO page after the document + note are added, and the WO is auto-saved (best-effort; prompts you to type it if it can't read/write the field - it never touches the clipboard, which BWN Drop Upload uses to hand you the email note for Ctrl+V). Selects Client, Location (address-verified), Trade and Priority by clicking the real dropdown option; fills Client DNE, Source Job # and Source PO #; warns you if the WO PDF shows a cancel/flag note. CW-Amazon (Cushman & Wakefield / FAMIS 360, from amazon@ilrs.360facility.net - a separate feed from Fairmarkit, so the client is "CW-Amazon"): reads the plain-text Case Summary for Site (matched by the exact site code = Umbrava locationNumber), Request ID (-> Source Job #; Source PO # is left blank per the client convention), Trade, Scope, Client DNE (from the PO/NTE amount in the Statement of Work, else 0.00) and Priority (the FAMIS P-code -> the client's "P<n> - ..." priority, or Scheduled PPM); it sets WO Type from the Type|Sub-Type line - a Request for Proposal -> Proposal, a preventive/PPM job -> Preventative, everything else -> Reactive. Then, after you Create the WO, it hands the email to BWN Drop Upload to attach it to the new WO's Documents. JLL-Amazon (Jones Lang LaSalle / CorrigoPro, from alerts@am.corrigopro.com - a separate feed again, so the client is "JLL-Amazon"): reads the "WORK ORDER #..." body for Site (matched by the exact property/site code = Umbrava locationNumber, e.g. BNA12/ATL11/DEN17), the CorrigoPro WO number (set as BOTH Source Job # and Source PO # per the client convention), Scope, Client DNE (the NTE, else 0.00) and Priority (the email's priority IS the Umbrava label - a PM job is "PM (Scheduled)"); it sets WO Type from the job kind - a PM (Scheduled) job -> Preventative, everything else -> Reactive. Reads everything in the browser; nothing is uploaded to any server. Best-effort: review every field before you click Create.
+// @description  Drop a client PO/WO email (.msg or .eml) onto the Create Work Order modal and it prefills the fields. Pilot Travel Centers: from the email body. Caleres (Famous Footwear / Corrigo): reads the attached WO PDF on-device for Trade, Scope, Priority, Due-By, Store, NTE. If a Caleres request has no WO PDF (image-only), it reads Store, City/State and Trade from the subject and the scope from the body (NTE + Priority stay manual - they live only in the images). Amazon (Fairmarkit RFQ): the buyer is Amazon.com, Inc. but the sender is the Fairmarkit e-bidding platform - reads the RFQ body (no PDF) for Site (matched by the Amazon site code e.g. PIT2/STL3, else the shipping address), RFQ #, Trade, Scope + line items; NTE and Priority stay manual because an RFQ carries no ceiling yet (we are the quoting supplier). The email carries no attachment - the full scope / any 'see attached file' lives on the Fairmarkit bid page - so it surfaces that RFQ link and warns you when the body defers to it. Per Amazon: Source PO # is set to the literal "Quote Request", Source Job # is set to the RFQ ID suffixed " (FM-AMZ)" (e.g. 2956102 (FM-AMZ)), Client DNE is set to 0.00, and WO Type is selected as Proposal in the create modal - all filled in the one pass (no post-Create tracking-number step). Selects Client, Location (address-verified), Trade and Priority by clicking the real dropdown option; fills Client DNE, Source Job # and Source PO #; warns you if the WO PDF shows a cancel/flag note. CW-Amazon (Cushman & Wakefield / FAMIS 360, from amazon@ilrs.360facility.net - a separate feed from Fairmarkit, so the client is "CW-Amazon"): reads the plain-text Case Summary for Site (matched by the exact site code = Umbrava locationNumber), Request ID (-> Source Job #; Source PO # is left blank per the client convention), Trade, Scope, Client DNE (from the PO/NTE amount in the Statement of Work, else 0.00) and Priority (the FAMIS P-code -> the client's "P<n> - ..." priority, or Scheduled PPM); it sets WO Type from the Type|Sub-Type line - a Request for Proposal -> Proposal, a preventive/PPM job -> Preventative, everything else -> Reactive. Then, after you Create the WO, it hands the email to BWN Drop Upload to attach it to the new WO's Documents. JLL-Amazon (Jones Lang LaSalle / CorrigoPro, from alerts@am.corrigopro.com - a separate feed again, so the client is "JLL-Amazon"): reads the "WORK ORDER #..." body for Site (matched by the exact property/site code = Umbrava locationNumber, e.g. BNA12/ATL11/DEN17), the CorrigoPro WO number (set as BOTH Source Job # and Source PO # per the client convention), Scope, Client DNE (the NTE, else 0.00) and Priority (the email's priority IS the Umbrava label - a PM job is "PM (Scheduled)"); it sets WO Type from the job kind - a PM (Scheduled) job -> Preventative, everything else -> Reactive. Reads everything in the browser; nothing is uploaded to any server. Best-effort: review every field before you click Create.
 // @match        https://app.umbrava.com/*
 // @run-at       document-idle
 // @noframes
@@ -13,7 +13,7 @@
 
 (function () {
   'use strict';
-  var VER = '0.9.11';
+  var VER = '0.9.14';
   var FONT = "-apple-system,BlinkMacSystemFont,'Segoe UI','Helvetica Neue',Arial,sans-serif";
   console.info('[BWN WO INTAKE] v' + VER + ' - drop a PO / Amazon RFQ email (.msg/.eml) on Create Work Order to prefill + auto-attach to the new WO Documents (via Drop Upload); reads locally, nothing leaves the browser');
 
@@ -444,9 +444,9 @@
   function extractAmazon(subject, body) {
     subject = String(subject || ''); body = String(body || '');
     var B = body.replace(/\s+/g, ' ').trim();
-    var out = { po: '', location: '', trade: '', scope: '', _siteCode: '', _addr: null, _dueBy: '', _note: '', _bidUrl: '', _seeAttached: false };
-    // RFQ ID -> Source PO # (7-8 digits; do not assume length). Body first, subject as fallback.
-    var mid = B.match(/RFQ ID:\s*(\d+)/i) || subject.match(/#\s*(\d+)/); if (mid) out.po = mid[1];
+    var out = { rfqId: '', location: '', trade: '', scope: '', _siteCode: '', _addr: null, _dueBy: '', _note: '', _bidUrl: '', _seeAttached: false };
+    // RFQ ID -> Source Job # (7-8 digits; do not assume length). Body first, subject as fallback.
+    var mid = B.match(/RFQ ID:\s*(\d+)/i) || subject.match(/#\s*(\d+)/); if (mid) out.rfqId = mid[1];
     // Title sits between "Invitation to Quote" and "You have been invited".
     var mt = B.match(/Invitation to Quote\s+(.+?)\s+You have been invited/i);
     var title = mt ? mt[1].trim() : '';
@@ -495,7 +495,7 @@
     var refs = [], mbuy = B.match(/Buyer:\s*(.+?)\s*Close date:/i), mclose = B.match(/Close date:\s*(.+?)\s*RFQ ID:/i);
     if (mbuy) refs.push('Buyer ' + mbuy[1].replace(/\s+/g, ' ').trim());
     if (mclose) refs.push('RFQ closes ' + mclose[1].replace(/\s+/g, ' ').trim() + ' (quote deadline, not the work due date)');
-    if (out.po) refs.push('RFQ #' + out.po);
+    if (out.rfqId) refs.push('RFQ #' + out.rfqId);
     if (out._bidUrl) refs.push('Fairmarkit RFQ: ' + out._bidUrl);
     out._note = refs.join(' · ');
     return out;
@@ -993,7 +993,7 @@
       if (wo._note) parts.push(wo._note);
       var nAtt = (wo._attachments || []).length;
       if (nAtt) parts.push('the email + ' + nAtt + ' attachment' + (nAtt === 1 ? '' : 's') + ' will attach to Documents after Create');
-      if (wo._amazon) parts.push('Amazon: Source PO # = N/A, DNE 0.00, WO Type = ' + (wo._woType || 'Proposal') + ', Source Job # = Q/R (""); after Create + upload + note it becomes Q/R (<tracking>)');
+      if (wo._amazon) parts.push('Amazon: Source PO # = Quote Request, DNE 0.00, WO Type = ' + (wo._woType || 'Proposal') + ', Source Job # = ' + (wo.sourceJob || '<RFQ ID> (FM-AMZ)'));
       if (wo._cwAmazon) parts.push('CW-Amazon: Source Job # = ' + (wo.sourceJob || 'Request ID') + ', Source PO # blank, WO Type = ' + (wo._woType || 'Reactive') + ', Client DNE $' + (wo.clientDne || '0.00'));
       if (wo._jllAmazon) parts.push('JLL-Amazon: Source Job # + Source PO # = WO ' + (wo.sourceJob || '') + ', WO Type = ' + (wo._woType || 'Preventative') + ', Client DNE $' + (wo.clientDne || '0.00'));
       parts.push('review before Create');
@@ -1044,64 +1044,6 @@
       })();
     });
   }
-  // Amazon RFQ WOs: Source Job # follows the client convention Q/R "<this WO's tracking #>", and the
-  // tracking only exists after Create - so it is stamped here on the new WO page. SAFE-DEGRADING and
-  // LIVE-UNVERIFIED: the WO-detail-page selectors below (where Tracking # renders, and the Source Job #
-  // field) have NOT been confirmed on a real page. The write only fires into a clearly-matched EMPTY
-  // field; otherwise the value is copied to the clipboard and shown, so a wrong/missing selector never
-  // writes garbage. (WO Type = Proposal is handled in the create modal, not here.)
-  function amazonReadTracking() {
-    try {
-      var nodes = [].slice.call(document.querySelectorAll('span, div, td, dt, label, p'));
-      for (var i = 0; i < nodes.length; i++) {
-        var t = (nodes[i].childElementCount === 0 ? (nodes[i].textContent || '') : '').trim();
-        var inline = t.match(/^tracking\s*#\s*(\d{4,})\b/i);   // the WO header "Tracking # 1269746"
-        if (inline) return inline[1];
-        if (/^tracking\s*#?$|^tracking number$/i.test(t)) {
-          var sib = nodes[i].nextElementSibling;
-          var v = sib ? (sib.textContent || '').replace(/\D+/g, '') : '';
-          if (v.length >= 4) return v;
-        }
-      }
-      var m = (document.body.textContent || '').match(/tracking\s*#?\s*:?\s*(\d{4,})/i);
-      return m ? m[1] : '';
-    } catch (e) { return ''; }
-  }
-  // After the stamp, click the WO's edit-mode Save (header "Save" beside "Cancel"). Auto-save was
-  // explicitly requested. Guarded: only a visible, enabled button whose text is exactly "Save";
-  // prompts if none renders within the window.
-  function amazonClickSave(val) {
-    var t0 = Date.now();
-    (function poll() {
-      var save = [].slice.call(document.querySelectorAll('button')).filter(function (b) {
-        return /^save$/i.test(normText(b.textContent)) && !b.disabled && b.offsetParent !== null;
-      })[0];
-      if (save) { try { save.click(); } catch (e) { } toast('Amazon RFQ: Source Job # ' + val + ' saved.', 9000); return; }
-      if (Date.now() - t0 > 3500) { toast('Amazon RFQ: Source Job # set to ' + val + ' - click Save to persist.', 13000, '#8b1a1a'); return; }
-      setTimeout(poll, 150);
-    })();
-  }
-  function amazonStampSourceJob() {
-    var tracking = amazonReadTracking();
-    var val = tracking ? ('Q/R (' + tracking + ')') : '';   // Q/R (1282870) - replaces the Q/R ("") template
-    var el = document.querySelector('input#sourceJobNumber');
-    if (!el) {
-      var labs = [].slice.call(document.querySelectorAll('label, .MuiInputLabel-root'));
-      var lab = labs.filter(function (l) { return /source job\s*#?/i.test(normText(l.textContent)); })[0];
-      if (lab) { var fc = lab.closest('.MuiFormControl-root, .MuiTextField-root') || lab.parentElement; el = fc ? fc.querySelector('input, textarea') : null; }
-    }
-    // Overwrite ONLY the Q/R ("") placeholder or an empty field - never a value that already carries
-    // digits (an already-stamped or human-entered job #). setNativeValue dispatches blur (how Umbrava's
-    // inline fields commit); then auto-click Save.
-    if (val && el && !/\d/.test(String(el.value || ''))) {
-      try { setNativeValue(el, val); setTimeout(function () { amazonClickSave(val); }, 700); return; }
-      catch (e) { }
-    }
-    // Fallback: DO NOT touch the clipboard. BWN Drop Upload puts the email note on the clipboard for a
-    // one-tap Ctrl+V into the WO note (Umbrava's note field rejects programmatic fills); writing the
-    // Q/R value here would clobber it and leave the note empty. Just show the value to type in.
-    toast('Amazon RFQ - set Source Job # to ' + (val || 'Q/R (<this WO\'s tracking #>)') + ' and Save (could not write the field).', 16000, '#8b1a1a');
-  }
 
   var _consuming = false;
   function maybeConsumePending() {
@@ -1121,8 +1063,6 @@
           document.removeEventListener('bwn:evt', onAck, false);
           if (acked) toast('Handed the PO email to Drop Upload - attaching to this WO\'s Documents + drafting the note. Review + Save.', 11000);
           else toast('Could not auto-attach: BWN Drop Upload not detected (install/update it). Drag the .msg onto the Work Order to attach it.', 13000);
-          // Amazon: only AFTER the document upload + note, stamp Source Job # with Q/R (<tracking>).
-          if (p.amazon) setTimeout(function () { try { amazonStampSourceJob(); } catch (e) { } }, 2500);
           _consuming = false;
         }, 1800);
       });
@@ -1174,12 +1114,14 @@
       // stay manual (an RFQ has no ceiling/priority yet - see extractAmazon).
       if (!wo && isAmazon(parsed.senderEmail, parsed.subject, parsed.body)) {
         var ax = extractAmazon(parsed.subject, parsed.body);
-        if (ax && (ax.po || ax._siteCode || ax.location)) {
+        if (ax && (ax.rfqId || ax._siteCode || ax.location)) {
           wo = {
-            // Amazon convention (Amanda Murtha): Source PO # = N/A (quote requests), Client DNE = 0.00,
-            // WO Type = Proposal (create-modal dropdown), Source Job # = Q/R ("") in the modal then
-            // rewritten to Q/R (<tracking>) after Create + upload + note.
-            client: 'Amazon', location: ax.location, po: 'N/A', sourceJob: 'Q/R ("")', clientDne: '0.00',
+            // Amazon convention: Source PO # = the literal "Quote Request", Source Job # = the RFQ ID
+            // suffixed " (FM-AMZ)" (e.g. 2956102 (FM-AMZ)). Both are known from the email, so they fill
+            // in the create modal in one pass - no post-Create tracking-number stamp. Client DNE = 0.00
+            // and WO Type = Proposal (create-modal dropdown): an RFQ has no ceiling/priority yet.
+            client: 'Amazon', location: ax.location, po: 'Quote Request',
+            sourceJob: ax.rfqId ? (ax.rfqId + ' (FM-AMZ)') : '', clientDne: '0.00',
             trade: ax.trade, scope: ax.scope,
             _amazon: true, _woType: 'Proposal', _siteCode: ax._siteCode, _addr: ax._addr, _dueBy: ax._dueBy, _note: ax._note,
             // No attachment in the email - if the RFQ defers to one, warn and point at the bid page.
@@ -1257,15 +1199,29 @@
       if (f) handleDrop(f, woModal() || root);
       else toast('No file came through. Dragging directly from Outlook often does not - save the email as a .msg first, then drag that file (or click the box to pick it).', 12000);
     });
-    // Span the full Vendor Priority -> Vendor NTE width: drop into the grid *container*
-    // that holds both cells (as a full-width wrapped line), not the NTE cell itself.
+    // Span the full Vendor Priority -> Vendor NTE width. Class names for the MUI grid
+    // wrapper have proven unreliable, so anchor on GEOMETRY instead: the nearest common
+    // ancestor of the Priority cell and the NTE cell is exactly the element that bounds
+    // both, so a full-width child of it stretches Priority-left to NTE-right.
     var anchor = root.querySelector('input#vendorNotToExceed');
-    var grid = anchor ? anchor.closest('.MuiGrid-container') : null;
-    if (grid) grid.appendChild(dz);
+    var priEl = inputByLabel(root, /vendor\s*priority/i);
+    var host = null;
+    if (anchor && priEl) {
+      var up = [];
+      for (var a = anchor; a; a = a.parentElement) up.push(a);
+      for (var b = priEl; b && !host; b = b.parentElement) { if (up.indexOf(b) !== -1) host = b; }
+      // Reject an ancestor so large it also swallows the left column (would span the whole modal).
+      if (host && host.querySelector('#client-dropdown, textarea#scopeOfWork')) host = null;
+    }
+    if (host) host.appendChild(dz);
     else {
-      var col = anchor ? (anchor.closest('.MuiGrid-item, .MuiGrid-root, [class*="col"]') || anchor.parentElement) : null;
-      if (col && col.parentElement) col.parentElement.appendChild(dz);
-      else (root.querySelector('.MuiDialogContent-root') || root.querySelector('form') || root).appendChild(dz);
+      var grid = anchor ? anchor.closest('.MuiGrid-container') : null;
+      if (grid) grid.appendChild(dz);
+      else {
+        var col = anchor ? (anchor.closest('.MuiGrid-item, .MuiGrid-root, [class*="col"]') || anchor.parentElement) : null;
+        if (col && col.parentElement) col.parentElement.appendChild(dz);
+        else (root.querySelector('.MuiDialogContent-root') || root.querySelector('form') || root).appendChild(dz);
+      }
     }
   }
 
