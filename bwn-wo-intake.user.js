@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         BWN WO Intake (Broadway National)
 // @namespace    broadwaynational.bwn
-// @version      0.9.15
+// @version      0.9.16
 // @downloadURL  https://raw.githubusercontent.com/Intermu/userscripts/main/bwn-wo-intake.user.js
 // @updateURL    https://raw.githubusercontent.com/Intermu/userscripts/main/bwn-wo-intake.user.js
 // @description  Drop a client PO/WO email (.msg or .eml) onto the Create Work Order modal and it prefills the fields. Pilot Travel Centers: from the email body. Caleres (Famous Footwear / Corrigo): reads the attached WO PDF on-device for Trade, Scope, Priority, Due-By, Store, NTE. If a Caleres request has no WO PDF (image-only), it reads Store, City/State and Trade from the subject and the scope from the body (NTE + Priority stay manual - they live only in the images). Amazon (Fairmarkit RFQ): the buyer is Amazon.com, Inc. but the sender is the Fairmarkit e-bidding platform - reads the RFQ body (no PDF) for Site (matched by the Amazon site code e.g. PIT2/STL3, else the shipping address), RFQ #, Trade, Scope + line items; NTE and Priority stay manual because an RFQ carries no ceiling yet (we are the quoting supplier). The email carries no attachment - the full scope / any 'see attached file' lives on the Fairmarkit bid page - so it surfaces that RFQ link and warns you when the body defers to it. Per Amazon: Source PO # is set to the literal "Quote Request", Source Job # is set to the RFQ ID suffixed " (FM-AMZ)" (e.g. 2956102 (FM-AMZ)), Client DNE is set to 0.00, and WO Type is selected as Proposal in the create modal - all filled in the one pass (no post-Create tracking-number step). Selects Client, Location (address-verified), Trade and Priority by clicking the real dropdown option; fills Client DNE, Source Job # and Source PO #; warns you if the WO PDF shows a cancel/flag note. CW-Amazon (Cushman & Wakefield / FAMIS 360, from amazon@ilrs.360facility.net - a separate feed from Fairmarkit, so the client is "CW-Amazon"): reads the plain-text Case Summary for Site (matched by the exact site code = Umbrava locationNumber), Request ID (-> Source Job #; Source PO # is left blank per the client convention), Trade, Scope, Client DNE (from the PO/NTE amount in the Statement of Work, else 0.00) and Priority (the FAMIS P-code -> the client's "P<n> - ..." priority, or Scheduled PPM); it sets WO Type from the Type|Sub-Type line - a Request for Proposal -> Proposal, a preventive/PPM job -> Preventative, everything else -> Reactive. Then, after you Create the WO, it hands the email to BWN Drop Upload to attach it to the new WO's Documents. JLL-Amazon (Jones Lang LaSalle / CorrigoPro, from alerts@am.corrigopro.com - a separate feed again, so the client is "JLL-Amazon"): reads the "WORK ORDER #..." body for Site (matched by the exact property/site code = Umbrava locationNumber, e.g. BNA12/ATL11/DEN17), the CorrigoPro WO number (set as BOTH Source Job # and Source PO # per the client convention), Scope, Client DNE (the NTE, else 0.00) and Priority (the email's priority IS the Umbrava label - a PM job is "PM (Scheduled)"); it sets WO Type from the job kind - a PM (Scheduled) job -> Preventative, everything else -> Reactive. CW-Amazon via CorrigoPro (C&W Services on the CorrigoPro network, from alerts@am.corrigopro.com with subject "...received from C&W Services" - the SAME CorrigoPro format as JLL-Amazon but a different brand, so the client is still "CW-Amazon"): reads the "WORK ORDER #..." body for Site (the code in "Requested By: AMAZON <code>", e.g. IFM-JFK8 = Umbrava locationNumber), the CorrigoPro WO number (BOTH Source Job # and Source PO #), Scope (the Problem block), Trade (from the Problem "<Area> > <Issue>" head), Client DNE (the NTE, else 0.00), WO Type (a PM/preventive job -> Preventative, a proposal -> Proposal, else Reactive - the CorrigoPro Details "Type:" line is a ridealong and is ignored) and Priority (the Details "Priority:" value - "PM" -> "Scheduled PPM"). Reads everything in the browser; nothing is uploaded to any server. Best-effort: review every field before you click Create.
@@ -13,7 +13,7 @@
 
 (function () {
   'use strict';
-  var VER = '0.9.15';
+  var VER = '0.9.16';
   var FONT = "-apple-system,BlinkMacSystemFont,'Segoe UI','Helvetica Neue',Arial,sans-serif";
   console.info('[BWN WO INTAKE] v' + VER + ' - drop a PO / Amazon RFQ email (.msg/.eml) on Create Work Order to prefill + auto-attach to the new WO Documents (via Drop Upload); reads locally, nothing leaves the browser');
 
@@ -346,6 +346,33 @@
     // Umbrava has no fuel/dispenser trade, so fuel assets fall through to '' (user picks).
     return '';
   }
+  // Free-text request emails (Pilot Travel Centers and the generic path) put the actual work
+  // description as the FIRST paragraph of the body, with the NTE amount and the sender's signature
+  // below it. There is no "Description:" label to anchor on, so take the leading body text and cut
+  // at the first trailer line: the NTE/PO amount, a signature email address, a phone
+  // ("office:"/"tel:"), a sign-off, a URL, or the start of a quoted/forwarded chain. The email
+  // SUBJECT (e.g. "Store 305, Jamestown NM, PO 170101430655, P2 dispatch") is a routing header,
+  // NOT the scope - so it stays only the LAST resort, below this (see extractWo).
+  function genericBodyScope(body) {
+    var b = String(body || '').replace(/\r/g, '');
+    var reply = b.search(/\n\s*(From:|Sent:|To:|Subject:|On .+wrote:|-{3,}\s*Original|_{3,}|Get Outlook|Sent from my)/i);
+    if (reply > 0) b = b.slice(0, reply);
+    var keep = [], lines = b.split('\n');
+    for (var i = 0; i < lines.length; i++) {
+      var ln = lines[i].trim();
+      if (!ln) continue;
+      // Skip a lone leading salutation ("Hi team,") so it never becomes the scope.
+      if (!keep.length && /^(hi|hello|hey|greetings|good (morning|afternoon|evening))\b.{0,30},?$/i.test(ln)) continue;
+      if (/^NTE\b/i.test(ln)) break;                                            // client NTE amount -> signature follows
+      if (/^(PO|P\.O\.|Purchase Order)\b\s*#?\s*:?\s*\d/i.test(ln)) break;
+      if (/[A-Za-z0-9._%+\-]+@[A-Za-z0-9.\-]+\.[A-Za-z]{2,}/.test(ln)) break;    // signature email address
+      if (/^(office|cell|mobile|tel|phone|fax|direct)\b\s*:?/i.test(ln)) break;  // signature phone line
+      if (/^(thanks|thank you|regards|best|sincerely|cheers|respectfully|v\/r)\b/i.test(ln)) break;
+      if (/https?:\/\//i.test(ln)) break;
+      keep.push(ln);
+    }
+    return keep.join(' ').replace(/\s{2,}/g, ' ').trim().slice(0, 600);
+  }
   function extractWo(subject, body, senderEmail) {
     subject = subject || ''; body = body || '';
     var out = { po: '', sourceJob: '', client: '', location: '', trade: '', scope: '', clientDne: '', priorityLevel: '', assetName: '' };
@@ -356,7 +383,8 @@
     var masset = body.match(/Asset Name\s*:?\s*([^\r\n]+)/i); if (masset) { out.assetName = masset[1].trim(); out.trade = assetToTrade(out.assetName); }
     var mdesc = body.match(/Description\s*:?\s*([\s\S]*?)(?:[\r\n]+\s*(?:Dispatcher|Vendor|Model\s*:|Serial|Parts Warranty|Labor Warranty)\b|$)/i);
     if (mdesc) out.scope = mdesc[1].replace(/\s+/g, ' ').trim().slice(0, 600);
-    if (!out.scope) out.scope = subject.replace(/purchase order\s*:?\s*\d+/i, '').replace(/\s{2,}/g, ' ').trim().slice(0, 300);
+    if (!out.scope) out.scope = genericBodyScope(body);   // free-text request body (Pilot: "Pump sign on light pole...")
+    if (!out.scope) out.scope = subject.replace(/purchase order\s*:?\s*\d+/i, '').replace(/\s{2,}/g, ' ').trim().slice(0, 300);   // last resort: the routing subject
     out.client = clientFromDomain(senderEmail);
     return out;
   }
@@ -1327,7 +1355,7 @@
     if (!root || root.querySelector('#bwn-wo-drop')) return;
     var dz = document.createElement('div');
     dz.id = 'bwn-wo-drop';
-    dz.style.cssText = 'flex:1 1 100%;width:100%;box-sizing:border-box;margin:16px 0 4px;padding:18px 20px;border:1.5px dashed #c2d8cd;border-radius:12px;background:#f4f9f6;color:#0d3d26;font:600 13.5px ' + FONT + ';text-align:center;cursor:pointer;line-height:1.45;transition:border-color .15s,background-color .15s;';
+    dz.style.cssText = 'display:block;width:100%;box-sizing:border-box;margin:16px 0 4px;padding:18px 20px;border:1.5px dashed #c2d8cd;border-radius:12px;background:#f4f9f6;color:#0d3d26;font:600 13.5px ' + FONT + ';text-align:center;cursor:pointer;line-height:1.45;transition:border-color .15s,background-color .15s;';
     dz.innerHTML = '<div style="display:flex;align-items:center;justify-content:center;gap:8px;"><span style="font-size:18px;line-height:1;">📧</span><span>Drop the PO email to prefill</span></div><div style="font:400 12px ' + FONT + ';color:#6a7d73;margin-top:5px;">.msg or .eml, read locally &mdash; nothing leaves your browser</div>';
     var file = document.createElement('input'); file.type = 'file'; file.accept = '.msg,.eml,message/rfc822,application/vnd.ms-outlook'; file.style.display = 'none';
     dz.appendChild(file);
@@ -1343,20 +1371,22 @@
       if (f) handleDrop(f, woModal() || root);
       else toast('No file came through. Dragging directly from Outlook often does not - save the email as a .msg first, then drag that file (or click the box to pick it).', 12000);
     });
-    // Span the full Vendor Priority -> Vendor NTE width. Class names for the MUI grid
-    // wrapper have proven unreliable, so anchor on GEOMETRY instead: the nearest common
-    // ancestor of the Priority cell and the NTE cell is exactly the element that bounds
-    // both, so a full-width child of it stretches Priority-left to NTE-right.
+    // Placement: a full-width block at the BOTTOM of the right-hand Dispatch column, directly
+    // below the Vendor Priority / Vendor NTE row (the spot Mike marked with the red box). Class
+    // names for the MUI grid have proven unreliable, so anchor on GEOMETRY: climb from the Vendor
+    // NTE input to the WIDEST ancestor that still belongs ONLY to the right column - i.e. the last
+    // one before an ancestor also swallows the LEFT column (its Client dropdown / Scope textarea).
+    // Appending the drop-zone there stacks it under the vendor row across the full column width,
+    // instead of squeezing it beside the vendor fields the way the old Priority->NTE span did.
     var anchor = root.querySelector('input#vendorNotToExceed');
-    var priEl = inputByLabel(root, /vendor\s*priority/i);
     var host = null;
-    if (anchor && priEl) {
-      var up = [];
-      for (var a = anchor; a; a = a.parentElement) up.push(a);
-      for (var b = priEl; b && !host; b = b.parentElement) { if (up.indexOf(b) !== -1) host = b; }
-      // Reject an ancestor so large it also swallows the left column (would span the whole modal).
-      if (host && host.querySelector('#client-dropdown, textarea#scopeOfWork')) host = null;
+    if (anchor) {
+      for (var a = anchor.parentElement; a && a !== root; a = a.parentElement) {
+        if (a.querySelector('#client-dropdown, textarea#scopeOfWork')) break;   // this ancestor also holds the left column - too wide
+        host = a;                                                               // widest right-column-only ancestor so far
+      }
     }
+    try { console.info('[BWN WO INTAKE] drop-zone host:', host ? (host.tagName + '.' + String(host.className || '').split(/\s+/).slice(0, 2).join('.')) : 'NULL (using fallback)'); } catch (e) { }
     if (host) host.appendChild(dz);
     else {
       var grid = anchor ? anchor.closest('.MuiGrid-container') : null;
