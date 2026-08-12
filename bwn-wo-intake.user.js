@@ -1,10 +1,10 @@
 // ==UserScript==
 // @name         BWN WO Intake (Broadway National)
 // @namespace    broadwaynational.bwn
-// @version      0.9.14
+// @version      0.9.15
 // @downloadURL  https://raw.githubusercontent.com/Intermu/userscripts/main/bwn-wo-intake.user.js
 // @updateURL    https://raw.githubusercontent.com/Intermu/userscripts/main/bwn-wo-intake.user.js
-// @description  Drop a client PO/WO email (.msg or .eml) onto the Create Work Order modal and it prefills the fields. Pilot Travel Centers: from the email body. Caleres (Famous Footwear / Corrigo): reads the attached WO PDF on-device for Trade, Scope, Priority, Due-By, Store, NTE. If a Caleres request has no WO PDF (image-only), it reads Store, City/State and Trade from the subject and the scope from the body (NTE + Priority stay manual - they live only in the images). Amazon (Fairmarkit RFQ): the buyer is Amazon.com, Inc. but the sender is the Fairmarkit e-bidding platform - reads the RFQ body (no PDF) for Site (matched by the Amazon site code e.g. PIT2/STL3, else the shipping address), RFQ #, Trade, Scope + line items; NTE and Priority stay manual because an RFQ carries no ceiling yet (we are the quoting supplier). The email carries no attachment - the full scope / any 'see attached file' lives on the Fairmarkit bid page - so it surfaces that RFQ link and warns you when the body defers to it. Per Amazon: Source PO # is set to the literal "Quote Request", Source Job # is set to the RFQ ID suffixed " (FM-AMZ)" (e.g. 2956102 (FM-AMZ)), Client DNE is set to 0.00, and WO Type is selected as Proposal in the create modal - all filled in the one pass (no post-Create tracking-number step). Selects Client, Location (address-verified), Trade and Priority by clicking the real dropdown option; fills Client DNE, Source Job # and Source PO #; warns you if the WO PDF shows a cancel/flag note. CW-Amazon (Cushman & Wakefield / FAMIS 360, from amazon@ilrs.360facility.net - a separate feed from Fairmarkit, so the client is "CW-Amazon"): reads the plain-text Case Summary for Site (matched by the exact site code = Umbrava locationNumber), Request ID (-> Source Job #; Source PO # is left blank per the client convention), Trade, Scope, Client DNE (from the PO/NTE amount in the Statement of Work, else 0.00) and Priority (the FAMIS P-code -> the client's "P<n> - ..." priority, or Scheduled PPM); it sets WO Type from the Type|Sub-Type line - a Request for Proposal -> Proposal, a preventive/PPM job -> Preventative, everything else -> Reactive. Then, after you Create the WO, it hands the email to BWN Drop Upload to attach it to the new WO's Documents. JLL-Amazon (Jones Lang LaSalle / CorrigoPro, from alerts@am.corrigopro.com - a separate feed again, so the client is "JLL-Amazon"): reads the "WORK ORDER #..." body for Site (matched by the exact property/site code = Umbrava locationNumber, e.g. BNA12/ATL11/DEN17), the CorrigoPro WO number (set as BOTH Source Job # and Source PO # per the client convention), Scope, Client DNE (the NTE, else 0.00) and Priority (the email's priority IS the Umbrava label - a PM job is "PM (Scheduled)"); it sets WO Type from the job kind - a PM (Scheduled) job -> Preventative, everything else -> Reactive. Reads everything in the browser; nothing is uploaded to any server. Best-effort: review every field before you click Create.
+// @description  Drop a client PO/WO email (.msg or .eml) onto the Create Work Order modal and it prefills the fields. Pilot Travel Centers: from the email body. Caleres (Famous Footwear / Corrigo): reads the attached WO PDF on-device for Trade, Scope, Priority, Due-By, Store, NTE. If a Caleres request has no WO PDF (image-only), it reads Store, City/State and Trade from the subject and the scope from the body (NTE + Priority stay manual - they live only in the images). Amazon (Fairmarkit RFQ): the buyer is Amazon.com, Inc. but the sender is the Fairmarkit e-bidding platform - reads the RFQ body (no PDF) for Site (matched by the Amazon site code e.g. PIT2/STL3, else the shipping address), RFQ #, Trade, Scope + line items; NTE and Priority stay manual because an RFQ carries no ceiling yet (we are the quoting supplier). The email carries no attachment - the full scope / any 'see attached file' lives on the Fairmarkit bid page - so it surfaces that RFQ link and warns you when the body defers to it. Per Amazon: Source PO # is set to the literal "Quote Request", Source Job # is set to the RFQ ID suffixed " (FM-AMZ)" (e.g. 2956102 (FM-AMZ)), Client DNE is set to 0.00, and WO Type is selected as Proposal in the create modal - all filled in the one pass (no post-Create tracking-number step). Selects Client, Location (address-verified), Trade and Priority by clicking the real dropdown option; fills Client DNE, Source Job # and Source PO #; warns you if the WO PDF shows a cancel/flag note. CW-Amazon (Cushman & Wakefield / FAMIS 360, from amazon@ilrs.360facility.net - a separate feed from Fairmarkit, so the client is "CW-Amazon"): reads the plain-text Case Summary for Site (matched by the exact site code = Umbrava locationNumber), Request ID (-> Source Job #; Source PO # is left blank per the client convention), Trade, Scope, Client DNE (from the PO/NTE amount in the Statement of Work, else 0.00) and Priority (the FAMIS P-code -> the client's "P<n> - ..." priority, or Scheduled PPM); it sets WO Type from the Type|Sub-Type line - a Request for Proposal -> Proposal, a preventive/PPM job -> Preventative, everything else -> Reactive. Then, after you Create the WO, it hands the email to BWN Drop Upload to attach it to the new WO's Documents. JLL-Amazon (Jones Lang LaSalle / CorrigoPro, from alerts@am.corrigopro.com - a separate feed again, so the client is "JLL-Amazon"): reads the "WORK ORDER #..." body for Site (matched by the exact property/site code = Umbrava locationNumber, e.g. BNA12/ATL11/DEN17), the CorrigoPro WO number (set as BOTH Source Job # and Source PO # per the client convention), Scope, Client DNE (the NTE, else 0.00) and Priority (the email's priority IS the Umbrava label - a PM job is "PM (Scheduled)"); it sets WO Type from the job kind - a PM (Scheduled) job -> Preventative, everything else -> Reactive. CW-Amazon via CorrigoPro (C&W Services on the CorrigoPro network, from alerts@am.corrigopro.com with subject "...received from C&W Services" - the SAME CorrigoPro format as JLL-Amazon but a different brand, so the client is still "CW-Amazon"): reads the "WORK ORDER #..." body for Site (the code in "Requested By: AMAZON <code>", e.g. IFM-JFK8 = Umbrava locationNumber), the CorrigoPro WO number (BOTH Source Job # and Source PO #), Scope (the Problem block), Trade (from the Problem "<Area> > <Issue>" head), Client DNE (the NTE, else 0.00), WO Type (the Details "Type:" value verbatim - a "Preventive Maintenance Task" WO stays Reactive if Type says Reactive) and Priority (the Details "Priority:" value - "PM" -> "Scheduled PPM"). Reads everything in the browser; nothing is uploaded to any server. Best-effort: review every field before you click Create.
 // @match        https://app.umbrava.com/*
 // @run-at       document-idle
 // @noframes
@@ -13,7 +13,7 @@
 
 (function () {
   'use strict';
-  var VER = '0.9.14';
+  var VER = '0.9.15';
   var FONT = "-apple-system,BlinkMacSystemFont,'Segoe UI','Helvetica Neue',Arial,sans-serif";
   console.info('[BWN WO INTAKE] v' + VER + ' - drop a PO / Amazon RFQ email (.msg/.eml) on Create Work Order to prefill + auto-attach to the new WO Documents (via Drop Upload); reads locally, nothing leaves the browser');
 
@@ -626,6 +626,121 @@
     return out;
   }
 
+  // ---- CW-Amazon via CorrigoPro (C&W Services on the CorrigoPro Work Order Network) -----------
+  // A SECOND channel for the SAME "CW-Amazon" client (#20432): besides FAMIS 360 (above), Cushman &
+  // Wakefield ("C&W Services") also dispatches Amazon work through CorrigoPro. These arrive from
+  // alerts@am.corrigopro.com (the SAME sender domain as JLL-Amazon), subject "The new ... work order
+  // #<WO#> received from C&W Services", body header "Broadway National - CW Amazon" / "For C&W
+  // Services". The email FORMAT is the CorrigoPro "WORK ORDER #..." block (identical to JLL-Amazon),
+  // but the brand is C&W, so the client is "CW-Amazon", NOT "JLL-Amazon" - and C&W puts several fields
+  // in different places than JLL:
+  //   - Location = the site code in "Requested By: AMAZON <code> - <city>" (e.g. IFM-JFK8) = the
+  //     Umbrava locationNumber. JLL reads "Property:", which these C&W emails omit; the same site also
+  //     has a bare "JFK8" record (the FAMIS channel), so the FULL "IFM-JFK8" is what disambiguates.
+  //   - Source Job # AND Source PO # = the CorrigoPro WO number (same convention as JLL).
+  //   - WO Type = the Details "Type:" value LITERALLY (Reactive) - do NOT infer Preventative from the
+  //     "Preventive Maintenance Task" problem wording (per Mike, this WO stays Reactive).
+  //   - Priority = the Details "Priority:" value: "PM" -> "Scheduled PPM", a "P<n>" -> "P<n>".
+  //   - Trade from the Problem "<Area> > <Issue>" head (Electrical Issues -> Electrical).
+  //   - Client DNE = the NTE ("NTE: $0.00 USD"), else 0.00.
+  // Grounded on the real WO #AMNJFK8000762 email + live Umbrava (client #20432, location IFM-JFK8).
+  function isCwCorrigo(senderEmail, subject, body) {
+    var d = String(senderEmail || '').split('@')[1] || '';
+    var fromCorrigoPro = /(^|\.)corrigopro\.com$/i.test(d);         // alerts@am.corrigopro.com
+    var s = String(subject || ''), b = String(body || '');
+    var brandCW = /C&W Services|C&W Amazon|CW[\s\-]?Amazon/i.test(s + ' ' + b);
+    var subjMatch = /work order\s*#\s*[A-Za-z0-9\-]+\s*received from C&?W Services/i.test(s);
+    return (fromCorrigoPro && brandCW) || subjMatch;
+  }
+  // Self-contained Trade map (keeps this block independently vm-sliceable for its own harness).
+  function cwCorrigoTrade(issue) {
+    var s = ' ' + String(issue || '').toLowerCase() + ' ';
+    if (/dock door|overhead door|roll-?up|man door|\bdoor\b|hardware/.test(s)) return 'Doors and Hardware';
+    if (/electric|breaker|\bpanel\b|\bwiring\b|\boutlet\b|low voltage|transformer|generator|\bpower\b/.test(s)) return 'Electrical';
+    if (/plumb|toilet|\bdrain\b|water heater|faucet|urinal|\bsewer\b|backflow|\bpipe\b|\bvalve\b|\bleak/.test(s)) return 'Plumbing';
+    if (/hvac|mechanical|air cond|\brtu\b|rooftop|condenser|furnace|air handler|\bheating\b|\bcooling\b|refriger/.test(s)) return 'HVAC';
+    if (/fire|life safety|sprinkler|extinguisher|\balarm\b/.test(s)) return 'Fire Life Safety';
+    if (/\blight|\blamp|fixture|\bbulb/.test(s)) return 'Lighting';
+    if (/paint/.test(s)) return 'Painting';
+    if (/access control|badge|card reader/.test(s)) return 'Access Control';
+    if (/janitor|\bclean|sweep|porter/.test(s)) return 'Handyman';
+    return '';
+  }
+  // WO Type from the Details "Type:" value (authoritative). Proposal/RFP -> Proposal,
+  // preventive/planned -> Preventative, everything else (incl. "Reactive") -> Reactive.
+  function cwCorrigoWoType(typeRaw) {
+    var t = String(typeRaw || '').toLowerCase();
+    if (/proposal|request for proposal|\brfp\b|\bquote\b/.test(t)) return 'Proposal';
+    if (/prevent|planned|\bppm\b/.test(t)) return 'Preventative';
+    return 'Reactive';
+  }
+  // Priority from the Details "Priority:" value: a "P<n>" prefix -> "P<n>", a PM/PPM marker ->
+  // "Scheduled PPM", else blank (user picks).
+  function cwCorrigoPriority(priorityRaw) {
+    var p = String(priorityRaw || '');
+    var mp = p.match(/\bP([1-5])\b/i);
+    if (mp) return 'P' + mp[1];
+    if (/\bpm\b|\bppm\b|scheduled|preventive|preventative/i.test(p)) return 'Scheduled PPM';
+    return '';
+  }
+  function extractCwCorrigo(subject, body) {
+    subject = String(subject || ''); body = String(body || '');
+    var F = body.replace(/ /g, ' ').replace(/\s+/g, ' ').trim();   // flattened; NBSP folded in
+    var out = { woNumber: '', siteCode: '', addrRaw: '', priorityRaw: '', typeRaw: '', problem: '',
+                completeBy: '', dne: '0.00', trade: '', woType: 'Reactive', priority: '', scope: '',
+                _addr: null, _note: '', _warn: '' };
+    var m;
+    // WO number -> Source Job # AND Source PO #. Body "WORK ORDER #AMNJFK8000762", subject fallback.
+    m = F.match(/WORK ORDER\s*#\s*([A-Za-z0-9\-]+)/i) || subject.match(/work order\s*#\s*([A-Za-z0-9\-]+)/i) || subject.match(/#\s*([A-Za-z0-9\-]+)/);
+    if (m) out.woNumber = m[1];
+    // Site code = the code in "Requested By: AMAZON <code> - <city>" (letters/digits/underscore/hyphen).
+    m = F.match(/Requested By:\s*AMAZON\s+([A-Za-z0-9_\-]+)\s*-/i);
+    if (m) out.siteCode = m[1].toUpperCase();
+    // Client DNE from the NTE line ("NTE: $0.00 USD"); 0.00 when absent.
+    var mn = F.match(/\bNTE:\s*\$?\s*([\d,]+(?:\.\d{1,2})?)/i); out.dne = mn ? mn[1].replace(/,/g, '') : '0.00';
+    // Priority + Type from the Details block (label / newline / value -> "Priority: PM Type: Reactive").
+    m = F.match(/Priority:\s*(.+?)\s*Type:/i); if (m) out.priorityRaw = m[1].trim();
+    m = F.match(/\bType:\s*(.+?)\s*Accept\s*\/\s*Reject By:/i); if (m) out.typeRaw = m[1].trim();
+    m = F.match(/Complete By:\s*(.+?)\s*(?:Appointment Type:|Execution Plan:|Procedures\b|$)/i); if (m) out.completeBy = m[1].trim();
+    // Site address (secondary Location score + toast). Location itself matches by code.
+    m = F.match(/Site Address:\s*(.+?)\s*(?:Service Contact|WO check in|IVR code|Problem\b)/i);
+    if (m) out.addrRaw = m[1].replace(/,\s*US\.?$/i, '').replace(/,\s*$/, '').trim();
+    // Problem block, newlines PRESERVED: between "Problem ___" and "Details". Each line is trimmed of
+    // the trailing tabs/underscores CorrigoPro pads with; blank / underscore-only lines are dropped.
+    var raw = body.replace(/\r/g, '');
+    var pm = raw.match(/Problem[\s_]*\n([\s\S]*?)\n\s*Details\b/i);
+    var lines = [];
+    if (pm) {
+      lines = pm[1].split('\n').map(function (x) { return x.replace(/[_\t]+/g, ' ').replace(/\s+/g, ' ').trim(); })
+        .filter(function (x) { return x && !/^_+$/.test(x); });
+    }
+    out.problem = lines.join(' ');
+    out.scope = (lines.length ? lines.join('\n') : out.problem).slice(0, 600);
+    // Trade from the issue head "<Area> > <Issue>" (first problem line).
+    var issue = ''; var mi = (lines[0] || '').match(/>\s*(.+)$/); if (mi) issue = mi[1].trim();
+    out.trade = cwCorrigoTrade(issue || out.problem);
+    out.woType = cwCorrigoWoType(out.typeRaw);
+    out.priority = cwCorrigoPriority(out.priorityRaw);
+    // Address parse (secondary score + toast).
+    var addr = { streetNum: '', street: '', city: '', state: '', zip: '' };
+    var a = out.addrRaw;
+    var mS = a.match(/^\s*(\d{1,6})\b/); if (mS) addr.streetNum = mS[1];
+    var mc = a.match(/([A-Za-z][A-Za-z .'\-]+?),\s*([A-Z]{2})\s+(\d{5})/);
+    if (mc) { addr.city = mc[1].trim(); addr.state = mc[2]; addr.zip = mc[3]; }
+    var mst = a.match(/^\s*(\d{1,6}[^,]*)/); if (mst) addr.street = mst[1].trim();
+    out._addr = addr;
+    var refs = [];
+    if (out.woNumber) refs.push('CorrigoPro WO #' + out.woNumber);
+    if (out.priorityRaw) refs.push('Priority ' + out.priorityRaw);
+    if (out.completeBy) refs.push('Complete by ' + out.completeBy + ' (client target)');
+    out._note = refs.join(' · ');
+    // The PM procedures / JHA / attachments are referenced but not machine-read here.
+    out._warn = /requires the following procedures|attached procedure|complete the attached|see attached/i.test(body)
+      ? 'this WO references procedure(s)/JHA/attachment(s) NOT auto-read here - they live in CorrigoPro + the email; accept the WO in CorrigoPro and check the attached files'
+      : '';
+    return out;
+  }
+
   // ---- JLL-Amazon (Jones Lang LaSalle / CorrigoPro) extractor ----------------
   // A THIRD Amazon-adjacent feed: Amazon sites managed by JLL (Jones Lang LaSalle) through the
   // CorrigoPro Work Order Network. These arrive from alerts@am.corrigopro.com (subject "The new
@@ -921,8 +1036,8 @@
       if (wo.location) {
         await waitEnabled(root, 'input#location-dropdown', 3000);
         var locEl = root.querySelector('input#location-dropdown');
-        if (wo._amazon || wo._cwAmazon || wo._jllAmazon) {
-          // Amazon / CW-Amazon / JLL-Amazon: match by SITE CODE (locationNumber), else by the address. See selectAmazonLocation.
+        if (wo._amazon || wo._cwAmazon || wo._jllAmazon || wo._cwCorrigo) {
+          // Amazon / CW-Amazon (FAMIS + CorrigoPro) / JLL-Amazon: match by SITE CODE (locationNumber), else by the address. See selectAmazonLocation.
           var ra = await selectAmazonLocation(locEl, wo._siteCode, wo._addr);
           var label = wo._siteCode || wo.location;
           if (ra === 'selected') picked.push('Location ' + label + (wo._addr && wo._addr.city ? ' (' + [wo._addr.streetNum, wo._addr.city, wo._addr.state].filter(Boolean).join(' ') + ')' : ''));
@@ -996,6 +1111,7 @@
       if (wo._amazon) parts.push('Amazon: Source PO # = Quote Request, DNE 0.00, WO Type = ' + (wo._woType || 'Proposal') + ', Source Job # = ' + (wo.sourceJob || '<RFQ ID> (FM-AMZ)'));
       if (wo._cwAmazon) parts.push('CW-Amazon: Source Job # = ' + (wo.sourceJob || 'Request ID') + ', Source PO # blank, WO Type = ' + (wo._woType || 'Reactive') + ', Client DNE $' + (wo.clientDne || '0.00'));
       if (wo._jllAmazon) parts.push('JLL-Amazon: Source Job # + Source PO # = WO ' + (wo.sourceJob || '') + ', WO Type = ' + (wo._woType || 'Preventative') + ', Client DNE $' + (wo.clientDne || '0.00'));
+      if (wo._cwCorrigo) parts.push('CW-Amazon (CorrigoPro): Source Job # + Source PO # = WO ' + (wo.sourceJob || '') + ', WO Type = ' + (wo._woType || 'Reactive') + ', Client DNE $' + (wo.clientDne || '0.00'));
       parts.push('review before Create');
       toast('From the PO email - ' + parts.join(' · '), 15000);
     })();
@@ -1147,6 +1263,27 @@
             _cwAmazon: true, _woType: cw.woType, _siteCode: cw.siteCode, _addr: cw._addr,
             _dueBy: cw.completeBy, _note: cw._note,
             _warn: refAttach ? 'the Statement of Work references an attached report/document that is NOT in this email - open the FAMIS request (link in the details) to get it' : ''
+          };
+        }
+      }
+      // CW-Amazon via CorrigoPro (C&W Services): a SECOND channel for the SAME CW-Amazon client
+      // (#20432) as the FAMIS path above, but on the CorrigoPro network (alerts@am.corrigopro.com,
+      // "received from C&W Services"). Same CorrigoPro FORMAT as JLL-Amazon; the brand (C&W, not JLL)
+      // is what routes the client. Source Job # AND Source PO # are both the CorrigoPro WO number.
+      if (!wo && isCwCorrigo(parsed.senderEmail, parsed.subject, parsed.body)) {
+        var cc = extractCwCorrigo(parsed.subject, parsed.body);
+        if (cc && (cc.woNumber || cc.siteCode)) {
+          wo = {
+            client: 'CW-Amazon',
+            location: cc.siteCode,             // Umbrava locationNumber = the site code (e.g. IFM-JFK8)
+            po: cc.woNumber,                   // Source PO # = the CorrigoPro WO number
+            sourceJob: cc.woNumber,            // Source Job # = the same WO number
+            clientDne: cc.dne,                 // NTE amount, else 0.00
+            trade: cc.trade,
+            scope: cc.scope,
+            priorityLevel: cc.priority,        // "Scheduled PPM" (from "PM") or "P<n>"
+            _cwCorrigo: true, _woType: cc.woType, _siteCode: cc.siteCode, _addr: cc._addr,
+            _dueBy: cc.completeBy, _note: cc._note, _warn: cc._warn
           };
         }
       }
