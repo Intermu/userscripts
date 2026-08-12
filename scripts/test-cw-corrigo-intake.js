@@ -19,7 +19,8 @@
 //   - Client   -> "CW-Amazon" (asserted at the handleDrop wiring level; here we assert the inputs)
 //   - Location -> site code from "Requested By: AMAZON <code>" = IFM-JFK8 (Umbrava locationNumber)
 //   - Source Job # AND Source PO # = the CorrigoPro WO number AMNJFK8000762 (both)
-//   - WO Type  = the Details "Type:" value LITERALLY -> Reactive (NOT Preventative from "PM Task")
+//   - WO Type  = Preventative (this is a PM job); the Details "Type: Reactive" is a CorrigoPro
+//                ridealong, NOT the Umbrava WO type, so it is ignored
 //   - Priority = the Details "Priority:" value "PM" -> "Scheduled PPM"
 //   - Trade    = the Problem "<Area> > <Issue>" head "Electrical Issues" -> Electrical
 //   - Client DNE = the NTE "$0.00 USD" -> 0.00
@@ -125,7 +126,7 @@ var out = api.extractCwCorrigo(SUBJECT, BODY);
 console.log('\n# field mapping (screenshot ground truth)');
 A.ok('WO # -> Source Job # AND Source PO # = AMNJFK8000762', out.woNumber === 'AMNJFK8000762', 'got ' + out.woNumber);
 A.ok('Site code = IFM-JFK8 (the full code, not bare JFK8)', out.siteCode === 'IFM-JFK8', 'got ' + out.siteCode);
-A.ok('WO Type = Reactive (from Details "Type:", NOT Preventative)', out.woType === 'Reactive', 'got ' + out.woType);
+A.ok('WO Type = Preventative (PM job - Details "Type:" ridealong ignored)', out.woType === 'Preventative', 'got ' + out.woType);
 A.ok('Priority = Scheduled PPM (from "PM")', out.priority === 'Scheduled PPM', 'got ' + JSON.stringify(out.priority) + ' from ' + JSON.stringify(out.priorityRaw));
 A.ok('Trade = Electrical', out.trade === 'Electrical', 'got ' + JSON.stringify(out.trade));
 A.ok('Client DNE = 0.00', out.dne === '0.00', 'got ' + out.dne);
@@ -155,12 +156,17 @@ A.ok('a FAMIS CW-Amazon email is NOT CW-Corrigo (different channel, different de
 A.ok('a plain Pilot PO is NOT CW-Corrigo',
   api.isCwCorrigo('orders@pilottravelcenters.com', 'Purchase Order 12345678', 'PO # 12345678 store 0421') === false);
 
-// WO-type rule unit checks (the "keep it Reactive" fix Mike asked for).
-console.log('\n# WO Type rule (Details "Type:" is authoritative)');
-A.ok('Type: Reactive -> Reactive (even for a PM Task)', api.cwCorrigoWoType('Reactive') === 'Reactive');
-A.ok('Type: Preventive -> Preventative', api.cwCorrigoWoType('Preventive Maintenance') === 'Preventative');
-A.ok('Type: Request for Proposal -> Proposal', api.cwCorrigoWoType('Request for Proposal') === 'Proposal');
-A.ok('Type: (blank) -> Reactive', api.cwCorrigoWoType('') === 'Reactive');
+// WO-type rule unit checks. The Details "Type:" ridealong is IGNORED; the PM/preventive signal
+// (Priority "PM" / "Preventive Maintenance Task" problem / "PM work order" subject) drives it.
+console.log('\n# WO Type rule (PM signal, NOT the Details "Type:" ridealong)');
+A.ok('Priority "PM" -> Preventative (even though Details Type says Reactive)',
+  api.cwCorrigoWoType('PM', 'Interior > Electrical Issues Preventive Maintenance Task', 'The new PM work order #X received from C&W Services') === 'Preventative');
+A.ok('"Preventive Maintenance Task" problem -> Preventative',
+  api.cwCorrigoWoType('', 'Preventive Maintenance Task', '') === 'Preventative');
+A.ok('proposal / quote-request problem -> Proposal',
+  api.cwCorrigoWoType('P4', 'Please provide quote to replace the backflow', '') === 'Proposal');
+A.ok('no PM signal -> Reactive',
+  api.cwCorrigoWoType('P5', 'Interior > Electrical Issues no power to overhead door', 'The new work order #Y received from C&W Services') === 'Reactive');
 
 // Priority rule unit checks.
 console.log('\n# Priority rule');

@@ -4,7 +4,7 @@
 // @version      0.9.15
 // @downloadURL  https://raw.githubusercontent.com/Intermu/userscripts/main/bwn-wo-intake.user.js
 // @updateURL    https://raw.githubusercontent.com/Intermu/userscripts/main/bwn-wo-intake.user.js
-// @description  Drop a client PO/WO email (.msg or .eml) onto the Create Work Order modal and it prefills the fields. Pilot Travel Centers: from the email body. Caleres (Famous Footwear / Corrigo): reads the attached WO PDF on-device for Trade, Scope, Priority, Due-By, Store, NTE. If a Caleres request has no WO PDF (image-only), it reads Store, City/State and Trade from the subject and the scope from the body (NTE + Priority stay manual - they live only in the images). Amazon (Fairmarkit RFQ): the buyer is Amazon.com, Inc. but the sender is the Fairmarkit e-bidding platform - reads the RFQ body (no PDF) for Site (matched by the Amazon site code e.g. PIT2/STL3, else the shipping address), RFQ #, Trade, Scope + line items; NTE and Priority stay manual because an RFQ carries no ceiling yet (we are the quoting supplier). The email carries no attachment - the full scope / any 'see attached file' lives on the Fairmarkit bid page - so it surfaces that RFQ link and warns you when the body defers to it. Per Amazon: Source PO # is set to the literal "Quote Request", Source Job # is set to the RFQ ID suffixed " (FM-AMZ)" (e.g. 2956102 (FM-AMZ)), Client DNE is set to 0.00, and WO Type is selected as Proposal in the create modal - all filled in the one pass (no post-Create tracking-number step). Selects Client, Location (address-verified), Trade and Priority by clicking the real dropdown option; fills Client DNE, Source Job # and Source PO #; warns you if the WO PDF shows a cancel/flag note. CW-Amazon (Cushman & Wakefield / FAMIS 360, from amazon@ilrs.360facility.net - a separate feed from Fairmarkit, so the client is "CW-Amazon"): reads the plain-text Case Summary for Site (matched by the exact site code = Umbrava locationNumber), Request ID (-> Source Job #; Source PO # is left blank per the client convention), Trade, Scope, Client DNE (from the PO/NTE amount in the Statement of Work, else 0.00) and Priority (the FAMIS P-code -> the client's "P<n> - ..." priority, or Scheduled PPM); it sets WO Type from the Type|Sub-Type line - a Request for Proposal -> Proposal, a preventive/PPM job -> Preventative, everything else -> Reactive. Then, after you Create the WO, it hands the email to BWN Drop Upload to attach it to the new WO's Documents. JLL-Amazon (Jones Lang LaSalle / CorrigoPro, from alerts@am.corrigopro.com - a separate feed again, so the client is "JLL-Amazon"): reads the "WORK ORDER #..." body for Site (matched by the exact property/site code = Umbrava locationNumber, e.g. BNA12/ATL11/DEN17), the CorrigoPro WO number (set as BOTH Source Job # and Source PO # per the client convention), Scope, Client DNE (the NTE, else 0.00) and Priority (the email's priority IS the Umbrava label - a PM job is "PM (Scheduled)"); it sets WO Type from the job kind - a PM (Scheduled) job -> Preventative, everything else -> Reactive. CW-Amazon via CorrigoPro (C&W Services on the CorrigoPro network, from alerts@am.corrigopro.com with subject "...received from C&W Services" - the SAME CorrigoPro format as JLL-Amazon but a different brand, so the client is still "CW-Amazon"): reads the "WORK ORDER #..." body for Site (the code in "Requested By: AMAZON <code>", e.g. IFM-JFK8 = Umbrava locationNumber), the CorrigoPro WO number (BOTH Source Job # and Source PO #), Scope (the Problem block), Trade (from the Problem "<Area> > <Issue>" head), Client DNE (the NTE, else 0.00), WO Type (the Details "Type:" value verbatim - a "Preventive Maintenance Task" WO stays Reactive if Type says Reactive) and Priority (the Details "Priority:" value - "PM" -> "Scheduled PPM"). Reads everything in the browser; nothing is uploaded to any server. Best-effort: review every field before you click Create.
+// @description  Drop a client PO/WO email (.msg or .eml) onto the Create Work Order modal and it prefills the fields. Pilot Travel Centers: from the email body. Caleres (Famous Footwear / Corrigo): reads the attached WO PDF on-device for Trade, Scope, Priority, Due-By, Store, NTE. If a Caleres request has no WO PDF (image-only), it reads Store, City/State and Trade from the subject and the scope from the body (NTE + Priority stay manual - they live only in the images). Amazon (Fairmarkit RFQ): the buyer is Amazon.com, Inc. but the sender is the Fairmarkit e-bidding platform - reads the RFQ body (no PDF) for Site (matched by the Amazon site code e.g. PIT2/STL3, else the shipping address), RFQ #, Trade, Scope + line items; NTE and Priority stay manual because an RFQ carries no ceiling yet (we are the quoting supplier). The email carries no attachment - the full scope / any 'see attached file' lives on the Fairmarkit bid page - so it surfaces that RFQ link and warns you when the body defers to it. Per Amazon: Source PO # is set to the literal "Quote Request", Source Job # is set to the RFQ ID suffixed " (FM-AMZ)" (e.g. 2956102 (FM-AMZ)), Client DNE is set to 0.00, and WO Type is selected as Proposal in the create modal - all filled in the one pass (no post-Create tracking-number step). Selects Client, Location (address-verified), Trade and Priority by clicking the real dropdown option; fills Client DNE, Source Job # and Source PO #; warns you if the WO PDF shows a cancel/flag note. CW-Amazon (Cushman & Wakefield / FAMIS 360, from amazon@ilrs.360facility.net - a separate feed from Fairmarkit, so the client is "CW-Amazon"): reads the plain-text Case Summary for Site (matched by the exact site code = Umbrava locationNumber), Request ID (-> Source Job #; Source PO # is left blank per the client convention), Trade, Scope, Client DNE (from the PO/NTE amount in the Statement of Work, else 0.00) and Priority (the FAMIS P-code -> the client's "P<n> - ..." priority, or Scheduled PPM); it sets WO Type from the Type|Sub-Type line - a Request for Proposal -> Proposal, a preventive/PPM job -> Preventative, everything else -> Reactive. Then, after you Create the WO, it hands the email to BWN Drop Upload to attach it to the new WO's Documents. JLL-Amazon (Jones Lang LaSalle / CorrigoPro, from alerts@am.corrigopro.com - a separate feed again, so the client is "JLL-Amazon"): reads the "WORK ORDER #..." body for Site (matched by the exact property/site code = Umbrava locationNumber, e.g. BNA12/ATL11/DEN17), the CorrigoPro WO number (set as BOTH Source Job # and Source PO # per the client convention), Scope, Client DNE (the NTE, else 0.00) and Priority (the email's priority IS the Umbrava label - a PM job is "PM (Scheduled)"); it sets WO Type from the job kind - a PM (Scheduled) job -> Preventative, everything else -> Reactive. CW-Amazon via CorrigoPro (C&W Services on the CorrigoPro network, from alerts@am.corrigopro.com with subject "...received from C&W Services" - the SAME CorrigoPro format as JLL-Amazon but a different brand, so the client is still "CW-Amazon"): reads the "WORK ORDER #..." body for Site (the code in "Requested By: AMAZON <code>", e.g. IFM-JFK8 = Umbrava locationNumber), the CorrigoPro WO number (BOTH Source Job # and Source PO #), Scope (the Problem block), Trade (from the Problem "<Area> > <Issue>" head), Client DNE (the NTE, else 0.00), WO Type (a PM/preventive job -> Preventative, a proposal -> Proposal, else Reactive - the CorrigoPro Details "Type:" line is a ridealong and is ignored) and Priority (the Details "Priority:" value - "PM" -> "Scheduled PPM"). Reads everything in the browser; nothing is uploaded to any server. Best-effort: review every field before you click Create.
 // @match        https://app.umbrava.com/*
 // @run-at       document-idle
 // @noframes
@@ -638,8 +638,10 @@
   //     Umbrava locationNumber. JLL reads "Property:", which these C&W emails omit; the same site also
   //     has a bare "JFK8" record (the FAMIS channel), so the FULL "IFM-JFK8" is what disambiguates.
   //   - Source Job # AND Source PO # = the CorrigoPro WO number (same convention as JLL).
-  //   - WO Type = the Details "Type:" value LITERALLY (Reactive) - do NOT infer Preventative from the
-  //     "Preventive Maintenance Task" problem wording (per Mike, this WO stays Reactive).
+  //   - WO Type: a PM / preventive job -> Preventative, a proposal / quote request -> Proposal, else
+  //     Reactive. The Details "Type:" line ("Reactive") is a CorrigoPro RIDEALONG, NOT the WO type,
+  //     so it is ignored (same trap as JLL's "Type: PM/RM"); the PM signal is Priority "PM" / the
+  //     "Preventive Maintenance Task" problem / the "PM work order" subject.
   //   - Priority = the Details "Priority:" value: "PM" -> "Scheduled PPM", a "P<n>" -> "P<n>".
   //   - Trade from the Problem "<Area> > <Issue>" head (Electrical Issues -> Electrical).
   //   - Client DNE = the NTE ("NTE: $0.00 USD"), else 0.00.
@@ -666,13 +668,16 @@
     if (/janitor|\bclean|sweep|porter/.test(s)) return 'Handyman';
     return '';
   }
-  // WO Type from the Details "Type:" value (authoritative). Proposal/RFP -> Proposal,
-  // preventive/planned -> Preventative, everything else (incl. "Reactive") -> Reactive.
-  function cwCorrigoWoType(typeRaw) {
-    var t = String(typeRaw || '').toLowerCase();
-    if (/proposal|request for proposal|\brfp\b|\bquote\b/.test(t)) return 'Proposal';
-    if (/prevent|planned|\bppm\b/.test(t)) return 'Preventative';
-    return 'Reactive';
+  // WO Type. The CorrigoPro Details "Type:" line is a RIDEALONG ("Reactive" even on PM work) - it is
+  // NOT the Umbrava WO type, so it is deliberately NOT read here (same trap as JLL's "Type: PM/RM").
+  // A preventive / PM job -> Preventative; a proposal / quote request -> Proposal; else -> Reactive.
+  function cwCorrigoWoType(priorityRaw, problem, subject) {
+    var p = String(problem || '');
+    if (/\bproposal\b|request for proposal|\brfp\b|please provide (a |the )?quote|quote request/i.test(p)) return 'Proposal';
+    var pm = /\bPPM\b|\bPM\b|PM\s*\(Scheduled\)/i.test(String(priorityRaw || ''))
+          || /\bpreventive\b|\bpreventative\b|\bPPM\b/i.test(p)
+          || /\bPM\b\s*work order/i.test(String(subject || ''));
+    return pm ? 'Preventative' : 'Reactive';
   }
   // Priority from the Details "Priority:" value: a "P<n>" prefix -> "P<n>", a PM/PPM marker ->
   // "Scheduled PPM", else blank (user picks).
@@ -699,6 +704,8 @@
     // Client DNE from the NTE line ("NTE: $0.00 USD"); 0.00 when absent.
     var mn = F.match(/\bNTE:\s*\$?\s*([\d,]+(?:\.\d{1,2})?)/i); out.dne = mn ? mn[1].replace(/,/g, '') : '0.00';
     // Priority + Type from the Details block (label / newline / value -> "Priority: PM Type: Reactive").
+    // NB: the Details "Type:" ("Reactive") is a CorrigoPro ridealong, NOT the Umbrava WO type - it is
+    // captured for the record only; cwCorrigoWoType decides the type from the PM/preventive signal.
     m = F.match(/Priority:\s*(.+?)\s*Type:/i); if (m) out.priorityRaw = m[1].trim();
     m = F.match(/\bType:\s*(.+?)\s*Accept\s*\/\s*Reject By:/i); if (m) out.typeRaw = m[1].trim();
     m = F.match(/Complete By:\s*(.+?)\s*(?:Appointment Type:|Execution Plan:|Procedures\b|$)/i); if (m) out.completeBy = m[1].trim();
@@ -719,7 +726,7 @@
     // Trade from the issue head "<Area> > <Issue>" (first problem line).
     var issue = ''; var mi = (lines[0] || '').match(/>\s*(.+)$/); if (mi) issue = mi[1].trim();
     out.trade = cwCorrigoTrade(issue || out.problem);
-    out.woType = cwCorrigoWoType(out.typeRaw);
+    out.woType = cwCorrigoWoType(out.priorityRaw, out.problem, subject);
     out.priority = cwCorrigoPriority(out.priorityRaw);
     // Address parse (secondary score + toast).
     var addr = { streetNum: '', street: '', city: '', state: '', zip: '' };
@@ -1111,7 +1118,7 @@
       if (wo._amazon) parts.push('Amazon: Source PO # = Quote Request, DNE 0.00, WO Type = ' + (wo._woType || 'Proposal') + ', Source Job # = ' + (wo.sourceJob || '<RFQ ID> (FM-AMZ)'));
       if (wo._cwAmazon) parts.push('CW-Amazon: Source Job # = ' + (wo.sourceJob || 'Request ID') + ', Source PO # blank, WO Type = ' + (wo._woType || 'Reactive') + ', Client DNE $' + (wo.clientDne || '0.00'));
       if (wo._jllAmazon) parts.push('JLL-Amazon: Source Job # + Source PO # = WO ' + (wo.sourceJob || '') + ', WO Type = ' + (wo._woType || 'Preventative') + ', Client DNE $' + (wo.clientDne || '0.00'));
-      if (wo._cwCorrigo) parts.push('CW-Amazon (CorrigoPro): Source Job # + Source PO # = WO ' + (wo.sourceJob || '') + ', WO Type = ' + (wo._woType || 'Reactive') + ', Client DNE $' + (wo.clientDne || '0.00'));
+      if (wo._cwCorrigo) parts.push('CW-Amazon (CorrigoPro): Source Job # + Source PO # = WO ' + (wo.sourceJob || '') + ', WO Type = ' + (wo._woType || 'Preventative') + ', Client DNE $' + (wo.clientDne || '0.00'));
       parts.push('review before Create');
       toast('From the PO email - ' + parts.join(' · '), 15000);
     })();
