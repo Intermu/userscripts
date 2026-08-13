@@ -43,7 +43,9 @@ A.ok('AI reads bwn:props for openProposals', ai.indexOf("BWN.lsGetJSON('bwn:prop
 A.ok('AI includes gpPct + openProposals in jobFacts', /jobFacts:\{[\s\S]*?gpPct:gpPct[\s\S]*?openProposals:openProposals[\s\S]*?\}/.test(ai));
 
 // ---- 4. execute the SHIPPED AI lookup bytes ----------------------------------------------
-var snip = ai.match(/var gpPct = null, openProposals = null;[\s\S]*?catch\(e\)\{\}\n\s*try \{ var _pp[\s\S]*?catch\(e\)\{\}/);
+// NB: the declaration line also carries noteCount/clientNoteDays (added by the notes-history
+// slice, which shares this bus read) - match up to the props catch without pinning the trailing vars.
+var snip = ai.match(/var gpPct = null, openProposals = null[\s\S]*?catch\(e\)\{\}\n\s*try \{ var _pp[\s\S]*?catch\(e\)\{\}/);
 A.ok('sliced the AI gp/props lookup snippet from source', !!snip);
 if (snip) {
   function run(bus, props, job) {

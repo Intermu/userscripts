@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         BWN Suite - AI (Broadway National)
 // @namespace    broadwaynational.bwn
-// @version      1.45.4
+// @version      1.45.5
 // @downloadURL  https://raw.githubusercontent.com/Intermu/userscripts/main/bwn-suite-ai.user.js
 // @updateURL    https://raw.githubusercontent.com/Intermu/userscripts/main/bwn-suite-ai.user.js
 // @description  The Umbrava tools that call outside APIs, kept separate from the zero-egress Core script. Client Update and WO Audit drafts (Anthropic Claude; draft-only, scrubbed before sending, you review before posting); Find Techs / Find Suppliers (Google Places; vendor leads near a WO); and Job View (opens the Ops-Dashboard job card on the WO page - WO details from Umbrava plus the authored case file and next actions, read-only). Network access is limited by the browser to the declared API hosts and the BWN Static Web App. API keys are stored in Tampermonkey's storage via the menu commands and never enter the page. Toggle modules in BWN_MODULES below.
@@ -4957,8 +4957,17 @@ if (BWN_MODULES.jobView) BWN.safeModule('jobView', function () {
     // 12h max-age built into busGet) - the real API GP% (grossProfitInfo), not the row estimate.
     // openProposals from Core's bwn:props:<wo> (client proposals with no terminal date). Both
     // absent => null => omitted; never a guessed 0.
-    var gpPct = null, openProposals = null;
-    try { var _b = BWN.busGet(job.wo||job.woNumber||'', 12*3600000); if(_b && typeof _b.gpPct === 'number') gpPct = _b.gpPct; } catch(e){}
+    // Track A notes-history: noteCount + client-note staleness ride the SAME bwn:wo bus read as
+    // gpPct (Core publishes staleDays/noteCount/lastNote/lastClientNote). noteCount = note volume;
+    // clientNoteDays = days since the newest CLIENT-typed note (distinct from the board's any-note
+    // lastNoteDate - it is client silence specifically). Both absent => null => omitted.
+    var gpPct = null, openProposals = null, noteCount = null, clientNoteDays = null;
+    try { var _b = BWN.busGet(job.wo||job.woNumber||'', 12*3600000);
+      if(_b){
+        if(typeof _b.gpPct === 'number') gpPct = _b.gpPct;
+        if(typeof _b.noteCount === 'number') noteCount = _b.noteCount;
+        if(_b.lastClientNote){ var _cn = Date.parse(_b.lastClientNote); if(!isNaN(_cn)) clientNoteDays = Math.floor((Date.now() - _cn) / 86400000); }
+      } } catch(e){}
     try { var _pp = BWN.lsGetJSON('bwn:props:' + (job.wo||job.woNumber||''), null); if(_pp && typeof _pp.open === 'number') openProposals = _pp.open; } catch(e){}
     jvPost({ jobFacts:{ target:target, status:job.status, coordinator:job.coordinator, location:job.location,
       priority:job.priority, fm:job.fm, trades:job.trades, vendors:job.vendors, amount:job.amount, aged:job.aged,
@@ -4966,7 +4975,8 @@ if (BWN_MODULES.jobView) BWN.safeModule('jobView', function () {
       firstTripDate:iso(job.firstTripDate), nextOnsiteDate:iso(job.nextOnsiteDate), expectedCompletion:iso(job.expectedCompletion),
       woNumber:job.wo||job.woNumber, sourceJob:job.sourceJob||job.jobId,
       city:job.city, state:job.state, client:job.client, sourcePo:job.po, vendorNte:job.totalVendorNte, docCount:docCount,
-      noShowDays:noShowDays, noShowVendor:noShowVendor, gpPct:gpPct, openProposals:openProposals } });
+      noShowDays:noShowDays, noShowVendor:noShowVendor, gpPct:gpPct, openProposals:openProposals,
+      noteCount:noteCount, clientNoteDays:clientNoteDays } });
   }
   // Freshen the CURRENT WO on the dashboard when the connector records WO actions
   // (debounced per WO). Exposed on window so the top-level connector drain can call it.

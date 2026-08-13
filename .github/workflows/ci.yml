@@ -285,6 +285,12 @@ jobs:
       - name: GP + proposals ingest harness (bus gpPct + listClientProposals open-count)
         run: node scripts/test-gp-proposals-ingest.js
 
+      # Track A notes-history: noteCount + client-note staleness ride the same bwn:wo bus read as
+      # gpPct (Core publishes state.noteCount + lastClientNote). AI carries noteCount + clientNoteDays
+      # (client silence, distinct from the board's any-note lastNoteDate). Runs the shipped bus block.
+      - name: Notes-history ingest harness (bus noteCount + clientNoteDays)
+        run: node scripts/test-notes-hist-ingest.js
+
       # The Operate panel — the seam an agent drives the page from, the code path that once had page
       # tools registered where no coordinator-facing UI invoked them. Sliced from bwn-suite-ai: panel
       # unprojectable, capability line derived, posts `operate` never `ask`, adopts the SERVER's round
