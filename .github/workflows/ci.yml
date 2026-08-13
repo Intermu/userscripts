@@ -121,6 +121,15 @@ jobs:
       - name: List Heat open-count harness (phase beats the status name)
         run: node scripts/test-heat-open-count.js
 
+      # List Heat 1.78.6: the API scan needs a captured PagedWorkOrders query, but capture is a
+      # passive race the document-start hook can lose - leaving 'no capture yet' for the page's
+      # life. Core now seeds apiList with the pinned board query (captured off the wire 2026-08-13)
+      # so the scan runs regardless. Slices the seed block + heatRecordCapture and pins: the two
+      # REQUIRED non-null args are present, the seed pages+gates like a live capture, and the seed
+      # is always DISPLACED by a real board request (never blocks it) while non-seeds stay protected.
+      - name: List Heat seed-fallback harness (pinned board query + displaceable seed)
+        run: node scripts/test-heat-seed.js
+
       # Notes without scraping: workOrderNotes in one call, plus the SHA gate that keeps
       # the block identical in bwn-suite-core and bwn-suite-ai.
       - name: Notes API harness (bwnNotesApi block + cross-file SHA)

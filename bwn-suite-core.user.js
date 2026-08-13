@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         BWN Suite - Core (Broadway National)
 // @namespace    broadwaynational.bwn
-// @version      1.78.5
+// @version      1.78.6
 // @downloadURL  https://raw.githubusercontent.com/Intermu/userscripts/main/bwn-suite-core.user.js
 // @updateURL    https://raw.githubusercontent.com/Intermu/userscripts/main/bwn-suite-core.user.js
 // @description  Runs several Umbrava helpers for BWN coordinators, in the browser with no privileged grants. Includes: PO Approval + ETA Builder; WO Assist (GP/ETA, a stall watchdog, DNE calculator, and a next-action playbook); Email Leak Guard (checks recipients against vendor names, PO amounts, and client budget references before an outbound email sends); WO List Heat (a triage overlay + My Day strip on the work-order list, with an optional same-origin Umbrava API scan for deterministic full-board coverage); and the BWN Launcher (opens the Azure Static Web App tools with the current WO's context). Modules share state through sessionStorage/localStorage. The only network calls are same-origin Umbrava GraphQL requests (app.umbrava.com/api/graphql, the app's own session): List Heat's full-board scan and WO Assist's work-order / trip / clock-in / document reads, plus ONE write - BWN Views saves the column layout through Umbrava's own putUserPreference, the same preference the column chooser writes; everything else is offline. Toggle modules in BWN_MODULES below.
@@ -6340,6 +6340,7 @@
         if (apiList && body.query === apiList.query) {
           var sameVars = heatFilterSig(body.variables) === heatFilterSig(apiList.variables);
           apiList.variables = body.variables || {};
+          apiList.seeded = false;   // a real request carrying the same query text upgrades the pinned seed to a live capture
           apiCapTs = Date.now();
           if (respProves) {
             apiList.path = found.path; apiList.conn = found.conn;
@@ -6354,7 +6355,7 @@
         // verified) is never displaced by a request-only guess from another operation,
         // and a fresh request-only latch holds for a minute so two board-shaped
         // operations on one page cannot fight over the slot every few seconds.
-        if (apiList && !respProves && (apiList.proven || (Date.now() - apiCapTs) < 60000)) return;
+        if (apiList && !apiList.seeded && !respProves && (apiList.proven || (Date.now() - apiCapTs) < 60000)) return;
         if (apiList && respProves && apiList.proven && found.rows.length < (apiList._rows || 0) && (Date.now() - apiCapTs) < 60000) return;
         apiList = {
           query: body.query, variables: body.variables || {},
@@ -7268,6 +7269,10 @@
         BWN.beat('listHeat', 'waiting', 'not the WO list');
         return;
       }
+      // On the list route: arm the pinned-query seed fallback (SET-ONCE) so the API scan is
+      // available even if the passive capture lost the boot race - independent of whether the
+      // DOM table below is detected. A live capture, if one fires, always displaces the seed.
+      heatArmSeedFallback();
       var table = findBodyTable();
       var H = table ? alignMap(headerMap(), table) : null;
       if (!table || !H) { diag(table, H, 0); BWN.beat('listHeat', 'waiting', 'list table/header not detected'); return; }
@@ -7982,6 +7987,173 @@
       heatAutoTimer = setTimeout(function () { heatAutoTimer = null; heatAutoScan(vars); }, 700);
     }
 
+    // ---- Seed fallback: the pinned board query when nothing latched (2026-08-13) -----
+    // WHY. The API scan replays a captured PagedWorkOrders query. Capture is PASSIVE: the
+    // document-start hook only sees the board query if it wins the race with the app's own
+    // boot overwrite of window.fetch (the app grabs its transport reference at boot - see
+    // installGqlHook). When the hook loses that race, apiList stays null for the page's whole
+    // life: every scan path reports 'no capture yet', the manual button falls to the slow
+    // scroll sweep, and the book-wide numbers never arrive without a click.
+    //
+    // The board op is now PINNED (captured off the wire 2026-08-13; see
+    // wiki/umbrava-graphql-operations.md): op PagedWorkOrders, and the ONLY two REQUIRED,
+    // non-null args are `page: PageInput!` and `sortBy: [SortInput!]!`. So Core carries the
+    // exact query and seeds apiList itself, and the API scan runs whether or not the passive
+    // capture ever fired.
+    //
+    // The seed is DELIBERATELY WEAK and always loses to a real capture:
+    //   - marked seeded:true / proven:false, and heatRecordCapture's anti-downgrade guard
+    //     lets ANY real board request displace a seed - a real capture carries the user's
+    //     actual filters, the seed only knows the whole unfiltered book.
+    //   - the query text is BYTE-IDENTICAL to what the SPA sends, so when the app's own board
+    //     query fires, heatRecordCapture's `body.query === apiList.query` branch simply swaps
+    //     in the real variables and re-scans - the seed converts to a live capture with no
+    //     churn. If Umbrava ever changes the query text, the seed is displaced instead.
+    //   - it is armed on a GRACE TIMER, not immediately, so in the normal case (the passive
+    //     capture wins within the grace window) the seed never fires and behaviour is
+    //     unchanged. Killable per browser via the existing localStorage['bwn:heat:autoscan']='0'.
+    var HEAT_SEED_GRACE_MS = 3500;
+    var heatSeedTimer = null;
+    var HEAT_DEFAULT_QUERY = [
+      'query PagedWorkOrders($page: PageInput!, $sortBy: [SortInput!]!, $search: String, $filter: [ColumnFilterInput!], $statuses: [Int], $statusesInclusive: Boolean = true, $onlyUnassigned: Boolean = false, $assignedTo: [ID], $clientId: ID, $vendorId: ID, $locationId: ID, $assetId: ID, $WorkOrderNumbers: [Int], $phase: SystemPhaseValue, $locationIds: [ID!], $regionIds: [ID!], $regionPrefixes: [String!]) {',
+      '  __typename',
+      '  listWorkOrdersPaginated(',
+      '    page: $page',
+      '    sortBy: $sortBy',
+      '    search: $search',
+      '    filter: $filter',
+      '    statuses: $statuses',
+      '    statusesInclusive: $statusesInclusive',
+      '    onlyUnassigned: $onlyUnassigned',
+      '    assignedTo: $assignedTo',
+      '    clientId: $clientId',
+      '    vendorId: $vendorId',
+      '    locationId: $locationId',
+      '    assetId: $assetId',
+      '    WorkOrderNumbers: $WorkOrderNumbers',
+      '    phase: $phase',
+      '    locationIds: $locationIds',
+      '    regionIds: $regionIds',
+      '    regionPrefixes: $regionPrefixes',
+      '  ) {',
+      '    __typename',
+      '    rowCount',
+      '    take',
+      '    firstRowOnPage',
+      '    lastRowOnPage',
+      '    items {',
+      '      __typename',
+      '      address {',
+      '        __typename',
+      '        addressLine1',
+      '        addressLine2',
+      '        city',
+      '        state',
+      '        postalCode',
+      '      }',
+      '      trackingNumber',
+      '      timeInStatus',
+      '      assetName',
+      '      assetTagId',
+      '      assignedTo',
+      '      assignedToMemberName',
+      '      clientName',
+      '      clientTenantProfileId',
+      '      createdByMemberName',
+      '      createdBy_UserProfileId',
+      '      doNotExceed {',
+      '        __typename',
+      '        amount',
+      '        currency',
+      '        precision',
+      '      }',
+      '      formattedJobNumber',
+      '      id',
+      '      lastModifiedDate',
+      '      lastNoteDate',
+      '      locationName',
+      '      locationNumber',
+      '      nextOnsiteDate',
+      '      number',
+      '      numberOfDays',
+      '      priority {',
+      '        __typename',
+      '        label',
+      '        firstTripDate',
+      '        expectedCompletionDate',
+      '        category',
+      '      }',
+      '      remainingDays',
+      '      scopeOfWork',
+      '      state',
+      '      statusName',
+      '      statusId',
+      '      trades {',
+      '        __typename',
+      '        id',
+      '        name',
+      '        systemTradeId',
+      '        systemTradeName',
+      '        isSystemTrade',
+      '        hidden',
+      '      }',
+      '      vendorNames',
+      '      workOrderDate',
+      '      workOrderTypeName',
+      '      workOrderTypeId',
+      '      sourceJobNumber',
+      '      sourcePurchaseOrderNumber',
+      '      totalNTE {',
+      '        __typename',
+      '        amount',
+      '        currency',
+      '        precision',
+      '      }',
+      '      flag',
+      '      workOrderCategory {',
+      '        __typename',
+      '        id',
+      '        name',
+      '        isActive',
+      '        colorHex',
+      '      }',
+      '      phase',
+      '      systemStatusId',
+      '      systemStatusName',
+      '    }',
+      '  }',
+      '}',
+      ''
+    ].join('\n');
+    // Seed apiList with the pinned query IF nothing has latched. Returns false (no-op) when a
+    // real capture or a prior seed already holds the slot, or when we are off the list route.
+    function heatSeedCapture() {
+      if (apiList && apiList.query) return false;
+      if (!isListPage()) return false;
+      apiList = {
+        query: HEAT_DEFAULT_QUERY,
+        variables: { page: { skip: 0, take: 200 }, sortBy: [{ columnName: 'formattedJobNumber', direction: 'DESC' }] },
+        path: null, conn: false, _rows: 0, sample: null, proven: false, seeded: true
+      };
+      apiCapTs = Date.now();
+      console.info('[BWN HEAT] no board query captured off the wire; seeding the pinned PagedWorkOrders fallback for a book-wide scan.');
+      return true;
+    }
+    // SET-ONCE arm (never clear-and-reset). woListHeat runs on every list mutation, and a
+    // timer cleared+re-armed on each call never fires on a busy SPA (wiki/observer-debounce-
+    // starves). The route-change handler clears heatSeedTimer, so leaving the list cancels a
+    // pending seed and returning re-arms fresh.
+    function heatArmSeedFallback() {
+      if (heatSeedTimer) return;
+      heatSeedTimer = setTimeout(function () {
+        heatSeedTimer = null;
+        if (!isListPage()) return;
+        if (apiList && apiList.query) return;   // the passive capture won the race - leave it
+        if (!heatAuthToken()) return;           // no bearer to replay with; the scroll button still covers it
+        if (heatSeedCapture()) heatAutoScan(apiList.variables);
+      }, HEAT_SEED_GRACE_MS);
+    }
+
     // ---- API scan: replay the captured list query across the whole board ------------
     // Deterministic and virtualizer-free. Resolves true on a clean, confident full
     // board (heatStore filled, snapshot written); false to hand off to the scroll scan.
@@ -8569,6 +8741,7 @@
           lastScanClean: !!heatScanClean, hasStore: !!heatStore,
           storeRows: heatStore ? Object.keys(heatStore).length : 0,
           hasCapture: !!(apiList && apiList.query), captureProven: !!(apiList && apiList.proven),
+          captureSeeded: !!(apiList && apiList.seeded),
           autoOn: (function () { try { return !!heatAutoOn(); } catch (e) { return null; } })(),
           onListRoute: (function () { try { return !!isListPage(); } catch (e) { return null; } })()
         },
@@ -8590,6 +8763,7 @@
     var obs = new MutationObserver(BWN.guard(function () {
       if (location.pathname !== lastPath) {
         lastPath = location.pathname;
+        if (heatSeedTimer) { clearTimeout(heatSeedTimer); heatSeedTimer = null; }   // cancel a pending seed; woListHeat re-arms on the list route
         if (heatScanning) heatScanAbort = true;   // an in-flight scan must not write into a nulled store
         heatStore = null; heatRaw = null; heatRowsCache = null;
         heatScanClean = false;
