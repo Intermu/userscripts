@@ -76,7 +76,35 @@
   // ===== copy engine ========================================================
   // (mapLineItem, buildCreateVars, buildEditVars, copyProposal land here in
   //  Tasks 2-4. Kept DOM-free so the node harness can run it headless.)
-  function mapLineItem() {}          // Task 2
+  function mapLineItem(src) {
+    src = src || {};
+    var out = {
+      id: src.id,
+      category: src.category,
+      tripLabel: src.tripLabel,
+      tradeId: (src.trade && src.trade.id) != null ? src.trade.id : src.tradeId,
+      quantity: src.quantity,
+      fractionalQuantity: src.fractionalQuantity,
+      chargeQuantity: src.chargeQuantity,
+      fractionalChargeQuantity: src.fractionalChargeQuantity,
+      unitCost: src.unitCost ? { amount: src.unitCost.amount, currency: src.unitCost.currency, precision: src.unitCost.precision } : null,
+      unitOfMeasurement: src.unitOfMeasurement,
+      useMarkUpPercent: src.useMarkUpPercent,
+      markUpPercent: src.markUpPercent,
+      unitCharge: src.unitCharge ? { amount: src.unitCharge.amount, currency: src.unitCharge.currency, precision: src.unitCharge.precision } : null,
+      isTaxable: src.isTaxable,
+      taxRate: src.taxRate,
+      item: src.item,
+      itemId: src.itemId,
+      isPrivate: src.isPrivate,
+      sortOrder: src.sortOrder,
+      rateId: src.rateId,
+      description: src.description,
+      descriptionHtml: src.descriptionHtml
+    };
+    delete out.id;   // a copied line is a NEW row; sending the source id would target an existing item
+    return out;
+  }
   function buildCreateVars() {}      // Task 3
   function buildEditVars() {}        // Task 3
   function copyProposal() {}         // Task 4

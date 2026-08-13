@@ -90,5 +90,35 @@ function loadCore(env) {
   var e9 = makeEnv({}); var api9 = loadCore(e9);
   A.ok('rank() is null when no slot', api9.rank() === null);
 
+  // --- mapLineItem ---
+  var apiM = loadCore(makeEnv({}));
+  var SRC_ITEM = {
+    id: 999, category: 1, tripLabel: 'T1', quantity: 2, chargeQuantity: 2,
+    unitOfMeasurement: 'EA', useMarkUpPercent: true, markUpPercent: '15.00',
+    isTaxable: true, taxRate: '8.875', item: 'Widget', itemId: 42, isPrivate: false,
+    sortOrder: 0, rateId: 'rate-abc', description: 'A widget', descriptionHtml: '<p>A widget</p>',
+    trade: { id: 'trade-xyz' },
+    unitCost: { amount: 12345, currency: 'USD', precision: 2 },
+    unitCharge: { amount: 14197, currency: 'USD', precision: 2 }
+  };
+  var mapped = apiM.mapLineItem(SRC_ITEM);
+  A.ok('mapLineItem OMITS id (new row)', !('id' in mapped) || mapped.id == null);
+  A.ok('mapLineItem maps trade.id -> tradeId', mapped.tradeId === 'trade-xyz');
+  A.eq('mapLineItem copies unitCost verbatim (minor units)', mapped.unitCost, { amount: 12345, currency: 'USD', precision: 2 });
+  A.eq('mapLineItem copies unitCharge verbatim', mapped.unitCharge, { amount: 14197, currency: 'USD', precision: 2 });
+  A.ok('mapLineItem keeps markUpPercent as a STRING', mapped.markUpPercent === '15.00');
+  A.ok('mapLineItem keeps taxRate as a STRING', mapped.taxRate === '8.875');
+  A.eq('mapLineItem preserves category/sortOrder/itemId/rateId', { c: mapped.category, s: mapped.sortOrder, i: mapped.itemId, r: mapped.rateId }, { c: 1, s: 0, i: 42, r: 'rate-abc' });
+
+  // negative controls: the mapper must never re-key or rescale.
+  var CORE_M = slice('  // ===== auth + gql', '  // ===== ui', 'core block');
+  function loadMutant(coreSrc) {
+    var env = makeEnv({}); var ctx = vm.createContext(env);
+    vm.runInContext('(function(){' + coreSrc + '\n; this.__api = { mapLineItem: mapLineItem }; }).call(globalThis);', ctx);
+    return env.__api;
+  }
+  var mutIdKept = loadMutant(mutate(CORE_M, 'delete out.id;', '/* keep id */')).mapLineItem(SRC_ITEM);
+  A.ok('CONTROL: keeping id turns a new copy into an edit (red if id present)', mutIdKept.id === undefined || mutIdKept.id == null ? false : true);
+
   A.finish();
 })();
