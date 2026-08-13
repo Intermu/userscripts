@@ -1,10 +1,10 @@
 // ==UserScript==
 // @name         BWN Drop Upload (Broadway National)
 // @namespace    broadwaynational.bwn
-// @version      1.10.5
+// @version      1.11.0
 // @downloadURL  https://raw.githubusercontent.com/Intermu/userscripts/main/bwn-drop-upload.user.js
 // @updateURL    https://raw.githubusercontent.com/Intermu/userscripts/main/bwn-drop-upload.user.js
-// @description  Drop files anywhere on an Umbrava work order to upload them. Opens the Documents tab and upload dialog, hands over the files, and builds each file's description from its contents. Emails are parsed locally (.msg via an OLE/MAPI reader, .eml via RFC822) into an Outlook-style block - From/Sent/To/Cc/Subject and the body - that becomes the WO note, led by a one-line summary from Chrome's on-device built-in AI (zero cost, zero egress, nothing leaves the browser), falling back to local WO-field extraction (store, city/state, priority, PO, NTE, problem, requester) when the on-device model is unavailable. That same summary fills each file's Description. The WO note's Type is chosen from the email's parties: inbound is typed by the sender (client -> Client, else Vendor); outbound from Broadway is typed by the recipients (a client recipient -> Client, any vendor recipient -> Vendor, all-internal -> Internal). Umbrava's Description field is a TipTap/ProseMirror rich-text editor. It rejects synthetic paste, beforeinput, insertHTML and raw innerHTML, but honours execCommand('insertText') plus a synthetic Enter keydown - so the note is filled line by line (Enter between lines to keep paragraphs), paced ~12ms/line so ProseMirror's async commit doesn't drop lines (measured live 2026-08-10). The text is also placed on your clipboard as a backup, and if every fill method fails a "Copy the WO note" button appears (its click supplies the gesture for a reliable copy, then Ctrl+V). A console diagnostic reports which editor was found and which fill method stuck. When WO Intake hands off a just-created WO's request email, each uploaded file's Label (document type) is set to "Work Order Request" and the note Type is forced to Client (a WO Intake handoff is a client's request, even when the sender is a broker like Fairmarkit that reads as a Vendor domain). Fairmarkit / bulk-email footer boilerplate (the Fairmarkit company block: tagline + Boston address + FAQ/Privacy/Terms/Unsubscribe, and the -----!{...}!----- machine tail) plus ALL tracking URLs (safelinks/awstrack/logo) are stripped from the note body, keeping content through the suppliers@ email. A Fairmarkit RFQ body is also condensed to one line per entry - single-spaced, with each line-item rejoined to its QTY and each Details label (Buyer/Close date/RFQ ID/Shipping address) rejoined to its value. You review and Save everything. Runs in the browser only: no network access, no grants.
+// @description  Drop files anywhere on an Umbrava work order to upload them. Opens the Documents tab and upload dialog, hands over the files, and builds each file's description from its contents. Emails are parsed locally (.msg via an OLE/MAPI reader, .eml via RFC822) into an Outlook-style block - From/Sent/To/Cc/Subject and the body - that becomes the WO note, led by a one-line summary from Chrome's on-device built-in AI (zero cost, zero egress, nothing leaves the browser), falling back to local WO-field extraction (store, city/state, priority, PO, NTE, problem, requester) when the on-device model is unavailable. That same summary fills each file's Description. The WO note's Type is chosen from the email's parties: inbound is typed by the sender (client -> Client, else Vendor); outbound from Broadway is typed by the recipients (a client recipient -> Client, any vendor recipient -> Vendor, all-internal -> Internal). Umbrava's Description field is a TipTap/ProseMirror rich-text editor. It rejects synthetic paste, beforeinput, insertHTML and raw innerHTML, but honours execCommand('insertText') plus a synthetic Enter keydown - so the note is filled line by line (Enter between lines to keep paragraphs), paced ~12ms/line so ProseMirror's async commit doesn't drop lines (measured live 2026-08-10). The text is also placed on your clipboard as a backup, and if every fill method fails a "Copy the WO note" button appears (its click supplies the gesture for a reliable copy, then Ctrl+V). A console diagnostic reports which editor was found and which fill method stuck. When WO Intake hands off a just-created WO's request email, each uploaded file's Label (document type) is set to "Work Order Request" and the note Type is forced to Client (a WO Intake handoff is a client's request, even when the sender is a broker like Fairmarkit that reads as a Vendor domain). Fairmarkit / bulk-email footer boilerplate (the Fairmarkit company block: tagline + Boston address + FAQ/Privacy/Terms/Unsubscribe, and the -----!{...}!----- machine tail) plus ALL tracking URLs (safelinks/awstrack/logo) are stripped from the note body, keeping content through the suppliers@ email. A Fairmarkit RFQ body is also condensed to one line per entry - single-spaced, with each line-item rejoined to its QTY and each Details label (Buyer/Close date/RFQ ID/Shipping address) rejoined to its value. Files upload via Umbrava's own API (initializeJobDocument -> Azure blob PUT -> bulkAddWorkOrderDocuments, captured live 2026-08-12), Label set by id, so the brittle upload-dialog combobox is bypassed; the dialog remains the automatic fallback if the API is unavailable. The email note is shown in a BWN review box (editable, Type selectable) and posted via addEditJobNote ONLY when you click Post - it is never auto-posted, and posts under your own Umbrava session for correct attribution. Network calls are same-origin to app.umbrava.com's own /api/graphql (the app's Auth0 bearer, no @connect/GM) plus the SAS-authorized blob PUT the SPA itself makes - nothing goes to any third party. @grant none.
 // @match        https://app.umbrava.com/*
 // @match        https://*.umbrava.com/*
 // @run-at       document-idle
@@ -15,8 +15,8 @@
 (function () {
   'use strict';
 
-  var VER = '1.10.6';   // keep in step with @version (drift caught earlier: banner had lagged two releases)
-  console.info('[BWN DROP UPLOAD] v' + VER + ' · Email→note: real .msg (OLE/MAPI) + .eml parsing · on-device AI one-line summary (Chrome built-in, zero egress) leads the note + fills Description, local field-extraction fallback · note Type by parties (inbound=sender, outbound=recipient) · document Label + note Type selectors both target their stable testids · WO Intake handoff sets Label=Work Order Request · bwn:cmd dropupload:files bridge');
+  var VER = '1.11.0';   // keep in step with @version (drift caught earlier: banner had lagged two releases)
+  console.info('[BWN DROP UPLOAD] v' + VER + ' · Uploads via Umbrava API (initializeJobDocument→blob PUT→bulkAddWorkOrderDocuments, Label by id), DOM dialog is the fallback · email→note in a human-gated BWN review box, posted via addEditJobNote on an explicit Post click (never auto-posted) · note Type by parties (inbound=sender, outbound=recipient) · on-device AI one-line summary leads the note · bwn:cmd dropupload:files bridge');
 
   // Active only on WO pages; checked at drag time so SPA navigation needs no watcher.
   function onWorkOrder() {
@@ -515,6 +515,167 @@
   function woIdFromUrl() {
     var m = String(location.pathname || '').match(/\/work-orders\/(\d+)/);
     return m ? m[1] : '';
+  }
+  function woNumberFromUrl() { var s = woIdFromUrl(); return s ? parseInt(s, 10) : 0; }
+
+  // ===== API write path (note + document upload) - captured live 2026-08-12 ======
+  // Historically this script was pure DOM: it drove Umbrava's own Add-Note composer and upload
+  // dialog by clicking react-aria/MUI comboboxes. That is brittle (portal listboxes, 2.5s option
+  // polls) and could not fill the Description field at all (Umbrava locks it - the code fell back
+  // to a clipboard paste). These are the REAL mutations the SPA fires, captured off the wire on a
+  // scratch WO, so we write via the API instead. Contract + id maps: [[umbrava-graphql-operations]]
+  // "Mutations (the WRITE surface)". The note write stays HUMAN-GATED (a BWN review box, Post
+  // button) - the API only fires on an explicit click, never on drop. Uploads fire on drop (the
+  // drop IS the confirmation). Both fall back to the DOM path on any failure.
+  //
+  // Auth: a plain SAME-ORIGIN POST to /api/graphql carries the app's Auth0 bearer; the token is
+  // content-picked from the SPA's @@auth0spajs@@ cache exactly as bwn-suite-core's bwnAuthToken
+  // does (the audience slot transiently holds non-Umbrava tokens). No @connect, no GM_xhr. The
+  // blob PUT (step 2 of an upload) goes to umbravadocuments.blob.core.windows.net, authorized by
+  // the SAS in the URL (no bearer) - cross-origin but the storage account CORS-allows this origin
+  // because the SPA makes the identical page-fetch PUT.
+  function duIsUmbravaToken(tok) {
+    try {
+      var p = JSON.parse(atob(String(tok).split('.')[1].replace(/-/g, '+').replace(/_/g, '/')));
+      var iss = String(p.iss || '').replace(/\/+$/, '');
+      if (iss !== 'https://login.umbrava.com' && iss !== 'https://umbrava.us.auth0.com') return false;
+      return !(typeof p.exp === 'number' && (Date.now() / 1000) > p.exp);
+    } catch (e) { return false; }
+  }
+  function duAuthToken() {
+    try {
+      var keys = Object.keys(localStorage).filter(function (x) {
+        return /@@auth0spajs@@::.*::https:\/\/app\.umbrava\.com\/api::/.test(x);
+      });
+      for (var i = 0; i < keys.length; i++) {
+        var body = (JSON.parse(localStorage.getItem(keys[i])) || {}).body;
+        var tok = (body && body.access_token) || '';
+        if (tok && duIsUmbravaToken(tok)) return tok;
+      }
+    } catch (e) { }
+    return '';
+  }
+  function duGql(op, query, variables) {
+    var tok = duAuthToken();
+    if (!tok) return Promise.reject(new Error('no-umbrava-token'));
+    return fetch('/api/graphql', {
+      method: 'POST',
+      credentials: 'include',
+      headers: { 'Authorization': 'Bearer ' + tok, 'Content-Type': 'application/json' },
+      body: JSON.stringify({ operationName: op, query: query, variables: variables || {} })
+    }).then(function (r) { return r.json(); }).then(function (j) {
+      if (j && j.errors && j.errors.length) throw new Error(j.errors[0].message || 'GraphQL error');
+      return j && j.data;
+    });
+  }
+
+  // Doc-label id map, read live off the MUI Autocomplete options (the SPA loads it once at boot,
+  // never on the wire). The names are stable tenant reference data; drop-upload only ever needs
+  // "Work Order Request" (17), but the whole map is kept so a caller can pass any label by name.
+  var DOC_LABELS = {
+    'Contract': 0, 'Drawings': 2, 'Signoff': 3, 'Photo': 4, 'Permits': 6, 'Survey': 10,
+    'Invoice': 12, 'Proposal Approved': 13, 'Proposal Declined': 14, 'Vendor Correspondence': 15,
+    'Client Correspondence': 16, 'Work Order Request': 17, 'Supplier Correspondence': 18,
+    'Location Correspondence': 19, 'Vendor Proposal': 20, 'Supplier Proposal': 21,
+    'Client Proposal': 22, 'Internal': 23, 'Resale': 24, 'Certification': 25,
+    'Municipal Correspondence': 26, 'Video': 28, 'Receipt': 29
+  };
+  function docLabelId(name) { var v = DOC_LABELS[name]; return (typeof v === 'number') ? v : null; }
+
+  // Note-type id, resolved by NAME so the numeric ids are never hardcoded past a floor. The suite
+  // caches the full id->name map in localStorage bwn:noteTypes (populated by Core); we invert it.
+  // Fallback floor covers the three the party-typer produces, so a missing cache never blocks a note.
+  var NOTE_TYPE_FALLBACK = { 'Internal': 13, 'Vendor': 18, 'Client': 55 };
+  function noteTypeId(name) {
+    if (!name) return null;
+    try {
+      var cache = JSON.parse(localStorage.getItem('bwn:noteTypes') || 'null');
+      var map = cache && cache.map;
+      if (map) {
+        for (var id in map) { if (String(map[id]).toLowerCase() === String(name).toLowerCase()) return parseInt(id, 10); }
+      }
+    } catch (e) { }
+    var f = NOTE_TYPE_FALLBACK[name];
+    return (typeof f === 'number') ? f : null;
+  }
+
+  // Plain text -> paragraph HTML (blank line = new <p>, single newline = <br>), matching what the
+  // old TipTap paste path produced so a posted note reads like the email.
+  function textToHtml(text) {
+    function esc(s) { return String(s).replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;'); }
+    return String(text).replace(/\r\n/g, '\n').split(/\n{2,}/)
+      .map(function (p) { return '<p>' + esc(p).replace(/\n/g, '<br>') + '</p>'; }).join('');
+  }
+
+  var MUT_ADD_NOTE = 'mutation AddEditWONote($addEditInput: WorkOrderNoteInput!) { addEditJobNote(data: $addEditInput) { success message note { id type } } }';
+  var MUT_INIT_DOC = 'mutation InitializeJobDocument($workOrderNumber: Int, $data: NewFileInput!) { initializeJobDocument(workOrderNumber: $workOrderNumber, data: $data) { success message sasToken { documentInfoId uriWithSas displayFileName } } }';
+  var MUT_BULK_ADD = 'mutation BulkAddWorkOrderDocuments($data: BulkAddWorkOrderDocumentsInput!) { bulkAddWorkOrderDocuments(data: $data) { success message documentIds } }';
+
+  // Post a WO note via addEditJobNote. type is the numeric note-type id (resolved from the name).
+  // Returns Promise<createdNote>; throws on no-token / GraphQL error / success:false.
+  function postNoteViaApi(text, typeName, woNumber) {
+    var typeId = noteTypeId(typeName);
+    var input = {
+      workOrderNumber: woNumber,
+      type: typeId,
+      content: String(text),
+      contentHtml: textToHtml(text),
+      isCompletion: false,
+      isInvoice: false,
+      isPinned: false,
+      actionNoteEmails: null,
+      targetPurchaseOrderNumbers: []
+    };
+    return duGql('AddEditWONote', MUT_ADD_NOTE, { addEditInput: input }).then(function (d) {
+      var res = d && d.addEditJobNote;
+      if (!res || res.success !== true) throw new Error((res && res.message) || 'addEditJobNote reported no success');
+      return res.note;
+    });
+  }
+
+  // Upload ONE file: initializeJobDocument -> reserve blob + SAS, PUT the bytes, return the entry
+  // BulkAddWorkOrderDocuments needs. rawFile is the real File (Blob body + name/size); description
+  // is free text; labelId the numeric doc-label id. Throws on any step failing.
+  function uploadOneViaApi(rawFile, description, labelId, woNumber) {
+    return duGql('InitializeJobDocument', MUT_INIT_DOC, {
+      workOrderNumber: woNumber,
+      data: { fileName: rawFile.name, fileSize: rawFile.size }
+    }).then(function (d) {
+      var init = d && d.initializeJobDocument;
+      if (!init || init.success !== true || !init.sasToken || !init.sasToken.uriWithSas) {
+        throw new Error((init && init.message) || 'initializeJobDocument returned no SAS');
+      }
+      var sas = init.sasToken;
+      return fetch(sas.uriWithSas, { method: 'PUT', headers: { 'x-ms-blob-type': 'BlockBlob' }, body: rawFile })
+        .then(function (r) {
+          if (!r.ok) throw new Error('blob PUT ' + r.status);
+          var entry = { workOrderNumber: woNumber, documentInfoId: sas.documentInfoId, description: String(description || '') };
+          if (typeof labelId === 'number') entry.label = labelId;
+          return entry;
+        });
+    });
+  }
+
+  // Upload every file via the API, then ONE bulkAdd registers them. rawFiles[i] pairs with
+  // describedFiles[i] (both built from the same raw list, same order). Returns Promise<documentIds>;
+  // throws (so the caller can fall back to the DOM dialog) if init/PUT/bulkAdd fails.
+  function uploadViaApi(rawFiles, describedFiles, labelName, woNumber) {
+    if (!woNumber) return Promise.reject(new Error('no-wo-number'));
+    if (!rawFiles || !rawFiles.length) return Promise.reject(new Error('no-files'));
+    var labelId = labelName ? docLabelId(labelName) : null;
+    var jobs = [];
+    for (var i = 0; i < rawFiles.length; i++) {
+      var desc = (describedFiles && describedFiles[i] && describedFiles[i].desc) || '';
+      jobs.push(uploadOneViaApi(rawFiles[i], desc, labelId, woNumber));
+    }
+    return Promise.all(jobs).then(function (entries) {
+      return duGql('BulkAddWorkOrderDocuments', MUT_BULK_ADD, { data: { workOrderNumber: woNumber, documents: entries } })
+        .then(function (d) {
+          var res = d && d.bulkAddWorkOrderDocuments;
+          if (!res || res.success !== true) throw new Error((res && res.message) || 'bulkAddWorkOrderDocuments reported no success');
+          return res.documentIds || [];
+        });
+    });
   }
 
   // ===== bwnAI v1 - shared suite-wide AI router - KEEP IN SYNC across suite scripts =====
@@ -1367,6 +1528,122 @@
     respTimer = setTimeout(clearRespChip, PENDING_TTL);
   }
 
+  // ---- BWN note review box (human-gated API note) -----------------------------
+  // Replaces the old "draft into Umbrava's composer when the user clicks Upload" path. The note is
+  // NEVER auto-posted: this box shows the drafted note (editable) and its Type, and only an explicit
+  // "Post note to WO" click calls postNoteViaApi. It folds in the old respChip's "needs a response"
+  // toggle and shows the upload status. If the API post fails it falls back to the DOM composer
+  // (insertNote) so the note is never lost. One box at a time; it outlives the drop but not `pending`.
+  var DEFAULT_DOC_LABEL = 'Work Order Request';  // manual + handoff drops both default here (the script's purpose is WO-request intake)
+  var noteBox = null, noteBoxTimer = null;
+  function clearNoteBox() {
+    if (noteBox) { try { noteBox.remove(); } catch (e) { } noteBox = null; }
+    if (noteBoxTimer) { clearTimeout(noteBoxTimer); noteBoxTimer = null; }
+  }
+  function noteBoxStatus(msg) { if (noteBox && noteBox.__status) noteBox.__status.textContent = msg; }
+  function showNoteReview() {
+    clearNoteBox();
+    clearRespChip();
+    if (!pending || !woNumberFromUrl()) return null;
+    var woNum = woNumberFromUrl();
+    var canRespond = !!inboundClientEmail(pending.files);
+    var box = document.createElement('div');
+    box.id = 'bwn-du-note';
+    box.style.cssText =
+      'position:fixed;right:22px;bottom:22px;z-index:2147483001;width:360px;max-width:92vw;' +
+      'background:#fff;border:1px solid #c6d2cc;border-left:4px solid #2f6f4f;border-radius:10px;' +
+      'box-shadow:0 8px 28px rgba(0,0,0,.22);padding:12px 13px;' +
+      'font:400 12.5px/1.45 -apple-system,BlinkMacSystemFont,\'Segoe UI\',\'Helvetica Neue\',Arial,sans-serif;color:#12241b;';
+    var h = document.createElement('div');
+    h.style.cssText = 'font-weight:600;margin-bottom:6px;';
+    h.textContent = 'Upload note for W-' + woNum;
+    box.appendChild(h);
+    var status = document.createElement('div');
+    status.style.cssText = 'color:#5b6b8c;margin-bottom:8px;font-size:11.5px;';
+    box.appendChild(status);
+    var ta = document.createElement('textarea');
+    ta.style.cssText = 'width:100%;height:150px;box-sizing:border-box;resize:vertical;border:1px solid #c6d2cc;border-radius:7px;padding:7px;font:inherit;color:#12241b;';
+    ta.value = pending.noteText || '';
+    box.appendChild(ta);
+    var typeRow = document.createElement('div');
+    typeRow.style.cssText = 'display:flex;align-items:center;gap:7px;margin-top:8px;';
+    var tl = document.createElement('span'); tl.textContent = 'Type:'; tl.style.cssText = 'color:#5b6b8c;';
+    var sel = document.createElement('select');
+    sel.style.cssText = 'flex:0 0 auto;padding:3px 6px;border:1px solid #c6d2cc;border-radius:6px;font:inherit;';
+    ['Client', 'Vendor', 'Internal'].forEach(function (t) { var o = document.createElement('option'); o.value = t; o.textContent = t; sel.appendChild(o); });
+    sel.value = (pending.noteType && /^(Client|Vendor|Internal)$/.test(pending.noteType)) ? pending.noteType : 'Client';
+    typeRow.appendChild(tl); typeRow.appendChild(sel);
+    box.appendChild(typeRow);
+    var respCb = null;
+    if (canRespond) {
+      var lab = document.createElement('label');
+      lab.style.cssText = 'display:flex;gap:8px;align-items:flex-start;cursor:pointer;margin-top:9px;';
+      respCb = document.createElement('input'); respCb.type = 'checkbox'; respCb.checked = !!pending.needsResponse;
+      respCb.style.cssText = 'margin:2px 0 0;flex:0 0 auto;width:15px;height:15px;';
+      var lt = document.createElement('div');
+      lt.innerHTML = '<strong style="font-weight:600;">This client email needs a response</strong>' +
+        '<div style="color:#5b6b8c;margin-top:2px;">Opens a tracked item on the priority clock. The note posts as <strong>Internal</strong> so it does not read as “we updated the client”.</div>';
+      lab.appendChild(respCb); lab.appendChild(lt);
+      box.appendChild(lab);
+      var syncType = function () { if (respCb.checked) { sel.value = 'Internal'; sel.disabled = true; } else { sel.disabled = false; } };
+      respCb.addEventListener('change', syncType); syncType();
+    }
+    var btns = document.createElement('div');
+    btns.style.cssText = 'display:flex;gap:8px;margin-top:11px;justify-content:flex-end;';
+    var skip = document.createElement('button');
+    skip.textContent = 'Skip note'; skip.type = 'button';
+    skip.style.cssText = 'padding:6px 12px;border:1px solid #c6d2cc;background:#f4f7f5;border-radius:7px;cursor:pointer;font:inherit;';
+    var post = document.createElement('button');
+    post.textContent = 'Post note to WO'; post.type = 'button';
+    post.style.cssText = 'padding:6px 13px;border:0;background:#2f6f4f;color:#fff;border-radius:7px;cursor:pointer;font:600 12.5px/1.2 -apple-system,BlinkMacSystemFont,\'Segoe UI\',Arial,sans-serif;';
+    btns.appendChild(skip); btns.appendChild(post);
+    box.appendChild(btns);
+
+    skip.addEventListener('click', function () { copyText(ta.value); clearNoteBox(); toast('Note skipped - kept on your clipboard.'); });
+    post.addEventListener('click', function () {
+      var text = ta.value, type = sel.value, needsResp = !!(respCb && respCb.checked);
+      if (needsResp) type = 'Internal';
+      post.disabled = true; post.textContent = 'Posting…';
+      postNoteViaApi(text, type, woNum).then(function () {
+        toast('Note posted to W-' + woNum + ' (Type: ' + type + ').');
+        if (needsResp) { var f = inboundClientEmail(pending.files); if (f) requestTrack(f, String(woNum)); }
+        clearNoteBox();
+      }).catch(function (err) {
+        post.disabled = false; post.textContent = 'Post note to WO';
+        copyText(text);
+        toast('API post failed (' + ((err && err.message) || err) + ') - opening the composer; text is on your clipboard.');
+        try { insertNote(text, (pending && pending.originTab) || '', type); } catch (e) { }
+      });
+    });
+
+    document.body.appendChild(box);
+    box.__status = status;
+    noteBox = box;
+    noteBoxTimer = setTimeout(clearNoteBox, PENDING_TTL);
+    if (pending) pending.__box = true;   // tells the legacy Upload-click handler the box owns the note
+    return box;
+  }
+
+  // Run the API upload for a drop, update the review box, and fall back to the DOM dialog on any
+  // failure (init / blob PUT / bulkAdd) so a drop never silently drops a file.
+  function runApiUpload(rawFiles, described, dt, ctx, labelName) {
+    var woNum = woNumberFromUrl();
+    return described.then(function (files) {
+      if (ctx.aborted) throw new Error('aborted');
+      noteBoxStatus('Uploading ' + rawFiles.length + ' file' + (rawFiles.length > 1 ? 's' : '') + '…');
+      return uploadViaApi(rawFiles, files, labelName, woNum);
+    }).then(function (ids) {
+      var n = (ids && ids.length) || rawFiles.length;
+      noteBoxStatus('Uploaded ' + n + ' file' + (n > 1 ? 's' : '') + ' ✓  - review the note, then Post.');
+      toast('Uploaded ' + rawFiles.length + ' file' + (rawFiles.length > 1 ? 's' : '') + ' to W-' + woNum + '.');
+    }).catch(function (err) {
+      if (ctx.aborted) return;
+      try { console.warn('[BWN DROP UPLOAD] API upload failed, falling back to the dialog:', (err && err.message) || err); } catch (e) { }
+      noteBoxStatus('Uploading via the dialog (API unavailable) - finish Upload there; the note is still here to Post.');
+      handleDrop(dt, described, ctx, labelName ? { docLabel: labelName } : {});
+    });
+  }
+
   // Ask bwn-wo-assist to record the item. This script is @grant none - it has no egress at
   // all - so the assist script owns the POST. The ack leg is not optional: without it a
   // failed track is silent, and the coordinator walks away believing the WO is tracked.
@@ -1398,6 +1675,7 @@
 
   document.addEventListener('click', function (e) {
     if (!pending) return;
+    if (pending.__box) return;   // the BWN note review box owns the note now; don't also draft into the composer
     if (Date.now() - pending.ts > PENDING_TTL) { pending = null; clearRespChip(); return; }
     var btn = e.target && e.target.closest ? e.target.closest('button') : null;
     if (!btn) return;
@@ -1451,7 +1729,7 @@
     card.innerHTML =
       '📎 Drop to upload to this Work Order' +
       '<div style="font:400 13px/1.5 -apple-system,BlinkMacSystemFont,\'Segoe UI\',\'Helvetica Neue\',Arial,sans-serif;color:#5b6b8c;margin-top:6px;">' +
-      'Descriptions are prepped for one-tap paste; emails become a full WO note on Upload - you review and Save.</div>';
+      'Files upload straight to this WO; an email becomes a WO note you review and Post from the box.</div>';
     overlay.appendChild(card);
 
     overlay.addEventListener('dragover', function (e) {
@@ -1490,9 +1768,9 @@
         // and dropping a second attachment is not them changing their mind.
         var keepResp = !!(fresh && pending.needsResponse);
         pending = { ts: Date.now(), files: merged, noteText: buildNoteText(merged), originTab: origin, noteType: noteTypeForFiles(merged), needsResponse: keepResp };
-        showRespChip();
+        showNoteReview();
       });
-      handleDrop(dt, described, ctx);
+      runApiUpload(raw, described, dt, ctx, DEFAULT_DOC_LABEL);
     });
 
     document.body.appendChild(overlay);
@@ -1559,10 +1837,11 @@
       // WO Intake handoff = a just-created WO's CLIENT request email, so the note is always a
       // Client note (the sender is often a broker like Fairmarkit that classifyDomain reads as Vendor).
       pending = { ts: Date.now(), files: merged, noteText: buildNoteText(merged), originTab: origin, noteType: 'Client' };
+      showNoteReview();
     });
     // WO Intake handoff = a just-created WO's client request email, so label the uploaded
-    // document(s) "Work Order Request". Manual drops (the overlay path) keep the default Label.
-    handleDrop(dt, described, ctx, { docLabel: 'Work Order Request' });
+    // document(s) "Work Order Request". Uploads via the API; DOM dialog is the fallback.
+    runApiUpload(raw, described, dt, ctx, 'Work Order Request');
   }, false);
 
   // ---- Toast -----------------------------------------------------------------

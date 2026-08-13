@@ -129,6 +129,15 @@ jobs:
       - name: Docs API harness (jobDocuments reader + docs:none gate)
         run: node scripts/test-docs-api.js
 
+      # drop-upload 1.11.0 writes notes + documents via Umbrava's own mutations
+      # (addEditJobNote; initializeJobDocument -> blob PUT -> bulkAddWorkOrderDocuments),
+      # captured live 2026-08-12, replacing the brittle combobox DOM automation. Slices the
+      # shipped API block and pins the captured op/arg/id shapes (note-type + doc-label ids)
+      # against a fake fetch, and that every write REJECTS (so the DOM fallback fires) on no
+      # token / errors[] / success:false / non-2xx blob PUT. Tripwire if the block regresses.
+      - name: Drop Upload API harness (note + document write mutations)
+        run: node scripts/test-drop-upload-api.js
+
       # Views v2.0 applies column presets through Umbrava's own putUserPreference instead
       # of chooser-checkbox choreography. Pins the measured contract: the 30-column
       # title->id map (incl. the "Label"=workOrderCategory trap), version ECHOED never
