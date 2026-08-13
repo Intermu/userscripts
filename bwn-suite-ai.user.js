@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         BWN Suite - AI (Broadway National)
 // @namespace    broadwaynational.bwn
-// @version      1.45.3
+// @version      1.46.0
 // @downloadURL  https://raw.githubusercontent.com/Intermu/userscripts/main/bwn-suite-ai.user.js
 // @updateURL    https://raw.githubusercontent.com/Intermu/userscripts/main/bwn-suite-ai.user.js
 // @description  The Umbrava tools that call outside APIs, kept separate from the zero-egress Core script. Client Update and WO Audit drafts (Anthropic Claude; draft-only, scrubbed before sending, you review before posting); Find Techs / Find Suppliers (Google Places; vendor leads near a WO); and Job View (opens the Ops-Dashboard job card on the WO page - WO details from Umbrava plus the authored case file and next actions, read-only). Network access is limited by the browser to the declared API hosts and the BWN Static Web App. API keys are stored in Tampermonkey's storage via the menu commands and never enter the page. Toggle modules in BWN_MODULES below.
@@ -1135,6 +1135,53 @@
     var cur = GM_getValue('ingest_key', '');
     var v = prompt('Paste the WO_INGEST_KEY (the SWA ingest function key; stored locally in Tampermonkey, never in the page):', cur || '');
     if (v !== null) { GM_setValue('ingest_key', v.trim()); publishAiStatus(); alert(v.trim() ? 'Saved.' : 'Cleared.'); }
+  });
+
+  // In-House Dispatch Report push: Core's dispatch scan (window.__bwnDispatchSyncNow) writes the
+  // whole tenant OPEN book to localStorage 'bwn:dispatchq'; drain it to the SWA dispatch-dataset
+  // slot (key-gated POST /api/dispatch-ingest) so the report page shows the live open book with no
+  // upload. Same key, kill-switch, dedupe-by-generatedAt and clear-on-real-ok discipline as the
+  // board drain above - a chased AAD login page is 200 HTML, not ok:true, so only ok:true marks sent.
+  var DISPATCH_URL = INGEST_URL.replace(/\/wo-ingest$/, '/dispatch-ingest');
+  var dispatchBusy = false;
+  function dispatchDrain(force) {
+    if (dispatchBusy) return;
+    if (!connectorEnabled()) return;                      // kill-switch: Ops Suite toggle
+    var key = GM_getValue('ingest_key', ''); if (!key) return;
+    var ds = BWN.lsGetJSON('bwn:dispatchq', null);
+    if (!ds || !Array.isArray(ds.rows) || !ds.rows.length || !ds.generatedAt) return;
+    if (!force && localStorage.getItem('bwn:dispatchsent') === ds.generatedAt) return;   // this scan already sent
+    var body;
+    try { body = JSON.stringify({ actor: ingestActor(), source: 'dispatch-scan', dataset: { generatedAt: ds.generatedAt, rows: ds.rows } }); }
+    catch (e) { return; }                                 // couldn't serialize -> don't set busy (would wedge the drain)
+    dispatchBusy = true;
+    GM_xmlhttpRequest({
+      method: 'POST', url: DISPATCH_URL + '?client=' + INGEST_CLIENT,
+      headers: { 'Content-Type': 'application/json', 'x-bwn-key': key },
+      data: body,
+      timeout: 20000,
+      onload: function (r) {
+        dispatchBusy = false;
+        var stored = false;
+        if (r.status >= 200 && r.status < 300) { try { stored = JSON.parse(r.responseText).ok === true; } catch (e) { } }
+        // Mark sent only on a REAL ok:true. 400/413 = non-retryable (malformed / over the row cap)
+        // so mark sent to stop head-of-line blocking; 403/timeout/5xx leave it for the next tick.
+        if (stored) { try { localStorage.setItem('bwn:dispatchsent', ds.generatedAt); } catch (e) { } connOk(); }
+        else if (r.status === 400 || r.status === 413) { try { localStorage.setItem('bwn:dispatchsent', ds.generatedAt); } catch (e) { } connFail(r.status); }
+        else connFail(r.status);
+      },
+      onerror: function () { dispatchBusy = false; connFail('network'); },
+      ontimeout: function () { dispatchBusy = false; connFail('timeout'); }
+    });
+  }
+  setTimeout(BWN.guard(dispatchDrain, 'dispatchDrain'), 11000);
+  setInterval(BWN.guard(dispatchDrain, 'dispatchDrain'), 45000);
+  GM_registerMenuCommand('BWN: Sync In-House Dispatch report now', function () {
+    var ds = BWN.lsGetJSON('bwn:dispatchq', null);
+    if (!ds || !Array.isArray(ds.rows) || !ds.rows.length) { alert('No dispatch scan yet. Open the Work Orders list and run __bwnDispatchSyncNow() (or press Sync Dispatch), then try again.'); return; }
+    if (!GM_getValue('ingest_key', '')) { alert('Set the SWA ingest key first (Tampermonkey menu -> "Set SWA ingest key").'); return; }
+    dispatchDrain(true);
+    alert('Pushing ' + ds.rows.length + ' open WOs to the In-House Dispatch report…');
   });
 
   // ===== BWN AI TRANSPORT (Phase 2 - unified bwnAI transport) =========================
