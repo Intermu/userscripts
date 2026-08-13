@@ -6265,6 +6265,13 @@
       // the 2-letter postal code. city has only the one key after heatFlatten (address.city).
       var city = String(g(/address\.city$|(^|\.)city$/i) || '');
       var state = String(g(/address\.state$/i) || '').toUpperCase();
+      // Street + zip (In-House Dispatch geocode feed). The scan already SELECTS
+      // address{addressLine1 addressLine2 postalCode}; lift them onto the record so the SWA can
+      // geocode a real pin, not a city centroid. Anchored to the address.* dotted keys heatFlatten
+      // produces - a bare top-level key would risk the alias-orphan trap (silent '').
+      var street1 = String(g(/address\.addressline1$/i) || '');
+      var street2 = String(g(/address\.addressline2$/i) || '');
+      var zip = String(g(/address\.postalcode$/i) || '');
       // SLA facts, straight off the row's own priority object - no parsing of display text.
       var respMin = g(/responseminutes/i);
       var slaMin = g(/servicelevelagreementminutes|slaminutes/i);
@@ -6288,7 +6295,7 @@
           nte: (nteAmt === null ? '' : BWN.money(nteAmt)),
           dneAmt: dneAmt, nteAmt: nteAmt,
           phase: phase, vendors: vendors, vendorsKnown: vendorsKnown, remDays: remDays,
-          city: city, state: state,
+          city: city, state: state, street1: street1, street2: street2, zip: zip,
           sla: {
             responseMinutes: (respMin !== '' && !isNaN(parseFloat(respMin))) ? parseFloat(respMin) : null,
             slaMinutes: (slaMin !== '' && !isNaN(parseFloat(slaMin))) ? parseFloat(slaMin) : null,
@@ -7083,6 +7090,10 @@
         if (r.assignee && r.assignee !== '(unresolved member)') row.coordinator = r.assignee;
         if (r.city) row.city = r.city;
         if (r.state) row.state = r.state;
+        // Street + zip for the geocode step (SWA composes the geocodable address from these).
+        if (r.street1) row.street1 = r.street1;
+        if (r.street2) row.street2 = r.street2;
+        if (r.zip) row.zip = r.zip;
         // vendorsKnown separates "no vendor yet" (an OFFER candidate) from "column not read".
         // Only a KNOWN read is emitted - as '' when empty - so the report never reads an unread
         // field as "no vendor" and mis-bucket an already-dispatched job as offerable.
@@ -8267,6 +8278,7 @@
             // treats undefined as "not read" rather than as a zero.
             assigneeId: e.assigneeId, nte: e.nte, dneAmt: e.dneAmt, nteAmt: e.nteAmt,
             phase: e.phase, vendors: e.vendors, vendorsKnown: e.vendorsKnown, city: e.city, state: e.state,
+            street1: e.street1, street2: e.street2, zip: e.zip,
             remDays: e.remDays, sla: e.sla, slaScaled: vf.slaScaled, src: 'api',
             // The limits this row was judged against, so a consumer can print "1.8x the
             // 120h limit" without a second threshold model (see computeVerdict's header).

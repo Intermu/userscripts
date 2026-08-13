@@ -6,6 +6,8 @@
 //     priority, assignee->coordinator, dneAmt->dne, plus status/client/city/state passthrough);
 //   - CITY + STATE ride the row - they are what the report's coverage rule keys on, and were the
 //     fields the heat scan fetched (address{city state}) but never carried until this feed;
+//   - STREET1/STREET2/ZIP ride the row too (geocode feed) - the SWA composes a geocodable address
+//     from them so the map plots a real pin, not a city centroid; empty parts are omitted;
 //   - vendorsKnown gates `vendors`: emitted (even as '') ONLY when the column was read, so the
 //     report never mistakes an unread vendor field for "no vendor" and offer-buckets a dispatched job;
 //   - a GUID / "(unresolved member)" assignee is NEVER sent as a coordinator;
@@ -54,6 +56,7 @@ function rec(over) {
   return Object.assign({
     id: '386559', wo: '386559', tracking: '1286108', status: 'Pending Dispatch', prio: 'STANDARD-2',
     client: 'Best Buy', assignee: 'Michelle Black', city: 'Baldwin', state: 'NY',
+    street1: '123 Main St', street2: 'Ste 4', zip: '11510',
     vendors: 'Broadway National Maintenance LLC', vendorsKnown: true, dneAmt: 750
   }, over || {});
 }
@@ -69,6 +72,9 @@ A.eq('client', w.client, 'Best Buy');
 A.eq('coordinator = assignee', w.coordinator, 'Michelle Black');
 A.eq('city carried (coverage key)', w.city, 'Baldwin');
 A.eq('state carried (coverage key)', w.state, 'NY');
+A.eq('street1 carried (geocode feed)', w.street1, '123 Main St');
+A.eq('street2 carried (geocode feed)', w.street2, 'Ste 4');
+A.eq('zip carried (geocode feed)', w.zip, '11510');
 A.eq('vendors carried when known', w.vendors, 'Broadway National Maintenance LLC');
 A.eq('dne = dneAmt (already dollars)', w.dne, 750);
 
@@ -83,6 +89,9 @@ A.ok('empty assignee omits coordinator', !('coordinator' in dispatchDatasetRows(
 // ---- empty optional fields omitted -------------------------------------------------------
 A.ok('empty city omitted', !('city' in dispatchDatasetRows(store([rec({ city: '' })]))[0]));
 A.ok('empty state omitted', !('state' in dispatchDatasetRows(store([rec({ state: '' })]))[0]));
+A.ok('empty street1 omitted', !('street1' in dispatchDatasetRows(store([rec({ street1: '' })]))[0]));
+A.ok('empty street2 omitted', !('street2' in dispatchDatasetRows(store([rec({ street2: '' })]))[0]));
+A.ok('empty zip omitted', !('zip' in dispatchDatasetRows(store([rec({ zip: '' })]))[0]));
 
 // ---- identity drops ----------------------------------------------------------------------
 A.eq('row with neither woNumber nor tracking is dropped', dispatchDatasetRows(store([rec({ wo: '', tracking: '' })])).length, 0);

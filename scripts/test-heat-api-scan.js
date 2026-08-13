@@ -751,6 +751,28 @@ console.log('\n-- v3.19: fields the board returned and the audit ignored --');
   A.eq('an ABSENT vendor field is not a fact', s.heatApiRowToEntry(missing).entry.vendorsKnown, false);
 })();
 
+console.log('\n-- dispatch geocode feed: address extraction (city/state/street/zip) --');
+(function () {
+  var s = build({});
+  // The scan SELECTS address{addressLine1 addressLine2 city state postalCode}; each must be lifted
+  // onto the record or the In-House Dispatch geocode feed silently ships blanks (the alias-orphan
+  // trap: a getField read with no matching key returns '' forever). `state` is anchored to
+  // address.state - the decoy top-level `state: 0` is the INTEGER WO-state and must NOT win.
+  var row = omitKeys(makeRow(0), []);
+  row.state = 0;
+  row.address = { __typename: 'Address', addressLine1: '123 Main St', addressLine2: 'Ste 4',
+    city: 'Baldwin', state: 'NY', postalCode: '11510' };
+  var e = s.heatApiRowToEntry(row).entry;
+  A.eq('addressLine1 -> street1', e.street1, '123 Main St');
+  A.eq('addressLine2 -> street2', e.street2, 'Ste 4');
+  A.eq('address.city -> city', e.city, 'Baldwin');
+  A.eq('address.state -> state (postal code, not the integer WO-state)', e.state, 'NY');
+  A.eq('postalCode -> zip', e.zip, '11510');
+  // makeRow carries NO address block: every part must read blank, never a stray value.
+  var bare = s.heatApiRowToEntry(makeRow(1)).entry;
+  A.eq('no address -> all parts blank', [bare.street1, bare.street2, bare.city, bare.state, bare.zip], ['', '', '', '', '']);
+})();
+
 console.log('\n-- v3.19: the status clock scales off the client SLA, not a parsed label --');
 (function () {
   var s = buildVerdict({});
