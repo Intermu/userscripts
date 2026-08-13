@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         BWN Suite - Core (Broadway National)
 // @namespace    broadwaynational.bwn
-// @version      1.78.6
+// @version      1.78.7
 // @downloadURL  https://raw.githubusercontent.com/Intermu/userscripts/main/bwn-suite-core.user.js
 // @updateURL    https://raw.githubusercontent.com/Intermu/userscripts/main/bwn-suite-core.user.js
 // @description  Runs several Umbrava helpers for BWN coordinators, in the browser with no privileged grants. Includes: PO Approval + ETA Builder; WO Assist (GP/ETA, a stall watchdog, DNE calculator, and a next-action playbook); Email Leak Guard (checks recipients against vendor names, PO amounts, and client budget references before an outbound email sends); WO List Heat (a triage overlay + My Day strip on the work-order list, with an optional same-origin Umbrava API scan for deterministic full-board coverage); and the BWN Launcher (opens the Azure Static Web App tools with the current WO's context). Modules share state through sessionStorage/localStorage. The only network calls are same-origin Umbrava GraphQL requests (app.umbrava.com/api/graphql, the app's own session): List Heat's full-board scan and WO Assist's work-order / trip / clock-in / document reads, plus ONE write - BWN Views saves the column layout through Umbrava's own putUserPreference, the same preference the column chooser writes; everything else is offline. Toggle modules in BWN_MODULES below.
@@ -8004,7 +8004,7 @@
     // The seed is DELIBERATELY WEAK and always loses to a real capture:
     //   - marked seeded:true / proven:false, and heatRecordCapture's anti-downgrade guard
     //     lets ANY real board request displace a seed - a real capture carries the user's
-    //     actual filters, the seed only knows the whole unfiltered book.
+    //     actual filters, the seed only knows the tenant-wide open book (phase:Open).
     //   - the query text is BYTE-IDENTICAL to what the SPA sends, so when the app's own board
     //     query fires, heatRecordCapture's `body.query === apiList.query` branch simply swaps
     //     in the real variables and re-scans - the seed converts to a live capture with no
@@ -8132,11 +8132,18 @@
       if (!isListPage()) return false;
       apiList = {
         query: HEAT_DEFAULT_QUERY,
-        variables: { page: { skip: 0, take: 200 }, sortBy: [{ columnName: 'formattedJobNumber', direction: 'DESC' }] },
+        // Scoped to phase Open on PURPOSE. The strip reports "of N open", and the whole
+        // unfiltered book is every WO ever (373,657 on this tenant 2026-08-13) - far past the
+        // 60-page x 200 scan cap, so an unscoped seed finishes 'incomplete' and drops the store.
+        // phase:'Open' is the app's OWN default board scope (measured: the SPA sends phase:"Open")
+        // and the open book is small enough to sweep clean (5,241 rows -> ~27 pages). SystemPhaseValue
+        // enum literal 'Open' confirmed by introspection. No assignee/client filter: this is the
+        // tenant-wide open book, which a real (filtered) capture replaces the moment one fires.
+        variables: { page: { skip: 0, take: 200 }, sortBy: [{ columnName: 'formattedJobNumber', direction: 'DESC' }], phase: 'Open' },
         path: null, conn: false, _rows: 0, sample: null, proven: false, seeded: true
       };
       apiCapTs = Date.now();
-      console.info('[BWN HEAT] no board query captured off the wire; seeding the pinned PagedWorkOrders fallback for a book-wide scan.');
+      console.info('[BWN HEAT] no board query captured off the wire; seeding the pinned PagedWorkOrders fallback (phase:Open) for a book-wide open scan.');
       return true;
     }
     // SET-ONCE arm (never clear-and-reset). woListHeat runs on every list mutation, and a

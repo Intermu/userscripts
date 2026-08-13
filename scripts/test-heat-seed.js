@@ -133,6 +133,9 @@ console.log('== B. the seed vars page cleanly and pass the board-query gate ==')
   A.eq('seed page is the {skip,take} object, take 200', v.page, { skip: 0, take: 200 });
   A.ok('seed sortBy is a non-empty [SortInput]', Array.isArray(v.sortBy) && v.sortBy.length === 1);
   A.ok('seed sortBy carries columnName + direction', !!(v.sortBy[0].columnName && v.sortBy[0].direction));
+  // Scoped to phase Open: the whole book is 373k WOs (past the scan cap -> always 'incomplete');
+  // the open book is ~5k and completes. 'Open' is the SystemPhaseValue the SPA itself sends.
+  A.eq('seed is scoped to phase Open (completable + matches the strip\'s "of N open")', v.phase, 'Open');
   var pg = s.heatPagingVars(v);
   A.eq('heatPagingVars locates the nested page host', pg && pg.host, 'page');
   A.eq('  ...as a nested object', pg && pg.nested, true);
@@ -242,6 +245,11 @@ console.log('== F. mutation negative controls (each reverts one fix; harness mus
   var m3 = build([['$sortBy: [SortInput!]!', '$sortBy: [SortInput!]']]);
   A.ok('M3: the required-arg check catches a weakened $sortBy',
     m3.HEAT_DEFAULT_QUERY.indexOf('$sortBy: [SortInput!]!') === -1);
+
+  // M4: drop the phase:Open scope -> the seed would sweep the whole 373k book and never complete.
+  var m4 = build([["phase: 'Open'", 'phase: null']]);
+  m4.heatSeedCapture();
+  A.ok('M4: the phase-scope check catches an unscoped seed', m4.apiList.variables.phase !== 'Open');
 })();
 
 console.log('== G. wiring present in source (arm point + route-change cancel) ==');
