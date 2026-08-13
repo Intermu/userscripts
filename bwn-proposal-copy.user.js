@@ -491,6 +491,11 @@
     function refreshConfirm() { confirmBtn.disabled = !confirmReady(pcState); }
 
     function setTarget(t) {
+      // Guard against a stale async callback (a verify that started before this drawer was
+      // closed, or before a NEW drawer replaced it): once openEl no longer IS this overlay,
+      // pcState may be null (closed) or may belong to a different, currently-open drawer
+      // (superseded) - either way, this call must touch NOTHING.
+      if (openEl !== overlay) return;
       pcState.target = t;
       warnEl.innerHTML = '';
       if (t && sourceWo && sourceWo.locationId != null && t.locationId != null && t.locationId !== sourceWo.locationId) {
@@ -552,11 +557,17 @@
       if (!isFinite(n)) { setTarget(null); verifyStatus.textContent = 'Not a valid WO number.'; return; }
       verifyStatus.textContent = 'Verifying W-' + n + '…';
       pcGql('ProposalWO', Q_PROPOSAL_WO, { workOrderNumber: n }).then(function (d) {
+        // Same guard as setTarget: this request may resolve after the drawer that started
+        // it closed (or was replaced by a new one) - a stale response must update nothing,
+        // not even the status line, and must never reach into a (possibly null, possibly
+        // reassigned-to-another-drawer) pcState.
+        if (openEl !== overlay) return;
         var job = d && d.job;
         if (!job || job.number == null || job.id == null) { verifyStatus.textContent = 'W-' + n + ' was not found.'; setTarget(null); return; }
         verifyStatus.textContent = 'Target: W-' + job.number + (job.locationName ? ' - ' + job.locationName : '');
         setTarget(job);
       }).catch(function (err) {
+        if (openEl !== overlay) return;   // drawer closed/superseded - nothing left to update
         verifyStatus.textContent = 'Could not verify W-' + n + ' (' + ((err && err.message) || err) + ').';
         setTarget(null);
       });
