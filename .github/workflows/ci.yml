@@ -252,6 +252,13 @@ jobs:
       - name: Heat dataset push harness (board -> Dashboard producer + wire-key contract)
         run: node scripts/test-heat-dataset-push.js
 
+      # B.1 shared field map: scripts/field-map.json is a byte-identical mirror of the CANONICAL
+      # copy in the SWA repo (api/shared/field-map.json). Asserts Core's board producer emits only
+      # wire keys the map declares with the "board" producer, so the userscript<->SWA vocabulary
+      # can no longer drift silently (store-key-two-writers-drift, getfield-alias-orphan).
+      - name: Field-map conformance harness (board producer keys vs shared map)
+        run: node scripts/test-field-map-conformance.js
+
       # The Operate panel — the seam an agent drives the page from, the code path that once had page
       # tools registered where no coordinator-facing UI invoked them. Sliced from bwn-suite-ai: panel
       # unprojectable, capability line derived, posts `operate` never `ask`, adopts the SERVER's round
