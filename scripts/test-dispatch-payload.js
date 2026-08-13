@@ -61,7 +61,10 @@ function mutate(src, from, to, what) {
 function build(src) {
   var S_FIELDS = slice(src, '  var FIELDS = [', '  var EMAIL_RE', 'FIELDS');
   var S_PRE = slice(src, '    var pre = {', '    // Suite drawer:', 'pre-fill');
-  var S_PAYLOAD = slice(src, '      var payload = { actor:', '      var reenable = function ()', 'payload builder');
+  // Ends at the direct-write section added in 0.10.0 (patchWorkOrder status/assign/ECD, covered by
+  // test-dispatch-patch.js): the payload builder proper is everything up to `payload.WONumber`, so the
+  // slice stops at that section's banner rather than at `var reenable`, which now sits past the writes.
+  var S_PAYLOAD = slice(src, '      var payload = { actor:', '      // ---- Direct record writes (patchWorkOrder) selected by the operator ----', 'payload builder');
   var S_HYDRATE = slice(src, '  function hydrateFromUmbrava(woId, inputs, touched) {', '  // Prefill AssigneeEmail from the roster', 'hydrateFromUmbrava');
   var S_SITENUM = slice(src, '  function siteNumberOf(locNum) {', '  // The person who had the last', 'siteNumberOf');
   var S_GUESS = slice(src, '  function guessEmail(name) {', '  function manageRoster()', 'guessEmail');
@@ -97,6 +100,17 @@ function build(src) {
         }
       };
     },
+    // 0.10.0: hydrate now ALSO populates the direct-write controls (status/user pickers + auto ECD).
+    // Those are covered by test-dispatch-patch.js; stub them to no-ops here so this harness keeps
+    // testing hydrate's Location / Tracking / assignee behaviour, which is unchanged. ecdEl is null so
+    // hydrate's `if (ecdEl)` guard is a safe no-op; the picker fetches return a thenable that ignores
+    // its callback.
+    fetchStatuses: function () { return { then: function () { return { then: function () {} }; } }; },
+    fetchUsers: function () { return { then: function () { return { then: function () {} }; } }; },
+    fillStatusOptions: function () {},
+    fillAssigneeOptions: function () {},
+    showEcd: function () {},
+    ecdEl: null,
     EMAIL_RE: /^[^\s@]+@[^\s@]+\.[^\s@]+$/,
   };
   vm.createContext(sandbox);
@@ -555,8 +569,8 @@ redUnder('M11 the fallback is dropped from the success path',
     "      setTracking(wo.trackingNumber);", 'M11'),
   checkTrackingFallback);
 redUnder('M12 the fallback is dropped from the GraphQL failure path',
-  mutate(full, "}, function () { /* GraphQL unavailable - bus prefill stands */ trackingFallback(); });",
-    "}, function () { /* GraphQL unavailable - bus prefill stands */ });", 'M12'),
+  mutate(full, "so it is not written. */\n      trackingFallback();",
+    "so it is not written. */", 'M12'),
   checkTrackingOffline);
 redUnder('M13 the value guard is restored unconditionally (the reported defect)',
   mutate(full, "    if (!reresolve && inputs.AssigneeEmail.value.trim()) return;",
@@ -591,7 +605,7 @@ redUnder('M22 the inactive assignee is filled in silently',
   mutate(full, "        markEmailGuess(!!inactive, inactive ?", "        markEmailGuess(false, inactive ?", 'M22'),
   checkInactiveAssignee);
 redUnder('M23 the dead field comes back into the WO query',
-  mutate(full, ' assignedTo priority{ label } } }', ' assignedToMemberName priority{ label } } }', 'M23'),
+  mutate(full, 'assignedTo statusId statusName serviceLevelAgreementId', 'assignedToMemberName statusId statusName serviceLevelAgreementId', 'M23'),
   checkQuery, true);
 redUnder('M24 the user lookup goes back to a nullable ID',
   mutate(full, "query($id:ID!){ user(id:$id)", "query($id:ID){ user(id:$id)", 'M24'),

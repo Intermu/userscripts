@@ -1,10 +1,10 @@
 // ==UserScript==
 // @name         BWN Dispatch (Broadway National)
 // @namespace    broadwaynational.bwn
-// @version      0.9.3
+// @version      0.10.0
 // @downloadURL  https://raw.githubusercontent.com/Intermu/userscripts/main/bwn-dispatch.user.js
 // @updateURL    https://raw.githubusercontent.com/Intermu/userscripts/main/bwn-dispatch.user.js
-// @description  One-click Dispatch for a work order - replaces manually typing a row into Dispatch_Notifications.xlsx. The Dispatch launcher shows only on a WO that is in "Pending Dispatch". It opens a confirm modal prefilled from the BWN Ops Suite bus (Tracking) and a same-origin Umbrava GraphQL read (Location as the site NUMBER, Priority, and the coordinator to ping): it uses the person this WO is assigned to (whoever a supervisor/manager assigned it to, read live when you open it), and when that is a team or blank it falls back to the coordinator from the most recent work order(s) at the same location. The coordinator name + email are editable before you send. On submit it POSTs the 5 typed fields plus the WO number (read from the URL, never typed - the flow needs it to deep-link the card, because Tracking is the CLIENT's tracking number and points at the wrong record) to the broadway-internal-ops SWA proxy (x-bwn-key gated) which forwards to the HTTP-triggered "Dispatch HTTP" Power Automate flow - the flow adds the row to Dispatch_Notifications.xlsx AND dispatches it (posts a Teams adaptive card to the coordinator and waits for their accept). Dispatching is a coordinator action, so there is no role gate (the x-bwn-key is the boundary). The assignee's email is not on the WO record (Umbrava exposes the coordinator NAME only), so it is resolved from a per-user name->email roster you maintain (seeded with you, and it remembers each coordinator you dispatch to); for a coordinator the roster has never met it falls back to a GUESS derived from the house name pattern and the signed-in user's own domain, shown with a "check it before you send" warning and always editable - never a silent send to an address nobody confirmed. The flow's secret URL stays server-side; nothing sensitive lives in this script. Registers a single "Dispatch" launcher into the shared dock (bwn:dock:*) - the dock tab is the only launcher; no floating fallback button.
+// @description  One-click Dispatch for a work order - replaces manually typing a row into Dispatch_Notifications.xlsx. The Dispatch launcher shows only on a WO that is in "Pending Dispatch". It opens a confirm modal prefilled from the BWN Ops Suite bus (Tracking) and a same-origin Umbrava GraphQL read (Location as the site NUMBER, Priority, and the coordinator to ping): it uses the person this WO is assigned to (whoever a supervisor/manager assigned it to, read live when you open it), and when that is a team or blank it falls back to the coordinator from the most recent work order(s) at the same location. The coordinator name + email are editable before you send. On submit it POSTs the 5 typed fields plus the WO number (read from the URL, never typed - the flow needs it to deep-link the card, because Tracking is the CLIENT's tracking number and points at the wrong record) to the broadway-internal-ops SWA proxy (x-bwn-key gated) which forwards to the HTTP-triggered "Dispatch HTTP" Power Automate flow - the flow adds the row to Dispatch_Notifications.xlsx AND dispatches it (posts a Teams adaptive card to the coordinator and waits for their accept). Dispatching is a coordinator action, so there is no role gate (the x-bwn-key is the boundary). The assignee's email is not on the WO record (Umbrava exposes the coordinator NAME only), so it is resolved from a per-user name->email roster you maintain (seeded with you, and it remembers each coordinator you dispatch to); for a coordinator the roster has never met it falls back to a GUESS derived from the house name pattern and the signed-in user's own domain, shown with a "check it before you send" warning and always editable - never a silent send to an address nobody confirmed. The flow's secret URL stays server-side; nothing sensitive lives in this script. As of 0.10.0 the modal also writes the WO RECORD directly via the same-origin Umbrava GraphQL patchWorkOrder mutation (the write kanban proved live) - an operator-picked target status, an operator-picked assignee (a real Umbrava user, so the assign carries a proper GUID and the card name/email come from the record), and an auto priority-scaled Expected Completion Date - behind a confirm that spells out each write and warns that a status change resets the time-in-status clock. Writes run first and atomically; the Teams card is posted only if the record change succeeds. Registers a single "Dispatch" launcher into the shared dock (bwn:dock:*) - the dock tab is the only launcher; no floating fallback button.
 // @match        https://app.umbrava.com/*
 // @run-at       document-idle
 // @noframes
@@ -19,7 +19,7 @@
 (function () {
   'use strict';
 
-  var VER = '0.9.3';   // keep in step with @version - this is what the console banner reports
+  var VER = '0.10.0';   // keep in step with @version - this is what the console banner reports
   var FONT = "-apple-system,BlinkMacSystemFont,'Segoe UI','Helvetica Neue',Arial,sans-serif";
   var GREEN = '#0d3d26';          // BWN Ops Suite brand green - matches CC Request / WO Audit
   var SWA_BASE = 'https://green-stone-0717dab0f.7.azurestaticapps.net';
@@ -29,7 +29,7 @@
   // Lenient match (substring, case-insensitive) so minor header/API formatting drift
   // does not hide the launcher.
   var DISPATCH_STATUS_RE = /pending\s+dispatch/i;
-  console.info('[BWN DISPATCH] v' + VER + ' - Pending-Dispatch-gated launcher -> confirm modal (bus + live GraphQL prefill, name->email roster) -> SWA /api/dispatch (x-bwn-key) -> Dispatch HTTP flow -> Dispatch_Notifications.xlsx + Teams card. Registers into the shared dock (bwn:dock:*); no floating fallback button.');
+  console.info('[BWN DISPATCH] v' + VER + ' - Pending-Dispatch-gated launcher -> confirm modal (bus + live GraphQL prefill, name->email roster) -> direct patchWorkOrder writes (status/assign/ECD) + SWA /api/dispatch (x-bwn-key) -> Dispatch HTTP flow -> Dispatch_Notifications.xlsx + Teams card. Registers into the shared dock (bwn:dock:*); no floating fallback button.');
 
   // ---- WO id + BWN Ops Suite bus (read-only consumer, suite data contract v1) --
   // bwn-suite-core (WO Assist) PUBLISHES the current WO's facts to sessionStorage
@@ -118,12 +118,125 @@
   //   assignedTo    ID scalar, a USER GUID - resolve it through USER_Q, there is no name here
   //   locationId    ID scalar, a GUID - NOT a site number, never put it in the Location field
   //   locationNumber String, "PFJ 0674"-shaped - siteNumberOf() derives the bare number
-  var DISP_WO_Q = 'query($n:Int!){ workOrder(workOrderNumber:$n){ trackingNumber locationId locationNumber locationName assignedTo priority{ label } } }';
+  // Expanded 2026-08-12 for the direct-write build (0.10.0): also reads the current statusId (to
+  // prefill the status dropdown), and the FULL priority object + serviceLevelAgreementId, which the
+  // ECD write needs. ECD is not a top-level patch field - it rides inside `priority`, and a patch of
+  // `priority` is a WHOLE-OBJECT REPLACE (captured live on WO 386473: editing the ECD re-sent all 9
+  // priority fields, flipped hasOverridePriority:true, and re-sent serviceLevelAgreementId). So we
+  // must READ the whole priority here, copy it, and override only expectedCompletionDate on write, or
+  // the other priority fields get blanked. See [[umbrava-graphql-operations]] patchWorkOrder contract.
+  // NOTE the read/write name flip: the READ field is `hasPriorityOverride`; the INPUT field is
+  // `hasOverridePriority`. Do not confuse them.
+  var DISP_WO_Q = 'query($n:Int!){ workOrder(workOrderNumber:$n){ trackingNumber locationId locationNumber locationName assignedTo statusId statusName serviceLevelAgreementId priority{ label responseMinutes firstTripDate serviceLevelAgreementMinutes expirationMinutes expectedCompletionDate hasPriorityOverride category skipWeekends } } }';
   // The assignee, resolved from the GUID above. `emailAddress` is the WO assignee's REAL address:
   // the 2026-07-24 recon concluded no email was readable anywhere, but that was the REST
   // `search_members` endpoint - GraphQL `user(id:)` carries it. That makes the derived guess a
   // last resort rather than the normal path. `id` is ID! - passing ID gets a type error.
   var USER_Q = 'query($id:ID!){ user(id:$id){ firstName lastName emailAddress isInactive } }';
+
+  // ---- Direct WO record writes: the "gold key" patchWorkOrder engine ---------
+  // Reuses the mutation kanban proved writes status LIVE. PATCH semantics: send ONLY the fields being
+  // changed, each wrapped { shouldInclude:true, value:<T> }. The three fields a dispatch writes -
+  // status / assign / ECD - and every shape below were WIRE-PROVEN 2026-08-12, captured off real
+  // edits in the Umbrava SPA on scratch WO 386473 (not guessed). See the memory
+  // [[dispatch-patchworkorder-pin]] and the catalog [[umbrava-graphql-operations]].
+  //   status  data.statusId              = { shouldInclude:true, value:<Int> }          (goes alone)
+  //   assign  data.assignedTo            = { shouldInclude:true, value:<User GUID> }     (goes alone)
+  //   ECD     data.priority              = { shouldInclude:true, value:<full JobPriorityInput> }
+  //           data.serviceLevelAgreementId = { shouldInclude:true, value:<GUID> }        (bundled by the SPA)
+  // All three may be bundled into ONE data object; the mutation is atomic, which is what dispatch
+  // wants (either every chosen write lands or none - no half-dispatched WO).
+  var PATCH_M = 'mutation PatchWorkOrder($data: PatchWorkOrderInput!) { patchWorkOrder(data: $data) { success message } }';
+  function patchWorkOrder(data) {
+    return gql(PATCH_M, { data: data }).then(function (d) {
+      var p = d && d.patchWorkOrder;
+      if (!p || !p.success) throw new Error((p && p.message) || 'patchWorkOrder reported no success');
+      return true;
+    });
+  }
+  function cond(v) { return { shouldInclude: true, value: v }; }   // the Conditional*Input wrapper
+
+  // The tenant WO status list (27 rows), for the status dropdown. Session-cached; active only.
+  var STATUS_Q = 'query{ workOrderStatuses{ id name isActive } }';
+  var _statuses = null;
+  function fetchStatuses() {
+    if (_statuses) return Promise.resolve(_statuses);
+    return gql(STATUS_Q, {}).then(function (d) {
+      var arr = (d && d.workOrderStatuses) || [];
+      _statuses = arr.filter(function (s) { return s && s.id != null && s.isActive !== false; })
+        .sort(function (a, b) { return String(a.name).localeCompare(String(b.name)); });
+      return _statuses;
+    }, function () { return []; });
+  }
+
+  // The internal Umbrava user list, for the assignee picker. Each row's `id` is the USER GUID that
+  // `assignedTo.value` wants (same id `user(id:)` resolves). Technicians and inactive users are not
+  // dispatch coordinators, so they are filtered out. Session-cached.
+  var USERS_Q = 'query{ users(includeInactiveUsers:false, includeSystemUsers:false){ id firstName lastName emailAddress isInactive isTechnician } }';
+  var _users = null;
+  function fetchUsers() {
+    if (_users) return Promise.resolve(_users);
+    return gql(USERS_Q, {}).then(function (d) {
+      var arr = (d && d.users) || [];
+      _users = arr.filter(function (u) { return u && u.id && !u.isInactive && !u.isTechnician; })
+        .map(function (u) {
+          return { id: u.id, name: ((u.firstName || '') + ' ' + (u.lastName || '')).replace(/\s+/g, ' ').trim(), email: String(u.emailAddress || '').trim() };
+        })
+        .filter(function (u) { return u.name; })
+        .sort(function (a, b) { return a.name.localeCompare(b.name); });
+      return _users;
+    }, function () { return []; });
+  }
+
+  // Auto priority-scaled ECD. "Priority-scaled" = the priority's OWN SLA window off the WO record:
+  // ECD = dispatch moment + serviceLevelAgreementMinutes (fall back to responseMinutes). Returns an
+  // ISO string, or null when the priority carries no usable minutes (then ECD is left untouched -
+  // never write a completion date with no basis). ASSUMPTION to confirm on the first live card: SLA
+  // minutes is the right basis vs. responseMinutes; both are shown so a wrong pick is visible.
+  function ecdBasisMinutes(priority) {
+    var sla = Number(priority && priority.serviceLevelAgreementMinutes);
+    if (sla > 0) return { mins: sla, from: 'SLA' };
+    var rm = Number(priority && priority.responseMinutes);
+    if (rm > 0) return { mins: rm, from: 'response' };
+    return null;
+  }
+  function computeEcd(priority, nowMs) {
+    var b = ecdBasisMinutes(priority);
+    if (!b) return null;
+    return new Date((nowMs == null ? Date.now() : nowMs) + b.mins * 60000).toISOString();
+  }
+  // Build the whole-object priority value for the ECD write: copy the READ priority verbatim, map the
+  // read's `hasPriorityOverride` onto the input's `hasOverridePriority` (forced true - a manual ECD
+  // IS a priority override, matching the captured write), and override only expectedCompletionDate.
+  // Everything else is passed straight through so no sibling field is nulled.
+  function num(v) { var n = Number(v); return isFinite(n) ? n : null; }
+  function priorityWriteValue(readPriority, newEcd) {
+    var p = readPriority || {};
+    return {
+      label: (p.label == null ? null : String(p.label)),
+      responseMinutes: num(p.responseMinutes),
+      firstTripDate: (p.firstTripDate == null ? null : String(p.firstTripDate)),
+      serviceLevelAgreementMinutes: num(p.serviceLevelAgreementMinutes),
+      expirationMinutes: num(p.expirationMinutes),
+      expectedCompletionDate: newEcd,
+      hasOverridePriority: true,
+      category: (p.category == null ? null : String(p.category)),
+      skipWeekends: !!p.skipWeekends
+    };
+  }
+  // Assemble the patch `data` from the operator's choices. Only the chosen fields are included, each
+  // as a Conditional wrapper; the WO key is always the bare workOrderNumber. `sel` = { woNumber,
+  // statusId, assignedTo (GUID), ecd (iso|null), priority (read obj), slaId }.
+  function buildPatchData(sel) {
+    var data = { workOrderNumber: sel.woNumber };
+    if (sel.statusId != null && sel.statusId !== '') data.statusId = cond(parseInt(sel.statusId, 10));
+    if (sel.assignedTo) data.assignedTo = cond(sel.assignedTo);
+    if (sel.ecd) {
+      data.priority = cond(priorityWriteValue(sel.priority, sel.ecd));
+      if (sel.slaId) data.serviceLevelAgreementId = cond(sel.slaId);
+    }
+    return data;
+  }
 
   // The WO's default assignee is often the CLIENT's team (e.g. "Team J"), not a dispatchable
   // person. Treat a "Team ..." name as not-a-person so we fall back to a real coordinator.
@@ -368,6 +481,10 @@
   var EMAIL_RE = /^[^\s@]+@[^\s@]+\.[^\s@]+$/;
 
   var openEl = null;
+  // Direct-write controls + the live WO read, module-scoped so hydrate + submit reach them. Reset in
+  // closeModal. _woRead = DISP_WO_Q's result (priority / serviceLevelAgreementId / current status +
+  // assignee) so submit builds the ECD write without a second read. _ecdIso = the auto ECD to write.
+  var statusSel = null, assigneeSel = null, ecdEl = null, _woRead = null, _ecdIso = null, _ecdBasis = '';
   // Suite drawer exit, per the contract in Core's ensureStyle. Core's stylesheet owns the fade;
   // sandboxes cannot share the helper, so these five lines are duplicated in every drawer module.
   function drawerDismiss(el) {
@@ -380,7 +497,7 @@
   }
   // Listeners come off before the fade starts - the node outlives the tool by 170ms and must
   // not answer a key or a bus event on its way out.
-  function closeModal() { if (openEl) { document.removeEventListener('keydown', onKey); drawerDismiss(openEl); openEl = null; emailGuessEl = null; } }
+  function closeModal() { if (openEl) { document.removeEventListener('keydown', onKey); drawerDismiss(openEl); openEl = null; emailGuessEl = null; statusSel = null; assigneeSel = null; ecdEl = null; _woRead = null; _ecdIso = null; _ecdBasis = ''; } }
   function onKey(e) { if (e.key === 'Escape') closeModal(); }
 
   function buildModal() {
@@ -515,6 +632,57 @@
       resolveEmailFromName();
     });
 
+    // ---- Update the work order (direct patchWorkOrder writes) ---------------
+    // These change the Umbrava RECORD, not just the Teams card: assignee, status, and an auto ECD.
+    // The card fields above still drive the notification; picking an assignee here ALSO fills the
+    // card name/email from that user's record (the record beats a guess). Populated by
+    // hydrateFromUmbrava once the live read returns. Status + assignee are opt-in (default: leave
+    // unchanged) so a dispatch never rewrites them by accident; ECD is auto (Mike's choice) and
+    // always shown before it is written.
+    var wsec = document.createElement('div');
+    wsec.style.cssText = 'margin:8px 0 2px;padding-top:13px;border-top:1px solid #dbe6e0;';
+    var wh = document.createElement('div');
+    wh.style.cssText = 'font-weight:700;font-size:12px;color:' + GREEN + ';margin-bottom:10px;letter-spacing:.02em;';
+    wh.textContent = 'Update the work order';
+    wsec.appendChild(wh);
+
+    var awrap = document.createElement('div'); awrap.style.cssText = 'margin-bottom:13px;';
+    var albl = document.createElement('label'); albl.style.cssText = lblCss; albl.textContent = 'Assign to (Umbrava user)';
+    assigneeSel = document.createElement('select'); assigneeSel.style.cssText = inCss;
+    albl.setAttribute('for', 'disp_assignee'); assigneeSel.id = 'disp_assignee';
+    assigneeSel.innerHTML = '<option value="">(loading users…)</option>';
+    assigneeSel.addEventListener('change', onAssigneePick);
+    awrap.appendChild(albl); awrap.appendChild(assigneeSel); wsec.appendChild(awrap);
+
+    var swrap = document.createElement('div'); swrap.style.cssText = 'margin-bottom:5px;';
+    var slbl = document.createElement('label'); slbl.style.cssText = lblCss; slbl.textContent = 'Set status';
+    statusSel = document.createElement('select'); statusSel.style.cssText = inCss;
+    slbl.setAttribute('for', 'disp_status'); statusSel.id = 'disp_status';
+    statusSel.innerHTML = '<option value="">(loading statuses…)</option>';
+    swrap.appendChild(slbl); swrap.appendChild(statusSel); wsec.appendChild(swrap);
+    var sHint = document.createElement('div'); sHint.style.cssText = 'font-size:11.5px;color:#8a5a00;margin:4px 0 12px;';
+    sHint.textContent = 'Changing status resets the WO’s time-in-status clock (not reversible).';
+    wsec.appendChild(sHint);
+
+    ecdEl = document.createElement('div');
+    ecdEl.style.cssText = 'font-size:12.5px;color:#33473d;background:#eef4f0;border:1px solid #cfe0d7;border-radius:8px;padding:8px 11px;margin-bottom:4px;line-height:1.45;';
+    ecdEl.textContent = 'Expected completion date: (reading…)';
+    wsec.appendChild(ecdEl);
+
+    form.appendChild(wsec);
+
+    // Picking a real Umbrava user is the record's own name+email, so it OUTRANKS the card prefill:
+    // fill both card fields and mark them touched (the operator can still hand-edit afterwards).
+    function onAssigneePick() {
+      if (!assigneeSel) return;
+      var opt = assigneeSel.options[assigneeSel.selectedIndex];
+      if (!opt || !opt.value) return;
+      var nm = opt.getAttribute('data-name') || '';
+      var em = opt.getAttribute('data-email') || '';
+      if (nm && inputs.AssignedToName) { inputs.AssignedToName.value = nm; touched.AssignedToName = true; }
+      if (em && inputs.AssigneeEmail) { inputs.AssigneeEmail.value = em; touched.AssigneeEmail = true; markEmailGuess(false); }
+    }
+
     var msg = document.createElement('div');
     msg.style.cssText = 'min-height:18px;color:#b4231f;font-size:12.5px;margin:2px 0 10px;';
 
@@ -557,31 +725,74 @@
       // forwards it; the link is only actually fixed once the flow maps it, which is Mike's edit.
       payload.WONumber = woId || '';
 
+      // ---- Direct record writes (patchWorkOrder) selected by the operator ----
+      // Only on a real WO page, and only the fields explicitly chosen (status/assignee opt-in) plus
+      // the auto ECD. Bundled into ONE atomic patch. The card still goes out afterwards ("both").
+      var sel = {
+        woNumber: parseInt(woId, 10),
+        statusId: (woId && statusSel && statusSel.value) ? statusSel.value : '',
+        assignedTo: (woId && assigneeSel && assigneeSel.value) ? assigneeSel.value : '',
+        ecd: (woId && _ecdIso) ? _ecdIso : null,
+        priority: _woRead && _woRead.priority,
+        slaId: _woRead && _woRead.serviceLevelAgreementId
+      };
+      var data = (woId && (sel.statusId || sel.assignedTo || sel.ecd)) ? buildPatchData(sel) : null;
+      var hasWrites = !!(data && Object.keys(data).length > 1);
+
+      // Confirm - the writes are named explicitly (status change is called out as clock-resetting),
+      // so nothing is written silently. ECD is included whenever a basis exists (Mike's "auto").
+      var wlines = [];
+      if (hasWrites) {
+        if (sel.statusId) { var so = statusSel.options[statusSel.selectedIndex]; wlines.push('  • Status → ' + (so ? so.text.replace(/ - current$/, '') : sel.statusId) + '   (RESETS the time-in-status clock)'); }
+        if (sel.assignedTo) { var ao = assigneeSel.options[assigneeSel.selectedIndex]; wlines.push('  • Assign → ' + (ao ? (ao.getAttribute('data-name') || ao.text) : sel.assignedTo)); }
+        if (sel.ecd) wlines.push('  • Expected completion → ' + fmtEcd(sel.ecd) + '   (auto, now + ' + _ecdBasis + ')');
+      }
+      var confirmMsg = hasWrites
+        ? ('This will WRITE to work order ' + woId + ':\n\n' + wlines.join('\n') + '\n\nThen post a Teams dispatch card to ' + payload.AssignedToName + '.\n\nContinue?')
+        : ('Post a Teams dispatch card to ' + payload.AssignedToName + ' (Tracking ' + payload.Tracking + ')?\n\nNo work-order record changes were selected.');
+      if (!window.confirm(confirmMsg)) return;
+
       var reenable = function () { submit.disabled = false; submit.textContent = 'Dispatch'; };
       submit.disabled = true;
-      submit.textContent = 'Dispatching…';
+      submit.textContent = hasWrites ? 'Updating WO…' : 'Dispatching…';
 
-      gmPost(PROXY_URL, { 'Content-Type': 'application/json', 'x-bwn-key': key }, payload, 30000)
-        .then(function (r) {
-          if (r.status >= 200 && r.status < 300 && r.json && r.json.ok) {
-            rosterRemember(payload.AssignedToName, payload.AssigneeEmail);   // learn this coordinator for next time
-            closeModal();
-            toast('Dispatched ✓  ' + payload.AssignedToName + ' will get a Teams card to accept (Tracking ' + payload.Tracking + ').', 7000);
-          } else if (r.status === 400) {
-            reenable(); msg.textContent = 'Rejected (400)' + (r.json && r.json.error ? ': ' + r.json.error : ' - check the fields') + '.';
-          } else if (r.status === 403) {
-            reenable(); msg.textContent = 'Rejected (403): the SWA ingest key is missing or wrong. Re-set it via the Tampermonkey menu.';
-          } else if (r.status === 429) {
-            reenable(); msg.textContent = 'Too many dispatches in a row - wait a moment and try again.';
-          } else if (r.status === 503) {
-            reenable(); msg.textContent = 'Dispatch is not fully configured on the server yet (503) - tell Mike the DISPATCH_FLOW_URL app setting is missing.';
-          } else {
-            reenable(); msg.textContent = 'Dispatch failed (' + r.status + ')' + (r.json && r.json.error ? ': ' + r.json.error : '') + '.';
-          }
-        })
-        .catch(function (err) {
-          reenable(); msg.textContent = (err && err.message ? err.message : 'could not reach the proxy') + '.';
-        });
+      // The card POST leg (the existing behaviour). Threads `hasWrites` so a card failure AFTER a
+      // successful write tells the operator the record already changed - re-running would re-write
+      // (and re-reset the clock), so the message says to re-send the card only.
+      function postCard() {
+        return gmPost(PROXY_URL, { 'Content-Type': 'application/json', 'x-bwn-key': key }, payload, 30000)
+          .then(function (r) {
+            if (r.status >= 200 && r.status < 300 && r.json && r.json.ok) {
+              rosterRemember(payload.AssignedToName, payload.AssigneeEmail);   // learn this coordinator for next time
+              closeModal();
+              toast((hasWrites ? 'WO updated + dispatched ✓  ' : 'Dispatched ✓  ') + payload.AssignedToName + ' will get a Teams card to accept (Tracking ' + payload.Tracking + ').', 7000);
+            } else {
+              reenable();
+              var tail = hasWrites ? '  NOTE: the WO record WAS already updated - re-send the card only, do not re-run the writes.' : '';
+              if (r.status === 400) msg.textContent = 'Card rejected (400)' + (r.json && r.json.error ? ': ' + r.json.error : ' - check the fields') + '.' + tail;
+              else if (r.status === 403) msg.textContent = 'Card rejected (403): the SWA ingest key is missing or wrong. Re-set it via the Tampermonkey menu.' + tail;
+              else if (r.status === 429) msg.textContent = 'Too many dispatches in a row - wait a moment and try the card again.' + tail;
+              else if (r.status === 503) msg.textContent = 'Dispatch is not fully configured on the server yet (503) - tell Mike the DISPATCH_FLOW_URL app setting is missing.' + tail;
+              else msg.textContent = 'Card failed (' + r.status + ')' + (r.json && r.json.error ? ': ' + r.json.error : '') + '.' + tail;
+            }
+          })
+          .catch(function (err) {
+            reenable();
+            msg.textContent = ((err && err.message) ? err.message : 'could not reach the proxy') + '.' + (hasWrites ? '  NOTE: the WO record WAS already updated; re-send the card only.' : '');
+          });
+      }
+
+      // Writes first (atomic); only notify if the record actually changed. A write failure aborts
+      // before any card is sent, so a failed dispatch never notifies a coordinator about a WO whose
+      // record did not change.
+      var writeStep = hasWrites ? patchWorkOrder(data) : Promise.resolve(true);
+      writeStep.then(function () {
+        if (hasWrites) submit.textContent = 'Dispatching…';
+        return postCard();
+      }).catch(function (err) {
+        reenable();
+        msg.textContent = 'Work order NOT updated: ' + ((err && err.message) ? err.message : err) + '. No card was sent.';
+      });
     });
 
     card.appendChild(head); card.appendChild(form);
@@ -651,6 +862,13 @@
     }
     gql(DISP_WO_Q, { n: n }).then(function (d) {
       var wo = (d && d.workOrder) || {};
+      // Stash the read for submit (ECD write reuses wo.priority + wo.serviceLevelAgreementId), and
+      // populate the direct-write controls: status list (current annotated), assignee picker (current
+      // shown), auto ECD. fetchStatuses/fetchUsers resolve to [] on failure, so no reject leg needed.
+      _woRead = wo;
+      fetchStatuses().then(function (list) { fillStatusOptions(list, wo.statusId); });
+      fetchUsers().then(function (list) { fillAssigneeOptions(list, wo.assignedTo); });
+      showEcd(wo.priority);
       setTracking(wo.trackingNumber);
       trackingFallback();
       // locationId, NOT locationName: the flow's `Lookup site` keys on the bare site number, and
@@ -674,7 +892,15 @@
         if (!isPerson(nm)) { historyFallback(); return; }
         setName(nm, p.emailAddress, p.isInactive);
       }, function () { historyFallback(); });
-    }, function () { /* GraphQL unavailable - bus prefill stands */ trackingFallback(); });
+    }, function () {
+      /* GraphQL unavailable - bus prefill stands. Still offer the pickers (they read independently)
+         but ECD cannot be computed without the priority, so it is not written. */
+      trackingFallback();
+      fetchStatuses().then(function (list) { fillStatusOptions(list, null); });
+      fetchUsers().then(function (list) { fillAssigneeOptions(list, null); });
+      _ecdIso = null; _ecdBasis = '';
+      if (ecdEl) ecdEl.textContent = 'Expected completion date: unavailable (WO read failed) - ECD will not be written.';
+    });
   }
   // Prefill AssigneeEmail from the roster (or from the signed-in user when the name matches
   // them), only if untouched + empty.
@@ -706,6 +932,47 @@
     if (!emailGuessEl) return;
     emailGuessEl.textContent = on ? (text || 'Guessed from the name - check it before you send.') : '';
     emailGuessEl.style.display = on ? 'block' : 'none';
+  }
+
+  // ---- Write-control population (called from hydrateFromUmbrava) -------------
+  function esc(s) { return String(s == null ? '' : s).replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;').replace(/"/g, '&quot;'); }
+  function fmtEcd(iso) { try { return new Date(iso).toLocaleString(); } catch (e) { return String(iso); } }
+  // Status dropdown. Default is "leave unchanged" (empty value = no status write); the current status
+  // is annotated but NOT pre-selected, so a status write only happens on an explicit pick - writing
+  // the same status back would reset the clock for nothing.
+  function fillStatusOptions(list, currentId) {
+    if (!statusSel) return;
+    if (!list || !list.length) { statusSel.innerHTML = '<option value="">(status list unavailable - status will not be written)</option>'; return; }
+    var cur = (currentId == null) ? '' : String(currentId);
+    var html = '<option value="">(leave status unchanged)</option>';
+    list.forEach(function (s) {
+      html += '<option value="' + esc(s.id) + '">' + esc(s.name) + (String(s.id) === cur ? ' - current' : '') + '</option>';
+    });
+    statusSel.innerHTML = html;
+  }
+  // Assignee picker. Same opt-in rule: default "leave unchanged" (shows the current assignee's name in
+  // the label so the operator knows who it is), current person NOT pre-selected, so assign writes only
+  // on an explicit pick.
+  function fillAssigneeOptions(list, currentGuid) {
+    if (!assigneeSel) return;
+    if (!list || !list.length) { assigneeSel.innerHTML = '<option value="">(user list unavailable - assignee will not be written)</option>'; return; }
+    var curName = '';
+    list.forEach(function (u) { if (currentGuid && u.id === currentGuid) curName = u.name; });
+    var html = '<option value="">(leave assignee unchanged' + (curName ? ' - ' + esc(curName) : '') + ')</option>';
+    list.forEach(function (u) {
+      html += '<option value="' + esc(u.id) + '" data-name="' + esc(u.name) + '" data-email="' + esc(u.email) + '">' + esc(u.name) + (u.email ? ' (' + esc(u.email) + ')' : '') + '</option>';
+    });
+    assigneeSel.innerHTML = html;
+  }
+  // ECD line. _ecdIso / _ecdBasis are stashed for the confirm + write; null when the WO has no
+  // priority SLA to scale from, in which case ECD is simply not written (never a baseless date).
+  function showEcd(priority) {
+    if (!ecdEl) return;
+    var b = ecdBasisMinutes(priority);
+    _ecdIso = b ? computeEcd(priority) : null;
+    if (!_ecdIso) { _ecdBasis = ''; ecdEl.textContent = 'Expected completion date: no priority SLA on this WO - ECD will not be written.'; return; }
+    _ecdBasis = (b.from === 'SLA' ? 'SLA ' + b.mins + ' min' : 'response ' + b.mins + ' min');
+    ecdEl.innerHTML = 'Expected completion date → <strong>' + esc(fmtEcd(_ecdIso)) + '</strong><br><span style="color:#5b7367;font-size:11.5px;">auto: now + ' + esc(_ecdBasis) + ' (priority-scaled)</span>';
   }
 
   // ---- Shared launcher dock (bwn:dock:*) -----------------------------------

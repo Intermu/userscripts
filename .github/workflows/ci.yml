@@ -97,6 +97,16 @@ jobs:
       - name: dispatch payload harness (WO number + site number)
         run: node scripts/test-dispatch-payload.js
 
+      # bwn-dispatch 0.10.0 writes the WO record directly via patchWorkOrder (the mutation kanban
+      # proved writes status LIVE), adding assign + ECD. Every shape was captured off real SPA edits
+      # 2026-08-12. Slices the shipped engine block and pins: the Conditional{shouldInclude,value}
+      # wrapper, status coerced to Int, assign GUID, and the ECD whole-object COPY that overrides only
+      # expectedCompletionDate + forces hasOverridePriority:true and NEVER blanks a sibling priority
+      # field (the captured hazard), plus patchWorkOrder throwing on success:false so a failed write
+      # aborts before any card is sent. Seven controls each turn it red.
+      - name: dispatch patchWorkOrder engine harness (status/assign/ECD writes)
+        run: node scripts/test-dispatch-patch.js
+
       - name: bus identity publish harness (identity ahead of the anchor gate)
         run: node scripts/test-bus-identity-publish.js
 
