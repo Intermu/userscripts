@@ -6289,6 +6289,18 @@
       // Vendors: the value AND whether the field was read at all (see has()).
       var vendorsKnown = has(/vendornames?$|(^|\.)vendors$|vendor\.name$/i);
       var vendors = String(g(/vendornames?$|(^|\.)vendors$|vendor\.name$/i) || '');
+      // Address (in-house dispatch feed): city/state drive the coverage rule. `state` is anchored
+      // to address.state - a bare top-level `state` is the INTEGER WO-state (live: state:0), never
+      // the 2-letter postal code. city has only the one key after heatFlatten (address.city).
+      var city = String(g(/address\.city$|(^|\.)city$/i) || '');
+      var state = String(g(/address\.state$/i) || '').toUpperCase();
+      // Street + zip (In-House Dispatch geocode feed). The scan already SELECTS
+      // address{addressLine1 addressLine2 postalCode}; lift them onto the record so the SWA can
+      // geocode a real pin, not a city centroid. Anchored to the address.* dotted keys heatFlatten
+      // produces - a bare top-level key would risk the alias-orphan trap (silent '').
+      var street1 = String(g(/address\.addressline1$/i) || '');
+      var street2 = String(g(/address\.addressline2$/i) || '');
+      var zip = String(g(/address\.postalcode$/i) || '');
       // SLA facts, straight off the row's own priority object - no parsing of display text.
       var respMin = g(/responseminutes/i);
       var slaMin = g(/servicelevelagreementminutes|slaminutes/i);
@@ -6312,6 +6324,7 @@
           nte: (nteAmt === null ? '' : BWN.money(nteAmt)),
           dneAmt: dneAmt, nteAmt: nteAmt,
           phase: phase, vendors: vendors, vendorsKnown: vendorsKnown, remDays: remDays,
+          city: city, state: state, street1: street1, street2: street2, zip: zip,
           sla: {
             responseMinutes: (respMin !== '' && !isNaN(parseFloat(respMin))) ? parseFloat(respMin) : null,
             slaMinutes: (slaMin !== '' && !isNaN(parseFloat(slaMin))) ? parseFloat(slaMin) : null,
@@ -7082,6 +7095,51 @@
           console.warn('[BWN HEAT] board over ' + HEAT_DATASET_MAX + ' rows - dataset push capped, some rows omitted');
         BWN.lsSetJSON('bwn:datasetq', { generatedAt: new Date().toISOString(), rows: rows, by: 'listHeat' });
       } catch (e) { console.warn('[BWN HEAT] dataset queue failed:', (e && e.message) || e); }
+    }
+
+    // ---- In-House Dispatch Report feed (dedicated whole-open-book push) --------------
+    // Fed ONLY by the tenant-wide OPEN (seeded) scan, so it is the WHOLE open book, not a
+    // coordinator's filtered board. Its own queue (bwn:dispatchq) + SWA route, separate from
+    // the Dashboard dataset above, so the two never collide and the Dashboard guard is untouched.
+    // The report page (broadway-internal-ops) classifies OFFER / POSSIBLE-BYPASS / ALREADY-IN-HOUSE
+    // from {city, state, vendors} against in-house vendor #19378 "Broadway National Maintenance LLC".
+    // Units are already normalized upstream (dneAmt in DOLLARS via moneyNum); this only renames.
+    var DISPATCH_DATASET_MAX = 8000;   // > the ~5,241 tenant open book, with headroom
+    function dispatchDatasetRows(store) {
+      var out = [], keys = Object.keys(store || {});
+      for (var i = 0; i < keys.length && out.length < DISPATCH_DATASET_MAX; i++) {
+        var r = store[keys[i]];
+        if (!r || !r.id) { continue; }   // braced to keep this skip-line unique for the harness
+        var row = { woNumber: r.wo || '', tracking: r.tracking || '' };
+        if (!row.woNumber && !row.tracking) continue;   // no identity the report could key a job on
+        if (r.status) row.status = r.status;
+        if (r.prio) row.priority = r.prio;
+        if (r.client) row.client = r.client;
+        // A resolved human name only - never a GUID, never "(unresolved member)".
+        if (r.assignee && r.assignee !== '(unresolved member)') row.coordinator = r.assignee;
+        if (r.city) row.city = r.city;
+        if (r.state) row.state = r.state;
+        // Street + zip for the geocode step (SWA composes the geocodable address from these).
+        if (r.street1) row.street1 = r.street1;
+        if (r.street2) row.street2 = r.street2;
+        if (r.zip) row.zip = r.zip;
+        // vendorsKnown separates "no vendor yet" (an OFFER candidate) from "column not read".
+        // Only a KNOWN read is emitted - as '' when empty - so the report never reads an unread
+        // field as "no vendor" and mis-bucket an already-dispatched job as offerable.
+        if (r.vendorsKnown) row.vendors = r.vendors || '';
+        if (r.dneAmt != null) row.dne = r.dneAmt;
+        out.push(row);
+      }
+      return out;
+    }
+    // END dispatchDatasetRows
+    function dispatchQueueDataset(store) {
+      try {
+        var rows = dispatchDatasetRows(store);
+        if (!rows.length) return;
+        BWN.lsSetJSON('bwn:dispatchq', { generatedAt: new Date().toISOString(), rows: rows, by: 'dispatchScan', scope: 'tenant-open' });
+        console.info('[BWN DISPATCH] queued ' + rows.length + ' open WOs for the In-House Dispatch Report (bwn:dispatchq).');
+      } catch (e) { console.warn('[BWN DISPATCH] dispatch queue failed:', (e && e.message) || e); }
     }
 
     // ---- Assignee names from GUIDs ------------------------------------------------
@@ -8248,7 +8306,8 @@
             // API-only facts. The DOM scan leaves these undefined and every consumer
             // treats undefined as "not read" rather than as a zero.
             assigneeId: e.assigneeId, nte: e.nte, dneAmt: e.dneAmt, nteAmt: e.nteAmt,
-            phase: e.phase, vendors: e.vendors, vendorsKnown: e.vendorsKnown,
+            phase: e.phase, vendors: e.vendors, vendorsKnown: e.vendorsKnown, city: e.city, state: e.state,
+            street1: e.street1, street2: e.street2, zip: e.zip,
             remDays: e.remDays, sla: e.sla, slaScaled: vf.slaScaled, src: 'api',
             // The limits this row was judged against, so a consumer can print "1.8x the
             // 120h limit" without a second threshold model (see computeVerdict's header).
@@ -8285,7 +8344,7 @@
         // heatQueueDataset feeds the Dashboard and is SKIPPED for a seeded scan - the seed is the
         // transient tenant-wide OPEN book, not the user's real board (a real capture re-scans and
         // pushes the proper per-user dataset), which also sidesteps the HEAT_DATASET_MAX cap.
-        if (clean && heatStore) { heatPublishVerdicts(heatStore); if (!seededScan) heatQueueDataset(heatStore); }
+        if (clean && heatStore) { heatPublishVerdicts(heatStore); if (!seededScan) heatQueueDataset(heatStore); else dispatchQueueDataset(heatStore); }
         // Announce on EVERY finish, clean or dirty - see heatRowsAnnounce for why. A consumer
         // that pulled mid-scan is stuck on "scan in progress" until something tells it the scan
         // ended, and a dirty finish is exactly when that matters most.
@@ -8308,7 +8367,7 @@
             // is not rendering has no other writer, so without this the bus would hold a
             // verdict one signal out of date for most of the board.
             heatPublishVerdicts(store);
-            if (!seededScan) heatQueueDataset(store);
+            if (!seededScan) heatQueueDataset(store); else dispatchQueueDataset(store);
             // Rebuild and re-announce for the same reason the bus is re-published: name
             // resolution can ADD an orphan amber, so a consumer holding the first snapshot
             // would render a verdict one signal out of date for most of the board.
@@ -8388,6 +8447,23 @@
 
       return step();
     }
+
+    // ---- In-House Dispatch sync trigger --------------------------------------------
+    // Runs the tenant-wide OPEN seed scan on demand and pushes bwn:dispatchq (drained by the
+    // connector to the SWA). The seeded scan is otherwise a passive fallback a real per-user
+    // board capture pre-empts, so the dispatch feed needs an explicit runner. Console entry
+    // point today; a strip button can call the same function. Side effect: the live heat strip
+    // shows whole-open-book numbers until the next real board capture displaces the seed (self-
+    // heals, same as the seed fallback). Resolves apiScanAll's promise (true on a clean scan).
+    if (typeof window !== 'undefined') window.__bwnDispatchSyncNow = function () {
+      if (!isListPage()) { console.warn('[BWN DISPATCH] open the Work Orders LIST first.'); return Promise.resolve(false); }
+      if (!heatAuthToken()) { console.warn('[BWN DISPATCH] no auth bearer captured yet - load the WO list once, then retry.'); return Promise.resolve(false); }
+      apiList = null;   // drop any per-user capture so the tenant-wide OPEN seed is what runs
+      if (!heatSeedCapture()) { console.warn('[BWN DISPATCH] could not seed the open-book query.'); return Promise.resolve(false); }
+      var btn = document.getElementById('bwn-heat-scan') || { disabled: false, textContent: '' };
+      console.info('[BWN DISPATCH] syncing the whole open book for the In-House Dispatch Report...');
+      return apiScanAll(btn);
+    };
 
     // ---- Scan All (scroll fallback) -------------------------------------------------
     function listScroller() {
