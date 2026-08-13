@@ -298,6 +298,13 @@ jobs:
       - name: Tasks ingest harness (fetchTasks open-count + carry)
         run: node scripts/test-tasks-ingest.js
 
+      # Track A IVR hours: Core extends the jobIVRs read it already does for the no-show check to sum
+      # labor + travel hours (non-canceled) into the bwn:trips payload; AI carries laborHours +
+      # travelHours. Hours only when the jobIVRs read succeeded (unknown stays absent). Runs the
+      # shipped AI extraction + Core's hours-sum.
+      - name: IVR hours ingest harness (jobIVRs labor/travel sum + carry)
+        run: node scripts/test-ivr-ingest.js
+
       # The Operate panel — the seam an agent drives the page from, the code path that once had page
       # tools registered where no coordinator-facing UI invoked them. Sliced from bwn-suite-ai: panel
       # unprojectable, capability line derived, posts `operate` never `ask`, adopts the SERVER's round
