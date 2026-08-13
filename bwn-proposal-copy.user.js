@@ -73,6 +73,16 @@
     return null;
   }
 
+  // ===== ops ================================================================
+  var Q_PROPOSAL_WO = 'query ProposalWO($workOrderNumber: Int!) { job: workOrder(workOrderNumber: $workOrderNumber) { id number clientId clientName locationId locationName locationNumber formattedClientPurchaseOrderNumber } }';
+  var Q_PROPOSAL_DETAILS = 'query ClientProposalDetails($proposalId: Int!) { proposal(id: $proposalId) { id number description scopeOfWork scopeOfWorkHtml disclaimer jobId jobType formattedClientPurchaseOrderNumber timeFrameDays { value } type { id name } status { id name } subtotal { amount currency precision } proposalLineItems { id category tripLabel quantity chargeQuantity unitOfMeasurement useMarkUpPercent markUpPercent isTaxable taxRate item itemId isPrivate sortOrder rateId description descriptionHtml trade { id } unitCost { amount currency precision } unitCharge { amount currency precision } } } }';
+  var Q_LOCATION_OPEN_WOS = 'query PagedWorkOrders($page: PageInput!, $sortBy: [SortInput!]!, $locationId: ID, $phase: SystemPhaseValue) { listWorkOrdersPaginated(page: $page, sortBy: $sortBy, locationId: $locationId, phase: $phase) { rowCount items { id number statusName scopeOfWork locationId locationNumber } } }';
+  // Return selection {success message proposal{id number}} is the wrapper editProposal + cloneProposal
+  // were both captured returning (2026-08-13). createDraftProposal's wrapper is assumed identical;
+  // the first dry-run/live create confirms it.
+  var M_CREATE_DRAFT = 'mutation CreateDraftProposal($proposalData: CreateDraftProposalInput!) { createDraftProposal(proposalData: $proposalData) { success message proposal { id number } } }';
+  var M_EDIT = 'mutation EditProposal($proposalData: EditProposalInput!) { editProposal(proposalData: $proposalData) { success message proposal { id number } } }';
+
   // ===== copy engine ========================================================
   // (mapLineItem, buildCreateVars, buildEditVars, copyProposal land here in
   //  Tasks 2-4. Kept DOM-free so the node harness can run it headless.)
@@ -134,7 +144,54 @@
       proposalLineItems: items
     } };
   }
-  function copyProposal() {}         // Task 4
+  function copyProposal(sourceProposalId, targetWorkOrderNumber, opts) {
+    opts = opts || {};
+    var dry = (opts.dryRun != null) ? opts.dryRun : DRY_RUN;
+    var source = null, target = null, newId = null;
+    return pcGql('ClientProposalDetails', Q_PROPOSAL_DETAILS, { proposalId: sourceProposalId })
+      .then(function (d) {
+        source = d && d.proposal;
+        if (!source || !Array.isArray(source.proposalLineItems)) throw stage('read-source', 'source proposal not found or empty');
+        return pcGql('ProposalWO', Q_PROPOSAL_WO, { workOrderNumber: targetWorkOrderNumber });
+      })
+      .then(function (d) {
+        target = d && d.job;
+        if (!target || target.number == null || target.id == null) throw stage('resolve-target', 'target WO not found');
+        var createVars = buildCreateVars(source, target);
+        if (dry) {
+          var editPreview = buildEditVars('<newId>', source);
+          console.info('[BWN PROPOSAL COPY] DRY-RUN create', JSON.stringify(createVars));
+          console.info('[BWN PROPOSAL COPY] DRY-RUN edit', JSON.stringify(editPreview));
+          return { __dry: true, create: createVars, edit: editPreview };
+        }
+        return pcGql('CreateDraftProposal', M_CREATE_DRAFT, createVars).then(function (r) {
+          var res = r && r.createDraftProposal;
+          if (!res || res.success !== true || !res.proposal || res.proposal.id == null) throw stage('create', (res && res.message) || 'createDraftProposal reported no success');
+          newId = res.proposal.id;
+          return pcGql('EditProposal', M_EDIT, buildEditVars(newId, source));
+        }).then(function (r) {
+          var res = r && r.editProposal;
+          if (!res || res.success !== true) throw stage('edit', (res && res.message) || 'editProposal reported no success');
+          return pcGql('ClientProposalDetails', Q_PROPOSAL_DETAILS, { proposalId: newId });
+        }).then(function (d) {
+          var nu = d && d.proposal;
+          var srcN = source.proposalLineItems.length;
+          var newN = nu && Array.isArray(nu.proposalLineItems) ? nu.proposalLineItems.length : -1;
+          var srcSub = source.subtotal ? source.subtotal.amount : null;
+          var newSub = nu && nu.subtotal ? nu.subtotal.amount : null;
+          var match = (newN === srcN) && (srcSub == null || newSub === srcSub);
+          return { ok: true, newProposalId: newId, created: true, filled: true, readBack: { sourceItems: srcN, newItems: newN, sourceSubtotal: srcSub, newSubtotal: newSub, match: match } };
+        });
+      })
+      .then(function (r) {
+        if (r && r.__dry) return { ok: true, dryRun: true, create: r.create, edit: r.edit };
+        return r;
+      })
+      .catch(function (err) {
+        return { ok: false, newProposalId: newId, stage: (err && err.stage) || 'unknown', error: (err && err.message) || String(err) };
+      });
+    function stage(s, msg) { var e = new Error(msg); e.stage = s; return e; }
+  }
 
   // ===== ui =================================================================
   // (row button + drawer + picker land here in Task 5.)

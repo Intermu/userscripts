@@ -151,5 +151,54 @@ function loadCore(env) {
   var mutTarget = loadB(mutate(CORE_B, 'workOrderNumber: target.number', 'workOrderNumber: source.number')).buildCreateVars(SOURCE, TARGET).proposalData;
   A.ok('CONTROL: mis-targeting to source.number is observable', mutTarget.workOrderNumber === 7001);
 
+  // --- copyProposal orchestration ---
+  function detailsReply(vars) {
+    // ClientProposalDetails(proposalId) -> the source on read, the new draft on read-back
+    if (vars.proposalId === 500) return { data: { proposal: SOURCE } };
+    if (vars.proposalId === 9003) return { data: { proposal: Object.assign({}, SOURCE, { id: 9003, proposalLineItems: SOURCE.proposalLineItems }) } };
+    return { data: { proposal: null } };
+  }
+  function baseReplies(extra) {
+    return Object.assign({
+      ClientProposalDetails: detailsReply,
+      ProposalWO: function () { return { data: { job: TARGET } }; },
+      CreateDraftProposal: function () { return { data: { createDraftProposal: { success: true, message: '', proposal: { id: 9003, number: 8002 } } } }; },
+      EditProposal: function () { return { data: { editProposal: { success: true, message: '', proposal: { id: 9003, number: 8002 } } } }; }
+    }, extra || {});
+  }
+  // happy path
+  var eH = makeEnv({ replies: baseReplies() }); var apiH = loadCore(eH);
+  var rH = await apiH.copyProposal(500, 8002, { dryRun: false });
+  A.ok('happy: ok true', rH.ok === true);
+  A.ok('happy: returns the new proposal id', rH.newProposalId === 9003);
+  var ops = eH.calls.map(function (c) { return c.op; });
+  A.ok('happy: creates THEN edits', ops.indexOf('CreateDraftProposal') !== -1 && ops.indexOf('CreateDraftProposal') < ops.indexOf('EditProposal'));
+  A.ok('happy: edit was sent with the new proposalId', eH.calls.filter(function (c) { return c.op === 'EditProposal'; })[0].variables.proposalData.proposalId === 9003);
+  A.ok('happy: read-back matched', rH.readBack && rH.readBack.match === true);
+
+  // dry-run sends ZERO writes
+  var eD = makeEnv({ replies: baseReplies() }); var apiD = loadCore(eD);
+  var rD = await apiD.copyProposal(500, 8002, { dryRun: true });
+  var writeCalls = eD.calls.filter(function (c) { return c.op === 'CreateDraftProposal' || c.op === 'EditProposal'; });
+  A.ok('dry-run: no write mutation sent', writeCalls.length === 0);
+  A.ok('dry-run: still returns assembled create+edit', rD.dryRun === true && rD.create && rD.edit);
+
+  // null source = failure, no write
+  var eN = makeEnv({ replies: baseReplies({ ClientProposalDetails: function () { return { data: { proposal: null } }; } }) }); var apiN = loadCore(eN);
+  var rN = await apiN.copyProposal(500, 8002, { dryRun: false });
+  A.ok('null source -> ok false at stage read', rN.ok === false && rN.stage === 'read-source');
+  A.ok('null source -> no write attempted', eN.calls.filter(function (c) { return c.op === 'CreateDraftProposal'; }).length === 0);
+
+  // create fails -> stop, no edit
+  var eF = makeEnv({ replies: baseReplies({ CreateDraftProposal: function () { return { data: { createDraftProposal: { success: false, message: 'denied' } } }; } }) }); var apiF = loadCore(eF);
+  var rF = await apiF.copyProposal(500, 8002, { dryRun: false });
+  A.ok('create fail -> ok false at stage create', rF.ok === false && rF.stage === 'create');
+  A.ok('create fail -> edit NOT sent', eF.calls.filter(function (c) { return c.op === 'EditProposal'; }).length === 0);
+
+  // read-back mismatch -> ok true but match false (warning)
+  var eW = makeEnv({ replies: baseReplies({ ClientProposalDetails: function (vars) { if (vars.proposalId === 9003) return { data: { proposal: Object.assign({}, SOURCE, { proposalLineItems: [SRC_ITEM] }) } }; return detailsReply(vars); } }) }); var apiW = loadCore(eW);
+  var rW = await apiW.copyProposal(500, 8002, { dryRun: false });
+  A.ok('read-back mismatch -> ok true, match false (warning)', rW.ok === true && rW.readBack.match === false);
+
   A.finish();
 })();
