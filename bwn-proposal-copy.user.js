@@ -179,8 +179,16 @@
           var newN = nu && Array.isArray(nu.proposalLineItems) ? nu.proposalLineItems.length : -1;
           var srcSub = source.subtotal ? source.subtotal.amount : null;
           var newSub = nu && nu.subtotal ? nu.subtotal.amount : null;
-          var match = (newN === srcN) && (srcSub == null || newSub === srcSub);
-          return { ok: true, newProposalId: newId, created: true, filled: true, readBack: { sourceItems: srcN, newItems: newN, sourceSubtotal: srcSub, newSubtotal: newSub, match: match } };
+          // EditProposalInput has NO clientPurchaseOrderNumber field (confirmed against the pinned
+          // schema), so editProposal can never resend the PO that createDraftProposal set. If the
+          // server does a whole-object replace on edit, that PO could be silently nulled out - compare
+          // it here so the drop is visible instead of passing as a clean match. Two null/absent POs
+          // (neither side ever had one) still agree.
+          var srcPO = source.formattedClientPurchaseOrderNumber || null;
+          var newPO = (nu && nu.formattedClientPurchaseOrderNumber) || null;
+          var poMatch = srcPO === newPO;
+          var match = (newN === srcN) && (srcSub == null || newSub === srcSub) && poMatch;
+          return { ok: true, newProposalId: newId, created: true, filled: true, readBack: { sourceItems: srcN, newItems: newN, sourceSubtotal: srcSub, newSubtotal: newSub, sourcePO: srcPO, newPO: newPO, match: match } };
         });
       })
       .then(function (r) {
@@ -238,7 +246,11 @@
     return m ? parseInt(m[1], 10) : null;
   }
   function escapeHtml(s) { return String(s == null ? '' : s).replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;'); }
-  function fmtMoney(amt) { return (amt == null) ? '-' : ('$' + (Number(amt) / 100).toFixed(2)); }
+  function fmtMoney(money) {
+    if (!money || money.amount == null) return '-';
+    var precision = (money.precision != null) ? money.precision : 2;
+    return '$' + (Number(money.amount) / Math.pow(10, precision)).toFixed(2);
+  }
 
   // ---- row discovery (UNVERIFIED) ------------------------------------------
   // UNVERIFIED: confirm against a live WO snapshot before the live gate. No WO carrying
@@ -438,7 +450,7 @@
       '<div style="font-size:13px;line-height:1.6;">' +
       '<div><strong>Type:</strong> ' + escapeHtml(source.type && source.type.name) + '</div>' +
       '<div><strong>Description:</strong> ' + escapeHtml(source.description || '-') + '</div>' +
-      '<div><strong>Total:</strong> ' + fmtMoney(source.subtotal && source.subtotal.amount) + '</div>' +
+      '<div><strong>Total:</strong> ' + fmtMoney(source.subtotal) + '</div>' +
       '</div>';
     body.appendChild(summary);
 
@@ -450,7 +462,7 @@
       var tr = document.createElement('tr');
       tr.innerHTML = '<td>' + escapeHtml(li.description || li.item || '') + '</td>' +
         '<td>' + escapeHtml(li.quantity) + '</td>' +
-        '<td>' + fmtMoney(li.unitCharge && li.unitCharge.amount) + '</td>';
+        '<td>' + fmtMoney(li.unitCharge) + '</td>';
       tb.appendChild(tr);
     });
     tbl.appendChild(tb);

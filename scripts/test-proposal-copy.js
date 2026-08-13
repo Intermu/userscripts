@@ -200,6 +200,30 @@ function loadCore(env) {
   var rW = await apiW.copyProposal(500, 8002, { dryRun: false });
   A.ok('read-back mismatch -> ok true, match false (warning)', rW.ok === true && rW.readBack.match === false);
 
+  // read-back PO mismatch -> ok true but match false (EditProposalInput has no PO field, so a
+  // server-side whole-object replace on edit could silently drop the PO createDraftProposal set)
+  var eP = makeEnv({ replies: baseReplies({ ClientProposalDetails: function (vars) { if (vars.proposalId === 9003) return { data: { proposal: Object.assign({}, SOURCE, { id: 9003, formattedClientPurchaseOrderNumber: 'PO-999' }) } }; return detailsReply(vars); } }) }); var apiP = loadCore(eP);
+  var rP = await apiP.copyProposal(500, 8002, { dryRun: false });
+  A.ok('read-back PO mismatch -> ok true, match false', rP.ok === true && rP.readBack.match === false);
+  A.ok('read-back PO mismatch -> sourcePO/newPO exposed on readBack', rP.readBack.sourcePO === 'PO-123' && rP.readBack.newPO === 'PO-999');
+
+  // null target -> resolve-target failure, no write
+  var eT = makeEnv({ replies: baseReplies({ ProposalWO: function () { return { data: { job: null } }; } }) }); var apiT = loadCore(eT);
+  var rT = await apiT.copyProposal(500, 8002, { dryRun: false });
+  A.ok('null target -> ok false at stage resolve-target', rT.ok === false && rT.stage === 'resolve-target');
+  A.ok('null target -> no write attempted', eT.calls.filter(function (c) { return c.op === 'CreateDraftProposal'; }).length === 0);
+
+  // missing token -> pcGql rejects before any write is ever sent
+  var eNT = makeEnv({ withToken: false, replies: baseReplies() }); var apiNT = loadCore(eNT);
+  var rNT = await apiNT.copyProposal(500, 8002, { dryRun: false });
+  A.ok('missing token -> ok false', rNT.ok === false);
+  A.ok('missing token -> no write mutation sent', eNT.calls.filter(function (c) { return c.op === 'CreateDraftProposal' || c.op === 'EditProposal'; }).length === 0);
+
+  // edit fails -> stop, ok false at stage edit
+  var eE = makeEnv({ replies: baseReplies({ EditProposal: function () { return { data: { editProposal: { success: false, message: 'denied' } } }; } }) }); var apiE = loadCore(eE);
+  var rE = await apiE.copyProposal(500, 8002, { dryRun: false });
+  A.ok('edit fail -> ok false at stage edit', rE.ok === false && rE.stage === 'edit');
+
   // --- pure UI helpers ---
   var apiU = loadCore(makeEnv({}));
   var OPEN_WOS = [
