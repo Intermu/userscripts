@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         BWN Suite - Core (Broadway National)
 // @namespace    broadwaynational.bwn
-// @version      1.78.11
+// @version      1.78.12
 // @downloadURL  https://raw.githubusercontent.com/Intermu/userscripts/main/bwn-suite-core.user.js
 // @updateURL    https://raw.githubusercontent.com/Intermu/userscripts/main/bwn-suite-core.user.js
 // @description  Runs several Umbrava helpers for BWN coordinators, in the browser with no privileged grants. Includes: PO Approval + ETA Builder; WO Assist (GP/ETA, a stall watchdog, DNE calculator, and a next-action playbook); Email Leak Guard (checks recipients against vendor names, PO amounts, and client budget references before an outbound email sends); WO List Heat (a triage overlay + My Day strip on the work-order list, with an optional same-origin Umbrava API scan for deterministic full-board coverage); and the BWN Launcher (opens the Azure Static Web App tools with the current WO's context). Modules share state through sessionStorage/localStorage. The only network calls are same-origin Umbrava GraphQL requests (app.umbrava.com/api/graphql, the app's own session): List Heat's full-board scan and WO Assist's work-order / trip / clock-in / document reads, plus ONE write - BWN Views saves the column layout through Umbrava's own putUserPreference, the same preference the column chooser writes; everything else is offline. Toggle modules in BWN_MODULES below.
@@ -1969,6 +1969,28 @@
       }).catch(function () { PROPS_DONE[woNum] = 'error'; });
     }
 
+    // ---- Open tasks via tasksByEntityTypeAndId(entityType:1, entityId:<woNumber>) --------
+    // Fifth reader in this cluster (Track A tasks slice). readOpenTasks() above is a DOM SCRAPE of
+    // the "Open Tasks N" panel - fragile (needs the panel rendered); this is the deterministic API
+    // count for the live-jobs push. entityType 1 = work order; entityId is the WO NUMBER as a String.
+    // Counts INCOMPLETE tasks client-side (don't trust includeComplete alone - same discipline as the
+    // docs reader's !isArchived). Confident reads only -> bwn:tasks:<wo>; a failed read stays absent
+    // (unknown), never a guessed 0.
+    var TASKS_DONE = Object.create(null);
+    var OPEN_TASKS_Q = 'query WOOpenTasks($id: String!) { tasksByEntityTypeAndId(entityType: 1, entityId: $id, includeComplete: false) { tasks { id isComplete } } }';
+    function fetchTasks(woNum) {
+      if (!woNum || TASKS_DONE[woNum]) return;
+      TASKS_DONE[woNum] = 'pending';
+      bwnGql(OPEN_TASKS_Q, { id: String(woNum) }).then(function (d) {
+        var r = d && d.tasksByEntityTypeAndId;
+        if (!r || !Array.isArray(r.tasks)) { TASKS_DONE[woNum] = 'error'; return; }   // schema drift = unknown, NEVER a guessed 0
+        var open = r.tasks.filter(function (t) { return t && !t.isComplete; }).length;
+        TASKS_DONE[woNum] = true;
+        try { BWN.lsSetJSON('bwn:tasks:' + woNum, { open: open, ts: new Date().toISOString() }); } catch (e) { }
+        try { refresh(); } catch (e) { }
+      }).catch(function () { TASKS_DONE[woNum] = 'error'; });
+    }
+
     // ---- Documents via jobDocuments(workOrderNumber) ---------------------------
     // Third reader in this cluster, same cache shape as readWO/fetchTrips: async
     // fetch fills DOCS_CACHE, readDocs() is a SYNC cache read so compute() and the
@@ -2219,6 +2241,7 @@
       var woApi = readWO(currentWOId());   // async WO-header read (cached); null until it lands
       try { if (woApi && woApi.id) fetchTrips(currentWOId(), woApi.id); } catch (e) { }   // async: populates bwn:trips no-show from the API (needs jobId)
       try { if (woApi && woApi.id) fetchProposals(currentWOId(), woApi.id); } catch (e) { }   // async: populates bwn:props open-count for the live-jobs push (needs jobId)
+      try { fetchTasks(currentWOId()); } catch (e) { }   // async: populates bwn:tasks open-count for the live-jobs push (needs only the WO number)
       var pos = readPOs();
       var vendorTotal = pos.reduce(function (a, p) { return a + (p.amount > 0 ? p.amount : 0); }, 0);
       var nte = detectNTE();
