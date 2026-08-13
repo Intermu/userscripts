@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         BWN Suite - Core (Broadway National)
 // @namespace    broadwaynational.bwn
-// @version      1.78.13
+// @version      1.78.14
 // @downloadURL  https://raw.githubusercontent.com/Intermu/userscripts/main/bwn-suite-core.user.js
 // @updateURL    https://raw.githubusercontent.com/Intermu/userscripts/main/bwn-suite-core.user.js
 // @description  Runs several Umbrava helpers for BWN coordinators, in the browser with no privileged grants. Includes: PO Approval + ETA Builder; WO Assist (GP/ETA, a stall watchdog, DNE calculator, and a next-action playbook); Email Leak Guard (checks recipients against vendor names, PO amounts, and client budget references before an outbound email sends); WO List Heat (a triage overlay + My Day strip on the work-order list, with an optional same-origin Umbrava API scan for deterministic full-board coverage); and the BWN Launcher (opens the Azure Static Web App tools with the current WO's context). Modules share state through sessionStorage/localStorage. The only network calls are same-origin Umbrava GraphQL requests (app.umbrava.com/api/graphql, the app's own session): List Heat's full-board scan and WO Assist's work-order / trip / clock-in / document reads, plus ONE write - BWN Views saves the column layout through Umbrava's own putUserPreference, the same preference the column chooser writes; everything else is offline. Toggle modules in BWN_MODULES below.
@@ -1827,41 +1827,12 @@
       }
     }
 
-    // ---- Trips recon (selectors not yet pinned) -----------------------------
-    function tripsRecon() {
-      var seen = {};
-      document.querySelectorAll('[data-testid*="trip" i]').forEach(function (el) {
-        var t = el.getAttribute('data-testid');
-        if (t && t !== 'work-order-first-trip-date-picker') seen[t] = (el.textContent || '').slice(0, 60);
-      });
-      var keys = Object.keys(seen);
-      if (keys.length) console.info('[BWN GP] trips recon - testids found:', JSON.stringify(seen, null, 1));
-      return keys.length;
-    }
-
     // ---- Documents: the DOM reader is RETIRED (see fetchDocs/readDocs below) ---
     // The old readDocs() scanned for a "Documents (N)" header or document-row
     // testids. Neither exists on a real WO - the Documents DOM was never pinned -
     // so it returned null on EVERY read and the docs:none closure gate has never
     // once fired in production. Replaced by the jobDocuments API read in the
     // readWO/fetchTrips cluster below: no selectors, nothing left to pin.
-    // Console recon, RETAINED until the API route is live-verified: dump
-    // document/attachment testids + any "Documents" header (mirrors tripsRecon).
-    // Exposed on window for manual use; no automatic behavior depends on it.
-    function docsRecon() {
-      var seen = {};
-      document.querySelectorAll('[data-testid*="document" i],[data-testid*="attach" i],[data-testid*="file" i]').forEach(function (el) {
-        var t = el.getAttribute('data-testid'); if (t) seen[t] = (el.textContent || '').replace(/\s+/g, ' ').slice(0, 60);
-      });
-      var hdrs = [];
-      document.querySelectorAll('h1,h2,h3,h4,h5,h6,div,span').forEach(function (el) {
-        var tx = (el.textContent || '').replace(/\s+/g, ' ').trim();
-        if (/^documents\b/i.test(tx) && tx.length < 30 && el.querySelectorAll('*').length <= 3) hdrs.push(tx);
-      });
-      console.info('[BWN GP] docs recon - testids:', JSON.stringify(seen, null, 1), '| headers:', hdrs);
-      return { testids: Object.keys(seen).length, headers: hdrs };
-    }
-    try { window.__bwnDocsRecon = docsRecon; } catch (e) { }
 
     // ---- WO header via workOrder API (enriches headerInfo's DOM scrape) --------
     // Cache-backed so compute()/the pure engine stay synchronous (mirrors the trips
@@ -4887,7 +4858,6 @@
       if (old) { old.remove(); return; }
       ensureWAStyle();
       var state = compute();
-      tripsRecon();
 
       var wrap = document.createElement('div');
       wrap.id = PANEL_ID;
