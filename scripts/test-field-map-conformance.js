@@ -56,9 +56,13 @@ emittedKeys.forEach(function (k) {
 // --- Best-effort cross-repo byte check (local dev only; skipped in CI) --------------------
 var CANON = 'C:/Users/mnajarro/OneDrive - Broadway National/Documents/GitHub/broadway-internal-ops/api/shared/field-map.json';
 if (fs.existsSync(CANON)) {
-  var here = fs.readFileSync(path.join(__dirname, 'field-map.json'));
-  var there = fs.readFileSync(CANON);
-  A.ok('mirror is byte-identical to the SWA canonical field-map.json', here.equals(there),
+  // Compare EOL-normalized text, never raw bytes: `* text=auto` in both repos means a
+  // checkout on a core.autocrlf machine can hand back CRLF, and a raw-byte compare would
+  // false-alarm on line endings alone (byte-compare-fails-on-eol). Real content drift
+  // still fails; only EOL is ignored.
+  var norm = function (p) { return fs.readFileSync(p, 'utf8').replace(/\r\n/g, '\n'); };
+  A.ok('mirror content matches the SWA canonical field-map.json (EOL-normalized)',
+    norm(path.join(__dirname, 'field-map.json')) === norm(CANON),
     'the two copies have drifted - re-copy the canonical (see field-map.json _comment)');
 } else {
   console.log('  ..  - cross-repo byte check SKIPPED (SWA canonical not on this machine; CI-expected)');
