@@ -55,7 +55,7 @@ function makeEnv(opts) {
 var S_CORE = slice('  // ===== auth + gql', '  // ===== ui', 'core block');
 function loadCore(env) {
   var ctx = vm.createContext(env);
-  vm.runInContext('(function(){' + S_CORE + '\n; this.__api = { pcAuthToken: pcAuthToken, pcGql: pcGql, rank: rank, mapLineItem: mapLineItem, buildCreateVars: buildCreateVars, buildEditVars: buildEditVars, copyProposal: copyProposal }; }).call(globalThis);', ctx);
+  vm.runInContext('(function(){' + S_CORE + '\n; this.__api = { pcAuthToken: pcAuthToken, pcGql: pcGql, rank: rank, mapLineItem: mapLineItem, buildCreateVars: buildCreateVars, buildEditVars: buildEditVars, copyProposal: copyProposal, pickerFilter: pickerFilter, confirmReady: confirmReady }; }).call(globalThis);', ctx);
   return env.__api;
 }
 
@@ -199,6 +199,22 @@ function loadCore(env) {
   var eW = makeEnv({ replies: baseReplies({ ClientProposalDetails: function (vars) { if (vars.proposalId === 9003) return { data: { proposal: Object.assign({}, SOURCE, { proposalLineItems: [SRC_ITEM] }) } }; return detailsReply(vars); } }) }); var apiW = loadCore(eW);
   var rW = await apiW.copyProposal(500, 8002, { dryRun: false });
   A.ok('read-back mismatch -> ok true, match false (warning)', rW.ok === true && rW.readBack.match === false);
+
+  // --- pure UI helpers ---
+  var apiU = loadCore(makeEnv({}));
+  var OPEN_WOS = [
+    { id: 1, number: 8002, statusName: 'Open', locationId: 'loc-1' },
+    { id: 2, number: 7001, statusName: 'Open', locationId: 'loc-1' }, // the source WO - excluded
+    { id: 3, number: 8003, statusName: 'Open', locationId: 'loc-1' }
+  ];
+  var filtered = apiU.pickerFilter(OPEN_WOS, 'loc-1', 7001);
+  A.ok('pickerFilter drops the source WO', filtered.every(function (w) { return w.number !== 7001; }));
+  A.ok('pickerFilter keeps the other same-location WOs', filtered.length === 2);
+
+  A.ok('confirmReady false when no target', apiU.confirmReady({ hasToken: true, source: SOURCE, target: null }) === false);
+  A.ok('confirmReady false when source empty', apiU.confirmReady({ hasToken: true, source: { proposalLineItems: [] }, target: TARGET }) === false);
+  A.ok('confirmReady false when no token', apiU.confirmReady({ hasToken: false, source: SOURCE, target: TARGET }) === false);
+  A.ok('confirmReady true when all present', apiU.confirmReady({ hasToken: true, source: SOURCE, target: TARGET }) === true);
 
   A.finish();
 })();
