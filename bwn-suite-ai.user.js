@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         BWN Suite - AI (Broadway National)
 // @namespace    broadwaynational.bwn
-// @version      1.45.5
+// @version      1.45.6
 // @downloadURL  https://raw.githubusercontent.com/Intermu/userscripts/main/bwn-suite-ai.user.js
 // @updateURL    https://raw.githubusercontent.com/Intermu/userscripts/main/bwn-suite-ai.user.js
 // @description  The Umbrava tools that call outside APIs, kept separate from the zero-egress Core script. Client Update and WO Audit drafts (Anthropic Claude; draft-only, scrubbed before sending, you review before posting); Find Techs / Find Suppliers (Google Places; vendor leads near a WO); and Job View (opens the Ops-Dashboard job card on the WO page - WO details from Umbrava plus the authored case file and next actions, read-only). Network access is limited by the browser to the declared API hosts and the BWN Static Web App. API keys are stored in Tampermonkey's storage via the menu commands and never enter the page. Toggle modules in BWN_MODULES below.
@@ -4969,6 +4969,11 @@ if (BWN_MODULES.jobView) BWN.safeModule('jobView', function () {
         if(_b.lastClientNote){ var _cn = Date.parse(_b.lastClientNote); if(!isNaN(_cn)) clientNoteDays = Math.floor((Date.now() - _cn) / 86400000); }
       } } catch(e){}
     try { var _pp = BWN.lsGetJSON('bwn:props:' + (job.wo||job.woNumber||''), null); if(_pp && typeof _pp.open === 'number') openProposals = _pp.open; } catch(e){}
+    // Track A tasks: open-task count from Core's bwn:tasks:<wo> (fetchTasks -> tasksByEntityTypeAndId,
+    // incomplete tasks). Its own line (not the shared bus declaration) so the gp/notes slice tests
+    // stay stable. Absent => null => omitted.
+    var openTasks = null;
+    try { var _tk = BWN.lsGetJSON('bwn:tasks:' + (job.wo||job.woNumber||''), null); if(_tk && typeof _tk.open === 'number') openTasks = _tk.open; } catch(e){}
     jvPost({ jobFacts:{ target:target, status:job.status, coordinator:job.coordinator, location:job.location,
       priority:job.priority, fm:job.fm, trades:job.trades, vendors:job.vendors, amount:job.amount, aged:job.aged,
       statusHrs:job.statusHrs, daysSinceUpdate:job.daysSinceUpdate, lastUpdated:iso(job.lastUpdated), woDate:iso(job.woDate),
@@ -4976,7 +4981,7 @@ if (BWN_MODULES.jobView) BWN.safeModule('jobView', function () {
       woNumber:job.wo||job.woNumber, sourceJob:job.sourceJob||job.jobId,
       city:job.city, state:job.state, client:job.client, sourcePo:job.po, vendorNte:job.totalVendorNte, docCount:docCount,
       noShowDays:noShowDays, noShowVendor:noShowVendor, gpPct:gpPct, openProposals:openProposals,
-      noteCount:noteCount, clientNoteDays:clientNoteDays } });
+      noteCount:noteCount, clientNoteDays:clientNoteDays, openTasks:openTasks } });
   }
   // Freshen the CURRENT WO on the dashboard when the connector records WO actions
   // (debounced per WO). Exposed on window so the top-level connector drain can call it.
