@@ -4938,12 +4938,17 @@ if (BWN_MODULES.jobView) BWN.safeModule('jobView', function () {
     target = target || _jvTarget;
     if(!target || !job) return;
     function iso(d){ return d ? (d instanceof Date ? d.toISOString() : String(d)) : null; }
+    // Track A docs-closure: Core (on the WO details page) publishes the confident
+    // jobDocuments count to bwn:docs:<wo>; carry it as docCount. Absent => unknown => omitted
+    // (null is dropped by wo-ingest + the Dashboard overlay), never a guessed 0. Keyed by WO #.
+    var docCount = null;
+    try { var _dc = BWN.lsGetJSON('bwn:docs:' + (job.wo||job.woNumber||''), null); if(_dc && typeof _dc.count === 'number') docCount = _dc.count; } catch(e){}
     jvPost({ jobFacts:{ target:target, status:job.status, coordinator:job.coordinator, location:job.location,
       priority:job.priority, fm:job.fm, trades:job.trades, vendors:job.vendors, amount:job.amount, aged:job.aged,
       statusHrs:job.statusHrs, daysSinceUpdate:job.daysSinceUpdate, lastUpdated:iso(job.lastUpdated), woDate:iso(job.woDate),
       firstTripDate:iso(job.firstTripDate), nextOnsiteDate:iso(job.nextOnsiteDate), expectedCompletion:iso(job.expectedCompletion),
       woNumber:job.wo||job.woNumber, sourceJob:job.sourceJob||job.jobId,
-      city:job.city, state:job.state, client:job.client, sourcePo:job.po, vendorNte:job.totalVendorNte } });
+      city:job.city, state:job.state, client:job.client, sourcePo:job.po, vendorNte:job.totalVendorNte, docCount:docCount } });
   }
   // Freshen the CURRENT WO on the dashboard when the connector records WO actions
   // (debounced per WO). Exposed on window so the top-level connector drain can call it.

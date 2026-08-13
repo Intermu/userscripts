@@ -259,6 +259,19 @@ jobs:
       - name: Dispatch dataset harness (In-House Dispatch Report feed producer)
         run: node scripts/test-dispatch-dataset.js
 
+      # B.1 shared field map: scripts/field-map.json is a byte-identical mirror of the CANONICAL
+      # copy in the SWA repo (api/shared/field-map.json). Asserts Core's board producer emits only
+      # wire keys the map declares with the "board" producer, so the userscript<->SWA vocabulary
+      # can no longer drift silently (store-key-two-writers-drift, getfield-alias-orphan).
+      - name: Field-map conformance harness (board producer keys vs shared map)
+        run: node scripts/test-field-map-conformance.js
+
+      # Track A docs-closure: Core publishes the confident jobDocuments count to bwn:docs:<wo>
+      # (confident reads only - unknown stays absent), AI's pushJobFacts carries it as docCount
+      # to the live-jobs slot, the Dashboard surfaces "Docs on file". Runs the shipped lookup bytes.
+      - name: Docs-ingest harness (bwn:docs publish + docCount carry)
+        run: node scripts/test-docs-ingest.js
+
       # The Operate panel — the seam an agent drives the page from, the code path that once had page
       # tools registered where no coordinator-facing UI invoked them. Sliced from bwn-suite-ai: panel
       # unprojectable, capability line derived, posts `operate` never `ask`, adopts the SERVER's round

@@ -1,2 +1,6 @@
 # Auto detect text files and perform LF normalization
 * text=auto
+
+# Byte-identical mirror of the SWA canonical api/shared/field-map.json; pin LF so the
+# cross-repo mirror check is stable regardless of core.autocrlf (byte-compare-fails-on-eol).
+field-map.json text eol=lf

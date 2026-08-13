@@ -1982,6 +1982,12 @@
         // count must not depend on the server honouring the argument.
         var live = rows.filter(function (r) { return r && !r.isArchived; });
         DOCS_CACHE[woNum] = { count: live.length, docs: live };
+        // Track A docs-closure: publish the confident count for the live-jobs push - AI's
+        // pushJobFacts reads bwn:docs:<wo> and sends it as docCount to the Ops Dashboard.
+        // CONFIDENT reads ONLY: the 'error'/'pending' branches never write here, so an
+        // unknown WO stays ABSENT from bwn:docs (never a guessed 0), preserving the same
+        // unknown-vs-empty contract the docs gate relies on. Keyed by WO number (not tracking).
+        try { BWN.lsSetJSON('bwn:docs:' + woNum, { count: live.length, ts: new Date().toISOString() }); } catch (e) { }
         try { refresh(); } catch (e) { }
       }).catch(function () { DOCS_CACHE[woNum] = 'error'; });
     }
