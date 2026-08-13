@@ -4943,12 +4943,23 @@ if (BWN_MODULES.jobView) BWN.safeModule('jobView', function () {
     // (null is dropped by wo-ingest + the Dashboard overlay), never a guessed 0. Keyed by WO #.
     var docCount = null;
     try { var _dc = BWN.lsGetJSON('bwn:docs:' + (job.wo||job.woNumber||''), null); if(_dc && typeof _dc.count === 'number') docCount = _dc.count; } catch(e){}
+    // Track A trips/no-show: Core computes the earliest missed-onsite no-show into bwn:trips:<wo>
+    // (fetchTrips, sessionStorage - shared page storage, readable across the @grant boundary).
+    // Carry days-since + vendor; apply the SAME 12h TTL as state.noShow so a long-lived tab can't
+    // push a stale phantom. Absent/stale/no-noShow => null => omitted downstream.
+    var noShowDays = null, noShowVendor = null;
+    try { var _tb = BWN.ssGetJSON('bwn:trips:' + (job.wo||job.woNumber||''), null);
+      if(_tb && _tb.noShow && typeof _tb.noShow.ms === 'number' && (Date.now() - (_tb.ts||0)) < 12*3600000){
+        noShowDays = Math.round((Date.now() - _tb.noShow.ms) / 86400000);
+        noShowVendor = _tb.noShow.vendor || null;
+      } } catch(e){}
     jvPost({ jobFacts:{ target:target, status:job.status, coordinator:job.coordinator, location:job.location,
       priority:job.priority, fm:job.fm, trades:job.trades, vendors:job.vendors, amount:job.amount, aged:job.aged,
       statusHrs:job.statusHrs, daysSinceUpdate:job.daysSinceUpdate, lastUpdated:iso(job.lastUpdated), woDate:iso(job.woDate),
       firstTripDate:iso(job.firstTripDate), nextOnsiteDate:iso(job.nextOnsiteDate), expectedCompletion:iso(job.expectedCompletion),
       woNumber:job.wo||job.woNumber, sourceJob:job.sourceJob||job.jobId,
-      city:job.city, state:job.state, client:job.client, sourcePo:job.po, vendorNte:job.totalVendorNte, docCount:docCount } });
+      city:job.city, state:job.state, client:job.client, sourcePo:job.po, vendorNte:job.totalVendorNte, docCount:docCount,
+      noShowDays:noShowDays, noShowVendor:noShowVendor } });
   }
   // Freshen the CURRENT WO on the dashboard when the connector records WO actions
   // (debounced per WO). Exposed on window so the top-level connector drain can call it.
