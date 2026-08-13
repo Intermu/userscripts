@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         BWN Suite - Core (Broadway National)
 // @namespace    broadwaynational.bwn
-// @version      1.78.9
+// @version      1.78.10
 // @downloadURL  https://raw.githubusercontent.com/Intermu/userscripts/main/bwn-suite-core.user.js
 // @updateURL    https://raw.githubusercontent.com/Intermu/userscripts/main/bwn-suite-core.user.js
 // @description  Runs several Umbrava helpers for BWN coordinators, in the browser with no privileged grants. Includes: PO Approval + ETA Builder; WO Assist (GP/ETA, a stall watchdog, DNE calculator, and a next-action playbook); Email Leak Guard (checks recipients against vendor names, PO amounts, and client budget references before an outbound email sends); WO List Heat (a triage overlay + My Day strip on the work-order list, with an optional same-origin Umbrava API scan for deterministic full-board coverage); and the BWN Launcher (opens the Azure Static Web App tools with the current WO's context). Modules share state through sessionStorage/localStorage. The only network calls are same-origin Umbrava GraphQL requests (app.umbrava.com/api/graphql, the app's own session): List Heat's full-board scan and WO Assist's work-order / trip / clock-in / document reads, plus ONE write - BWN Views saves the column layout through Umbrava's own putUserPreference, the same preference the column chooser writes; everything else is offline. Toggle modules in BWN_MODULES below.
@@ -1982,6 +1982,12 @@
         // count must not depend on the server honouring the argument.
         var live = rows.filter(function (r) { return r && !r.isArchived; });
         DOCS_CACHE[woNum] = { count: live.length, docs: live };
+        // Track A docs-closure: publish the confident count for the live-jobs push - AI's
+        // pushJobFacts reads bwn:docs:<wo> and sends it as docCount to the Ops Dashboard.
+        // CONFIDENT reads ONLY: the 'error'/'pending' branches never write here, so an
+        // unknown WO stays ABSENT from bwn:docs (never a guessed 0), preserving the same
+        // unknown-vs-empty contract the docs gate relies on. Keyed by WO number (not tracking).
+        try { BWN.lsSetJSON('bwn:docs:' + woNum, { count: live.length, ts: new Date().toISOString() }); } catch (e) { }
         try { refresh(); } catch (e) { }
       }).catch(function () { DOCS_CACHE[woNum] = 'error'; });
     }

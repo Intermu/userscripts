@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         BWN Suite - AI (Broadway National)
 // @namespace    broadwaynational.bwn
-// @version      1.45.1
+// @version      1.45.2
 // @downloadURL  https://raw.githubusercontent.com/Intermu/userscripts/main/bwn-suite-ai.user.js
 // @updateURL    https://raw.githubusercontent.com/Intermu/userscripts/main/bwn-suite-ai.user.js
 // @description  The Umbrava tools that call outside APIs, kept separate from the zero-egress Core script. Client Update and WO Audit drafts (Anthropic Claude; draft-only, scrubbed before sending, you review before posting); Find Techs / Find Suppliers (Google Places; vendor leads near a WO); and Job View (opens the Ops-Dashboard job card on the WO page - WO details from Umbrava plus the authored case file and next actions, read-only). Network access is limited by the browser to the declared API hosts and the BWN Static Web App. API keys are stored in Tampermonkey's storage via the menu commands and never enter the page. Toggle modules in BWN_MODULES below.
@@ -4891,12 +4891,17 @@ if (BWN_MODULES.jobView) BWN.safeModule('jobView', function () {
     target = target || _jvTarget;
     if(!target || !job) return;
     function iso(d){ return d ? (d instanceof Date ? d.toISOString() : String(d)) : null; }
+    // Track A docs-closure: Core (on the WO details page) publishes the confident
+    // jobDocuments count to bwn:docs:<wo>; carry it as docCount. Absent => unknown => omitted
+    // (null is dropped by wo-ingest + the Dashboard overlay), never a guessed 0. Keyed by WO #.
+    var docCount = null;
+    try { var _dc = BWN.lsGetJSON('bwn:docs:' + (job.wo||job.woNumber||''), null); if(_dc && typeof _dc.count === 'number') docCount = _dc.count; } catch(e){}
     jvPost({ jobFacts:{ target:target, status:job.status, coordinator:job.coordinator, location:job.location,
       priority:job.priority, fm:job.fm, trades:job.trades, vendors:job.vendors, amount:job.amount, aged:job.aged,
       statusHrs:job.statusHrs, daysSinceUpdate:job.daysSinceUpdate, lastUpdated:iso(job.lastUpdated), woDate:iso(job.woDate),
       firstTripDate:iso(job.firstTripDate), nextOnsiteDate:iso(job.nextOnsiteDate), expectedCompletion:iso(job.expectedCompletion),
       woNumber:job.wo||job.woNumber, sourceJob:job.sourceJob||job.jobId,
-      city:job.city, state:job.state, client:job.client, sourcePo:job.po, vendorNte:job.totalVendorNte } });
+      city:job.city, state:job.state, client:job.client, sourcePo:job.po, vendorNte:job.totalVendorNte, docCount:docCount } });
   }
   // Freshen the CURRENT WO on the dashboard when the connector records WO actions
   // (debounced per WO). Exposed on window so the top-level connector drain can call it.
