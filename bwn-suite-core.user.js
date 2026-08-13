@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         BWN Suite - Core (Broadway National)
 // @namespace    broadwaynational.bwn
-// @version      1.78.8
+// @version      1.78.9
 // @downloadURL  https://raw.githubusercontent.com/Intermu/userscripts/main/bwn-suite-core.user.js
 // @updateURL    https://raw.githubusercontent.com/Intermu/userscripts/main/bwn-suite-core.user.js
 // @description  Runs several Umbrava helpers for BWN coordinators, in the browser with no privileged grants. Includes: PO Approval + ETA Builder; WO Assist (GP/ETA, a stall watchdog, DNE calculator, and a next-action playbook); Email Leak Guard (checks recipients against vendor names, PO amounts, and client budget references before an outbound email sends); WO List Heat (a triage overlay + My Day strip on the work-order list, with an optional same-origin Umbrava API scan for deterministic full-board coverage); and the BWN Launcher (opens the Azure Static Web App tools with the current WO's context). Modules share state through sessionStorage/localStorage. The only network calls are same-origin Umbrava GraphQL requests (app.umbrava.com/api/graphql, the app's own session): List Heat's full-board scan and WO Assist's work-order / trip / clock-in / document reads, plus ONE write - BWN Views saves the column layout through Umbrava's own putUserPreference, the same preference the column chooser writes; everything else is offline. Toggle modules in BWN_MODULES below.
@@ -8770,24 +8770,6 @@
         },
         ownBodiesRemembered: heatOwnBodyQ.length
       };
-    };
-
-    // TEMPORARY test trigger (2026-08-13) - REMOVE after the live seed-fallback gate passes.
-    // Proves the pinned-query seed path in one console call. The seed normally stays dormant
-    // (the passive capture wins the race), so it cannot be observed on a healthy load; this
-    // FORCES it: drop any live capture, install the seed, run the scan. Console-only, no UI.
-    // NOTE it DISCARDS the current live capture and scans the WHOLE UNFILTERED book (the seed's
-    // vars), so the strip shows book-wide numbers regardless of any active filter until the
-    // app's next board query re-latches. After it resolves, read __bwnHeatDiag().flags:
-    // captureSeeded must be true and storeRows the full board.
-    window.__bwnHeatSeedNow = function () {
-      if (!isListPage()) { console.warn('[BWN HEAT] __bwnHeatSeedNow: not on the WO list route.'); return false; }
-      if (!heatAuthToken()) { console.warn('[BWN HEAT] __bwnHeatSeedNow: no auth token; cannot replay.'); return false; }
-      apiList = null; apiCapTs = 0;                                          // drop any live capture so the seed can take the slot
-      if (heatSeedTimer) { clearTimeout(heatSeedTimer); heatSeedTimer = null; }
-      if (!heatSeedCapture()) { console.warn('[BWN HEAT] __bwnHeatSeedNow: seed refused.'); return false; }
-      console.info('[BWN HEAT] __bwnHeatSeedNow: seeded the pinned query; forcing a scan. When it resolves, check __bwnHeatDiag().flags.captureSeeded (expect true) and storeRows (expect the full board).');
-      return heatForceScan();                                               // forced: bypasses the TTL/backoff throttles, resolves when the scan + snapshot finish
     };
 
     var debounce = null;
