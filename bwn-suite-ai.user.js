@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         BWN Suite - AI (Broadway National)
 // @namespace    broadwaynational.bwn
-// @version      1.45.6
+// @version      1.45.7
 // @downloadURL  https://raw.githubusercontent.com/Intermu/userscripts/main/bwn-suite-ai.user.js
 // @updateURL    https://raw.githubusercontent.com/Intermu/userscripts/main/bwn-suite-ai.user.js
 // @description  The Umbrava tools that call outside APIs, kept separate from the zero-egress Core script. Client Update and WO Audit drafts (Anthropic Claude; draft-only, scrubbed before sending, you review before posting); Find Techs / Find Suppliers (Google Places; vendor leads near a WO); and Job View (opens the Ops-Dashboard job card on the WO page - WO details from Umbrava plus the authored case file and next actions, read-only). Network access is limited by the browser to the declared API hosts and the BWN Static Web App. API keys are stored in Tampermonkey's storage via the menu commands and never enter the page. Toggle modules in BWN_MODULES below.
@@ -4948,11 +4948,17 @@ if (BWN_MODULES.jobView) BWN.safeModule('jobView', function () {
     // Carry days-since + vendor; apply the SAME 12h TTL as state.noShow so a long-lived tab can't
     // push a stale phantom. Absent/stale/no-noShow => null => omitted downstream.
     var noShowDays = null, noShowVendor = null;
+    var laborHours = null, travelHours = null;   // Track A IVR - own line so the trips-test slice stays stable
     try { var _tb = BWN.ssGetJSON('bwn:trips:' + (job.wo||job.woNumber||''), null);
       if(_tb && _tb.noShow && typeof _tb.noShow.ms === 'number' && (Date.now() - (_tb.ts||0)) < 12*3600000){
         noShowDays = Math.round((Date.now() - _tb.noShow.ms) / 86400000);
         noShowVendor = _tb.noShow.vendor || null;
-      } } catch(e){}
+      }
+      // IVR hours ride the same bwn:trips payload (Core sums the jobIVRs ledger); no TTL - cumulative
+      // hours only grow. Absent => null => omitted.
+      if(_tb && typeof _tb.laborHours === 'number') laborHours = _tb.laborHours;
+      if(_tb && typeof _tb.travelHours === 'number') travelHours = _tb.travelHours;
+    } catch(e){}
     // Track A proposals+GP: gpPct from WO Assist's bus (bwn:wo:<woNumber>; Core is the producer,
     // 12h max-age built into busGet) - the real API GP% (grossProfitInfo), not the row estimate.
     // openProposals from Core's bwn:props:<wo> (client proposals with no terminal date). Both
@@ -4981,7 +4987,8 @@ if (BWN_MODULES.jobView) BWN.safeModule('jobView', function () {
       woNumber:job.wo||job.woNumber, sourceJob:job.sourceJob||job.jobId,
       city:job.city, state:job.state, client:job.client, sourcePo:job.po, vendorNte:job.totalVendorNte, docCount:docCount,
       noShowDays:noShowDays, noShowVendor:noShowVendor, gpPct:gpPct, openProposals:openProposals,
-      noteCount:noteCount, clientNoteDays:clientNoteDays, openTasks:openTasks } });
+      noteCount:noteCount, clientNoteDays:clientNoteDays, openTasks:openTasks,
+      laborHours:laborHours, travelHours:travelHours } });
   }
   // Freshen the CURRENT WO on the dashboard when the connector records WO actions
   // (debounced per WO). Exposed on window so the top-level connector drain can call it.
