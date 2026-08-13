@@ -1,8 +1,8 @@
 // ==UserScript==
 // @name         BWN Suite - Note Templates (Broadway National)
 // @namespace    broadwaynational.bwn
-// @version      0.1.0
-// @description  Canned dispatch-note templates in a dropdown beside "Add Note" on an Umbrava work order. Picking a template DRAFTS it into the note composer (signed with your first name, blanks left for you to fill) - it is NEVER auto-posted. Reuses bwn-drop-upload's live-tested ProseMirror inserter via the page-window hook window.__bwnInsertNote, so the fragile editor-fill code is not duplicated. @grant none, zero egress.
+// @version      0.2.0
+// @description  Canned dispatch-note templates in a "Notes" dropdown beside the "+ Add" note button in the Umbrava Dispatch Board's work-order detail panel (Notes tab). Picking a template opens Umbrava's own Add Note composer and DRAFTS the note into it (signed with your first name, ______ blanks left for you to fill) - it is NEVER auto-posted; you review, set the Type, and click Save. Reuses bwn-drop-upload's live-tested tiptap/ProseMirror inserter via the page-window hook window.__bwnFillNoteEditor, so the fragile editor-fill code is not duplicated. @grant none, zero egress.
 // @match        https://app.umbrava.com/*
 // @run-at       document-idle
 // @grant        none
@@ -75,15 +75,21 @@
   }
 
   // ===== Draft the chosen template into the composer (human-gated; never posts) =============
+  // On the dispatch-board detail panel: click the note "+ Add" button to open Umbrava's own Add Note
+  // modal (the SAME tiptap/ProseMirror composer as the WO page), then hand the text to drop-upload's
+  // fill hook. The dispatcher reviews, fills the ______ blanks, sets the Type, and clicks Umbrava's
+  // Add/Save. We NEVER post.
   function pickTemplate(tpl) {
-    if (typeof window.__bwnInsertNote !== 'function') {
-      alert('The note inserter is not available.\n\nThe "BWN Suite - Drop Upload" script provides it - make sure that script is enabled and up to date, then try again.');
+    if (typeof window.__bwnFillNoteEditor !== 'function') {
+      alert('The note inserter is not available.\n\nThe "BWN Suite - Drop Upload" script (1.12+) provides it - make sure that script is enabled and up to date, then try again.');
       return;
     }
+    var addBtn = noteAddButton();
+    if (!addBtn) { alert('Open a work order on the board and its Notes tab first, then pick a template.'); return; }
     var text = buildNote(tpl, currentFirstName());
-    // '' = leave the note Type for the dispatcher to pick. Insert-only: bwn-drop-upload opens the
-    // composer and fills it; the human reviews, fills the blanks, sets the Type, and clicks Save.
-    try { window.__bwnInsertNote(text, ''); } catch (e) { alert('Could not draft the note: ' + ((e && e.message) || e)); }
+    addBtn.click();                              // open Umbrava's Add Note composer
+    // '' noteType = leave the Type for the dispatcher to pick. The hook waits for the editor + fills it.
+    try { window.__bwnFillNoteEditor(text, ''); } catch (e) { alert('Could not draft the note: ' + ((e && e.message) || e)); }
   }
 
   // ===== The dropdown (self-contained; fixed-positioned so no ancestor clips it) ============
@@ -148,34 +154,43 @@
     return wrap;
   }
 
-  // ===== Mount beside "Add Note" (mirrors bwn-suite-ai's AI-Draft mount) ====================
+  // ===== Mount beside the note "+ Add" in the dispatch-board detail panel ====================
+  // The panel's Notes tab has a search box ("Search note description and type") and a "+ Add" button
+  // beside it (no testid, build-hashed class). Anchor via the search placeholder - user-facing and
+  // stable - then take the adjacent "Add" button. Its click opens Umbrava's Add Note modal (the same
+  // tiptap composer as the WO page - verified live 2026-08-13).
   var BTN_ID = 'bwn-notes-dd';
-  function addNoteButton() {
-    var btns = document.querySelectorAll('button');
-    for (var i = 0; i < btns.length; i++) { if (/add note/i.test((btns[i].textContent || '').trim())) return btns[i]; }
+  function noteSearchInput() {
+    var ins = document.querySelectorAll('input');
+    for (var i = 0; i < ins.length; i++) {
+      if (ins[i].offsetParent && /note description/i.test(ins[i].getAttribute('placeholder') || '')) return ins[i];
+    }
     return null;
   }
-  function notesLoaded() { return !!document.querySelector('[data-testid^="wo-note-"][data-testid$="-summary"]'); }
+  function noteAddButton() {
+    var s = noteSearchInput();
+    if (!s) return null;
+    var row = s;
+    for (var d = 0; d < 5 && row; d++) {
+      var btns = row.querySelectorAll ? row.querySelectorAll('button') : [];
+      for (var j = 0; j < btns.length; j++) {
+        if (btns[j].offsetParent && /^\+?\s*add$/i.test((btns[j].textContent || '').trim())) return btns[j];
+      }
+      row = row.parentElement;
+    }
+    return null;
+  }
   function mount() {
-    if (document.getElementById(BTN_ID)) return true;
-    if (!notesLoaded()) return false;
+    var existing = document.getElementById(BTN_ID);
+    if (existing && existing.isConnected) return true;
+    var addBtn = noteAddButton();
+    if (!addBtn || !addBtn.parentNode) return false;
     var bar = document.createElement('span');
     bar.id = BTN_ID;
     bar.style.cssText = 'display:inline-flex;align-items:center;vertical-align:middle;margin-right:8px;';
     bar.appendChild(buildDropdown());
-    var addNote = addNoteButton();
-    if (addNote && addNote.parentNode) {
-      addNote.parentNode.insertBefore(bar, addNote);   // sit just left of Add Note
-    } else {
-      var dl = document.querySelector('[data-testid="download-notes-button"]');
-      if (dl && dl.parentNode) {
-        dl.parentNode.insertBefore(bar, dl.nextSibling);
-      } else {
-        bar.style.cssText += 'position:fixed;bottom:20px;right:78px;z-index:99999;box-shadow:0 4px 14px rgba(0,0,0,.25);';
-        document.body.appendChild(bar);   // right:78px so it clears bwn-suite-ai's AI-Draft float
-      }
-    }
-    console.info('[BWN NOTES] template dropdown mounted');
+    addBtn.parentNode.insertBefore(bar, addBtn);   // sit just left of "+ Add"
+    console.info('[BWN NOTES] template dropdown mounted (dispatch board notes)');
     return true;
   }
 
@@ -184,8 +199,9 @@
     if (mount()) { if (pollTimer) { clearInterval(pollTimer); pollTimer = null; } return; }
     if (pollTimer) return;
     pollTimer = setInterval(function () {
-      if (mount() || !/\/work-orders\//.test(location.pathname)) { clearInterval(pollTimer); pollTimer = null; }
-    }, 300);
+      // stop polling once mounted, or when we leave the dispatch board (the notes toolbar is gone)
+      if (mount() || !/dispatch-board/.test(location.pathname)) { clearInterval(pollTimer); pollTimer = null; }
+    }, 400);
   }
   var obs = new MutationObserver(schedule);
   obs.observe(document.body, { childList: true, subtree: true });

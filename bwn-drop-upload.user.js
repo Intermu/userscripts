@@ -1493,6 +1493,26 @@
   // Pass noteType '' to leave the Type field for the user to pick.
   if (typeof window !== 'undefined') window.__bwnInsertNote = function (text, noteType) { return insertNote(text, '', noteType); };
 
+  // Fill an ALREADY-OPEN note composer. The dispatch-board detail panel opens Umbrava's Add Note
+  // modal from its own "+ Add" button (not an "Add Note" button), so bwn-notes clicks that itself
+  // and then calls this - it waits for the tiptap editor and fills it with the SAME setEditorValue
+  // the email path uses (no duplicated ProseMirror code). '' noteType leaves the Type for the user.
+  // Insert-only: it NEVER posts; the human clicks Umbrava's own Add/Save.
+  if (typeof window !== 'undefined') window.__bwnFillNoteEditor = function (text, noteType) {
+    return waitFor(function () {
+      var eds = document.querySelectorAll('.tiptap.ProseMirror');
+      for (var i = eds.length - 1; i >= 0; i--) { if (eds[i].offsetParent && eds[i].offsetWidth > 0) return eds[i]; }
+      return null;
+    }, 6000).then(function (ed) {
+      if (!ed) { toast('Could not find the note editor - open the note composer, then pick a template.'); return false; }
+      return setEditorValue(ed, text).then(function (filled) {
+        if (noteType) { try { var comp = (ed.closest && ed.closest('[role="dialog"],.MuiDialog-root,form,.MuiPaper-root')) || document; setTimeout(function () { setNoteType(noteType, comp); }, 80); } catch (e) { } }
+        toast(filled ? 'Note drafted - review, fill any blanks, and Save.' : 'Auto-fill was blocked - use the composer paste or type it in.');
+        return filled;
+      });
+    });
+  };
+
   // ---- The needs-a-response chip ----------------------------------------------
   // BWN-owned DOM, deliberately. The obvious place for this toggle is inside Umbrava's own
   // upload dialog, but injecting a control into a third-party MUI dialog makes the feature a
