@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         BWN Drop Upload (Broadway National)
 // @namespace    broadwaynational.bwn
-// @version      1.11.0
+// @version      1.12.0
 // @downloadURL  https://raw.githubusercontent.com/Intermu/userscripts/main/bwn-drop-upload.user.js
 // @updateURL    https://raw.githubusercontent.com/Intermu/userscripts/main/bwn-drop-upload.user.js
 // @description  Drop files anywhere on an Umbrava work order to upload them. Opens the Documents tab and upload dialog, hands over the files, and builds each file's description from its contents. Emails are parsed locally (.msg via an OLE/MAPI reader, .eml via RFC822) into an Outlook-style block - From/Sent/To/Cc/Subject and the body - that becomes the WO note, led by a one-line summary from Chrome's on-device built-in AI (zero cost, zero egress, nothing leaves the browser), falling back to local WO-field extraction (store, city/state, priority, PO, NTE, problem, requester) when the on-device model is unavailable. That same summary fills each file's Description. The WO note's Type is chosen from the email's parties: inbound is typed by the sender (client -> Client, else Vendor); outbound from Broadway is typed by the recipients (a client recipient -> Client, any vendor recipient -> Vendor, all-internal -> Internal). Umbrava's Description field is a TipTap/ProseMirror rich-text editor. It rejects synthetic paste, beforeinput, insertHTML and raw innerHTML, but honours execCommand('insertText') plus a synthetic Enter keydown - so the note is filled line by line (Enter between lines to keep paragraphs), paced ~12ms/line so ProseMirror's async commit doesn't drop lines (measured live 2026-08-10). The text is also placed on your clipboard as a backup, and if every fill method fails a "Copy the WO note" button appears (its click supplies the gesture for a reliable copy, then Ctrl+V). A console diagnostic reports which editor was found and which fill method stuck. When WO Intake hands off a just-created WO's request email, each uploaded file's Label (document type) is set to "Work Order Request" and the note Type is forced to Client (a WO Intake handoff is a client's request, even when the sender is a broker like Fairmarkit that reads as a Vendor domain). Fairmarkit / bulk-email footer boilerplate (the Fairmarkit company block: tagline + Boston address + FAQ/Privacy/Terms/Unsubscribe, and the -----!{...}!----- machine tail) plus ALL tracking URLs (safelinks/awstrack/logo) are stripped from the note body, keeping content through the suppliers@ email. A Fairmarkit RFQ body is also condensed to one line per entry - single-spaced, with each line-item rejoined to its QTY and each Details label (Buyer/Close date/RFQ ID/Shipping address) rejoined to its value. Files upload via Umbrava's own API (initializeJobDocument -> Azure blob PUT -> bulkAddWorkOrderDocuments, captured live 2026-08-12), Label set by id, so the brittle upload-dialog combobox is bypassed; the dialog remains the automatic fallback if the API is unavailable. The email note is shown in a BWN review box (editable, Type selectable) and posted via addEditJobNote ONLY when you click Post - it is never auto-posted, and posts under your own Umbrava session for correct attribution. Network calls are same-origin to app.umbrava.com's own /api/graphql (the app's Auth0 bearer, no @connect/GM) plus the SAS-authorized blob PUT the SPA itself makes - nothing goes to any third party. @grant none.
@@ -1453,7 +1453,7 @@
   }
 
   function insertNote(text, originTab, noteType) {
-    noteType = noteType || 'Client';
+    if (noteType == null) noteType = 'Client';   // undefined/null -> default; an explicit '' leaves the Type for the user (canned-note hook)
     // Clipboard backup first - rich editors can swallow programmatic text, and the
     // paste is then the instant recovery. Track whether it actually landed so the
     // toast wording doesn't over-promise a paste target.
@@ -1473,9 +1473,9 @@
           // Note Type is chosen from the email's parties (noteTypeForFiles -> noteTypeForEmail:
           // inbound by sender, outbound by recipient). Scope to the just-opened composer so we
           // never touch an unrelated dropdown. Best-effort; posts regardless.
-          try { var comp = (ed.closest && ed.closest('[role="dialog"],.MuiDialog-root,form,.MuiPaper-root')) || document; setTimeout(function () { setNoteType(noteType, comp); }, 80); } catch (e) { }
+          try { var comp = (ed.closest && ed.closest('[role="dialog"],.MuiDialog-root,form,.MuiPaper-root')) || document; setTimeout(function () { if (noteType) setNoteType(noteType, comp); }, 80); } catch (e) { }
           copied.then(function (ok) {
-            if (filled) { toast('Upload note drafted (Type: ' + noteType + ') - review and Save.' + (ok ? ' (Also on your clipboard.)' : '')); return; }
+            if (filled) { toast('Note drafted' + (noteType ? ' (Type: ' + noteType + ')' : '') + ' - review and Save.' + (ok ? ' (Also on your clipboard.)' : '')); return; }
             // Editor rejected the fill. Always offer the Copy button: the auto clipboard write has no
             // user gesture and can silently no-op even when it reports success, leaving Ctrl+V empty.
             toast(ok ? 'Note composer opened - press Ctrl+V, or use the Copy button below first.'
@@ -1486,6 +1486,12 @@
       });
     });
   }
+
+  // Reuse hook for sibling @grant-none scripts (bwn-notes: canned dispatch templates). Both run in
+  // the page window, so this exposes the live-tested composer-open + ProseMirror insert without
+  // duplicating the fragile fill code. Insert-only - it NEVER posts (same as every insertNote path).
+  // Pass noteType '' to leave the Type field for the user to pick.
+  if (typeof window !== 'undefined') window.__bwnInsertNote = function (text, noteType) { return insertNote(text, '', noteType); };
 
   // ---- The needs-a-response chip ----------------------------------------------
   // BWN-owned DOM, deliberately. The obvious place for this toggle is inside Umbrava's own
