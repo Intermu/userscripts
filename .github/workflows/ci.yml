@@ -271,6 +271,13 @@ jobs:
       - name: Trips no-show ingest harness (bwn:trips read + noShow carry)
         run: node scripts/test-trips-ingest.js
 
+      # Track A proposals+GP: GP% from Core's bwn:wo bus (real grossProfitInfo, AI-only); open
+      # client-proposal count from Core fetchProposals -> bwn:props (proposals with no terminal date).
+      # AI's pushJobFacts carries gpPct + openProposals; the Dashboard prefers the live GP% and shows
+      # an "Open proposals" row. Runs the shipped AI lookup + Core's open-classification filter.
+      - name: GP + proposals ingest harness (bus gpPct + listClientProposals open-count)
+        run: node scripts/test-gp-proposals-ingest.js
+
       # The Operate panel — the seam an agent drives the page from, the code path that once had page
       # tools registered where no coordinator-facing UI invoked them. Sliced from bwn-suite-ai: panel
       # unprojectable, capability line derived, posts `operate` never `ask`, adopts the SERVER's round
