@@ -105,8 +105,35 @@
     delete out.id;   // a copied line is a NEW row; sending the source id would target an existing item
     return out;
   }
-  function buildCreateVars() {}      // Task 3
-  function buildEditVars() {}        // Task 3
+  function buildCreateVars(source, target) {
+    source = source || {}; target = target || {};
+    return { proposalData: {
+      workOrderNumber: target.number,
+      typeId: source.type ? source.type.id : null,
+      scopeOfWork: source.scopeOfWork,
+      scopeOfWorkHtml: source.scopeOfWorkHtml,
+      description: source.description,
+      disclaimer: source.disclaimer,
+      timeFrameDays: source.timeFrameDays && (source.timeFrameDays.value != null)
+        ? { value: source.timeFrameDays.value } : null,
+      clientPurchaseOrderNumber: source.formattedClientPurchaseOrderNumber || null
+    } };
+  }
+  function buildEditVars(newProposalId, source) {
+    source = source || {};
+    var items = (source.proposalLineItems || []).map(mapLineItem);
+    return { proposalData: {
+      proposalId: newProposalId,
+      typeId: source.type ? source.type.id : null,
+      scopeOfWork: source.scopeOfWork,
+      scopeOfWorkHtml: source.scopeOfWorkHtml,
+      description: source.description,
+      disclaimer: source.disclaimer,
+      timeFrameDays: source.timeFrameDays && (source.timeFrameDays.value != null)
+        ? { value: source.timeFrameDays.value } : null,
+      proposalLineItems: items
+    } };
+  }
   function copyProposal() {}         // Task 4
 
   // ===== ui =================================================================

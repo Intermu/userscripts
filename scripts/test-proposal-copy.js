@@ -120,5 +120,36 @@ function loadCore(env) {
   var mutIdKept = loadMutant(mutate(CORE_M, 'delete out.id;', '/* keep id */')).mapLineItem(SRC_ITEM);
   A.ok('CONTROL: keeping id turns a new copy into an edit (red if id present)', mutIdKept.id === undefined || mutIdKept.id == null ? false : true);
 
+  // --- buildCreateVars / buildEditVars ---
+  var apiB = loadCore(makeEnv({}));
+  var SOURCE = {
+    id: 500, number: 7001, type: { id: 3, name: 'Repair' }, status: { id: 1, name: 'Draft' },
+    scopeOfWork: 'Fix the thing', scopeOfWorkHtml: '<p>Fix the thing</p>', description: 'desc',
+    disclaimer: 'std disclaimer', timeFrameDays: { value: 30 },
+    formattedClientPurchaseOrderNumber: 'PO-123',
+    subtotal: { amount: 50000, currency: 'USD', precision: 2 },
+    proposalLineItems: [SRC_ITEM, Object.assign({}, SRC_ITEM, { sortOrder: 1, id: 1000 })]
+  };
+  var TARGET = { number: 8002, id: 1200500, locationId: 'loc-1', clientId: 'cli-1' };
+
+  var cv = apiB.buildCreateVars(SOURCE, TARGET).proposalData;
+  A.ok('create targets the new WO by workOrderNumber', cv.workOrderNumber === 8002);
+  A.ok('create carries typeId from the SOURCE proposal', cv.typeId === 3);
+  A.ok('create carries scopeOfWork verbatim', cv.scopeOfWork === 'Fix the thing');
+  A.ok('create carries timeFrameDays', cv.timeFrameDays && cv.timeFrameDays.value === 30);
+  A.ok('create does NOT carry line items (edit does)', !('proposalLineItems' in cv));
+
+  var ev = apiB.buildEditVars(9003, SOURCE).proposalData;
+  A.ok('edit keys off the NEW proposalId', ev.proposalId === 9003);
+  A.ok('edit carries typeId', ev.typeId === 3);
+  A.ok('edit carries mapped line items, count matches source', Array.isArray(ev.proposalLineItems) && ev.proposalLineItems.length === 2);
+  A.ok('edit line items are mapped (no id)', ev.proposalLineItems[0].id == null && ev.proposalLineItems[1].id == null);
+
+  // control: create must send workOrderNumber, not the source's own WO
+  var CORE_B = slice('  // ===== auth + gql', '  // ===== ui', 'core block');
+  function loadB(coreSrc) { var env = makeEnv({}); var ctx = vm.createContext(env); vm.runInContext('(function(){' + coreSrc + '\n; this.__api = { buildCreateVars: buildCreateVars, mapLineItem: mapLineItem }; }).call(globalThis);', ctx); return env.__api; }
+  var mutTarget = loadB(mutate(CORE_B, 'workOrderNumber: target.number', 'workOrderNumber: source.number')).buildCreateVars(SOURCE, TARGET).proposalData;
+  A.ok('CONTROL: mis-targeting to source.number is observable', mutTarget.workOrderNumber === 7001);
+
   A.finish();
 })();
