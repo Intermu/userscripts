@@ -252,6 +252,13 @@ jobs:
       - name: Heat dataset push harness (board -> Dashboard producer + wire-key contract)
         run: node scripts/test-heat-dataset-push.js
 
+      # The In-House Dispatch Report feed: the tenant-open -> bwn:dispatchq producer. Pins the
+      # heat-record -> dispatch wire-row map, that CITY + STATE ride the row (the report's coverage
+      # key), the vendorsKnown gate (unread != "no vendor"), coordinator GUID/placeholder skips, and
+      # the identity-drop + row cap. Negative controls revert each guarantee.
+      - name: Dispatch dataset harness (In-House Dispatch Report feed producer)
+        run: node scripts/test-dispatch-dataset.js
+
       # The Operate panel — the seam an agent drives the page from, the code path that once had page
       # tools registered where no coordinator-facing UI invoked them. Sliced from bwn-suite-ai: panel
       # unprojectable, capability line derived, posts `operate` never `ask`, adopts the SERVER's round
