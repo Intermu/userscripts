@@ -264,4 +264,24 @@ console.log('== G. wiring present in source (arm point + route-change cancel) ==
     core.indexOf('A live capture, if one fires, always displaces the seed.') !== -1);
 })();
 
+console.log('== H. a seeded scan does NOT feed the Dashboard dataset (source guard) ==');
+(function () {
+  // A seeded scan is the tenant-wide OPEN book (5,241 on this tenant), which exceeds the
+  // HEAT_DATASET_MAX cap and is the wrong scope for the per-user Dashboard dataset. Both
+  // heatQueueDataset call sites in finishApi (immediate + post-name-resolution) must be gated on
+  // the seededScan flag captured at scan start; the per-WO bus publish stays UNCONDITIONAL.
+  A.ok('seededScan is captured at scan start (stable across the async name-resolution step)',
+    core.indexOf('var seededScan = !!apiList.seeded;') !== -1);
+  A.ok('the immediate dataset push is gated on !seededScan',
+    core.indexOf('if (!seededScan) heatQueueDataset(heatStore);') !== -1);
+  A.ok('the post-name-resolution dataset push is gated too (whole surface, not one site)',
+    core.indexOf('if (!seededScan) heatQueueDataset(store);') !== -1);
+  A.ok('the per-WO bus publish stays unconditional (uncapped, benefits from full coverage)',
+    core.indexOf('heatPublishVerdicts(heatStore); if (!seededScan) heatQueueDataset(heatStore);') !== -1);
+  // Negative control: an ungated dataset push must be caught. If either gate is dropped, the
+  // exact gated strings above vanish and these assertions fail - proving they are load-bearing.
+  A.ok('no UNgated heatQueueDataset(heatStore) survives in finishApi',
+    core.indexOf('heatPublishVerdicts(heatStore); heatQueueDataset(heatStore);') === -1);
+})();
+
 A.finish();

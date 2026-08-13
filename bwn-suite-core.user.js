@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         BWN Suite - Core (Broadway National)
 // @namespace    broadwaynational.bwn
-// @version      1.78.7
+// @version      1.78.8
 // @downloadURL  https://raw.githubusercontent.com/Intermu/userscripts/main/bwn-suite-core.user.js
 // @updateURL    https://raw.githubusercontent.com/Intermu/userscripts/main/bwn-suite-core.user.js
 // @description  Runs several Umbrava helpers for BWN coordinators, in the browser with no privileged grants. Includes: PO Approval + ETA Builder; WO Assist (GP/ETA, a stall watchdog, DNE calculator, and a next-action playbook); Email Leak Guard (checks recipients against vendor names, PO amounts, and client budget references before an outbound email sends); WO List Heat (a triage overlay + My Day strip on the work-order list, with an optional same-origin Umbrava API scan for deterministic full-board coverage); and the BWN Launcher (opens the Azure Static Web App tools with the current WO's context). Modules share state through sessionStorage/localStorage. The only network calls are same-origin Umbrava GraphQL requests (app.umbrava.com/api/graphql, the app's own session): List Heat's full-board scan and WO Assist's work-order / trip / clock-in / document reads, plus ONE write - BWN Views saves the column layout through Umbrava's own putUserPreference, the same preference the column chooser writes; everything else is offline. Toggle modules in BWN_MODULES below.
@@ -8166,6 +8166,9 @@
     // board (heatStore filled, snapshot written); false to hand off to the scroll scan.
     function apiScanAll(btn) {
       if (!apiList || !apiList.query) return Promise.resolve(false);
+      // Captured NOW, not read in finishApi: a real capture can displace the seed during the async
+      // name-resolution step, but the dataset decision must reflect the scan that actually ran.
+      var seededScan = !!apiList.seeded;
       heatScanning = true; heatScanClean = false; heatScanAbort = false; heatStore = {}; heatRaw = {}; heatRowsCache = null; heatReplaying = true;
       btn.disabled = true; btn.textContent = 'Scanning (API)…';
       var progEl = document.getElementById('bwn-heat-prog');
@@ -8249,7 +8252,11 @@
         // Additive fields only and `v` stays 1: busHeatGet rejects any other version outright.
         // Only on a clean finish - a dirty scan drops the store above, and publishing a
         // partial board as if it were the board is the mistake `heatScanClean` exists to stop.
-        if (clean && heatStore) { heatPublishVerdicts(heatStore); heatQueueDataset(heatStore); }
+        // heatPublishVerdicts feeds the per-WO bus (uncapped, benefits from full open coverage);
+        // heatQueueDataset feeds the Dashboard and is SKIPPED for a seeded scan - the seed is the
+        // transient tenant-wide OPEN book, not the user's real board (a real capture re-scans and
+        // pushes the proper per-user dataset), which also sidesteps the HEAT_DATASET_MAX cap.
+        if (clean && heatStore) { heatPublishVerdicts(heatStore); if (!seededScan) heatQueueDataset(heatStore); }
         // Announce on EVERY finish, clean or dirty - see heatRowsAnnounce for why. A consumer
         // that pulled mid-scan is stuck on "scan in progress" until something tells it the scan
         // ended, and a dirty finish is exactly when that matters most.
@@ -8272,7 +8279,7 @@
             // is not rendering has no other writer, so without this the bus would hold a
             // verdict one signal out of date for most of the board.
             heatPublishVerdicts(store);
-            heatQueueDataset(store);
+            if (!seededScan) heatQueueDataset(store);
             // Rebuild and re-announce for the same reason the bus is re-published: name
             // resolution can ADD an orphan amber, so a consumer holding the first snapshot
             // would render a verdict one signal out of date for most of the board.
