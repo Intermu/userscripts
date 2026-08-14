@@ -1,8 +1,8 @@
 // ==UserScript==
 // @name         BWN Suite - Note Templates (Broadway National)
 // @namespace    broadwaynational.bwn
-// @version      0.2.0
-// @description  Canned dispatch-note templates in a "Notes" dropdown beside the "+ Add" note button in the Umbrava Dispatch Board's work-order detail panel (Notes tab). Picking a template opens Umbrava's own Add Note composer and DRAFTS the note into it (signed with your first name, ______ blanks left for you to fill) - it is NEVER auto-posted; you review, set the Type, and click Save. Reuses bwn-drop-upload's live-tested tiptap/ProseMirror inserter via the page-window hook window.__bwnFillNoteEditor, so the fragile editor-fill code is not duplicated. @grant none, zero egress.
+// @version      0.2.1
+// @description  Canned dispatch-note templates in a "Templates" dropdown beside the "+ Add" note button in the Umbrava Dispatch Board's work-order detail panel (Notes tab). Picking a template opens Umbrava's own Add Note composer and DRAFTS the note into it (signed with your first name, ______ blanks left for you to fill) - it is NEVER auto-posted; you review, set the Type, and click Save. Reuses bwn-drop-upload's live-tested tiptap/ProseMirror inserter via the page-window hook window.__bwnFillNoteEditor, so the fragile editor-fill code is not duplicated. @grant none, zero egress.
 // @match        https://app.umbrava.com/*
 // @run-at       document-idle
 // @grant        none
@@ -101,7 +101,7 @@
     trig.setAttribute('aria-haspopup', 'menu');
     trig.setAttribute('aria-expanded', 'false');
     trig.style.cssText = 'min-width:96px;padding:6px 12px;font:500 14px/1 -apple-system,BlinkMacSystemFont,"Segoe UI",Arial,sans-serif;color:#fff;border:none;border-radius:6px;cursor:pointer;display:inline-flex;align-items:center;gap:7px;background:' + GREEN + ';';
-    var lab = document.createElement('span'); lab.textContent = 'Notes';
+    var lab = document.createElement('span'); lab.textContent = 'Templates';
     var car = document.createElement('span'); car.textContent = '▾'; car.setAttribute('aria-hidden', 'true'); car.style.cssText = 'font-size:10px;opacity:.85;';
     trig.appendChild(lab); trig.appendChild(car);
     wrap.appendChild(trig);
