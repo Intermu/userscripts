@@ -137,7 +137,17 @@ A.eq('  Client DNE = 500.00 (body NTE)', wo2.clientDne, '500.00');
 A.eq('  Priority = P2', wo2.priorityLevel, 'P2');
 A.eq('  Location = PFJ 0114', wo2.location, 'PFJ 0114');
 A.eq('  Asset Name = DRYER', wo2.assetName, 'DRYER');
-A.eq('  Trade = blank (DRYER unmapped -> scope-suggester/user picks; never a wrong confident guess)', wo2.trade, '');
+A.eq('  Trade = Appliances (DRYER -> Appliances auto-trade)', wo2.trade, 'Appliances');
+
+console.log('\n# assetToTrade Appliances mapping + anti-collision guards');
+A.eq('  DRYER -> Appliances', api.assetToTrade('DRYER'), 'Appliances');
+A.eq('  Washer -> Appliances', api.assetToTrade('Washer'), 'Appliances');
+A.eq('  Dishwasher -> Appliances', api.assetToTrade('Dishwasher'), 'Appliances');
+A.eq('  Ice Machine -> Appliances', api.assetToTrade('Ice Machine'), 'Appliances');
+A.ok('  Water Heater is NOT stolen by Appliances (pre-existing "heat" -> HVAC wins)', api.assetToTrade('Water Heater') !== 'Appliances', 'got ' + api.assetToTrade('Water Heater'));
+A.eq('  Walk-in Freezer stays HVAC (not Appliances)', api.assetToTrade('Walk-in Freezer'), 'HVAC');
+A.eq('  Reach-in Cooler stays HVAC (not Appliances)', api.assetToTrade('Reach-in Cooler'), 'HVAC');
+A.eq('  Medium Range LSI fixture stays Lighting (bare "range" not an appliance)', api.assetToTrade('Medium Range LSI V-locity fixture'), 'Lighting');
 
 console.log('\n# regression guard: the subject stays the LAST resort in extractWo source');
 A.ok('  genericBodyScope is tried before the subject fallback',
