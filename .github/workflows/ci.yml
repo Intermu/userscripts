@@ -259,6 +259,12 @@ jobs:
       - name: Dispatch dataset harness (In-House Dispatch Report feed producer)
         run: node scripts/test-dispatch-dataset.js
 
+      # Canned dispatch-note templates: the 3 groups / 9 templates are intact, first name resolves
+      # from given_name then the display-name token, the signature is appended to signed templates
+      # only (blank when unresolved), and NO body bakes in a name. Negative control reverts the gate.
+      - name: Note templates harness (canned dispatch notes + dynamic signature)
+        run: node scripts/test-notes-templates.js
+
       # B.1 shared field map: scripts/field-map.json is a byte-identical mirror of the CANONICAL
       # copy in the SWA repo (api/shared/field-map.json). Asserts Core's board producer emits only
       # wire keys the map declares with the "board" producer, so the userscript<->SWA vocabulary
