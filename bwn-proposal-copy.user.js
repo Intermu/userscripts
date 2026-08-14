@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         BWN Proposal Copy (Broadway National)
 // @namespace    broadwaynational.bwn
-// @version      0.1.4
+// @version      0.1.5
 // @downloadURL  https://raw.githubusercontent.com/Intermu/userscripts/main/bwn-proposal-copy.user.js
 // @updateURL    https://raw.githubusercontent.com/Intermu/userscripts/main/bwn-proposal-copy.user.js
 // @description  Copy a client proposal from an aged-out work order onto a chosen replacement WO as an un-submitted Draft, in one confirmed action. Replays Umbrava's own createDraftProposal + editProposal mutations (line items copied verbatim); never submits, deletes, or retries. Manager-gated visibility. @grant none.
@@ -15,7 +15,7 @@
 (function () {
   'use strict';
 
-  var VER = '0.1.4';   // keep in step with @version
+  var VER = '0.1.5';   // keep in step with @version
   var DRY_RUN = false; // when true, the two WRITE mutations are logged, not sent
   console.info('[BWN PROPOSAL COPY] v' + VER + ' - copy client proposal to another WO as a Draft (createDraftProposal + editProposal replay)');
 
@@ -309,7 +309,12 @@
   var ROW_BTN_MARK = 'data-bwn-pc';
   var ROW_BTN_CLASS = 'bwn-pc-row-btn';
   function onClientProposalsList() {
-    return /\/work-orders\/\d+\/proposals\/client-proposals/.test(location.pathname || '');
+    // LIST route ONLY. The old prefix form also matched .../client-proposals/<id>/details
+    // and .../client-proposals/<id>/notes - those subpages render the SAME
+    // tr[id^="table-row-"] MUI grid (line items / notes), so Copy leaked onto note rows and
+    // read a NOTE id as if it were a proposal id. Anchor to the bare list path; any
+    // /<proposalId>/ subroute now fails closed (keeps Copy off Details + Notes tabs).
+    return /\/work-orders\/\d+\/proposals\/client-proposals\/?$/.test(location.pathname || '');
   }
   function proposalRows() {
     return Array.prototype.slice.call(document.querySelectorAll('tr[id^="table-row-"]'));
@@ -330,7 +335,8 @@
     btn.className = ROW_BTN_CLASS;
     btn.textContent = 'Copy';
     btn.title = 'Copy this proposal to another work order';
-    btn.style.cssText = 'margin:0 0 0 2px;padding:3px 8px;border:1px solid #1a5f3e;border-radius:6px;white-space:nowrap;' +
+    btn.style.cssText = 'display:inline-flex;align-items:center;vertical-align:middle;flex:0 0 auto;' +
+      'margin:0 6px 0 0;padding:3px 8px;border:1px solid #1a5f3e;border-radius:6px;white-space:nowrap;' +
       'background:#f0fdf4;color:#0d3d26;font:600 11px -apple-system,BlinkMacSystemFont,"Segoe UI",Arial,sans-serif;cursor:pointer;';
     btn.addEventListener('click', function (e) {
       e.preventDefault(); e.stopPropagation();
@@ -361,9 +367,17 @@
       if (pid == null) return;   // fail safe: no confirmed id, no button
       row.setAttribute(ROW_BTN_MARK, '1');   // kept for debuggability only; no longer the guard
       // First cell = the far-left "More"/action column: always visible, never needs a horizontal
-      // scroll (the last cell sat off-screen on narrower windows).
+      // scroll. Put Copy INLINE at the LEFT of that cell (before the alert icon) instead of
+      // appended - appending let it wrap to a second line under the row and get clipped. Force
+      // the cell to lay its children in one non-wrapping row and stop it truncating.
       var host = row.firstElementChild || row;
-      host.appendChild(buildRowButton(pid));
+      host.style.display = 'flex';
+      host.style.flexDirection = 'row';
+      host.style.alignItems = 'center';
+      host.style.flexWrap = 'nowrap';
+      host.style.whiteSpace = 'nowrap';
+      host.style.overflow = 'visible';
+      host.insertBefore(buildRowButton(pid), host.firstChild);
     });
   }
 
