@@ -109,6 +109,12 @@ function loadCore(env) {
   A.ok('mapLineItem keeps markUpPercent as a STRING', mapped.markUpPercent === '15.00');
   A.ok('mapLineItem keeps taxRate as a STRING', mapped.taxRate === '8.875');
   A.eq('mapLineItem preserves category/sortOrder/itemId/rateId', { c: mapped.category, s: mapped.sortOrder, i: mapped.itemId, r: mapped.rateId }, { c: 1, s: 0, i: 42, r: 'rate-abc' });
+  // quantity coercion: source read returns strings; ProposalLineItemInput.quantity is Int
+  var mq = apiM.mapLineItem({ quantity: '3', chargeQuantity: '4', unitCost: { amount: 1, currency: 'USD', precision: 2 } });
+  A.ok('mapLineItem coerces string quantity to an Int (number)', mq.quantity === 3 && typeof mq.quantity === 'number');
+  A.ok('mapLineItem coerces string chargeQuantity to an Int (number)', mq.chargeQuantity === 4 && typeof mq.chargeQuantity === 'number');
+  A.ok('mapLineItem carries the exact value as fractionalQuantity string', mq.fractionalQuantity === '3' && mq.fractionalChargeQuantity === '4');
+  A.ok('mapLineItem null quantity stays null (not NaN)', apiM.mapLineItem({}).quantity === null);
 
   // negative controls: the mapper must never re-key or rescale.
   var CORE_M = slice('  // ===== auth + gql', '  // ===== ui', 'core block');

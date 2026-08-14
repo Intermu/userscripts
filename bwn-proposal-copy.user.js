@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         BWN Proposal Copy (Broadway National)
 // @namespace    broadwaynational.bwn
-// @version      0.1.1
+// @version      0.1.2
 // @downloadURL  https://raw.githubusercontent.com/Intermu/userscripts/main/bwn-proposal-copy.user.js
 // @updateURL    https://raw.githubusercontent.com/Intermu/userscripts/main/bwn-proposal-copy.user.js
 // @description  Copy a client proposal from an aged-out work order onto a chosen replacement WO as an un-submitted Draft, in one confirmed action. Replays Umbrava's own createDraftProposal + editProposal mutations (line items copied verbatim); never submits, deletes, or retries. Manager-gated visibility. @grant none.
@@ -15,7 +15,7 @@
 (function () {
   'use strict';
 
-  var VER = '0.1.1';   // keep in step with @version
+  var VER = '0.1.2';   // keep in step with @version
   var DRY_RUN = false; // when true, the two WRITE mutations are logged, not sent
   console.info('[BWN PROPOSAL COPY] v' + VER + ' - copy client proposal to another WO as a Draft (createDraftProposal + editProposal replay)');
 
@@ -86,6 +86,14 @@
   // ===== copy engine ========================================================
   // (mapLineItem, buildCreateVars, buildEditVars, copyProposal land here in
   //  Tasks 2-4. Kept DOM-free so the node harness can run it headless.)
+  // Quantity coercion: the ClientProposalDetails read returns quantity / chargeQuantity as
+  // STRINGS ("1", "4"), but ProposalLineItemInput.quantity / chargeQuantity are Int, with
+  // fractionalQuantity / fractionalChargeQuantity carrying the exact decimal as a String.
+  // Sending the raw string to the Int field is REJECTED (measured live 2026-08-14:
+  // 'Int cannot represent non-integer value: "1"'). Send both: the Int (truncated) to satisfy
+  // the scalar, and the exact value as the fractional String so precision survives.
+  function pcInt(v) { if (v == null || v === '') return null; var n = Math.trunc(Number(v)); return isFinite(n) ? n : null; }
+  function pcFrac(v) { return (v == null) ? null : String(v); }
   function mapLineItem(src) {
     src = src || {};
     var out = {
@@ -93,10 +101,10 @@
       category: src.category,
       tripLabel: src.tripLabel,
       tradeId: (src.trade && src.trade.id) != null ? src.trade.id : src.tradeId,
-      quantity: src.quantity,
-      fractionalQuantity: src.fractionalQuantity,
-      chargeQuantity: src.chargeQuantity,
-      fractionalChargeQuantity: src.fractionalChargeQuantity,
+      quantity: pcInt(src.quantity),
+      fractionalQuantity: (src.fractionalQuantity != null) ? String(src.fractionalQuantity) : pcFrac(src.quantity),
+      chargeQuantity: pcInt(src.chargeQuantity),
+      fractionalChargeQuantity: (src.fractionalChargeQuantity != null) ? String(src.fractionalChargeQuantity) : pcFrac(src.chargeQuantity),
       unitCost: src.unitCost ? { amount: src.unitCost.amount, currency: src.unitCost.currency, precision: src.unitCost.precision } : null,
       unitOfMeasurement: src.unitOfMeasurement,
       useMarkUpPercent: src.useMarkUpPercent,
