@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         BWN Drop Upload (Broadway National)
 // @namespace    broadwaynational.bwn
-// @version      1.13.1
+// @version      1.14.0
 // @downloadURL  https://raw.githubusercontent.com/Intermu/userscripts/main/bwn-drop-upload.user.js
 // @updateURL    https://raw.githubusercontent.com/Intermu/userscripts/main/bwn-drop-upload.user.js
 // @description  Drop files anywhere on an Umbrava work order to upload them. Opens the Documents tab and upload dialog, hands over the files, and builds each file's description from its contents. Emails are parsed locally (.msg via an OLE/MAPI reader, .eml via RFC822) into an Outlook-style block - From/Sent/To/Cc/Subject and the body - that becomes the WO note, led by a one-line summary from Chrome's on-device built-in AI (zero cost, zero egress, nothing leaves the browser), falling back to local WO-field extraction (store, city/state, priority, PO, NTE, problem, requester) when the on-device model is unavailable. That same summary fills each file's Description. The WO note's Type is chosen from the email's parties: inbound is typed by the sender (client -> Client, else Vendor); outbound from Broadway is typed by the recipients (a client recipient -> Client, any vendor recipient -> Vendor, all-internal -> Internal). Umbrava's Description field is a TipTap/ProseMirror rich-text editor. It rejects synthetic paste, beforeinput, insertHTML and raw innerHTML, but honours execCommand('insertText') plus a synthetic Enter keydown - so the note is filled line by line (Enter between lines to keep paragraphs), paced ~12ms/line so ProseMirror's async commit doesn't drop lines (measured live 2026-08-10). The text is also placed on your clipboard as a backup, and if every fill method fails a "Copy the WO note" button appears (its click supplies the gesture for a reliable copy, then Ctrl+V). A console diagnostic reports which editor was found and which fill method stuck. When WO Intake hands off a just-created WO's request email, each uploaded file's Label (document type) is set to "Work Order Request" and the note Type is forced to Client (a WO Intake handoff is a client's request, even when the sender is a broker like Fairmarkit that reads as a Vendor domain). Fairmarkit / bulk-email footer boilerplate (the Fairmarkit company block: tagline + Boston address + FAQ/Privacy/Terms/Unsubscribe, and the -----!{...}!----- machine tail) plus ALL tracking URLs (safelinks/awstrack/logo) are stripped from the note body, keeping content through the suppliers@ email. A Fairmarkit RFQ body is also condensed to one line per entry - single-spaced, with each line-item rejoined to its QTY and each Details label (Buyer/Close date/RFQ ID/Shipping address) rejoined to its value. Files upload via Umbrava's own API (initializeJobDocument -> Azure blob PUT -> bulkAddWorkOrderDocuments, captured live 2026-08-12), Label set by id, so the brittle upload-dialog combobox is bypassed; the dialog remains the automatic fallback if the API is unavailable. The email note is shown in a BWN review box (editable, Type selectable) and posted via addEditJobNote ONLY when you click Post - it is never auto-posted, and posts under your own Umbrava session for correct attribution. Network calls are same-origin to app.umbrava.com's own /api/graphql (the app's Auth0 bearer, no @connect/GM) plus the SAS-authorized blob PUT the SPA itself makes - nothing goes to any third party. @grant none.
@@ -15,7 +15,7 @@
 (function () {
   'use strict';
 
-  var VER = '1.13.1';   // keep in step with @version (drift caught earlier: banner had lagged two releases)
+  var VER = '1.14.0';   // keep in step with @version (drift caught earlier: banner had lagged two releases)
   console.info('[BWN DROP UPLOAD] v' + VER + ' · Uploads via Umbrava API (initializeJobDocument→blob PUT→bulkAddWorkOrderDocuments, Label by id), DOM dialog is the fallback · email→note in a human-gated BWN review box, posted via addEditJobNote on an explicit Post click (never auto-posted) · note Type by parties (inbound=sender, outbound=recipient) · on-device AI short brief (Gemini Nano / Edge Phi) leads the note, mechanical floor when off · bwn:cmd dropupload:files bridge');
 
   // Active only on WO pages; checked at drag time so SPA navigation needs no watcher.
@@ -400,7 +400,10 @@
   }
   var BRAND_BY_DOMAIN = { 'pilottravelcenters.com': 'Pilot', 'caleres.com': 'Caleres', 'staples.com': 'Staples' };
   function localSummary(m) {
-    var subject = String(m.subject || ''), body = String(m.body || ''), hay = subject + '\n' + body;
+    // Scan the NEW message only (tidyBody cuts the quoted reply thread). Scanning raw m.body made a
+    // short reply inherit the PO/NTE/priority/ETA from the original request quoted below it, so a
+    // "can you send revised NTE?" reply came out framed as a fresh WO request.
+    var subject = String(m.subject || ''), body = tidyBody(m.body || ''), hay = subject + '\n' + body;
 
     // Brand: from the sender domain, else a "#### <Brand>" token in the body (e.g. "PFJ#: 7976 Pilot").
     var dom = (String(m.fromEmail || '').split('@')[1] || '').toLowerCase();
@@ -938,17 +941,21 @@
           m = isMsg ? parseMsg(rd.result) : emlToModel(parseEml(String(rd.result || '')));
         } catch (e) { return fallback(''); }
         var mech = '';
-        try { mech = localSummary(m); } catch (e2) { mech = ''; }   // local field extraction; '' when too little is found
+        try { mech = localSummary(m); } catch (e2) { mech = ''; }   // WO-request field extraction; '' unless it IS a request
+        var generic = '';
+        try { generic = genericEmailSummary(m); } catch (e2b) { generic = ''; }   // sender + opening line of the NEW message
         // On-device AI brief (2-4 sentences) LEADS the note; '' when the built-in model is off/slow.
         // aiBrief is self-bounded, but the outer 10s timeout may already have fired - re-check `done`.
-        // The doc Description and the manifest bullet stay ONE line (they can't hold a paragraph), so
-        // they use a mechanical one-liner (no second AI call) - the brief's first sentence only if the
-        // mechanical extractors find nothing.
         aiBrief(m).then(function (brief) {
           if (done) return;
           try {
-            var line = mech || genericEmailSummary(m) || firstSentence(brief);
-            var lead = brief || line;   // the note leads with the AI brief; mechanical line is the floor
+            // The note lead summarizes what THIS message says: AI brief, else the generic sender+opening
+            // line. localSummary is NOT in the lead - it's a WO-request triage extractor and misframes a
+            // reply as a request; it stays only as a secondary option for the short doc Description.
+            var lead = brief || generic || emailDesc(m, base.name);
+            // Short one line for the doc Description + manifest bullet: prefer the message summary
+            // (generic), then the WO-request line for genuine intake, then the brief's first sentence.
+            var line = generic || mech || firstSentence(brief) || emailDesc(m, base.name);
             var block = formatEmailBlock(m, lead);
             if (!block) return fallback('');
             base.isEmail = true; base.email = m; base.summary = lead; base.aiUsed = !!brief;
@@ -1604,7 +1611,21 @@
   // "Post note to WO" click calls postNoteViaApi. It folds in the old respChip's "needs a response"
   // toggle and shows the upload status. If the API post fails it falls back to the DOM composer
   // (insertNote) so the note is never lost. One box at a time; it outlives the drop but not `pending`.
-  var DEFAULT_DOC_LABEL = 'Work Order Request';  // manual + handoff drops both default here (the script's purpose is WO-request intake)
+  var DEFAULT_DOC_LABEL = 'Work Order Request';  // non-email drops + the WO-intake handoff default here
+  // Auto-pick the doc Label for a manual drop. An email is CORRESPONDENCE, labeled by the other party
+  // (the same Client/Vendor call the note Type uses): a client email -> Client Correspondence, a vendor
+  // email -> Vendor Correspondence. A drop with no email (a photo, a PDF) keeps the WO-request default,
+  // and so does an internal/unknown email. Only the WO-intake HANDOFF forces 'Work Order Request'
+  // explicitly (it really is the request that created the WO) - it never calls this.
+  function docLabelForFiles(files) {
+    var hasEmail = false;
+    for (var i = 0; i < (files || []).length; i++) { if (files[i] && files[i].isEmail && files[i].email) { hasEmail = true; break; } }
+    if (!hasEmail) return DEFAULT_DOC_LABEL;
+    var t = noteTypeForFiles(files);
+    if (t === 'Client') return 'Client Correspondence';
+    if (t === 'Vendor') return 'Vendor Correspondence';
+    return DEFAULT_DOC_LABEL;
+  }
   var noteBox = null, noteBoxTimer = null;
   function clearNoteBox() {
     if (noteBox) { try { if (noteBox.__unblockMO) noteBox.__unblockMO.disconnect(); } catch (e) { } try { noteBox.remove(); } catch (e) { } noteBox = null; }
@@ -1720,10 +1741,15 @@
   // failure (init / blob PUT / bulkAdd) so a drop never silently drops a file.
   function runApiUpload(rawFiles, described, dt, ctx, labelName) {
     var woNum = woNumberFromUrl();
+    // A caller may FORCE a label (the WO-intake handoff passes 'Work Order Request'); otherwise the
+    // label is auto-picked from the resolved files (email -> correspondence by party). Held in a closure
+    // so the dialog fallback labels the same way if the API leg fails.
+    var resolvedLabel = labelName || DEFAULT_DOC_LABEL;
     return described.then(function (files) {
       if (ctx.aborted) throw new Error('aborted');
+      resolvedLabel = labelName || docLabelForFiles(files);
       noteBoxStatus('Uploading ' + rawFiles.length + ' file' + (rawFiles.length > 1 ? 's' : '') + '…');
-      return uploadViaApi(rawFiles, files, labelName, woNum);
+      return uploadViaApi(rawFiles, files, resolvedLabel, woNum);
     }).then(function (ids) {
       var n = (ids && ids.length) || rawFiles.length;
       noteBoxStatus('Uploaded ' + n + ' file' + (n > 1 ? 's' : '') + ' ✓  - review the note, then Post.');
@@ -1736,7 +1762,7 @@
       // passed a live dry-run, so the reason IS the diagnostic. The note box stays editable and the
       // Post button still works even while the Umbrava dialog is open (see the unblock() in showNoteReview).
       noteBoxStatus('Upload API failed (' + reason + ') - finish the Upload dialog; the note is still here to edit and Post.');
-      handleDrop(dt, described, ctx, labelName ? { docLabel: labelName } : {});
+      handleDrop(dt, described, ctx, { docLabel: resolvedLabel });
     });
   }
 
@@ -1866,7 +1892,8 @@
         pending = { ts: Date.now(), files: merged, noteText: buildNoteText(merged), originTab: origin, noteType: noteTypeForFiles(merged), needsResponse: keepResp };
         showNoteReview();
       });
-      runApiUpload(raw, described, dt, ctx, DEFAULT_DOC_LABEL);
+      // null label = auto-classify from the files (email -> correspondence by party; else WO Request).
+      runApiUpload(raw, described, dt, ctx, null);
     });
 
     document.body.appendChild(overlay);
