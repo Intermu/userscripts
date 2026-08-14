@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         BWN Drop Upload (Broadway National)
 // @namespace    broadwaynational.bwn
-// @version      1.12.0
+// @version      1.13.0
 // @downloadURL  https://raw.githubusercontent.com/Intermu/userscripts/main/bwn-drop-upload.user.js
 // @updateURL    https://raw.githubusercontent.com/Intermu/userscripts/main/bwn-drop-upload.user.js
 // @description  Drop files anywhere on an Umbrava work order to upload them. Opens the Documents tab and upload dialog, hands over the files, and builds each file's description from its contents. Emails are parsed locally (.msg via an OLE/MAPI reader, .eml via RFC822) into an Outlook-style block - From/Sent/To/Cc/Subject and the body - that becomes the WO note, led by a one-line summary from Chrome's on-device built-in AI (zero cost, zero egress, nothing leaves the browser), falling back to local WO-field extraction (store, city/state, priority, PO, NTE, problem, requester) when the on-device model is unavailable. That same summary fills each file's Description. The WO note's Type is chosen from the email's parties: inbound is typed by the sender (client -> Client, else Vendor); outbound from Broadway is typed by the recipients (a client recipient -> Client, any vendor recipient -> Vendor, all-internal -> Internal). Umbrava's Description field is a TipTap/ProseMirror rich-text editor. It rejects synthetic paste, beforeinput, insertHTML and raw innerHTML, but honours execCommand('insertText') plus a synthetic Enter keydown - so the note is filled line by line (Enter between lines to keep paragraphs), paced ~12ms/line so ProseMirror's async commit doesn't drop lines (measured live 2026-08-10). The text is also placed on your clipboard as a backup, and if every fill method fails a "Copy the WO note" button appears (its click supplies the gesture for a reliable copy, then Ctrl+V). A console diagnostic reports which editor was found and which fill method stuck. When WO Intake hands off a just-created WO's request email, each uploaded file's Label (document type) is set to "Work Order Request" and the note Type is forced to Client (a WO Intake handoff is a client's request, even when the sender is a broker like Fairmarkit that reads as a Vendor domain). Fairmarkit / bulk-email footer boilerplate (the Fairmarkit company block: tagline + Boston address + FAQ/Privacy/Terms/Unsubscribe, and the -----!{...}!----- machine tail) plus ALL tracking URLs (safelinks/awstrack/logo) are stripped from the note body, keeping content through the suppliers@ email. A Fairmarkit RFQ body is also condensed to one line per entry - single-spaced, with each line-item rejoined to its QTY and each Details label (Buyer/Close date/RFQ ID/Shipping address) rejoined to its value. Files upload via Umbrava's own API (initializeJobDocument -> Azure blob PUT -> bulkAddWorkOrderDocuments, captured live 2026-08-12), Label set by id, so the brittle upload-dialog combobox is bypassed; the dialog remains the automatic fallback if the API is unavailable. The email note is shown in a BWN review box (editable, Type selectable) and posted via addEditJobNote ONLY when you click Post - it is never auto-posted, and posts under your own Umbrava session for correct attribution. Network calls are same-origin to app.umbrava.com's own /api/graphql (the app's Auth0 bearer, no @connect/GM) plus the SAS-authorized blob PUT the SPA itself makes - nothing goes to any third party. @grant none.
@@ -15,8 +15,8 @@
 (function () {
   'use strict';
 
-  var VER = '1.11.0';   // keep in step with @version (drift caught earlier: banner had lagged two releases)
-  console.info('[BWN DROP UPLOAD] v' + VER + ' · Uploads via Umbrava API (initializeJobDocument→blob PUT→bulkAddWorkOrderDocuments, Label by id), DOM dialog is the fallback · email→note in a human-gated BWN review box, posted via addEditJobNote on an explicit Post click (never auto-posted) · note Type by parties (inbound=sender, outbound=recipient) · on-device AI one-line summary leads the note · bwn:cmd dropupload:files bridge');
+  var VER = '1.13.0';   // keep in step with @version (drift caught earlier: banner had lagged two releases)
+  console.info('[BWN DROP UPLOAD] v' + VER + ' · Uploads via Umbrava API (initializeJobDocument→blob PUT→bulkAddWorkOrderDocuments, Label by id), DOM dialog is the fallback · email→note in a human-gated BWN review box, posted via addEditJobNote on an explicit Post click (never auto-posted) · note Type by parties (inbound=sender, outbound=recipient) · on-device AI short brief (Gemini Nano / Edge Phi) leads the note, mechanical floor when off · bwn:cmd dropupload:files bridge');
 
   // Active only on WO pages; checked at drag time so SPA navigation needs no watcher.
   function onWorkOrder() {
@@ -457,6 +457,42 @@
     return line.slice(0, 300);
   }
 
+  // Mechanical floor for emails that AREN'T inbound WO-requests - outbound status replies, general
+  // correspondence. localSummary returns '' for those (no store/PO/NTE/Description), and the on-device
+  // AI line is '' whenever Chrome's built-in model isn't available, so without this the note would lead
+  // with nothing. Leads instead with the sender + the opening line of the NEW (thread-cut) message body,
+  // skipping a bare salutation, so a coordinator sees what the email SAID even with no AI. '' when there
+  // is nothing usable (describeFile then falls to the mechanical woSummary / no lead).
+  var SALUTATION_RE = /^(hi|hello|hey|dear|good\s+(morning|afternoon|evening)|greetings|thanks|thank\s+you)\b/i;
+  function genericEmailSummary(m) {
+    var who = (m.fromName || smtpAddr(m.fromEmail) || '').replace(/\s+/g, ' ').trim();
+    var body = tidyBody(m.body || '');
+    if (!body) return '';
+    var parts = body.split(/\n{2,}/), para = '';
+    for (var i = 0; i < parts.length; i++) {
+      var s = parts[i].replace(/\s+/g, ' ').trim();
+      if (s.length >= 12 && !SALUTATION_RE.test(s)) { para = s; break; }
+    }
+    if (!para) para = body.replace(/\s+/g, ' ').trim();
+    if (!para) return '';
+    var cap = 200;
+    if (para.length > cap) {
+      var win = para.slice(0, cap);
+      var dot = Math.max(win.lastIndexOf('. '), win.lastIndexOf('? '), win.lastIndexOf('! '));
+      para = (dot >= 80) ? win.slice(0, dot + 1) : win.replace(/\s+\S*$/, '') + '…';
+    }
+    return (who ? who + ': ' : '') + para;
+  }
+
+  // First sentence of a brief, one line, ~200 chars - used only to derive a short doc Description /
+  // manifest bullet from the AI brief when the mechanical extractors found nothing.
+  function firstSentence(t) {
+    var s = String(t || '').replace(/\s+/g, ' ').trim();
+    if (!s) return '';
+    var mm = s.match(/^.*?[.?!](?:\s|$)/);
+    return (mm ? mm[0] : s).trim().slice(0, 200);
+  }
+
   // ---- Note Type from the email's parties ------------------------------------
   // classifyDomain: a client domain -> "Client", Broadway-internal -> "Internal", any
   // other external domain -> "Vendor", unknown -> ''. Extend CLIENT_DOMAINS as clients
@@ -841,12 +877,14 @@
   })();
   // ===== END bwnAI =====
 
-  // ---- Optional on-device AI summary (now via the shared bwnAI router) -------
-  // Thin wrapper: summarizes the NEW message (thread already trimmed by tidyBody) into one
-  // scan-line for the note, ON-DEVICE only (drop-upload is @grant none / zero-egress). Passes
-  // this module's email-specific system prompt verbatim so output is unchanged from v1.8.0.
-  // Returns '' on any miss; describeFile then falls back to localSummary/emailDesc.
-  function aiSummary(m) {
+  // ---- On-device AI brief (now via the shared bwnAI router) ------------------
+  // Summarizes the NEW message (thread already trimmed by tidyBody) into a SHORT 2-4 sentence brief
+  // that LEADS the WO note - who sent it, what was done/reported, and any next step / date / WO-PO /
+  // dollar figure. ON-DEVICE only (drop-upload is @grant none / zero-egress): Chrome's Gemini Nano or
+  // Edge's Phi-4-mini, whichever the browser exposes as `LanguageModel`. Returns '' on any miss (model
+  // off, timeout); describeFile then leads with the mechanical one-liner instead. NOT oneLine, so the
+  // sentences and any line breaks survive; capped so a runaway generation can't bloat the note.
+  function aiBrief(m) {
     var from = (m.fromName || smtpAddr(m.fromEmail) || '').trim();
     var to = (m.to || []).map(function (r) { return r.name || smtpAddr(r.email); }).filter(Boolean).join(', ');
     var body = tidyBody(m.body).slice(0, 4000);   // the NEW message only - thread cut
@@ -854,10 +892,12 @@
     return bwnAI({
       task: 'summarize',
       tier: 'ondevice',
-      system: 'You summarize ONE work-order email into a single plain-text line (<=200 chars) for a facilities coordinator scanning a work order. Name who sent it and what they are asking for or reporting. No greeting, no sign-off, no preamble, no quotes - output only the one line.',
+      oneLine: false,
+      maxChars: 700,
+      system: 'You summarize ONE work-order email for a facilities coordinator into a SHORT brief of 2 to 4 plain sentences. State who sent it, what was done or is being reported, and any next step, dates, work-order or PO numbers, or dollar amounts mentioned. No greeting, no sign-off, no preamble, no bullet points, no quotes - output only the sentences.',
       prompt: content,
-      fallback: ['ondevice'],   // local floor handled by describeFile's mech/emailDesc path
-      timeoutMs: 8000
+      fallback: ['ondevice'],   // local floor handled by describeFile's mechanical path
+      timeoutMs: 9000
     });
   }
 
@@ -897,20 +937,22 @@
         } catch (e) { return fallback(''); }
         var mech = '';
         try { mech = localSummary(m); } catch (e2) { mech = ''; }   // local field extraction; '' when too little is found
-        // On-device AI line for every email; '' (falls back to mech, then emailDesc) when
-        // the built-in model is unavailable. aiSummary is self-bounded, but the outer 10s
-        // timeout may already have fired - re-check `done` before using the result.
-        aiSummary(m).then(function (ai) {
+        // On-device AI brief (2-4 sentences) LEADS the note; '' when the built-in model is off/slow.
+        // aiBrief is self-bounded, but the outer 10s timeout may already have fired - re-check `done`.
+        // The doc Description and the manifest bullet stay ONE line (they can't hold a paragraph), so
+        // they use a mechanical one-liner (no second AI call) - the brief's first sentence only if the
+        // mechanical extractors find nothing.
+        aiBrief(m).then(function (brief) {
           if (done) return;
           try {
-            var summary = ai || mech;
-            var block = formatEmailBlock(m, summary);
+            var line = mech || genericEmailSummary(m) || firstSentence(brief);
+            var lead = brief || line;   // the note leads with the AI brief; mechanical line is the floor
+            var block = formatEmailBlock(m, lead);
             if (!block) return fallback('');
-            base.isEmail = true; base.email = m; base.summary = summary; base.aiUsed = !!ai;
+            base.isEmail = true; base.email = m; base.summary = lead; base.aiUsed = !!brief;
             base.noteBlock = block;
-            // The summary is the best Description; else the mechanical one-liner.
-            base.desc = summary ? summary.slice(0, 300) : emailDesc(m, base.name);
-            base.noteLine = '• ' + (summary || m.subject || base.name) + ' - Email';
+            base.desc = line ? line.slice(0, 300) : emailDesc(m, base.name);
+            base.noteLine = '• ' + (line || m.subject || base.name) + ' - Email';
             finish(base);
           } catch (e3) { fallback(''); }
         });
@@ -1563,10 +1605,31 @@
   var DEFAULT_DOC_LABEL = 'Work Order Request';  // manual + handoff drops both default here (the script's purpose is WO-request intake)
   var noteBox = null, noteBoxTimer = null;
   function clearNoteBox() {
-    if (noteBox) { try { noteBox.remove(); } catch (e) { } noteBox = null; }
+    if (noteBox) { try { if (noteBox.__unblockMO) noteBox.__unblockMO.disconnect(); } catch (e) { } try { noteBox.remove(); } catch (e) { } noteBox = null; }
     if (noteBoxTimer) { clearTimeout(noteBoxTimer); noteBoxTimer = null; }
   }
   function noteBoxStatus(msg) { if (noteBox && noteBox.__status) noteBox.__status.textContent = msg; }
+  // Keep the note box editable while Umbrava's Upload dialog (a MUI modal) is open. Modern MUI marks
+  // every body-level sibling of the modal `inert` + `aria-hidden` - and `inert` makes our textarea
+  // truly un-focusable/un-typeable - and its FocusTrap yanks focus back on any `focusin` that reaches
+  // document. This box deliberately floats OUTSIDE the dialog (so a dialog re-render can't break it),
+  // so we defend it here: strip those attrs (and re-strip if the modal re-applies them), and stop our
+  // own focusin from bubbling to document so the trap never fires. Verified against a simulated modal
+  // (inert + focusin-restore): focus is blocked before, sticks after, and survives a re-add.
+  function unblockFromModal(node) {
+    function strip() {
+      if (node.hasAttribute('aria-hidden')) node.removeAttribute('aria-hidden');
+      if (node.inert) { try { node.inert = false; } catch (e) { } }
+      if (node.hasAttribute('inert')) node.removeAttribute('inert');
+    }
+    strip();
+    node.addEventListener('focusin', function (e) { e.stopPropagation(); }, false);
+    try {
+      var mo = new MutationObserver(strip);
+      mo.observe(node, { attributes: true, attributeFilter: ['inert', 'aria-hidden'] });
+      node.__unblockMO = mo;   // GC'd with the box; clearNoteBox drops the ref
+    } catch (e) { }
+  }
   function showNoteReview() {
     clearNoteBox();
     clearRespChip();
@@ -1643,6 +1706,7 @@
     });
 
     document.body.appendChild(box);
+    unblockFromModal(box);
     box.__status = status;
     noteBox = box;
     noteBoxTimer = setTimeout(clearNoteBox, PENDING_TTL);
@@ -1664,8 +1728,12 @@
       toast('Uploaded ' + rawFiles.length + ' file' + (rawFiles.length > 1 ? 's' : '') + ' to W-' + woNum + '.');
     }).catch(function (err) {
       if (ctx.aborted) return;
-      try { console.warn('[BWN DROP UPLOAD] API upload failed, falling back to the dialog:', (err && err.message) || err); } catch (e) { }
-      noteBoxStatus('Uploading via the dialog (API unavailable) - finish Upload there; the note is still here to Post.');
+      var reason = (err && err.message) || String(err || 'unknown');
+      try { console.warn('[BWN DROP UPLOAD] API upload failed, falling back to the dialog:', reason); } catch (e) { }
+      // Name the actual failing step in the box (not a generic "API unavailable"): this path never
+      // passed a live dry-run, so the reason IS the diagnostic. The note box stays editable and the
+      // Post button still works even while the Umbrava dialog is open (see the unblock() in showNoteReview).
+      noteBoxStatus('Upload API failed (' + reason + ') - finish the Upload dialog; the note is still here to edit and Post.');
       handleDrop(dt, described, ctx, labelName ? { docLabel: labelName } : {});
     });
   }
