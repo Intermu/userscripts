@@ -340,6 +340,14 @@ jobs:
       - name: Write-queue drain harness (Track C executor: patchWorkOrder/addEditJobNote + idempotency)
         run: node scripts/test-write-queue-drain.js
 
+      # Track C write-back phase 2: the catalog pusher in bwn-write-queue.user.js. Reads the tenant
+      # status list + user directory and pushes them to /api/catalog-ingest so the Dashboard's write-back
+      # Status/Assign pickers have real options. Slices the pure mappers (status id coerced to int; a
+      # user's first+last -> name, inactive dropped) and pins the queries, the route, the version bump,
+      # and that the push runs on load independent of draining (throttled). Inactive-drop negative control.
+      - name: Write-queue catalog push harness (status + user catalog ingest)
+        run: node scripts/test-wq-catalog-push.js
+
   lint:
     name: Lint (advisory)
     runs-on: ubuntu-latest

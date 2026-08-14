@@ -162,7 +162,8 @@ function notePostsOf(g) { return g.calls.filter(function (c) { return /addEditJo
   A.ok("posts op:'report'", /op:\s*"report"/.test(full));
   A.ok("targets /api/wo-write-queue", /\/api\/wo-write-queue/.test(full));
   A.ok("draining is DISABLED by default (wq_enabled false)", /GM_getValue\("wq_enabled",\s*false\)/.test(full));
-  A.ok("@version and runtime VER agree", /@version\s+0\.1\.0/.test(full) && /VER\s*=\s*"0\.1\.0"/.test(full));
+  var _mV = full.match(/@version\s+([0-9.]+)/), _mR = full.match(/VER\s*=\s*"([0-9.]+)"/);
+  A.ok("@version and runtime VER agree", !!(_mV && _mR && _mV[1] === _mR[1]));
 
   A.finish();
 })().catch(function (e) { console.error(e); process.exit(1); });
