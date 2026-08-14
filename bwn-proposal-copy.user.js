@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         BWN Proposal Copy (Broadway National)
 // @namespace    broadwaynational.bwn
-// @version      0.1.5
+// @version      0.1.6
 // @downloadURL  https://raw.githubusercontent.com/Intermu/userscripts/main/bwn-proposal-copy.user.js
 // @updateURL    https://raw.githubusercontent.com/Intermu/userscripts/main/bwn-proposal-copy.user.js
 // @description  Copy a client proposal from an aged-out work order onto a chosen replacement WO as an un-submitted Draft, in one confirmed action. Replays Umbrava's own createDraftProposal + editProposal mutations (line items copied verbatim); never submits, deletes, or retries. Manager-gated visibility. @grant none.
@@ -15,7 +15,7 @@
 (function () {
   'use strict';
 
-  var VER = '0.1.5';   // keep in step with @version
+  var VER = '0.1.6';   // keep in step with @version
   var DRY_RUN = false; // when true, the two WRITE mutations are logged, not sent
   console.info('[BWN PROPOSAL COPY] v' + VER + ' - copy client proposal to another WO as a Draft (createDraftProposal + editProposal replay)');
 
@@ -267,7 +267,7 @@
   //
   // Every selector/extraction below that touches the Proposals section is marked
   // UNVERIFIED and is written to FAIL SAFE: if the expected row/anchor/id is not
-  // found, injectRowButtons() injects nothing rather than guessing. Confirm each
+  // found, injectCopyColumn() injects nothing rather than guessing. Confirm each
   // UNVERIFIED marker against a live WO snapshot before the live gate (Task 6).
 
   // ---- console entry point for the live gate (DOM-independent) --------------
@@ -306,8 +306,9 @@
   // MUI table whose rows are <tr id="table-row-<proposalId>"> (the row id carries the real
   // proposal id, e.g. table-row-517386). The route lists ONLY client proposals (vendor
   // proposals are a sibling route), so route membership is the client-ness signal.
-  var ROW_BTN_MARK = 'data-bwn-pc';
   var ROW_BTN_CLASS = 'bwn-pc-row-btn';
+  var COL_CELL_MARK = 'data-bwn-pc-cell';   // our injected <td> (Copy's own column)
+  var COL_HDR_MARK = 'data-bwn-pc-hdr';     // our injected <th> header
   function onClientProposalsList() {
     // LIST route ONLY. The old prefix form also matched .../client-proposals/<id>/details
     // and .../client-proposals/<id>/notes - those subpages render the SAME
@@ -336,7 +337,7 @@
     btn.textContent = 'Copy';
     btn.title = 'Copy this proposal to another work order';
     btn.style.cssText = 'display:inline-flex;align-items:center;vertical-align:middle;flex:0 0 auto;' +
-      'margin:0 6px 0 0;padding:3px 8px;border:1px solid #1a5f3e;border-radius:6px;white-space:nowrap;' +
+      'margin:0;padding:3px 8px;border:1px solid #1a5f3e;border-radius:6px;white-space:nowrap;' +
       'background:#f0fdf4;color:#0d3d26;font:600 11px -apple-system,BlinkMacSystemFont,"Segoe UI",Arial,sans-serif;cursor:pointer;';
     btn.addEventListener('click', function (e) {
       e.preventDefault(); e.stopPropagation();
@@ -344,40 +345,63 @@
     });
     return btn;
   }
-  function injectRowButtons() {
+  // ---- Copy gets its OWN column --------------------------------------------
+  // Earlier builds injected Copy INTO the first cell (the "More"/actions column). That cell also
+  // hosts Umbrava's native hover-reveal "..." menu; sharing it made Copy eat the menu's width, so
+  // the "..." spilled under the next column and read as truncated. Fix: give Copy a dedicated
+  // leftmost column - a real <th> in the header row plus one <td> per body row - so it never
+  // touches the actions cell again. React re-renders wipe injected nodes (measured live
+  // 2026-08-14), so the header cell and every body cell are re-added on PRESENCE, driven by the
+  // MutationObserver + interval below. Injected cells borrow a sibling's className so the grid's
+  // padding/border/typography match; the auto-layout table then sizes the new column to fit.
+  function injectCopyColumn() {
     if (!onClientProposalsList()) return;
     if (!gated()) {
-      // Rank dropped (or was never known) after a button was already shown - hide, don't
-      // remove, so a later rank recovery doesn't need to re-discover the row.
-      var shown = document.querySelectorAll('.' + ROW_BTN_CLASS);
-      Array.prototype.forEach.call(shown, function (b) { b.style.display = 'none'; });
+      // Rank dropped (or never known): drop the WHOLE column - header and every body cell
+      // together - so no row is left short a cell (which would shift its other columns).
+      // Re-injected in full if rank recovers.
+      Array.prototype.forEach.call(
+        document.querySelectorAll('[' + COL_HDR_MARK + '],[' + COL_CELL_MARK + ']'),
+        function (n) { try { n.remove(); } catch (e) { } });
       return;
     }
     var rows = proposalRows();
+    if (!rows.length) return;
+    var table = rows[0].closest ? rows[0].closest('table') : null;
+
+    // Header cell (once).
+    var headRow = (table && table.tHead && table.tHead.rows.length) ? table.tHead.rows[0] : null;
+    if (headRow && !headRow.querySelector('th[' + COL_HDR_MARK + ']')) {
+      var th = document.createElement('th');
+      th.setAttribute(COL_HDR_MARK, '1');
+      var sampleHdr = headRow.children[0];
+      if (sampleHdr) th.className = sampleHdr.className;   // match the grid's header chrome
+      th.style.whiteSpace = 'nowrap';
+      th.textContent = 'Copy';
+      headRow.insertBefore(th, headRow.firstChild);
+    }
+
+    // One body cell per row - Copy lives ALONE here, never in the actions cell.
     rows.forEach(function (row) {
-      // Key on the button's ACTUAL presence, not a mark. React re-renders the row's cells and
-      // WIPES the injected button while leaving the <tr> (and any data-attr mark) alive, so a
-      // mark-based guard sees the mark, finds no button, and never re-adds - the button vanishes
-      // on the first table re-render (measured live 2026-08-14). Presence-based re-adds after
-      // each wipe (the MutationObserver + interval drive the retry).
-      var existing = row.querySelector('.' + ROW_BTN_CLASS);
-      if (existing) { existing.style.display = ''; return; }   // already present - ensure visible, done
       if (!isClientProposalRow(row)) return;
+      var cell = row.querySelector('td[' + COL_CELL_MARK + ']');
+      if (cell) {
+        // Cell survived; React may have wiped only the button inside it. Re-add on presence.
+        var b = cell.querySelector('.' + ROW_BTN_CLASS);
+        if (!b) { var pid0 = proposalIdFromRow(row); if (pid0 != null) cell.appendChild(buildRowButton(pid0)); }
+        else b.style.display = '';
+        return;
+      }
       var pid = proposalIdFromRow(row);
-      if (pid == null) return;   // fail safe: no confirmed id, no button
-      row.setAttribute(ROW_BTN_MARK, '1');   // kept for debuggability only; no longer the guard
-      // First cell = the far-left "More"/action column: always visible, never needs a horizontal
-      // scroll. Put Copy INLINE at the LEFT of that cell (before the alert icon) instead of
-      // appended - appending let it wrap to a second line under the row and get clipped. Force
-      // the cell to lay its children in one non-wrapping row and stop it truncating.
-      var host = row.firstElementChild || row;
-      host.style.display = 'flex';
-      host.style.flexDirection = 'row';
-      host.style.alignItems = 'center';
-      host.style.flexWrap = 'nowrap';
-      host.style.whiteSpace = 'nowrap';
-      host.style.overflow = 'visible';
-      host.insertBefore(buildRowButton(pid), host.firstChild);
+      if (pid == null) return;   // fail safe: no confirmed id, no cell
+      var td = document.createElement('td');
+      td.setAttribute(COL_CELL_MARK, '1');
+      var sampleTd = row.children[0];
+      if (sampleTd) td.className = sampleTd.className;   // match the grid's cell chrome
+      td.style.whiteSpace = 'nowrap';
+      td.style.overflow = 'visible';
+      td.appendChild(buildRowButton(pid));
+      row.insertBefore(td, row.firstChild);
     });
   }
 
@@ -696,18 +720,18 @@
   try {
     document.addEventListener('bwn:evt', function (e) {
       var d = e && e.detail;
-      if (d && d.id === 'bwn:role') injectRowButtons();
+      if (d && d.id === 'bwn:role') injectCopyColumn();
     });
   } catch (e) { }
   try {
-    var pcObs = new MutationObserver(function () { injectRowButtons(); });
+    var pcObs = new MutationObserver(function () { injectCopyColumn(); });
     pcObs.observe(document.body, { childList: true, subtree: true });
   } catch (e) { }
   var _pcLastPath = location.pathname;
   setInterval(function () {
     if (location.pathname !== _pcLastPath) _pcLastPath = location.pathname;
-    injectRowButtons();
+    injectCopyColumn();
   }, 900);
-  injectRowButtons();
+  injectCopyColumn();
 
 })();
