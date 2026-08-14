@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         BWN Proposal Copy (Broadway National)
 // @namespace    broadwaynational.bwn
-// @version      0.1.2
+// @version      0.1.3
 // @downloadURL  https://raw.githubusercontent.com/Intermu/userscripts/main/bwn-proposal-copy.user.js
 // @updateURL    https://raw.githubusercontent.com/Intermu/userscripts/main/bwn-proposal-copy.user.js
 // @description  Copy a client proposal from an aged-out work order onto a chosen replacement WO as an un-submitted Draft, in one confirmed action. Replays Umbrava's own createDraftProposal + editProposal mutations (line items copied verbatim); never submits, deletes, or retries. Manager-gated visibility. @grant none.
@@ -15,7 +15,7 @@
 (function () {
   'use strict';
 
-  var VER = '0.1.2';   // keep in step with @version
+  var VER = '0.1.3';   // keep in step with @version
   var DRY_RUN = false; // when true, the two WRITE mutations are logged, not sent
   console.info('[BWN PROPOSAL COPY] v' + VER + ' - copy client proposal to another WO as a Draft (createDraftProposal + editProposal replay)');
 
@@ -301,35 +301,28 @@
     return '$' + (Number(money.amount) / Math.pow(10, precision)).toFixed(2);
   }
 
-  // ---- row discovery (UNVERIFIED) ------------------------------------------
-  // UNVERIFIED: confirm against a live WO snapshot before the live gate. No WO carrying
-  // a client proposal was available while building this script, so the Proposals
-  // section's row markup and how a row exposes its OWN proposal id were never captured
-  // live. These probes are written defensively - a miss at any step means NOTHING is
-  // injected, rather than guessing a selector that merely looks plausible.
+  // ---- row discovery (VERIFIED live 2026-08-14) ----------------------------
+  // Measured on /work-orders/<n>/proposals/client-proposals: the client-proposal list is a
+  // MUI table whose rows are <tr id="table-row-<proposalId>"> (the row id carries the real
+  // proposal id, e.g. table-row-517386). The route lists ONLY client proposals (vendor
+  // proposals are a sibling route), so route membership is the client-ness signal.
   var ROW_BTN_MARK = 'data-bwn-pc';
   var ROW_BTN_CLASS = 'bwn-pc-row-btn';
+  function onClientProposalsList() {
+    return /\/work-orders\/\d+\/proposals\/client-proposals/.test(location.pathname || '');
+  }
   function proposalRows() {
-    // UNVERIFIED: the Proposals section container + row selector.
-    var scope = document.querySelector('[data-testid="proposals-section"], [data-testid*="proposal-list" i], [data-testid*="proposals" i]') || document;
-    var rows = scope.querySelectorAll('[data-testid*="proposal-row" i], [data-proposal-id], tr[data-id]');
-    return Array.prototype.slice.call(rows);
+    return Array.prototype.slice.call(document.querySelectorAll('tr[id^="table-row-"]'));
   }
   function proposalIdFromRow(row) {
-    // UNVERIFIED: how a row exposes its own proposal id. Only ever read from the row's
-    // OWN data (never scraped from visible text - a displayed "number" is the proposal
-    // NUMBER, not the id copyProposal() needs).
-    var raw = row.getAttribute('data-proposal-id') || row.getAttribute('data-id');
-    if (raw == null) return null;
-    var n = parseInt(raw, 10);
-    return isFinite(n) ? n : null;
+    // The proposal id is in the row's own id ("table-row-517386"). NEVER scrape the visible
+    // "number" column - that shows the proposal NUMBER (1,2,3), not the id copyProposal needs.
+    var m = /table-row-(\d+)/.exec((row && row.id) || '');
+    return m ? parseInt(m[1], 10) : null;
   }
-  function isClientProposalRow(row) {
-    // UNVERIFIED: how a row marks itself as a CLIENT proposal (vs. vendor/other). Fails
-    // CLOSED - an unrecognized row is left alone rather than assumed to qualify, so a
-    // wrong guess here can only under-inject, never mis-offer the button on the wrong row.
-    var kind = (row.getAttribute('data-proposal-type') || row.getAttribute('data-kind') || '').toLowerCase();
-    return kind.indexOf('client') !== -1;
+  function isClientProposalRow() {
+    // The client-proposals route lists only client proposals; fails closed off that route.
+    return onClientProposalsList();
   }
   function buildRowButton(sourceProposalId) {
     var btn = document.createElement('button');
@@ -345,7 +338,7 @@
     return btn;
   }
   function injectRowButtons() {
-    if (!onProposalPage()) return;
+    if (!onClientProposalsList()) return;
     if (!gated()) {
       // Rank dropped (or was never known) after a button was already shown - hide, don't
       // remove, so a later rank recovery doesn't need to re-discover the row.
@@ -365,7 +358,8 @@
       var pid = proposalIdFromRow(row);
       if (pid == null) return;   // fail safe: no confirmed id, no button
       row.setAttribute(ROW_BTN_MARK, '1');
-      row.appendChild(buildRowButton(pid));   // UNVERIFIED: append point within the row
+      var host = row.lastElementChild || row;   // append INSIDE the last cell - a <button> cannot be a bare <tr> child
+      host.appendChild(buildRowButton(pid));
     });
   }
 
