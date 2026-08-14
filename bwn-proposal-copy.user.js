@@ -74,7 +74,7 @@
   }
 
   // ===== ops ================================================================
-  var Q_PROPOSAL_WO = 'query ProposalWO($workOrderNumber: Int!) { job: workOrder(workOrderNumber: $workOrderNumber) { id number clientId clientName locationId locationName locationNumber formattedClientPurchaseOrderNumber } }';
+  var Q_PROPOSAL_WO = 'query ProposalWO($workOrderNumber: Int!) { job: workOrder(workOrderNumber: $workOrderNumber) { id number clientId clientName locationId locationName locationNumber formattedClientPurchaseOrderNumber address { addressLine1 addressLine2 city state postalCode isInternational latitude longitude googlePlaceId subAdministrativeArea countryCode } } }';
   var Q_PROPOSAL_DETAILS = 'query ClientProposalDetails($proposalId: Int!) { proposal(id: $proposalId) { id number description scopeOfWork scopeOfWorkHtml disclaimer jobId jobType formattedClientPurchaseOrderNumber timeFrameDays { value } type { id name } status { id name } subtotal { amount currency precision } proposalLineItems { id category tripLabel quantity chargeQuantity unitOfMeasurement useMarkUpPercent markUpPercent isTaxable taxRate item itemId isPrivate sortOrder rateId description descriptionHtml trade { id } unitCost { amount currency precision } unitCharge { amount currency precision } } } }';
   var Q_LOCATION_OPEN_WOS = 'query PagedWorkOrders($page: PageInput!, $sortBy: [SortInput!]!, $locationId: ID, $phase: SystemPhaseValue) { listWorkOrdersPaginated(page: $page, sortBy: $sortBy, locationId: $locationId, phase: $phase) { rowCount items { id number statusName scopeOfWork locationId locationNumber } } }';
   // Return selection {success message proposal{id number}} is the wrapper editProposal + cloneProposal
@@ -117,8 +117,31 @@
   }
   function buildCreateVars(source, target) {
     source = source || {}; target = target || {};
+    var a = target.address || {};
+    // createDraftProposal server-validates jobId + a full location.address as REQUIRED
+    // (both nullable in the GraphQL schema, but rejected empty by the server - measured
+    // live 2026-08-14). location is by number/name + address (ProposalLocationInfoInput
+    // has no id field). Address is copied from the TARGET WO, not the source proposal.
     return { proposalData: {
+      jobId: target.id,
       workOrderNumber: target.number,
+      location: {
+        number: target.locationNumber,
+        name: target.locationName,
+        address: {
+          addressLine1: a.addressLine1,
+          addressLine2: a.addressLine2,
+          city: a.city,
+          state: a.state,
+          postalCode: a.postalCode,
+          isInternational: a.isInternational,
+          latitude: a.latitude,
+          longitude: a.longitude,
+          googlePlaceId: a.googlePlaceId,
+          subAdministrativeArea: a.subAdministrativeArea,
+          countryCode: a.countryCode
+        }
+      },
       typeId: source.type ? source.type.id : null,
       scopeOfWork: source.scopeOfWork,
       scopeOfWorkHtml: source.scopeOfWorkHtml,

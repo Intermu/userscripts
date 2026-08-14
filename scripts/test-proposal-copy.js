@@ -130,13 +130,16 @@ function loadCore(env) {
     subtotal: { amount: 50000, currency: 'USD', precision: 2 },
     proposalLineItems: [SRC_ITEM, Object.assign({}, SRC_ITEM, { sortOrder: 1, id: 1000 })]
   };
-  var TARGET = { number: 8002, id: 1200500, locationId: 'loc-1', clientId: 'cli-1' };
+  var TARGET = { number: 8002, id: 1200500, locationId: 'loc-1', clientId: 'cli-1', locationNumber: 'LOC-1', locationName: 'Site One', address: { addressLine1: '1 Main St', city: 'Townsville', state: 'NY', postalCode: '10001', countryCode: 'US' } };
 
   var cv = apiB.buildCreateVars(SOURCE, TARGET).proposalData;
   A.ok('create targets the new WO by workOrderNumber', cv.workOrderNumber === 8002);
   A.ok('create carries typeId from the SOURCE proposal', cv.typeId === 3);
   A.ok('create carries scopeOfWork verbatim', cv.scopeOfWork === 'Fix the thing');
   A.ok('create carries timeFrameDays', cv.timeFrameDays && cv.timeFrameDays.value === 30);
+  A.ok('create carries jobId from the target WO id (server-required)', cv.jobId === 1200500);
+  A.ok('create carries a populated location.address from the TARGET WO (server-required)', cv.location && cv.location.address && cv.location.address.addressLine1 === '1 Main St' && cv.location.address.city === 'Townsville' && cv.location.address.state === 'NY' && cv.location.address.postalCode === '10001');
+  A.ok('create location is by number/name (ProposalLocationInfoInput has no id)', cv.location.number === 'LOC-1' && cv.location.name === 'Site One');
   A.ok('create does NOT carry line items (edit does)', !('proposalLineItems' in cv));
 
   var ev = apiB.buildEditVars(9003, SOURCE).proposalData;
