@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         BWN Write Queue (Broadway National)
 // @namespace    broadwaynational.bwn
-// @version      0.1.0
+// @version      0.2.0
 // @downloadURL  https://raw.githubusercontent.com/Intermu/userscripts/main/bwn-write-queue.user.js
 // @updateURL    https://raw.githubusercontent.com/Intermu/userscripts/main/bwn-write-queue.user.js
 // @description  Drains the Track C write-back queue: claims THIS coordinator's own queued Umbrava write commands from the SWA, confirms each irreversible write, executes it via patchWorkOrder/addEditJobNote, and reports the result. Self-drain; every write is human-confirmed; disabled until you turn it on.
@@ -38,10 +38,11 @@
 
 (function () {
   "use strict";
-  var VER = "0.1.0";   // keep in lockstep with @version (TM compares versions, not contents)
+  var VER = "0.2.0";   // keep in lockstep with @version (TM compares versions, not contents)
 
   var SWA_BASE = "https://green-stone-0717dab0f.7.azurestaticapps.net";
   var PROXY_URL = SWA_BASE + "/api/wo-write-queue";
+  var CATALOG_URL = SWA_BASE + "/api/catalog-ingest";   // phase 2: push the status list + user directory for the Dashboard pickers
   var CLIENT = "pilot";
   var POLL_MS = 20000;         // 20s; well under the route's 60/min courtesy cap
   var CONFIRM_TIMEOUT_MS = 0;  // 0 = the strip waits for the human indefinitely (lease may lapse; see contract)
@@ -218,6 +219,35 @@
   function ingestKey() { return GM_getValue("ingest_key", ""); }
   function enabled() { return GM_getValue("wq_enabled", false) === true; }
 
+  // ---- Catalog push (phase 2): feed the Dashboard's Status/Assign pickers ----
+  // Reads the tenant STATUS list + USER directory and pushes them to /api/catalog-ingest (key-gated,
+  // no vouch - the catalogs are not user-specific). Runs on load REGARDLESS of wq_enabled (the pickers
+  // must work for Dashboard users who never enable draining), throttled to once per 6h per browser.
+  var CAT_TTL_MS = 6 * 3600000;
+  var CAT_STATUS_Q = "query{ workOrderStatuses{ id name isActive } }";
+  var CAT_USERS_Q = "query{ users(includeInactiveUsers:false, includeSystemUsers:false){ id firstName lastName emailAddress isInactive isTechnician } }";
+  // WQ-CAT-PURE-BEGIN - pure mappers, sliced by scripts/test-wq-catalog-push.js
+  function wqMapStatus(s){ if(!s) return null; var id=parseInt(s.id,10); var name=String(s.name||"").trim(); if(!isFinite(id)||!name) return null; return { id:id, name:name, isActive:s.isActive!==false }; }
+  function wqMapUser(u){ if(!u||u.isInactive) return null; var id=String(u.id||"").trim(); var name=((u.firstName||"")+" "+(u.lastName||"")).trim(); if(!id||!name) return null; return { id:id, name:name, email:String(u.emailAddress||"").trim(), isTechnician:!!u.isTechnician }; }
+  // WQ-CAT-PURE-END
+  function wqPushCatalogs(force){
+    if(!ingestKey() || !authToken()) return;                       // need the shared key + a live Umbrava session
+    var last = Number(GM_getValue("wq_catalog_ts", 0)) || 0;
+    if(!force && (Date.now() - last < CAT_TTL_MS)) return;          // throttle
+    Promise.all([ gql(CAT_STATUS_Q, {}).catch(function(){ return null; }), gql(CAT_USERS_Q, {}).catch(function(){ return null; }) ]).then(function(res){
+      var sd = res[0], ud = res[1];
+      var statuses = (sd && Array.isArray(sd.workOrderStatuses)) ? sd.workOrderStatuses.map(wqMapStatus).filter(Boolean) : null;
+      var users = (ud && Array.isArray(ud.users)) ? ud.users.map(wqMapUser).filter(Boolean) : null;
+      if((!statuses || !statuses.length) && (!users || !users.length)) return;   // read failed both ways - do not stamp the throttle
+      var body = { client: CLIENT, actor: "write-queue-catalog" };
+      if(statuses && statuses.length) body.statuses = statuses;
+      if(users && users.length) body.users = users;
+      gmPost(CATALOG_URL, { "Content-Type": "application/json", "x-bwn-key": ingestKey() }, body, 30000).then(function(r){
+        if(r && r.json && r.json.ok) GM_setValue("wq_catalog_ts", Date.now());
+      });
+    });
+  }
+
   function claimOnce(tok) {
     return gmPost(PROXY_URL, { "Content-Type": "application/json", "x-bwn-key": ingestKey() },
       { op: "claim", userToken: tok, client: CLIENT, capabilities: { dedupAppend: true } }, 20000)
@@ -292,8 +322,10 @@
   });
   GM_registerMenuCommand("BWN Write Queue: enable draining", function () { GM_setValue("wq_enabled", true); alert("Write-queue draining ENABLED. Each write still waits for your Approve."); });
   GM_registerMenuCommand("BWN Write Queue: disable draining", function () { GM_setValue("wq_enabled", false); alert("Write-queue draining disabled."); });
+  GM_registerMenuCommand("BWN Write Queue: refresh Umbrava catalogs now", function () { GM_setValue("wq_catalog_ts", 0); wqPushCatalogs(true); alert("Refreshing the status + user catalogs for the Dashboard pickers."); });
 
   setInterval(pollTick, POLL_MS);
   setTimeout(pollTick, 3000);
+  setTimeout(function () { wqPushCatalogs(false); }, 5000);   // push catalogs on load (throttled), independent of draining
   try { console.log("[BWN Write Queue " + VER + "] loaded" + (enabled() ? " (draining ON)" : " (disabled - use the menu to enable)")); } catch (e) { }
 })();
