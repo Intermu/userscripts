@@ -329,6 +329,17 @@ jobs:
       - name: Proposal Copy engine harness (createDraftProposal + editProposal replay)
         run: node scripts/test-proposal-copy.js
 
+      # Track C write-back DRAIN half (bwn-write-queue.user.js): the coordinator's-tab executor that
+      # claims a queued command from /api/wo-write-queue, confirms it, and turns it into a real
+      # patchWorkOrder / addEditJobNote write. Slices the exec block into a vm with an injected gql and
+      # pins: set verbs (status/assign/ECD) skip when current==target (no needless clock reset); ECD does
+      # the whole-priority read-copy-override (never blanks a sibling); the append verb embeds a
+      # [bwn:<idemKey>] marker and reads workOrderNotes for it BEFORE posting; a business error is
+      # non-retryable while a transport error is retryable. The append dedup carries a negative control -
+      # disabling the marker check double-posts, RED. 40 assertions.
+      - name: Write-queue drain harness (Track C executor: patchWorkOrder/addEditJobNote + idempotency)
+        run: node scripts/test-write-queue-drain.js
+
   lint:
     name: Lint (advisory)
     runs-on: ubuntu-latest
