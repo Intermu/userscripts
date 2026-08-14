@@ -113,6 +113,9 @@ var LEDGER = {
   'bwn-dispatch.user.js':      { drawer: 'HAS',       toast: 'HAS',       rmotion: 'NA',  rail: 'NA'  },
   'bwn-drop-upload.user.js':   { drawer: 'NA',        toast: 'DIVERGENT', rmotion: 'NA',  rail: 'NA'  },
   'bwn-kanban.user.js':        { drawer: 'NA',        toast: 'NA',        rmotion: 'NA',  rail: 'NA'  },
+  // Self-contained modal overlay (#bwn-pc-overlay, own sheet) + own pcToast; closes by plain
+  // remove, NOT the shared .bwn-closing exit. Carries NONE of the four SHARED primitives.
+  'bwn-proposal-copy.user.js': { drawer: 'NA',        toast: 'NA',        rmotion: 'NA',  rail: 'NA'  },
   'bwn-suite-ai.user.js':      { drawer: 'NA',        toast: 'DIVERGENT', rmotion: 'HAS', rail: 'HAS' },
   'bwn-suite-core.user.js':    { drawer: 'HAS',       toast: 'DIVERGENT', rmotion: 'HAS', rail: 'HAS' },
   'bwn-vendor-intake.user.js': { drawer: 'NA',        toast: 'DIVERGENT', rmotion: 'NA',  rail: 'NA'  },

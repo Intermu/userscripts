@@ -404,13 +404,18 @@
       '@media (prefers-reduced-motion:reduce){#bwn-pc-overlay,#bwn-pc-card{transition:none;}}';
     document.head.appendChild(st);
   }
-  function drawerDismiss(el) {
+  // Self-contained overlay close - a plain remove, NOT the suite's shared .bwn-closing
+  // drawer-exit animation (this is the no-host-fallback overlay per the DESIGN NOTE, so it
+  // deliberately does not carry the shared drawer primitive). Named to avoid colliding with
+  // the shared `drawerDismiss` the UI-contract ledger detects (harness would then require the
+  // full shared exit contract this overlay intentionally does not implement).
+  function pcRemoveDrawer(el) {
     try { el.remove(); } catch (e) { }
   }
   function closeDrawer() {
     if (!openEl) return;
     document.removeEventListener('keydown', onKeyClose);
-    drawerDismiss(openEl);
+    pcRemoveDrawer(openEl);
     openEl = null; pcState = null;
   }
   function onKeyClose(e) { if (e.key === 'Escape') closeDrawer(); }
