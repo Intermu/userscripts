@@ -239,6 +239,24 @@
   // found, injectRowButtons() injects nothing rather than guessing. Confirm each
   // UNVERIFIED marker against a live WO snapshot before the live gate (Task 6).
 
+  // ---- console entry point for the live gate (DOM-independent) --------------
+  // Registered HERE, early and before any DOM/injection code runs, so a throw in
+  // the row-injection lifecycle (or an unverified selector) can never prevent it.
+  // Runs the copy engine straight, so the copy is testable even while the
+  // Proposals-row selectors are unverified and no button has injected. Suite
+  // convention (cf. window.__bwnLauncher, __bwnDispatchSyncNow). Defaults to
+  // DRY-RUN regardless of the DRY_RUN flag - a console call NEVER writes unless
+  // {dryRun:false} is passed explicitly, so it cannot fire a write by accident.
+  // (copyProposal is a hoisted function declaration, so referencing it here is safe.)
+  try {
+    window.__bwnCopyProposal = function (sourceProposalId, targetWorkOrderNumber, opts) {
+      opts = opts || {};
+      if (opts.dryRun == null) opts.dryRun = true;
+      return copyProposal(sourceProposalId, targetWorkOrderNumber, opts);
+    };
+    console.info('[BWN PROPOSAL COPY] console entry: __bwnCopyProposal(sourceProposalId, targetWorkOrderNumber, {dryRun:true})  (dry-run default; pass {dryRun:false} to write)');
+  } catch (e) { }
+
   var MIN_RANK = 4;
   function gated() { return typeof rank() === 'number' && rank() >= MIN_RANK; }
   function woNumberFromUrl() {
@@ -643,20 +661,5 @@
     injectRowButtons();
   }, 900);
   injectRowButtons();
-
-  // ---- console entry point for the live gate (DOM-independent) --------------
-  // Runs the copy engine straight, so the copy is testable even while the
-  // Proposals-row selectors are unverified and no button has injected. Suite
-  // convention (cf. window.__bwnLauncher, __bwnDispatchSyncNow). Defaults to
-  // DRY-RUN regardless of the DRY_RUN flag - a console call NEVER writes unless
-  // {dryRun:false} is passed explicitly, so it cannot fire a write by accident.
-  try {
-    window.__bwnCopyProposal = function (sourceProposalId, targetWorkOrderNumber, opts) {
-      opts = opts || {};
-      if (opts.dryRun == null) opts.dryRun = true;
-      return copyProposal(sourceProposalId, targetWorkOrderNumber, opts);
-    };
-    console.info('[BWN PROPOSAL COPY] console entry: __bwnCopyProposal(sourceProposalId, targetWorkOrderNumber, {dryRun:true})  (dry-run default; pass {dryRun:false} to actually write)');
-  } catch (e) { }
 
 })();
