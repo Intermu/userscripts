@@ -217,7 +217,10 @@ function runCases(src) {
       var puts = e2.calls.filter(function (x) { return x.op === 'BLOB_PUT'; });
       var bulk = e2.calls.filter(function (x) { return x.op === 'BulkAddWorkOrderDocuments'; });
       eq('two files initialize two documents', inits.length, 2);
-      eq('init sends fileName + fileSize', inits[0].vars && inits[0].vars.data, { fileName: 'a.msg', fileSize: 100 });
+      // fileSize is a STRING in the live schema (a Number errored "String cannot represent a non string
+      // value" at data.fileSize on a live drop). Assert the string form + guard the type explicitly.
+      eq('init sends fileName + fileSize (fileSize is a String)', inits[0].vars && inits[0].vars.data, { fileName: 'a.msg', fileSize: '100' });
+      ok('init fileSize is typeof string, not number', typeof (inits[0].vars && inits[0].vars.data && inits[0].vars.data.fileSize) === 'string', typeof (inits[0].vars && inits[0].vars.data && inits[0].vars.data.fileSize));
       eq('init is keyed by workOrderNumber', inits[0].vars && inits[0].vars.workOrderNumber, WO);
       eq('each file is PUT to the blob store', puts.length, 2);
       eq('the blob PUT uses method PUT', puts[0].method, 'PUT');
