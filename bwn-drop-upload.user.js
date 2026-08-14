@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         BWN Drop Upload (Broadway National)
 // @namespace    broadwaynational.bwn
-// @version      1.14.0
+// @version      1.15.0
 // @downloadURL  https://raw.githubusercontent.com/Intermu/userscripts/main/bwn-drop-upload.user.js
 // @updateURL    https://raw.githubusercontent.com/Intermu/userscripts/main/bwn-drop-upload.user.js
 // @description  Drop files anywhere on an Umbrava work order to upload them. Opens the Documents tab and upload dialog, hands over the files, and builds each file's description from its contents. Emails are parsed locally (.msg via an OLE/MAPI reader, .eml via RFC822) into an Outlook-style block - From/Sent/To/Cc/Subject and the body - that becomes the WO note, led by a one-line summary from Chrome's on-device built-in AI (zero cost, zero egress, nothing leaves the browser), falling back to local WO-field extraction (store, city/state, priority, PO, NTE, problem, requester) when the on-device model is unavailable. That same summary fills each file's Description. The WO note's Type is chosen from the email's parties: inbound is typed by the sender (client -> Client, else Vendor); outbound from Broadway is typed by the recipients (a client recipient -> Client, any vendor recipient -> Vendor, all-internal -> Internal). Umbrava's Description field is a TipTap/ProseMirror rich-text editor. It rejects synthetic paste, beforeinput, insertHTML and raw innerHTML, but honours execCommand('insertText') plus a synthetic Enter keydown - so the note is filled line by line (Enter between lines to keep paragraphs), paced ~12ms/line so ProseMirror's async commit doesn't drop lines (measured live 2026-08-10). The text is also placed on your clipboard as a backup, and if every fill method fails a "Copy the WO note" button appears (its click supplies the gesture for a reliable copy, then Ctrl+V). A console diagnostic reports which editor was found and which fill method stuck. When WO Intake hands off a just-created WO's request email, each uploaded file's Label (document type) is set to "Work Order Request" and the note Type is forced to Client (a WO Intake handoff is a client's request, even when the sender is a broker like Fairmarkit that reads as a Vendor domain). Fairmarkit / bulk-email footer boilerplate (the Fairmarkit company block: tagline + Boston address + FAQ/Privacy/Terms/Unsubscribe, and the -----!{...}!----- machine tail) plus ALL tracking URLs (safelinks/awstrack/logo) are stripped from the note body, keeping content through the suppliers@ email. A Fairmarkit RFQ body is also condensed to one line per entry - single-spaced, with each line-item rejoined to its QTY and each Details label (Buyer/Close date/RFQ ID/Shipping address) rejoined to its value. Files upload via Umbrava's own API (initializeJobDocument -> Azure blob PUT -> bulkAddWorkOrderDocuments, captured live 2026-08-12), Label set by id, so the brittle upload-dialog combobox is bypassed; the dialog remains the automatic fallback if the API is unavailable. The email note is shown in a BWN review box (editable, Type selectable) and posted via addEditJobNote ONLY when you click Post - it is never auto-posted, and posts under your own Umbrava session for correct attribution. Network calls are same-origin to app.umbrava.com's own /api/graphql (the app's Auth0 bearer, no @connect/GM) plus the SAS-authorized blob PUT the SPA itself makes - nothing goes to any third party. @grant none.
@@ -15,8 +15,8 @@
 (function () {
   'use strict';
 
-  var VER = '1.14.0';   // keep in step with @version (drift caught earlier: banner had lagged two releases)
-  console.info('[BWN DROP UPLOAD] v' + VER + ' · Uploads via Umbrava API (initializeJobDocument→blob PUT→bulkAddWorkOrderDocuments, Label by id), DOM dialog is the fallback · email→note in a human-gated BWN review box, posted via addEditJobNote on an explicit Post click (never auto-posted) · note Type by parties (inbound=sender, outbound=recipient) · on-device AI short brief (Gemini Nano / Edge Phi) leads the note, mechanical floor when off · bwn:cmd dropupload:files bridge');
+  var VER = '1.15.0';   // keep in step with @version (drift caught earlier: banner had lagged two releases)
+  console.info('[BWN DROP UPLOAD] v' + VER + ' · Uploads via Umbrava API (initializeJobDocument→blob PUT→bulkAddWorkOrderDocuments, Label by id), DOM dialog is the fallback · email→note in a human-gated BWN review box, posted via addEditJobNote on an explicit Post click (never auto-posted) · note Type by parties (inbound=sender, outbound=recipient) · note box shows instantly with a mechanical lead; the slow on-device AI brief (Gemini Nano / Edge Phi) fills in async · bwn:cmd dropupload:files bridge');
 
   // Active only on WO pages; checked at drag time so SPA navigation needs no watcher.
   function onWorkOrder() {
@@ -487,15 +487,6 @@
     return (who ? who + ': ' : '') + para;
   }
 
-  // First sentence of a brief, one line, ~200 chars - used only to derive a short doc Description /
-  // manifest bullet from the AI brief when the mechanical extractors found nothing.
-  function firstSentence(t) {
-    var s = String(t || '').replace(/\s+/g, ' ').trim();
-    if (!s) return '';
-    var mm = s.match(/^.*?[.?!](?:\s|$)/);
-    return (mm ? mm[0] : s).trim().slice(0, 200);
-  }
-
   // ---- Note Type from the email's parties ------------------------------------
   // classifyDomain: a client domain -> "Client", Broadway-internal -> "Internal", any
   // other external domain -> "Vendor", unknown -> ''. Extend CLIENT_DOMAINS as clients
@@ -906,6 +897,34 @@
     });
   }
 
+  // Background upgrade: after the note box is already up (with the fast mechanical lead), run the SLOW
+  // on-device AI brief per email and swap it into the note when it lands - so the model never delays the
+  // drop, the upload, or the box appearing. Patches the file's noteBlock, rebuilds pending.noteText, and
+  // refreshes the textarea IN PLACE - but only if the box is still the current one AND the user has not
+  // edited it (their edits always win). Idempotent: each email is enriched once (aiPending -> false when
+  // claimed); a merge drop re-runs and only touches the newly added files. Never throws.
+  function enrichNoteWithAI(pend) {
+    if (!pend || !pend.files || !pend.files.length) return;
+    pend.files.forEach(function (f) {
+      if (!f || !f.isEmail || !f.email || !f.aiPending) return;
+      f.aiPending = false;   // claim once - a failed/empty call keeps the mechanical lead, no retry
+      aiBrief(f.email).then(function (brief) {
+        if (!brief) return;
+        var block;
+        try { block = formatEmailBlock(f.email, brief); } catch (e) { return; }
+        if (!block) return;
+        f.summary = brief; f.aiUsed = true; f.noteBlock = block;
+        // Only touch the live UI if this drop is still the current pending and its box is still open.
+        if (pending !== pend || !noteBox) return;
+        var newText;
+        try { newText = buildNoteText(pend.files); } catch (e2) { return; }
+        pend.noteText = newText;
+        var ta = noteBox.__ta;
+        if (ta && !noteBox.__noteEdited) { ta.value = newText; }
+      }).catch(function () { });
+    });
+  }
+
   // Build per file: {kind, name, size, desc (short - Description field/clipboard),
   // noteLine (one-line WO-note fallback), and for emails isEmail + email model +
   // summary + noteBlock (the full Outlook-style block, led by the summary)}.
@@ -940,31 +959,25 @@
         try {
           m = isMsg ? parseMsg(rd.result) : emlToModel(parseEml(String(rd.result || '')));
         } catch (e) { return fallback(''); }
-        var mech = '';
-        try { mech = localSummary(m); } catch (e2) { mech = ''; }   // WO-request field extraction; '' unless it IS a request
-        var generic = '';
-        try { generic = genericEmailSummary(m); } catch (e2b) { generic = ''; }   // sender + opening line of the NEW message
-        // On-device AI brief (2-4 sentences) LEADS the note; '' when the built-in model is off/slow.
-        // aiBrief is self-bounded, but the outer 10s timeout may already have fired - re-check `done`.
-        aiBrief(m).then(function (brief) {
-          if (done) return;
-          try {
-            // The note lead summarizes what THIS message says: AI brief, else the generic sender+opening
-            // line. localSummary is NOT in the lead - it's a WO-request triage extractor and misframes a
-            // reply as a request; it stays only as a secondary option for the short doc Description.
-            var lead = brief || generic || emailDesc(m, base.name);
-            // Short one line for the doc Description + manifest bullet: prefer the message summary
-            // (generic), then the WO-request line for genuine intake, then the brief's first sentence.
-            var line = generic || mech || firstSentence(brief) || emailDesc(m, base.name);
-            var block = formatEmailBlock(m, lead);
-            if (!block) return fallback('');
-            base.isEmail = true; base.email = m; base.summary = lead; base.aiUsed = !!brief;
-            base.noteBlock = block;
-            base.desc = line ? line.slice(0, 300) : emailDesc(m, base.name);
-            base.noteLine = '• ' + (line || m.subject || base.name) + ' - Email';
-            finish(base);
-          } catch (e3) { fallback(''); }
-        });
+        try {
+          var mech = '';
+          try { mech = localSummary(m); } catch (e2) { mech = ''; }   // WO-request field extraction; '' unless it IS a request
+          var generic = '';
+          try { generic = genericEmailSummary(m); } catch (e2b) { generic = ''; }   // sender + opening line of the NEW message
+          // Resolve NOW with the mechanical lead - the on-device AI brief is SLOW, so it must not block
+          // the drop, the upload, or the note box. enrichNoteWithAI() runs aiBrief in the background and
+          // swaps the brief into the note when it lands (base.aiPending marks this email as not-yet-done).
+          // localSummary is deliberately NOT the lead: it's a WO-request extractor and misframes a reply.
+          var lead = generic || emailDesc(m, base.name);
+          var line = generic || mech || emailDesc(m, base.name);   // short line for the doc Description + bullet
+          var block = formatEmailBlock(m, lead);
+          if (!block) return fallback('');
+          base.isEmail = true; base.email = m; base.summary = lead; base.aiUsed = false; base.aiPending = true;
+          base.noteBlock = block;
+          base.desc = line ? line.slice(0, 300) : emailDesc(m, base.name);
+          base.noteLine = '• ' + (line || m.subject || base.name) + ' - Email';
+          finish(base);
+        } catch (e3) { fallback(''); }
       };
       if (isMsg) rd.readAsArrayBuffer(f); else rd.readAsText(f);
     });
@@ -1677,6 +1690,11 @@
     ta.style.cssText = 'width:100%;height:150px;box-sizing:border-box;resize:vertical;border:1px solid #c6d2cc;border-radius:7px;padding:7px;font:inherit;color:#12241b;';
     ta.value = pending.noteText || '';
     box.appendChild(ta);
+    // enrichNoteWithAI refreshes this textarea when the on-device brief lands - but never over a user
+    // edit. The flag latches on the first keystroke and is what makes the async swap safe.
+    box.__ta = ta;
+    box.__noteEdited = false;
+    ta.addEventListener('input', function () { box.__noteEdited = true; });
     var typeRow = document.createElement('div');
     typeRow.style.cssText = 'display:flex;align-items:center;gap:7px;margin-top:8px;';
     var tl = document.createElement('span'); tl.textContent = 'Type:'; tl.style.cssText = 'color:#5b6b8c;';
@@ -1891,6 +1909,7 @@
         var keepResp = !!(fresh && pending.needsResponse);
         pending = { ts: Date.now(), files: merged, noteText: buildNoteText(merged), originTab: origin, noteType: noteTypeForFiles(merged), needsResponse: keepResp };
         showNoteReview();
+        enrichNoteWithAI(pending);   // upgrade the mechanical lead to the AI brief in the background
       });
       // null label = auto-classify from the files (email -> correspondence by party; else WO Request).
       runApiUpload(raw, described, dt, ctx, null);
@@ -1961,6 +1980,7 @@
       // Client note (the sender is often a broker like Fairmarkit that classifyDomain reads as Vendor).
       pending = { ts: Date.now(), files: merged, noteText: buildNoteText(merged), originTab: origin, noteType: 'Client' };
       showNoteReview();
+      enrichNoteWithAI(pending);   // upgrade the mechanical lead to the AI brief in the background
     });
     // WO Intake handoff = a just-created WO's client request email, so label the uploaded
     // document(s) "Work Order Request". Uploads via the API; DOM dialog is the fallback.
