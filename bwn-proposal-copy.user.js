@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         BWN Proposal Copy (Broadway National)
 // @namespace    broadwaynational.bwn
-// @version      0.1.3
+// @version      0.1.4
 // @downloadURL  https://raw.githubusercontent.com/Intermu/userscripts/main/bwn-proposal-copy.user.js
 // @updateURL    https://raw.githubusercontent.com/Intermu/userscripts/main/bwn-proposal-copy.user.js
 // @description  Copy a client proposal from an aged-out work order onto a chosen replacement WO as an un-submitted Draft, in one confirmed action. Replays Umbrava's own createDraftProposal + editProposal mutations (line items copied verbatim); never submits, deletes, or retries. Manager-gated visibility. @grant none.
@@ -15,7 +15,7 @@
 (function () {
   'use strict';
 
-  var VER = '0.1.3';   // keep in step with @version
+  var VER = '0.1.4';   // keep in step with @version
   var DRY_RUN = false; // when true, the two WRITE mutations are logged, not sent
   console.info('[BWN PROPOSAL COPY] v' + VER + ' - copy client proposal to another WO as a Draft (createDraftProposal + editProposal replay)');
 
@@ -328,9 +328,10 @@
     var btn = document.createElement('button');
     btn.type = 'button';
     btn.className = ROW_BTN_CLASS;
-    btn.textContent = 'Copy to WO…';
-    btn.style.cssText = 'margin-left:8px;padding:4px 10px;border:1px solid #1a5f3e;border-radius:6px;' +
-      'background:#f0fdf4;color:#0d3d26;font:600 12px -apple-system,BlinkMacSystemFont,"Segoe UI",Arial,sans-serif;cursor:pointer;';
+    btn.textContent = 'Copy';
+    btn.title = 'Copy this proposal to another work order';
+    btn.style.cssText = 'margin:0 0 0 2px;padding:3px 8px;border:1px solid #1a5f3e;border-radius:6px;white-space:nowrap;' +
+      'background:#f0fdf4;color:#0d3d26;font:600 11px -apple-system,BlinkMacSystemFont,"Segoe UI",Arial,sans-serif;cursor:pointer;';
     btn.addEventListener('click', function (e) {
       e.preventDefault(); e.stopPropagation();
       openDrawer(sourceProposalId);
@@ -348,17 +349,20 @@
     }
     var rows = proposalRows();
     rows.forEach(function (row) {
-      var mark = row.getAttribute(ROW_BTN_MARK);
-      if (mark) {
-        var existing = row.querySelector('.' + ROW_BTN_CLASS);
-        if (existing) existing.style.display = '';   // rank regained - unhide
-        return;
-      }
+      // Key on the button's ACTUAL presence, not a mark. React re-renders the row's cells and
+      // WIPES the injected button while leaving the <tr> (and any data-attr mark) alive, so a
+      // mark-based guard sees the mark, finds no button, and never re-adds - the button vanishes
+      // on the first table re-render (measured live 2026-08-14). Presence-based re-adds after
+      // each wipe (the MutationObserver + interval drive the retry).
+      var existing = row.querySelector('.' + ROW_BTN_CLASS);
+      if (existing) { existing.style.display = ''; return; }   // already present - ensure visible, done
       if (!isClientProposalRow(row)) return;
       var pid = proposalIdFromRow(row);
       if (pid == null) return;   // fail safe: no confirmed id, no button
-      row.setAttribute(ROW_BTN_MARK, '1');
-      var host = row.lastElementChild || row;   // append INSIDE the last cell - a <button> cannot be a bare <tr> child
+      row.setAttribute(ROW_BTN_MARK, '1');   // kept for debuggability only; no longer the guard
+      // First cell = the far-left "More"/action column: always visible, never needs a horizontal
+      // scroll (the last cell sat off-screen on narrower windows).
+      var host = row.firstElementChild || row;
       host.appendChild(buildRowButton(pid));
     });
   }
