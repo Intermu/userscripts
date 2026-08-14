@@ -54,7 +54,7 @@ var BODY = [
   '5508 Lonas Drive / Knoxville, TN 37909'
 ].join('\r\n');
 
-console.log('Pilot Travel Centers / generic intake - extractWo scope-from-body fix (0.9.16)\n');
+console.log('Pilot Travel Centers / generic intake - extractWo scope-from-body fix (0.9.16 -> 0.9.17 real-label + asset block)\n');
 
 var wo = api.extractWo(SUBJECT, BODY, SENDER);
 
@@ -87,6 +87,57 @@ A.eq('  skips a lone salutation',
   api.genericBodyScope('Hi team,\r\nThe canopy light is out.\r\njdoe@client.com'),
   'The canopy light is out.');
 A.eq('  empty body -> empty (extractWo then falls back to the subject)', api.genericBodyScope(''), '');
+
+// --- Second real format: the ASSET/LABELED Pilot email (0.9.17) ---------------------------------
+// Grounded on Mike's dropped .msg "Pilot Store: 114 ... PO 170101431647 ... P2 - Normal (24 hrs)".
+// This format carries a real "Description:" FIELD LABEL near the BOTTOM, under a routing/asset block.
+// The intro line "Need service for per description below." is a DECOY - a loose /Description/ match
+// latched onto it and produced the boilerplate block instead of the request. The scope must be the
+// real Description value, with the Asset Information block kept under it.
+var SENDER2 = 'bradley.crockett@pilottravelcenters.com';
+var SUBJECT2 = 'Pilot Store: 114-Travel Center Purchase Order: 170101431647 Priority: P2 - Normal (24 hrs)';
+var BODY2 = [
+  'Hello Broadway National Group,',
+  'Need service for per description below.',
+  '**Please respond with an ETA on the Purchase Order**',
+  'Priority: P2 - Normal (24 hrs)',
+  'Created: 8/14/2026',
+  'PO: 170101431647',
+  'NTE:$500.00',
+  'Store Information:',
+  'PFJ#: 114 Pilot',
+  '2449 Genesis Road',
+  'Crossville, Tennessee 38571',
+  '(931) 450-3018',
+  'Asset Information:',
+  'Asset Name: DRYER',
+  'Model: MLG26PRBWW1',
+  'Serial#: M94402946',
+  'Parts Warranty End Date: 5/27/2026',
+  'Labor Warranty End Date: 5/27/2026',
+  'Description:',
+  'Left dryer needs new drum and belt strip. When running the lip of the drum came off in metal shavings.',
+  'Dispatcher',
+  'Bradley Crockett',
+  'bradley.crockett@pilottravelcenters.com'
+].join('\r\n');
+
+console.log('\n# the asset/labeled Pilot format - scope from the REAL "Description:" label, not the decoy');
+var wo2 = api.extractWo(SUBJECT2, BODY2, SENDER2);
+A.eq('  Scope = the real Description value + the Asset Information block',
+  wo2.scope,
+  'Left dryer needs new drum and belt strip. When running the lip of the drum came off in metal shavings.\n\n' +
+  'Asset Information:\nAsset Name: DRYER\nModel: MLG26PRBWW1\nSerial#: M94402946\n' +
+  'Parts Warranty End Date: 5/27/2026\nLabor Warranty End Date: 5/27/2026');
+A.ok('  Scope does NOT start with the decoy "below." block', wo2.scope.indexOf('below.') === -1 && wo2.scope.indexOf('respond with an ETA') === -1, 'got ' + JSON.stringify(wo2.scope));
+A.ok('  Scope excludes the routing block (Priority/PO/NTE/Store)', wo2.scope.indexOf('NTE') === -1 && wo2.scope.indexOf('Store Information') === -1 && wo2.scope.indexOf('PO: 1701') === -1, 'got ' + JSON.stringify(wo2.scope));
+A.ok('  Scope excludes the Dispatcher/signature trailer', wo2.scope.indexOf('Dispatcher') === -1 && wo2.scope.indexOf('Bradley') === -1, 'got ' + JSON.stringify(wo2.scope));
+A.eq('  Source PO # = 170101431647', wo2.po, '170101431647');
+A.eq('  Client DNE = 500.00 (body NTE)', wo2.clientDne, '500.00');
+A.eq('  Priority = P2', wo2.priorityLevel, 'P2');
+A.eq('  Location = PFJ 0114', wo2.location, 'PFJ 0114');
+A.eq('  Asset Name = DRYER', wo2.assetName, 'DRYER');
+A.eq('  Trade = blank (DRYER unmapped -> scope-suggester/user picks; never a wrong confident guess)', wo2.trade, '');
 
 console.log('\n# regression guard: the subject stays the LAST resort in extractWo source');
 A.ok('  genericBodyScope is tried before the subject fallback',
