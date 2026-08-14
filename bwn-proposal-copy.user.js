@@ -644,4 +644,19 @@
   }, 900);
   injectRowButtons();
 
+  // ---- console entry point for the live gate (DOM-independent) --------------
+  // Runs the copy engine straight, so the copy is testable even while the
+  // Proposals-row selectors are unverified and no button has injected. Suite
+  // convention (cf. window.__bwnLauncher, __bwnDispatchSyncNow). Defaults to
+  // DRY-RUN regardless of the DRY_RUN flag - a console call NEVER writes unless
+  // {dryRun:false} is passed explicitly, so it cannot fire a write by accident.
+  try {
+    window.__bwnCopyProposal = function (sourceProposalId, targetWorkOrderNumber, opts) {
+      opts = opts || {};
+      if (opts.dryRun == null) opts.dryRun = true;
+      return copyProposal(sourceProposalId, targetWorkOrderNumber, opts);
+    };
+    console.info('[BWN PROPOSAL COPY] console entry: __bwnCopyProposal(sourceProposalId, targetWorkOrderNumber, {dryRun:true})  (dry-run default; pass {dryRun:false} to actually write)');
+  } catch (e) { }
+
 })();
