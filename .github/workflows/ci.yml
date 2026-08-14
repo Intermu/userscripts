@@ -318,6 +318,17 @@ jobs:
       - name: Operate surface harness (agent drive seam + loop contract)
         run: node scripts/test-operate-surface.js
 
+      # Proposal Copy copies a client proposal onto another WO as an un-submitted Draft by replaying
+      # createDraftProposal + editProposal (line items batch-embedded, verbatim). Live-gated 2026-08-14
+      # (real copy #517386 on W-371126 -> new draft #540165 on W-386771). Slices the copy engine and pins:
+      # mapLineItem omits id + coerces the read's STRING quantity/chargeQuantity to Int (server rejects the
+      # string) + copies money verbatim; buildCreateVars sends jobId + location.address (both server-required
+      # though nullable in the schema); the two-mutation replay order; dry-run sends ZERO writes; null=failure
+      # preflight; stop-at-first-mutation-failure; read-back count+subtotal+client-PO; the pure picker/confirm
+      # helpers. Negative controls (mutate()) turn it red. 60 assertions.
+      - name: Proposal Copy engine harness (createDraftProposal + editProposal replay)
+        run: node scripts/test-proposal-copy.js
+
   lint:
     name: Lint (advisory)
     runs-on: ubuntu-latest
