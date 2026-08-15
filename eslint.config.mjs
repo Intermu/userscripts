@@ -27,7 +27,7 @@ const ES = readonly([
   'Uint8Array', 'Uint8ClampedArray', 'Int16Array', 'Uint16Array', 'Int32Array',
   'Uint32Array', 'Float32Array', 'Float64Array', 'Intl', 'parseInt', 'parseFloat',
   'isNaN', 'isFinite', 'NaN', 'Infinity', 'undefined', 'encodeURI', 'decodeURI',
-  'encodeURIComponent', 'decodeURIComponent', 'escape', 'unescape', 'eval',
+  'encodeURIComponent', 'decodeURIComponent', 'escape', 'unescape', 'eval', 'WebAssembly',
 ]);
 
 // Browser / DOM host environment.
@@ -44,8 +44,13 @@ const BROWSER = readonly([
   'alert', 'confirm', 'prompt', 'performance', 'crypto', 'WebSocket', 'TextEncoder',
   'TextDecoder', 'AbortController', 'AbortSignal', 'structuredClone', 'Image', 'CSS',
   'self', 'top', 'parent', 'frames', 'FileList', 'DataTransfer', 'ClipboardEvent',
-  // libraries commonly injected alongside userscripts
-  'jQuery', '$',
+  // DOM event constructors, Clipboard/Notifications/Streams/IndexedDB, the Option() element
+  // constructor, and Chrome's built-in AI (window.LanguageModel) — all host-provided.
+  'MouseEvent', 'KeyboardEvent', 'DragEvent', 'ClipboardItem', 'Notification',
+  'DecompressionStream', 'indexedDB', 'Option', 'LanguageModel',
+  // libraries commonly injected alongside userscripts (@require/@resource): jQuery, SheetJS
+  // (XLSX), Tesseract.js (OCR), pdf.js (pdfjsLib).
+  'jQuery', '$', 'XLSX', 'Tesseract', 'pdfjsLib',
 ]);
 
 // Greasemonkey / Tampermonkey APIs granted via @grant.
@@ -57,6 +62,11 @@ const GM = readonly([
   'GM_unregisterMenuCommand', 'GM_notification', 'GM_setClipboard', 'GM_getTab',
   'GM_saveTab', 'GM_getTabs', 'GM_log', 'GM_cookie', 'GM_webRequest',
 ]);
+
+// Embedded third-party UMD library footers inside bwn-suite-core reference `module`/`require`
+// under a `typeof module !== 'undefined'` guard; declare them so no-undef does not flag the
+// guarded value use. (The scripts/ harnesses get these from NODE below instead.)
+const UMD = readonly(['module', 'require']);
 
 // Node.js environment for the scripts/ test harnesses.
 const NODE = readonly([
@@ -73,7 +83,10 @@ const correctness = {
   'no-dupe-else-if': 'error',
   'no-duplicate-case': 'error',
   'no-unreachable': 'error',
-  'no-cond-assign': ['error', 'always'],
+  // 'except-parens' (ESLint's default): the intentional `while ((m = re.exec(s)) !== null)` and
+  // `if ((v = val(id)) !== undefined)` idioms these scripts rely on are allowed; a bare
+  // `if (x = y)` (the =/== typo this rule exists to catch) still errors.
+  'no-cond-assign': ['error', 'except-parens'],
   'no-const-assign': 'error',
   'no-class-assign': 'error',
   'no-func-assign': 'error',
@@ -103,14 +116,13 @@ export default [
     languageOptions: {
       ecmaVersion: 2021,
       sourceType: 'script',
-      globals: { ...ES, ...BROWSER, ...GM },
+      globals: { ...ES, ...BROWSER, ...GM, ...UMD },
     },
     rules: {
       ...correctness,
-      // Reports references to globals not in the list above (undefined-global check).
-      // Advisory today (the CI lint job is non-blocking) because Umbrava/app globals are
-      // not yet fully enumerated; extend the BROWSER list or add /* global X */ as they
-      // surface, then promote the lint job to a hard gate.
+      // Reports references to globals not in the list above (undefined-global check). The lint
+      // job is now a HARD GATE, so a newly-surfaced host/app global must be added to the lists
+      // above (or suppressed with an inline /* global X */) or it fails CI.
       'no-undef': 'error',
       // The scripts carry intentional scaffolding; unused-var churn is out of scope here.
       'no-unused-vars': 'off',
