@@ -337,7 +337,7 @@ jobs:
       # [bwn:<idemKey>] marker and reads workOrderNotes for it BEFORE posting; a business error is
       # non-retryable while a transport error is retryable. The append dedup carries a negative control -
       # disabling the marker check double-posts, RED. 40 assertions.
-      - name: Write-queue drain harness (Track C executor: patchWorkOrder/addEditJobNote + idempotency)
+      - name: "Write-queue drain harness (Track C executor: patchWorkOrder/addEditJobNote + idempotency)"
         run: node scripts/test-write-queue-drain.js
 
       # Track C write-back phase 2: the catalog pusher in bwn-write-queue.user.js. Reads the tenant
