@@ -500,11 +500,22 @@ A.ok('the status chip is unconditional now, not only when lanes are not status',
   !/group !== 'status' && r\.statusName/.test(S_CARD));
 A.ok('the confirm dialog quotes corrected hours too', /statusHours\(row\)/.test(kbFull));
 
+// 0.6.3 (open item #51): the age chip is DEMOTED to a neutral cue. Its over-30 modifier must not
+// borrow the severity red (#a11) - that colour is reserved for the judged verdict on the severity
+// EDGE beside it. Two reds with different meanings is exactly the redundancy this removes.
+var mAgeOld = kbFull.match(/\.kb-days\.kb-old\{([^}]*)\}/);
+A.ok('the age chip has a neutral over-30 modifier (kb-old)', !!mAgeOld);
+A.ok('and the age chip never uses the severity red #a11', !!mAgeOld && mAgeOld[1].indexOf('#a11') === -1);
+A.ok('the old alarm class kb-hot is gone from both CSS and the render', !/\.kb-days\.kb-hot\b/.test(kbFull) && !/ kb-hot'/.test(kbFull));
+// Negative control: #a11 is still in the file, on the severity edge - the demotion took red off the
+// age chip only, it did not delete red everywhere. If this goes red the edge lost its colour too.
+A.ok('the severity EDGE still owns the red, so red still means a judged verdict', /\.kb-card\.sev2\{border-left-color:#a11;\}/.test(kbFull));
+
 // The 0.3.0 drift: @version said 0.3.0 while the console constant said 0.2.0.
 var mVer = kbFull.match(/@version\s+(\S+)/);
 var mConst = kbFull.match(/var VER = '([^']+)'/);
 A.ok('the metadata @version and the VER constant agree', !!(mVer && mConst) && mVer[1] === mConst[1]);
-A.eq('and this is the version under test', mVer && mVer[1], '0.6.2');
+A.eq('and this is the version under test', mVer && mVer[1], '0.6.3');
 // The mirror (Intermu/userscripts-public) is being retired now that the source repo is public
 // again; raw URLs must point at the SOURCE repo or auto-update dies with the mirror.
 A.ok('the script points at the source repo raw URL, so it can auto-update at all',

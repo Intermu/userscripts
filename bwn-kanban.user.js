@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         BWN WO Kanban (Broadway National)
 // @namespace    broadwaynational.bwn
-// @version      0.6.2
+// @version      0.6.3
 // @description  Turns Umbrava's Work Orders list into a kanban board without leaving the page. A Board/List toggle sits next to the list's own search box; switching to Board hides the table (the toolbar stays, so the app's own filtering still drives everything) and lays the same work orders out as cards in lanes. Lanes are WO Status by default and regroup to Priority, Assignee, Client or Age from a dropdown. The board never invents its own filter system, and as of 0.5.0 it does not query at all: it reads both rows and verdicts from the full-board scan bwn-suite-core's List Heat already runs on the same page, so whatever the list is filtered to (phase, statuses, search, assignee chips, sort) is exactly what the board shows, and one list page now costs one full-board query instead of two. It still captures the SPA's own PagedWorkOrders request off the wire, because that capture is where the auth headers for the status write come from. Cards carry the triage picture: the status clock against the limit that WO was actually judged against, the reasons it is flagged, whether its onsite date has already passed, DNE vs vendor NTE with GP, vendors and trades. Severity is never computed here - it is read from the verdicts List Heat publishes in bwn-suite-core, so the board and the list can never disagree. Dragging a card between status lanes DOES change the work order, through Umbrava's own captured PatchWorkOrder mutation - it asks first, states that the WO's time-in-status clock will reset, verifies the server reported success, re-scans rather than trusting the optimistic move, and leaves the card where it was if anything fails. Everything is same-origin using the page's own session: no @connect, no keys, nothing leaves the browser.
 // @downloadURL  https://raw.githubusercontent.com/Intermu/userscripts/main/bwn-kanban.user.js
 // @updateURL    https://raw.githubusercontent.com/Intermu/userscripts/main/bwn-kanban.user.js
@@ -26,7 +26,7 @@
   // update check another. There is no GM_info without a grant (and a grant would sandbox the
   // script away from the page's fetch - see the header note), so the fallback is a literal
   // that must be bumped WITH @version; the harness pins the two together.
-  var VER = '0.6.2';
+  var VER = '0.6.3';
   console.info('[BWN KANBAN] v' + VER + ' - board rows AND verdicts read from bwn-suite-core\'s List Heat scan (no second full-board query); drag between status lanes writes via captured PatchWorkOrder');
 
   // ---------------------------------------------------------------------------
@@ -366,7 +366,10 @@
       '#bwn-kanban .kb-wo{font-weight:700;color:' + GREEN + ';text-decoration:none;}',
       '#bwn-kanban .kb-wo:hover{text-decoration:underline;}',
       '#bwn-kanban .kb-days{font:600 11px ui-monospace,"Segoe UI Mono",monospace;color:#5b6b63;}',
-      '#bwn-kanban .kb-days.kb-hot{color:#a11;}',
+      // Age is a neutral cue, never an alarm. Over 30 days darkens the chip slightly - it does NOT
+      // go red. The red/amber SEVERITY EDGE beside it owns "in trouble", and that is a judged
+      // verdict, not a raw age threshold; a second red on a different meaning is worse than one.
+      '#bwn-kanban .kb-days.kb-old{color:#3d4a44;}',
       '#bwn-kanban .kb-line{color:#3d4a44;margin-top:3px;font-size:12px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;}',
       '#bwn-kanban .kb-scope{color:#5b6b63;margin-top:5px;font-size:11.5px;line-height:1.35;}',
       '#bwn-kanban .kb-chips{display:flex;gap:5px;flex-wrap:wrap;margin-top:6px;}',
@@ -526,7 +529,7 @@
     var a = el('a', 'kb-wo', 'W-' + r.number);
     a.href = '/work-orders/' + r.number + '/details';
     top.appendChild(a);
-    var days = el('span', 'kb-days' + ((Number(r.numberOfDays) || 0) > 30 ? ' kb-hot' : ''), (r.numberOfDays != null ? r.numberOfDays + 'd' : ''));
+    var days = el('span', 'kb-days' + ((Number(r.numberOfDays) || 0) > 30 ? ' kb-old' : ''), (r.numberOfDays != null ? r.numberOfDays + 'd' : ''));
     top.appendChild(days);
     card.appendChild(top);
 
