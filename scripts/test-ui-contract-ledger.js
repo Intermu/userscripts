@@ -114,6 +114,9 @@ var LEDGER = {
   'bwn-drop-upload.user.js':   { drawer: 'NA',        toast: 'DIVERGENT', rmotion: 'NA',  rail: 'NA'  },
   'bwn-kanban.user.js':        { drawer: 'NA',        toast: 'NA',        rmotion: 'NA',  rail: 'NA'  },
   'bwn-notes.user.js':         { drawer: 'NA',        toast: 'NA',        rmotion: 'NA',  rail: 'NA'  },
+  // Own #bwn-pa-card overlay/menu + own paToast (the same private-toast pattern as proposal-copy,
+  // NOT the shared function toast()); no drawer, animation, or rail. NONE of the four SHARED primitives.
+  'bwn-proposal-actions.user.js': { drawer: 'NA',     toast: 'NA',        rmotion: 'NA',  rail: 'NA'  },
   // Self-contained modal overlay (#bwn-pc-overlay, own sheet) + own pcToast; closes by plain
   // remove, NOT the shared .bwn-closing exit. Carries NONE of the four SHARED primitives.
   'bwn-proposal-copy.user.js': { drawer: 'NA',        toast: 'NA',        rmotion: 'NA',  rail: 'NA'  },
@@ -123,7 +126,10 @@ var LEDGER = {
   'bwn-wide-list.user.js':     { drawer: 'NA',        toast: 'NA',        rmotion: 'NA',  rail: 'NA'  },
   'bwn-wo-assist.user.js':     { drawer: 'HAS',       toast: 'HAS',       rmotion: 'NA',  rail: 'NA'  },
   'bwn-wo-audit.user.js':      { drawer: 'HAS',       toast: 'DIVERGENT', rmotion: 'NA',  rail: 'NA'  },
-  'bwn-wo-intake.user.js':     { drawer: 'NA',        toast: 'HAS',       rmotion: 'NA',  rail: 'NA'  }
+  'bwn-wo-intake.user.js':     { drawer: 'NA',        toast: 'HAS',       rmotion: 'NA',  rail: 'NA'  },
+  // Headless Track C write-back executor + catalog pusher: no coordinator-facing UI surface at all
+  // (no drawer, toast, animation, or rail). NONE of the four SHARED primitives.
+  'bwn-write-queue.user.js':   { drawer: 'NA',        toast: 'NA',        rmotion: 'NA',  rail: 'NA'  }
 };
 
 // Why each DIVERGENT cell is intentional, not owed. Confirmed with Mike 2026-08-10; the toast rows
@@ -212,7 +218,7 @@ A.ok('ledger row count equals the ' + onDisk.length + ' scripts on disk', inLedg
   'ledger ' + inLedger.length + ' vs disk ' + onDisk.length);
 
 // =============================================================================================
-// 2. PER-CELL: detected reality agrees with the ledger classification, for all 14 scripts.
+// 2. PER-CELL: detected reality agrees with the ledger classification, for all scripts on disk.
 // =============================================================================================
 console.log('\n-- 2. per-script classification (' + onDisk.length + ' scripts x 4 contracts) --');
 var SRC = {};
