@@ -14,7 +14,6 @@
 // @updateURL    https://raw.githubusercontent.com/Intermu/userscripts/main/bwn-ask.user.js
 // ==/UserScript==
 
-/* eslint-disable */
 (function () {
   'use strict';
 
