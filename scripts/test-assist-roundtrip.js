@@ -337,8 +337,8 @@ async function probeAssist(src) {
   // The assist pin was left at 0.3.0 by the mirror-retirement sweep (b24cecc) that patch-bumped
   // every script's @version; the file has read 0.3.1 since, so this pin was red on main until
   // 2026-08-06. Its internal `var VER` still says 0.3.0 - that drift is bwn-wo-assist's to fix.
-  A.ok('core @version is 1.78.17', coreFull.indexOf('// @version      1.78.17') !== -1, 'core version drift');
-  A.ok('core banner says WO Assist 2.70', coreFull.indexOf('WO Assist 2.70') !== -1, 'module banner drift');
+  A.ok('core @version is 1.78.18', coreFull.indexOf('// @version      1.78.18') !== -1, 'core version drift');
+  A.ok('core banner says WO Assist 2.71', coreFull.indexOf('WO Assist 2.71') !== -1, 'module banner drift');
   A.ok('assist @version is 0.3.3', assistFull.indexOf('// @version      0.3.3') !== -1, 'assist version drift');
   A.ok("assist VER is '0.3.0'", assistFull.indexOf("var VER = '0.3.0';") !== -1, 'assist VER drift');
   // Step 4 hangs the client-response state read off the SAME tick, deliberately: two queues on

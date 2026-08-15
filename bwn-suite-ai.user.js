@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         BWN Suite - AI (Broadway National)
 // @namespace    broadwaynational.bwn
-// @version      1.45.7
+// @version      1.45.8
 // @downloadURL  https://raw.githubusercontent.com/Intermu/userscripts/main/bwn-suite-ai.user.js
 // @updateURL    https://raw.githubusercontent.com/Intermu/userscripts/main/bwn-suite-ai.user.js
 // @description  The Umbrava tools that call outside APIs, kept separate from the zero-egress Core script. Client Update and WO Audit drafts (Anthropic Claude; draft-only, scrubbed before sending, you review before posting); Find Techs / Find Suppliers (Google Places; vendor leads near a WO); and Job View (opens the Ops-Dashboard job card on the WO page - WO details from Umbrava plus the authored case file and next actions, read-only). Network access is limited by the browser to the declared API hosts and the BWN Static Web App. API keys are stored in Tampermonkey's storage via the menu commands and never enter the page. Toggle modules in BWN_MODULES below.
@@ -1013,6 +1013,61 @@
   }
   setTimeout(BWN.guard(planDrain, 'planDrain'), 7500);
   setInterval(BWN.guard(planDrain, 'planDrain'), 30000);
+
+  // job-acts drain (board item #42): the mirror of planDrain for the live WO-page overlay Core
+  // stages to 'bwn:actsq'. POST {acts:[{target,wo,over}]} to the SAME wo-ingest endpoint; the
+  // route stores each entry under both the tracking # and the WO #. Same terminal-result +
+  // dedup discipline: a 2xx-ok or 400 (reached + authed, invalid dropped) settles the entry and
+  // records the sent content hash in 'bwn:actssent' so Core won't re-enqueue an unchanged overlay.
+  var actsBusy = false;
+  function actsDrain() {
+    if (actsBusy) return;
+    if (!connectorEnabled()) return;   // kill-switch
+    var key = GM_getValue('ingest_key', '');
+    if (!key) return;
+    var q = BWN.lsGetJSON('bwn:actsq', []);
+    if (!Array.isArray(q) || !q.length) return;
+    var sendable = q.filter(function (e) { return e && e.id && e.key && (e.target || e.wo) && e.over && typeof e.over === 'object'; });
+    if (sendable.length !== q.length) BWN.lsSetJSON('bwn:actsq', sendable);   // purge unsendables once
+    if (!sendable.length) return;
+    var byKey = {}; sendable.forEach(function (e) { byKey[e.key] = e; });   // latest per key (Core keeps one)
+    var batch = Object.keys(byKey).map(function (k) { return byKey[k]; }).slice(0, 20);
+    var sentIds = {}, sentKeys = {}; batch.forEach(function (e) { if (e.id) sentIds[e.id] = 1; sentKeys[e.key] = e.h || null; });
+    var body;
+    try { body = JSON.stringify({ actor: ingestActor(), acts: batch.map(function (e) { return { target: e.target || '', wo: e.wo || '', over: e.over }; }) }); }
+    catch (e) { return; }   // couldn't serialize -> don't set busy (would wedge the drain)
+    function settle() {
+      var cur = BWN.lsGetJSON('bwn:actsq', []); if (!Array.isArray(cur)) cur = [];
+      BWN.lsSetJSON('bwn:actsq', cur.filter(function (e) {
+        if (!e) return false;
+        if (e.id && sentIds[e.id]) return false;
+        if (Object.prototype.hasOwnProperty.call(sentKeys, e.key) && e.h && e.h === sentKeys[e.key]) return false;   // same-content dup for a sent key
+        return true;   // a DIFFERENT-content entry Core queued mid-flight survives
+      }));
+      var as = BWN.lsGetJSON('bwn:actssent', null); if (!as || typeof as !== 'object') as = {};
+      Object.keys(sentKeys).forEach(function (k) { if (sentKeys[k]) as[k] = sentKeys[k]; });
+      var ak = Object.keys(as); while (ak.length > 500) delete as[ak.shift()];
+      BWN.lsSetJSON('bwn:actssent', as);
+    }
+    actsBusy = true;
+    GM_xmlhttpRequest({
+      method: 'POST',
+      url: INGEST_URL + '?client=' + INGEST_CLIENT,
+      headers: { 'Content-Type': 'application/json', 'x-bwn-key': key },
+      data: body,
+      timeout: 15000,
+      onload: function (r) {
+        actsBusy = false;
+        var stored = false;
+        if (r.status >= 200 && r.status < 300) { try { stored = JSON.parse(r.responseText).ok === true; } catch (e) { } }
+        if (stored || r.status === 400) { settle(); connOk(); } else connFail(r.status);   // 400 = reached + authed; transient/403/5xx retry next tick
+      },
+      onerror: function () { actsBusy = false; connFail('network'); },
+      ontimeout: function () { actsBusy = false; connFail('timeout'); }
+    });
+  }
+  setTimeout(BWN.guard(actsDrain, 'actsDrain'), 8500);
+  setInterval(BWN.guard(actsDrain, 'actsDrain'), 30000);
   // Reverse direction: pull the DASHBOARD's case file + ack state for the on-screen WO
   // (by tracking #) onto the bus, so Core can merge the dashboard's Next Actions Required
   // into the checklist. Cached per tracking # for SWA_TTL; no-ops off WO pages or when

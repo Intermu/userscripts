@@ -120,6 +120,8 @@ jobs:
       # in "Clocked Out: Complete" and muted 19 live rows in five counts at once.
       - name: List Heat open-count harness (phase beats the status name)
         run: node scripts/test-heat-open-count.js
+      - name: Job-acts producer harness (Core stager + AI drain, board item 42)
+        run: node scripts/test-acts-push.js
 
       # List Heat 1.78.6: the API scan needs a captured PagedWorkOrders query, but capture is a
       # passive race the document-start hook can lose - leaving 'no capture yet' for the page's

@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         BWN Suite - Core (Broadway National)
 // @namespace    broadwaynational.bwn
-// @version      1.78.17
+// @version      1.78.18
 // @downloadURL  https://raw.githubusercontent.com/Intermu/userscripts/main/bwn-suite-core.user.js
 // @updateURL    https://raw.githubusercontent.com/Intermu/userscripts/main/bwn-suite-core.user.js
 // @description  Runs several Umbrava helpers for BWN coordinators, in the browser with no privileged grants. Includes: PO Approval + ETA Builder; WO Assist (GP/ETA, a stall watchdog, DNE calculator, and a next-action playbook); Email Leak Guard (checks recipients against vendor names, PO amounts, and client budget references before an outbound email sends); WO List Heat (a triage overlay + My Day strip on the work-order list, with an optional same-origin Umbrava API scan for deterministic full-board coverage); and the BWN Launcher (opens the Azure Static Web App tools with the current WO's context). Modules share state through sessionStorage/localStorage. The only network calls are same-origin Umbrava GraphQL requests (app.umbrava.com/api/graphql, the app's own session): List Heat's full-board scan and WO Assist's work-order / trip / clock-in / document reads, plus ONE write - BWN Views saves the column layout through Umbrava's own putUserPreference, the same preference the column chooser writes; everything else is offline. Toggle modules in BWN_MODULES below.
@@ -45,7 +45,7 @@
   try { localStorage.setItem('bwn:status:core', JSON.stringify({ ver: BWN_VER, ts: Date.now() })); } catch (e) { /* best-effort */ }
 
   console.info('[BWN SUITE CORE] v' + BWN_VER + ' |',
-    'Shared Core 7 \u00b7 DOM Handles 1.0 \u00b7 PO Approval 1.13 \u00b7 WO Assist 2.70 \u00b7 Leak Guard 2.0 \u00b7 List Heat 3.28 \u00b7 Launcher 2.0 \u00b7 Views 3.0 \u00b7 Palette 1.1 \u00b7 Visit 1.2 \u00b7 Reminders 1.1 \u00b7 Timeline 1.1 \u00b7 TripCal 1.4 \u00b7 Connector 1.2 |',
+    'Shared Core 7 \u00b7 DOM Handles 1.0 \u00b7 PO Approval 1.13 \u00b7 WO Assist 2.71 \u00b7 Leak Guard 2.0 \u00b7 List Heat 3.28 \u00b7 Launcher 2.0 \u00b7 Views 3.0 \u00b7 Palette 1.1 \u00b7 Visit 1.2 \u00b7 Reminders 1.1 \u00b7 Timeline 1.1 \u00b7 TripCal 1.4 \u00b7 Connector 1.2 |',
     'enabled:', Object.keys(BWN_MODULES).filter(function (k) { return BWN_MODULES[k]; }).join(', '));
 
   // ===== BWN SHARED CORE v7 - KEEP IN SYNC across both suite scripts =====
@@ -1398,7 +1398,7 @@
   });
 
   // ==========================================================================
-  // MODULE: WO Assist: GP + ETA Watchdog + Playbook v2.70 (Connector 1.2)
+  // MODULE: WO Assist: GP + ETA Watchdog + Playbook v2.71 (Connector 1.2)
   // ==========================================================================
   bwnBoot('woAssist', BWN_MODULES.woAssist, function () {
     'use strict';
@@ -1428,7 +1428,7 @@
     var PANEL_ID = 'bwn-gp-panel';
     var GREEN = BWN.GREEN;
 
-    console.info('[BWN GP] WO Assist v2.70 loaded on', location.href);
+    console.info('[BWN GP] WO Assist v2.71 loaded on', location.href);
 
     // ---- Parsing helpers (shared via BWN core) -----------------------------
     var parseMoney = BWN.parseMoney;
@@ -2855,6 +2855,9 @@
       if (plan && plan.items && plan.items.length && !plan.dash) {
         try { stagePlanPush((state.hd || {}).tracking, plan.items, 'note'); } catch (e) { }
       }
+      // Push the live WO-page state (PO/trips/docs/tasks) to the dashboard's job-acts overlay
+      // (#42), same zero-egress queue-then-drain pattern as the plan push above.
+      try { stageActsPush(state); } catch (e) { }
       return computeNextActions(state, state.cfg || bwnConfig());
     }
 
@@ -3700,6 +3703,54 @@
         if (q.length > 100) q = q.slice(-100);
         BWN.lsSetJSON('bwn:planq', q);
       } catch (e) { /* best-effort */ }
+    }
+    // Stage a job -> dashboard ACTS overlay (board item #42). Zero-egress: enqueues to
+    // localStorage 'bwn:actsq'; the AI script drains it (key-gated POST {acts}) into the SWA
+    // 'job-acts' store, which the dashboard overlays onto stateFromRow via opts.over so the SAME
+    // engine yields the PO/stall/no-show/docs/task steps a workbook row cannot reach. The overlay
+    // is exactly the fields the dashboard adapter defaults empty (pos:[], stall/noShow/docs/
+    // openTasks null). Keyed by BOTH the tracking # and the WO # (the header carries both) so the
+    // dashboard join resolves regardless of board item 43. Deduped by content hash per key
+    // ('bwn:actssent', the AI-confirmed marker) so an unchanged overlay doesn't re-enqueue every
+    // refresh; one pending entry per key. Only stages when a detail-page-only signal exists.
+    function stageActsPush(state) {
+      try {
+        if (!state) return;
+        var hd = state.hd || {};
+        var tracking = String(hd.tracking || '').replace(/\D+/g, '');
+        var woNum = String(hd.wo || '').replace(/\D+/g, '');
+        if (!/^\d+$/.test(tracking) && !/^\d+$/.test(woNum)) return;   // no key the dashboard could join on
+        var over = {
+          pos: Array.isArray(state.pos) ? state.pos : [],
+          stall: state.stall || null,
+          noShow: state.noShow || null,
+          docs: state.docs || null,
+          openTasks: state.openTasks || null,
+          gpPct: (typeof state.gpPct === 'number') ? state.gpPct : null,
+          nte: state.nte || null,
+          vendorTotal: (typeof state.vendorTotal === 'number') ? state.vendorTotal : null,
+          noteCount: (typeof state.noteCount === 'number') ? state.noteCount : 0,
+          lastClientNoteDays: (typeof state.lastClientNoteDays === 'number') ? state.lastClientNoteDays : null,
+          staleDays: (typeof state.staleDays === 'number') ? state.staleDays : null,
+          eta: state.eta || null
+        };
+        // Only worth a push if it carries something the workbook row lacks - else the dashboard's
+        // default (workbook-only) state is already equivalent, so pushing an empty overlay is noise.
+        var hasSignal = (over.pos && over.pos.length) || over.stall || over.noShow || over.docs || over.openTasks;
+        if (!hasSignal) return;
+        var key = tracking || woNum;
+        var h = authoredKeyHash(JSON.stringify(over));
+        var sent = BWN.lsGetJSON('bwn:actssent', null); if (!sent || typeof sent !== 'object') sent = {};
+        if (sent[key] === h) return;   // this exact overlay already handled by the AI
+        var q = BWN.lsGetJSON('bwn:actsq', []); if (!Array.isArray(q)) q = [];
+        var existing = null;
+        q = q.filter(function (e) { if (e && e.key === key) { existing = e; return false; } return true; });   // one pending per key
+        if (existing && existing.h === h) { q.push(existing); BWN.lsSetJSON('bwn:actsq', q); return; }   // identical entry already queued -> keep its id
+        var id = Date.now().toString(36) + (ingestSeq++).toString(36) + Math.random().toString(36).slice(2, 6);
+        q.push({ id: id, key: key, target: tracking || null, wo: woNum || null, over: over, h: h, ts: Date.now() });
+        if (q.length > 100) q = q.slice(-100);
+        BWN.lsSetJSON('bwn:actsq', q);
+      } catch (e) { /* best-effort, zero-egress */ }
     }
     // ---- Usage stats + adaptive NUDGING (Increment B) --------------------------
     // INVERTED learning, per the operating rule: habits only ever ADD pressure, they
