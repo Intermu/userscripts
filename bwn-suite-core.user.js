@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         BWN Suite - Core (Broadway National)
 // @namespace    broadwaynational.bwn
-// @version      1.78.14
+// @version      1.78.15
 // @downloadURL  https://raw.githubusercontent.com/Intermu/userscripts/main/bwn-suite-core.user.js
 // @updateURL    https://raw.githubusercontent.com/Intermu/userscripts/main/bwn-suite-core.user.js
 // @description  Runs several Umbrava helpers for BWN coordinators, in the browser with no privileged grants. Includes: PO Approval + ETA Builder; WO Assist (GP/ETA, a stall watchdog, DNE calculator, and a next-action playbook); Email Leak Guard (checks recipients against vendor names, PO amounts, and client budget references before an outbound email sends); WO List Heat (a triage overlay + My Day strip on the work-order list, with an optional same-origin Umbrava API scan for deterministic full-board coverage); and the BWN Launcher (opens the Azure Static Web App tools with the current WO's context). Modules share state through sessionStorage/localStorage. The only network calls are same-origin Umbrava GraphQL requests (app.umbrava.com/api/graphql, the app's own session): List Heat's full-board scan and WO Assist's work-order / trip / clock-in / document reads, plus ONE write - BWN Views saves the column layout through Umbrava's own putUserPreference, the same preference the column chooser writes; everything else is offline. Toggle modules in BWN_MODULES below.
@@ -5911,7 +5911,7 @@
     }
     window.__bwnWoHeat = true;
 
-    console.info('[BWN HEAT] v3.27 loaded on', location.href);
+    console.info('[BWN HEAT] v3.28 loaded on', location.href);
 
     // ---- Config (edit here) ----------------------------------------------
     // Advanced knobs (status-class regexes + priority multipliers) now live in the
@@ -6826,6 +6826,33 @@
       return HEAT_DONE_STATUS_RE.test(String(status == null ? '' : status));
     }
 
+    // ---- Audit panel: open-row tally (v3.28) ----------------------------------------
+    // The "since last scan" counts the Audit panel's delta strip shows - open, red, amber,
+    // over-30 and the age buckets - over the OPEN rows only. Factored out of toggleAuditPanel
+    // (~250 lines of DOM building) so the heatDone gate that decides "open" HERE is testable
+    // without a fake DOM; test-heat-open-count.js slices it, the same way it already slices the
+    // other four callers. This is the FIFTH heatDone site (v3.22): a done row is excluded from
+    // every count, applied once more at DISPLAY time because heatStore caches a row's
+    // last-scanned sev and a row can converge to done after it was stored. `days`/`hrs`/
+    // `lastNote` are the stored strings off the row (commas tolerated), not numbers; sev is the
+    // stored verdict, so bad/warn read what the scan judged, not a recomputation.
+    function auditOpenTally(entries) {
+      var t = { open: 0, bad: 0, warn: 0, over30: 0, bkt: { a: 0, b: 0, c: 0, d: 0 }, noHrs: 0, noNote: 0 };
+      (entries || []).forEach(function (e) {
+        if (heatDone(e.status, e.phase)) return;
+        t.open++;
+        if (e.sev === 2) t.bad++; else if (e.sev === 1) t.warn++;
+        var ag = parseFloat(String(e.days || '').replace(/,/g, ''));
+        if (!isNaN(ag)) {
+          if (ag > 30) t.over30++;
+          if (ag <= 7) t.bkt.a++; else if (ag <= 30) t.bkt.b++; else if (ag <= 60) t.bkt.c++; else t.bkt.d++;
+        }
+        if (!String(e.hrs || '').trim()) t.noHrs++;
+        if (!String(e.lastNote || '').trim()) t.noNote++;
+      });
+      return t;
+    }
+
     // ---- Threshold model -----------------------------------------------------------
     // Delegates to the file-shared engine (single source of truth with WO Assist).
     // THE 4th PARAMETER IS LOAD-BEARING (v3.23). This alias declared only three while both
@@ -7607,20 +7634,10 @@
         var snaps = BWN.lsGetJSON(SNAP_KEY, {}) || {};
         var todayK = mydayDateKey();
         var priorKey = Object.keys(snaps).filter(function (k) { return k < todayK; }).sort().pop();
-        var curS = { bad: 0, warn: 0, open: 0, over30: 0 };
-        var bkt = { a: 0, b: 0, c: 0, d: 0 }, noHrs = 0, noNote = 0;
-        entries.forEach(function (e) {
-          if (heatDone(e.status, e.phase)) return;
-          curS.open++;
-          if (e.sev === 2) curS.bad++; else if (e.sev === 1) curS.warn++;
-          var ag = parseFloat(String(e.days || '').replace(/,/g, ''));
-          if (!isNaN(ag)) {
-            if (ag > 30) curS.over30++;
-            if (ag <= 7) bkt.a++; else if (ag <= 30) bkt.b++; else if (ag <= 60) bkt.c++; else bkt.d++;
-          }
-          if (!String(e.hrs || '').trim()) noHrs++;
-          if (!String(e.lastNote || '').trim()) noNote++;
-        });
+        // The open-row tally is a pure function now (auditOpenTally, sliced by
+        // test-heat-open-count.js) - it, not this DOM builder, owns the heatDone gate.
+        var curS = auditOpenTally(entries);
+        var bkt = curS.bkt, noHrs = curS.noHrs, noNote = curS.noNote;
         var dl = document.createElement('div'); dl.className = 'dl';
         var pS = priorKey ? snaps[priorKey] : null;
         function dseg(label, nowV, thenV) {

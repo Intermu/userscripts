@@ -90,8 +90,15 @@ var core = readLF(CORE_SRC);
 // ---- The real blocks under test ------------------------------------------------------
 var SRC_DONE = slice(core,
   '    // ---- Is this row finished? ONE place (v3.22) ---',
-  '    // ---- Threshold model ---',
+  '    // ---- Audit panel: open-row tally',
   'heatDone');
+// v3.28: the audit panel's open-row tally, factored out of toggleAuditPanel so the FIFTH
+// heatDone call site is sliced and EXERCISED, not merely source-checked. Needs heatDone
+// (from SRC_DONE) in scope.
+var SRC_AUDIT = slice(core,
+  '    // ---- Audit panel: open-row tally',
+  '    // ---- Threshold model ---',
+  'auditOpenTally');
 var SRC_THRESH = slice(core,
   '  var BWN_HEAT_CFG = {',
   '  // ---- Next-actions engine, published across module closures',
@@ -166,7 +173,7 @@ var PRELUDE = [
 
 function build(opts) {
   var o = opts || {};
-  var src = [PRELUDE, SRC_THRESH, SRC_DONE, SRC_ALIAS, SRC_VERDICT, SRC_SNAP, SRC_O30, SRC_MYDAY].join('\n\n');
+  var src = [PRELUDE, SRC_THRESH, SRC_DONE, SRC_AUDIT, SRC_ALIAS, SRC_VERDICT, SRC_SNAP, SRC_O30, SRC_MYDAY].join('\n\n');
   (o.mutations || []).forEach(function (m) { src = mutate(src, m[0], m[1]); });
   var sandbox = { Date: Date, JSON: JSON, Math: Math, String: String, Number: Number, parseFloat: parseFloat, parseInt: parseInt, isNaN: isNaN, Object: Object, Array: Array };
   // The live config, so these numbers are the board's numbers.
@@ -323,6 +330,47 @@ console.log('\n-- o30BatchStart: the over-30 batch --');
   A.eq('and it says so out loud', s2.__alerts, ['No open over-30 jobs in the scan.']);
 })();
 
+console.log('\n-- auditOpenTally: the Audit panel delta strip, now SLICED (was source-only) --');
+(function () {
+  // The fifth heatDone site. Until v3.28 it lived inside toggleAuditPanel's ~250 lines of DOM
+  // building and was covered by a source-string check alone; it is now a pure function and is
+  // exercised here exactly like the other four callers. The panel reads the STORED sev off each
+  // row (not a recomputation), so mark the 19 "Clocked Out: Complete" rows red the way a v3.22
+  // scan now would - same as the snapshot test - then hand it the entries array the panel builds.
+  function entriesOf(s) { return Object.keys(s.heatStore).map(function (k) { var e = s.heatStore[k]; e._href = k; return e; }); }
+  function markClockedRed(s) { Object.keys(s.heatStore).forEach(function (k) { if (/Clocked Out/.test(s.heatStore[k].status)) s.heatStore[k].sev = 2; }); }
+
+  var s = seed(build({})); markClockedRed(s);
+  var t = s.auditOpenTally(entriesOf(s));
+  A.eq('open is the whole board - the 19 Clocked-Out rows are active-phase, not done', t.open, 218);
+  A.eq('the 19 red rows are counted, none as amber', [t.bad, t.warn], [19, 0]);
+  A.eq('the 5 aged Clocked-Out rows land in over-30', t.over30, 5);
+  A.eq('over-30 equals the 31-60 plus 60+ buckets', t.bkt.c + t.bkt.d, 5);
+  A.eq('every scanned row falls in exactly one age bucket', t.bkt.a + t.bkt.b + t.bkt.c + t.bkt.d, 218);
+  A.eq('this board has no data gaps', [t.noHrs, t.noNote], [0, 0]);
+
+  // THE GATE, both directions. A terminal phase drops all 19 from every count...
+  var sC = seed(build({}), { mutedPhase: 'Closed' }); markClockedRed(sC);
+  var tC = sC.auditOpenTally(entriesOf(sC));
+  A.eq('a Closed phase drops the 19 from open', tC.open, 199);
+  A.eq('and from red and over-30 too', [tC.bad, tC.over30], [0, 0]);
+
+  // ...and with no phase read at all, the status NAME mutes them, exactly as before the fix.
+  var sN = seed(build({}), { mutedPhaseAbsent: true }); markClockedRed(sN);
+  var tN = sN.auditOpenTally(entriesOf(sN));
+  A.eq('with no phase, the name mutes the 19 - open is 199', tN.open, 199);
+  A.eq('and they reach no count', [tN.bad, tN.over30], [0, 0]);
+
+  // Data-gap counters run AFTER the gate: a blank hrs / blank lastNote on an OPEN row is
+  // counted; an empty list tallies to zero rather than throwing.
+  var sG = seed(build({}));
+  sG.heatStore['/work-orders/300000'].hrs = '';
+  sG.heatStore['/work-orders/300000'].lastNote = '';
+  var tG = sG.auditOpenTally(entriesOf(sG));
+  A.eq('a blank-hrs, blank-note open row shows in both data-gap counts', [tG.noHrs, tG.noNote], [1, 1]);
+  A.eq('an empty entries list tallies to zero, never throws', s.auditOpenTally([]).open, 0);
+})();
+
 console.log('\n-- mutation controls (each must FAIL an assertion above) --');
 (function () {
   // M1: the fix reverted - the active-phase veto removed, so the status name rules again.
@@ -386,6 +434,18 @@ console.log('\n-- mutation controls (each must FAIL an assertion above) --');
   var s7 = build({ mutations: m7 });
   A.eq('M7 control: a widened whitelist drags WorkComplete rows in too', s7.heatDone('Work Complete', 'WorkComplete'), false);
   A.eq('M7 control: and the shipped whitelist leaves them alone', build({}).heatDone('Work Complete', 'WorkComplete'), true);
+
+  // M8: the audit tally's gate reverted to an inline regex - the delta strip drifts from the
+  // My Day strip and the snapshot, the exact five-places-disagree bug, on the very site that
+  // used to be source-checked only. Targeted by its unique trailing "t.open++;" so the mutation
+  // lands in auditOpenTally and not in heatSnapshot's byte-identical (but s.open++) copy.
+  var m8 = [['        if (heatDone(e.status, e.phase)) return;\n        t.open++;',
+    "        if (/complete|invoiced|closed|cancel/i.test(e.status || '')) return;\n        t.open++;"]];
+  var s8 = seed(build({ mutations: m8 }));
+  Object.keys(s8.heatStore).forEach(function (k) { if (/Clocked Out/.test(s8.heatStore[k].status)) s8.heatStore[k].sev = 2; });
+  var t8 = s8.auditOpenTally(Object.keys(s8.heatStore).map(function (k) { var e = s8.heatStore[k]; e._href = k; return e; }));
+  A.eq('M8 control: with the inline regex the audit tally says 199 open, drifting from 218', t8.open, 199);
+  A.eq('M8 control: and it loses the 19 red and the 5 over-30', [t8.bad, t8.over30], [0, 0]);
 })();
 
 console.log('\n-- the shipped call sites: all five ask the same question --');
@@ -397,19 +457,23 @@ console.log('\n-- the shipped call sites: all five ask the same question --');
   A.ok('and it lives in heatDone', /var HEAT_DONE_STATUS_RE = \/complete\|invoiced\|closed\|cancel\/i;/.test(core));
   A.eq('every open count calls heatDone', core.split('heatDone(').length - 1, 6);   // 1 definition + 5 call sites
   A.ok('the verdict engine asks it too', core.indexOf('if (heatDone(f.status, f.phase)) return v;') !== -1);
-  A.ok('the audit panel asks it (not sliced above - source check is its only automated cover)',
-    core.indexOf('        entries.forEach(function (e) {\n          if (heatDone(e.status, e.phase)) return;') !== -1);
+  A.ok('the audit panel delegates its open tally to auditOpenTally (SLICED + exercised above, no longer source-only)',
+    /var curS = auditOpenTally\(entries\);/.test(core));
+  A.ok('and auditOpenTally is the one carrying the fifth heatDone gate',
+    /function auditOpenTally\(entries\) \{[\s\S]*?if \(heatDone\(e\.status, e\.phase\)\) return;/.test(core));
   A.ok('and the tint borrows the phase from the API record for the same row',
     core.indexOf('phase: apiRec ? apiRec.phase : undefined') !== -1);
   // Version bumps: without them the fix reaches nobody (Tampermonkey compares versions).
   // Updated for 1.78.5: the dataset push now also carries Job ID / Source PO # / WO Date / Project Type
   // (the v2 gap); List Heat bumps to v3.27. (v3.26 carried Last Note Date; v3.25 added the push.)
-  // (1.66.35 had added the closure auto-advance step.) The exact pin is the
-  // point: it forces a conscious edit on every Core bump, so a version can never ride out
-  // attached to an unrelated change. It was red on main from 1.66.33 (the mirror-retirement
-  // sweep bumped Core without acknowledging it here) until 2026-08-06.
-  A.ok('Core is bumped to 1.78.14', core.indexOf('// @version      1.78.14') !== -1);
-  A.ok('and List Heat announces v3.27', core.indexOf("console.info('[BWN HEAT] v3.27 loaded on', location.href);") !== -1);
+  // v3.28 / Core 1.78.15: the audit panel's open tally was factored into auditOpenTally so its
+  // heatDone gate is sliced above rather than source-checked. (1.66.35 had added the closure
+  // auto-advance step.) The exact pin is the point: it forces a conscious edit on every Core
+  // bump, so a version can never ride out attached to an unrelated change. It was red on main
+  // from 1.66.33 (the mirror-retirement sweep bumped Core without acknowledging it here) until
+  // 2026-08-06.
+  A.ok('Core is bumped to 1.78.15', core.indexOf('// @version      1.78.15') !== -1);
+  A.ok('and List Heat announces v3.28', core.indexOf("console.info('[BWN HEAT] v3.28 loaded on', location.href);") !== -1);
 })();
 
 A.finish();
