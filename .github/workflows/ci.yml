@@ -349,13 +349,15 @@ jobs:
         run: node scripts/test-wq-catalog-push.js
 
   lint:
-    name: Lint (advisory)
+    name: Lint
     runs-on: ubuntu-latest
-    # Non-blocking for now: the injected userscripts reference host/app globals
-    # (framework singletons, jQuery, unsafeWindow-exposed objects) that are not yet
-    # fully enumerated in eslint.config.mjs, so no-undef may report until that list is
-    # confirmed. Flip continue-on-error off to promote lint to a hard gate.
-    continue-on-error: true
+    # Hard gate (was advisory until 2026-08-14). eslint.config.mjs now enumerates the injected
+    # host/app globals (XLSX, Tesseract, pdfjsLib, the DOM event constructors, LanguageModel, ...)
+    # and allows the intentional parenthesized assignment-in-condition idiom
+    # (no-cond-assign: except-parens), so the userscripts + harnesses lint with zero errors. A new
+    # undefined global or a real cond-assign now fails CI. Two files still carry a blanket
+    # /* eslint-disable */ and emit an advisory unused-directive WARNING, which does NOT fail the
+    # run (no --max-warnings is set); the gate blocks on ERRORS only.
     steps:
       - name: Checkout repository
         uses: actions/checkout@v7
