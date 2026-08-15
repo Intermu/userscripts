@@ -472,7 +472,7 @@ console.log('\n-- the shipped call sites: all five ask the same question --');
   // bump, so a version can never ride out attached to an unrelated change. It was red on main
   // from 1.66.33 (the mirror-retirement sweep bumped Core without acknowledging it here) until
   // 2026-08-06.
-  A.ok('Core is bumped to 1.78.15', core.indexOf('// @version      1.78.15') !== -1);
+  A.ok('Core is bumped to 1.78.16', core.indexOf('// @version      1.78.16') !== -1);
   A.ok('and List Heat announces v3.28', core.indexOf("console.info('[BWN HEAT] v3.28 loaded on', location.href);") !== -1);
 })();
 

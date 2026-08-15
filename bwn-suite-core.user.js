@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         BWN Suite - Core (Broadway National)
 // @namespace    broadwaynational.bwn
-// @version      1.78.15
+// @version      1.78.16
 // @downloadURL  https://raw.githubusercontent.com/Intermu/userscripts/main/bwn-suite-core.user.js
 // @updateURL    https://raw.githubusercontent.com/Intermu/userscripts/main/bwn-suite-core.user.js
 // @description  Runs several Umbrava helpers for BWN coordinators, in the browser with no privileged grants. Includes: PO Approval + ETA Builder; WO Assist (GP/ETA, a stall watchdog, DNE calculator, and a next-action playbook); Email Leak Guard (checks recipients against vendor names, PO amounts, and client budget references before an outbound email sends); WO List Heat (a triage overlay + My Day strip on the work-order list, with an optional same-origin Umbrava API scan for deterministic full-board coverage); and the BWN Launcher (opens the Azure Static Web App tools with the current WO's context). Modules share state through sessionStorage/localStorage. The only network calls are same-origin Umbrava GraphQL requests (app.umbrava.com/api/graphql, the app's own session): List Heat's full-board scan and WO Assist's work-order / trip / clock-in / document reads, plus ONE write - BWN Views saves the column layout through Umbrava's own putUserPreference, the same preference the column chooser writes; everything else is offline. Toggle modules in BWN_MODULES below.
@@ -45,7 +45,7 @@
   try { localStorage.setItem('bwn:status:core', JSON.stringify({ ver: BWN_VER, ts: Date.now() })); } catch (e) { /* best-effort */ }
 
   console.info('[BWN SUITE CORE] v' + BWN_VER + ' |',
-    'Shared Core 7 \u00b7 DOM Handles 1.0 \u00b7 PO Approval 1.13 \u00b7 WO Assist 2.69 \u00b7 Leak Guard 2.0 \u00b7 List Heat 3.24 \u00b7 Launcher 2.0 \u00b7 Views 3.0 \u00b7 Palette 1.1 \u00b7 Visit 1.2 \u00b7 Reminders 1.1 \u00b7 Timeline 1.1 \u00b7 TripCal 1.4 \u00b7 Connector 1.2 |',
+    'Shared Core 7 \u00b7 DOM Handles 1.0 \u00b7 PO Approval 1.13 \u00b7 WO Assist 2.70 \u00b7 Leak Guard 2.0 \u00b7 List Heat 3.24 \u00b7 Launcher 2.0 \u00b7 Views 3.0 \u00b7 Palette 1.1 \u00b7 Visit 1.2 \u00b7 Reminders 1.1 \u00b7 Timeline 1.1 \u00b7 TripCal 1.4 \u00b7 Connector 1.2 |',
     'enabled:', Object.keys(BWN_MODULES).filter(function (k) { return BWN_MODULES[k]; }).join(', '));
 
   // ===== BWN SHARED CORE v7 - KEEP IN SYNC across both suite scripts =====
@@ -1398,7 +1398,7 @@
   });
 
   // ==========================================================================
-  // MODULE: WO Assist: GP + ETA Watchdog + Playbook v2.69 (Connector 1.2)
+  // MODULE: WO Assist: GP + ETA Watchdog + Playbook v2.70 (Connector 1.2)
   // ==========================================================================
   bwnBoot('woAssist', BWN_MODULES.woAssist, function () {
     'use strict';
@@ -1428,7 +1428,7 @@
     var PANEL_ID = 'bwn-gp-panel';
     var GREEN = BWN.GREEN;
 
-    console.info('[BWN GP] WO Assist v2.69 loaded on', location.href);
+    console.info('[BWN GP] WO Assist v2.70 loaded on', location.href);
 
     // ---- Parsing helpers (shared via BWN core) -----------------------------
     var parseMoney = BWN.parseMoney;
@@ -2592,7 +2592,7 @@
         'proposal-approved': ['Send approved proposal to client / issue the vendor PO', 'Proposal approved internally - status "' + status + '"', 'Re: ' + ref + '. Proposal is approved internally - send it to the client for sign-off, and once approved issue the vendor PO so work can start.', 'client'],
         materials: ['Chase material delivery ETA + tracking', 'Status "' + status + '"' + hb, 'Hi - re: ' + ref + '. Please confirm the materials: supplier, expected delivery date, and tracking #. Once they land, reply with the return-visit date so I can update the client.', 'parts'],
         'materials-client': ['Chase the client for their materials', 'Client-supplied materials - status "' + status + '"' + hb, 'Hi - re: ' + ref + '. This is waiting on client-provided materials. Please advise the delivery date so we can schedule the return visit.', 'client'],
-        scheduled: ['Confirm the scheduled visit + prep', 'Status "Scheduled" - a visit is booked', 'Hi - confirming the scheduled visit for ' + ref + '. Please reply with the tech + arrival window and flag any parts/access needs so the trip is not wasted.', 'eta'],
+        scheduled: ['Confirm the scheduled visit + prep', 'Status "Scheduled"' + hb + ' - a visit is booked', 'Hi - confirming the scheduled visit for ' + ref + '. Please reply with the tech + arrival window and flag any parts/access needs so the trip is not wasted.', 'eta'],
         onsite: ['Confirm on-site progress + ETA to complete', 'Status "' + status + '"' + hb, 'Hi - re: ' + ref + '. Your tech is on-site - please send a quick status and the ETA to completion (or the next step + return date).', null],
         recall: ['Reschedule the return visit (recalled/reopened)', 'Status "' + status + '" - completed work was rejected/reopened', 'Hi - re: ' + ref + '. This was recalled/reopened - the prior visit did not resolve it. Please schedule a return trip and advise the date so I can update the client.', 'eta'],
         inprogress: ['Follow up on in-progress work', 'Status "' + status + '"' + hb, 'Hi - re: ' + ref + '. Checking on progress - where does this stand and what is the ETA to completion? Flag any 3rd-party/supplier blocker so I can help.', null],
