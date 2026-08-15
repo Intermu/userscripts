@@ -15,7 +15,6 @@
 // @connect      green-stone-0717dab0f.7.azurestaticapps.net
 // ==/UserScript==
 
-/* eslint-disable */
 (function () {
   'use strict';
 
