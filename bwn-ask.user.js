@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         BWN Ask (Coordinator Copilot)
 // @namespace    https://broadwaynational.com/bwn
-// @version      0.7.2
+// @version      0.7.3
 // @description  Ask questions about the work order you're viewing. Reads the WO live from Umbrava via same-origin GraphQL (details + full note / site-visit history) AND a summary roster of the other work orders at the same location, plus the team knowledge doc, and answers through the Broadway AI proxy with dates and references. Phase 1.5 = page-scoped + location roster (Path A); no data leaves the trusted Broadway path.
 // @match        https://app.umbrava.com/*
 // @run-at       document-idle
@@ -124,66 +124,44 @@
     'query($n:Int!){ jobNotes(workOrderNumber:$n, includeDeleted:false){ id type content contentHtml createdDate isPinned isCompletion workOrderNoteSource createdBy { firstName lastName } } }';
 
   // ---- Location-wide WO roster (Phase 1.5) ----------------------------------
-  // Umbrava's SPA has a "work orders at a location" query, but its field/arg NAME is not
-  // known from source (the WO-list query is captured opaque). Rather than guess arg names,
-  // DISCOVER the schema via GraphQL introspection: find the root field that returns work
-  // orders AND takes a location arg, resolve its return shape (list vs relay connection),
-  // then fetch a compact roster of the location's OTHER work orders. Everything here is
-  // best-effort and isolated - any miss (introspection disabled, no matching field, query
-  // error) leaves the per-WO answer intact and the roster simply marked unavailable, never
-  // fabricated. Discovery + roster are cached for the session so it runs at most once/location.
-  var _locField;             // undefined=unqueried, null=none found, else {field,locArg,argType,container}
-  var _locRoster = {};       // locationId -> { ok, wos:[...] } | { ok:false }
-  var ROSTER_MAX = 40, ROSTER_SEL = 'number statusName priority{ label } trades{ name } workOrderDate creationDate';
-
-  function unwrapType(t) { var isList = false, cur = t; while (cur && cur.ofType) { if (cur.kind === 'LIST') isList = true; cur = cur.ofType; } return { name: cur && cur.name, kind: cur && cur.kind, isList: isList }; }
-
-  function discoverLocField() {
-    if (_locField !== undefined) return Promise.resolve(_locField);
-    var Q = '{ __schema { queryType { fields { name args { name type { kind name ofType { kind name } } } type { kind name ofType { kind name ofType { kind name ofType { kind name } } } } } } } }';
-    return gql(Q, {}).then(function (d) {
-      var fs = (d && d.__schema && d.__schema.queryType && d.__schema.queryType.fields) || [];
-      var pick = null;
-      for (var i = 0; i < fs.length && !pick; i++) {
-        var f = fs[i], nm = String(f.name || '');
-        if (!/work.?orders/i.test(nm)) continue;                 // plural list field, not single workOrder
-        var la = null, at = 'ID';
-        (f.args || []).forEach(function (a) { if (!la && /location.?id|^location$/i.test(a.name)) { la = a.name; var u = unwrapType(a.type || {}); at = u.name || 'ID'; } });
-        if (!la) continue;
-        var ret = unwrapType(f.type || {});
-        pick = { field: nm, locArg: la, argType: at, retName: ret.name, retKind: ret.kind, retIsList: ret.isList };
-      }
-      if (!pick) { _locField = null; return null; }
-      if (pick.retIsList) { pick.container = null; _locField = pick; return pick; }   // field returns [WorkOrder] directly
-      // Connection object: introspect it to find the list container (nodes/items/edges).
-      var TQ = 'query($t:String!){ __type(name:$t){ fields { name type { kind name ofType { kind name ofType { kind name } } } } } }';
-      return gql(TQ, { t: pick.retName }).then(function (td) {
-        var tf = (td && td.__type && td.__type.fields) || [];
-        for (var j = 0; j < tf.length; j++) { var u = unwrapType(tf[j].type || {}); if (u.isList && (u.kind === 'OBJECT' || u.kind === 'INTERFACE')) { pick.container = tf[j].name; break; } }
-        _locField = pick.container ? pick : null;
-        return _locField;
-      }, function () { _locField = null; return null; });
-    }, function () { _locField = null; return null; });
-  }
+  /* ===== BWN-ASK-ROSTER:START ===== */
+  // Fetch a compact roster of the OTHER work orders at this WO's location so the copilot can
+  // answer "any other open WOs at this site?" without guessing. Uses the PINNED board op
+  // PagedWorkOrders / listWorkOrdersPaginated, captured off the wire 2026-08-13 and already
+  // replayed by Core's List-Heat scan (wiki/umbrava-graphql-operations.md). TWO args are REQUIRED
+  // and non-null - page:PageInput! and sortBy:[SortInput!]! - and dropping EITHER 400s. That 400 is
+  // exactly why the previous roster (introspection-discovered field, location arg ONLY, no page /
+  // sortBy) came back "unavailable: site-roster" in production. locationId:ID is the server-side
+  // filter; page + sortBy are sent as VARIABLES with the same proven shapes Core replays, never
+  // inlined (direction may be an enum, unsafe as a quoted literal). Best-effort and isolated: any
+  // miss leaves the per-WO answer intact and the roster simply marked unavailable, never
+  // fabricated. Cached per location for the session so it runs at most once/location.
+  var _locRoster = {};       // locationId -> { ok, wos:[...], total } | { ok:false }
+  var ROSTER_MAX = 40, ROSTER_TAKE = 200;
+  // Only fields PROVEN on the LIST item type (which is NOT WorkOrder - see the wiki unit traps):
+  // number, statusName, priority.label, trades.name, workOrderDate. There is NO creationDate on
+  // this type, so the old selection that asked for it would have 400'd even had discovery run.
+  var ROSTER_Q =
+    'query($page:PageInput!, $sortBy:[SortInput!]!, $loc:ID){' +
+    ' listWorkOrdersPaginated(page:$page, sortBy:$sortBy, locationId:$loc){' +
+    ' rowCount items{ number statusName priority{ label } trades{ name } workOrderDate } } }';
+  // page is the OBJECT {skip,take}, never a scalar; sortBy is non-empty (dropping it 400s). Both
+  // shapes are the ones Core's proven replay sends.
+  var ROSTER_VARS = { page: { skip: 0, take: ROSTER_TAKE }, sortBy: [{ columnName: 'formattedJobNumber', direction: 'DESC' }] };
 
   function fetchLocationRoster(locationId) {
     if (locationId == null) return Promise.resolve({ ok: false });
     var key = String(locationId);
     if (_locRoster[key]) return Promise.resolve(_locRoster[key]);
-    return discoverLocField().then(function (fld) {
-      if (!fld) { _locRoster[key] = { ok: false }; return _locRoster[key]; }
-      var vtype = /int/i.test(fld.argType) ? 'Int!' : 'ID!';
-      var inner = fld.container === 'edges' ? ('edges{ node{ ' + ROSTER_SEL + ' } }') : (fld.container ? (fld.container + '{ ' + ROSTER_SEL + ' }') : ROSTER_SEL);
-      var Q = 'query($loc:' + vtype + '){ ' + fld.field + '(' + fld.locArg + ':$loc){ ' + inner + ' } }';
-      return gql(Q, { loc: locationId }).then(function (d) {
-        var root = d && d[fld.field];
-        var arr = !fld.container ? root : (fld.container === 'edges' ? (root && root.edges || []).map(function (e) { return e && e.node; }) : (root && root[fld.container]));
-        arr = Array.isArray(arr) ? arr.filter(Boolean) : [];
-        _locRoster[key] = { ok: true, wos: arr };
-        return _locRoster[key];
-      }, function () { _locRoster[key] = { ok: false }; return _locRoster[key]; });
-    });
+    var vars = { page: ROSTER_VARS.page, sortBy: ROSTER_VARS.sortBy, loc: locationId };
+    return gql(ROSTER_Q, vars).then(function (d) {
+      var root = d && d.listWorkOrdersPaginated;
+      var arr = (root && Array.isArray(root.items)) ? root.items.filter(Boolean) : [];
+      _locRoster[key] = { ok: true, wos: arr, total: (root && typeof root.rowCount === 'number') ? root.rowCount : arr.length };
+      return _locRoster[key];
+    }, function () { _locRoster[key] = { ok: false }; return _locRoster[key]; });
   }
+  /* ===== BWN-ASK-ROSTER:END ===== */
 
   // Run a query and DISTINGUISH failure from empty: { ok:true, wo } or { ok:false }.
   // A silent []/{} on error is how the copilot could turn a fetch failure into a confident

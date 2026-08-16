@@ -99,6 +99,25 @@ function makeWorld(o) {
   };
 }
 
+// The SHIPPED roster block, sliced out and run against a fake gql. Judges the real bytes that
+// build the location-roster query, so a regression to the arg-less query that went dark in prod
+// ("unavailable: site-roster") fails here instead of only on Mike's tenant.
+var ROSTER_BLOCK = slice(ASK, '/* ===== BWN-ASK-ROSTER:START ===== */', '/* ===== BWN-ASK-ROSTER:END ===== */', 'ask roster block');
+function makeRosterWorld(gqlImpl) {
+  var calls = [];
+  var sandbox = {
+    console: console, JSON: JSON, Promise: Promise, Array: Array,
+    gql: function (q, v) { calls.push({ query: q, vars: v }); return gqlImpl(q, v); }
+  };
+  sandbox.globalThis = sandbox;
+  vm.createContext(sandbox);
+  vm.runInContext('(function(){\n' + ROSTER_BLOCK +
+    '\nthis.fetchLocationRoster = fetchLocationRoster; this.ROSTER_Q = ROSTER_Q;' +
+    '\nthis.ROSTER_VARS = ROSTER_VARS; this.ROSTER_MAX = ROSTER_MAX;' +
+    '\n}).call(this)', sandbox, { filename: 'bwn-ask.roster.slice.js' });
+  return { sandbox: sandbox, calls: calls };
+}
+
 /* ============================ 3. the bus client ============================ */
 
 console.log('\nbus client');
@@ -245,6 +264,66 @@ console.log('\nbus client');
   });
 })
 
+/* ==================== 4b. the location roster (site-roster) ==================== */
+
+.then(function () {
+  console.log('\nlocation roster (site-roster)');
+
+  var w = makeRosterWorld(function () {
+    return Promise.resolve({ listWorkOrdersPaginated: { rowCount: 3, items: [
+      { number: 371126, statusName: 'Open', priority: { label: 'P2' }, trades: [{ name: 'HVAC' }], workOrderDate: '2026-08-01' },
+      { number: 371200, statusName: 'Open', priority: { label: 'P3' }, trades: [{ name: 'Plumbing' }], workOrderDate: '2026-08-10' }
+    ] } });
+  });
+  var Q = w.sandbox.ROSTER_Q;
+
+  // The live bug: the roster query dropped the two REQUIRED non-null args, so the field 400'd and
+  // the panel showed "unavailable: site-roster". These four assertions are that failure's fixture.
+  A.ok('the roster query DECLARES the two required non-null args (the thing that 400d before)',
+    /\$page\s*:\s*PageInput!/.test(Q) && /\$sortBy\s*:\s*\[SortInput!\]!/.test(Q), Q);
+  A.ok('the roster query PASSES page + sortBy and filters by locationId',
+    /page\s*:\s*\$page/.test(Q) && /sortBy\s*:\s*\$sortBy/.test(Q) && /locationId\s*:\s*\$loc/.test(Q), Q);
+  A.ok('the roster hits the PINNED board field, not schema introspection',
+    /listWorkOrdersPaginated/.test(Q) && Q.indexOf('__schema') === -1 && Q.indexOf('__type') === -1, Q);
+  A.ok('the roster selects only proven item fields, no creationDate',
+    /items\s*\{[^}]*number[^}]*statusName/.test(Q) && Q.indexOf('creationDate') === -1, Q);
+
+  // The two variable shapes the pinned op requires: page is the OBJECT {skip,take}, sortBy non-empty.
+  A.ok('page is sent as the OBJECT {skip,take}, never a scalar',
+    w.sandbox.ROSTER_VARS.page && typeof w.sandbox.ROSTER_VARS.page === 'object' &&
+    typeof w.sandbox.ROSTER_VARS.page.take === 'number', JSON.stringify(w.sandbox.ROSTER_VARS.page));
+  A.ok('sortBy is a non-empty [{columnName,direction}] (dropping it 400s)',
+    Array.isArray(w.sandbox.ROSTER_VARS.sortBy) && w.sandbox.ROSTER_VARS.sortBy.length >= 1 &&
+    !!w.sandbox.ROSTER_VARS.sortBy[0].columnName, JSON.stringify(w.sandbox.ROSTER_VARS.sortBy));
+
+  return w.sandbox.fetchLocationRoster(4021).then(function (r) {
+    A.ok('a good response yields ok:true with the location items', r.ok === true && r.wos.length === 2, JSON.stringify(r).slice(0, 160));
+    A.ok('rowCount is surfaced as the site total', r.total === 3, String(r.total));
+    A.ok('the request actually carried the locationId', w.calls.length === 1 && w.calls[0].vars.loc === 4021, JSON.stringify(w.calls[0] && w.calls[0].vars));
+    return w.sandbox.fetchLocationRoster(4021).then(function (r2) {
+      A.ok('the same location is served from cache, not re-fetched', r2 === r && w.calls.length === 1, String(w.calls.length));
+    });
+  });
+})
+
+/* ---- a query error degrades to unavailable; it never fabricates a site ---- */
+.then(function () {
+  var w = makeRosterWorld(function () { return Promise.reject(new Error('page is required')); });
+  return w.sandbox.fetchLocationRoster(99).then(function (r) {
+    A.ok('a 400/gql error marks the roster unavailable (ok:false), it does NOT invent a site',
+      r.ok === false && !r.wos, JSON.stringify(r));
+  });
+})
+
+/* ---- a null locationId short-circuits with no request ---- */
+.then(function () {
+  var w = makeRosterWorld(function () { throw new Error('must not query with a null location'); });
+  return w.sandbox.fetchLocationRoster(null).then(function (r) {
+    A.ok('a null locationId short-circuits to unavailable with no wire request',
+      r.ok === false && w.calls.length === 0, JSON.stringify(r));
+  });
+})
+
 /* ============================ 5. controls ============================ */
 
 .then(function () {
@@ -258,6 +337,12 @@ console.log('\nbus client');
   // equal, the comparison is not looking at what it claims to.
   var mutated = askDefs.replace('READ-ONLY', 'READ-WRITE');
   A.ok('control: a one-word drift in the defs is caught', mutated !== aiDefs && mutated !== askDefs);
+
+  // The roster slice must be non-trivial, and the dead introspection path must be GONE from the
+  // shipped file - a re-introduced discoverLocField would guess the arg-less query again and go dark.
+  A.ok('the roster block slice is non-trivial', ROSTER_BLOCK.length > 400, String(ROSTER_BLOCK.length));
+  A.ok('the old introspection roster is gone (no discoverLocField / __schema in the file)',
+    ASK.indexOf('discoverLocField') === -1 && ASK.indexOf('__schema') === -1);
 
   // Ask must not have kept a second, toolless path to the old route for live traffic.
   A.ok('askServer posts to /api/ai, not /api/ask', /askDriveLoop\(body, post\)/.test(ASK) && /var post = function \(b\) \{ return gmPost\(AI_URL/.test(ASK));
