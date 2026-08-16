@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         BWN Suite - AI (Broadway National)
 // @namespace    broadwaynational.bwn
-// @version      1.45.9
+// @version      1.45.10
 // @downloadURL  https://raw.githubusercontent.com/Intermu/userscripts/main/bwn-suite-ai.user.js
 // @updateURL    https://raw.githubusercontent.com/Intermu/userscripts/main/bwn-suite-ai.user.js
 // @description  The Umbrava tools that call outside APIs, kept separate from the zero-egress Core script. Client Update and WO Audit drafts (Anthropic Claude; draft-only, scrubbed before sending, you review before posting); Find Techs / Find Suppliers (Google Places; vendor leads near a WO); and Job View (opens the Ops-Dashboard job card on the WO page - WO details from Umbrava plus the authored case file and next actions, read-only). Network access is limited by the browser to the declared API hosts and the BWN Static Web App. API keys are stored in Tampermonkey's storage via the menu commands and never enter the page. Toggle modules in BWN_MODULES below.
@@ -1449,6 +1449,19 @@
     'query($n:Int!){ jobNotes(workOrderNumber:$n, includeDeleted:false){ ' +
     '  id type content contentHtml createdDate isPinned isCompletion workOrderNoteSource ' +
     '  createdBy { firstName lastName } } }';
+  // Location -> work orders: the PINNED board op PagedWorkOrders / listWorkOrdersPaginated,
+  // captured off the wire 2026-08-13 (wiki/umbrava-graphql-operations.md) - the same op Core
+  // replays for its List Heat scan, so it is proven live. RISK-004 is now CLOSED: the selector is
+  // no longer guessed. The field REQUIRES two non-null args, page:PageInput! and sortBy:[SortInput!]!
+  // - dropping either 400s (the trap that had bwn-ask's introspection roster dark in prod) - so both
+  // are sent as VARIABLES in the shapes Core proves; locationId:ID is the server-side filter.
+  // Selection limited to fields proven on the LIST item type (NOT WorkOrder): number, statusName,
+  // priority.label, trades.name, workOrderDate. NO creationDate on this type (it would itself 400).
+  var AI_LOC_WOS_Q =
+    'query($page:PageInput!, $sortBy:[SortInput!]!, $loc:ID){' +
+    ' listWorkOrdersPaginated(page:$page, sortBy:$sortBy, locationId:$loc){' +
+    ' rowCount items{ number statusName priority{ label } trades{ name } workOrderDate } } }';
+  var AI_LOC_WOS_VARS = { page: { skip: 0, take: 200 }, sortBy: [{ columnName: 'formattedJobNumber', direction: 'DESC' }] };
 
   function aiWoNum(v) {
     var n = parseInt(String(v == null ? '' : v).replace(/^W-?/i, '').replace(/[^0-9]/g, ''), 10);
@@ -1580,15 +1593,30 @@
         return { ok: true, content: { workOrderNumber: n, count: notes.length, notes: notes } };
       }, function (e) { return { ok: false, content: 'job notes read failed: ' + ((e && e.message) || e) }; });
     },
-    // RISK-004: the location -> work-orders selector is NOT pinned. Per repo Hard Rule 6 we do
-    // NOT guess a GraphQL field. Return a clear, terminating tool_result so Ask stays WO-scoped
-    // and the loop still ends. TODO capture/replay the live query, then wire the confirmed
-    // selector here (see [[bwn-ai-transport]] RISK-004 / [[bwn-ask-copilot]]).
+    // RISK-004 CLOSED: wired to the PINNED PagedWorkOrders op (AI_LOC_WOS_Q), the same query Core
+    // replays for List Heat - no field is guessed. Newest first; summary rows only (open getJobNotes
+    // for a specific WO's notes). Never throws into the loop: any fault resolves {ok:false}.
     getLocationWorkOrders: function (input) {
-      return Promise.resolve({ ok: false, content:
-        'getLocationWorkOrders is not yet wired - the location-to-work-orders selector is ' +
-        'unconfirmed and will not be guessed. Ask the coordinator for a specific work-order ' +
-        'number and use getWorkOrder / getJobNotes instead.' });
+      var loc = input && input.locationId;
+      if (loc == null || String(loc) === '') return Promise.resolve({ ok: false, content: 'invalid or missing locationId' });
+      var limit = (input && typeof input.limit === 'number' && input.limit > 0) ? Math.min(input.limit, 200) : 50;
+      var vars = { page: AI_LOC_WOS_VARS.page, sortBy: AI_LOC_WOS_VARS.sortBy, loc: loc };
+      return aiGql(AI_LOC_WOS_Q, vars).then(function (d) {
+        var root = d && d.listWorkOrdersPaginated;
+        var items = (root && Array.isArray(root.items)) ? root.items.filter(Boolean) : [];
+        items.sort(function (a, b) { return (aiDate(b && b.workOrderDate) || 0) - (aiDate(a && a.workOrderDate) || 0); });
+        var wos = items.slice(0, limit).map(function (w) {
+          return {
+            number: w.number,
+            statusName: w.statusName || '',
+            priority: (w.priority && w.priority.label) || '',
+            trades: (w.trades || []).map(function (t) { return t && t.name; }).filter(Boolean),
+            workOrderDate: w.workOrderDate || ''
+          };
+        });
+        var total = (root && typeof root.rowCount === 'number') ? root.rowCount : items.length;
+        return { ok: true, content: { locationId: String(loc), count: wos.length, total: total, workOrders: wos } };
+      }, function (e) { return { ok: false, content: 'location work orders read failed: ' + ((e && e.message) || e) }; });
     },
     // The three READ-ONLY page verbs. This is the unlock the protocol was built for: a surface
     // with no confirmed GraphQL selector can still be read, because the coordinator is already
@@ -1621,9 +1649,10 @@
         limit: { type: 'number', description: 'Max notes to return (default 20, cap 50).' }
       }, required: ['workOrderNumber'] } },
     { name: 'getLocationWorkOrders',
-      description: 'List the work orders at a location. NOTE: not yet available - the selector is unconfirmed and this returns an unavailable notice. Prefer getWorkOrder with a specific work-order number.',
+      description: 'List the work orders at a location, newest first. Returns each work order\'s number, status, priority, trades, and date, plus the total count at the location. Use this to answer "what other work orders are at this site". Summary rows only - open getJobNotes for a specific work order\'s notes.',
       input_schema: { type: 'object', properties: {
-        locationId: { type: 'string', description: 'The Umbrava location id.' }
+        locationId: { type: 'string', description: 'The Umbrava location id, e.g. from getWorkOrder\'s locationId.' },
+        limit: { type: 'number', description: 'Max work orders to return (default 50, cap 200).' }
       }, required: ['locationId'] } },
     // The descriptions below carry three facts the model gets wrong without them: handles expire,
     // an omission is reported rather than implied, and nothing here can act on the page.
