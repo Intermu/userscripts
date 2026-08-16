@@ -167,10 +167,53 @@ function run() {
     });
   });
 
+  // getLocationWorkOrders is WIRED to the pinned PagedWorkOrders op (RISK-004 closed). It must send
+  // the two REQUIRED non-null args (page, sortBy) + the locationId filter, and shape the items.
+  chain = chain.then(function () {
+    var rows = [
+      { number: 100, statusName: 'Work Complete', priority: { label: 'P3' }, trades: [{ name: 'Plumbing' }, { name: null }], workOrderDate: '2026-07-01T00:00:00Z' },
+      { number: 200, statusName: 'Open', priority: { label: 'P2' }, trades: [{ name: 'HVAC' }], workOrderDate: '2026-08-10T00:00:00Z' }
+    ];
+    var captured = null;
+    var fetch = function (url, opts) {
+      try { captured = JSON.parse(opts.body); } catch (e) {}
+      return Promise.resolve({ json: function () { return Promise.resolve({ data: { listWorkOrdersPaginated: { rowCount: 5, items: rows } } }); } });
+    };
+    var T = loadTransport({ fetch: fetch });
+    return T.AI_TOOLS.getLocationWorkOrders({ locationId: 'loc-9' }).then(function (r) {
+      ok('getLocationWorkOrders wired -> ok:true', r.ok === true);
+      eq('getLocationWorkOrders count', r.content.count, 2);
+      eq('getLocationWorkOrders total = rowCount', r.content.total, 5);
+      eq('getLocationWorkOrders newest first', r.content.workOrders[0].number, 200);
+      eq('getLocationWorkOrders trades (nulls dropped)', r.content.workOrders[0].trades, ['HVAC']);
+      // The whole point of the fix: the query DECLARES + PASSES page/sortBy (dropping either 400s)
+      // and filters by locationId - the arg-less query is what went dark in prod.
+      ok('query declares the two required non-null args', /\$page\s*:\s*PageInput!/.test(captured.query) && /\$sortBy\s*:\s*\[SortInput!\]!/.test(captured.query), captured.query);
+      ok('query passes page + sortBy + locationId', /page\s*:\s*\$page/.test(captured.query) && /sortBy\s*:\s*\$sortBy/.test(captured.query) && /locationId\s*:\s*\$loc/.test(captured.query), captured.query);
+      ok('query hits the pinned field, not introspection', /listWorkOrdersPaginated/.test(captured.query) && captured.query.indexOf('__schema') === -1);
+      ok('vars send page as the OBJECT {skip,take}', captured.variables.page && typeof captured.variables.page === 'object' && typeof captured.variables.page.take === 'number', JSON.stringify(captured.variables.page));
+      ok('vars send a non-empty sortBy and the locationId', Array.isArray(captured.variables.sortBy) && captured.variables.sortBy.length >= 1 && captured.variables.loc === 'loc-9');
+    });
+  });
+
+  chain = chain.then(function () {
+    var T = loadTransport();  // default fetch -> { data: {} }, no listWorkOrdersPaginated
+    return T.AI_TOOLS.getLocationWorkOrders({ locationId: 'loc-9' }).then(function (r) {
+      ok('getLocationWorkOrders empty/absent container -> ok:true, no rows (never fabricates)', r.ok === true && r.content.count === 0);
+    });
+  });
+
   chain = chain.then(function () {
     var T = loadTransport();
+    return T.AI_TOOLS.getLocationWorkOrders({}).then(function (r) {
+      ok('getLocationWorkOrders missing locationId -> ok:false', r.ok === false && /locationId/.test(r.content));
+    });
+  });
+
+  chain = chain.then(function () {
+    var T = loadTransport({ fetch: makeFetch({ errors: [{ message: 'page is required' }] }) });
     return T.AI_TOOLS.getLocationWorkOrders({ locationId: 'loc-9' }).then(function (r) {
-      ok('getLocationWorkOrders stub -> ok:false + not-wired notice', r.ok === false && /not yet wired/.test(r.content));
+      ok('getLocationWorkOrders gql error -> ok:false (no throw)', r.ok === false && /page is required|read failed/.test(r.content));
     });
   });
 
@@ -243,11 +286,13 @@ function run() {
     });
   });
 
-  // is_error propagation: a failing tool -> toolResults entry flagged is_error.
+  // is_error propagation: a failing tool -> toolResults entry flagged is_error. getWorkOrder with a
+  // non-numeric number reliably resolves ok:false without depending on the fetch stub (and no longer
+  // relies on getLocationWorkOrders being an always-failing stub - it is wired now).
   chain = chain.then(function () {
-    var T = loadTransport();  // default fetch -> getWorkOrder returns not-found (ok:false)
+    var T = loadTransport();
     var script = [
-      { ok: true, status: 'tool_calls', toolCalls: [{ id: 'e1', name: 'getLocationWorkOrders', input: { locationId: 'x' } }], messages: [{ role: 'user', content: 'q' }] },
+      { ok: true, status: 'tool_calls', toolCalls: [{ id: 'e1', name: 'getWorkOrder', input: { workOrderNumber: 'not-a-number' } }], messages: [{ role: 'user', content: 'q' }] },
       { ok: true, status: 'final', text: 'ok' }
     ];
     var posts = [];
