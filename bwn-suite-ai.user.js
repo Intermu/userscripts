@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         BWN Suite - AI (Broadway National)
 // @namespace    broadwaynational.bwn
-// @version      1.45.8
+// @version      1.45.9
 // @downloadURL  https://raw.githubusercontent.com/Intermu/userscripts/main/bwn-suite-ai.user.js
 // @updateURL    https://raw.githubusercontent.com/Intermu/userscripts/main/bwn-suite-ai.user.js
 // @description  The Umbrava tools that call outside APIs, kept separate from the zero-egress Core script. Client Update and WO Audit drafts (Anthropic Claude; draft-only, scrubbed before sending, you review before posting); Find Techs / Find Suppliers (Google Places; vendor leads near a WO); and Job View (opens the Ops-Dashboard job card on the WO page - WO details from Umbrava plus the authored case file and next actions, read-only). Network access is limited by the browser to the declared API hosts and the BWN Static Web App. API keys are stored in Tampermonkey's storage via the menu commands and never enter the page. Toggle modules in BWN_MODULES below.
@@ -1865,22 +1865,7 @@
       };
     }
 
-    // ---- Usage ledger (tokens per month; numbers only, readable by the Ops panel) ----
     var lastUsage = null;   // {input, output} of the most recent successful generation
-    function recordUsage(u) {
-      try {
-        if (!u || (!u.input && !u.output)) return;
-        var d0 = new Date();
-        var key = d0.getFullYear() + '-' + ('0' + (d0.getMonth() + 1)).slice(-2);
-        var led = BWN.lsGetJSON('bwn:ai:usage', {}) || {};
-        var cur = led[key] || { calls: 0, input: 0, output: 0 };
-        cur.calls++; cur.input += u.input || 0; cur.output += u.output || 0;
-        led[key] = cur;
-        var ks = Object.keys(led).sort();
-        while (ks.length > 6) delete led[ks.shift()];
-        BWN.lsSetJSON('bwn:ai:usage', led);
-      } catch (e) { /* ledger is best-effort */ }
-    }
 
     console.info('[BWN CU] client-update userscript loaded on', location.href);
 

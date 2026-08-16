@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         BWN Suite - Core (Broadway National)
 // @namespace    broadwaynational.bwn
-// @version      1.78.18
+// @version      1.78.19
 // @downloadURL  https://raw.githubusercontent.com/Intermu/userscripts/main/bwn-suite-core.user.js
 // @updateURL    https://raw.githubusercontent.com/Intermu/userscripts/main/bwn-suite-core.user.js
 // @description  Runs several Umbrava helpers for BWN coordinators, in the browser with no privileged grants. Includes: PO Approval + ETA Builder; WO Assist (GP/ETA, a stall watchdog, DNE calculator, and a next-action playbook); Email Leak Guard (checks recipients against vendor names, PO amounts, and client budget references before an outbound email sends); WO List Heat (a triage overlay + My Day strip on the work-order list, with an optional same-origin Umbrava API scan for deterministic full-board coverage); and the BWN Launcher (opens the Azure Static Web App tools with the current WO's context). Modules share state through sessionStorage/localStorage. The only network calls are same-origin Umbrava GraphQL requests (app.umbrava.com/api/graphql, the app's own session): List Heat's full-board scan and WO Assist's work-order / trip / clock-in / document reads, plus ONE write - BWN Views saves the column layout through Umbrava's own putUserPreference, the same preference the column chooser writes; everything else is offline. Toggle modules in BWN_MODULES below.
@@ -7416,7 +7416,6 @@
     var heatScanAbort = false;   // set by the route-change observer so an in-flight API scan bails cleanly
     var heatScanClean = false;   // true only after a clean Scan All convergence - gates trend/snapshot writes
     var heatScanNote = null;     // WHY the last scan was dirty (shown in the Over-30 confirm so the user isn't guessing)
-    var heatFilter = null;    // null | 'bad' | 'warn'  (vestigial: red/amber chips removed; pills filter now)
     var heatDim = null;       // null | {field:'status'|'assignee'|'client', value:string}
     var mydayFilter = null;   // null | 'over30' | 'limitbad' | 'limitwatch' | 'nonote'  (My Day pill filters)
     var diagFor = '';
@@ -7532,8 +7531,6 @@
         // Filters DIM non-matching rows instead of hiding them: hiding rows breaks
         // the virtualizer's layout math and it falls back to skeleton placeholders.
         var dimmed = false;
-        if (heatFilter === 'bad' && sev !== 2) dimmed = true;
-        if (heatFilter === 'warn' && sev !== 1) dimmed = true;
         if (mydayFilter === 'over30' && !rOver30) dimmed = true;
         if (mydayFilter === 'limitbad' && !rLimitBad) dimmed = true;
         if (mydayFilter === 'limitwatch' && !rLimitWatch) dimmed = true;
@@ -7604,7 +7601,7 @@
         var clearBtn = document.createElement('button');
         clearBtn.type = 'button'; clearBtn.id = 'bwn-heat-clear'; clearBtn.textContent = 'Clear filters';
         clearBtn.addEventListener('click', function () {
-          heatFilter = null; heatDim = null; mydayFilter = null; woListHeat();
+          heatDim = null; mydayFilter = null; woListHeat();
           var pn = document.getElementById(PANEL_ID); if (pn) { pn.remove(); toggleAuditPanel(); }
         });
         sum.appendChild(clearBtn);
@@ -7808,11 +7805,9 @@
         });
         panel.appendChild(cols);
 
-        if (heatFilter || heatDim) {
+        if (heatDim) {
           var matches = entries.filter(function (e) {
-            if (heatFilter === 'bad' && e.sev !== 2) return false;
-            if (heatFilter === 'warn' && e.sev !== 1) return false;
-            if (heatDim && e[heatDim.field] !== heatDim.value) return false;
+            if (e[heatDim.field] !== heatDim.value) return false;
             return true;
           }).sort(function (a, b) { return b.sev - a.sev || (parseFloat(b.hrs.replace(/,/g, '')) || 0) - (parseFloat(a.hrs.replace(/,/g, '')) || 0); });
           var mt = document.createElement('div'); mt.className = 'off';
@@ -7882,7 +7877,7 @@
         }
 
         var off = document.createElement('div'); off.className = 'off';
-        if (heatFilter || heatDim) off.style.display = 'none';   // Matching WOs supersedes it
+        if (heatDim) off.style.display = 'none';   // Matching WOs supersedes it
         var h4o = document.createElement('h4'); h4o.textContent = 'Top offenders (vs. their own status limit)'; off.appendChild(h4o);
         // v3.8: rank by hours RELATIVE to the row's own threshold (status class \u00d7
         // priority), not raw hours \u2014 a P1 active job 3\u00d7 over its limit outranks a
@@ -8960,7 +8955,6 @@
         if (heatScanning) heatScanAbort = true;   // an in-flight scan must not write into a nulled store
         heatStore = null; heatRaw = null; heatRowsCache = null;
         heatScanClean = false;
-        heatFilter = null;
         heatDim = null;
         diagFor = '';
         totCache = { path: '', v: null };

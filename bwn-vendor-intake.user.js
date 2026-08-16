@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         BWN Vendor Intake (Broadway National)
 // @namespace    broadwaynational.bwn
-// @version      0.9.3
+// @version      0.9.4
 // @downloadURL  https://raw.githubusercontent.com/Intermu/userscripts/main/bwn-vendor-intake.user.js
 // @updateURL    https://raw.githubusercontent.com/Intermu/userscripts/main/bwn-vendor-intake.user.js
 // @description  Prefills Umbrava's Create Vendor form (and the detail-page Tax ID) from a Prospect Set-Up Form or a W-9. Fillable PDFs are read straight from their form fields; SCANNED W-9s are read by on-device OCR (Tesseract + pdf.js, fetched once at install, run entirely in the browser). The document and its tax ID never leave your machine. Adds a "Prefill from document" button; every extracted field is a suggestion to review before saving - the TIN especially, since OCR can misread digits.
@@ -86,16 +86,6 @@
     chunks.forEach(function (c) { all.set(c, off); off += c.length; });
     return all;
   }
-  async function parseProspect(file) {
-    var u8 = new Uint8Array(await file.arrayBuffer());
-    var f = fieldsFromStr(latin1(u8));
-    if (!f.company_name && !f.email && !f.contact_names) {
-      var infl = await inflateAll(u8);
-      if (infl) Object.assign(f, fieldsFromStr(latin1(infl)));
-    }
-    return f;
-  }
-
   // ---- W-9 (best-effort, local) -------------------------------------------
   // Two kinds of W-9 we can read locally:
   //  (1) The REAL IRS fillable W-9. Its fields have cryptic XFA names (f1_1, c1_1[..]) with NO
