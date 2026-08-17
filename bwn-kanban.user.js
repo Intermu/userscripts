@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         BWN WO Kanban (Broadway National)
 // @namespace    broadwaynational.bwn
-// @version      0.6.3
+// @version      0.7.0
 // @description  Turns Umbrava's Work Orders list into a kanban board without leaving the page. A Board/List toggle sits next to the list's own search box; switching to Board hides the table (the toolbar stays, so the app's own filtering still drives everything) and lays the same work orders out as cards in lanes. Lanes are WO Status by default and regroup to Priority, Assignee, Client or Age from a dropdown. The board never invents its own filter system, and as of 0.5.0 it does not query at all: it reads both rows and verdicts from the full-board scan bwn-suite-core's List Heat already runs on the same page, so whatever the list is filtered to (phase, statuses, search, assignee chips, sort) is exactly what the board shows, and one list page now costs one full-board query instead of two. It still captures the SPA's own PagedWorkOrders request off the wire, because that capture is where the auth headers for the status write come from. Cards carry the triage picture: the status clock against the limit that WO was actually judged against, the reasons it is flagged, whether its onsite date has already passed, DNE vs vendor NTE with GP, vendors and trades. Severity is never computed here - it is read from the verdicts List Heat publishes in bwn-suite-core, so the board and the list can never disagree. Dragging a card between status lanes DOES change the work order, through Umbrava's own captured PatchWorkOrder mutation - it asks first, states that the WO's time-in-status clock will reset, verifies the server reported success, re-scans rather than trusting the optimistic move, and leaves the card where it was if anything fails. Everything is same-origin using the page's own session: no @connect, no keys, nothing leaves the browser.
 // @downloadURL  https://raw.githubusercontent.com/Intermu/userscripts/main/bwn-kanban.user.js
 // @updateURL    https://raw.githubusercontent.com/Intermu/userscripts/main/bwn-kanban.user.js
@@ -26,7 +26,7 @@
   // update check another. There is no GM_info without a grant (and a grant would sandbox the
   // script away from the page's fetch - see the header note), so the fallback is a literal
   // that must be bumped WITH @version; the harness pins the two together.
-  var VER = '0.6.3';
+  var VER = '0.7.0';
   console.info('[BWN KANBAN] v' + VER + ' - board rows AND verdicts read from bwn-suite-core\'s List Heat scan (no second full-board query); drag between status lanes writes via captured PatchWorkOrder');
 
   // ---------------------------------------------------------------------------
@@ -330,6 +330,13 @@
     var st = document.createElement('style');
     st.id = 'bwn-kanban-css';
     st.textContent = [
+      // 0.7.0 card redesign: one spacing rhythm (the card is a flex column with a single gap,
+      // so no element carries its own margin-top and the vertical spacing can no longer drift
+      // card to card), a 3-size type scale (13 title / 12 client / 11 everything else, down
+      // from five sizes), money on one line instead of three wrapping chips, client+location+
+      // assignee condensed from three lines to two, and long free text (why + scope) clamped
+      // to two lines so a chatty WO cannot make its card twice as tall as its neighbour. The
+      // information shown is unchanged - only its layout, weight and rhythm are.
       '#bwn-kanban{font:13px -apple-system,BlinkMacSystemFont,"Segoe UI",Arial,sans-serif;padding:8px 0 24px;}',
       '#bwn-kanban .kb-bar{display:flex;align-items:center;gap:12px;padding:6px 4px 10px;flex-wrap:wrap;}',
       '#bwn-kanban .kb-note{color:#5b6b63;font-size:12px;}',
@@ -337,48 +344,68 @@
       '#bwn-kanban .kb-err{color:#a11;font-size:12px;}',
       '#bwn-kanban select{font:12px inherit;padding:4px 6px;border:1px solid #cfd8d3;border-radius:6px;background:#fff;}',
       '#bwn-kanban .kb-lanes{display:flex;gap:12px;align-items:flex-start;overflow-x:auto;padding-bottom:12px;}',
-      '#bwn-kanban .kb-lane{flex:0 0 300px;background:#f4f6f5;border:1px solid #e2e8e5;border-radius:10px;display:flex;flex-direction:column;max-height:calc(100vh - 260px);}',
+      '#bwn-kanban .kb-lane{flex:0 0 300px;background:#f4f6f5;border:1px solid #e2e8e5;border-radius:12px;display:flex;flex-direction:column;max-height:calc(100vh - 260px);}',
       '#bwn-kanban .kb-lane.kb-over{border-color:' + GREEN + ';background:#eaf2ee;}',
-      '#bwn-kanban .kb-lane h4{margin:0;padding:10px 12px;font:600 12px inherit;color:' + GREEN + ';display:flex;justify-content:space-between;gap:8px;border-bottom:1px solid #e2e8e5;position:sticky;top:0;background:#f4f6f5;border-radius:10px 10px 0 0;}',
+      '#bwn-kanban .kb-lane h4{margin:0;padding:11px 13px;font:600 12px inherit;color:' + GREEN + ';display:flex;justify-content:space-between;gap:8px;border-bottom:1px solid #e2e8e5;position:sticky;top:0;background:#f4f6f5;border-radius:12px 12px 0 0;}',
       '#bwn-kanban .kb-lane h4 span{color:#5b6b63;font-weight:500;}',
-      '#bwn-kanban .kb-cards{overflow-y:auto;padding:8px;display:flex;flex-direction:column;gap:8px;}',
-      '#bwn-kanban .kb-card{background:#fff;border:1px solid #e2e8e5;border-radius:8px;padding:8px 10px;cursor:grab;box-shadow:0 1px 2px rgba(0,0,0,.04);border-left:3px solid transparent;}',
-      '#bwn-kanban .kb-card:hover{border-color:#c2cec8;}',
+      '#bwn-kanban .kb-cards{overflow-y:auto;padding:10px;display:flex;flex-direction:column;gap:10px;}',
+      // The card is a flex column: one gap owns every vertical space inside it, so children
+      // never set their own margin-top. This is the single change that makes card heights read
+      // as a set instead of "all over the place".
+      '#bwn-kanban .kb-card{background:#fff;border:1px solid #e4e9e7;border-radius:10px;padding:10px 12px;cursor:grab;box-shadow:0 1px 2px rgba(20,40,30,.05);border-left:3px solid transparent;display:flex;flex-direction:column;gap:6px;}',
+      '#bwn-kanban .kb-card:hover{border-color:#c7d2cc;box-shadow:0 2px 6px rgba(20,40,30,.08);}',
       '#bwn-kanban .kb-card.kb-drag{opacity:.45;}',
       // Severity edge. Only ever set from a published verdict; a card with no verdict keeps
-      // the transparent edge rather than being coloured "clear", which would be a claim.
-      '#bwn-kanban .kb-card.sev2{border-left-color:#a11;}',
-      '#bwn-kanban .kb-card.sev1{border-left-color:#c98a00;}',
+      // the transparent edge rather than being coloured "clear", which would be a claim. The
+      // matching dot beside the WO# repeats the same class, so severity reads even when the
+      // left edge is hidden by the lane it sits against.
+      '#bwn-kanban .kb-card.sev2{border-left-color:#b0201a;}',
+      '#bwn-kanban .kb-card.sev1{border-left-color:#8a6100;}',
       '#bwn-kanban .kb-card.sevack{border-left-color:#b9c3be;}',
-      '#bwn-kanban .kb-clock{margin-top:5px;font:600 11px ui-monospace,"Segoe UI Mono",monospace;color:#3d4a44;}',
-      '#bwn-kanban .kb-clock.over{color:#a11;}',
-      '#bwn-kanban .kb-clock.watch{color:#8a6100;}',
-      '#bwn-kanban .kb-why{margin-top:4px;font-size:11.5px;line-height:1.35;color:#a11;}',
-      '#bwn-kanban .kb-why.warnonly{color:#8a6100;}',
-      '#bwn-kanban .kb-why.ackd{color:#5b6b63;}',
-      '#bwn-kanban .kb-meta{margin-top:4px;font-size:11.5px;color:#3d4a44;}',
-      '#bwn-kanban .kb-meta .miss{color:#a11;font-weight:600;}',
-      '#bwn-kanban .kb-meta .soon{color:#8a6100;font-weight:600;}',
-      '#bwn-kanban .kb-vend{margin-top:4px;font-size:11px;color:#5b6b63;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;}',
-      '#bwn-kanban .kb-lane h4 .kb-hotn{color:#a11;font-weight:700;}',
-      '#bwn-kanban .kb-lane.kb-mixed h4{background:#eef2f0;}',
-      '#bwn-kanban .kb-top{display:flex;justify-content:space-between;align-items:baseline;gap:6px;}',
-      '#bwn-kanban .kb-wo{font-weight:700;color:' + GREEN + ';text-decoration:none;}',
+      '#bwn-kanban .kb-top{display:flex;justify-content:space-between;align-items:baseline;gap:8px;}',
+      '#bwn-kanban .kb-wowrap{display:flex;align-items:center;gap:6px;min-width:0;}',
+      '#bwn-kanban .kb-dot{width:7px;height:7px;border-radius:50%;flex:0 0 auto;background:#c7d2cc;}',
+      '#bwn-kanban .kb-dot.sev2{background:#b0201a;}',
+      '#bwn-kanban .kb-dot.sev1{background:#8a6100;}',
+      '#bwn-kanban .kb-dot.sevack{background:#b9c3be;}',
+      '#bwn-kanban .kb-wo{font:700 13px/1.1 inherit;color:' + GREEN + ';text-decoration:none;}',
       '#bwn-kanban .kb-wo:hover{text-decoration:underline;}',
-      '#bwn-kanban .kb-days{font:600 11px ui-monospace,"Segoe UI Mono",monospace;color:#5b6b63;}',
-      // Age is a neutral cue, never an alarm. Over 30 days darkens the chip slightly - it does NOT
-      // go red. The red/amber SEVERITY EDGE beside it owns "in trouble", and that is a judged
-      // verdict, not a raw age threshold; a second red on a different meaning is worse than one.
+      '#bwn-kanban .kb-days{font:600 11px ui-monospace,"Segoe UI Mono",monospace;color:#5f6f68;flex:0 0 auto;}',
+      // Age is a neutral cue, never an alarm. Over 30 days darkens it slightly - it does NOT go
+      // red. The red/amber SEVERITY edge+dot own "in trouble", and that is a judged verdict,
+      // not a raw age threshold; a second red on a different meaning is worse than one.
       '#bwn-kanban .kb-days.kb-old{color:#3d4a44;}',
-      '#bwn-kanban .kb-line{color:#3d4a44;margin-top:3px;font-size:12px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;}',
-      '#bwn-kanban .kb-scope{color:#5b6b63;margin-top:5px;font-size:11.5px;line-height:1.35;}',
-      '#bwn-kanban .kb-chips{display:flex;gap:5px;flex-wrap:wrap;margin-top:6px;}',
-      '#bwn-kanban .kb-chip{font:600 10px inherit;padding:2px 6px;border-radius:999px;background:#eef2f0;color:#3d4a44;}',
-      '#bwn-kanban .kb-chip.p-red{background:#fde8e8;color:#a11;}',
+      '#bwn-kanban .kb-client{font:600 12px/1.25 inherit;color:#1e2a24;white-space:nowrap;overflow:hidden;text-overflow:ellipsis;}',
+      '#bwn-kanban .kb-sub{font:11px/1.3 inherit;color:#5f6f68;white-space:nowrap;overflow:hidden;text-overflow:ellipsis;}',
+      '#bwn-kanban .kb-rule{height:1px;background:#e4e9e7;border:0;margin:1px 0;}',
+      '#bwn-kanban .kb-chips{display:flex;gap:5px;flex-wrap:wrap;}',
+      '#bwn-kanban .kb-chip{font:600 10px/1.4 inherit;padding:2px 8px;border-radius:999px;background:#eef2f0;color:#3d4a44;white-space:nowrap;}',
+      '#bwn-kanban .kb-chip.p-red{background:#fde8e8;color:#b0201a;}',
       '#bwn-kanban .kb-chip.p-yellow{background:#fdf3d8;color:#8a6100;}',
       '#bwn-kanban .kb-chip.p-blue{background:#e6f0fb;color:#1b4f8a;}',
       '#bwn-kanban .kb-chip.p-next{background:#f3e2fb;color:#6b1b8a;}',
-      '#bwn-kanban .kb-dne{font:600 11px ui-monospace,"Segoe UI Mono",monospace;color:#0d3d26;}',
+      '#bwn-kanban .kb-chip.st{background:transparent;border:1px solid #e4e9e7;color:#5f6f68;}',
+      // Money on ONE line (was three chips that wrapped to a second row on some cards and not
+      // others - a big source of the height jitter). DNE, NTE, then GP/breach, all monospace.
+      '#bwn-kanban .kb-money{display:flex;flex-wrap:wrap;gap:4px 10px;font:600 11px ui-monospace,"Segoe UI Mono",monospace;color:#3d4a44;}',
+      '#bwn-kanban .kb-money .gp-bad{color:#b0201a;}',
+      '#bwn-kanban .kb-money .gp-thin{color:#8a6100;}',
+      '#bwn-kanban .kb-clock{font:600 11px ui-monospace,"Segoe UI Mono",monospace;color:#3d4a44;}',
+      '#bwn-kanban .kb-clock.over{color:#b0201a;}',
+      '#bwn-kanban .kb-clock.watch{color:#8a6100;}',
+      // why + scope clamp to two lines. Full text stays reachable on hover (card title), so
+      // nothing is lost - only bounded. -webkit-line-clamp is honoured by the Chromium the
+      // app runs in.
+      '#bwn-kanban .kb-why{font:11px/1.4 inherit;color:#b0201a;display:-webkit-box;-webkit-line-clamp:2;-webkit-box-orient:vertical;overflow:hidden;}',
+      '#bwn-kanban .kb-why.warnonly{color:#8a6100;}',
+      '#bwn-kanban .kb-why.ackd{color:#5f6f68;}',
+      '#bwn-kanban .kb-scope{font:11px/1.4 inherit;color:#5f6f68;display:-webkit-box;-webkit-line-clamp:2;-webkit-box-orient:vertical;overflow:hidden;}',
+      '#bwn-kanban .kb-meta{font:11px/1.35 inherit;color:#3d4a44;}',
+      '#bwn-kanban .kb-meta .miss{color:#b0201a;font-weight:600;}',
+      '#bwn-kanban .kb-meta .soon{color:#8a6100;font-weight:600;}',
+      '#bwn-kanban .kb-vend{font:11px/1.3 inherit;color:#5f6f68;white-space:nowrap;overflow:hidden;text-overflow:ellipsis;}',
+      '#bwn-kanban .kb-lane h4 .kb-hotn{color:#a11;font-weight:700;}',
+      '#bwn-kanban .kb-lane.kb-mixed h4{background:#eef2f0;}',
       '.bwn-kb-btn{font:600 12px -apple-system,BlinkMacSystemFont,"Segoe UI",Arial,sans-serif;padding:5px 12px;border:1px solid ' + GREEN + ';background:#fff;color:' + GREEN + ';border-radius:6px;cursor:pointer;margin-left:8px;}',
       '.bwn-kb-btn.on{background:' + GREEN + ';color:#fff;}'
     ].join('');
@@ -401,6 +428,24 @@
     if (s.indexOf('yellow') > -1 || s.indexOf('medium') > -1) return 'p-yellow';
     if (s.indexOf('blue') > -1 || s.indexOf('low') > -1) return 'p-blue';
     return '';
+  }
+  // The colour-coded priority labels arrive as "Blue - Low Priority" / "Yellow - Medium
+  // Priority" / "Red - High Priority". The colour is already carried by prioClass()'s chip
+  // tint, so the chip only needs the level word - "Low" / "Medium" / "High" - which halves
+  // the chip's width and stops the priority+status row wrapping. SLA-style labels ("P4 PM",
+  // "P2 Next Day") carry no such redundancy and are kept whole.
+  function shortPrio(label) {
+    var s = String(label || '').trim();
+    var m = s.match(/\b(low|medium|high)\b/i);
+    if (m && /priority/i.test(s)) return m[1].charAt(0).toUpperCase() + m[1].slice(1).toLowerCase();
+    return s;
+  }
+  // First name to an initial so location and assignee share one line without the assignee
+  // truncating it away. A single-token name (no space) is left alone.
+  function shortName(n) {
+    var p = String(n || '').trim().split(/\s+/);
+    if (p.length < 2 || !p[0]) return String(n || '');
+    return p[0].charAt(0).toUpperCase() + '. ' + p.slice(1).join(' ');
   }
   function fmtDate(d) {
     if (!d) return null;
@@ -525,48 +570,63 @@
     card.dataset.statusId = r.statusId;
     card.dataset.statusName = r.statusName || '';
 
+    // Severity verdict is read first: it tints both the left edge and the dot in the header,
+    // so it must be known before the header is built.
+    var heat = heatOf(r.number);
+    var sevCls = heat ? (heat.acked ? 'sevack' : heat.sev === 2 ? 'sev2' : heat.sev === 1 ? 'sev1' : '') : '';
+    if (sevCls) card.classList.add(sevCls);
+
+    // ---- Header: severity dot + WO#, with the age pinned to the right --------------------
     var top = el('div', 'kb-top');
+    var wowrap = el('div', 'kb-wowrap');
+    wowrap.appendChild(el('span', 'kb-dot' + (sevCls ? ' ' + sevCls : '')));
     var a = el('a', 'kb-wo', 'W-' + r.number);
     a.href = '/work-orders/' + r.number + '/details';
-    top.appendChild(a);
-    var days = el('span', 'kb-days' + ((Number(r.numberOfDays) || 0) > 30 ? ' kb-old' : ''), (r.numberOfDays != null ? r.numberOfDays + 'd' : ''));
-    top.appendChild(days);
+    wowrap.appendChild(a);
+    top.appendChild(wowrap);
+    top.appendChild(el('span', 'kb-days' + ((Number(r.numberOfDays) || 0) > 30 ? ' kb-old' : ''), (r.numberOfDays != null ? r.numberOfDays + 'd' : '')));
     card.appendChild(top);
 
-    if (r.clientName) card.appendChild(el('div', 'kb-line', r.clientName));
+    // ---- Identity: client on its own line, then "location · assignee" on one line --------
+    // Three separate lines (client / location / assignee) made the identity block's height
+    // depend on how many of the three a WO happened to carry; collapsing location+assignee to
+    // one line fixes both the height jitter and the wasted width.
+    if (r.clientName) card.appendChild(el('div', 'kb-client', r.clientName));
     var loc = [r.locationName, r.locationNumber].filter(Boolean).join(' ');
-    if (loc) card.appendChild(el('div', 'kb-line', loc));
-    if (r.assignedToMemberName) card.appendChild(el('div', 'kb-line', r.assignedToMemberName));
+    var subParts = [loc, shortName(r.assignedToMemberName)].filter(Boolean);
+    if (subParts.length) card.appendChild(el('div', 'kb-sub', subParts.join(' · ')));
+    if (r.clientName || subParts.length) card.appendChild(el('hr', 'kb-rule'));
 
-    var heat = heatOf(r.number);
-    if (heat) {
-      if (heat.acked) card.classList.add('sevack');
-      else if (heat.sev === 2) card.classList.add('sev2');
-      else if (heat.sev === 1) card.classList.add('sev1');
-    }
-
+    // ---- Priority + status chips, one row. prioClass() tints the chip, so the label is the
+    // level word only (shortPrio) and the two chips fit on a single line. ------------------
     var chips = el('div', 'kb-chips');
     var pl = r.priority && r.priority.label;
-    if (pl) chips.appendChild(el('span', 'kb-chip ' + prioClass(pl), pl));
+    if (pl) chips.appendChild(el('span', 'kb-chip ' + prioClass(pl), shortPrio(pl)));
     // Status is on EVERY card now, not only when the lanes are grouped by something else. On
     // a status-laned board the lane header is 300px away and off-screen once the lane scrolls,
     // and the roll-up lane below mixes statuses on purpose - so the card has to carry its own.
-    if (r.statusName) chips.appendChild(el('span', 'kb-chip', r.statusName));
-    // Money: DNE is what the client authorized, totalNTE is committed vendor cost. 0.3.0 showed
-    // DNE alone, so a card had revenue with no cost beside it and GP could not be read off the
-    // board at all. Both, then GP, and only when both are really there.
+    if (r.statusName) chips.appendChild(el('span', 'kb-chip st', r.statusName));
+    if (chips.children.length) card.appendChild(chips);
+
+    // ---- Money on ONE line: DNE (client authorized) · NTE (committed vendor cost) · GP ----
+    // 0.3.0 showed DNE alone; 0.6.x showed all three as chips that wrapped to a second row on
+    // some cards and not others, a big source of the height jitter. One mono line, both then GP,
+    // only when they are really there.
     var dneAmt = moneyAmt(firstVal(r, ['doNotExceed', 'dne', 'clientDoNotExceed']));
     var nteAmt = moneyAmt(firstVal(r, ['totalNTE', 'totalVendorNTE', 'nte', 'vendorNTE']));
-    if (dneAmt !== null) chips.appendChild(el('span', 'kb-chip kb-dne', 'DNE ' + fmtMoney(dneAmt)));
-    if (nteAmt !== null) chips.appendChild(el('span', 'kb-chip kb-dne', 'NTE ' + fmtMoney(nteAmt)));
-    if (dneAmt !== null && nteAmt !== null && dneAmt > 0) {
-      var gp = Math.round((dneAmt - nteAmt) / dneAmt * 100);
-      // Vendor cost over the client's authorization is a money-control breach, not a thin
-      // margin, and it is the one List Heat marks red on its own - so it is spelled out.
-      chips.appendChild(el('span', 'kb-chip ' + (gp < 0 ? 'p-red' : gp < 20 ? 'p-yellow' : ''),
-        gp < 0 ? 'NTE OVER DNE' : 'GP ' + gp + '%'));
+    if (dneAmt !== null || nteAmt !== null) {
+      var money = el('div', 'kb-money');
+      if (dneAmt !== null) money.appendChild(el('span', null, 'DNE ' + fmtMoney(dneAmt)));
+      if (nteAmt !== null) money.appendChild(el('span', null, 'NTE ' + fmtMoney(nteAmt)));
+      if (dneAmt !== null && nteAmt !== null && dneAmt > 0) {
+        var gp = Math.round((dneAmt - nteAmt) / dneAmt * 100);
+        // Vendor cost over the client's authorization is a money-control breach, not a thin
+        // margin, and it is the one List Heat marks red on its own - so it is spelled out.
+        money.appendChild(el('span', gp < 0 ? 'gp-bad' : gp < 20 ? 'gp-thin' : null,
+          gp < 0 ? 'NTE OVER DNE' : 'GP ' + gp + '%'));
+      }
+      card.appendChild(money);
     }
-    if (chips.children.length) card.appendChild(chips);
 
     // ---- The status clock, corrected, against the limit this row was judged against -------
     var hrs = statusHours(r);
@@ -577,8 +637,8 @@
       // the row was actually judged by - including the client-SLA scaling from List Heat
       // v3.19. Without a verdict the hours print bare: a limit is not invented here.
       if (heat && typeof heat.bad === 'number' && heat.bad > 0) {
-        if (hrs >= heat.bad) { txt += ' - ' + (hrs / heat.bad).toFixed(1) + 'x the ' + Math.round(heat.bad) + 'h limit'; cls += ' over'; }
-        else if (typeof heat.warn === 'number' && hrs >= heat.warn) { txt += ' - watch from ' + Math.round(heat.warn) + 'h'; cls += ' watch'; }
+        if (hrs >= heat.bad) { txt += ' · ' + (hrs / heat.bad).toFixed(1) + '× the ' + Math.round(heat.bad) + 'h limit'; cls += ' over'; }
+        else if (typeof heat.warn === 'number' && hrs >= heat.warn) { txt += ' · watch from ' + Math.round(heat.warn) + 'h'; cls += ' watch'; }
         else txt += ' of ' + Math.round(heat.bad) + 'h';
       }
       card.appendChild(el('div', cls, txt));
@@ -587,7 +647,8 @@
     // ---- Why it is flagged: the authority's own words, not a second opinion --------------
     // The reasons are exactly the strings List Heat's computeVerdict produced for this WO, so
     // the board cannot describe a row differently from the list. The status-clock reason is
-    // dropped because the line above already says it, in more detail.
+    // dropped because the line above already says it, in more detail. CSS clamps this to two
+    // lines; the full text stays on hover via the card title set below.
     if (heat && heat.reasons && heat.reasons.length) {
       var why = heat.reasons.filter(function (t) { return !/h in "/.test(t); });
       if (why.length) {
@@ -647,9 +708,13 @@
     var tradeTxt = nameList(trades);
     if (vendTxt || tradeTxt) card.appendChild(el('div', 'kb-vend', [vendTxt, tradeTxt].filter(Boolean).join(' · ')));
 
+    // Scope is clamped to two lines by CSS. A raw hard cap still applies so a runaway scope
+    // never bloats the DOM, and the full untrimmed text is kept on hover.
     if (r.scopeOfWork) {
       var s = String(r.scopeOfWork).replace(/\s+/g, ' ').trim();
-      card.appendChild(el('div', 'kb-scope', s.length > CARD_SCOPE_CHARS ? s.slice(0, CARD_SCOPE_CHARS) + '...' : s));
+      var scopeEl = el('div', 'kb-scope', s.length > CARD_SCOPE_CHARS ? s.slice(0, CARD_SCOPE_CHARS) + '...' : s);
+      scopeEl.title = s;
+      card.appendChild(scopeEl);
     }
     if (heat && heat.reasons && heat.reasons.length) card.title = heat.reasons.join(' · ');
 
