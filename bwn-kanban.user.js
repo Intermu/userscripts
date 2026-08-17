@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         BWN WO Kanban (Broadway National)
 // @namespace    broadwaynational.bwn
-// @version      0.7.1
+// @version      0.7.2
 // @description  Turns Umbrava's Work Orders list into a kanban board without leaving the page. A Board/List toggle sits next to the list's own search box; switching to Board hides the table (the toolbar stays, so the app's own filtering still drives everything) and lays the same work orders out as cards in lanes. Lanes are WO Status by default and regroup to Priority, Assignee, Client or Age from a dropdown. The board never invents its own filter system, and as of 0.5.0 it does not query at all: it reads both rows and verdicts from the full-board scan bwn-suite-core's List Heat already runs on the same page, so whatever the list is filtered to (phase, statuses, search, assignee chips, sort) is exactly what the board shows, and one list page now costs one full-board query instead of two. It still captures the SPA's own PagedWorkOrders request off the wire, because that capture is where the auth headers for the status write come from. Cards carry the triage picture: the status clock against the limit that WO was actually judged against, the reasons it is flagged, whether its onsite date has already passed, DNE vs vendor NTE with GP, vendors and trades. Severity is never computed here - it is read from the verdicts List Heat publishes in bwn-suite-core, so the board and the list can never disagree. Dragging a card between status lanes DOES change the work order, through Umbrava's own captured PatchWorkOrder mutation - it asks first, states that the WO's time-in-status clock will reset, verifies the server reported success, re-scans rather than trusting the optimistic move, and leaves the card where it was if anything fails. Everything is same-origin using the page's own session: no @connect, no keys, nothing leaves the browser.
 // @downloadURL  https://raw.githubusercontent.com/Intermu/userscripts/main/bwn-kanban.user.js
 // @updateURL    https://raw.githubusercontent.com/Intermu/userscripts/main/bwn-kanban.user.js
@@ -26,7 +26,7 @@
   // update check another. There is no GM_info without a grant (and a grant would sandbox the
   // script away from the page's fetch - see the header note), so the fallback is a literal
   // that must be bumped WITH @version; the harness pins the two together.
-  var VER = '0.7.1';
+  var VER = '0.7.2';
   console.info('[BWN KANBAN] v' + VER + ' - board rows AND verdicts read from bwn-suite-core\'s List Heat scan (no second full-board query); drag between status lanes writes via captured PatchWorkOrder');
 
   // ---------------------------------------------------------------------------
@@ -49,7 +49,7 @@
   // PAGE_TAKE and MAX_ROWS went with the scan in 0.5.0 - paging and the row ceiling are
   // bwn-suite-core's problem now (its own CAP and HEAT_DATASET_MAX).
   var OP = 'PagedWorkOrders';
-  var CARD_SCOPE_CHARS = 140;
+  var CARD_SCOPE_CHARS = 600;   // note-block scrolls with the card, so it can hold more text
   var LS_VIEW = 'bwn:kanban:view';      // 'board' | 'list'
   var LS_GROUP = 'bwn:kanban:group';
 
@@ -330,13 +330,15 @@
     var st = document.createElement('style');
     st.id = 'bwn-kanban-css';
     st.textContent = [
-      // 0.7.0 card redesign: one spacing rhythm (the card is a flex column with a single gap,
-      // so no element carries its own margin-top and the vertical spacing can no longer drift
-      // card to card), a 3-size type scale (13 title / 12 client / 11 everything else, down
-      // from five sizes), money on one line instead of three wrapping chips, client+location+
-      // assignee condensed from three lines to two, and long free text (why + scope) clamped
-      // to two lines so a chatty WO cannot make its card twice as tall as its neighbour. The
-      // information shown is unchanged - only its layout, weight and rhythm are.
+      // 0.7.2 card overhaul, live-iterated on the real board. Wider 500px lanes; a uniform
+      // fixed card height with the WHOLE card scrolling for anything past the fold, so nothing
+      // is ever truncated - the description and vendor tail are reachable by scroll while the
+      // header stays pinned (`.kb-card > *{flex:0 0 auto}` is what turns overflow into scroll
+      // instead of silent shrink). Hierarchy: the company is a quiet uppercase eyebrow and the
+      // site + coordinator is the bold identity line. The SLA clock is the hero triage signal -
+      // a red PILL only when it is OVER its limit, plain amber when merely on watch. Money reads
+      // as muted label + bold value pairs, and the free-text description sits in its own note
+      // block. Colours are unchanged from List Heat (#a11 / #c98a00), so board and list agree.
       '#bwn-kanban{font:13px -apple-system,BlinkMacSystemFont,"Segoe UI",Arial,sans-serif;padding:8px 0 24px;}',
       '#bwn-kanban .kb-bar{display:flex;align-items:center;gap:12px;padding:6px 4px 10px;flex-wrap:wrap;}',
       '#bwn-kanban .kb-note{color:#5b6b63;font-size:12px;}',
@@ -344,17 +346,21 @@
       '#bwn-kanban .kb-err{color:#a11;font-size:12px;}',
       '#bwn-kanban select{font:12px inherit;padding:4px 6px;border:1px solid #cfd8d3;border-radius:6px;background:#fff;}',
       '#bwn-kanban .kb-lanes{display:flex;gap:12px;align-items:flex-start;overflow-x:auto;padding-bottom:12px;}',
-      '#bwn-kanban .kb-lane{flex:0 0 300px;background:#f4f6f5;border:1px solid #e2e8e5;border-radius:12px;display:flex;flex-direction:column;max-height:calc(100vh - 260px);}',
+      '#bwn-kanban .kb-lane{flex:0 0 500px;background:#f4f6f5;border:1px solid #e2e8e5;border-radius:12px;display:flex;flex-direction:column;max-height:calc(100vh - 260px);}',
       '#bwn-kanban .kb-lane.kb-over{border-color:' + GREEN + ';background:#eaf2ee;}',
       '#bwn-kanban .kb-lane h4{margin:0;padding:11px 13px;font:600 12px inherit;color:' + GREEN + ';display:flex;justify-content:space-between;gap:8px;border-bottom:1px solid #e2e8e5;position:sticky;top:0;background:#f4f6f5;border-radius:12px 12px 0 0;}',
       '#bwn-kanban .kb-lane h4 span{color:#5b6b63;font-weight:500;}',
       '#bwn-kanban .kb-cards{overflow-y:auto;padding:10px;display:flex;flex-direction:column;gap:10px;}',
-      // The card is a flex column: one gap owns every vertical space inside it, so children
-      // never set their own margin-top. This is the single change that makes card heights read
-      // as a set instead of "all over the place".
-      '#bwn-kanban .kb-card{background:#fff;border:1px solid #e2e8e5;border-radius:10px;padding:10px 12px;cursor:grab;box-shadow:0 1px 2px rgba(0,0,0,.04);border-left:3px solid transparent;display:flex;flex-direction:column;gap:6px;}',
+      // The card is a fixed-height flex column that scrolls its own overflow. Children never
+      // shrink (rule below), so content past 250px becomes a scroll rather than a silent clip;
+      // the sticky header keeps the WO# in view while you scroll. Uniform height = a real grid.
+      '#bwn-kanban .kb-card{background:#fff;border:1px solid #e2e8e5;border-radius:12px;padding:12px 15px;cursor:grab;box-shadow:0 1px 2px rgba(0,0,0,.04);border-left:4px solid transparent;display:flex;flex-direction:column;gap:2px;max-height:250px;overflow-y:auto;overflow-x:hidden;}',
+      '#bwn-kanban .kb-card > *{flex:0 0 auto;}',
       '#bwn-kanban .kb-card:hover{border-color:#c2cec8;box-shadow:0 2px 6px rgba(0,0,0,.08);}',
       '#bwn-kanban .kb-card.kb-drag{opacity:.45;}',
+      '#bwn-kanban .kb-card::-webkit-scrollbar{width:8px;}',
+      '#bwn-kanban .kb-card::-webkit-scrollbar-thumb{background:transparent;border-radius:4px;}',
+      '#bwn-kanban .kb-card:hover::-webkit-scrollbar-thumb{background:#c4cfc9;}',
       // Severity edge. Only ever set from a published verdict; a card with no verdict keeps
       // the transparent edge rather than being coloured "clear", which would be a claim. The
       // matching dot beside the WO# repeats the same class, so severity reads even when the
@@ -363,48 +369,55 @@
       '#bwn-kanban .kb-card.sev2{border-left-color:#a11;}',
       '#bwn-kanban .kb-card.sev1{border-left-color:#c98a00;}',
       '#bwn-kanban .kb-card.sevack{border-left-color:#b9c3be;}',
-      '#bwn-kanban .kb-top{display:flex;justify-content:space-between;align-items:baseline;gap:8px;}',
+      // Header pinned to the top of the card while it scrolls, so the WO# never scrolls away.
+      '#bwn-kanban .kb-top{display:flex;justify-content:space-between;align-items:center;gap:8px;position:sticky;top:0;background:#fff;z-index:1;padding-bottom:3px;margin-bottom:2px;}',
       '#bwn-kanban .kb-wowrap{display:flex;align-items:center;gap:6px;min-width:0;}',
       '#bwn-kanban .kb-dot{width:7px;height:7px;border-radius:50%;flex:0 0 auto;background:#c2cec8;}',
       '#bwn-kanban .kb-dot.sev2{background:#a11;}',
       '#bwn-kanban .kb-dot.sev1{background:#c98a00;}',
       '#bwn-kanban .kb-dot.sevack{background:#b9c3be;}',
-      '#bwn-kanban .kb-wo{font:700 13px/1.1 inherit;color:' + GREEN + ';text-decoration:none;}',
+      '#bwn-kanban .kb-wo{font:800 15px/1.1 inherit;color:' + GREEN + ';text-decoration:none;}',
       '#bwn-kanban .kb-wo:hover{text-decoration:underline;}',
-      '#bwn-kanban .kb-days{font:600 11px ui-monospace,"Segoe UI Mono",monospace;color:#5b6b63;flex:0 0 auto;}',
+      '#bwn-kanban .kb-days{font:600 11px ui-monospace,"Segoe UI Mono",monospace;color:#7c8880;flex:0 0 auto;}',
       // Age is a neutral cue, never an alarm. Over 30 days darkens it slightly - it does NOT go
       // red. The red/amber SEVERITY edge+dot own "in trouble", and that is a judged verdict,
       // not a raw age threshold; a second red on a different meaning is worse than one.
       '#bwn-kanban .kb-days.kb-old{color:#3d4a44;}',
-      '#bwn-kanban .kb-client{font:600 12px/1.25 inherit;color:#1e2a24;white-space:nowrap;overflow:hidden;text-overflow:ellipsis;}',
-      '#bwn-kanban .kb-sub{font:11px/1.3 inherit;color:#5b6b63;white-space:nowrap;overflow:hidden;text-overflow:ellipsis;}',
-      '#bwn-kanban .kb-rule{height:1px;background:#e2e8e5;border:0;margin:1px 0;}',
-      '#bwn-kanban .kb-chips{display:flex;gap:5px;flex-wrap:wrap;}',
+      // Identity: the company is a quiet eyebrow (it is the same on most cards), the site +
+      // coordinator is the bold line the eye lands on.
+      '#bwn-kanban .kb-client{font:700 10px/1.3 inherit;letter-spacing:.04em;text-transform:uppercase;color:#8b978f;white-space:nowrap;overflow:hidden;text-overflow:ellipsis;}',
+      '#bwn-kanban .kb-sub{font:700 13.5px/1.25 inherit;color:#14201b;white-space:nowrap;overflow:hidden;text-overflow:ellipsis;}',
+      '#bwn-kanban .kb-chips{display:flex;gap:5px;flex-wrap:wrap;margin-top:6px;}',
       '#bwn-kanban .kb-chip{font:600 10px/1.4 inherit;padding:2px 8px;border-radius:999px;background:#eef2f0;color:#3d4a44;white-space:nowrap;}',
       '#bwn-kanban .kb-chip.p-red{background:#fde8e8;color:#a11;}',
       '#bwn-kanban .kb-chip.p-yellow{background:#fdf3d8;color:#8a6100;}',
       '#bwn-kanban .kb-chip.p-blue{background:#e6f0fb;color:#1b4f8a;}',
       '#bwn-kanban .kb-chip.p-next{background:#f3e2fb;color:#6b1b8a;}',
       '#bwn-kanban .kb-chip.st{background:transparent;border:1px solid #e2e8e5;color:#5b6b63;}',
-      // Money on ONE line (was three chips that wrapped to a second row on some cards and not
-      // others - a big source of the height jitter). DNE, NTE, then GP/breach, all monospace.
-      '#bwn-kanban .kb-money{display:flex;flex-wrap:wrap;gap:4px 10px;font:600 11px ui-monospace,"Segoe UI Mono",monospace;color:#3d4a44;}',
-      '#bwn-kanban .kb-money .gp-bad{color:#a11;}',
-      '#bwn-kanban .kb-money .gp-thin{color:#8a6100;}',
-      '#bwn-kanban .kb-clock{font:600 11px ui-monospace,"Segoe UI Mono",monospace;color:#3d4a44;}',
-      '#bwn-kanban .kb-clock.over{color:#a11;}',
+      // Money as muted DNE/NTE/GP labels beside bold tabular values, on one row. A vendor cost
+      // over the client authorization ("NTE OVER DNE") is spelled out whole instead.
+      '#bwn-kanban .kb-money{display:flex;flex-wrap:wrap;gap:2px 20px;align-items:baseline;margin-top:6px;font-size:12px;}',
+      '#bwn-kanban .kb-money > span{display:inline-flex;gap:5px;align-items:baseline;}',
+      '#bwn-kanban .kb-money .mlbl{font:700 9px/1.4 inherit;letter-spacing:.04em;color:#8b978f;}',
+      '#bwn-kanban .kb-money .mval{font-weight:700;color:#1f2a24;font-variant-numeric:tabular-nums;}',
+      '#bwn-kanban .kb-money .gp-thin .mval{color:#8a6100;}',
+      '#bwn-kanban .kb-money .gp-bad{color:#a11;font-weight:700;}',
+      // SLA clock = the hero triage number. Plain when healthy; a red PILL when OVER limit;
+      // plain amber when only on watch (a pill on every watched card was too much colour).
+      '#bwn-kanban .kb-clock{align-self:flex-start;font:700 11.5px ui-monospace,"Segoe UI Mono",monospace;color:#3d4a44;margin-top:6px;}',
+      '#bwn-kanban .kb-clock.over{background:#fdeaea;color:#a11;padding:3px 9px;border-radius:6px;}',
       '#bwn-kanban .kb-clock.watch{color:#8a6100;}',
-      // why + scope clamp to two lines. Full text stays reachable on hover (card title), so
-      // nothing is lost - only bounded. -webkit-line-clamp is honoured by the Chromium the
-      // app runs in.
-      '#bwn-kanban .kb-why{font:11px/1.4 inherit;color:#a11;display:-webkit-box;-webkit-line-clamp:2;-webkit-box-orient:vertical;overflow:hidden;}',
+      // why: the reasons, clamped to two lines (full set on the card title / by scroll).
+      '#bwn-kanban .kb-why{font:11px/1.4 inherit;color:#9e1f1a;display:-webkit-box;-webkit-line-clamp:2;-webkit-box-orient:vertical;overflow:hidden;margin-top:5px;}',
       '#bwn-kanban .kb-why.warnonly{color:#8a6100;}',
       '#bwn-kanban .kb-why.ackd{color:#5b6b63;}',
-      '#bwn-kanban .kb-scope{font:11px/1.4 inherit;color:#5b6b63;display:-webkit-box;-webkit-line-clamp:2;-webkit-box-orient:vertical;overflow:hidden;}',
-      '#bwn-kanban .kb-meta{font:11px/1.35 inherit;color:#3d4a44;}',
+      '#bwn-kanban .kb-meta{font:11px/1.35 inherit;color:#3a453f;margin-top:3px;}',
       '#bwn-kanban .kb-meta .miss{color:#a11;font-weight:600;}',
       '#bwn-kanban .kb-meta .soon{color:#8a6100;font-weight:600;}',
-      '#bwn-kanban .kb-vend{font:11px/1.3 inherit;color:#5b6b63;white-space:nowrap;overflow:hidden;text-overflow:ellipsis;}',
+      // Vendor + trade wraps to two lines rather than ellipsing off the card.
+      '#bwn-kanban .kb-vend{font:11px/1.3 inherit;color:#55625b;display:-webkit-box;-webkit-line-clamp:2;-webkit-box-orient:vertical;overflow:hidden;margin-top:6px;}',
+      // The free-text description sits in its own note block; its full text scrolls with the card.
+      '#bwn-kanban .kb-scope{font:11px/1.42 inherit;color:#54615a;background:#f5f8f6;border:1px solid #e7edea;border-radius:8px;padding:8px 10px;margin-top:7px;}',
       '#bwn-kanban .kb-lane h4 .kb-hotn{color:#a11;font-weight:700;}',
       '#bwn-kanban .kb-lane.kb-mixed h4{background:#eef2f0;}',
       '.bwn-kb-btn{font:600 12px -apple-system,BlinkMacSystemFont,"Segoe UI",Arial,sans-serif;padding:5px 12px;border:1px solid ' + GREEN + ';background:#fff;color:' + GREEN + ';border-radius:6px;cursor:pointer;margin-left:8px;}',
@@ -564,6 +577,16 @@
     return GROUPS[0];
   }
 
+  // A money cell renders a muted label beside a bold value, so DNE / NTE / GP read as small
+  // columns rather than a run-on monospace string. `cls` tints the GP cell when the margin is
+  // thin. The "NTE OVER DNE" breach is NOT a cell - it is spelled out whole by the caller.
+  function moneyCell(label, value, cls) {
+    var sp = el('span', cls || null);
+    sp.appendChild(el('span', 'mlbl', label));
+    sp.appendChild(el('span', 'mval', value));
+    return sp;
+  }
+
   function buildCard(r) {
     var card = el('div', 'kb-card');
     card.draggable = true;
@@ -596,7 +619,6 @@
     var loc = [r.locationName, r.locationNumber].filter(Boolean).join(' ');
     var subParts = [loc, shortName(r.assignedToMemberName)].filter(Boolean);
     if (subParts.length) card.appendChild(el('div', 'kb-sub', subParts.join(' · ')));
-    if (r.clientName || subParts.length) card.appendChild(el('hr', 'kb-rule'));
 
     // ---- Priority + status chips, one row. prioClass() tints the chip, so the label is the
     // level word only (shortPrio) and the two chips fit on a single line. ------------------
@@ -609,22 +631,22 @@
     if (r.statusName) chips.appendChild(el('span', 'kb-chip st', r.statusName));
     if (chips.children.length) card.appendChild(chips);
 
-    // ---- Money on ONE line: DNE (client authorized) · NTE (committed vendor cost) · GP ----
-    // 0.3.0 showed DNE alone; 0.6.x showed all three as chips that wrapped to a second row on
-    // some cards and not others, a big source of the height jitter. One mono line, both then GP,
-    // only when they are really there.
+    // ---- Money row: DNE (client authorized) / NTE (committed vendor cost) / GP, each a muted
+    // label + bold value cell. 0.3.0 showed DNE alone; 0.6.x showed three chips; 0.7.2 makes
+    // them read as columns. Cells appear only when the value is really there.
     var dneAmt = moneyAmt(firstVal(r, ['doNotExceed', 'dne', 'clientDoNotExceed']));
     var nteAmt = moneyAmt(firstVal(r, ['totalNTE', 'totalVendorNTE', 'nte', 'vendorNTE']));
     if (dneAmt !== null || nteAmt !== null) {
       var money = el('div', 'kb-money');
-      if (dneAmt !== null) money.appendChild(el('span', null, 'DNE ' + fmtMoney(dneAmt)));
-      if (nteAmt !== null) money.appendChild(el('span', null, 'NTE ' + fmtMoney(nteAmt)));
+      if (dneAmt !== null) money.appendChild(moneyCell('DNE', fmtMoney(dneAmt)));
+      if (nteAmt !== null) money.appendChild(moneyCell('NTE', fmtMoney(nteAmt)));
       if (dneAmt !== null && nteAmt !== null && dneAmt > 0) {
         var gp = Math.round((dneAmt - nteAmt) / dneAmt * 100);
         // Vendor cost over the client's authorization is a money-control breach, not a thin
-        // margin, and it is the one List Heat marks red on its own - so it is spelled out.
-        money.appendChild(el('span', gp < 0 ? 'gp-bad' : gp < 20 ? 'gp-thin' : null,
-          gp < 0 ? 'NTE OVER DNE' : 'GP ' + gp + '%'));
+        // margin, and it is the one List Heat marks red on its own - so it is spelled out whole
+        // rather than shown as a GP cell.
+        if (gp < 0) money.appendChild(el('span', 'gp-bad', 'NTE OVER DNE'));
+        else money.appendChild(moneyCell('GP', gp + '%', gp < 20 ? 'gp-thin' : null));
       }
       card.appendChild(money);
     }
