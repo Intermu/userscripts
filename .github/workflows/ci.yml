@@ -358,6 +358,14 @@ jobs:
       - name: Write-queue catalog push harness (status + user catalog ingest)
         run: node scripts/test-wq-catalog-push.js
 
+      # bwn-low-gp: the "Low GP" button beside global search posts a Billing "Low GP" note plus an
+      # @-mention ping to the WO's assignee. Slices LOW-GP-SLICE and pins the two must-be-exact paths:
+      # the mention contentHtml byte-identical to the 2026-08-17 wire capture (the span alone notifies,
+      # actionNoteEmails null), and note-type resolution (Billing=3) with cache->floor->null. Plus HTML
+      # escaping at the write boundary and the GUID-only assignee gate. Mutation controls revert each.
+      - name: Low GP note harness (mention contentHtml + note-type + assignee gate)
+        run: node scripts/test-low-gp.js
+
   lint:
     name: Lint
     runs-on: ubuntu-latest
