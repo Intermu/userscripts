@@ -35,7 +35,7 @@ function slice(startNeedle, endNeedle, what) {
 var BLOCK = slice('var CLIENT_BY_DOMAIN = {', '// Image-based Caleres/Corrigo request', 'Pilot/generic extractor cluster');
 var exportLine = '\n;this.extractWo=extractWo;this.genericBodyScope=genericBodyScope;' +
   'this.assetToTrade=assetToTrade;this.clientFromDomain=clientFromDomain;' +
-  'this.extractCaleres=extractCaleres;this.calPriorityTarget=calPriorityTarget;';
+  'this.extractCaleres=extractCaleres;';
 var api = {};
 vm.runInNewContext(BLOCK + exportLine, api);
 
@@ -157,27 +157,30 @@ A.ok('  genericBodyScope is tried before the subject fallback',
 A.ok('  image-only path still keeps the subject fallback',
   full.indexOf("last resort: the routing subject") >= 0);
 
-// ---- Caleres priority comes from the SUBJECT, not the PDF's P-tier ----------
-// Ground truth: Mike, 2026-08-17. The real WO 1135344-00000006 arrived with subject "...EMERGENCY"
-// while its PDF says "P3 IMPORTANT - 1 DAY ETA". Caleres' subject word is authoritative, so the WO
-// is Priority 1 (Emergency), NOT the Priority 2 the PDF tier would give. This is the exact pair.
-console.log('\n# Caleres priority: the email SUBJECT word wins over the PDF P-tier');
+// ---- Caleres priority comes ENTIRELY from the SUBJECT word, not the PDF ------
+// Ground truth: Mike, 2026-08-17. Caleres subjects use words (never P-codes): EMERGENCY -> Priority 1,
+// URGENT -> Priority 2, anything else -> Priority 3 (Normal). The EMCOR/Corrigo PDF P-tier is IGNORED -
+// the real WO 1135344-00000006 arrived subject "...EMERGENCY" while its PDF says "P3 IMPORTANT", so
+// the WO is Priority 1, not the Priority 2 the PDF tier would give.
+console.log('\n# Caleres priority: SUBJECT word only (EMERGENCY/URGENT else Normal), PDF P-tier ignored');
 var CAL_PDF = 'Caleres/62336/FF - 1633 W BETHANY HOME ROAD DUE BY 8/19/2026 4:00 PM ' +
   'P3 IMPORTANT - 1 DAY ETA, 3 DAY COMP WO# 1135344-00000006 NOT TO EXCEED $650.00 ' +
   'ON DEMAND WORK Doors - General Glass Doors - Exterior Back emergency exit glass on door cracked. ' +
   'ASSIGNMENT Assigned To Caleres Store Maintenance';
 var calEmerg = api.extractCaleres(CAL_PDF, 'FF62336 WO# 1135344-00000006 EMERGENCY');
-A.eq('  subject EMERGENCY -> Priority 1 (overrides the PDF P3 IMPORTANT)', calEmerg.priorityTarget, 'Priority 1');
-A.eq('  priorityLabel is taken from the subject', calEmerg.priorityLabel, 'EMERGENCY');
+A.eq('  subject EMERGENCY -> Priority 1 (PDF P3 IMPORTANT ignored)', calEmerg.priorityTarget, 'Priority 1');
 A.eq('  Client DNE still read from the PDF', calEmerg.dne, '650.00');
 A.eq('  Source WO # still read from the PDF', calEmerg.sourceNum, '1135344-00000006');
 
 var calUrgent = api.extractCaleres(CAL_PDF, 'FF62336 WO# 1135344-00000006 URGENT');
 A.eq('  subject URGENT -> Priority 2', calUrgent.priorityTarget, 'Priority 2');
 
-// No priority word in the subject: fall back to the PDF tier (P3 IMPORTANT -> Priority 2). Proves
-// the subject-override is what flips EMERGENCY to P1, not a change to the PDF path.
+// No EMERGENCY/URGENT in the subject: fall back to Priority 3 (Normal) - NOT the PDF's P3-IMPORTANT
+// tier (which happens to also be 3 here, so use a subject the PDF would have mapped to P2 to prove
+// the PDF is truly ignored). "IMPORTANT" as a bare subject word is NOT urgent/emergency -> Normal.
+var calImportant = api.extractCaleres(CAL_PDF, 'FF62336 WO# 1135344-00000006 IMPORTANT');
+A.eq('  subject IMPORTANT (not urgent/emergency) -> Priority 3 Normal', calImportant.priorityTarget, 'Priority 3');
 var calNoWord = api.extractCaleres(CAL_PDF, 'FF62336 WO# 1135344-00000006');
-A.eq('  no subject word -> PDF P3 IMPORTANT fallback -> Priority 2', calNoWord.priorityTarget, 'Priority 2');
+A.eq('  no priority word in subject -> Priority 3 Normal (PDF tier ignored)', calNoWord.priorityTarget, 'Priority 3');
 
 A.finish();
