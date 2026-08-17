@@ -30,6 +30,15 @@ function slice(src) {
 }
 var ENGINE = slice(full);
 
+// gpLabel lives outside PA-WRITES; slice it on its own markers and eval as a pure function.
+function sliceBetween(a0, b0) {
+  var a = full.indexOf(a0); if (a === -1) throw new Error("missing marker " + a0);
+  var b = full.indexOf(b0, a); if (b === -1) throw new Error("missing marker " + b0);
+  return full.slice(a, b);
+}
+var GPLABEL = sliceBetween("// ===== PA-GPLABEL START", "// ===== PA-GPLABEL END");
+function loadGpLabel(src) { var box = { console: console }; vm.createContext(box); vm.runInContext(src, box); return box; }
+
 function mutate(src, from, to) {
   var i = src.indexOf(from);
   if (i === -1) throw new Error("MUTATION TARGET ABSENT: " + JSON.stringify(from.slice(0, 70)));
@@ -79,6 +88,19 @@ function callsOf(g, op) { return g.calls.filter(function (c) { return c.op === o
   A.ok("slice exposes createTask", typeof S.createTask === "function");
   A.ok("slice exposes completeTask", typeof S.completeTask === "function");
   A.ok("slice exposes completeAllTasks", typeof S.completeAllTasks === "function");
+
+  // ---- gpLabel: threshold at 33% (GP is a FRACTION) ------------------------------------------
+  var GL = loadGpLabel(GPLABEL);
+  A.eq("gpLabel: 41.07% -> Good GP (was mislabeled 'Low GP' by the old rule)", GL.gpLabel(0.4107), "Good GP");
+  A.eq("gpLabel: exactly 33% -> Good GP (at/above the threshold)", GL.gpLabel(0.33), "Good GP");
+  A.eq("gpLabel: 32% -> Low GP (below the threshold)", GL.gpLabel(0.32), "Low GP");
+  A.eq("gpLabel: 16.7% -> Low GP", GL.gpLabel(0.167), "Low GP");
+  A.eq("gpLabel: negative -> Negative GP", GL.gpLabel(-0.1), "Negative GP");
+  A.eq("gpLabel: null (read failed) -> GP unknown, never a confident label", GL.gpLabel(null), "GP unknown");
+  A.eq("gpLabel: NaN -> GP unknown", GL.gpLabel(NaN), "GP unknown");
+  // CONTROL: the 0.33 threshold is load-bearing - raising it flips a 41% proposal back to Low GP
+  var GL2 = loadGpLabel(mutate(GPLABEL, "GP_GOOD_THRESHOLD = 0.33", "GP_GOOD_THRESHOLD = 0.99"));
+  A.eq("CONTROL: with the threshold at 0.99, 41% reads Low GP (threshold is load-bearing)", GL2.gpLabel(0.4107), "Low GP");
 
   // ---- addProposalNote: a client-proposal "billing note" keyed by proposal entityId ----------
   var r = await S.addProposalNote(537526, "Good to submit - Low GP - Summary\nTotal\n$2,955.80");
@@ -166,7 +188,7 @@ function callsOf(g, op) { return g.calls.filter(function (c) { return c.op === o
   A.ok("every write still honors DRY_RUN", (full.match(/\[PA DRY_RUN\]/g) || []).length >= 5);
   var mV = full.match(/@version\s+([0-9.]+)/), mR = full.match(/VER\s*=\s*'([0-9.]+)'/);
   A.ok("@version and runtime VER agree", !!(mV && mR && mV[1] === mR[1]));
-  A.eq("shipped at 0.2.1", mV && mV[1], "0.2.1");
+  A.eq("shipped at 0.2.2", mV && mV[1], "0.2.2");
 
   A.finish();
 })().catch(function (e) { console.error(e); process.exit(1); });

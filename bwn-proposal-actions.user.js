@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         BWN Proposal Actions (Broadway National)
 // @namespace    broadwaynational.bwn
-// @version      0.2.1
+// @version      0.2.2
 // @downloadURL  https://raw.githubusercontent.com/Intermu/userscripts/main/bwn-proposal-actions.user.js
 // @updateURL    https://raw.githubusercontent.com/Intermu/userscripts/main/bwn-proposal-actions.user.js
 // @description  On a Client Proposal DETAILS page, a "Proposal Actions" dropdown runs the internal review workflow in one confirmed action: Approval / TSP Review / Kickback. Each posts a note to the Proposal + the Work Order, sets the WO status, completes open tasks, and files a new task (assigned to the WO coordinator, or Ronny Sharp for TSP). Kickback drafts a rejection reason with the on-device browser AI for the operator to confirm. Every write is shown in a confirm dialog first; nothing fires until Confirm. @grant none.
@@ -15,7 +15,7 @@
 (function () {
   'use strict';
 
-  var VER = '0.2.1';   // keep in step with @version
+  var VER = '0.2.2';   // keep in step with @version
   var DRY_RUN = false; // when true, every WRITE is console.logged instead of sent
   console.info('[BWN PROPOSAL ACTIONS] v' + VER + ' - Approval / TSP Review / Kickback workflow on the Client Proposal details page');
 
@@ -105,12 +105,19 @@
     var v = Number(m.amount) / Math.pow(10, p);
     return '$' + v.toLocaleString('en-US', { minimumFractionDigits: 2, maximumFractionDigits: 2 });
   }
+  // ===== PA-GPLABEL START (sliced by scripts/test-proposal-actions.js) =====
+  // Rule (per Mike 2026-08-17): negative GP -> "Negative GP"; below 33% -> "Low GP"; 33%+ -> "Good GP".
+  // gpPct is a FRACTION parsed from the API's string (0.4107 = 41.07%, -0.41 = -41%), so the 33%
+  // threshold is 0.33. A null / unreadable GP returns "GP unknown" so a failed read is VISIBLE in the
+  // posted note rather than silently mislabeled as Low GP (the old rule defaulted everything non-negative
+  // to "Low GP", which mislabeled a 41% proposal).
+  var GP_GOOD_THRESHOLD = 0.33;   // 33%, expressed as a fraction to match the API GP
   function gpLabel(gpPct) {
-    // Rule (per Mike): negative gross profit -> "Negative GP", otherwise -> "Low GP".
-    // gpPct is a NUMBER already parsed from the API's string fraction (e.g. -0.41, 0.0414).
-    if (typeof gpPct === 'number' && gpPct < 0) return 'Negative GP';
-    return 'Low GP';
+    if (typeof gpPct !== 'number' || isNaN(gpPct)) return 'GP unknown';
+    if (gpPct < 0) return 'Negative GP';
+    return gpPct < GP_GOOD_THRESHOLD ? 'Low GP' : 'Good GP';
   }
+  // ===== PA-GPLABEL END =====
   function textToHtml(t) {
     return String(t == null ? '' : t).split('\n').map(function (ln) {
       return '<p>' + (ln === '' ? '<br>' : escapeHtml(ln)) + '</p>';
