@@ -352,58 +352,59 @@
       // The card is a flex column: one gap owns every vertical space inside it, so children
       // never set their own margin-top. This is the single change that makes card heights read
       // as a set instead of "all over the place".
-      '#bwn-kanban .kb-card{background:#fff;border:1px solid #e4e9e7;border-radius:10px;padding:10px 12px;cursor:grab;box-shadow:0 1px 2px rgba(20,40,30,.05);border-left:3px solid transparent;display:flex;flex-direction:column;gap:6px;}',
-      '#bwn-kanban .kb-card:hover{border-color:#c7d2cc;box-shadow:0 2px 6px rgba(20,40,30,.08);}',
+      '#bwn-kanban .kb-card{background:#fff;border:1px solid #e2e8e5;border-radius:10px;padding:10px 12px;cursor:grab;box-shadow:0 1px 2px rgba(0,0,0,.04);border-left:3px solid transparent;display:flex;flex-direction:column;gap:6px;}',
+      '#bwn-kanban .kb-card:hover{border-color:#c2cec8;box-shadow:0 2px 6px rgba(0,0,0,.08);}',
       '#bwn-kanban .kb-card.kb-drag{opacity:.45;}',
       // Severity edge. Only ever set from a published verdict; a card with no verdict keeps
       // the transparent edge rather than being coloured "clear", which would be a claim. The
       // matching dot beside the WO# repeats the same class, so severity reads even when the
-      // left edge is hidden by the lane it sits against.
-      '#bwn-kanban .kb-card.sev2{border-left-color:#b0201a;}',
-      '#bwn-kanban .kb-card.sev1{border-left-color:#8a6100;}',
+      // left edge is hidden by the lane it sits against. The exact hexes are the ones List Heat
+      // already uses (#a11 / #c98a00), so the board and the list are the same red and amber.
+      '#bwn-kanban .kb-card.sev2{border-left-color:#a11;}',
+      '#bwn-kanban .kb-card.sev1{border-left-color:#c98a00;}',
       '#bwn-kanban .kb-card.sevack{border-left-color:#b9c3be;}',
       '#bwn-kanban .kb-top{display:flex;justify-content:space-between;align-items:baseline;gap:8px;}',
       '#bwn-kanban .kb-wowrap{display:flex;align-items:center;gap:6px;min-width:0;}',
-      '#bwn-kanban .kb-dot{width:7px;height:7px;border-radius:50%;flex:0 0 auto;background:#c7d2cc;}',
-      '#bwn-kanban .kb-dot.sev2{background:#b0201a;}',
-      '#bwn-kanban .kb-dot.sev1{background:#8a6100;}',
+      '#bwn-kanban .kb-dot{width:7px;height:7px;border-radius:50%;flex:0 0 auto;background:#c2cec8;}',
+      '#bwn-kanban .kb-dot.sev2{background:#a11;}',
+      '#bwn-kanban .kb-dot.sev1{background:#c98a00;}',
       '#bwn-kanban .kb-dot.sevack{background:#b9c3be;}',
       '#bwn-kanban .kb-wo{font:700 13px/1.1 inherit;color:' + GREEN + ';text-decoration:none;}',
       '#bwn-kanban .kb-wo:hover{text-decoration:underline;}',
-      '#bwn-kanban .kb-days{font:600 11px ui-monospace,"Segoe UI Mono",monospace;color:#5f6f68;flex:0 0 auto;}',
+      '#bwn-kanban .kb-days{font:600 11px ui-monospace,"Segoe UI Mono",monospace;color:#5b6b63;flex:0 0 auto;}',
       // Age is a neutral cue, never an alarm. Over 30 days darkens it slightly - it does NOT go
       // red. The red/amber SEVERITY edge+dot own "in trouble", and that is a judged verdict,
       // not a raw age threshold; a second red on a different meaning is worse than one.
       '#bwn-kanban .kb-days.kb-old{color:#3d4a44;}',
       '#bwn-kanban .kb-client{font:600 12px/1.25 inherit;color:#1e2a24;white-space:nowrap;overflow:hidden;text-overflow:ellipsis;}',
-      '#bwn-kanban .kb-sub{font:11px/1.3 inherit;color:#5f6f68;white-space:nowrap;overflow:hidden;text-overflow:ellipsis;}',
-      '#bwn-kanban .kb-rule{height:1px;background:#e4e9e7;border:0;margin:1px 0;}',
+      '#bwn-kanban .kb-sub{font:11px/1.3 inherit;color:#5b6b63;white-space:nowrap;overflow:hidden;text-overflow:ellipsis;}',
+      '#bwn-kanban .kb-rule{height:1px;background:#e2e8e5;border:0;margin:1px 0;}',
       '#bwn-kanban .kb-chips{display:flex;gap:5px;flex-wrap:wrap;}',
       '#bwn-kanban .kb-chip{font:600 10px/1.4 inherit;padding:2px 8px;border-radius:999px;background:#eef2f0;color:#3d4a44;white-space:nowrap;}',
-      '#bwn-kanban .kb-chip.p-red{background:#fde8e8;color:#b0201a;}',
+      '#bwn-kanban .kb-chip.p-red{background:#fde8e8;color:#a11;}',
       '#bwn-kanban .kb-chip.p-yellow{background:#fdf3d8;color:#8a6100;}',
       '#bwn-kanban .kb-chip.p-blue{background:#e6f0fb;color:#1b4f8a;}',
       '#bwn-kanban .kb-chip.p-next{background:#f3e2fb;color:#6b1b8a;}',
-      '#bwn-kanban .kb-chip.st{background:transparent;border:1px solid #e4e9e7;color:#5f6f68;}',
+      '#bwn-kanban .kb-chip.st{background:transparent;border:1px solid #e2e8e5;color:#5b6b63;}',
       // Money on ONE line (was three chips that wrapped to a second row on some cards and not
       // others - a big source of the height jitter). DNE, NTE, then GP/breach, all monospace.
       '#bwn-kanban .kb-money{display:flex;flex-wrap:wrap;gap:4px 10px;font:600 11px ui-monospace,"Segoe UI Mono",monospace;color:#3d4a44;}',
-      '#bwn-kanban .kb-money .gp-bad{color:#b0201a;}',
+      '#bwn-kanban .kb-money .gp-bad{color:#a11;}',
       '#bwn-kanban .kb-money .gp-thin{color:#8a6100;}',
       '#bwn-kanban .kb-clock{font:600 11px ui-monospace,"Segoe UI Mono",monospace;color:#3d4a44;}',
-      '#bwn-kanban .kb-clock.over{color:#b0201a;}',
+      '#bwn-kanban .kb-clock.over{color:#a11;}',
       '#bwn-kanban .kb-clock.watch{color:#8a6100;}',
       // why + scope clamp to two lines. Full text stays reachable on hover (card title), so
       // nothing is lost - only bounded. -webkit-line-clamp is honoured by the Chromium the
       // app runs in.
-      '#bwn-kanban .kb-why{font:11px/1.4 inherit;color:#b0201a;display:-webkit-box;-webkit-line-clamp:2;-webkit-box-orient:vertical;overflow:hidden;}',
+      '#bwn-kanban .kb-why{font:11px/1.4 inherit;color:#a11;display:-webkit-box;-webkit-line-clamp:2;-webkit-box-orient:vertical;overflow:hidden;}',
       '#bwn-kanban .kb-why.warnonly{color:#8a6100;}',
-      '#bwn-kanban .kb-why.ackd{color:#5f6f68;}',
-      '#bwn-kanban .kb-scope{font:11px/1.4 inherit;color:#5f6f68;display:-webkit-box;-webkit-line-clamp:2;-webkit-box-orient:vertical;overflow:hidden;}',
+      '#bwn-kanban .kb-why.ackd{color:#5b6b63;}',
+      '#bwn-kanban .kb-scope{font:11px/1.4 inherit;color:#5b6b63;display:-webkit-box;-webkit-line-clamp:2;-webkit-box-orient:vertical;overflow:hidden;}',
       '#bwn-kanban .kb-meta{font:11px/1.35 inherit;color:#3d4a44;}',
-      '#bwn-kanban .kb-meta .miss{color:#b0201a;font-weight:600;}',
+      '#bwn-kanban .kb-meta .miss{color:#a11;font-weight:600;}',
       '#bwn-kanban .kb-meta .soon{color:#8a6100;font-weight:600;}',
-      '#bwn-kanban .kb-vend{font:11px/1.3 inherit;color:#5f6f68;white-space:nowrap;overflow:hidden;text-overflow:ellipsis;}',
+      '#bwn-kanban .kb-vend{font:11px/1.3 inherit;color:#5b6b63;white-space:nowrap;overflow:hidden;text-overflow:ellipsis;}',
       '#bwn-kanban .kb-lane h4 .kb-hotn{color:#a11;font-weight:700;}',
       '#bwn-kanban .kb-lane.kb-mixed h4{background:#eef2f0;}',
       '.bwn-kb-btn{font:600 12px -apple-system,BlinkMacSystemFont,"Segoe UI",Arial,sans-serif;padding:5px 12px;border:1px solid ' + GREEN + ';background:#fff;color:' + GREEN + ';border-radius:6px;cursor:pointer;margin-left:8px;}',
