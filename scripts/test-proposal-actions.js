@@ -101,6 +101,9 @@ function callsOf(g, op) { return g.calls.filter(function (c) { return c.op === o
   A.eq("create task: description is the task text", tc[0].v.data.description, "Good to submit - Low GP - Summary");
   A.eq("create task: assignedTo is the coordinator GUID", tc[0].v.data.assignedTo, "ff655968-a371-43b9-a199-e66847a54a2a");
   A.ok("create task: sends a required targetStartDate", typeof tc[0].v.data.targetStartDate === "string" && tc[0].v.data.targetStartDate.length > 0);
+  // The REST backend (taskrestapi/api/Task/AddTask) 500s without metadata; the SPA sends both. Captured 2026-08-17.
+  A.eq("create task: metadata is the WO number as a JSON string (backend REST requires it)", tc[0].v.data.metadata, JSON.stringify({ number: "385048" }));
+  A.eq("create task: notifyCreator false (matches the SPA payload)", tc[0].v.data.notifyCreator, false);
 
   // assignedTo falls back to null (unassigned) rather than "" or undefined when no GUID
   g = mkGql(); S = load(ENGINE, g);
@@ -148,6 +151,12 @@ function callsOf(g, op) { return g.calls.filter(function (c) { return c.op === o
   await S2.createTask(385048, "g", "x");
   A.eq("CONTROL: mutating entityType off 1 is observable in the payload", callsOf(g2, "AddTask")[0].v.data.entityType, 2);
 
+  // ---- NEGATIVE CONTROL 3: metadata is load-bearing (dropping it is what 500'd the backend) ---
+  var MUT3 = mutate(ENGINE, "metadata: JSON.stringify({ number: String(woNumber) })", "metadata: undefined");
+  var g3 = mkGql(); var S3 = load(MUT3, g3);
+  await S3.createTask(385048, "g", "x");
+  A.ok("CONTROL: without the metadata line the payload loses it (the field the REST backend requires)", callsOf(g3, "AddTask")[0].v.data.metadata === undefined);
+
   // ---- source-level wiring -------------------------------------------------------------------
   A.ok("no NOT_PINNED stub remains (all three are wired)", !/notPinned\s*\(/.test(full));
   A.ok("pins addClientProposalNote mutation", /addClientProposalNote\(data: \$data\)/.test(full));
@@ -157,7 +166,7 @@ function callsOf(g, op) { return g.calls.filter(function (c) { return c.op === o
   A.ok("every write still honors DRY_RUN", (full.match(/\[PA DRY_RUN\]/g) || []).length >= 5);
   var mV = full.match(/@version\s+([0-9.]+)/), mR = full.match(/VER\s*=\s*'([0-9.]+)'/);
   A.ok("@version and runtime VER agree", !!(mV && mR && mV[1] === mR[1]));
-  A.eq("shipped at 0.2.0", mV && mV[1], "0.2.0");
+  A.eq("shipped at 0.2.1", mV && mV[1], "0.2.1");
 
   A.finish();
 })().catch(function (e) { console.error(e); process.exit(1); });

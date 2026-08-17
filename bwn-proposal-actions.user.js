@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         BWN Proposal Actions (Broadway National)
 // @namespace    broadwaynational.bwn
-// @version      0.2.0
+// @version      0.2.1
 // @downloadURL  https://raw.githubusercontent.com/Intermu/userscripts/main/bwn-proposal-actions.user.js
 // @updateURL    https://raw.githubusercontent.com/Intermu/userscripts/main/bwn-proposal-actions.user.js
 // @description  On a Client Proposal DETAILS page, a "Proposal Actions" dropdown runs the internal review workflow in one confirmed action: Approval / TSP Review / Kickback. Each posts a note to the Proposal + the Work Order, sets the WO status, completes open tasks, and files a new task (assigned to the WO coordinator, or Ronny Sharp for TSP). Kickback drafts a rejection reason with the on-device browser AI for the operator to confirm. Every write is shown in a confirm dialog first; nothing fires until Confirm. @grant none.
@@ -15,7 +15,7 @@
 (function () {
   'use strict';
 
-  var VER = '0.2.0';   // keep in step with @version
+  var VER = '0.2.1';   // keep in step with @version
   var DRY_RUN = false; // when true, every WRITE is console.logged instead of sent
   console.info('[BWN PROPOSAL ACTIONS] v' + VER + ' - Approval / TSP Review / Kickback workflow on the Client Proposal details page');
 
@@ -256,9 +256,13 @@
   }
 
   // createTask - addTask(data: AddTaskInput!). entityType 1 = work order, entityId = the WO number
-  // as a String (the Task read's own convention). assignedTo is a USER GUID (same shape as a WO
-  // assignedTo); a task assigned to the coordinator. targetStartDate is REQUIRED - the task starts
-  // now. categoryId / notifyCreator are optional and omitted.
+  // as a String (the Task read's own convention). assignedTo is a USER GUID; a task assigned to the
+  // coordinator. targetStartDate REQUIRED (full ISO, matching the SPA). `metadata` and `notifyCreator`
+  // are OPTIONAL in the GraphQL schema but the backend REST service (taskrestapi/api/Task/AddTask)
+  // 500s with an empty body when `metadata` is absent - so both are sent to MATCH the SPA's own
+  // payload, captured off the wire 2026-08-17: metadata = the WO number as a JSON string
+  // `{"number":"<wo>"}`. (Introspection said they were optional; the live REST backend disagreed -
+  // same class as the addWorkOrder capture. Do not drop metadata again.)
   var M_ADD_TASK = 'mutation AddTask($data: AddTaskInput!){ addTask(data: $data){ success message } }';
   function createTask(woNumber, assigneeGuid, text) {
     if (DRY_RUN) { console.log('[PA DRY_RUN] createTask', { woNumber: woNumber, assigneeGuid: assigneeGuid, text: text }); return Promise.resolve(true); }
@@ -267,7 +271,9 @@
       entityType: 1,
       description: text,
       targetStartDate: new Date().toISOString(),
-      assignedTo: assigneeGuid || null
+      assignedTo: assigneeGuid || null,
+      notifyCreator: false,
+      metadata: JSON.stringify({ number: String(woNumber) })
     };
     return paGql('AddTask', M_ADD_TASK, { data: input }).then(function (d) {
       var r = d && d.addTask;
