@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         BWN Proposal Actions (Broadway National)
 // @namespace    broadwaynational.bwn
-// @version      0.1.0
+// @version      0.2.0
 // @downloadURL  https://raw.githubusercontent.com/Intermu/userscripts/main/bwn-proposal-actions.user.js
 // @updateURL    https://raw.githubusercontent.com/Intermu/userscripts/main/bwn-proposal-actions.user.js
 // @description  On a Client Proposal DETAILS page, a "Proposal Actions" dropdown runs the internal review workflow in one confirmed action: Approval / TSP Review / Kickback. Each posts a note to the Proposal + the Work Order, sets the WO status, completes open tasks, and files a new task (assigned to the WO coordinator, or Ronny Sharp for TSP). Kickback drafts a rejection reason with the on-device browser AI for the operator to confirm. Every write is shown in a confirm dialog first; nothing fires until Confirm. @grant none.
@@ -15,7 +15,7 @@
 (function () {
   'use strict';
 
-  var VER = '0.1.0';   // keep in step with @version
+  var VER = '0.2.0';   // keep in step with @version
   var DRY_RUN = false; // when true, every WRITE is console.logged instead of sent
   console.info('[BWN PROPOSAL ACTIONS] v' + VER + ' - Approval / TSP Review / Kickback workflow on the Client Proposal details page');
 
@@ -195,6 +195,7 @@
     }).catch(function () { return guid.slice(0, 8); });
   }
 
+  // ===== PA-WRITES START (sliced by scripts/test-proposal-actions.js; references injected paGql / textToHtml / DRY_RUN / NOTE_TYPE_INTERNAL) =====
   // ===== writes: PROVEN =====================================================
   var M_PATCH = 'mutation PatchWorkOrder($data: PatchWorkOrderInput!){ patchWorkOrder(data: $data){ success message } }';
   function setStatus(n, statusId) {
@@ -228,57 +229,68 @@
     });
   }
 
-  // ===== writes: GREENFIELD STUBS ===========================================
-  // These three mutations are NOT yet pinned. They throw the NOT_PINNED sentinel so the
-  // orchestrator SKIPS them (marking the step "pending capture") while the proven steps still
-  // run. Fill each body with the real mutation once the request payloads are captured off the
-  // wire (DevTools -> Network -> the POST /api/graphql -> Payload). Do NOT invent the schema.
-  function notPinned(name) { return Promise.reject(new Error('NOT_PINNED: ' + name + ' awaiting live capture')); }
+  // ===== writes: PINNED 2026-08-17 ==========================================
+  // These three were greenfield stubs (NOT_PINNED) until the mutations were pinned by read-only
+  // introspection - full shapes in the Claude Brain vault [[umbrava-graphql-operations]] "Task +
+  // entity-NOTE write mutations". Each takes a single `data` input object and returns the Umbrava
+  // house-style `{ success message }` payload (same wrapper addEditJobNote / patchWorkOrder use
+  // above); we select only those two always-present scalars and check `.success`, exactly like the
+  // proven writes. Values are never invented: `type` numeric ids, proposal `entityId`, and the
+  // entityType/entityId task convention all come from the pinned schema.
 
-  // -------------------------------------------------------------------------
-  // addProposalNote(proposalId, text)
-  //   Posts a note onto the CLIENT PROPOSAL's own Notes tab (NOT the work order).
-  //   addEditJobNote is WO-only (keyed by workOrderNumber) and CANNOT target a proposal, so a
-  //   separate proposal-scoped note mutation is needed. Capture it by adding one note on a
-  //   proposal's Notes tab. EXPECTED once captured: a mutation keyed by proposalId (or a
-  //   generic note keyed by an entity type + id), with a text/content(+html) field. Wire the
-  //   real call here, honor DRY_RUN, and check the success flag like addWONote does.
-  // -------------------------------------------------------------------------
+  // addProposalNote - a proposal Notes-tab note is a "billing note", NOT a WO note (addEditJobNote
+  // is WO-only). Mutation: addClientProposalNote(data: AddBillingNoteInput!). entityId is the
+  // proposal INTERNAL id, which is exactly what /client-proposals/<id> in the URL carries (the UI
+  // "#537526" IS that id, not a per-WO sequence number - resolved 2026-08-17). Both text fields are
+  // required (unlike WO notes, whose contentHtml is optional). noteTypeId is a DIFFERENT enum from
+  // WO note types and is optional, so it is omitted and the server applies its default.
+  var M_ADD_PROP_NOTE = 'mutation AddClientProposalNote($data: AddBillingNoteInput!){ addClientProposalNote(data: $data){ success message } }';
   function addProposalNote(proposalId, text) {
-    if (DRY_RUN) { console.log('[PA DRY_RUN] addProposalNote (STUB)', { proposalId: proposalId, text: text }); return Promise.resolve(true); }
-    return notPinned('addProposalNote(proposalId=' + proposalId + ')');
+    if (DRY_RUN) { console.log('[PA DRY_RUN] addProposalNote', { proposalId: proposalId, text: text }); return Promise.resolve(true); }
+    var input = { entityId: proposalId, plainTextContent: text, htmlContent: textToHtml(text) };
+    return paGql('AddClientProposalNote', M_ADD_PROP_NOTE, { data: input }).then(function (d) {
+      var r = d && d.addClientProposalNote;
+      if (!r || !r.success) throw new Error((r && r.message) || 'addClientProposalNote failed');
+      return true;
+    });
   }
 
-  // -------------------------------------------------------------------------
-  // createTask(woNumber, assigneeGuid, text)
-  //   Creates a task on the work order. The Task read shape is known
-  //   (entityId, entityType, assignedTo, targetStartDate, description, categoryId,
-  //   priorityStatus, flag) but the CREATE mutation is not pinned. Capture it by adding one
-  //   task on a WO with an assignee. EXPECTED once captured: entityType 1 + entityId
-  //   String(woNumber); assignedTo = assigneeGuid (a USER GUID, same shape as WO assignedTo);
-  //   description = text; plus whatever categoryId / priorityStatus / targetStartDate defaults
-  //   the form sends. Wire the real call here, honor DRY_RUN, check the success flag.
-  // -------------------------------------------------------------------------
+  // createTask - addTask(data: AddTaskInput!). entityType 1 = work order, entityId = the WO number
+  // as a String (the Task read's own convention). assignedTo is a USER GUID (same shape as a WO
+  // assignedTo); a task assigned to the coordinator. targetStartDate is REQUIRED - the task starts
+  // now. categoryId / notifyCreator are optional and omitted.
+  var M_ADD_TASK = 'mutation AddTask($data: AddTaskInput!){ addTask(data: $data){ success message } }';
   function createTask(woNumber, assigneeGuid, text) {
-    if (DRY_RUN) { console.log('[PA DRY_RUN] createTask (STUB)', { woNumber: woNumber, assigneeGuid: assigneeGuid, text: text }); return Promise.resolve(true); }
-    return notPinned('createTask(wo=' + woNumber + ', assignee=' + (assigneeGuid || '').slice(0, 8) + ')');
+    if (DRY_RUN) { console.log('[PA DRY_RUN] createTask', { woNumber: woNumber, assigneeGuid: assigneeGuid, text: text }); return Promise.resolve(true); }
+    var input = {
+      entityId: String(woNumber),
+      entityType: 1,
+      description: text,
+      targetStartDate: new Date().toISOString(),
+      assignedTo: assigneeGuid || null
+    };
+    return paGql('AddTask', M_ADD_TASK, { data: input }).then(function (d) {
+      var r = d && d.addTask;
+      if (!r || !r.success) throw new Error((r && r.message) || 'addTask failed');
+      return true;
+    });
   }
 
-  // -------------------------------------------------------------------------
-  // completeTask(taskId)
-  //   Marks an existing task complete. Not pinned. Capture it by ticking a task complete.
-  //   EXPECTED once captured: either a dedicated completeTask(id) mutation, or the task
-  //   create/edit mutation re-sent with isComplete: true. Wire it here, honor DRY_RUN.
-  // -------------------------------------------------------------------------
+  // completeTask - completeTask(data: CompleteTaskInput!). CompleteTaskInput is JUST { id: ID! }.
+  var M_COMPLETE_TASK = 'mutation CompleteTask($data: CompleteTaskInput!){ completeTask(data: $data){ success message } }';
   function completeTask(taskId) {
-    if (DRY_RUN) { console.log('[PA DRY_RUN] completeTask (STUB)', { taskId: taskId }); return Promise.resolve(true); }
-    return notPinned('completeTask(id=' + taskId + ')');
+    if (DRY_RUN) { console.log('[PA DRY_RUN] completeTask', { taskId: taskId }); return Promise.resolve(true); }
+    return paGql('CompleteTask', M_COMPLETE_TASK, { data: { id: taskId } }).then(function (d) {
+      var r = d && d.completeTask;
+      if (!r || !r.success) throw new Error((r && r.message) || 'completeTask failed');
+      return true;
+    });
   }
   function completeAllTasks(tasks) {
-    // Promise.all([]) resolves immediately, so a WO with zero open tasks succeeds even while
-    // completeTask is stubbed. Only actual open tasks hit the (currently stubbed) mutation.
+    // Promise.all([]) resolves immediately, so a WO with zero open tasks succeeds trivially.
     return Promise.all((tasks || []).map(function (t) { return completeTask(t.id); })).then(function () { return true; });
   }
+  // ===== PA-WRITES END ======================================================
 
   // ===== on-device browser AI (copied from bwn-drop-upload) =================
   function langModel() {
@@ -531,7 +543,7 @@
     };
   }
   function buildProposalNoteStep(ctx, noteFn) {
-    return { label: 'Add note to Proposal #' + ctx.pid + ' Notes tab', pending: true,
+    return { label: 'Add note to Proposal #' + ctx.pid + ' Notes tab', pending: false,
       run: function (reason) { return addProposalNote(ctx.pid, noteFn(reason)); } };
   }
   function buildWONoteStep(ctx, noteFn) {
@@ -540,11 +552,11 @@
   }
   function buildCompleteStep(ctx) {
     var c = ctx.openTasks.length;
-    return { label: c ? ('Complete ' + c + ' open task(s)') : 'No open tasks to complete', pending: c > 0,
+    return { label: c ? ('Complete ' + c + ' open task(s)') : 'No open tasks to complete', pending: false,
       run: function () { return completeAllTasks(ctx.openTasks); } };
   }
   function buildCreateTaskStep(ctx, assigneeGuid, assigneeName, noteFn) {
-    return { label: 'Create task for ' + assigneeName + ': ' + firstLine(noteFn('')), pending: true,
+    return { label: 'Create task for ' + assigneeName + ': ' + firstLine(noteFn('')), pending: false,
       run: function (reason) { return createTask(ctx.n, assigneeGuid, noteFn(reason)); } };
   }
 

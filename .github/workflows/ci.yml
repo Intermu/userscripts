@@ -331,6 +331,14 @@ jobs:
       - name: Proposal Copy engine harness (createDraftProposal + editProposal replay)
         run: node scripts/test-proposal-copy.js
 
+      # Proposal Actions write path (bwn-proposal-actions.user.js): the Approval / TSP / Kickback
+      # workflow's three newly-pinned mutations - addClientProposalNote (proposal "billing note", NOT a
+      # WO note), addTask (entityType 1 / entityId = WO# String / assignedTo GUID), completeTask ({id}).
+      # Slices PA-WRITES into a vm with an injected paGql; controls: disabling a success check stops
+      # throwing (RED), and entityType off 1 is observable. 36 assertions.
+      - name: Proposal Actions write harness (addClientProposalNote / addTask / completeTask)
+        run: node scripts/test-proposal-actions.js
+
       # Track C write-back DRAIN half (bwn-write-queue.user.js): the coordinator's-tab executor that
       # claims a queued command from /api/wo-write-queue, confirms it, and turns it into a real
       # patchWorkOrder / addEditJobNote write. Slices the exec block into a vm with an injected gql and
