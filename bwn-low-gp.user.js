@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         BWN Suite - Low GP Note (Broadway National)
 // @namespace    broadwaynational.bwn
-// @version      0.1.0
+// @version      0.2.0
 // @description  A "Low GP" button beside the global "Search Work Orders" box. Enter a WO#, Tracking#, Source PO#, or Source Job#; it finds the work order, shows a one-click CONFIRM card (WO / client / location / assignee), then posts TWO notes via Umbrava's own API: a Billing-type note reading "Low GP", and a second note that @-mentions the WO's assignee ("@Name Low GP note added") so they are notified. The @-mention is the real TipTap mention span the SPA sends (captured live 2026-08-17); actionNoteEmails stays null - the span alone notifies. Same-origin /api/graphql with the app's Auth0 bearer, @grant none, zero egress. Nothing posts until you click Confirm.
 // @match        https://app.umbrava.com/*
 // @run-at       document-idle
@@ -129,18 +129,36 @@
     });
   }
 
-  // The board search op (pinned). `search` matches WO#, Tracking#, Source PO#, Source Job# - the same
-  // field the global "Search Work Orders" box drives (tracking# confirmed live 2026-08-17).
-  var LG_SEARCH_Q = 'query BwnLowGpSearch($page:PageInput!,$sortBy:[SortInput!]!,$search:String){ listWorkOrdersPaginated(page:$page,sortBy:$sortBy,search:$search){ rowCount items{ number trackingNumber assignedTo assignedToMemberName clientName locationName statusName sourceJobNumber sourcePurchaseOrderNumber } } }';
-  function lgSearch(text) {
+  // Fast lookup. `lookupJob` is the op Umbrava's OWN "Search Work Orders" box fires - a typeahead index
+  // that resolves WO#/Tracking#/Source PO#/Source Job# in ~300ms (measured live 2026-08-17). The generic
+  // `listWorkOrdersPaginated(search:)` took 6-28s for the SAME lookup, so we resolve the identifier via
+  // lookupJob, then hydrate the matched WO number(s) with the fast `WorkOrderNumbers` filter (~40ms) -
+  // lookupJob does not expose `assignedToMemberName`/`locationName`, which the confirm card + @-mention need.
+  var LG_LOOKUP_Q = 'query LookupJob($page:PageInput!,$sortBy:[SortInput!]!,$search:String!){ lookupJob(page:$page,sortBy:$sortBy,search:$search){ items{ number } } }';
+  var LG_BYNUM_Q = 'query BwnLowGpByNum($page:PageInput!,$sortBy:[SortInput!]!,$WorkOrderNumbers:[Int]){ listWorkOrdersPaginated(page:$page,sortBy:$sortBy,WorkOrderNumbers:$WorkOrderNumbers){ items{ number trackingNumber assignedTo assignedToMemberName clientName locationName statusName sourceJobNumber sourcePurchaseOrderNumber } } }';
+  // Slow fallback, only if lookupJob ever changes/breaks: the generic board search (6-28s but works).
+  var LG_SEARCH_Q = 'query BwnLowGpSearch($page:PageInput!,$sortBy:[SortInput!]!,$search:String){ listWorkOrdersPaginated(page:$page,sortBy:$sortBy,search:$search){ items{ number trackingNumber assignedTo assignedToMemberName clientName locationName statusName sourceJobNumber sourcePurchaseOrderNumber } } }';
+
+  function lgRowsFromList(d) { var l = d && d.listWorkOrdersPaginated; return (l && l.items) ? l.items.map(lgRow) : []; }
+  function lgFetchByNumbers(nums) {
+    if (!nums.length) return Promise.resolve([]);
+    return lgGql('BwnLowGpByNum', LG_BYNUM_Q, {
+      page: { skip: 0, take: nums.length }, sortBy: [{ columnName: 'number', direction: 'DESC' }], WorkOrderNumbers: nums
+    }).then(lgRowsFromList);
+  }
+  function lgSearchSlow(text) {
     return lgGql('BwnLowGpSearch', LG_SEARCH_Q, {
-      page: { skip: 0, take: 25 },
-      sortBy: [{ columnName: 'numberOfDays', direction: 'DESC' }],
-      search: String(text)
+      page: { skip: 0, take: 25 }, sortBy: [{ columnName: 'numberOfDays', direction: 'DESC' }], search: String(text)
+    }).then(lgRowsFromList);
+  }
+  function lgSearch(text) {
+    return lgGql('LookupJob', LG_LOOKUP_Q, {
+      page: { skip: 0, take: 25 }, sortBy: [{ columnName: 'LastModified', direction: 'DESC' }], search: String(text)
     }).then(function (d) {
-      var l = d && d.listWorkOrdersPaginated;
-      return (l && l.items) ? l.items.map(lgRow) : [];
-    });
+      var items = (d && d.lookupJob && d.lookupJob.items) || [], seen = {}, nums = [];
+      items.forEach(function (it) { var n = it.number; if (typeof n === 'number' && !seen[n]) { seen[n] = 1; nums.push(n); } });
+      return lgFetchByNumbers(nums);
+    }).catch(function () { return lgSearchSlow(text); });   // lookupJob broke -> slow but working
   }
 
   var LG_ADD_NOTE = 'mutation AddEditWONote($addEditInput: WorkOrderNoteInput!) { addEditJobNote(data: $addEditInput) { success message note { id type } } }';
