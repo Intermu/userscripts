@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         BWN WO Intake (Broadway National)
 // @namespace    broadwaynational.bwn
-// @version      0.9.18
+// @version      0.9.19
 // @downloadURL  https://raw.githubusercontent.com/Intermu/userscripts/main/bwn-wo-intake.user.js
 // @updateURL    https://raw.githubusercontent.com/Intermu/userscripts/main/bwn-wo-intake.user.js
 // @description  Drop a client PO/WO email (.msg or .eml) onto the Create Work Order modal and it prefills the fields. Pilot Travel Centers: from the email body. Caleres (Famous Footwear / Corrigo): reads the attached WO PDF on-device for Trade, Scope, Priority, Due-By, Store, NTE. If a Caleres request has no WO PDF (image-only), it reads Store, City/State and Trade from the subject and the scope from the body (NTE + Priority stay manual - they live only in the images). Amazon (Fairmarkit RFQ): the buyer is Amazon.com, Inc. but the sender is the Fairmarkit e-bidding platform - reads the RFQ body (no PDF) for Site (matched by the Amazon site code e.g. PIT2/STL3, else the shipping address), RFQ #, Trade, Scope + line items; NTE and Priority stay manual because an RFQ carries no ceiling yet (we are the quoting supplier). The email carries no attachment - the full scope / any 'see attached file' lives on the Fairmarkit bid page - so it surfaces that RFQ link and warns you when the body defers to it. Per Amazon: Source PO # is set to the literal "Quote Request", Source Job # is set to the RFQ ID suffixed " (FM-AMZ)" (e.g. 2956102 (FM-AMZ)), Client DNE is set to 0.00, and WO Type is selected as Proposal in the create modal - all filled in the one pass (no post-Create tracking-number step). Selects Client, Location (address-verified), Trade and Priority by clicking the real dropdown option; fills Client DNE, Source Job # and Source PO #; warns you if the WO PDF shows a cancel/flag note. CW-Amazon (Cushman & Wakefield / FAMIS 360, from amazon@ilrs.360facility.net - a separate feed from Fairmarkit, so the client is "CW-Amazon"): reads the plain-text Case Summary for Site (matched by the exact site code = Umbrava locationNumber), Request ID (-> Source Job #; Source PO # is left blank per the client convention), Trade, Scope, Client DNE (from the PO/NTE amount in the Statement of Work, else 0.00) and Priority (the FAMIS P-code -> the client's "P<n> - ..." priority, or Scheduled PPM); it sets WO Type from the Type|Sub-Type line - a Request for Proposal -> Proposal, a preventive/PPM job -> Preventative, everything else -> Reactive. Then, after you Create the WO, it hands the email to BWN Drop Upload to attach it to the new WO's Documents. JLL-Amazon (Jones Lang LaSalle / CorrigoPro, from alerts@am.corrigopro.com - a separate feed again, so the client is "JLL-Amazon"): reads the "WORK ORDER #..." body for Site (matched by the exact property/site code = Umbrava locationNumber, e.g. BNA12/ATL11/DEN17), the CorrigoPro WO number (set as BOTH Source Job # and Source PO # per the client convention), Scope, Client DNE (the NTE, else 0.00) and Priority (the email's priority IS the Umbrava label - a PM job is "PM (Scheduled)"); it sets WO Type from the job kind - a PM (Scheduled) job -> Preventative, everything else -> Reactive. CW-Amazon via CorrigoPro (C&W Services on the CorrigoPro network, from alerts@am.corrigopro.com with subject "...received from C&W Services" - the SAME CorrigoPro format as JLL-Amazon but a different brand, so the client is still "CW-Amazon"): reads the "WORK ORDER #..." body for Site (the code in "Requested By: AMAZON <code>", e.g. IFM-JFK8 = Umbrava locationNumber), the CorrigoPro WO number (BOTH Source Job # and Source PO #), Scope (the Problem block), Trade (from the Problem "<Area> > <Issue>" head), Client DNE (the NTE, else 0.00), WO Type (a PM/preventive job -> Preventative, a proposal -> Proposal, else Reactive - the CorrigoPro Details "Type:" line is a ridealong and is ignored) and Priority (the Details "Priority:" value - "PM" -> "Scheduled PPM"). Reads everything in the browser; nothing is uploaded to any server. Best-effort: review every field before you click Create.
@@ -13,7 +13,7 @@
 
 (function () {
   'use strict';
-  var VER = '0.9.16';
+  var VER = '0.9.19';
   var FONT = "-apple-system,BlinkMacSystemFont,'Segoe UI','Helvetica Neue',Arial,sans-serif";
   console.info('[BWN WO INTAKE] v' + VER + ' - drop a PO / Amazon RFQ email (.msg/.eml) on Create Work Order to prefill + auto-attach to the new WO Documents (via Drop Upload); reads locally, nothing leaves the browser');
 
@@ -133,16 +133,46 @@
     var attachments = []; try { attachments = m.attachments(); } catch (e) { }
     return { subject: subject, body: body, senderEmail: (sender || '').toLowerCase(), attachments: attachments };
   }
+  // ---- MIME helpers (a real .eml is a multipart tree, not one flat body) --
+  // Before this, parseEml split head/body at the first blank line and dumped the whole rest as the
+  // body - so a multipart email fed boundary lines + part headers ("Content-Type: text/plain...")
+  // straight into the scope, and never extracted the attached PDF that holds the real WO detail.
+  function splitHeadBody(seg) { var m = seg.match(/\r?\n\r?\n/); return m ? { head: seg.slice(0, m.index), body: seg.slice(m.index + m[0].length) } : { head: seg, body: '' }; }
+  function hdrGet(head) { return function (name) { var mm = head.match(new RegExp('^' + name + ':\\s*(.*(?:\\r?\\n[ \\t].*)*)', 'im')); return mm ? mm[1].replace(/\r?\n[ \t]+/g, ' ').trim() : ''; }; }
+  function decodeQP(s) { return String(s).replace(/=\r?\n/g, '').replace(/=([0-9A-Fa-f]{2})/g, function (_, x) { return String.fromCharCode(parseInt(x, 16)); }); }
+  function b64ToU8(s) { var bin = atob(String(s).replace(/[^A-Za-z0-9+/=]/g, '')), u8 = new Uint8Array(bin.length); for (var i = 0; i < bin.length; i++) u8[i] = bin.charCodeAt(i); return u8; }
+  // Split a multipart body on its boundary (RFC 2046); preamble/epilogue and the closing --b-- drop.
+  function mimeParts(body, boundary) {
+    var out = [], b = '--' + boundary, i = body.indexOf(b);
+    while (i >= 0) {
+      if (body.substr(i + b.length, 2) === '--') break;                 // closing delimiter
+      var nl = body.indexOf('\n', i); if (nl < 0) break;
+      var next = body.indexOf(b, nl + 1); if (next < 0) break;
+      out.push(body.slice(nl + 1, next).replace(/\r?\n$/, ''));         // trailing CRLF belongs to the delimiter
+      i = next;
+    }
+    return out;
+  }
+  // Walk one part: multipart recurses; a named/attachment part is collected as bytes; text fills body.
+  function walkPart(head, body, acc) {
+    var h = hdrGet(head), ct = h('Content-Type') || 'text/plain', cte = h('Content-Transfer-Encoding').toLowerCase(), disp = h('Content-Disposition');
+    var bnd = ct.match(/boundary="?([^";]+)"?/i);
+    if (/^\s*multipart\//i.test(ct) && bnd) { mimeParts(body, bnd[1]).forEach(function (seg) { var sp = splitHeadBody(seg); walkPart(sp.head, sp.body, acc); }); return; }
+    var fname = (disp.match(/filename="?([^";\r\n]+)"?/i) || ct.match(/name="?([^";\r\n]+)"?/i) || [])[1] || '';
+    if (/attachment/i.test(disp) || (fname && !/^\s*text\//i.test(ct))) {
+      if (cte === 'base64') { try { acc.atts.push({ name: fname || 'attachment', bytes: b64ToU8(body), mime: ct.split(';')[0].trim() }); } catch (e) { } }
+      return;
+    }
+    var txt = cte === 'quoted-printable' ? decodeQP(body) : cte === 'base64' ? (function () { try { return latin1Of(b64ToU8(body)); } catch (e) { return body; } })() : body;
+    if (/text\/html/i.test(ct)) { if (!acc.html) acc.html = txt; } else if (!acc.plain) acc.plain = txt;
+  }
   function parseEml(text) {
-    var he = text.search(/\r?\n\r?\n/);
-    var head = he >= 0 ? text.slice(0, he) : text;
-    function h(name) { var mm = head.match(new RegExp('^' + name + ':\\s*(.*(?:\\r?\\n[ \\t].*)*)', 'im')); return mm ? mm[1].replace(/\r?\n[ \t]+/g, ' ').trim() : ''; }
-    var from = h('From');
-    var em = (from.match(/[A-Za-z0-9._%+\-]+@[A-Za-z0-9.\-]+\.[A-Za-z]{2,}/) || [''])[0].toLowerCase();
-    var body = he >= 0 ? text.slice(he) : '';
-    if (/<[a-z!]/i.test(body)) body = stripHtml(body);
-    body = body.replace(/=\r?\n/g, '').replace(/=3D/g, '=');
-    return { subject: h('Subject'), body: body, senderEmail: em, attachments: [] };   // .eml MIME-part attachments not yet extracted
+    var sp = splitHeadBody(text), h = hdrGet(sp.head);
+    var em = (h('From').match(/[A-Za-z0-9._%+\-]+@[A-Za-z0-9.\-]+\.[A-Za-z]{2,}/) || [''])[0].toLowerCase();
+    var acc = { plain: '', html: '', atts: [] };
+    walkPart(sp.head, sp.body, acc);
+    var body = acc.plain || (acc.html ? stripHtml(acc.html) : '');
+    return { subject: h('Subject'), body: body, senderEmail: em, attachments: acc.atts };
   }
 
   // ---- Email -> Work Order field mapping ----------------------------------
