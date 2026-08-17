@@ -404,7 +404,7 @@ function staticPins() {
   ok('dock keeps menu-then-pill child order (palette contract)', iMenu !== -1 && iPill !== -1 && iMenu < iPill, iMenu + ' vs ' + iPill);
   ok('toolbar discovery excludes header/nav (global search box must never anchor)',
     /closest\('header,nav'\)/.test(coreFull.slice(coreFull.indexOf('function pageSearchInput'), coreFull.indexOf('function searchMountRef'))));
-  ok('banner carries Views 3.0', coreFull.indexOf('Views 3.0') !== -1);
+  ok('banner carries Views 3.1', coreFull.indexOf('Views 3.1') !== -1);
   ok('the hardcoded presets are GONE - views are the user\'s own',
     coreFull.indexOf('DEFAULT_VIEWS') === -1 && coreFull.indexOf("name: 'Triage (heat overlay)'") === -1);
   ok('the stale "column ORDER is NOT controllable" claim is gone with them',
