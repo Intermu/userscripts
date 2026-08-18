@@ -188,7 +188,7 @@ function callsOf(g, op) { return g.calls.filter(function (c) { return c.op === o
   A.ok("every write still honors DRY_RUN", (full.match(/\[PA DRY_RUN\]/g) || []).length >= 5);
   var mV = full.match(/@version\s+([0-9.]+)/), mR = full.match(/VER\s*=\s*'([0-9.]+)'/);
   A.ok("@version and runtime VER agree", !!(mV && mR && mV[1] === mR[1]));
-  A.eq("shipped at 0.2.2", mV && mV[1], "0.2.2");
+  A.eq("shipped at 0.2.3", mV && mV[1], "0.2.3");
 
   A.finish();
 })().catch(function (e) { console.error(e); process.exit(1); });

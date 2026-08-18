@@ -334,13 +334,13 @@ async function probeAssist(src) {
   // auto-advance step. The pin is deliberate: it forces a conscious
   // update whenever Core moves, so a version bump cannot ride out unnoticed alongside an
   // unrelated change. The step-3 contract itself is untouched.
-  // The assist pin was left at 0.3.0 by the mirror-retirement sweep (b24cecc) that patch-bumped
-  // every script's @version; the file has read 0.3.1 since, so this pin was red on main until
-  // 2026-08-06. Its internal `var VER` still says 0.3.0 - that drift is bwn-wo-assist's to fix.
+  // The assist @version and its internal `var VER` banner (shown in support triage) MUST agree.
+  // VER had drifted to 0.3.0 while @version read 0.3.3; the 2026-08-18 surgical-fix pass set them
+  // in lockstep at 0.3.4, and these pins keep them from drifting apart again.
   A.ok('core @version is 1.78.20', coreFull.indexOf('// @version      1.78.20') !== -1, 'core version drift');
   A.ok('core banner says WO Assist 2.71', coreFull.indexOf('WO Assist 2.71') !== -1, 'module banner drift');
-  A.ok('assist @version is 0.3.3', assistFull.indexOf('// @version      0.3.3') !== -1, 'assist version drift');
-  A.ok("assist VER is '0.3.0'", assistFull.indexOf("var VER = '0.3.0';") !== -1, 'assist VER drift');
+  A.ok('assist @version is 0.3.4', assistFull.indexOf('// @version      0.3.4') !== -1, 'assist version drift');
+  A.ok("assist VER is '0.3.4'", assistFull.indexOf("var VER = '0.3.4';") !== -1, 'assist VER drift');
   // Step 4 hangs the client-response state read off the SAME tick, deliberately: two queues on
   // one refresh cadence is one thing to reason about, and a second timer would be a second
   // thing to drift. Both calls are pinned so dropping either is a red test, not a quiet loss.

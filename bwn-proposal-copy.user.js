@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         BWN Proposal Copy (Broadway National)
 // @namespace    broadwaynational.bwn
-// @version      0.1.6
+// @version      0.1.7
 // @downloadURL  https://raw.githubusercontent.com/Intermu/userscripts/main/bwn-proposal-copy.user.js
 // @updateURL    https://raw.githubusercontent.com/Intermu/userscripts/main/bwn-proposal-copy.user.js
 // @description  Copy a client proposal from an aged-out work order onto a chosen replacement WO as an un-submitted Draft, in one confirmed action. Replays Umbrava's own createDraftProposal + editProposal mutations (line items copied verbatim); never submits, deletes, or retries. Manager-gated visibility. @grant none.
@@ -15,7 +15,7 @@
 (function () {
   'use strict';
 
-  var VER = '0.1.6';   // keep in step with @version
+  var VER = '0.1.7';   // keep in step with @version
   var DRY_RUN = false; // when true, the two WRITE mutations are logged, not sent
   console.info('[BWN PROPOSAL COPY] v' + VER + ' - copy client proposal to another WO as a Draft (createDraftProposal + editProposal replay)');
 
@@ -693,15 +693,46 @@
     body.appendChild(progress);
     copyProposal(sourceProposalId, target.number, {}).then(function (r) {
       if (r && r.ok) {
-        pcToast('Copied to W-' + target.number + ' as a new Draft proposal.');
+        // Build the "open W-<n>" link with DOM APIs, never string-interpolation into innerHTML:
+        // target.number is Number()-coerced into the href and set as textContent, so it cannot
+        // inject regardless of source.
         // UNVERIFIED: the exact Proposals-TAB deep-link shape (query/hash param). The bare
         // WO route below is proven (onProposalPage's own match); landing on the Proposals
         // tab specifically is not confirmed - the operator may need one extra click there.
-        var link = '/work-orders/' + target.number;
-        progress.className = 'bwn-pc-ok';
-        progress.innerHTML = 'Done - <a href="' + link + '" style="color:#0d3d26;font-weight:600;">open W-' + target.number + '</a> and check its Proposals tab.';
-        confirmBtn.textContent = 'Copied';
-        setTimeout(closeDrawer, 3000);
+        var openLink = document.createElement('a');
+        openLink.href = '/work-orders/' + Number(target.number);
+        openLink.style.cssText = 'color:#0d3d26;font-weight:600;';
+        openLink.textContent = 'open W-' + target.number;
+
+        var rb = r.readBack;
+        if (rb && rb.match === false) {
+          // The Draft WAS created, but the read-back of the new proposal did not match the source:
+          // a dropped line item, a changed subtotal, or a client PO the edit silently nulled - all
+          // on a client-facing money document. Report "created, but verify" with the specifics, NOT
+          // a green success, and log the full read-back so the drop is never silent.
+          var diffs = [];
+          if (rb.newItems !== rb.sourceItems) diffs.push('line items ' + rb.sourceItems + ' -> ' + rb.newItems);
+          if (rb.sourceSubtotal != null && rb.newSubtotal !== rb.sourceSubtotal) diffs.push('subtotal changed');
+          if (rb.sourcePO !== rb.newPO) diffs.push('client PO ' + (rb.sourcePO || 'none') + ' -> ' + (rb.newPO || 'none'));
+          console.warn('[BWN PROPOSAL COPY] read-back did NOT match the source on the new Draft', rb);
+          pcToast('Copied to W-' + target.number + ', but the read-back did NOT match - verify it.');
+          progress.className = 'bwn-pc-warn';
+          progress.textContent = 'Created as a Draft, but VERIFY (' + (diffs.join('; ') || 'read-back differs') + ') - ';
+          progress.appendChild(openLink);
+          progress.appendChild(document.createTextNode(' and check its line items, total and client PO.'));
+          // confirmBtn stays disabled: the Draft exists, so re-running would create a duplicate.
+          cancelBtn.disabled = false;
+          confirmBtn.textContent = 'Created - verify';
+          // Deliberately no auto-close: leave the warning on screen until the operator dismisses it.
+        } else {
+          pcToast('Copied to W-' + target.number + ' as a new Draft proposal.');
+          progress.className = 'bwn-pc-ok';
+          progress.textContent = 'Done - ';
+          progress.appendChild(openLink);
+          progress.appendChild(document.createTextNode(' and check its Proposals tab.'));
+          confirmBtn.textContent = 'Copied';
+          setTimeout(closeDrawer, 3000);
+        }
       } else {
         confirmBtn.disabled = false; cancelBtn.disabled = false;
         confirmBtn.textContent = 'Retry';

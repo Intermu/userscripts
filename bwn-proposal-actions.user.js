@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         BWN Proposal Actions (Broadway National)
 // @namespace    broadwaynational.bwn
-// @version      0.2.2
+// @version      0.2.3
 // @downloadURL  https://raw.githubusercontent.com/Intermu/userscripts/main/bwn-proposal-actions.user.js
 // @updateURL    https://raw.githubusercontent.com/Intermu/userscripts/main/bwn-proposal-actions.user.js
 // @description  On a Client Proposal DETAILS page, a "Proposal Actions" dropdown runs the internal review workflow in one confirmed action: Approval / TSP Review / Kickback. Each posts a note to the Proposal + the Work Order, sets the WO status, completes open tasks, and files a new task (assigned to the WO coordinator, or Ronny Sharp for TSP). Kickback drafts a rejection reason with the on-device browser AI for the operator to confirm. Every write is shown in a confirm dialog first; nothing fires until Confirm. @grant none.
@@ -15,7 +15,7 @@
 (function () {
   'use strict';
 
-  var VER = '0.2.2';   // keep in step with @version
+  var VER = '0.2.3';   // keep in step with @version
   var DRY_RUN = false; // when true, every WRITE is console.logged instead of sent
   console.info('[BWN PROPOSAL ACTIONS] v' + VER + ' - Approval / TSP Review / Kickback workflow on the Client Proposal details page');
 
@@ -175,6 +175,21 @@
     return paGql('PA_Tasks', Q_TASKS, { e: String(n) }).then(function (d) {
       var t = (d && d.tasksByEntityTypeAndId && d.tasksByEntityTypeAndId.tasks) || [];
       return t.filter(function (x) { return !x.isComplete; });
+    });
+  }
+
+  // WO-notes read, for the idempotent WO-note step below. workOrderNotes is the REAL query (proven
+  // live in bwn-write-queue; the vault records a fabricated `workOrderNotes` as a past bug, so this
+  // reuses the confirmed one - it is not invented). Used to skip re-posting an identical WO note.
+  var Q_WONOTES = 'query PA_WONotes($n: Int!){ workOrderNotes(workOrderNumber: $n){ content isDeleted } }';
+  function readWONotes(n) {
+    return paGql('PA_WONotes', Q_WONOTES, { n: n }).then(function (d) {
+      return (d && d.workOrderNotes) || [];
+    });
+  }
+  function woNoteExists(notes, text) {
+    return (notes || []).some(function (x) {
+      return x && !x.isDeleted && String(x.content == null ? '' : x.content) === text;
     });
   }
 
@@ -507,7 +522,12 @@
   // Sequential runner. reason is threaded so kickback step closures can read the confirmed text.
   function runSteps(steps, reason, stepEls) {
     var skipped = 0;
+    // Resume from the first not-yet-completed step: a step already marked 'ok' (a checkmark from a
+    // previous run) is not re-run, so a Retry after a mid-sequence failure does NOT re-post a note,
+    // re-create the task, or re-set the status that already succeeded. First run: nothing is 'ok', so
+    // idx stays 0 and behaviour is unchanged.
     var idx = 0;
+    while (idx < steps.length && stepEls[idx] && stepEls[idx].className === 'ok') idx++;
     function next() {
       if (idx >= steps.length) return Promise.resolve({ ok: true, skipped: skipped });
       var s = steps[idx];
@@ -552,23 +572,55 @@
   function buildStatusStep(ctx, statusName) {
     return {
       label: 'Set WO status → ' + statusName, pending: false,
-      run: function () { return readStatusId(statusName).then(function (id) { return setStatus(ctx.n, id); }); }
+      run: function () {
+        // Idempotent set (matches bwn-write-queue's set-verb skip): re-read the WO's current status
+        // and skip the write when it is already at the target, so a Retry never resets the
+        // time-in-status clock a second time.
+        return readWO(ctx.n).then(function (cur) {
+          if (cur && cur.statusName === statusName) return true;
+          return readStatusId(statusName).then(function (id) { return setStatus(ctx.n, id); });
+        });
+      }
     };
   }
   function buildProposalNoteStep(ctx, noteFn) {
+    // ponytail: NOT deduped on Retry - no client-proposal-notes (billing-note) READ query is pinned,
+    // and inventing one is the fabricated-`workOrderNotes` bug class (vault umbrava-graphql-operations).
+    // The resume-from-first-incomplete-step fix above stops a re-post in the normal case; a true
+    // read-then-skip dedup (like the WO note below) needs a billing-notes read query pinned first.
     return { label: 'Add note to Proposal #' + ctx.pid + ' Notes tab', pending: false,
       run: function (reason) { return addProposalNote(ctx.pid, noteFn(reason)); } };
   }
   function buildWONoteStep(ctx, noteFn) {
     return { label: 'Add note to Work Order W-' + ctx.n + ' notes', pending: false,
-      run: function (reason) { return addWONote(ctx.n, noteFn(reason)); } };
+      run: function (reason) {
+        var text = noteFn(reason);
+        // Idempotent (matches bwn-write-queue's note dedup, keyed on the note text via workOrderNotes):
+        // skip the post when an identical, non-deleted note already exists, so a Retry does not
+        // duplicate it. Fail OPEN - if the read fails, post anyway (a missing note is worse than a
+        // rare duplicate, and the note text is itself the stable key).
+        return readWONotes(ctx.n).then(function (notes) {
+          if (woNoteExists(notes, text)) return true;
+          return addWONote(ctx.n, text);
+        }, function () { return addWONote(ctx.n, text); });
+      } };
   }
   function buildCompleteStep(ctx) {
     var c = ctx.openTasks.length;
     return { label: c ? ('Complete ' + c + ' open task(s)') : 'No open tasks to complete', pending: false,
-      run: function () { return completeAllTasks(ctx.openTasks); } };
+      run: function () {
+        // Idempotent (skip the task write when already at the target state): re-read at execution
+        // time and complete only the still-open tasks, so a Retry completes nothing already done.
+        // Fail open to the gather-time task list if the re-read fails.
+        return readOpenTasks(ctx.n).then(function (open) { return completeAllTasks(open); },
+          function () { return completeAllTasks(ctx.openTasks); });
+      } };
   }
   function buildCreateTaskStep(ctx, assigneeGuid, assigneeName, noteFn) {
+    // ponytail: this append is NOT deduped - the created task carries no idempotency key we can read
+    // back (the frozen addTask payload has no marker, and Task has no confirmed read field to match
+    // on). It is the LAST step, so the resume fix means it only re-runs if it ITSELF failed; grounding
+    // a read-then-skip here needs a task-identity field pinned first.
     return { label: 'Create task for ' + assigneeName + ': ' + firstLine(noteFn('')), pending: false,
       run: function (reason) { return createTask(ctx.n, assigneeGuid, noteFn(reason)); } };
   }
