@@ -113,6 +113,10 @@ var LEDGER = {
   'bwn-dispatch.user.js':      { drawer: 'HAS',       toast: 'HAS',       rmotion: 'NA',  rail: 'NA'  },
   'bwn-drop-upload.user.js':   { drawer: 'NA',        toast: 'DIVERGENT', rmotion: 'NA',  rail: 'NA'  },
   'bwn-kanban.user.js':        { drawer: 'NA',        toast: 'NA',        rmotion: 'NA',  rail: 'NA'  },
+  // Self-contained fixed-position confirm card (#bwn-lowgp-panel, own inline cssText); closes by plain
+  // remove (closePanel), no shared drawerDismiss, no toast(), no animation:, no --bwn-dock-shift.
+  // Carries NONE of the four SHARED primitives.
+  'bwn-low-gp.user.js':        { drawer: 'NA',        toast: 'NA',        rmotion: 'NA',  rail: 'NA'  },
   'bwn-notes.user.js':         { drawer: 'NA',        toast: 'NA',        rmotion: 'NA',  rail: 'NA'  },
   // Own #bwn-pa-card overlay/menu + own paToast (the same private-toast pattern as proposal-copy,
   // NOT the shared function toast()); no drawer, animation, or rail. NONE of the four SHARED primitives.
