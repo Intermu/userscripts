@@ -159,6 +159,15 @@ jobs:
       - name: Drop Upload API harness (note + document write mutations)
         run: node scripts/test-drop-upload-api.js
 
+      # drop-upload 1.15.5: the .eml reader had the SAME flat-parse bug wo-intake fixed - a nested
+      # multipart/alternative matched the /text\/plain/ substring, so the whole subtree (inner
+      # boundary lines + the base64 attachment) leaked into the WO note as gibberish. Slices the
+      # rewritten MIME walker + parseEml and pins: body is the decoded text/plain only (no boundary/
+      # header/base64 leakage), qp decoded, From/Date/To/Subject headers preserved, and both the
+      # single-part text and single-part base64 paths still yield their body.
+      - name: Drop Upload .eml MIME-parse harness (nested multipart, no gibberish)
+        run: node scripts/test-drop-upload-eml.js
+
       # Views v2.0 applies column presets through Umbrava's own putUserPreference instead
       # of chooser-checkbox choreography. Pins the measured contract: the 30-column
       # title->id map (incl. the "Label"=workOrderCategory trap), version ECHOED never
