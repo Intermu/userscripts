@@ -126,6 +126,9 @@ var LEDGER = {
   'bwn-proposal-copy.user.js': { drawer: 'NA',        toast: 'NA',        rmotion: 'NA',  rail: 'NA'  },
   'bwn-suite-ai.user.js':      { drawer: 'NA',        toast: 'DIVERGENT', rmotion: 'HAS', rail: 'HAS' },
   'bwn-suite-core.user.js':    { drawer: 'HAS',       toast: 'DIVERGENT', rmotion: 'HAS', rail: 'HAS' },
+  // Own inline panel inside the PO dialog (#bwn-tv-panel) + own body-modal fallback; closes by plain
+  // remove (closePanel), no shared drawerDismiss, no toast(), no animation:, no rail. NONE of the four.
+  'bwn-temp-vendor.user.js':   { drawer: 'NA',        toast: 'NA',        rmotion: 'NA',  rail: 'NA'  },
   'bwn-vendor-intake.user.js': { drawer: 'NA',        toast: 'DIVERGENT', rmotion: 'NA',  rail: 'NA'  },
   'bwn-wide-list.user.js':     { drawer: 'NA',        toast: 'NA',        rmotion: 'NA',  rail: 'NA'  },
   'bwn-wo-assist.user.js':     { drawer: 'HAS',       toast: 'HAS',       rmotion: 'NA',  rail: 'NA'  },
