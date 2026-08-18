@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         BWN Suite - Core (Broadway National)
 // @namespace    broadwaynational.bwn
-// @version      1.78.20
+// @version      1.78.21
 // @downloadURL  https://raw.githubusercontent.com/Intermu/userscripts/main/bwn-suite-core.user.js
 // @updateURL    https://raw.githubusercontent.com/Intermu/userscripts/main/bwn-suite-core.user.js
 // @description  Runs several Umbrava helpers for BWN coordinators, in the browser with no privileged grants. Includes: PO Approval + ETA Builder; WO Assist (GP/ETA, a stall watchdog, DNE calculator, and a next-action playbook); Email Leak Guard (checks recipients against vendor names, PO amounts, and client budget references before an outbound email sends); WO List Heat (a triage overlay + My Day strip on the work-order list, with an optional same-origin Umbrava API scan for deterministic full-board coverage); and the BWN Launcher (opens the Azure Static Web App tools with the current WO's context). Modules share state through sessionStorage/localStorage. The only network calls are same-origin Umbrava GraphQL requests (app.umbrava.com/api/graphql, the app's own session): List Heat's full-board scan and WO Assist's work-order / trip / clock-in / document reads, plus ONE write - BWN Views saves the column layout through Umbrava's own putUserPreference, the same preference the column chooser writes; everything else is offline. Toggle modules in BWN_MODULES below.
@@ -1033,7 +1033,8 @@
   // slot transiently holds non-Umbrava tokens), the same rule List Heat's heatGql
   // uses. Resolves to `data`, throws on errors[]. Lifted to file level so the WO
   // Assist closure can read the WO too (heatGql stays List-Heat-local; converge later).
-  function bwnIsUmbravaToken(tok) {
+  // ===== BWN-SHARED START v1 (paste-identical; pinned by scripts/test-shared-block-ledger.js) =====
+  function isUmbravaToken(tok) {
     try {
       var p = JSON.parse(atob(String(tok).split('.')[1].replace(/-/g, '+').replace(/_/g, '/')));
       var iss = String(p.iss || '').replace(/\/+$/, '');
@@ -1041,7 +1042,7 @@
       return !(typeof p.exp === 'number' && (Date.now() / 1000) > p.exp);
     } catch (e) { return false; }
   }
-  function bwnAuthToken() {
+  function authToken() {
     try {
       var keys = Object.keys(localStorage).filter(function (x) {
         return /@@auth0spajs@@::.*::https:\/\/app\.umbrava\.com\/api::/.test(x);
@@ -1049,13 +1050,14 @@
       for (var i = 0; i < keys.length; i++) {
         var body = (JSON.parse(localStorage.getItem(keys[i])) || {}).body;
         var tok = (body && body.access_token) || '';
-        if (tok && bwnIsUmbravaToken(tok)) return tok;
+        if (tok && isUmbravaToken(tok)) return tok;
       }
-    } catch (e) { }
-    return '';
+      return '';
+    } catch (e) { return ''; }
   }
+  // ===== BWN-SHARED END v1 =====
   function bwnGql(query, variables) {
-    var tok = bwnAuthToken();
+    var tok = authToken();
     return fetch('/api/graphql', {
       method: 'POST',
       headers: { 'Authorization': 'Bearer ' + tok, 'Content-Type': 'application/json' },
@@ -6093,32 +6095,11 @@
       return !!heatPagingVars(body.variables);
     }
 
-    function heatIsUmbravaToken(tok) {
-      try {
-        var p = JSON.parse(atob(String(tok).split('.')[1].replace(/-/g, '+').replace(/_/g, '/')));
-        var iss = String(p.iss || '').replace(/\/+$/, '');
-        if (iss !== 'https://login.umbrava.com' && iss !== 'https://umbrava.us.auth0.com') return false;
-        return !(typeof p.exp === 'number' && (Date.now() / 1000) > p.exp);
-      } catch (e) { return false; }
-    }
-    // Auth0 access token from the SPA's own cache - picked by CONTENT (the audience
-    // slot transiently holds non-Umbrava tokens), same rule the AI script's gql() uses.
-    function heatAuthToken() {
-      try {
-        var keys = Object.keys(localStorage).filter(function (x) {
-          return /@@auth0spajs@@::.*::https:\/\/app\.umbrava\.com\/api::/.test(x);
-        });
-        for (var i = 0; i < keys.length; i++) {
-          var body = (JSON.parse(localStorage.getItem(keys[i])) || {}).body;
-          var tok = (body && body.access_token) || '';
-          if (tok && heatIsUmbravaToken(tok)) return tok;
-        }
-      } catch (e) { }
-      return '';
-    }
+    // Umbrava access token: the file-level authToken() from the BWN-SHARED block (US-1 1b);
+    // the old List-Heat-local heatIsUmbravaToken/heatAuthToken were folded into it.
     // Same-origin GraphQL POST → resolves to `data`, throws on errors[].
     function heatGql(query, variables) {
-      var tok = heatAuthToken();
+      var tok = authToken();
       // Serialised ONCE and remembered, so the hook's response leg can recognise this exact
       // body as ours rather than as a fresh list query - see heatNoteOwnBody.
       var payload = JSON.stringify({ query: query, variables: variables || {} });
@@ -7286,7 +7267,7 @@
       });
       var pending = Object.keys(need);
       if (!pending.length) return Promise.resolve(0);
-      if (!heatAuthToken()) return Promise.resolve(heatApplyUsers(store, need));
+      if (!authToken()) return Promise.resolve(heatApplyUsers(store, need));
       var chunks = [];
       for (var i = 0; i < ids.length; i += HEAT_USER_Q_MAX) chunks.push(ids.slice(i, i + HEAT_USER_Q_MAX));
       return chunks.reduce(function (p, c) {
@@ -8039,7 +8020,7 @@
     // the proven scroll sweep so the user is never left with a silent partial.
     function runScan(btn) {
       if (heatScanning) return;
-      if (apiList && heatAuthToken()) {
+      if (apiList && authToken()) {
         apiScanAll(btn).then(function (ok) {
           if (!ok) { console.info('[BWN HEAT] API scan unavailable/low-confidence - falling back to scroll scan.'); scanAll(btn); }
         }, function (err) {
@@ -8074,7 +8055,7 @@
     }
     function heatAutoScan(vars, force) {
       if (!heatAutoOn() || heatScanning || heatReplaying || !isListPage()) { heatDiag.autoNoGate++; return; }
-      if (!apiList || !apiList.query || !heatAuthToken()) { heatDiag.autoNoGate++; return; }   // manual button still covers these
+      if (!apiList || !apiList.query || !authToken()) { heatDiag.autoNoGate++; return; }   // manual button still covers these
       var sig = heatFilterSig(vars || (apiList && apiList.variables));
       // `force` bypasses BOTH throttles below and nothing else. It is for a caller that must
       // READ BACK A WRITE it just made: a status change alters no filter, so the signature is
@@ -8312,7 +8293,7 @@
         heatSeedTimer = null;
         if (!isListPage()) return;
         if (apiList && apiList.query) return;   // the passive capture won the race - leave it
-        if (!heatAuthToken()) return;           // no bearer to replay with; the scroll button still covers it
+        if (!authToken()) return;           // no bearer to replay with; the scroll button still covers it
         if (heatSeedCapture()) heatAutoScan(apiList.variables);
       }, HEAT_SEED_GRACE_MS);
     }
@@ -8526,7 +8507,7 @@
     // heals, same as the seed fallback). Resolves apiScanAll's promise (true on a clean scan).
     if (typeof window !== 'undefined') window.__bwnDispatchSyncNow = function () {
       if (!isListPage()) { console.warn('[BWN DISPATCH] open the Work Orders LIST first.'); return Promise.resolve(false); }
-      if (!heatAuthToken()) { console.warn('[BWN DISPATCH] no auth bearer captured yet - load the WO list once, then retry.'); return Promise.resolve(false); }
+      if (!authToken()) { console.warn('[BWN DISPATCH] no auth bearer captured yet - load the WO list once, then retry.'); return Promise.resolve(false); }
       apiList = null;   // drop any per-user capture so the tenant-wide OPEN seed is what runs
       if (!heatSeedCapture()) { console.warn('[BWN DISPATCH] could not seed the open-book query.'); return Promise.resolve(false); }
       var btn = document.getElementById('bwn-heat-scan') || { disabled: false, textContent: '' };

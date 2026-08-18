@@ -71,6 +71,23 @@ function stripBlock(src) {
   if (b === -1) return src;
   return src.slice(0, a) + src.slice(b + END.length);
 }
+// The bwnNotesApi block is a SEPARATE sanctioned shared block: byte-identical across
+// bwn-suite-core and bwn-suite-ai and SHA-gated by scripts/test-notes-api.js. Its bwnNotesToken
+// reads the SAME Auth0 access-token slot (so its BODY trips SLOT_BODY), but the name is not a
+// picker (PICKER_DECL never matched it) and it is deliberately OUT OF SCOPE for THIS
+// consolidation - the notes-api harness gates its bytes, not this one. Strip it before hunting
+// for a rival picker, exactly as stripBlock removes the BWN-SHARED block, so its sanctioned slot
+// read is never mistaken for a rival that drifted back in. A rogue picker outside BOTH blocks is
+// still caught; faking these markers to smuggle one in would itself go red in test-notes-api.js.
+var NOTES_BEGIN = '// ===== BEGIN bwnNotesApi =====';
+var NOTES_END = '// ===== END bwnNotesApi =====';
+function stripNotesApi(src) {
+  var a = src.indexOf(NOTES_BEGIN);
+  if (a === -1) return src;
+  var b = src.indexOf(NOTES_END, a);
+  if (b === -1) return src;
+  return src.slice(0, a) + src.slice(b + NOTES_END.length);
+}
 function sha(s) { return crypto.createHash('sha256').update(s).digest('hex'); }
 function pickerDecls(src) { return (src.match(PICKER_DECL) || []).length; }
 
@@ -83,7 +100,7 @@ function judge(src, status) {
     if (!fb.present) return { ok: false, why: fb.malformed ? 'START marker without a matching END' : 'ledger says ADOPTED but the block is MISSING' };
     if (fb.dup) return { ok: false, why: 'a second BWN-SHARED START - the block is duplicated' };
     if (sha(fb.text) !== CANON_SHA) return { ok: false, why: 'block SHA != canonical (a byte drifted: reject the paste, do not re-pin)' };
-    var outside = stripBlock(src);
+    var outside = stripNotesApi(stripBlock(src));   // exclude the shared block AND the sanctioned bwnNotesApi block (its bwnNotesToken slot read is gated by test-notes-api.js, not here)
     if (pickerDecls(outside) !== 0) return { ok: false, why: 'a rival picker declaration survives OUTSIDE the block' };
     if (SLOT_BODY.test(outside)) return { ok: false, why: 'a rival picker BODY (Auth0 slot read) survives outside the block' };
     return { ok: true, why: 'canonical block present, no rival outside it' };
@@ -116,8 +133,8 @@ var LEDGER = {
   'bwn-notes.user.js':            { status: 'NA' },   // reads only the @@user@@ session slot, not the access-token picker
   'bwn-proposal-actions.user.js': { status: 'ADOPTED' },
   'bwn-proposal-copy.user.js':    { status: 'ADOPTED' },
-  'bwn-suite-ai.user.js':         { status: 'PENDING', reason: 'Local isUmbravaToken/aiIsUmbravaToken/rawAuthToken/authToken near the sentinel + PAT-002 regions; folded in a separate careful pass (US-1 defers the two mega scripts).' },
-  'bwn-suite-core.user.js':       { status: 'PENDING', reason: 'Two local pickers (bwnAuthToken + heatAuthToken, each with its own isUmbravaToken) near sentinel / SHA-gated regions; folded in a separate careful pass (US-1 defers the two mega scripts).' },
+  'bwn-suite-ai.user.js':         { status: 'ADOPTED' },   // US-1 1b: aiIsUmbravaToken/aiUserToken + jobView isUmbravaToken/rawAuthToken/authToken folded into ONE file-level block
+  'bwn-suite-core.user.js':       { status: 'ADOPTED' },   // US-1 1b: bwnIsUmbravaToken/bwnAuthToken + heatIsUmbravaToken/heatAuthToken folded into ONE file-level block
   'bwn-vendor-intake.user.js':    { status: 'NA' },
   'bwn-wide-list.user.js':        { status: 'NA' },
   'bwn-wo-assist.user.js':        { status: 'ADOPTED' },
@@ -165,11 +182,11 @@ onDisk.slice().sort().forEach(function (f) {
 // SAME canonical bytes (one distinct SHA across all adopters, equal to CANON_SHA).
 // =============================================================================================
 console.log('\n-- 3. aggregate counts + one canonical SHA --');
-A.ok('ADOPTED count is 12', ledgerWith('ADOPTED').length === 12, 'got ' + ledgerWith('ADOPTED').length);
-A.ok('PENDING count is 2', ledgerWith('PENDING').length === 2, 'got ' + ledgerWith('PENDING').length);
+A.ok('ADOPTED count is 14', ledgerWith('ADOPTED').length === 14, 'got ' + ledgerWith('ADOPTED').length);
+A.ok('PENDING count is 0', ledgerWith('PENDING').length === 0, 'got ' + ledgerWith('PENDING').length);
 A.ok('NA count is 5', ledgerWith('NA').length === 5, 'got ' + ledgerWith('NA').length);
-A.ok('PENDING is exactly suite-core + suite-ai',
-  ledgerWith('PENDING').slice().sort().join('|') === 'bwn-suite-ai.user.js|bwn-suite-core.user.js',
+A.ok('PENDING is empty (both mega scripts folded in US-1 1b)',
+  ledgerWith('PENDING').length === 0,
   ledgerWith('PENDING').join(','));
 var adoptedShas = {};
 ledgerWith('ADOPTED').forEach(function (f) { adoptedShas[sha(findBlock(SRC[f]).text)] = true; });
@@ -199,9 +216,12 @@ A.ok('C2b: a rival Auth0-slot body outside the block is caught', judge(c2b, 'ADO
 var c3 = SRC['bwn-kanban.user.js'] + '\n  function authToken() { return ""; }\n';
 A.ok('C3: a picker appearing in an NA script trips the NA guard', judge(c3, 'NA').ok === false);
 
-// C4: a PENDING script adopts the block without being reclassified -> the PENDING guard flips.
-var c4 = read('bwn-suite-core.user.js') + '\n' + START + '\n' + END + '\n';
-A.ok('C4: a PENDING script that grew the block is caught', judge(c4, 'PENDING').ok === false);
+// C4: a script still classified PENDING but which HAS grown the block must flip red (the fix is
+// to reclassify it ADOPTED, not to leave it PENDING). No script is PENDING today (both mega scripts
+// adopted in US-1 1b), so this is synthetic: take an NA script with no block, append one, and judge
+// it as if the ledger still called it PENDING.
+var c4 = read('bwn-kanban.user.js') + '\n' + START + '\n' + END + '\n';
+A.ok('C4: a PENDING-labelled script that grew the block is caught', judge(c4, 'PENDING').ok === false);
 
 // C5: a disk file with no ledger row (dropped/forgotten row).
 var c5disk = onDisk.concat(['bwn-phantom.user.js']);
@@ -216,6 +236,18 @@ A.ok('C6: a ledger row with no file on disk is caught',
 // C7: the block present but with a corrupted END marker (START without END) reads as absent, not adopted.
 var c7 = SRC[anAdopter].replace(END, '// ===== BWN-SHARED END v1 CORRUPT');
 A.ok('C7: a block missing its END marker fails ADOPTED', judge(c7, 'ADOPTED').ok === false);
+
+// C8: the bwnNotesApi exemption must not BLIND the guard. On a mega script that carries the notes
+// block, a rival picker pasted OUTSIDE both sanctioned blocks is still caught.
+var c8 = SRC['bwn-suite-core.user.js'] + '\n  function duAuthToken() { return authToken(); }\n';
+A.ok('C8: with the notes block exempt, a rival picker elsewhere is still caught', judge(c8, 'ADOPTED').ok === false);
+
+// C9: the exemption is LOAD-BEARING, not a no-op. The sanctioned bwnNotesApi block genuinely carries
+// the Auth0 slot read (SLOT_BODY sees it after only stripBlock), and stripNotesApi is exactly what
+// removes it - so a mega script is green ONLY because the exemption fires.
+var c9core = SRC['bwn-suite-core.user.js'];
+A.ok('C9a: the notes-block slot body is present after stripBlock alone', SLOT_BODY.test(stripBlock(c9core)) === true);
+A.ok('C9b: and stripNotesApi is what clears it', SLOT_BODY.test(stripNotesApi(stripBlock(c9core))) === false);
 
 console.log('\n(ledger: ' + onDisk.length + ' scripts, one canonical token-picker block. Green == the recorded US-1');
 console.log(' step-1 scope; a red here is drift from it, named by script, never a silent duplicate.)');

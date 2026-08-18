@@ -91,7 +91,7 @@ function loadTransport(opts) {
   var section = extractSection();
   var factory = new Function(
     'connectorEnabled', 'GM_getValue', 'GM_xmlhttpRequest', 'fetch', 'atob', 'localStorage', 'document', 'setTimeout', 'clearTimeout', 'console',
-    section + '\n;return { bwnAI: bwnAI, AI_TOOLS: AI_TOOLS, AI_TOOL_DEFS: AI_TOOL_DEFS, aiUserToken: aiUserToken, aiGql: aiGql, aiPost: aiPost, aiExecTool: aiExecTool, aiDriveLoop: aiDriveLoop, aiProxySend: aiProxySend };'
+    section + '\n;return { bwnAI: bwnAI, AI_TOOLS: AI_TOOLS, AI_TOOL_DEFS: AI_TOOL_DEFS, authToken: authToken, aiGql: aiGql, aiPost: aiPost, aiExecTool: aiExecTool, aiDriveLoop: aiDriveLoop, aiProxySend: aiProxySend };'
   );
   return factory(
     opts.connectorEnabled || function () { return true; },

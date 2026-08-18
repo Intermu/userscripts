@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         BWN Suite - AI (Broadway National)
 // @namespace    broadwaynational.bwn
-// @version      1.45.10
+// @version      1.45.11
 // @downloadURL  https://raw.githubusercontent.com/Intermu/userscripts/main/bwn-suite-ai.user.js
 // @updateURL    https://raw.githubusercontent.com/Intermu/userscripts/main/bwn-suite-ai.user.js
 // @description  The Umbrava tools that call outside APIs, kept separate from the zero-egress Core script. Client Update and WO Audit drafts (Anthropic Claude; draft-only, scrubbed before sending, you review before posting); Find Techs / Find Suppliers (Google Places; vendor leads near a WO); and Job View (opens the Ops-Dashboard job card on the WO page - WO details from Umbrava plus the authored case file and next actions, read-only). Network access is limited by the browser to the declared API hosts and the BWN Static Web App. API keys are stored in Tampermonkey's storage via the menu commands and never enter the page. Toggle modules in BWN_MODULES below.
@@ -1689,7 +1689,8 @@
   // (the auth cache slot transiently holds a non-Umbrava SCM token) and read FRESH each round
   // (RISK-001: it is short-lived). It rides only same-origin /api/graphql (SEC-001); the copy
   // sent to the SWA goes in the JSON BODY (SEC-002), never the Authorization header.
-  function aiIsUmbravaToken(tok) {
+  // ===== BWN-SHARED START v1 (paste-identical; pinned by scripts/test-shared-block-ledger.js) =====
+  function isUmbravaToken(tok) {
     try {
       var p = JSON.parse(atob(String(tok).split('.')[1].replace(/-/g, '+').replace(/_/g, '/')));
       var iss = String(p.iss || '').replace(/\/+$/, '');
@@ -1697,7 +1698,7 @@
       return !(typeof p.exp === 'number' && (Date.now() / 1000) > p.exp);
     } catch (e) { return false; }
   }
-  function aiUserToken() {
+  function authToken() {
     try {
       var keys = Object.keys(localStorage).filter(function (x) {
         return /@@auth0spajs@@::.*::https:\/\/app\.umbrava\.com\/api::/.test(x);
@@ -1705,13 +1706,14 @@
       for (var i = 0; i < keys.length; i++) {
         var body = (JSON.parse(localStorage.getItem(keys[i])) || {}).body;
         var tok = (body && body.access_token) || '';
-        if (tok && aiIsUmbravaToken(tok)) return tok;
+        if (tok && isUmbravaToken(tok)) return tok;
       }
       return '';
     } catch (e) { return ''; }
   }
+  // ===== BWN-SHARED END v1 =====
   function aiGql(query, variables) {
-    var tok = aiUserToken();
+    var tok = authToken();
     return fetch('/api/graphql', {
       method: 'POST',
       headers: { 'Authorization': 'Bearer ' + tok, 'Content-Type': 'application/json' },
@@ -1806,7 +1808,7 @@
         if (resp.status === 'tool_calls' && Array.isArray(resp.toolCalls) && resp.toolCalls.length && Array.isArray(resp.messages)) {
           var calls = resp.toolCalls.slice(0, AI_MAX_CALLS_PER_ROUND);
           return Promise.all(calls.map(aiExecTool)).then(function (toolResults) {
-            var next = { task: body.task, messages: resp.messages, toolResults: toolResults, tools: tools, userToken: aiUserToken() };
+            var next = { task: body.task, messages: resp.messages, toolResults: toolResults, tools: tools, userToken: authToken() };
             if (body.model) next.model = body.model;
             if (body.client) next.client = body.client;
             return step(next, posts + 1);
@@ -1828,7 +1830,7 @@
     payload = payload || {};
     if (!connectorEnabled()) return Promise.resolve('');
     if (!GM_getValue('ingest_key', '')) return Promise.resolve('');
-    var userToken = aiUserToken();
+    var userToken = authToken();
     if (!userToken) return Promise.resolve('');                         // advanced tasks need a vouch; no bearer -> miss
     var body = {
       task: payload.task || 'ask',
@@ -3489,43 +3491,11 @@ if (BWN_MODULES.jobView) BWN.safeModule('jobView', function () {
   // DATA LAYER (local)
   // ====================================================================
 
-  // Auth0 access token - same key pattern the Bid-Out tool uses. Picked by CONTENT, not just
-  // key: the audience-keyed cache slot transiently holds NON-Umbrava tokens (seen live
-  // 2026-07-21: an Azure Functions/SCM runtime token, iss *.scm.azurewebsites.net, HS256 -
-  // this is what the 07/19 "HS256" role-debug sighting actually was). Only an unexpired token
-  // whose iss is an Umbrava issuer is usable; anything else = treat as signed-out and retry.
-  function isUmbravaToken(tok) {
-    try {
-      var p = JSON.parse(atob(String(tok).split('.')[1].replace(/-/g, '+').replace(/_/g, '/')));
-      var iss = String(p.iss || '').replace(/\/+$/, '');
-      if (iss !== 'https://login.umbrava.com' && iss !== 'https://umbrava.us.auth0.com') return false;
-      return !(typeof p.exp === 'number' && (Date.now() / 1000) > p.exp);
-    } catch (e) { return false; }
-  }
-  // Raw first-match read (diagnostics only - shows whatever is in the slot right now).
-  function rawAuthToken() {
-    try {
-      var k = Object.keys(localStorage).filter(function (x) {
-        return /@@auth0spajs@@::.*::https:\/\/app\.umbrava\.com\/api::/.test(x);
-      })[0];
-      if (!k) return '';
-      var body = (JSON.parse(localStorage.getItem(k)) || {}).body;
-      return (body && body.access_token) || '';
-    } catch (e) { return ''; }
-  }
-  function authToken() {
-    try {
-      var keys = Object.keys(localStorage).filter(function (x) {
-        return /@@auth0spajs@@::.*::https:\/\/app\.umbrava\.com\/api::/.test(x);
-      });
-      for (var i = 0; i < keys.length; i++) {
-        var body = (JSON.parse(localStorage.getItem(keys[i])) || {}).body;
-        var tok = (body && body.access_token) || '';
-        if (tok && isUmbravaToken(tok)) return tok;
-      }
-      return '';
-    } catch (e) { return ''; }
-  }
+  // Umbrava access token: the file-level isUmbravaToken()/authToken() from the BWN-SHARED
+  // block (US-1 1b). The old jobView-local isUmbravaToken/rawAuthToken/authToken were folded
+  // into it; jobView reaches the shared copy through the module closure. The rawAuthToken
+  // diagnostic (raw slot read, may be a non-Umbrava token) has no shared equivalent, so the
+  // one caller below now reports a single "no usable token" reason.
 
   // ---- Umbrava role sender ------------------------------------------------------
   // Sends the Auth0 access token to the SWA, which PROVES it via Umbrava's own GraphQL
@@ -3567,7 +3537,7 @@ if (BWN_MODULES.jobView) BWN.safeModule('jobView', function () {
     var key = GM_getValue('ingest_key', ''); if (!key) { recordRole({ ok: false, err: 'no-ingest-key' }); if (cb) cb(null, 'SWA ingest key not set (Tampermonkey menu)'); return; }
     var tok = authToken();
     if (!tok) {
-      var whyTok = rawAuthToken() ? 'no usable Umbrava token yet (the auth cache holds a non-Umbrava token right now) - wait a few seconds or reload the tab, then retry' : 'not signed into Umbrava (no token found)';
+      var whyTok = 'no usable Umbrava token yet - either the auth cache holds a non-Umbrava token or you are not signed in; wait a few seconds or reload the tab, then retry';
       recordRole({ ok: false, err: whyTok });
       if (cb) cb(null, whyTok);
       return;
@@ -6521,7 +6491,7 @@ if (BWN_MODULES.jobView) BWN.safeModule('jobView', function () {
               if (stopped) return { stopped: true };
               return step({
                 task: 'operate', messages: resp.messages, toolResults: results,
-                tools: body.tools, userToken: aiUserToken()      // fresh: a long session outlives one token
+                tools: body.tools, userToken: authToken()      // fresh: a long session outlives one token
               }, posts + 1);
             });
           }
@@ -6535,7 +6505,7 @@ if (BWN_MODULES.jobView) BWN.safeModule('jobView', function () {
       if (running) return;
       var task = String(taskEl.value || '').trim();
       if (!task) { setStatus('type what it should do first'); return; }
-      var userToken = aiUserToken();
+      var userToken = authToken();
       if (!userToken) { setStatus('no usable Umbrava session token - reload the page'); return; }
       running = true; stopped = false;
       runBtn.disabled = true; stopBtn.disabled = false;

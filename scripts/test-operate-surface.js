@@ -112,7 +112,7 @@ function makeWorld(opts) {
       page_extract: function () { return Promise.resolve({ ok: true, content: { extract: {} } }); }
     },
     AI_TOOL_DEFS: [{ name: 'page_snapshot' }],
-    aiUserToken: function () { return opts.token === undefined ? 'tok' : opts.token; },
+    authToken: function () { return opts.token === undefined ? 'tok' : opts.token; },
     connectorEnabled: function () { return opts.connector !== false; },
     GM_getValue: function () { return opts.key === undefined ? 'k' : opts.key; },
     GM_xmlhttpRequest: function (o) {

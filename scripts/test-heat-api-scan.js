@@ -66,7 +66,7 @@ var core = readLF(CORE_SRC);
 // ---- The four real blocks under test ------------------------------------------------
 var SRC_PAGING = slice(core,
   '    function heatFilterSig(vars) {',
-  '    function heatIsUmbravaToken(tok) {',
+  '    function heatGql(query, variables) {',
   'heatFilterSig + paging/total/board-shape discovery');
 var SRC_FIND = slice(core,
   '    // A row "looks like a WO" if it carries a numeric WO number key.',
@@ -201,10 +201,11 @@ var PRELUDE = [
   'function cleanName(s) { return String(s == null ? "" : s).trim(); }',
   'function dSince(ts) { return Math.floor((__today - ts) / 86400000); }',
   'function dUntil(ts) { return Math.ceil((ts - __today) / 86400000); }',
-  // v3.19 stubs. heatAuthToken lives between two slices, so it is stubbed; __tokenOn lets a
-  // test drive the no-token branch (resolution must degrade, never leak an id to the panel).
+  // v3.19 stubs. authToken now lives at file level (the BWN-SHARED block, US-1 1b), outside
+  // these slices, so it is stubbed; __tokenOn lets a test drive the no-token branch
+  // (resolution must degrade, never leak an id to the panel).
   'var __tokenOn = true;',
-  'function heatAuthToken() { return __tokenOn ? "tok" : ""; }',
+  'function authToken() { return __tokenOn ? "tok" : ""; }',
   'var __ss = {};',
   'var sessionStorage = { getItem: function (k) { return (k in __ss) ? __ss[k] : null; }, setItem: function (k, v) { __ss[k] = String(v); } };',
   // The next-actions engine is published from the WO Assist closure at runtime. Here it is a

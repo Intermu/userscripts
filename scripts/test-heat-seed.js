@@ -56,7 +56,7 @@ var core = readLF(CORE_SRC);
 // heatFilterSig + paging discovery + heatQueryIsWOList (the gate a displacing capture passes).
 var SRC_PAGING = slice(core,
   '    function heatFilterSig(vars) {',
-  '    function heatIsUmbravaToken(tok) {',
+  '    function heatGql(query, variables) {',
   'heatFilterSig + paging discovery + heatQueryIsWOList');
 // heatRecordCapture - carries the seeded anti-downgrade guard edit.
 var SRC_CAPTURE = slice(core,
@@ -88,7 +88,7 @@ var PRELUDE = [
   'var __autoScan = [];',
   'function heatAutoScan(v) { __autoScan.push(v); return { then: function () { } }; }',
   'var __token = "tok";',
-  'function heatAuthToken() { return __token; }',
+  'function authToken() { return __token; }',
   'var __timers = [];',
   'function setTimeout(fn, ms) { __timers.push({ fn: fn, ms: ms }); return __timers.length; }'
 ].join('\n');
