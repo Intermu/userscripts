@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         BWN Write Queue (Broadway National)
 // @namespace    broadwaynational.bwn
-// @version      0.2.0
+// @version      0.2.1
 // @downloadURL  https://raw.githubusercontent.com/Intermu/userscripts/main/bwn-write-queue.user.js
 // @updateURL    https://raw.githubusercontent.com/Intermu/userscripts/main/bwn-write-queue.user.js
 // @description  Drains the Track C write-back queue: claims THIS coordinator's own queued Umbrava write commands from the SWA, confirms each irreversible write, executes it via patchWorkOrder/addEditJobNote, and reports the result. Self-drain; every write is human-confirmed; disabled until you turn it on.
@@ -38,7 +38,7 @@
 
 (function () {
   "use strict";
-  var VER = "0.2.0";   // keep in lockstep with @version (TM compares versions, not contents)
+  var VER = "0.2.1";   // keep in lockstep with @version (TM compares versions, not contents)
 
   var SWA_BASE = "https://green-stone-0717dab0f.7.azurestaticapps.net";
   var PROXY_URL = SWA_BASE + "/api/wo-write-queue";
@@ -51,12 +51,13 @@
   // Sent to the SWA in the JSON body as userToken (the SWA edge overwrites the Authorization header),
   // and used directly as the Bearer on same-origin /api/graphql writes. Ported from bwn-wo-assist /
   // bwn-dispatch.
-  function isUmbravaToken(t) {
+  // ===== BWN-SHARED START v1 (paste-identical; pinned by scripts/test-shared-block-ledger.js) =====
+  function isUmbravaToken(tok) {
     try {
-      var p = JSON.parse(atob(String(t).split(".")[1].replace(/-/g, "+").replace(/_/g, "/")));
-      var iss = String(p.iss || "").replace(/\/+$/, "");
-      if (iss !== "https://login.umbrava.com" && iss !== "https://umbrava.us.auth0.com") return false;
-      return !(typeof p.exp === "number" && (Date.now() / 1000) > p.exp);
+      var p = JSON.parse(atob(String(tok).split('.')[1].replace(/-/g, '+').replace(/_/g, '/')));
+      var iss = String(p.iss || '').replace(/\/+$/, '');
+      if (iss !== 'https://login.umbrava.com' && iss !== 'https://umbrava.us.auth0.com') return false;
+      return !(typeof p.exp === 'number' && (Date.now() / 1000) > p.exp);
     } catch (e) { return false; }
   }
   function authToken() {
@@ -66,12 +67,13 @@
       });
       for (var i = 0; i < keys.length; i++) {
         var body = (JSON.parse(localStorage.getItem(keys[i])) || {}).body;
-        var t = (body && body.access_token) || "";
-        if (t && isUmbravaToken(t)) return t;
+        var tok = (body && body.access_token) || '';
+        if (tok && isUmbravaToken(tok)) return tok;
       }
-      return "";
-    } catch (e) { return ""; }
+      return '';
+    } catch (e) { return ''; }
   }
+  // ===== BWN-SHARED END v1 =====
 
   // ---- Same-origin Umbrava GraphQL with an explicit bearer (works from the GM sandbox). A GraphQL
   // error is tagged .graphql so the report leg can classify it non-retryable; a network reject stays

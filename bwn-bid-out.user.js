@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         BWN Bid-Out (Broadway National)
 // @namespace    broadwaynational.bwn
-// @version      0.26.3
+// @version      0.26.4
 // @downloadURL  https://raw.githubusercontent.com/Intermu/userscripts/main/bwn-bid-out.user.js
 // @updateURL    https://raw.githubusercontent.com/Intermu/userscripts/main/bwn-bid-out.user.js
 // @description  Email RFP to outside / net-new vendors, launched from a caret on Umbrava's own "See Who Is Available" button (network-vendor bidding stays native - no separate Bid-Out button). The caret menu opens the tracked email RFP wizard: finds net-new vendors nearby through Google Places, looks up their emails via the BWN scrape-contacts function, takes pasted outside addresses, and can still include assignable Umbrava vendors in the same email. You pick who's included, then review the exact recipient list and the rendered email before anything sends. Send from your own mailbox via the SWA send-bid function (Microsoft Graph), or open a plain Outlook draft. Vendors are BCC'd; nothing sends until you click Send. Network access is limited to Umbrava (same-origin), Google Places, and your SWA host.
@@ -20,7 +20,7 @@
 (function () {
   'use strict';
 
-  var VER = '0.26.3';
+  var VER = '0.26.4';
   console.info('[BWN BID-OUT] v' + VER + ' - 3-step Build Requests wizard (WO details -> select vendors -> review) · Umbrava vendors + Places net-new discovery + email scrape · one-click Graph send via SWA (Outlook-draft fallback)');
 
   var COMPANY_ADDR = 'Broadway National Group, 100 Davids Dr, Hauppauge, NY 11788';
@@ -41,6 +41,7 @@
   // holds NON-Umbrava tokens (seen live 2026-07-21: an Azure Functions/SCM runtime token,
   // iss *.scm.azurewebsites.net, HS256), which Umbrava's GraphQL rejects as UNAUTHENTICATED.
   // Only an unexpired token with an Umbrava issuer is usable; otherwise report signed-out.
+  // ===== BWN-SHARED START v1 (paste-identical; pinned by scripts/test-shared-block-ledger.js) =====
   function isUmbravaToken(tok) {
     try {
       var p = JSON.parse(atob(String(tok).split('.')[1].replace(/-/g, '+').replace(/_/g, '/')));
@@ -51,15 +52,18 @@
   }
   function authToken() {
     try {
-      var keys = Object.keys(localStorage).filter(function (x) { return /@@auth0spajs@@::.*::https:\/\/app\.umbrava\.com\/api::/.test(x); });
+      var keys = Object.keys(localStorage).filter(function (x) {
+        return /@@auth0spajs@@::.*::https:\/\/app\.umbrava\.com\/api::/.test(x);
+      });
       for (var i = 0; i < keys.length; i++) {
-        var v = JSON.parse(localStorage.getItem(keys[i]));
-        var tok = (v && v.body && v.body.access_token) || null;
+        var body = (JSON.parse(localStorage.getItem(keys[i])) || {}).body;
+        var tok = (body && body.access_token) || '';
         if (tok && isUmbravaToken(tok)) return tok;
       }
-      return null;
-    } catch (e) { return null; }
+      return '';
+    } catch (e) { return ''; }
   }
+  // ===== BWN-SHARED END v1 =====
   function actor() {
     try {
       var k = Object.keys(localStorage).find(function (x) { return /@@auth0spajs@@::.*::@@user@@/.test(x); });

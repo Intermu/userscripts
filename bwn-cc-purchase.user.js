@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         BWN CC Purchase (Broadway National)
 // @namespace    broadwaynational.bwn
-// @version      0.7.4
+// @version      0.7.5
 // @downloadURL  https://raw.githubusercontent.com/Intermu/userscripts/main/bwn-cc-purchase.user.js
 // @updateURL    https://raw.githubusercontent.com/Intermu/userscripts/main/bwn-cc-purchase.user.js
 // @description  Replaces the "Log Credit Card Purchase Request" Microsoft Form with an in-page modal. Logging a purchase is a SUPERVISOR+ action (coordinators request via the CC Request form instead), and the server re-checks that rank on every submit - your Umbrava session token rides in the request body and the SWA proves it with Umbrava's own current-user API before forwarding. This script no longer draws its own floating button: the single Credit Card launcher is owned by bwn-cc-request, which shows a dropdown for supervisors+ and opens this modal over the bwn:evt bus (so there is only ever one button, never a stack). Fill the fields and submit; it POSTs to the broadway-internal-ops SWA proxy (x-bwn-key gated) which forwards to the HTTP-triggered Power Automate flow - logging a row to Credit Card Tracker.xlsx and emailing Mike, identically to the old Form. Opened on a work order, it prefills the Work Order # and drops the client/location into the description, and defaults Supplier to whichever PO line you flipped to "Supplier" in the BWN Ops Suite (falling back to the WO's vendors as suggestions). Card Used is a pick-list you maintain. An optional Receipt is uploaded (via /api/cc-receipt -> Graph) to the shared SharePoint folder and linked in the tracker. The flow's secret URL stays server-side; nothing sensitive lives in this script. Open it from the CC Request dropdown or the Tampermonkey menu.
@@ -18,7 +18,7 @@
 (function () {
   'use strict';
 
-  var VER = '0.7.0';
+  var VER = '0.7.1';
   var FONT = "-apple-system,BlinkMacSystemFont,'Segoe UI','Helvetica Neue',Arial,sans-serif";
   var SWA_BASE = 'https://green-stone-0717dab0f.7.azurestaticapps.net';
   var PROXY_URL = SWA_BASE + '/api/cc-purchase';
@@ -143,9 +143,10 @@
   // unexpired token whose iss is an Umbrava issuer is usable. Same pattern as bwn-suite-ai /
   // bwn-bid-out. The token is sent ONLY to the declared SWA @connect host, in the JSON BODY
   // (the SWA edge overwrites the Authorization header) - never logged or stored.
-  function isUmbravaToken(t) {
+  // ===== BWN-SHARED START v1 (paste-identical; pinned by scripts/test-shared-block-ledger.js) =====
+  function isUmbravaToken(tok) {
     try {
-      var p = JSON.parse(atob(String(t).split('.')[1].replace(/-/g, '+').replace(/_/g, '/')));
+      var p = JSON.parse(atob(String(tok).split('.')[1].replace(/-/g, '+').replace(/_/g, '/')));
       var iss = String(p.iss || '').replace(/\/+$/, '');
       if (iss !== 'https://login.umbrava.com' && iss !== 'https://umbrava.us.auth0.com') return false;
       return !(typeof p.exp === 'number' && (Date.now() / 1000) > p.exp);
@@ -158,12 +159,13 @@
       });
       for (var i = 0; i < keys.length; i++) {
         var body = (JSON.parse(localStorage.getItem(keys[i])) || {}).body;
-        var t = (body && body.access_token) || '';
-        if (t && isUmbravaToken(t)) return t;
+        var tok = (body && body.access_token) || '';
+        if (tok && isUmbravaToken(tok)) return tok;
       }
       return '';
     } catch (e) { return ''; }
   }
+  // ===== BWN-SHARED END v1 =====
 
   // ---- Cross-script launcher wiring (bwn-cc-request owns the single button) --
   // This script no longer draws its own floating button (that caused a second stacked pill and

@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         BWN Proposal Actions (Broadway National)
 // @namespace    broadwaynational.bwn
-// @version      0.2.3
+// @version      0.2.4
 // @downloadURL  https://raw.githubusercontent.com/Intermu/userscripts/main/bwn-proposal-actions.user.js
 // @updateURL    https://raw.githubusercontent.com/Intermu/userscripts/main/bwn-proposal-actions.user.js
 // @description  On a Client Proposal DETAILS page, a "Proposal Actions" dropdown runs the internal review workflow in one confirmed action: Approval / TSP Review / Kickback. Each posts a note to the Proposal + the Work Order, sets the WO status, completes open tasks, and files a new task (assigned to the WO coordinator, or Ronny Sharp for TSP). Kickback drafts a rejection reason with the on-device browser AI for the operator to confirm. Every write is shown in a confirm dialog first; nothing fires until Confirm. @grant none.
@@ -15,7 +15,7 @@
 (function () {
   'use strict';
 
-  var VER = '0.2.3';   // keep in step with @version
+  var VER = '0.2.4';   // keep in step with @version
   var DRY_RUN = false; // when true, every WRITE is console.logged instead of sent
   console.info('[BWN PROPOSAL ACTIONS] v' + VER + ' - Approval / TSP Review / Kickback workflow on the Client Proposal details page');
 
@@ -30,7 +30,8 @@
   var MIN_RANK = 4;   // same manager gate as bwn-proposal-copy
 
   // ===== auth + gql (copied from bwn-proposal-copy) =========================
-  function paIsUmbravaToken(tok) {
+  // ===== BWN-SHARED START v1 (paste-identical; pinned by scripts/test-shared-block-ledger.js) =====
+  function isUmbravaToken(tok) {
     try {
       var p = JSON.parse(atob(String(tok).split('.')[1].replace(/-/g, '+').replace(/_/g, '/')));
       var iss = String(p.iss || '').replace(/\/+$/, '');
@@ -38,7 +39,7 @@
       return !(typeof p.exp === 'number' && (Date.now() / 1000) > p.exp);
     } catch (e) { return false; }
   }
-  function paAuthToken() {
+  function authToken() {
     try {
       var keys = Object.keys(localStorage).filter(function (x) {
         return /@@auth0spajs@@::.*::https:\/\/app\.umbrava\.com\/api::/.test(x);
@@ -46,13 +47,14 @@
       for (var i = 0; i < keys.length; i++) {
         var body = (JSON.parse(localStorage.getItem(keys[i])) || {}).body;
         var tok = (body && body.access_token) || '';
-        if (tok && paIsUmbravaToken(tok)) return tok;
+        if (tok && isUmbravaToken(tok)) return tok;
       }
-    } catch (e) { }
-    return '';
+      return '';
+    } catch (e) { return ''; }
   }
+  // ===== BWN-SHARED END v1 =====
   function paGql(op, query, variables) {
-    var tok = paAuthToken();
+    var tok = authToken();
     if (!tok) return Promise.reject(new Error('no-umbrava-token'));
     return fetch('/api/graphql', {
       method: 'POST',

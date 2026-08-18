@@ -215,6 +215,15 @@ jobs:
       - name: UI-contract completeness ledger harness
         run: node scripts/test-ui-contract-ledger.js
 
+      # Shared-block completeness ledger: the Auth0 token-picker (isUmbravaToken + authToken) was a
+      # hand-copied, security-sensitive credential read duplicated across a dozen sandboxes. US-1
+      # step 1 consolidated it into ONE canonical block pasted byte-identical (SHA-pinned) into every
+      # adopter. This enumerates EVERY bwn-*.user.js, classifies each ADOPTED / PENDING / NA, and goes
+      # RED on any drift: a paste one byte off, a rival copy beside the block, a new script that grew a
+      # picker, or a deferred (suite-core/suite-ai) copy that quietly adopted or vanished.
+      - name: Shared token-picker block ledger harness
+        run: node scripts/test-shared-block-ledger.js
+
       # These six harnesses were committed to scripts/ but never wired here, so CI ran a green check
       # that said nothing about them — the exact "committed but never executed" rot the 2026-07-31
       # audit closed for the four steps near the top. All six pass a local sweep; wired here so a

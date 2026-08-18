@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         BWN Ask (Coordinator Copilot)
 // @namespace    https://broadwaynational.com/bwn
-// @version      0.7.3
+// @version      0.7.4
 // @description  Ask questions about the work order you're viewing. Reads the WO live from Umbrava via same-origin GraphQL (details + full note / site-visit history) AND a summary roster of the other work orders at the same location, plus the team knowledge doc, and answers through the Broadway AI proxy with dates and references. Phase 1.5 = page-scoped + location roster (Path A); no data leaves the trusted Broadway path.
 // @match        https://app.umbrava.com/*
 // @run-at       document-idle
@@ -32,6 +32,7 @@
   var CTX_TOTAL_MAX = 100000;
 
   // ---- Umbrava token (content-picked, mirrors bwn-suite-ai authToken) --------
+  // ===== BWN-SHARED START v1 (paste-identical; pinned by scripts/test-shared-block-ledger.js) =====
   function isUmbravaToken(tok) {
     try {
       var p = JSON.parse(atob(String(tok).split('.')[1].replace(/-/g, '+').replace(/_/g, '/')));
@@ -53,6 +54,7 @@
       return '';
     } catch (e) { return ''; }
   }
+  // ===== BWN-SHARED END v1 =====
 
   // ---- Rank read (grant-none-safe, mirrors bwnEscRank) -----------------------
   // UX only - the server is the real gate. Default floor is staff, so the panel

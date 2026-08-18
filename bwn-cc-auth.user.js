@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         BWN CC Request (Broadway National)
 // @namespace    broadwaynational.bwn
-// @version      0.4.4
+// @version      0.4.5
 // @downloadURL  https://raw.githubusercontent.com/Intermu/userscripts/main/bwn-cc-auth.user.js
 // @updateURL    https://raw.githubusercontent.com/Intermu/userscripts/main/bwn-cc-auth.user.js
 // @description  Replaces the "CC Authorization Form" Microsoft Form with an in-page CC Request modal. Requesting a card purchase is a coordinator action (any vouched Broadway Umbrava user): fill the fields and submit; it POSTs to the broadway-internal-ops SWA proxy (x-bwn-key gated) which proves your Umbrava session token with Umbrava's own current-user API, injects your verified email as the Requester, and forwards to the HTTP-triggered Power Automate flow "CC Authorization (HTTP)". That flow starts an approval (mnajarro@, GKohlmann@, LPorzelt@) and, on approve, emails you back that the order will be placed. This script OWNS the single Credit Card entry in the shared dock tab: coordinators and leads see just "CC Request"; supervisors and above get a dropdown that also opens the Supervisor-only "Log CC Purchase" modal (provided by bwn-cc-purchase, driven over the bwn:evt bus so there is only ever one button). Opened on a work order it prefills the Tracking # and drops the client/location into the description, and defaults Supplier to whichever PO line you flipped to "Supplier" in the BWN Ops Suite. The flow's secret URL stays server-side; nothing sensitive lives in this script.
@@ -18,7 +18,7 @@
 (function () {
   'use strict';
 
-  var VER = '0.4.0';
+  var VER = '0.4.1';
   var FONT = "-apple-system,BlinkMacSystemFont,'Segoe UI','Helvetica Neue',Arial,sans-serif";
   var SWA_BASE = 'https://green-stone-0717dab0f.7.azurestaticapps.net';
   var PROXY_URL = SWA_BASE + '/api/cc-auth';
@@ -94,9 +94,10 @@
   // NON-Umbrava tokens. Only an unexpired token whose iss is an Umbrava issuer is usable.
   // Same pattern as bwn-cc-purchase / bwn-suite-ai. The token is sent ONLY to the declared SWA
   // @connect host, in the JSON BODY (the SWA edge overwrites the Authorization header).
-  function isUmbravaToken(t) {
+  // ===== BWN-SHARED START v1 (paste-identical; pinned by scripts/test-shared-block-ledger.js) =====
+  function isUmbravaToken(tok) {
     try {
-      var p = JSON.parse(atob(String(t).split('.')[1].replace(/-/g, '+').replace(/_/g, '/')));
+      var p = JSON.parse(atob(String(tok).split('.')[1].replace(/-/g, '+').replace(/_/g, '/')));
       var iss = String(p.iss || '').replace(/\/+$/, '');
       if (iss !== 'https://login.umbrava.com' && iss !== 'https://umbrava.us.auth0.com') return false;
       return !(typeof p.exp === 'number' && (Date.now() / 1000) > p.exp);
@@ -109,12 +110,13 @@
       });
       for (var i = 0; i < keys.length; i++) {
         var body = (JSON.parse(localStorage.getItem(keys[i])) || {}).body;
-        var t = (body && body.access_token) || '';
-        if (t && isUmbravaToken(t)) return t;
+        var tok = (body && body.access_token) || '';
+        if (tok && isUmbravaToken(tok)) return tok;
       }
       return '';
     } catch (e) { return ''; }
   }
+  // ===== BWN-SHARED END v1 =====
 
   // ---- SWA POST (GM_xmlhttpRequest bypasses same-origin; @connect authorizes) ----
   function gmPost(url, headers, bodyObj, timeoutMs) {

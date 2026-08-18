@@ -131,7 +131,7 @@ function loadApi(src, env) {
   return vm.runInContext(
     '(function () {\n' + src + '\n' +
     'return { postNoteViaApi: postNoteViaApi, uploadViaApi: uploadViaApi, docLabelId: docLabelId,' +
-    ' noteTypeId: noteTypeId, textToHtml: textToHtml, duAuthToken: duAuthToken,' +
+    ' noteTypeId: noteTypeId, textToHtml: textToHtml, authToken: authToken,' +
     ' MUT_ADD_NOTE: MUT_ADD_NOTE, MUT_INIT_DOC: MUT_INIT_DOC, MUT_BULK_ADD: MUT_BULK_ADD, DOC_LABELS: DOC_LABELS };\n})()',
     sandbox, { filename: 'drop-upload-api.js' });
 }

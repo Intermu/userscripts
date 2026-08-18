@@ -55,18 +55,18 @@ function makeEnv(opts) {
 var S_CORE = slice('  // ===== auth + gql', '  // ===== ui', 'core block');
 function loadCore(env) {
   var ctx = vm.createContext(env);
-  vm.runInContext('(function(){' + S_CORE + '\n; this.__api = { pcAuthToken: pcAuthToken, pcGql: pcGql, rank: rank, mapLineItem: mapLineItem, buildCreateVars: buildCreateVars, buildEditVars: buildEditVars, copyProposal: copyProposal, pickerFilter: pickerFilter, confirmReady: confirmReady }; }).call(globalThis);', ctx);
+  vm.runInContext('(function(){' + S_CORE + '\n; this.__api = { authToken: authToken, pcGql: pcGql, rank: rank, mapLineItem: mapLineItem, buildCreateVars: buildCreateVars, buildEditVars: buildEditVars, copyProposal: copyProposal, pickerFilter: pickerFilter, confirmReady: confirmReady }; }).call(globalThis);', ctx);
   return env.__api;
 }
 
 (async function () {
   // --- auth: token pick ---
   var e1 = makeEnv({}); var api1 = loadCore(e1);
-  A.ok('pcAuthToken returns the umbrava-issuer token', api1.pcAuthToken() === GOOD_TOKEN);
+  A.ok('authToken returns the umbrava-issuer token', api1.authToken() === GOOD_TOKEN);
   var e2 = makeEnv({ foreign: true }); var api2 = loadCore(e2);
-  A.ok('pcAuthToken rejects a foreign-issuer token', api2.pcAuthToken() === '');
+  A.ok('authToken rejects a foreign-issuer token', api2.authToken() === '');
   var e3 = makeEnv({ withToken: false }); var api3 = loadCore(e3);
-  A.ok('pcAuthToken returns empty when no token cached', api3.pcAuthToken() === '');
+  A.ok('authToken returns empty when no token cached', api3.authToken() === '');
 
   // --- pcGql: shape + reject paths ---
   var e4 = makeEnv({ replies: { Ping: { data: { pong: 1 } } } }); var api4 = loadCore(e4);

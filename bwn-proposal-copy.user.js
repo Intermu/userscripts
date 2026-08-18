@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         BWN Proposal Copy (Broadway National)
 // @namespace    broadwaynational.bwn
-// @version      0.1.7
+// @version      0.1.8
 // @downloadURL  https://raw.githubusercontent.com/Intermu/userscripts/main/bwn-proposal-copy.user.js
 // @updateURL    https://raw.githubusercontent.com/Intermu/userscripts/main/bwn-proposal-copy.user.js
 // @description  Copy a client proposal from an aged-out work order onto a chosen replacement WO as an un-submitted Draft, in one confirmed action. Replays Umbrava's own createDraftProposal + editProposal mutations (line items copied verbatim); never submits, deletes, or retries. Manager-gated visibility. @grant none.
@@ -15,14 +15,15 @@
 (function () {
   'use strict';
 
-  var VER = '0.1.7';   // keep in step with @version
+  var VER = '0.1.8';   // keep in step with @version
   var DRY_RUN = false; // when true, the two WRITE mutations are logged, not sent
   console.info('[BWN PROPOSAL COPY] v' + VER + ' - copy client proposal to another WO as a Draft (createDraftProposal + editProposal replay)');
 
   function onProposalPage() { return /\/work-orders\/\d+/.test(location.pathname); }
 
   // ===== auth + gql =========================================================
-  function pcIsUmbravaToken(tok) {
+  // ===== BWN-SHARED START v1 (paste-identical; pinned by scripts/test-shared-block-ledger.js) =====
+  function isUmbravaToken(tok) {
     try {
       var p = JSON.parse(atob(String(tok).split('.')[1].replace(/-/g, '+').replace(/_/g, '/')));
       var iss = String(p.iss || '').replace(/\/+$/, '');
@@ -30,7 +31,7 @@
       return !(typeof p.exp === 'number' && (Date.now() / 1000) > p.exp);
     } catch (e) { return false; }
   }
-  function pcAuthToken() {
+  function authToken() {
     try {
       var keys = Object.keys(localStorage).filter(function (x) {
         return /@@auth0spajs@@::.*::https:\/\/app\.umbrava\.com\/api::/.test(x);
@@ -38,13 +39,14 @@
       for (var i = 0; i < keys.length; i++) {
         var body = (JSON.parse(localStorage.getItem(keys[i])) || {}).body;
         var tok = (body && body.access_token) || '';
-        if (tok && pcIsUmbravaToken(tok)) return tok;
+        if (tok && isUmbravaToken(tok)) return tok;
       }
-    } catch (e) { }
-    return '';
+      return '';
+    } catch (e) { return ''; }
   }
+  // ===== BWN-SHARED END v1 =====
   function pcGql(op, query, variables) {
-    var tok = pcAuthToken();
+    var tok = authToken();
     if (!tok) return Promise.reject(new Error('no-umbrava-token'));
     return fetch('/api/graphql', {
       method: 'POST',
@@ -511,7 +513,7 @@
     openEl = overlay;
 
     var sourceWoNumber = woNumberFromUrl();
-    pcState = { hasToken: !!pcAuthToken(), source: null, sourceWo: null, target: null };
+    pcState = { hasToken: !!authToken(), source: null, sourceWo: null, target: null };
 
     Promise.all([
       pcGql('ClientProposalDetails', Q_PROPOSAL_DETAILS, { proposalId: sourceProposalId }),
@@ -676,7 +678,7 @@
     }
 
     confirmBtn.addEventListener('click', function () {
-      pcState.hasToken = !!pcAuthToken();   // re-check - the drawer may have sat open a while
+      pcState.hasToken = !!authToken();   // re-check - the drawer may have sat open a while
       if (!confirmReady(pcState)) { refreshConfirm(); return; }
       runCopy(body, confirmBtn, cancelBtn, sourceProposalId, pcState.target);
     });
