@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         BWN Suite - Note Templates (Broadway National)
 // @namespace    broadwaynational.bwn
-// @version      0.6.0
+// @version      0.6.1
 // @description  Canned dispatch-note templates in a "Templates" dropdown beside the "+ Add" note button in the Umbrava Dispatch Board's work-order detail panel (Notes tab). Picking a template opens Umbrava's own Add Note composer and DRAFTS the note into it (signed with your first name, ______ blanks left for you to fill) - it is NEVER auto-posted; you review, set the Type, and click Save. STANDALONE: carries its own tiptap/ProseMirror inserter, so in-house techs install this one script alone - no drop-upload dependency. Still prefers drop-upload's hook (window.__bwnFillNoteEditor) when that script is also installed, so coordinator machines keep a single live-tested fill path. @grant none, zero egress.
 // @match        https://app.umbrava.com/*
 // @run-at       document-idle
@@ -473,8 +473,12 @@
   // "Add Note". Only for techs whose machine has NO AI script: when the AI script is present it asks us
   // over the bus (aiWantsMerge) and renders the merged "Draft" instead, so we stand down.
   var WO_BTN_ID = 'bwn-notes-wo-dd';
+  function aiDraftPresent() { return !!document.getElementById('bwn-client-update-btn'); }
   function woMount() {
-    if (aiWantsMerge) { var claimed = document.getElementById(WO_BTN_ID); if (claimed) claimed.remove(); return true; }
+    // Stand our standalone button down whenever the AI script's Draft button is up (it renders the
+    // merged flyout). Check the DOM, not just the bus flag: the AI script can pick up our load-time
+    // broadcast without ever sending a req we hear, so the flag alone missed it and both mounted.
+    if (aiWantsMerge || aiDraftPresent()) { var claimed = document.getElementById(WO_BTN_ID); if (claimed) claimed.remove(); return true; }
     var ex = document.getElementById(WO_BTN_ID);
     if (ex && ex.isConnected) return true;
     var add = woAddNote();
