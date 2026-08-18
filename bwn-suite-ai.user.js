@@ -270,9 +270,74 @@
       wrap.appendChild(trig);
 
       var menu = null, rows = [];
-      function focusAt(i) { if (rows.length) rows[(i + rows.length) % rows.length].focus(); }
+      var sub = null, subRows = [], subOwner = null, subCloseT = null;
+      var MENU_CSS = 'position:fixed;z-index:99998;min-width:212px;background:var(--bwn-surface);border:1px solid var(--bwn-border);border-radius:10px;box-shadow:var(--bwn-shadow);padding:6px;font-family:-apple-system,BlinkMacSystemFont,"Segoe UI","Helvetica Neue",Arial,sans-serif;';
+      var ITEM_CSS = 'display:block;width:100%;box-sizing:border-box;text-align:left;padding:9px 12px;border:none;background:transparent;border-radius:7px;cursor:pointer;font:500 14px -apple-system,BlinkMacSystemFont,"Segoe UI","Helvetica Neue",Arial,sans-serif;text-transform:none;color:var(--bwn-text);';
+      var HEAD_CSS = 'padding:8px 12px 4px;font:700 10px ui-monospace,"Segoe UI Mono","SF Mono",monospace;letter-spacing:.6px;text-transform:uppercase;color:var(--bwn-text-faint);';
+      var DESC_CSS = 'display:block;font:500 11px ui-monospace,"Segoe UI Mono","SF Mono",monospace;color:var(--bwn-text-faint);margin-top:2px;';
+      function focusList(list, i) { if (list.length) list[(i + list.length) % list.length].focus(); }
+      function focusAt(i) { focusList(rows, i); }
+      // Build one menu entry. `{header}` renders a non-interactive label; `{children}` renders a row
+      // that opens a flyout (▸); otherwise a plain menuitem. `sink` collects the focusable rows.
+      function makeItem(it, sink) {
+        if (it.header) {
+          var h = document.createElement('div');
+          h.textContent = it.header; h.style.cssText = HEAD_CSS;
+          return h;
+        }
+        var row = document.createElement('button');
+        row.type = 'button'; row.setAttribute('role', 'menuitem'); row.tabIndex = -1;
+        row.style.cssText = ITEM_CSS;
+        row.textContent = it.label;
+        if (it.desc) { var d = document.createElement('span'); d.textContent = it.desc; d.style.cssText = DESC_CSS; row.appendChild(d); }
+        var kids = (it.children && it.children.length) ? it.children : null;
+        if (kids) {
+          row._kids = kids;
+          row.setAttribute('aria-haspopup', 'menu');
+          var car2 = document.createElement('span');
+          car2.textContent = '▸'; car2.setAttribute('aria-hidden', 'true');
+          car2.style.cssText = 'float:right;opacity:.6;font-size:11px;margin-left:10px;';
+          row.appendChild(car2);
+        }
+        row.addEventListener('mouseenter', function () { row.style.background = 'var(--bwn-tint)'; if (kids) openSub(row, kids); else scheduleSubClose(); });
+        row.addEventListener('mouseleave', function () { row.style.background = 'transparent'; if (kids) scheduleSubClose(); });
+        row.addEventListener('click', function (e) {
+          e.preventDefault();
+          if (kids) { openSub(row, kids); focusList(subRows, 0); return; }   // reveal the flyout, don't close
+          removeMenu(true); it.fn();
+        });
+        sink.push(row);
+        return row;
+      }
+      function closeSub() {
+        if (subCloseT) { clearTimeout(subCloseT); subCloseT = null; }
+        if (sub) { sub.remove(); sub = null; subRows = []; subOwner = null; }
+      }
+      function scheduleSubClose() { if (subCloseT) clearTimeout(subCloseT); subCloseT = setTimeout(closeSub, 180); }
+      function openSub(owner, kids) {
+        if (subCloseT) { clearTimeout(subCloseT); subCloseT = null; }
+        if (subOwner === owner && sub) return;
+        closeSub();
+        subOwner = owner;
+        sub = document.createElement('div');
+        sub.setAttribute('role', 'menu');
+        sub.style.cssText = MENU_CSS + 'z-index:99999;';
+        subRows = [];
+        kids.forEach(function (k) { sub.appendChild(makeItem(k, subRows)); });
+        sub.addEventListener('mouseenter', function () { if (subCloseT) { clearTimeout(subCloseT); subCloseT = null; } });
+        sub.addEventListener('mouseleave', scheduleSubClose);
+        document.body.appendChild(sub);
+        var rr = owner.getBoundingClientRect();
+        var sw = sub.offsetWidth || 240, sh = sub.offsetHeight || 240;
+        var left = rr.right + 4;
+        if (left + sw > window.innerWidth - 8) left = rr.left - sw - 4;   // flip left if no room to the right
+        var top = Math.min(rr.top, window.innerHeight - sh - 8);
+        sub.style.left = Math.max(8, Math.round(left)) + 'px';
+        sub.style.top = Math.max(8, Math.round(top)) + 'px';
+      }
       function removeMenu(restore) {
         if (!menu) return;
+        closeSub();
         menu.remove(); menu = null; rows = [];
         car.style.transform = 'none';
         trig.setAttribute('aria-expanded', 'false');
@@ -282,43 +347,30 @@
         window.removeEventListener('resize', onScroll, true);
         if (restore) { try { trig.focus(); } catch (e) { } }
       }
-      function onDoc(e) { if (menu && !menu.contains(e.target) && !trig.contains(e.target)) removeMenu(false); }
+      function onDoc(e) { if (menu && !menu.contains(e.target) && !trig.contains(e.target) && !(sub && sub.contains(e.target))) removeMenu(false); }
       function onScroll() { removeMenu(false); }
       function onKey(e) {
         if (!menu) return;
-        var i = rows.indexOf(document.activeElement);
-        if (e.key === 'Escape') { e.preventDefault(); removeMenu(true); }
+        var inSub = !!(sub && subRows.indexOf(document.activeElement) !== -1);
+        var list = inSub ? subRows : rows;
+        var i = list.indexOf(document.activeElement);
+        var act = document.activeElement;
+        if (e.key === 'Escape') { e.preventDefault(); if (inSub) { var o = subOwner; closeSub(); if (o) o.focus(); } else removeMenu(true); }
         else if (e.key === 'Tab') { removeMenu(false); }
-        else if (e.key === 'ArrowDown') { e.preventDefault(); focusAt(i + 1); }
-        else if (e.key === 'ArrowUp') { e.preventDefault(); focusAt(i - 1); }
-        else if (e.key === 'Home') { e.preventDefault(); focusAt(0); }
-        else if (e.key === 'End') { e.preventDefault(); focusAt(rows.length - 1); }
+        else if (e.key === 'ArrowDown') { e.preventDefault(); focusList(list, i + 1); }
+        else if (e.key === 'ArrowUp') { e.preventDefault(); focusList(list, i - 1); }
+        else if (e.key === 'Home') { e.preventDefault(); focusList(list, 0); }
+        else if (e.key === 'End') { e.preventDefault(); focusList(list, list.length - 1); }
+        else if (e.key === 'ArrowRight' && !inSub && act && act._kids) { e.preventDefault(); openSub(act, act._kids); focusList(subRows, 0); }
+        else if (e.key === 'ArrowLeft' && inSub) { e.preventDefault(); var ow = subOwner; closeSub(); if (ow) ow.focus(); }
       }
       function openMenu() {
         menu = document.createElement('div');
         menu.setAttribute('role', 'menu');
         menu.setAttribute('aria-label', label);
-        menu.style.cssText = 'position:fixed;z-index:99998;min-width:212px;background:var(--bwn-surface);border:1px solid var(--bwn-border);border-radius:10px;box-shadow:var(--bwn-shadow);padding:6px;font-family:-apple-system,BlinkMacSystemFont,"Segoe UI","Helvetica Neue",Arial,sans-serif;';
+        menu.style.cssText = MENU_CSS;
         rows = [];
-        items.forEach(function (it) {
-          var row = document.createElement('button');
-          row.type = 'button';
-          row.setAttribute('role', 'menuitem');
-          row.tabIndex = -1;
-          row.style.cssText = 'display:block;width:100%;box-sizing:border-box;text-align:left;padding:9px 12px;border:none;background:transparent;border-radius:7px;cursor:pointer;font:500 14px -apple-system,BlinkMacSystemFont,"Segoe UI","Helvetica Neue",Arial,sans-serif;text-transform:none;color:var(--bwn-text);';
-          row.textContent = it.label;
-          if (it.desc) {
-            var d = document.createElement('span');
-            d.textContent = it.desc;
-            d.style.cssText = 'display:block;font:500 11px ui-monospace,"Segoe UI Mono","SF Mono",monospace;color:var(--bwn-text-faint);margin-top:2px;';
-            row.appendChild(d);
-          }
-          row.addEventListener('mouseenter', function () { row.style.background = 'var(--bwn-tint)'; });
-          row.addEventListener('mouseleave', function () { row.style.background = 'transparent'; });
-          row.addEventListener('click', function (e) { e.preventDefault(); removeMenu(true); it.fn(); });
-          menu.appendChild(row);
-          rows.push(row);
-        });
+        items.forEach(function (it) { menu.appendChild(makeItem(it, rows)); });
         document.body.appendChild(menu);
         var r = trig.getBoundingClientRect();
         var left = Math.min(Math.round(r.left), window.innerWidth - menu.offsetWidth - 8);   // keep on-screen
@@ -3094,13 +3146,27 @@
       var bar = document.createElement('div');
       bar.id = BTN_ID;
       bar.style.cssText = 'display:inline-flex;gap:6px;align-items:center;vertical-align:middle;margin-right:8px;';
-      bar.appendChild(bwnMakeDropdown('AI Draft', [
+      var draftItems = [
         { label: 'Client Update', desc: 'Client-safe draft', fn: function () { run(CLIENT_MODE); } },
         { label: 'WO Audit', desc: 'Internal \u00b7 full case file', fn: function () { run(AUDIT_MODE); } },
         { label: 'Recent Update', desc: 'Internal \u00b7 recent window', fn: function () { run(RECENT_MODE); } },
         { label: 'Next Actions', desc: 'Action \u00b7 next actions', fn: function () { run(NEXTSTEPS_MODE); } },
         { label: 'Over 30', desc: 'Internal \u00b7 one-line', fn: function () { run(OVER30_MODE); } }
-      ]));
+      ];
+      // If the Note Templates script (bwn-notes) is installed it exposes its canned notes here. Fold
+      // them in as a "Template" flyout and relabel the button "Draft", so the WO page carries both the
+      // AI drafts and the dispatch-note templates under one anchor. Absent -> stays plain "AI Draft".
+      var nt = window.__bwnNoteTemplates, draftLabel = 'AI Draft';
+      if (nt && nt.groups && typeof nt.pick === 'function') {
+        draftLabel = 'Draft';
+        var tplKids = [];
+        nt.groups.forEach(function (g) {
+          tplKids.push({ header: g.group });
+          g.items.forEach(function (t) { tplKids.push({ label: t.label, fn: function () { nt.pick(t); } }); });
+        });
+        draftItems.push({ label: 'Template', desc: 'Canned notes', children: tplKids });
+      }
+      bar.appendChild(bwnMakeDropdown(draftLabel, draftItems));
 
       var addNote = findAddNote();
       if (addNote && addNote.parentNode) {
