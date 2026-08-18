@@ -125,4 +125,26 @@ var b64body = [
 var b = api.parseEml(b64body);
 A.ok('base64 body decoded', /Unit down - please expedite\./.test(b.body), JSON.stringify(b.body));
 
+// ---- emailLead: original leads with SUBJECT, reply leads with BODY ----------
+// An original WO-request email often has a body that's just a signature (the real ask is the
+// subject: WO#/store/EMERGENCY), so lead with "<Sender>: Sent <Subject>". A reply carries its
+// content in the body, so lead with "<Responder>: <reply text>". Slices the real lead cluster.
+var LEAD = slice('function smtpAddr(', '// ---- Note Type from the email', 'emailLead cluster');
+var lapi = { String: String };
+vm.runInNewContext(LEAD + '\n;this.emailLead=emailLead;this.isReplyEmail=isReplyEmail;', lapi);
+
+console.log('# emailLead - original (no RE:) leads with the subject');
+var orig = { subject: 'FF62336 WO# 1135344-00000006 EMERGENCY', fromName: 'Jo Woods', fromEmail: 'jwoods@caleres.com', body: 'Thanks,\n\n\nJo Woods\nSpecialist, Store Maintenance | CALERES' };
+A.ok('original is NOT a reply', lapi.isReplyEmail(orig) === false);
+A.eq('original lead = "<Sender>: Sent <Subject>"', lapi.emailLead(orig), 'Jo Woods: Sent FF62336 WO# 1135344-00000006 EMERGENCY');
+
+console.log('# emailLead - reply (RE:) leads with the body');
+var reply = { subject: 'RE: FF62336 WO# 1135344-00000006 EMERGENCY', fromName: 'Lisa Porzelt', fromEmail: 'lporzelt@broadwaynational.com', body: 'We dispatched our crew, ETA tomorrow 8am. Please confirm access.\n\nThanks,\nLisa' };
+A.ok('reply IS a reply', lapi.isReplyEmail(reply) === true);
+A.ok('reply lead leads with the responder + body (not the subject)',
+  /^Lisa Porzelt: We dispatched our crew/.test(lapi.emailLead(reply)) && !/Sent RE:/.test(lapi.emailLead(reply)),
+  JSON.stringify(lapi.emailLead(reply)));
+A.ok('RE: / Re: / RE : / AW: all detected as replies',
+  lapi.isReplyEmail({ subject: 'Re: x' }) && lapi.isReplyEmail({ subject: 'RE : x' }) && lapi.isReplyEmail({ subject: 'AW: x' }));
+
 A.finish();
