@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         BWN Suite - Note Templates (Broadway National)
 // @namespace    broadwaynational.bwn
-// @version      0.3.0
+// @version      0.4.0
 // @description  Canned dispatch-note templates in a "Templates" dropdown beside the "+ Add" note button in the Umbrava Dispatch Board's work-order detail panel (Notes tab). Picking a template opens Umbrava's own Add Note composer and DRAFTS the note into it (signed with your first name, ______ blanks left for you to fill) - it is NEVER auto-posted; you review, set the Type, and click Save. STANDALONE: carries its own tiptap/ProseMirror inserter, so in-house techs install this one script alone - no drop-upload dependency. Still prefers drop-upload's hook (window.__bwnFillNoteEditor) when that script is also installed, so coordinator machines keep a single live-tested fill path. @grant none, zero egress.
 // @match        https://app.umbrava.com/*
 // @run-at       document-idle
@@ -263,9 +263,11 @@
     }
     return null;
   }
-  function noteAddButton() {
-    var s = noteSearchInput();
-    if (!s) return null;
+  // The clickable note "Add" trigger, in EITHER notes state:
+  //  - populated: the toolbar "+ Add" button beside the "note description" search box (live-tested).
+  //  - empty ("No Notes / Click Add to create a new Note"): the inline "Add" link - the panel has no
+  //    search box or toolbar then. pickTemplate clicks whichever we return to open the Add composer.
+  function toolbarAdd(s) {
     var row = s;
     for (var d = 0; d < 5 && row; d++) {
       var btns = row.querySelectorAll ? row.querySelectorAll('button') : [];
@@ -276,17 +278,71 @@
     }
     return null;
   }
+  // The "Add" word inside the empty-notes prompt. Match an element whose WHOLE text is "Add" and that
+  // sits within the "...create a new Note" prompt, so we never grab some other "Add" on the panel.
+  function emptyStateAdd() {
+    var els = document.querySelectorAll('a,button,[role="button"],span');
+    for (var i = 0; i < els.length; i++) {
+      var el = els[i];
+      if (!el.offsetParent || (el.textContent || '').trim().toLowerCase() !== 'add') continue;
+      var ctx = el;
+      for (var d = 0; d < 4 && ctx; d++) {
+        if (/create a new note/i.test(ctx.textContent || '')) return el;
+        ctx = ctx.parentElement;
+      }
+    }
+    return null;
+  }
+  function noteAddButton() {
+    var s = noteSearchInput();
+    return s ? toolbarAdd(s) : emptyStateAdd();
+  }
+  // The Trips/Notes/Docs/Proposals tab strip - the band the toolbar (and Templates) normally sits
+  // under. Used to place the button there in the empty state, where there is no toolbar to anchor to,
+  // so it lands as close to its populated spot (screenshot: left of "+ Add") as the empty DOM allows.
+  function notesTabStrip() {
+    var els = document.querySelectorAll('button,a,[role="tab"]');
+    for (var i = 0; i < els.length; i++) {
+      var el = els[i];
+      if (!el.offsetParent || (el.textContent || '').trim() !== 'Notes') continue;
+      var strip = el.parentElement;
+      for (var d = 0; d < 3 && strip; d++) {
+        var t = strip.textContent || '';
+        if (/Trips/.test(t) && /Docs/.test(t)) return strip;
+        strip = strip.parentElement;
+      }
+    }
+    return null;
+  }
   function mount() {
     var existing = document.getElementById(BTN_ID);
     if (existing && existing.isConnected) return true;
-    var addBtn = noteAddButton();
+    var search = noteSearchInput();
+    var addBtn = search ? toolbarAdd(search) : emptyStateAdd();
     if (!addBtn || !addBtn.parentNode) return false;
     var bar = document.createElement('span');
     bar.id = BTN_ID;
-    bar.style.cssText = 'display:inline-flex;align-items:center;vertical-align:middle;margin-right:8px;';
     bar.appendChild(buildDropdown());
-    addBtn.parentNode.insertBefore(bar, addBtn);   // sit just left of "+ Add"
-    console.info('[BWN NOTES] template dropdown mounted (dispatch board notes)');
+    if (search) {
+      // Populated: a real toolbar exists - sit just left of "+ Add" (screenshot: Search | Templates | + Add).
+      bar.style.cssText = 'display:inline-flex;align-items:center;vertical-align:middle;margin-right:8px;';
+      addBtn.parentNode.insertBefore(bar, addBtn);
+    } else {
+      // Empty ("No Notes"): no toolbar to anchor to. Drop it into the Trips/Notes/Docs tab-strip band so
+      // it lands as close to the populated spot as the empty DOM allows, instead of wedging mid-sentence
+      // beside the inline "Add". Fall back to beside "Add" only if the strip isn't found, so it still shows.
+      var strip = notesTabStrip();
+      if (strip && strip.parentNode) {
+        // ponytail: float:right right-aligns it in the band without knowing the strip's flex/grid setup;
+        // swap to the container's own layout once the empty-state DOM is measured live.
+        bar.style.cssText = 'display:inline-flex;align-items:center;float:right;margin:6px 6px 0 8px;';
+        strip.parentNode.insertBefore(bar, strip.nextSibling);
+      } else {
+        bar.style.cssText = 'display:inline-flex;align-items:center;vertical-align:middle;margin:0 6px;';
+        addBtn.parentNode.insertBefore(bar, addBtn);
+      }
+    }
+    console.info('[BWN NOTES] template dropdown mounted (notes ' + (search ? 'toolbar' : 'empty state') + ')');
     return true;
   }
 
