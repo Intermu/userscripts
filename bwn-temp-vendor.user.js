@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         BWN Suite - Temp-Activate Vendor for PO (Broadway National)
 // @namespace    broadwaynational.bwn
-// @version      0.1.0
+// @version      0.2.0
 // @description  Inside the "Create Purchase Order" modal, adds a "Temp-Activate Vendor" button. Type an inactive vendor's name or number; it finds them, temporarily activates them via Umbrava's own API (reason ALWAYS "Temporary Activation") so they become assignable in the PO. After you assign them and click Create, it watches the PO save and auto-prompts a one-click re-deactivation (reason ALWAYS "Pending Compliance"). A persistent reminder pill keeps the temporarily-active vendor visible until you deactivate, so nobody is left active by mistake. Same-origin /api/graphql with the app's Auth0 bearer, @grant none, zero egress. Every write is one click behind a confirm.
 // @match        https://app.umbrava.com/*
 // @run-at       document-idle
