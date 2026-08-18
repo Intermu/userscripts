@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         BWN Suite - AI (Broadway National)
 // @namespace    broadwaynational.bwn
-// @version      1.45.11
+// @version      1.45.12
 // @downloadURL  https://raw.githubusercontent.com/Intermu/userscripts/main/bwn-suite-ai.user.js
 // @updateURL    https://raw.githubusercontent.com/Intermu/userscripts/main/bwn-suite-ai.user.js
 // @description  The Umbrava tools that call outside APIs, kept separate from the zero-egress Core script. Client Update and WO Audit drafts (Anthropic Claude; draft-only, scrubbed before sending, you review before posting); Find Techs / Find Suppliers (Google Places; vendor leads near a WO); and Job View (opens the Ops-Dashboard job card on the WO page - WO details from Umbrava plus the authored case file and next actions, read-only). Network access is limited by the browser to the declared API hosts and the BWN Static Web App. API keys are stored in Tampermonkey's storage via the menu commands and never enter the page. Toggle modules in BWN_MODULES below.
@@ -3153,18 +3153,21 @@
         { label: 'Next Actions', desc: 'Action \u00b7 next actions', fn: function () { run(NEXTSTEPS_MODE); } },
         { label: 'Over 30', desc: 'Internal \u00b7 one-line', fn: function () { run(OVER30_MODE); } }
       ];
-      // If the Note Templates script (bwn-notes) is installed it exposes its canned notes here. Fold
-      // them in as a "Template" flyout and relabel the button "Draft", so the WO page carries both the
-      // AI drafts and the dispatch-note templates under one anchor. Absent -> stays plain "AI Draft".
-      var nt = window.__bwnNoteTemplates, draftLabel = 'AI Draft';
-      if (nt && nt.groups && typeof nt.pick === 'function') {
+      // The templates come from bwn-notes over the event bus (it is a @grant-none page-context script;
+      // we are GM_-sandboxed and cannot read its page-window globals). With the list in hand, fold it
+      // in as a "Template" flyout and relabel the button "Draft"; a leaf click sends the id back for
+      // bwn-notes to draft (calendar + fill). No list yet -> stay "AI Draft" and ask again.
+      var draftLabel = 'AI Draft';
+      if (noteTplGroups) {
         draftLabel = 'Draft';
         var tplKids = [];
-        nt.groups.forEach(function (g) {
+        noteTplGroups.forEach(function (g) {
           tplKids.push({ header: g.group });
-          g.items.forEach(function (t) { tplKids.push({ label: t.label, fn: function () { nt.pick(t); } }); });
+          (g.items || []).forEach(function (t) { tplKids.push({ label: t.label, fn: function () { pickBus(t.id); } }); });
         });
         draftItems.push({ label: 'Template', desc: 'Canned notes', children: tplKids });
+      } else {
+        try { document.dispatchEvent(new CustomEvent('bwn:cmd', { detail: { id: 'notes:tpl:req' } })); } catch (e) { }
       }
       bar.appendChild(bwnMakeDropdown(draftLabel, draftItems));
 
@@ -3201,6 +3204,21 @@
     }
     var obs = new MutationObserver(BWN.guard(schedule, 'clientUpdate:observe'));
     obs.observe(document.body, { childList: true, subtree: true });
+
+    // Template bridge to bwn-notes (see mount()): request its list over the bus and cache it; when it
+    // arrives, re-render the button so "AI Draft" becomes "Draft" with the flyout. A leaf click routes
+    // back through pickBus -> bwn-notes.
+    var noteTplGroups = null;
+    function pickBus(id) { try { document.dispatchEvent(new CustomEvent('bwn:cmd', { detail: { id: 'notes:tpl:pick', tplId: id } })); } catch (e) { } }
+    document.addEventListener('bwn:evt', BWN.guard(function (e) {
+      var d = e && e.detail;
+      if (!d || d.id !== 'notes:tpl:list' || !Array.isArray(d.groups)) return;
+      noteTplGroups = d.groups.length ? d.groups : null;
+      var existing = document.getElementById(BTN_ID);
+      if (existing) { existing.remove(); schedule(); }   // remount so the flyout appears
+    }, 'clientUpdate:tplList'));
+    try { document.dispatchEvent(new CustomEvent('bwn:cmd', { detail: { id: 'notes:tpl:req' } })); } catch (e) { }
+
     schedule();
 
     // Command-palette bridge: Core's palette dispatches bwn:cmd DOM events; this

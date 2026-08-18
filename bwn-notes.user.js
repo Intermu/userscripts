@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         BWN Suite - Note Templates (Broadway National)
 // @namespace    broadwaynational.bwn
-// @version      0.5.0
+// @version      0.6.0
 // @description  Canned dispatch-note templates in a "Templates" dropdown beside the "+ Add" note button in the Umbrava Dispatch Board's work-order detail panel (Notes tab). Picking a template opens Umbrava's own Add Note composer and DRAFTS the note into it (signed with your first name, ______ blanks left for you to fill) - it is NEVER auto-posted; you review, set the Type, and click Save. STANDALONE: carries its own tiptap/ProseMirror inserter, so in-house techs install this one script alone - no drop-upload dependency. Still prefers drop-upload's hook (window.__bwnFillNoteEditor) when that script is also installed, so coordinator machines keep a single live-tested fill path. @grant none, zero egress.
 // @match        https://app.umbrava.com/*
 // @run-at       document-idle
@@ -272,10 +272,34 @@
     }, 0);
   }
 
-  // Expose the templates + the (human-gated) draft function so the AI script can fold them into its
-  // "AI Draft" menu as a "Template" flyout (renaming that button "Draft") on the WO page. Data + a
-  // function only - the AI script owns the button; this stays the single source of the note bodies.
-  try { window.__bwnNoteTemplates = { groups: TEMPLATES, pick: pickTemplate }; } catch (e) { }
+  // Cross-script bridge to the AI script over the DOM event bus. The AI script is GM_-sandboxed and
+  // cannot read this @grant-none script's page-window globals, so we don't expose a global - we answer
+  // the bus: on `notes:tpl:req` reply with a serializable list (no functions cross the sandbox), and on
+  // `notes:tpl:pick` run our own pickTemplate (the bodies, the calendar and the fill all live here). A
+  // req also tells us an AI script is present and will render the merged "Draft", so we stand our own
+  // WO-page button down (aiWantsMerge) to avoid a double button.
+  var aiWantsMerge = false;
+  function tplList() {
+    return TEMPLATES.map(function (g, gi) {
+      return { group: g.group, items: g.items.map(function (t, ii) { return { id: gi + ':' + ii, label: t.label, date: t.date || null }; }) };
+    });
+  }
+  function tplById(id) {
+    var p = String(id).split(':'), g = TEMPLATES[+p[0]];
+    return g ? g.items[+p[1]] : null;
+  }
+  function announceTpl() { try { document.dispatchEvent(new CustomEvent('bwn:evt', { detail: { id: 'notes:tpl:list', groups: tplList() } })); } catch (e) { } }
+  document.addEventListener('bwn:cmd', function (e) {
+    var d = e && e.detail; if (!d) return;
+    if (d.id === 'notes:tpl:req') {
+      aiWantsMerge = true;
+      var own = document.getElementById(WO_BTN_ID); if (own) own.remove();   // AI owns the merged Draft
+      announceTpl();
+    } else if (d.id === 'notes:tpl:pick') {
+      var t = tplById(d.tplId); if (t) pickTemplate(t);
+    }
+  });
+  announceTpl();   // broadcast once on load too, for an AI script that mounted before it could ask
 
   // ===== The dropdown (self-contained; fixed-positioned so no ancestor clips it) ============
   function buildDropdown() {
@@ -445,13 +469,37 @@
     return true;
   }
 
+  // The regular WO page (/work-orders/<id>) has no board toolbar - anchor a "Templates" button left of
+  // "Add Note". Only for techs whose machine has NO AI script: when the AI script is present it asks us
+  // over the bus (aiWantsMerge) and renders the merged "Draft" instead, so we stand down.
+  var WO_BTN_ID = 'bwn-notes-wo-dd';
+  function woMount() {
+    if (aiWantsMerge) { var claimed = document.getElementById(WO_BTN_ID); if (claimed) claimed.remove(); return true; }
+    var ex = document.getElementById(WO_BTN_ID);
+    if (ex && ex.isConnected) return true;
+    var add = woAddNote();
+    if (!add || !add.parentNode) return false;
+    var bar = document.createElement('span');
+    bar.id = WO_BTN_ID;
+    bar.style.cssText = 'display:inline-flex;align-items:center;vertical-align:middle;margin-right:8px;';
+    bar.appendChild(buildDropdown());
+    add.parentNode.insertBefore(bar, add);            // sit just left of "Add Note"
+    console.info('[BWN NOTES] template dropdown mounted (WO page, standalone)');
+    return true;
+  }
+  // Route-aware tick: the board panel uses mount() (search / empty-state / tab-strip anchors), the WO
+  // page uses woMount(). Returns true when nothing is left to do so the poll can rest.
+  function tick() {
+    if (/dispatch-board/.test(location.pathname)) return mount();
+    if (/\/work-orders\//.test(location.pathname)) return woMount();
+    return true;
+  }
   var pollTimer = null;
   function schedule() {
-    if (mount()) { if (pollTimer) { clearInterval(pollTimer); pollTimer = null; } return; }
+    if (tick()) { if (pollTimer) { clearInterval(pollTimer); pollTimer = null; } return; }
     if (pollTimer) return;
     pollTimer = setInterval(function () {
-      // stop polling once mounted, or when we leave the dispatch board (the notes toolbar is gone)
-      if (mount() || !/dispatch-board/.test(location.pathname)) { clearInterval(pollTimer); pollTimer = null; }
+      if (tick()) { clearInterval(pollTimer); pollTimer = null; }
     }, 400);
   }
   var obs = new MutationObserver(schedule);
