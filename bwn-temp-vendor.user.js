@@ -145,27 +145,47 @@
   function closePanel() {
     var o = document.getElementById(OVERLAY_ID);
     if (o) o.remove();
+    var c = document.getElementById(PANEL_ID);
+    if (c) c.remove();
     document.removeEventListener('keydown', onKey, true);
   }
   function onKey(e) { if (e.key === 'Escape' && !isBusy()) { e.preventDefault(); closePanel(); } }
 
-  // A real centered modal with its own backdrop, on document.body so it sits ABOVE Umbrava's dialog
-  // (z far past MUI's ~1300) AND survives the PO dialog closing (needed for the auto re-deactivate
-  // prompt). Backdrop click (not the card) closes, unless a write is in flight.
+  // Umbrava's Create-PO dialog is a react-aria modal: it marks every OTHER subtree `inert` AND traps
+  // focus inside itself, so a floating panel on document.body can be neither clicked nor typed into
+  // (proven live). So while the dialog is OPEN we render the panel INLINE, as a real child of the
+  // dialog - inside the focus scope, non-inert, normally positioned (real click + keyboard verified).
+  // When NO dialog is open (the post-save re-deactivate prompt, or a pill click) we render a normal
+  // centered modal on body, where there are no such barriers.
   function openPanel(startView) {
     closePanel();
     view = startView || 'input';
     if (view === 'input') st = { query: '', rows: [], vendor: null, error: '', doneMsg: '' };
-    var o = document.createElement('div');
-    o.id = OVERLAY_ID;
-    o.style.cssText = 'position:fixed;top:0;left:0;right:0;bottom:0;z-index:2147483600;background:rgba(15,23,42,.45);display:flex;align-items:flex-start;justify-content:center;padding:8vh 12px 12px;font-family:-apple-system,BlinkMacSystemFont,"Segoe UI",Arial,sans-serif;';
+    var dlg = poModal();
     var p = document.createElement('div');
     p.id = PANEL_ID;
-    p.style.cssText = 'width:380px;max-width:calc(100vw - 24px);max-height:84vh;overflow:auto;background:#fff;border:1px solid #e2e8f0;border-radius:12px;box-shadow:0 18px 50px rgba(0,0,0,.35);padding:16px;color:#1e293b;';
-    o.appendChild(p);
-    o.addEventListener('mousedown', function (e) { if (e.target === o && !isBusy()) closePanel(); });
-    document.body.appendChild(o);
-    render();
+    if (dlg) {
+      p.style.cssText = 'margin:12px 0;padding:14px;border:1px solid #cbd5e1;border-radius:12px;background:#fff;box-shadow:0 8px 22px rgba(0,0,0,.14);color:#1e293b;font-family:-apple-system,BlinkMacSystemFont,\'Segoe UI\',Arial,sans-serif;';
+      var trig = document.getElementById(TRIGGER_ID);
+      if (trig && trig.parentElement && trig.parentElement.parentElement) {
+        trig.parentElement.parentElement.insertBefore(p, trig.parentElement.nextSibling);   // right below the button
+      } else {
+        var content = dlg.querySelector('form') || dlg;
+        content.insertBefore(p, content.firstChild);
+      }
+      render();
+      p.scrollIntoView({ block: 'nearest' });
+    } else {
+      var o = document.createElement('div');
+      o.id = OVERLAY_ID;
+      o.style.cssText = 'position:fixed;top:0;left:0;right:0;bottom:0;z-index:2147483600;background:rgba(15,23,42,.45);display:flex;align-items:flex-start;justify-content:center;padding:8vh 12px 12px;font-family:-apple-system,BlinkMacSystemFont,\'Segoe UI\',Arial,sans-serif;';
+      p.style.cssText = 'width:380px;max-width:calc(100vw - 24px);max-height:84vh;overflow:auto;background:#fff;border:1px solid #e2e8f0;border-radius:12px;box-shadow:0 18px 50px rgba(0,0,0,.35);padding:16px;color:#1e293b;';
+      o.appendChild(p);
+      o.addEventListener('mousedown', function (e) { e.stopPropagation(); if (e.target === o && !isBusy()) closePanel(); });
+      o.addEventListener('click', function (e) { e.stopPropagation(); });
+      document.body.appendChild(o);
+      render();
+    }
     document.addEventListener('keydown', onKey, true);
   }
 
@@ -354,7 +374,8 @@
   function onPoCreated() {
     if (!pending) return;
     if (view === 'deactconfirm' || view === 'deactivating' || view === 'done') return;   // already prompting/handled
-    openPanel('deactconfirm');
+    // Let Umbrava close the PO dialog first, then prompt on body (no modal open = not inert).
+    setTimeout(function () { if (pending && view !== 'deactivating' && view !== 'done') openPanel('deactconfirm'); }, 800);
   }
 
   // ===== Reminder pill (persistent while a temp activation is pending) ===========================
