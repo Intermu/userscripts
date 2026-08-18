@@ -21,12 +21,13 @@
 //
 // THE FIX under test: one heatDone(status, phase), asked by all five call sites.
 //   1. terminal phase (closed/cancel*/declined/revoked)  -> done, whatever the status says
-//   2. explicitly ACTIVE phase (open/on hold/pending acceptance/confirm reopen)
+//   2. explicitly ACTIVE phase (open/on hold/pending acceptance/confirm reopen/confirm complete)
 //                                                        -> NOT done; it VETOES the name guess
 //   3. no phase read at all (the DOM tinting pass has no phase column) -> the name guess, as before
-// Step 2 is the change. The active list is a WHITELIST on purpose: a WorkComplete or
-// ConfirmComplete phase still falls through to the name regex, so this can only ever REMOVE
-// silence, and only on a row the server itself calls active.
+// Step 2 is the change. The active list is a WHITELIST on purpose: a WorkComplete phase still
+// falls through to the name regex (ConfirmComplete was ADDED to the whitelist 2026-08-18 after
+// measuring 5 live WOs it was silencing), so this can only ever REMOVE silence, and only on a
+// row the server itself calls active.
 //
 // Drives the REAL shipped bytes: slices heatDone, computeVerdict, the shared status-clock
 // engine, heatSnapshot, myDayCounts and o30BatchStart out of bwn-suite-core.user.js and runs
@@ -233,6 +234,9 @@ console.log('-- heatDone: the three signals, in order of authority --');
   A.eq('On Hold is active too', [s.heatDone('Work Complete', 'On Hold'), s.heatDone('Work Complete', 'OnHold')], [false, false]);
   A.eq('Pending Acceptance and Confirm Reopen as well',
     [s.heatDone('Invoiced', 'PendingAcceptance'), s.heatDone('Invoiced', 'ConfirmReopen')], [false, false]);
+  // Added 2026-08-18 (measured: 5 live WOs at "Confirm Complete", 3 over-30, 3 past-due).
+  A.eq('ConfirmComplete is on the whitelist now: a "Confirm Complete" row is NOT done',
+    [s.heatDone('Confirm Complete', 'ConfirmComplete'), s.heatDone('Confirm Complete', 'Confirm Complete')], [false, false]);
   // The name guess, untouched, for the DOM pass that has no phase column to read.
   A.eq('no phase read -> the status name still decides', s.heatDone('Work Complete', ''), true);
   A.eq('and an ordinary status is still open', s.heatDone('Scheduled', ''), false);
@@ -446,6 +450,14 @@ console.log('\n-- mutation controls (each must FAIL an assertion above) --');
   var t8 = s8.auditOpenTally(Object.keys(s8.heatStore).map(function (k) { var e = s8.heatStore[k]; e._href = k; return e; }));
   A.eq('M8 control: with the inline regex the audit tally says 199 open, drifting from 218', t8.open, 199);
   A.eq('M8 control: and it loses the 19 red and the 5 over-30', [t8.bad, t8.over30], [0, 0]);
+
+  // M9: the ConfirmComplete token removed from the active whitelist - proves the 2026-08-18
+  // add is load-bearing. Without it a "Confirm Complete" row falls back to the name regex,
+  // matches "complete", and goes silent again (the 5-WO drop this change fixed).
+  var m9 = [['|confirm\\s?reopen|confirm\\s?complete)$/i;', '|confirm\\s?reopen)$/i;']];
+  var s9 = build({ mutations: m9 });
+  A.eq('M9 control: without the ConfirmComplete add a "Confirm Complete" row is silent again', s9.heatDone('Confirm Complete', 'ConfirmComplete'), true);
+  A.eq('M9 control: and the shipped whitelist keeps it active', build({}).heatDone('Confirm Complete', 'ConfirmComplete'), false);
 })();
 
 console.log('\n-- the shipped call sites: all five ask the same question --');
@@ -472,7 +484,7 @@ console.log('\n-- the shipped call sites: all five ask the same question --');
   // bump, so a version can never ride out attached to an unrelated change. It was red on main
   // from 1.66.33 (the mirror-retirement sweep bumped Core without acknowledging it here) until
   // 2026-08-06.
-  A.ok('Core is bumped to 1.78.21', core.indexOf('// @version      1.78.21') !== -1);
+  A.ok('Core is bumped to 1.78.22', core.indexOf('// @version      1.78.22') !== -1);
   A.ok('and List Heat announces v3.28', core.indexOf("console.info('[BWN HEAT] v3.28 loaded on', location.href);") !== -1);
   // Drift guard (1.78.17): the module-inventory banner had read "List Heat 3.24" while the module
   // banner read v3.28 - the two are hand-kept and had silently diverged. Assert they agree so it
