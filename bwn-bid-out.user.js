@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         BWN Bid-Out (Broadway National)
 // @namespace    broadwaynational.bwn
-// @version      0.26.4
+// @version      0.27.0
 // @downloadURL  https://raw.githubusercontent.com/Intermu/userscripts/main/bwn-bid-out.user.js
 // @updateURL    https://raw.githubusercontent.com/Intermu/userscripts/main/bwn-bid-out.user.js
 // @description  Email RFP to outside / net-new vendors, launched from a caret on Umbrava's own "See Who Is Available" button (network-vendor bidding stays native - no separate Bid-Out button). The caret menu opens the tracked email RFP wizard: finds net-new vendors nearby through Google Places, looks up their emails via the BWN scrape-contacts function, takes pasted outside addresses, and can still include assignable Umbrava vendors in the same email. You pick who's included, then review the exact recipient list and the rendered email before anything sends. Send from your own mailbox via the SWA send-bid function (Microsoft Graph), or open a plain Outlook draft. Vendors are BCC'd; nothing sends until you click Send. Network access is limited to Umbrava (same-origin), Google Places, and your SWA host.
@@ -20,8 +20,8 @@
 (function () {
   'use strict';
 
-  var VER = '0.26.4';
-  console.info('[BWN BID-OUT] v' + VER + ' - 3-step Build Requests wizard (WO details -> select vendors -> review) · Umbrava vendors + Places net-new discovery + email scrape · one-click Graph send via SWA (Outlook-draft fallback)');
+  var VER = '0.27.0';
+  console.info('[BWN BID-OUT] v' + VER + ' - Build Requests wizard (WO details -> select vendors -> review -> sent) · Umbrava vendors + Places net-new discovery + email scrape · one-click Graph send via SWA (Outlook-draft fallback) · sent-state flip persists bid-sent + GM baseline per WO');
 
   var COMPANY_ADDR = 'Broadway National Group, 100 Davids Dr, Hauppauge, NY 11788';
   var DEFAULT_MILES = 50;
@@ -808,6 +808,51 @@
       .catch(function (e) { return { ok: false, code: 'NET', msg: e.message }; });
   }
 
+  // ---- Bid-sent state flip: persist "this WO's bid went out" locally via the GM store -------
+  // bidStatus (above) is the SERVER read of per-vendor opens; it never tells the UI that a bid was
+  // ever SENT for this work order. So on a confirmed send we flip a small per-WO record into the
+  // same GM_setValue store the HVAC benchmark uses (HVAC_GM_KEY idiom), keyed by tracking number.
+  // bidStatus (server opens) + this local flag are the two halves of the WO's "bid sent" state.
+  var SENT_KEY = 'bwn:bidout:sent';   // { trackingOrWO: { status, ts, sent, from, channel, tracking, wo, gm } }
+  function sentLoad() { try { var raw = GM_getValue(SENT_KEY, ''); return raw ? JSON.parse(raw) : {}; } catch (e) { return {}; } }
+  function sentKeyFor(wo) { return String((wo && wo.trackingNumber) || woNumber() || ''); }
+  // GM (gross-margin) baseline captured at send time. The vendor's price is unknown until they bid
+  // back, so NO margin percent is computed here - that would be fabricated money. We record only
+  // whether a PRICED revenue baseline (the HVAC PM target annual price already shown in the email)
+  // was attached, so a returning vendor bid can later be measured against it. A zero, negative, or
+  // non-finite annual is NOT a baseline (guards a garbage benchmark from reading as "margin known").
+  function bidGm(benchmark) {
+    var a = benchmark ? +benchmark.annual : NaN;
+    var known = !!(benchmark && isFinite(a) && a > 0);
+    return { known: known, targetAnnual: known ? a : null, source: known ? 'hvac-benchmark' : null };
+  }
+  function markBidSent(wo, info) {
+    var k = sentKeyFor(wo); if (!k) return null;
+    var map = sentLoad();
+    map[k] = {
+      status: (info && info.channel === 'draft') ? 'draft-opened' : 'sent',
+      ts: Date.now(),
+      sent: (info && info.sent) || 0,
+      from: (info && info.from) || '',
+      channel: (info && info.channel) || 'graph',
+      tracking: (wo && wo.trackingNumber) || null,
+      wo: String(woNumber() || ''),
+      gm: bidGm(info && info.benchmark)
+    };
+    try { GM_setValue(SENT_KEY, JSON.stringify(map)); } catch (e) { }
+    return map[k];
+  }
+  function bidSentRec(wo) { return sentLoad()[sentKeyFor(wo)] || null; }
+  function bidGmFlag(rec) { return (rec && rec.gm && rec.gm.known) ? 'benchmarked' : 'pending'; }
+  // The send handler's flip GATE: flip to "sent" ONLY on a server-confirmed send (r.ok). A failed
+  // or maybe-sent resolve returns null and writes NOTHING, so the un-bid state survives a failed
+  // send. Idempotent - a duplicate (r.duplicate) re-affirms the record without downgrading it.
+  function applySendFlip(wo, r, opts) {
+    if (!r || !r.ok) return null;
+    return markBidSent(wo, { sent: r.sent, from: opts && opts.from, channel: 'graph', benchmark: opts && opts.benchmark });
+  }
+  // ---- end bid-sent state flip --------------------------------------------------------------
+
   // ---- UI ---------------------------------------------------------------------
   function esc(s) { return String(s == null ? '' : s).replace(/[&<>"]/g, function (c) { return { '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;' }[c]; }); }
 
@@ -1063,7 +1108,7 @@
         : '<span class="bwn-bo-chip">Service</span>';
     }
     function stepperHtml() {
-      var labels = ['Work Order Details', 'Select Vendors', 'Review'];
+      var labels = ['Work Order Details', 'Select Vendors', 'Review', 'Sent'];
       var h = '<div class="bwn-bo-steps">';
       for (var i = 0; i < labels.length; i++) {
         var num = i + 1;
@@ -1082,6 +1127,7 @@
 
     function draw() {
       clearFooter();
+      if (openState.step === 4) return drawSent();
       if (openState.step === 2) return drawVendors();
       if (openState.step === 3) return drawReview();
       return drawDetails();
@@ -1512,9 +1558,12 @@
         })() +
         '</div>';
 
+      var prevSent = bidSentRec(wo);
       body.innerHTML =
         stepperHtml() +
-        '<div class="bwn-bo-wo">Review - nothing has been sent yet</div>' +
+        (prevSent
+          ? '<div class="bwn-bo-wo">A bid was already ' + (prevSent.status === 'draft-opened' ? 'drafted' : 'sent') + ' for this WO on ' + esc(fmtWhen(prevSent.ts)) + ' - resend only if the request changed.</div>'
+          : '<div class="bwn-bo-wo">Review - nothing has been sent yet</div>') +
         sum +
         '<div class="bwn-bo-meta"><span>From</span><input id="bo-from" type="email" value="' + esc(fromDefault) + '" placeholder="you@broadwaynational.com"></div>' +
         '<div class="bwn-bo-meta"><span>Subject</span><input id="bo-subj" type="text" value="' + esc(mail.subject) + '" style="flex:1;min-width:300px;"></div>' +
@@ -1547,9 +1596,14 @@
         syncSubject();
         var nAtt = (openState.attachments || []).length + (req.benchmark && req.benchmark.list && req.benchmark.list.length ? 1 : 0);
         openDraft(mail);
+        // Flip: opening the Outlook draft is the coordinator's send channel, so record a (softer)
+        // 'draft-opened' bid state and land on the Sent confirmation. The channel marks it distinct
+        // from a Graph send (an Outlook draft is not de-duped and is not open-tracked).
+        var drec = markBidSent(wo, { sent: mail.bcc.length, from: fromDefault, channel: 'draft', benchmark: openState.benchmark });
         toast('Draft opened for ' + mail.bcc.length + ' recipient' + (mail.bcc.length === 1 ? '' : 's') + ' (BCC). Review + send in your mail client. Body also copied to clipboard.' +
           (nAtt ? ' Note: attachments (' + nAtt + ') are NOT carried into an Outlook draft - use one-click Send for those, or attach them manually.' : ''));
-        close();
+        openState.sentInfo = { rec: drec, sent: mail.bcc.length, from: fromDefault, channel: 'draft' };
+        openState.step = 4; draw();
       });
       pft.querySelector('#bo-send').addEventListener('click', function () {
         var from = (fromEl.value || '').trim();
@@ -1579,7 +1633,14 @@
         sendBid(from, mail, html, idem, allAttach).then(function (r) {
           if (r.ok) {
             GM_setValue('send_from', from);
-            if (r.duplicate) { toast('This bid was already submitted - not re-sent. Use the "📊 Who opened" menu item to check status.'); close(); return; }
+            // Flip the WO's bid state to "sent" (persists bidStatus + the GM baseline). Idempotent,
+            // so a duplicate re-affirms it; applySendFlip no-ops on a non-ok resolve.
+            var rec = applySendFlip(wo, r, { from: from, benchmark: openState.benchmark });
+            if (r.duplicate) {
+              toast('This bid was already submitted - not re-sent. Use the "📊 Who opened" menu item to check status.');
+              openState.sentInfo = { rec: rec, sent: r.sent, from: from, duplicate: true, tracked: !!r.tracked, failed: r.failed || 0 };
+              openState.step = 4; draw(); return;
+            }
             // Record "bid-sent" in the shared prospect pipeline for every net-new recipient, so a
             // future search near here shows who was already asked (and their reply outcome).
             try {
@@ -1591,7 +1652,8 @@
             var failNote = (r.failed > 0) ? (' (' + r.failed + ' could not be sent)') : '';
             var trackNote = r.tracked ? ' Per-vendor open tracking is on - use the "📊 Who opened" menu item to see who has viewed it.' : '';
             toast('✅ Sent to ' + r.sent + ' vendor' + (r.sent === 1 ? '' : 's') + failNote + ' from ' + from + '. Replies come to your inbox; the email is in your Sent Items.' + trackNote);
-            close(); return;
+            openState.sentInfo = { rec: rec, sent: r.sent, from: from, tracked: !!r.tracked, failed: r.failed || 0 };
+            openState.step = 4; draw(); return;
           }
           btn.disabled = false; btn.textContent = '⚡ Send now (' + mail.bcc.length + ')';
           if (r.code === 'NO_KEY') { toast('Set the SWA ingest key first (Tampermonkey menu).'); return; }
@@ -1615,6 +1677,39 @@
           toast('Send failed: ' + (r.msg || 'unknown error') + ' - you can still use "Outlook draft instead".');
         });
       });
+    }
+
+    // ---- Step 4: Sent - confirmation state after a successful send (the flip's UI) ----------
+    // Replaces the old close()-on-send: the wizard advances here so the coordinator SEES the WO
+    // move from un-bid to bid-sent (bid state + GM baseline), instead of the panel just vanishing.
+    function drawSent() {
+      var info = openState.sentInfo || {};
+      var rec = info.rec || bidSentRec(wo) || {};
+      var isDraft = info.channel === 'draft' || rec.status === 'draft-opened';
+      var n = info.sent || rec.sent || 0;
+      var gmLine = (bidGmFlag(rec) === 'benchmarked')
+        ? 'Gross-margin baseline captured: $' + hvacMoney(rec.gm.targetAnnual) + '/yr target price - measure returning vendor bids against it.'
+        : 'Gross margin: pending - it is set once vendors return pricing.';
+      function row(k, v) { return '<div class="bwn-bo-sumfld"><div class="k">' + esc(k) + '</div><div class="v">' + esc(v) + '</div></div>'; }
+      body.innerHTML =
+        stepperHtml() +
+        '<div class="bwn-bo-wo">' + (isDraft ? '📝 Outlook draft opened' : ('✅ Bid sent to ' + n + ' vendor' + (n === 1 ? '' : 's'))) + '</div>' +
+        '<div class="bwn-bo-sub">' + (isDraft
+          ? 'Review and send it in your mail client. The bid state for this work order is now marked as out.'
+          : 'The email left your mailbox (it is in your Sent Items; replies come to you). The bid state for this work order is now marked as sent.') + '</div>' +
+        '<div class="bwn-bo-sum">' +
+          row('Bid state', isDraft ? 'Draft opened' : 'Sent') +
+          row('From', info.from || rec.from || '') +
+          (rec.tracking ? row('Tracking #', rec.tracking) : '') +
+          (rec.ts ? row('When', fmtWhen(rec.ts)) : '') +
+          (info.failed ? row('Not delivered', String(info.failed)) : '') +
+          '<div class="bwn-bo-sumnote">' + esc(gmLine) + '</div>' +
+        '</div>';
+      var ft = footer('<span class="sp">Bid state: ' + esc(rec.status || (isDraft ? 'draft-opened' : 'sent')) + '</span>' +
+        (isDraft ? '' : '<button id="bo-status">📊 Who opened</button>') +
+        '<button class="pri" id="bo-done">Done</button>');
+      var st = ft.querySelector('#bo-status'); if (st) st.addEventListener('click', function () { close(); openStatusPanel(); });
+      ft.querySelector('#bo-done').addEventListener('click', function () { close(); });
     }
 
     draw();
