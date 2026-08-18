@@ -1,8 +1,8 @@
 // ==UserScript==
 // @name         BWN Suite - Note Templates (Broadway National)
 // @namespace    broadwaynational.bwn
-// @version      0.2.1
-// @description  Canned dispatch-note templates in a "Templates" dropdown beside the "+ Add" note button in the Umbrava Dispatch Board's work-order detail panel (Notes tab). Picking a template opens Umbrava's own Add Note composer and DRAFTS the note into it (signed with your first name, ______ blanks left for you to fill) - it is NEVER auto-posted; you review, set the Type, and click Save. Reuses bwn-drop-upload's live-tested tiptap/ProseMirror inserter via the page-window hook window.__bwnFillNoteEditor, so the fragile editor-fill code is not duplicated. @grant none, zero egress.
+// @version      0.3.0
+// @description  Canned dispatch-note templates in a "Templates" dropdown beside the "+ Add" note button in the Umbrava Dispatch Board's work-order detail panel (Notes tab). Picking a template opens Umbrava's own Add Note composer and DRAFTS the note into it (signed with your first name, ______ blanks left for you to fill) - it is NEVER auto-posted; you review, set the Type, and click Save. STANDALONE: carries its own tiptap/ProseMirror inserter, so in-house techs install this one script alone - no drop-upload dependency. Still prefers drop-upload's hook (window.__bwnFillNoteEditor) when that script is also installed, so coordinator machines keep a single live-tested fill path. @grant none, zero egress.
 // @match        https://app.umbrava.com/*
 // @run-at       document-idle
 // @grant        none
@@ -74,22 +74,118 @@
     } catch (e) { return ''; }
   }
 
+  // ===== Inlined tiptap/ProseMirror composer-fill (makes this script STANDALONE) ============
+  // ponytail: verbatim copy of bwn-drop-upload's live-tested fill code (waitFor + setNativeValue +
+  // setEditorValue), so in-house techs need only THIS script. Source of truth is drop-upload; if that
+  // measured code changes there (Umbrava editor change), mirror the change here. Coordinators still run
+  // drop-upload's hook (pickTemplate prefers it), so its copy stays the exercised one.
+  function waitFor(fn, timeoutMs) {
+    return new Promise(function (resolve) {
+      var t0 = Date.now();
+      (function poll() {
+        var v = fn();
+        if (v) return resolve(v);
+        if (Date.now() - t0 > (timeoutMs || 2500)) return resolve(null);
+        setTimeout(poll, 120);
+      })();
+    });
+  }
+  function setNativeValue(el, val) {
+    var proto = el.tagName === 'TEXTAREA' ? HTMLTextAreaElement.prototype : HTMLInputElement.prototype;
+    try { if (el._valueTracker) el._valueTracker.setValue('\u0000' + val); } catch (e) { }
+    try { Object.getOwnPropertyDescriptor(proto, 'value').set.call(el, val); } catch (e2) { el.value = val; }
+    el.dispatchEvent(new Event('input', { bubbles: true }));
+    el.dispatchEvent(new Event('change', { bubbles: true }));
+  }
+  function setEditorValue(ed, text) {
+    if (ed.tagName === 'TEXTAREA' || ed.tagName === 'INPUT') {
+      setNativeValue(ed, text);
+      return Promise.resolve(!!(ed.value || '').trim());
+    }
+    var lines = String(text).split('\n');
+    function esc(s) { return String(s).replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;'); }
+    var blockHtml = String(text).replace(/\r\n/g, '\n').split(/\n{2,}/).map(function (p) { return '<p>' + esc(p).replace(/\n/g, '<br>') + '</p>'; }).join('');
+    var tail = '';
+    for (var k = lines.length - 1; k >= 0; k--) { if (lines[k].trim()) { tail = lines[k].trim(); break; } }
+    function stuck() { var t = ed.textContent || ''; return tail ? t.indexOf(tail.slice(0, 40)) !== -1 : !!t.trim(); }
+    function clear() { try { ed.focus(); document.execCommand('selectAll', false, null); } catch (e) { } }
+    function selectAllRange() { try { ed.focus(); var sel = window.getSelection(); var rg = document.createRange(); rg.selectNodeContents(ed); sel.removeAllRanges(); sel.addRange(rg); } catch (e) { } }
+    function tryPaste() {
+      selectAllRange();
+      try { var dt = new DataTransfer(); dt.setData('text/html', blockHtml); dt.setData('text/plain', String(text)); ed.dispatchEvent(new ClipboardEvent('paste', { clipboardData: dt, bubbles: true, cancelable: true })); } catch (e) { }
+    }
+    function tryHtml() { clear(); try { document.execCommand('insertHTML', false, blockHtml); } catch (e) { } }
+    function trySoftLines() {
+      clear();
+      try {
+        for (var i = 0; i < lines.length; i++) {
+          if (i > 0 && !document.execCommand('insertLineBreak')) return;   // soft <br>; bail if unsupported
+          if (lines[i]) document.execCommand('insertText', false, lines[i]);
+        }
+      } catch (e) { }
+    }
+    function tryText() { clear(); try { document.execCommand('insertText', false, text); } catch (e) { } }
+    function tryInner() { try { ed.innerHTML = blockHtml; ed.dispatchEvent(new Event('input', { bubbles: true })); } catch (e) { } }
+    // PRIMARY for Umbrava's TipTap/ProseMirror note editor (measured live 2026-08-10): PM rejects
+    // synthetic paste/beforeinput/insertHTML/innerHTML but honours execCommand('insertText') + a
+    // synthetic Enter keydown. Hard-clear via Range, then per line insert text + press Enter. A ~12ms
+    // gap per line is required - a tight loop outruns PM's async commit and drops/merges lines.
+    function tryPmType() {
+      return new Promise(function (resolve) {
+        try {
+          ed.focus();
+          var sel = window.getSelection(), r = document.createRange();
+          r.selectNodeContents(ed); sel.removeAllRanges(); sel.addRange(r);
+          document.execCommand('delete', false, null);
+          var ls = String(text).replace(/\r\n/g, '\n').split('\n'), i = 0;
+          (function stepLine() {
+            if (i >= ls.length) { resolve(); return; }
+            if (i > 0) ['keydown', 'keyup'].forEach(function (ty) { ed.dispatchEvent(new KeyboardEvent(ty, { key: 'Enter', code: 'Enter', keyCode: 13, which: 13, bubbles: true, cancelable: true })); });
+            if (ls[i]) document.execCommand('insertText', false, ls[i]);
+            i++;
+            setTimeout(stepLine, 12);
+          })();
+        } catch (e) { resolve(); }
+      });
+    }
+    function settle() { return new Promise(function (r) { setTimeout(function () { r(stuck()); }, 250); }); }
+    var steps = [tryPmType, tryPaste, tryHtml, trySoftLines, tryText, tryInner], stepNames = ['pmType', 'paste', 'insertHTML', 'softLines', 'insertText', 'innerHTML'];
+    try { console.info('[BWN NOTES] note editor:', (ed.tagName || '?') + (ed.id ? '#' + ed.id : '') + (ed.className ? '.' + String(ed.className).split(/\s+/)[0] : ''), '| contenteditable=', ed.getAttribute && ed.getAttribute('contenteditable'), '| role=', ed.getAttribute && ed.getAttribute('role')); } catch (e) { }
+    function run(i) {
+      if (i >= steps.length) { try { console.warn('[BWN NOTES] note fill: NONE of the methods stuck - editor rejected all'); } catch (e) { } return Promise.resolve(stuck()); }
+      return Promise.resolve(steps[i]()).then(function () { return settle(); }).then(function (ok) { try { console.info('[BWN NOTES] note fill step "' + stepNames[i] + '":', ok ? 'STUCK' : 'no'); } catch (e) { } return ok ? true : run(i + 1); });
+    }
+    return run(0);
+  }
+  // Fill an ALREADY-OPEN note composer with `text`. Waits for the tiptap editor, then fills it.
+  // Insert-only: NEVER posts; the human clicks Umbrava's own Add/Save. Returns a Promise<boolean>.
+  function fillNoteEditor(text) {
+    return waitFor(function () {
+      var eds = document.querySelectorAll('.tiptap.ProseMirror');
+      for (var i = eds.length - 1; i >= 0; i--) { if (eds[i].offsetParent && eds[i].offsetWidth > 0) return eds[i]; }
+      return null;
+    }, 6000).then(function (ed) {
+      if (!ed) { alert('Could not find the note editor - open the note composer, then pick a template.'); return false; }
+      return setEditorValue(ed, text).then(function (filled) {
+        if (!filled) alert('Auto-fill was blocked - type the note in, or install "BWN Suite - Drop Upload" for the clipboard fallback.');
+        return filled;
+      });
+    });
+  }
+
   // ===== Draft the chosen template into the composer (human-gated; never posts) =============
   // On the dispatch-board detail panel: click the note "+ Add" button to open Umbrava's own Add Note
-  // modal (the SAME tiptap/ProseMirror composer as the WO page), then hand the text to drop-upload's
-  // fill hook. The dispatcher reviews, fills the ______ blanks, sets the Type, and clicks Umbrava's
-  // Add/Save. We NEVER post.
+  // modal (the SAME tiptap/ProseMirror composer as the WO page), then fill it. The dispatcher reviews,
+  // fills the ______ blanks, sets the Type, and clicks Umbrava's Add/Save. We NEVER post.
   function pickTemplate(tpl) {
-    if (typeof window.__bwnFillNoteEditor !== 'function') {
-      alert('The note inserter is not available.\n\nThe "BWN Suite - Drop Upload" script (1.12+) provides it - make sure that script is enabled and up to date, then try again.');
-      return;
-    }
     var addBtn = noteAddButton();
     if (!addBtn) { alert('Open a work order on the board and its Notes tab first, then pick a template.'); return; }
     var text = buildNote(tpl, currentFirstName());
     addBtn.click();                              // open Umbrava's Add Note composer
-    // '' noteType = leave the Type for the dispatcher to pick. The hook waits for the editor + fills it.
-    try { window.__bwnFillNoteEditor(text, ''); } catch (e) { alert('Could not draft the note: ' + ((e && e.message) || e)); }
+    // Prefer drop-upload's live-tested hook when that script is also installed (coordinators); else use
+    // our own inlined fill (in-house techs run this script alone). '' noteType = leave Type for the user.
+    var fill = (typeof window.__bwnFillNoteEditor === 'function') ? window.__bwnFillNoteEditor : fillNoteEditor;
+    try { fill(text, ''); } catch (e) { alert('Could not draft the note: ' + ((e && e.message) || e)); }
   }
 
   // ===== The dropdown (self-contained; fixed-positioned so no ancestor clips it) ============
