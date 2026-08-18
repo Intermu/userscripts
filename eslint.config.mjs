@@ -73,7 +73,7 @@ const NODE = readonly([
   'require', 'module', 'exports', '__dirname', '__filename', 'process', 'Buffer',
   'global', 'globalThis', 'console', 'setTimeout', 'clearTimeout', 'setInterval',
   'clearInterval', 'setImmediate', 'queueMicrotask', 'URL', 'URLSearchParams',
-  'TextEncoder', 'TextDecoder',
+  'TextEncoder', 'TextDecoder', 'atob', 'btoa',
 ]);
 
 // Correctness rules only — every one flags a probable bug, none enforce style.
