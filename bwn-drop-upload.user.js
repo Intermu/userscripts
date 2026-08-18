@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         BWN Drop Upload (Broadway National)
 // @namespace    broadwaynational.bwn
-// @version      1.15.4
+// @version      1.15.5
 // @downloadURL  https://raw.githubusercontent.com/Intermu/userscripts/main/bwn-drop-upload.user.js
 // @updateURL    https://raw.githubusercontent.com/Intermu/userscripts/main/bwn-drop-upload.user.js
 // @description  Drop files anywhere on an Umbrava work order to upload them. Opens the Documents tab and upload dialog, hands over the files, and builds each file's description from its contents. Emails are parsed locally (.msg via an OLE/MAPI reader, .eml via RFC822) into an Outlook-style block - From/Sent/To/Cc/Subject and the body - that becomes the WO note, led by a one-line summary from Chrome's on-device built-in AI (zero cost, zero egress, nothing leaves the browser), falling back to local WO-field extraction (store, city/state, priority, PO, NTE, problem, requester) when the on-device model is unavailable. That same summary fills each file's Description. The WO note's Type is chosen from the email's parties: inbound is typed by the sender (client -> Client, else Vendor); outbound from Broadway is typed by the recipients (a client recipient -> Client, any vendor recipient -> Vendor, all-internal -> Internal). Umbrava's Description field is a TipTap/ProseMirror rich-text editor. It rejects synthetic paste, beforeinput, insertHTML and raw innerHTML, but honours execCommand('insertText') plus a synthetic Enter keydown - so the note is filled line by line (Enter between lines to keep paragraphs), paced ~12ms/line so ProseMirror's async commit doesn't drop lines (measured live 2026-08-10). The text is also placed on your clipboard as a backup, and if every fill method fails a "Copy the WO note" button appears (its click supplies the gesture for a reliable copy, then Ctrl+V). A console diagnostic reports which editor was found and which fill method stuck. When WO Intake hands off a just-created WO's request email, each uploaded file's Label (document type) is set to "Work Order Request" and the note Type is forced to Client (a WO Intake handoff is a client's request, even when the sender is a broker like Fairmarkit that reads as a Vendor domain). Fairmarkit / bulk-email footer boilerplate (the Fairmarkit company block: tagline + Boston address + FAQ/Privacy/Terms/Unsubscribe, and the -----!{...}!----- machine tail) plus ALL tracking URLs (safelinks/awstrack/logo) are stripped from the note body, keeping content through the suppliers@ email. A Fairmarkit RFQ body is also condensed to one line per entry - single-spaced, with each line-item rejoined to its QTY and each Details label (Buyer/Close date/RFQ ID/Shipping address) rejoined to its value. Files upload via Umbrava's own API (initializeJobDocument -> Azure blob PUT -> bulkAddWorkOrderDocuments, captured live 2026-08-12), Label set by id, so the brittle upload-dialog combobox is bypassed; the dialog remains the automatic fallback if the API is unavailable. The email note is shown in a BWN review box (editable, Type selectable) and posted via addEditJobNote ONLY when you click Post - it is never auto-posted, and posts under your own Umbrava session for correct attribution. Network calls are same-origin to app.umbrava.com's own /api/graphql (the app's Auth0 bearer, no @connect/GM) plus the SAS-authorized blob PUT the SPA itself makes - nothing goes to any third party. @grant none.
@@ -15,7 +15,7 @@
 (function () {
   'use strict';
 
-  var VER = '1.15.4';   // keep in step with @version (drift caught earlier: banner had lagged two releases)
+  var VER = '1.15.5';   // keep in step with @version (drift caught earlier: banner had lagged two releases)
   console.info('[BWN DROP UPLOAD] v' + VER + ' · Uploads via Umbrava API (initializeJobDocument→blob PUT→bulkAddWorkOrderDocuments, Label by id), DOM dialog is the fallback · email→note in a human-gated BWN review box, posted via addEditJobNote on an explicit Post click (never auto-posted) · note Type by parties (inbound=sender, outbound=recipient) · note box shows instantly with a mechanical lead; the slow on-device AI brief (Gemini Nano / Edge Phi) fills in async · bwn:cmd dropupload:files bridge');
 
   // Active only on WO pages; checked at drag time so SPA navigation needs no watcher.
@@ -71,39 +71,54 @@
     return (d.getMonth() + 1) + '/' + d.getDate();
   }
 
-  // .eml = RFC822 text. Headers end at the first blank line; multipart bodies keep
-  // the text/plain part; quoted-printable soft breaks are undone; HTML falls back
-  // to tag-stripping. Best-effort - a miss just means a plainer description.
+  // .eml = RFC822. A real email is a MIME TREE, not one flat body: multipart/mixed wraps a
+  // multipart/alternative (text/plain + text/html) plus attachments. The old flat parser split
+  // head/body at the first blank line, split on ONE boundary, and took the first part whose text
+  // matched /text\/plain/ - but that substring ALSO matches the NESTED multipart/alternative block,
+  // so it dumped that whole subtree (inner boundary lines + the base64 attachment) into the note as
+  // gibberish. Walk the tree instead: prefer text/plain, fall back to stripped text/html, and never
+  // let an attachment's bytes reach the body. (Mirrors the bwn-wo-intake parseEml fix, 2026-08-17.)
+  function splitHeadBody(seg) { var m = seg.match(/\r?\n\r?\n/); return m ? { head: seg.slice(0, m.index), body: seg.slice(m.index + m[0].length) } : { head: seg, body: '' }; }
+  function hdr(head, name) {
+    var m = head.replace(/\r?\n[ \t]+/g, ' ').match(new RegExp('^' + name + ':\\s*(.+)$', 'im'));
+    return m ? m[1].replace(/\s+/g, ' ').trim() : '';
+  }
+  // Split a multipart body on its boundary (RFC 2046); preamble/epilogue and the closing --b-- drop.
+  function mimeParts(body, boundary) {
+    var out = [], b = '--' + boundary, i = body.indexOf(b);
+    while (i >= 0) {
+      if (body.substr(i + b.length, 2) === '--') break;              // closing delimiter --b--
+      var nl = body.indexOf('\n', i); if (nl < 0) break;
+      var next = body.indexOf(b, nl + 1); if (next < 0) break;
+      out.push(body.slice(nl + 1, next).replace(/\r?\n$/, ''));       // trailing CRLF belongs to the delimiter
+      i = next;
+    }
+    return out;
+  }
+  // Walk one MIME part: multipart recurses; an attachment is skipped; text fills plain/html.
+  function walkPart(head, body, acc) {
+    var ct = hdr(head, 'Content-Type') || 'text/plain';
+    var cte = hdr(head, 'Content-Transfer-Encoding').toLowerCase();
+    var disp = hdr(head, 'Content-Disposition');
+    var bnd = ct.match(/boundary="?([^";]+)"?/i);
+    if (/^\s*multipart\//i.test(ct) && bnd) {
+      mimeParts(body, bnd[1]).forEach(function (seg) { var sp = splitHeadBody(seg); walkPart(sp.head, sp.body, acc); });
+      return;
+    }
+    var fname = (disp.match(/filename="?([^";\r\n]+)"?/i) || ct.match(/name="?([^";\r\n]+)"?/i) || [])[1] || '';
+    if (/attachment/i.test(disp) || (fname && !/^\s*text\//i.test(ct))) return;   // attachment bytes must never reach the note
+    var txt = /quoted-printable/.test(cte) ? deqp(body) : /base64/.test(cte) ? deb64(body) : body;
+    if (/text\/html/i.test(ct)) { if (!acc.html) acc.html = txt; }
+    else if (!acc.plain) acc.plain = txt;
+  }
   function parseEml(text) {
-    var headEnd = text.search(/\r?\n\r?\n/);
-    var head = headEnd > 0 ? text.slice(0, headEnd) : text.slice(0, 3000);
-    var unfold = head.replace(/\r?\n[ \t]+/g, ' ');
-    function h(name) {
-      var m = unfold.match(new RegExp('^' + name + ':\\s*(.+)$', 'im'));
-      return m ? m[1].replace(/\s+/g, ' ').trim() : '';
-    }
-    var body = headEnd > 0 ? text.slice(headEnd + 2) : '';
-    var ct = h('Content-Type');
-    var bm = ct.match(/boundary="?([^";]+)"?/i);
-    if (bm) {
-      var parts = body.split('--' + bm[1]);
-      for (var i = 0; i < parts.length; i++) {
-        if (/content-type:\s*text\/plain/i.test(parts[i])) {
-          var pe = parts[i].search(/\r?\n\r?\n/);
-          var pb = pe > 0 ? parts[i].slice(pe + 2) : parts[i];
-          var ph = parts[i].slice(0, pe > 0 ? pe : 400);
-          if (/quoted-printable/i.test(ph)) pb = deqp(pb);
-          else if (/base64/i.test(ph)) pb = deb64(pb);   // Outlook .eml with non-ASCII commonly base64s the body - raw b64 in the note is noise (review)
-          body = pb;
-          break;
-        }
-      }
-    } else if (/quoted-printable/i.test(unfold)) {
-      body = deqp(body);
-    } else if (/^content-transfer-encoding:.*base64/im.test(unfold)) {
-      body = deb64(body);
-    }
-    return { from: h('From'), date: h('Date'), subject: h('Subject'), to: h('To'), cc: h('Cc'), body: cleanBody(body) };
+    var sp = splitHeadBody(text), acc = { plain: '', html: '' };
+    walkPart(sp.head, sp.body, acc);
+    var body = acc.plain || acc.html || '';
+    return {
+      from: hdr(sp.head, 'From'), date: hdr(sp.head, 'Date'), subject: hdr(sp.head, 'Subject'),
+      to: hdr(sp.head, 'To'), cc: hdr(sp.head, 'Cc'), body: cleanBody(body)
+    };
   }
 
   function deb64(s) {
