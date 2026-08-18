@@ -135,6 +135,7 @@ var LEDGER = {
   'bwn-proposal-copy.user.js':    { status: 'ADOPTED' },
   'bwn-suite-ai.user.js':         { status: 'ADOPTED' },   // US-1 1b: aiIsUmbravaToken/aiUserToken + jobView isUmbravaToken/rawAuthToken/authToken folded into ONE file-level block
   'bwn-suite-core.user.js':       { status: 'ADOPTED' },   // US-1 1b: bwnIsUmbravaToken/bwnAuthToken + heatIsUmbravaToken/heatAuthToken folded into ONE file-level block
+  'bwn-temp-vendor.user.js':      { status: 'ADOPTED' },
   'bwn-vendor-intake.user.js':    { status: 'NA' },
   'bwn-wide-list.user.js':        { status: 'NA' },
   'bwn-wo-assist.user.js':        { status: 'ADOPTED' },
@@ -182,7 +183,7 @@ onDisk.slice().sort().forEach(function (f) {
 // SAME canonical bytes (one distinct SHA across all adopters, equal to CANON_SHA).
 // =============================================================================================
 console.log('\n-- 3. aggregate counts + one canonical SHA --');
-A.ok('ADOPTED count is 14', ledgerWith('ADOPTED').length === 14, 'got ' + ledgerWith('ADOPTED').length);
+A.ok('ADOPTED count is 15', ledgerWith('ADOPTED').length === 15, 'got ' + ledgerWith('ADOPTED').length);
 A.ok('PENDING count is 0', ledgerWith('PENDING').length === 0, 'got ' + ledgerWith('PENDING').length);
 A.ok('NA count is 5', ledgerWith('NA').length === 5, 'got ' + ledgerWith('NA').length);
 A.ok('PENDING is empty (both mega scripts folded in US-1 1b)',
