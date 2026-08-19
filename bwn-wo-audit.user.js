@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         BWN WO Audit (Broadway National)
 // @namespace    broadwaynational.bwn
-// @version      0.7.4
+// @version      0.7.5
 // @downloadURL  https://raw.githubusercontent.com/Intermu/userscripts/main/bwn-wo-audit.user.js
 // @updateURL    https://raw.githubusercontent.com/Intermu/userscripts/main/bwn-wo-audit.user.js
 // @description  Batch WO-audit tool. Upload a WO audit .xlsx; for each work order this reads its two most recent notes DIRECTLY from Umbrava's GraphQL API in-page (using your live Umbrava session - the same read the BWN Ops Suite AI drafts use), then asks the broadway-internal-ops SWA summarize route (x-bwn-key gated, Anthropic key server-side) to write a 1-3 sentence client-ready status note. Fills the audit's notes column and downloads the workbook, preserving every other cell and formula. Runs entirely in the app.umbrava.com page so it inherits your Umbrava auth - no MCP, no pasted keys, nothing sensitive in this script. This replaces the old standalone WO_Audit_Automation.html SWA tool, whose server-side MCP path could not authenticate to Umbrava.
@@ -19,7 +19,7 @@
 (function () {
   'use strict';
 
-  var VER = '0.7.2';
+  var VER = '0.7.5';
   var FONT = "-apple-system,BlinkMacSystemFont,'Segoe UI','Helvetica Neue',Arial,sans-serif";
 
   // Suite drawer exit, per the contract in Core's ensureStyle. Core's stylesheet owns the fade;
@@ -432,6 +432,7 @@
     var head = (kind === 'throttle') ? 'the AI service was busy, rate limited'
       : (kind === 'timeout') ? 'the AI service did not respond in time'
       : (kind === 'auth') ? 'the SWA rejected the ingest key'
+      : (kind === 'credits') ? 'the AI account is out of credits - top up Anthropic billing (a retry will not fix it)'
       : (kind === 'budget') ? 'gave up waiting out a rate limit'
       : 'the AI service errored';
     var tail = [];
@@ -447,6 +448,23 @@
     if (r.status === 429 || r.status === 529) return true;
     var e = (r.json && r.json.error) ? String(r.json.error) : '';
     return r.status === 502 && /\((?:429|529)\)/.test(e);
+  }
+
+  // The route wraps EVERY upstream Anthropic failure as a generic 502, so r.status alone cannot
+  // tell a retryable overload (429/529) from a verdict a human must act on. The route now reports
+  // the real upstream status in `upstreamStatus`; older deploys are covered by parsing the "(400)"
+  // out of the error string. A 400/401/403/413 is a verdict - retrying only burns the budget, and
+  // for exhausted credits it spends tries on a call that cannot succeed while hiding the real cause
+  // behind the same rate-limit message that misled the 216-WO batch on 2026-08-18.
+  function upstreamStatus(r) {
+    var u = r && r.json && r.json.upstreamStatus;
+    if (typeof u === 'number') return u;
+    var m = /Anthropic API error \((\d{3})\)/.exec((r && r.json && r.json.error) ? String(r.json.error) : '');
+    return m ? parseInt(m[1], 10) : 0;
+  }
+  function isNonRetryable(r) {
+    var u = upstreamStatus(r);
+    return u === 400 || u === 401 || u === 403 || u === 413;
   }
 
   // Injected proxy sender: ONE POST to /api/ai (summarize tier). Reuses the existing
@@ -511,12 +529,17 @@
           if (r.status >= 200 && r.status < 300 && r.json && r.json.ok && r.json.status === 'final') return String(r.json.text || '');
           var throttled = isThrottle(r);
           var detail = (r.json && r.json.error) ? String(r.json.error) : '';
-          lastKind = throttled ? 'throttle' : (r.status === 403 ? 'auth' : 'error');
-          lastStatus = r.status;
+          var up = upstreamStatus(r);                       // the REAL Anthropic status behind a 502 shell
+          var credits = !!(r.json && r.json.code === 'INSUFFICIENT_CREDITS');
+          lastKind = throttled ? 'throttle' : (credits ? 'credits' : ((r.status === 403 || up === 401 || up === 403) ? 'auth' : 'error'));
+          lastStatus = up || r.status;                      // report what Anthropic said, not the 502 wrapper
           if (throttled) sawThrottle = true;
-          // 403/400/413 are verdicts, not weather - retrying them only wastes the budget.
-          if (r.status === 403 || r.status === 400 || r.status === 413) return give(causeText(lastKind, r.status, detail));
-          if (attempt >= tries) return give(causeText(lastKind, r.status, detail));
+          // A verdict, not weather: the route's own 403/400/413, OR an upstream one it wrapped as a
+          // generic 502 (isNonRetryable / credits). Retrying only wastes the budget; for exhausted
+          // credits it spends nothing while masking the cause. Fail fast with the truth. The status
+          // number carries the detail, so the redundant wrapper string is dropped here.
+          if (r.status === 403 || r.status === 400 || r.status === 413 || credits || isNonRetryable(r)) return give(causeText(lastKind, lastStatus, ''));
+          if (attempt >= tries) return give(causeText(lastKind, lastStatus, detail));
           var hinted = retryAfterMs(r.headers);
           var table = throttled ? THROTTLE_BACKOFF_MS : TRANSIENT_BACKOFF_MS;
           var planned = table[attempt - 1] || table[table.length - 1];
@@ -974,9 +997,12 @@
               var rr = session.results[ci];
               if (rr && rr.error) causes.push(String(rr.error));
             }
+            var anyCredits = causes.some(function (c) { return /out of credits/i.test(c); });
             var allThrottle = causes.length && causes.every(function (c) { return /rate limited|was busy/i.test(c); });
             var anyAuth = causes.some(function (c) { return /ingest key|rank not resolved|session expired/i.test(c); });
-            if (allThrottle) {
+            if (anyCredits) {
+              logln('The AI account is out of credits. A retry will NOT help until Anthropic billing is topped up - do that first, then press Retry Unfinished. (This is the failure that stopped the batch, not a rate limit.)');
+            } else if (allThrottle) {
               logln('Every failure was the AI service rate limiting this batch. Nothing is misconfigured - wait a minute and press Retry Unfinished.');
             } else if (anyAuth) {
               logln('At least one row failed on access. Check the SWA ingest key (Tampermonkey menu) and that you are signed into Umbrava with a resolved role - run the BWN Ops Suite alongside this.');

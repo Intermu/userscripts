@@ -66,6 +66,7 @@ function load(script) {
   var factory = new Function(
     'SWA_BASE', 'getKey', 'authToken', 'gmPost', 'sleep', 'document', 'localStorage', 'setTimeout', 'clearTimeout', 'console', 'Date',
     SECTION + '\n;return { aiProxySend: aiProxySend, retryAfterMs: retryAfterMs, hasRetryAfter: hasRetryAfter,' +
+    ' upstreamStatus: upstreamStatus, isNonRetryable: isNonRetryable,' +
     ' THROTTLE_BACKOFF_MS: THROTTLE_BACKOFF_MS, TRANSIENT_BACKOFF_MS: TRANSIENT_BACKOFF_MS,' +
     ' AI_ROW_BUDGET_MS: AI_ROW_BUDGET_MS, AI_MIN_ATTEMPT_MS: AI_MIN_ATTEMPT_MS };'
   );
@@ -150,6 +151,52 @@ function section4() {
   });
 }
 
+// ---- 6. a wrapped upstream verdict is non-retryable (2026-08-18 incident) -----------------
+// The route wraps EVERY upstream Anthropic failure as a generic 502. A 400 - especially exhausted
+// credits - will never succeed unchanged, so it must fail on the FIRST post, not burn all 3 tries
+// and report a rate limit. That misclassification is what turned one credit outage into 126
+// identical "the AI service errored" rows mid-batch. Mutation control: on the OLD bytes the outer
+// 502 is not 403/400/413, so it falls through and posts 3 times; the assert on posts===1 fails.
+function ai502(code, includeUpstream) {
+  var j = { ok: false, error: 'Anthropic API error (400)' };
+  if (includeUpstream) j.upstreamStatus = 400;
+  if (code) j.code = code;
+  return { status: 502, json: j, attemptMs: 200 };
+}
+function section6() {
+  console.log('\n6. a wrapped upstream 400 is a verdict, not a transient');
+  return run([ai502('INSUFFICIENT_CREDITS', true), ai502('INSUFFICIENT_CREDITS', true), ai502('INSUFFICIENT_CREDITS', true)]).then(function (o) {
+    A.eq('out of credits fails on the FIRST post - no retries', o.posts, 1);
+    A.eq('and takes no backoff waits', o.slept, []);
+    A.ok('reason names the credit exhaustion, not a rate limit', /out of credits/i.test(o.reason || '') && !/rate limited/i.test(o.reason || ''), o.reason);
+    return run([ai502(null, true), ai502(null, true), ai502(null, true)]);
+  }).then(function (o) {
+    A.eq('a plain wrapped 400 (no credit code) also fails fast', o.posts, 1);
+    A.ok('reason reports HTTP 400, not a rate limit', /HTTP 400/.test(o.reason || '') && !/rate limited/i.test(o.reason || ''), o.reason);
+    return run([ai502(null, false), ai502(null, false), ai502(null, false)]);
+  }).then(function (o) {
+    A.eq('older server with no upstreamStatus field still fails fast via the "(400)" string parse', o.posts, 1);
+    // NEGATIVE CONTROL: a genuine transient 5xx with no upstream 400 MUST still retry as before.
+    return run([{ status: 502, json: { ok: false, error: 'upstream' }, attemptMs: 200 },
+                { status: 502, json: { ok: false, error: 'upstream' }, attemptMs: 200 },
+                { status: 502, json: { ok: false, error: 'upstream' }, attemptMs: 200 }]);
+  }).then(function (o) {
+    A.eq('a real transient 5xx is untouched - still posts 3x', o.posts, 3);
+    A.eq('and still uses the transient backoff table', o.slept, [2000, 6000]);
+    // Unit-level mutation control on the classifier itself.
+    var h = load([thr(1)]);
+    A.eq('isNonRetryable 400', h.T.isNonRetryable({ json: { upstreamStatus: 400 } }), true);
+    A.eq('isNonRetryable 401', h.T.isNonRetryable({ json: { upstreamStatus: 401 } }), true);
+    A.eq('isNonRetryable 413', h.T.isNonRetryable({ json: { upstreamStatus: 413 } }), true);
+    A.eq('isNonRetryable 500 stays retryable', h.T.isNonRetryable({ json: { upstreamStatus: 500 } }), false);
+    A.eq('isNonRetryable 529 stays retryable', h.T.isNonRetryable({ json: { upstreamStatus: 529 } }), false);
+    A.eq('upstreamStatus reads the field first', h.T.upstreamStatus({ json: { upstreamStatus: 400, error: 'x' } }), 400);
+    A.eq('upstreamStatus parses the wrapped string when the field is absent', h.T.upstreamStatus({ json: { error: 'Anthropic API error (400)' } }), 400);
+    A.eq('upstreamStatus is 0 when neither is present', h.T.upstreamStatus({ json: { error: 'nope' } }), 0);
+    return Promise.resolve();
+  });
+}
+
 // ---- 5. constants pinned ------------------------------------------------------------------
 function section5() {
   console.log('\n5. constants are pinned');
@@ -167,6 +214,6 @@ function section5() {
 }
 
 console.log('WO Audit retry floor (council QA-1a) - ' + path.basename(SRC));
-section1().then(section2).then(section3).then(section4).then(section5)
+section1().then(section2).then(section3).then(section4).then(section5).then(section6)
   .then(function () { A.finish(); })
   .catch(function (e) { console.error('\nHARNESS ERROR: ' + (e && e.stack || e)); process.exit(1); });
