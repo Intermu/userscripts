@@ -9915,7 +9915,7 @@
       b.addEventListener('click', BWN.guard(function () { onClick(lb); }, 'launcher:dockclick'));
       return b;
     }
-    function dockLogoUrl() { return LAUNCHER_BASE.replace(/\/$/, '') + '/assets/bwn-logo.png'; }
+    function dockLogoUrl() { return 'https://raw.githubusercontent.com/Intermu/userscripts/main/assets/bwn-logo.png'; } // logo now lives with the scripts (source repo), not the SWA host
     function dockIsCollapsed() { try { return localStorage.getItem(DOCK_COLLAPSED_KEY) === '1'; } catch (e) { return false; } }
     function dockSetCollapsed(v) {
       try { if (v) localStorage.setItem(DOCK_COLLAPSED_KEY, '1'); else localStorage.removeItem(DOCK_COLLAPSED_KEY); } catch (e) { }

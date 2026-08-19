@@ -74,6 +74,9 @@ jobs:
       - name: WO Audit retry-floor harness
         run: node scripts/test-wo-audit-retry-floor.js
 
+      - name: WO Audit deterministic flags harness
+        run: node scripts/test-wo-audit-flags.js
+
       - name: Bid-out dock registration + ACT_TOOL harness
         run: node scripts/test-bidout-dock.js
 
