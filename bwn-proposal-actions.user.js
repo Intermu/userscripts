@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         BWN Proposal Actions (Broadway National)
 // @namespace    broadwaynational.bwn
-// @version      0.2.4
+// @version      0.2.5
 // @downloadURL  https://raw.githubusercontent.com/Intermu/userscripts/main/bwn-proposal-actions.user.js
 // @updateURL    https://raw.githubusercontent.com/Intermu/userscripts/main/bwn-proposal-actions.user.js
 // @description  On a Client Proposal DETAILS page, a "Proposal Actions" dropdown runs the internal review workflow in one confirmed action: Approval / TSP Review / Kickback. Each posts a note to the Proposal + the Work Order, sets the WO status, completes open tasks, and files a new task (assigned to the WO coordinator, or Ronny Sharp for TSP). Kickback drafts a rejection reason with the on-device browser AI for the operator to confirm. Every write is shown in a confirm dialog first; nothing fires until Confirm. @grant none.
@@ -15,7 +15,7 @@
 (function () {
   'use strict';
 
-  var VER = '0.2.4';   // keep in step with @version
+  var VER = '0.2.5';   // keep in step with @version
   var DRY_RUN = false; // when true, every WRITE is console.logged instead of sent
   console.info('[BWN PROPOSAL ACTIONS] v' + VER + ' - Approval / TSP Review / Kickback workflow on the Client Proposal details page');
 
@@ -342,8 +342,8 @@
     var cached = _AI_SESSIONS[sys];
     if (cached) return Promise.resolve(cached);
     function keep(hasSystem) { return function (s) { try { s._bwnSystem = hasSystem; } catch (e) { } _AI_SESSIONS[sys] = s; return s; }; }
-    return Promise.resolve(api.create({ initialPrompts: [{ role: 'system', content: sys }] }))
-      .then(keep(true), function () { return Promise.resolve(api.create()).then(keep(false)); });
+    return Promise.resolve(api.create({ initialPrompts: [{ role: 'system', content: sys }], outputLanguage: 'en' }))
+      .then(keep(true), function () { return Promise.resolve(api.create({ outputLanguage: 'en' })).then(keep(false)); });
   }
   function onDevice(sys, content) {
     var api = langModel();
