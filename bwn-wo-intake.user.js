@@ -1,10 +1,10 @@
 // ==UserScript==
 // @name         BWN WO Intake (Broadway National)
 // @namespace    broadwaynational.bwn
-// @version      0.9.21
+// @version      0.9.22
 // @downloadURL  https://raw.githubusercontent.com/Intermu/userscripts/main/bwn-wo-intake.user.js
 // @updateURL    https://raw.githubusercontent.com/Intermu/userscripts/main/bwn-wo-intake.user.js
-// @description  Drop a client PO/WO email (.msg or .eml) onto the Create Work Order modal and it prefills the fields. Pilot Travel Centers: from the email body. Caleres (Famous Footwear / Corrigo): reads the attached WO PDF on-device for Trade, Scope, Priority, Due-By, Store, NTE. If a Caleres request has no WO PDF (image-only), it reads Store, City/State and Trade from the subject and the scope from the body (NTE + Priority stay manual - they live only in the images). Amazon (Fairmarkit RFQ): the buyer is Amazon.com, Inc. but the sender is the Fairmarkit e-bidding platform - reads the RFQ body (no PDF) for Site (matched by the Amazon site code e.g. PIT2/STL3, else the shipping address), RFQ #, Trade, Scope + line items; NTE and Priority stay manual because an RFQ carries no ceiling yet (we are the quoting supplier). The email carries no attachment - the full scope / any 'see attached file' lives on the Fairmarkit bid page - so it surfaces that RFQ link and warns you when the body defers to it. Per Amazon: Source PO # is set to the literal "Quote Request", Source Job # is set to the RFQ ID suffixed " (FM-AMZ)" (e.g. 2956102 (FM-AMZ)), Client DNE is set to 0.00, and WO Type is selected as Proposal in the create modal - all filled in the one pass (no post-Create tracking-number step). Selects Client, Location (address-verified), Trade and Priority by clicking the real dropdown option; fills Client DNE, Source Job # and Source PO #; warns you if the WO PDF shows a cancel/flag note. CW-Amazon (Cushman & Wakefield / FAMIS 360, from amazon@ilrs.360facility.net - a separate feed from Fairmarkit, so the client is "CW-Amazon"): reads the plain-text Case Summary for Site (matched by the exact site code = Umbrava locationNumber), Request ID (-> Source Job #; Source PO # is left blank per the client convention), Trade, Scope, Client DNE (from the PO/NTE amount in the Statement of Work, else 0.00) and Priority (the FAMIS P-code -> the client's "P<n> - ..." priority, or Scheduled PPM); it sets WO Type from the Type|Sub-Type line - a Request for Proposal -> Proposal, a preventive/PPM job -> Preventative, everything else -> Reactive. Then, after you Create the WO, it hands the email to BWN Drop Upload to attach it to the new WO's Documents. JLL-Amazon (Jones Lang LaSalle / CorrigoPro, from alerts@am.corrigopro.com - a separate feed again, so the client is "JLL-Amazon"): reads the "WORK ORDER #..." body for Site (matched by the exact property/site code = Umbrava locationNumber, e.g. BNA12/ATL11/DEN17), the CorrigoPro WO number (set as BOTH Source Job # and Source PO # per the client convention), Scope, Client DNE (the NTE, else 0.00) and Priority (the email's priority IS the Umbrava label - a PM job is "PM (Scheduled)"); it sets WO Type from the job kind - a PM (Scheduled) job -> Preventative, everything else -> Reactive. CW-Amazon via CorrigoPro (C&W Services on the CorrigoPro network, from alerts@am.corrigopro.com with subject "...received from C&W Services" - the SAME CorrigoPro format as JLL-Amazon but a different brand, so the client is still "CW-Amazon"): reads the "WORK ORDER #..." body for Site (the code in "Requested By: AMAZON <code>", e.g. IFM-JFK8 = Umbrava locationNumber), the CorrigoPro WO number (BOTH Source Job # and Source PO #), Scope (the Problem block), Trade (from the Problem "<Area> > <Issue>" head), Client DNE (the NTE, else 0.00), WO Type (a PM/preventive job -> Preventative, a proposal -> Proposal, else Reactive - the CorrigoPro Details "Type:" line is a ridealong and is ignored) and Priority (the Details "Priority:" value - "PM" -> "Scheduled PPM"). Reads everything in the browser; nothing is uploaded to any server. Best-effort: review every field before you click Create.
+// @description  Drop a client PO/WO email (.msg or .eml) onto the Create Work Order modal and it prefills the fields. Pilot Travel Centers: from the email body. Caleres (Famous Footwear / Corrigo): reads the attached WO PDF on-device for Trade, Scope, Priority, Due-By, Store, NTE. If a Caleres request has no WO PDF (image-only), it reads Store, City/State and Trade from the subject and the scope from the body (NTE + Priority stay manual - they live only in the images). Amazon (Fairmarkit RFQ): the buyer is Amazon.com, Inc. but the sender is the Fairmarkit e-bidding platform - reads the RFQ body (no PDF) for Site (matched by the Amazon site code e.g. PIT2/STL3, else the shipping address), RFQ #, Trade, Scope + line items; NTE and Priority stay manual because an RFQ carries no ceiling yet (we are the quoting supplier). The email carries no attachment - the full scope / any 'see attached file' lives on the Fairmarkit bid page - so it surfaces that RFQ link and warns you when the body defers to it. Per Amazon: Source PO # is set to the literal "Quote Request", Source Job # is set to the RFQ ID suffixed " (FM-AMZ)" (e.g. 2956102 (FM-AMZ)), Client DNE is set to 0.00, and WO Type is selected as Proposal in the create modal - all filled in the one pass (no post-Create tracking-number step). Selects Client, Location (address-verified), Trade and Priority by clicking the real dropdown option; fills Client DNE, Source Job # and Source PO #; warns you if the WO PDF shows a cancel/flag note. CW-Amazon (Cushman & Wakefield / FAMIS 360, from amazon@ilrs.360facility.net - a separate feed from Fairmarkit, so the client is "CW-Amazon"): reads the plain-text Case Summary for Site (matched by the exact site code = Umbrava locationNumber), Request ID (-> Source Job #; Source PO # is left blank per the client convention), Trade, Scope, Client DNE (from the PO/NTE amount in the Statement of Work, else 0.00) and Priority (the FAMIS P-code -> the client's "P<n> - ..." priority, or Scheduled PPM); it sets WO Type from the Type|Sub-Type line - a Request for Proposal -> Proposal, a preventive/PPM job -> Preventative, everything else -> Reactive. Then, after you Create the WO, it hands the email to BWN Drop Upload to attach it to the new WO's Documents. JLL-Amazon (Jones Lang LaSalle / CorrigoPro, from alerts@am.corrigopro.com - a separate feed again, so the client is "JLL-Amazon"): reads the "WORK ORDER #..." body for Site (matched by the exact property/site code = Umbrava locationNumber, e.g. BNA12/ATL11/DEN17), the CorrigoPro WO number (set as BOTH Source Job # and Source PO # per the client convention), Scope, Client DNE (the NTE, else 0.00) and Priority (the email's priority IS the Umbrava label - a PM job is "PM (Scheduled)"); it sets WO Type from the job kind - a PM (Scheduled) job -> Preventative, everything else -> Reactive. CW-Amazon via CorrigoPro (C&W Services on the CorrigoPro network, from alerts@am.corrigopro.com with subject "...received from C&W Services" - the SAME CorrigoPro format as JLL-Amazon but a different brand, so the client is still "CW-Amazon"): reads the "WORK ORDER #..." body for Site (the code in "Requested By: AMAZON <code>", e.g. IFM-JFK8 = Umbrava locationNumber), the CorrigoPro WO number (BOTH Source Job # and Source PO #), Scope (the Problem block), Trade (from the Problem "<Area> > <Issue>" head), Client DNE (the NTE, else 0.00), WO Type (a PM/preventive job -> Preventative, a proposal -> Proposal, else Reactive - the CorrigoPro Details "Type:" line is a ridealong and is ignored) and Priority (the Details "Priority:" value - "PM" -> "Scheduled PPM"). Transform SR Brands LLC (TransformCo / Sears / Kmart, sender @transformco.com): reads the free-text dispatch/quote email body for Location (the store number in the subject = the Umbrava locationNumber), the TransformCo WO/PO reference number (set as BOTH Source Job # and Source PO #), Client DNE (the NTE, with $1K/$2K shorthand expanded), Scope (the request body) and a best-effort Trade; WO Type is set to Reactive and Priority is left blank (the client's SLA tier is a manual coordinator pick). Reads everything in the browser; nothing is uploaded to any server. Best-effort: review every field before you click Create.
 // @match        https://app.umbrava.com/*
 // @run-at       document-idle
 // @noframes
@@ -13,7 +13,7 @@
 
 (function () {
   'use strict';
-  var VER = '0.9.21';
+  var VER = '0.9.22';
   var FONT = "-apple-system,BlinkMacSystemFont,'Segoe UI','Helvetica Neue',Arial,sans-serif";
   console.info('[BWN WO INTAKE] v' + VER + ' - drop a PO / Amazon RFQ email (.msg/.eml) on Create Work Order to prefill + auto-attach to the new WO Documents (via Drop Upload); reads locally, nothing leaves the browser');
 
@@ -908,6 +908,101 @@
     return out;
   }
 
+  // ---- Transform SR Brands (TransformCo / Sears / Kmart) extractor -----------
+  // Free-text dispatch/quote emails from a TransformCo facilities manager (sender @transformco.com).
+  // No PDF and no structured form - the scope IS the body. Grounded on a 10-email corpus cross-checked
+  // against the live client WO history (Umbrava client "Transform SR Brands LLC" #23914):
+  //   - Location: the STORE NUMBER in the subject = the Umbrava locationNumber (unique 1:1);
+  //     locationName is generic ("Sears" / "Kmart" / "Multi Tenant"), so the number is the key and no
+  //     address disambiguation is needed. Matched via selectAmazonLocation (types the number, clicks
+  //     the option that shows it) - the same picker Amazon/JLL/CW use for a code-keyed Location.
+  //   - Source Job # AND Source PO # = the TransformCo WO/PO reference number, BOTH (per Mike;
+  //     confirmed on live WOs 4892 / 4909). It is DISTINCT from the store number (both are ~4 digits and
+  //     can co-occur in one subject), so it is anchored on a "Work Order# / WO # / Ref. WO # / P.O. #"
+  //     label - never a bare digit run (a bare body number is a WO#/PO#/phone/PIN).
+  //   - Client DNE = the NTE amount, with "$1K"/"$2K" shorthand expanded and "NTE - $400" (hyphen,
+  //     not colon) handled - both forms the generic NTE regex misses; 0.00 when the email has none.
+  //   - WO Type = Reactive (fixed). Even the "provide a proposal" emails are created Reactive for this
+  //     client, so there is no proposal-detection to fight practice.
+  //   - Priority: LEFT BLANK. The client uses 8 SLA-tier labels (EMERGENCY 2 HRS ... PM 30 DAYS) chosen
+  //     by coordinator judgment; there is no reliable keyword map (the same "alarm" wording landed both
+  //     EMERGENCY 2 HRS and EMERGENCY 4 HRS, and an Outlook High-importance email was created STANDARD).
+  function isTransform(senderEmail, subject, body) {
+    var d = String(senderEmail || '').split('@')[1] || '';
+    if (/(^|\.)transformco\.com$/i.test(d)) return true;
+    // Dropped from a Broadway reply (sender broadwaynational.com): back it up with a quoted
+    // transformco.com address AND the TRANSFORMCO signature in the body.
+    var b = String(body || '');
+    return /@transformco\.com\b/i.test(b) && /\bTRANSFORMCO\b/.test(b);
+  }
+  // NTE -> Client DNE. Handles "NTE - $400" (hyphen), "NTE $1K" / "$2K" (K/M suffix), "$1,500",
+  // "NTE: $750.00". 0.00 when the email carries none.
+  function transformDne(body) {
+    var m = String(body || '').match(/\bNTE\b\s*[-:]?\s*\$?\s*([\d,]+(?:\.\d{1,2})?)\s*([KkMm])?/);
+    if (!m) return '0.00';
+    var n = parseFloat(m[1].replace(/,/g, ''));
+    if (!(n >= 0)) return '0.00';
+    if (m[2]) n *= /[Mm]/.test(m[2]) ? 1000000 : 1000;
+    return n.toFixed(2);
+  }
+  // Store number = the Umbrava locationNumber. The FIRST 3-5 digit run in the subject, after stripping
+  // a leading RE:/FW:. Body fallback only via a "Unit #" / "Store #" label (a bare body digit run is a
+  // WO#/PO#/phone/PIN, never the store).
+  function transformStore(subject, body) {
+    var s = String(subject || '').replace(/^\s*(?:re|fw|fwd)\s*:\s*/i, '');
+    var m = s.match(/\b(\d{3,5})\b/);
+    if (m) return m[1];
+    m = String(body || '').match(/\b(?:Unit|Store)\s*#?\s*(\d{3,5})\b/i);
+    return m ? m[1] : '';
+  }
+  // TransformCo reference number -> BOTH Source Job # and Source PO #. Anchored on a label so it is
+  // never confused with the store number. Matches "Work Order# 4874", "WO-4833", "WO #", "Ref. WO #4892",
+  // "P.O. #4885", "PO #". Blank when the email carries none ("Work Order coming soon").
+  function transformRef(subject, body) {
+    var blob = String(subject || '') + '\n' + String(body || '');
+    var m = blob.match(/\b(?:Work\s*Order|Purchase\s*Order|W\.?\s*O\.?|P\.?\s*O\.?)\s*#?\s*[-:]?\s*#?\s*(\d{3,7})\b/i);
+    return m ? m[1] : '';
+  }
+  // City / State from the subject, best-effort, as a Location tiebreak ONLY (the store number is the
+  // real key). Handles "1182 St Peters, MO - ...", "Kmart 4389 Mc Allen, TX - ...", "1306 Hattiesburg
+  // MS - ...". Returns null when the subject carries no state (then the number match stands alone).
+  function transformAddr(subject) {
+    var m = String(subject || '').match(/([A-Za-z][A-Za-z .'\-]*[A-Za-z]),?\s+([A-Z]{2})\b(?=\s*[-:]|\s*$)/);
+    if (!m) return null;
+    return { streetNum: '', street: '', city: m[1].trim(), state: m[2], zip: '' };
+  }
+  // Best-effort Trade from the request wording; blank when unsure (a wrong confident trade is worse
+  // than blank). Self-contained (like the other per-client trade maps) so this block slices cleanly
+  // into its own harness. Parking-lot lights -> Electrical (this client's primary trade on lighting
+  // WOs; the coordinator adds Lighting); alarms / access / escort -> blank (created Handyman by hand).
+  function transformTrade(text) {
+    var s = ' ' + String(text || '').toLowerCase() + ' ';
+    if (/back ?flow|plumb|\bdrain|toilet|\bpipe\b|water ?heater|faucet|urinal|\bsewer\b|\bleak/.test(s)) return 'Plumbing';
+    if (/\block\b|re-?key|locksmith|padlock|deadbolt/.test(s)) return 'Locks';
+    if (/\blight|\blamp|\bpole|\bbulb|fixture/.test(s)) return 'Electrical';
+    if (/electric|\bpower\b|breaker|\bwiring\b|\boutlet\b|transformer|generator/.test(s)) return 'Electrical';
+    if (/carpet|\bfloor|\bvct\b|\btile\b|\bvinyl\b/.test(s)) return 'Flooring';
+    if (/hvac|\brtu\b|rooftop|condenser|furnace|air ?handler|refriger|freezer|cooler/.test(s)) return 'HVAC';
+    if (/overhead door|dock door|roll-?up|\bdoor\b|hardware/.test(s)) return 'Doors and Hardware';
+    if (/\broof|gutter|fascia|soffit|siding/.test(s)) return 'Roofing and Siding';
+    return '';
+  }
+  function extractTransform(subject, body) {
+    subject = String(subject || ''); body = String(body || '');
+    var out = { store: '', ref: '', dne: '0.00', trade: '', scope: '', _addr: null, _note: '' };
+    out.store = transformStore(subject, body);
+    out.ref = transformRef(subject, body);
+    out.dne = transformDne(body);
+    out.scope = genericBodyScope(body);   // free-text request body; cuts signature / quoted chain / NTE
+    out.trade = transformTrade(out.scope + ' ' + subject);
+    out._addr = transformAddr(subject);
+    var refs = [];
+    if (out.ref) refs.push('TransformCo WO/PO #' + out.ref + ' (Source Job # + Source PO #)');
+    refs.push('Priority left blank - set the SLA tier manually (EMERGENCY / SAME DAY / NEXT DAY / STANDARD / PM)');
+    out._note = refs.join(' · ');
+    return out;
+  }
+
   // ---- Create WO modal --------------------------------------------------------
   function woModal() {
     var s = document.querySelector('textarea#scopeOfWork') || document.querySelector('input#client-dropdown');
@@ -1105,8 +1200,9 @@
       if (wo.location) {
         await waitEnabled(root, 'input#location-dropdown', 3000);
         var locEl = root.querySelector('input#location-dropdown');
-        if (wo._amazon || wo._cwAmazon || wo._jllAmazon || wo._cwCorrigo) {
-          // Amazon / CW-Amazon (FAMIS + CorrigoPro) / JLL-Amazon: match by SITE CODE (locationNumber), else by the address. See selectAmazonLocation.
+        if (wo._amazon || wo._cwAmazon || wo._jllAmazon || wo._cwCorrigo || wo._transform) {
+          // Amazon / CW-Amazon (FAMIS + CorrigoPro) / JLL-Amazon / Transform: match by SITE CODE
+          // (= locationNumber; for Transform the store number), else by the address. See selectAmazonLocation.
           var ra = await selectAmazonLocation(locEl, wo._siteCode, wo._addr);
           var label = wo._siteCode || wo.location;
           if (ra === 'selected') picked.push('Location ' + label + (wo._addr && wo._addr.city ? ' (' + [wo._addr.streetNum, wo._addr.city, wo._addr.state].filter(Boolean).join(' ') + ')' : ''));
@@ -1181,6 +1277,7 @@
       if (wo._cwAmazon) parts.push('CW-Amazon: Source Job # = ' + (wo.sourceJob || 'Request ID') + ', Source PO # blank, WO Type = ' + (wo._woType || 'Reactive') + ', Client DNE $' + (wo.clientDne || '0.00'));
       if (wo._jllAmazon) parts.push('JLL-Amazon: Source Job # + Source PO # = WO ' + (wo.sourceJob || '') + ', WO Type = ' + (wo._woType || 'Preventative') + ', Client DNE $' + (wo.clientDne || '0.00'));
       if (wo._cwCorrigo) parts.push('CW-Amazon (CorrigoPro): Source Job # + Source PO # = WO ' + (wo.sourceJob || '') + ', WO Type = ' + (wo._woType || 'Preventative') + ', Client DNE $' + (wo.clientDne || '0.00'));
+      if (wo._transform) parts.push('Transform SR Brands: Source Job # + Source PO # = ' + (wo.sourceJob || '(none in email)') + ', WO Type = Reactive, Client DNE $' + (wo.clientDne || '0.00') + ', Priority left blank (set the SLA tier)');
       parts.push('review before Create');
       toast('From the PO email - ' + parts.join(' · '), 15000);
     })();
@@ -1373,6 +1470,28 @@
             priorityLevel: jx.priorityRaw,     // the email's priority IS the Umbrava label ("PM (Scheduled)")
             _jllAmazon: true, _woType: jx.woType, _siteCode: jx.siteCode, _addr: jx._addr,
             _dueBy: jx.completeBy, _note: jx._note, _warn: jx._warn
+          };
+        }
+      }
+      // Transform SR Brands (TransformCo / Sears / Kmart): free-text @transformco.com dispatch email.
+      // Store number = locationNumber; the TransformCo ref # = BOTH Source Job # and Source PO #;
+      // WO Type fixed Reactive; Priority left blank (see extractTransform).
+      if (!wo && isTransform(parsed.senderEmail, parsed.subject, parsed.body)) {
+        var tx = extractTransform(parsed.subject, parsed.body);
+        if (tx && (tx.store || tx.ref)) {
+          // ponytail: the store number is reused as selectAmazonLocation's site code (it types the
+          // number, clicks the option showing it). A store # that also appears as another option's
+          // street # could mis-hit; the subject city/state (_addr) breaks the tie when present.
+          // Upgrade to a locationNumber-column-anchored match only if a live miss shows up.
+          wo = {
+            client: 'Transform SR Brands LLC',
+            location: tx.store,                // Umbrava locationNumber = the store number
+            po: tx.ref,                        // Source PO # = the TransformCo WO/PO number
+            sourceJob: tx.ref,                 // Source Job # = the same number (both, per Mike)
+            clientDne: tx.dne,                 // NTE amount, else 0.00
+            trade: tx.trade,
+            scope: tx.scope,
+            _transform: true, _woType: 'Reactive', _siteCode: tx.store, _addr: tx._addr, _note: tx._note
           };
         }
       }
