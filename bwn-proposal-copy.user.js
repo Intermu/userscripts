@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         BWN Proposal Copy (Broadway National)
 // @namespace    broadwaynational.bwn
-// @version      0.1.8
+// @version      0.1.9
 // @downloadURL  https://raw.githubusercontent.com/Intermu/userscripts/main/bwn-proposal-copy.user.js
 // @updateURL    https://raw.githubusercontent.com/Intermu/userscripts/main/bwn-proposal-copy.user.js
 // @description  Copy a client proposal from an aged-out work order onto a chosen replacement WO as an un-submitted Draft, in one confirmed action. Replays Umbrava's own createDraftProposal + editProposal mutations (line items copied verbatim); never submits, deletes, or retries. Manager-gated visibility. @grant none.
@@ -15,7 +15,7 @@
 (function () {
   'use strict';
 
-  var VER = '0.1.8';   // keep in step with @version
+  var VER = '0.1.9';   // keep in step with @version
   var DRY_RUN = false; // when true, the two WRITE mutations are logged, not sent
   console.info('[BWN PROPOSAL COPY] v' + VER + ' - copy client proposal to another WO as a Draft (createDraftProposal + editProposal replay)');
 
@@ -336,10 +336,17 @@
     var btn = document.createElement('button');
     btn.type = 'button';
     btn.className = ROW_BTN_CLASS;
-    btn.textContent = 'Copy';
+    // Icon, not the word "Copy": this column is pure addition to a table that already scrolls
+    // horizontally, so at 100% zoom the text button's width pushed the operator's rightmost chosen
+    // column (Gross Profit %) off-view (reported live 2026-08-19). An icon + the "Copy" header label
+    // keeps the affordance while shrinking the column to ~an icon wide. aria-label carries the name
+    // for screen readers since the glyph has no text. (Feather "copy" icon, inline so it renders
+    // identically everywhere; static markup, no user data - innerHTML is safe here.)
+    btn.innerHTML = '<svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><rect x="9" y="9" width="13" height="13" rx="2"></rect><path d="M5 15H4a2 2 0 0 1-2-2V4a2 2 0 0 1 2-2h9a2 2 0 0 1 2 2v1"></path></svg>';
+    btn.setAttribute('aria-label', 'Copy this proposal to another work order');
     btn.title = 'Copy this proposal to another work order';
-    btn.style.cssText = 'display:inline-flex;align-items:center;vertical-align:middle;flex:0 0 auto;' +
-      'margin:0;padding:3px 8px;border:1px solid #1a5f3e;border-radius:6px;white-space:nowrap;' +
+    btn.style.cssText = 'display:inline-flex;align-items:center;justify-content:center;vertical-align:middle;flex:0 0 auto;' +
+      'margin:0;padding:3px 5px;border:1px solid #1a5f3e;border-radius:6px;white-space:nowrap;' +
       'background:#f0fdf4;color:#0d3d26;font:600 11px -apple-system,BlinkMacSystemFont,"Segoe UI",Arial,sans-serif;cursor:pointer;';
     btn.addEventListener('click', function (e) {
       e.preventDefault(); e.stopPropagation();
@@ -379,6 +386,9 @@
       var sampleHdr = headRow.children[0];
       if (sampleHdr) th.className = sampleHdr.className;   // match the grid's header chrome
       th.style.whiteSpace = 'nowrap';
+      th.style.width = '1%';          // shrink-to-fit: claim only what the label/icon needs
+      th.style.padding = '2px 6px';   // override MUI's wide cell padding - reclaim horizontal room
+      th.style.textAlign = 'center';
       th.textContent = 'Copy';
       headRow.insertBefore(th, headRow.firstChild);
     }
@@ -402,6 +412,9 @@
       if (sampleTd) td.className = sampleTd.className;   // match the grid's cell chrome
       td.style.whiteSpace = 'nowrap';
       td.style.overflow = 'visible';
+      td.style.width = '1%';          // shrink-to-fit: keep the column as narrow as the icon
+      td.style.padding = '2px 6px';   // override MUI's wide cell padding - reclaim horizontal room
+      td.style.textAlign = 'center';
       td.appendChild(buildRowButton(pid));
       row.insertBefore(td, row.firstChild);
     });
