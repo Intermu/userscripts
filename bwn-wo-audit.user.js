@@ -1,10 +1,10 @@
 // ==UserScript==
 // @name         BWN WO Audit (Broadway National)
 // @namespace    broadwaynational.bwn
-// @version      0.7.5
+// @version      0.8.0
 // @downloadURL  https://raw.githubusercontent.com/Intermu/userscripts/main/bwn-wo-audit.user.js
 // @updateURL    https://raw.githubusercontent.com/Intermu/userscripts/main/bwn-wo-audit.user.js
-// @description  Batch WO-audit tool. Upload a WO audit .xlsx; for each work order this reads its two most recent notes DIRECTLY from Umbrava's GraphQL API in-page (using your live Umbrava session - the same read the BWN Ops Suite AI drafts use), then asks the broadway-internal-ops SWA summarize route (x-bwn-key gated, Anthropic key server-side) to write a 1-3 sentence client-ready status note. Fills the audit's notes column and downloads the workbook, preserving every other cell and formula. Runs entirely in the app.umbrava.com page so it inherits your Umbrava auth - no MCP, no pasted keys, nothing sensitive in this script. This replaces the old standalone WO_Audit_Automation.html SWA tool, whose server-side MCP path could not authenticate to Umbrava.
+// @description  Batch WO-audit tool. Upload a WO audit .xlsx; for each work order this reads its two most recent notes DIRECTLY from Umbrava's GraphQL API in-page (using your live Umbrava session - the same read the BWN Ops Suite AI drafts use), then asks the broadway-internal-ops SWA summarize route (x-bwn-key gated, Anthropic key server-side) to write a 1-3 sentence client-ready status note. Fills the audit's notes column and downloads the workbook, preserving every other cell and formula. It also reads each WO's live header (status, phase, priority, GP, DNE/NTE, PO/vendor, schedule) in the same call and writes a deterministic Audit Flags column (OVERDUE, NEG/LOW GP, NTE>DNE, NO VENDOR, UNSCHEDULED, STALE) computed with no AI - so the exception audit survives an AI outage. Runs entirely in the app.umbrava.com page so it inherits your Umbrava auth - no MCP, no pasted keys, nothing sensitive in this script. This replaces the old standalone WO_Audit_Automation.html SWA tool, whose server-side MCP path could not authenticate to Umbrava.
 // @match        https://app.umbrava.com/*
 // @run-at       document-idle
 // @noframes
@@ -19,7 +19,7 @@
 (function () {
   'use strict';
 
-  var VER = '0.7.5';
+  var VER = '0.8.0';
   var FONT = "-apple-system,BlinkMacSystemFont,'Segoe UI','Helvetica Neue',Arial,sans-serif";
 
   // Suite drawer exit, per the contract in Core's ensureStyle. Core's stylesheet owns the fade;
@@ -42,7 +42,7 @@
     { id: 'claude-haiku-4-5', label: 'Haiku 4.5 (cheapest)' },
   ];
   var XLSX_MIME = 'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet';
-  console.info('[BWN WO AUDIT] v' + VER + ' - in-page GraphQL notes read -> bwnAI -> /api/ai summarize -> filled .xlsx download; registers into the shared dock (bwn:dock:*), no floating fallback button');
+  console.info('[BWN WO AUDIT] v' + VER + ' - in-page GraphQL header+notes read -> deterministic Audit Flags + bwnAI /api/ai status note -> filled .xlsx download; registers into the shared dock (bwn:dock:*)');
 
   // ====================================================================
   // Auth: the live Umbrava Auth0 bearer, read straight from the page (same
@@ -116,19 +116,71 @@
   function _stripHtml(s) { return String(s || '').replace(/<[^>]*>/g, ' ').replace(/\s+/g, ' ').trim(); }
   function sleep(ms) { return new Promise(function (r) { setTimeout(r, ms); }); }
 
-  // One WO's status + notes, newest first. Notes use Umbrava's REAL query, captured off the wire
-  // 2026-07-23: jobNotes(workOrderNumber, includeDeleted) - a ROOT field keyed by the WO NUMBER,
-  // so no internal-id lookup is needed. Field list is the confirmed WONoteFields subset. A real
-  // query error now REJECTS (surfaces loudly per WO) instead of silently returning 0 notes.
-  // statusName is an isolated best-effort read; on any drift it falls back to the xlsx Status col.
+  // One WO's LIVE header + notes, newest first. Notes use Umbrava's REAL jobNotes query (captured
+  // off the wire 2026-07-23, a ROOT field keyed by the WO NUMBER - no internal-id lookup). The
+  // header is the pinned single-WO WorkOrderFields read (the same one WO Assist's GP/NTE override
+  // uses): status, phase, priority, GP, DNE/NTE and PO/vendor presence in ONE call - so the audit
+  // judges LIVE state instead of the uploaded sheet's stale columns. Same call count as before
+  // (header replaces the old statusName-only read). The header is BEST-EFFORT (null on any error):
+  // a header miss must NOT fail the row - notes still summarize and flags just stay silent for that
+  // WO. Notes errors still REJECT (surface loudly per WO).
   var NOTES_Q = 'query($n:Int!){ jobNotes(workOrderNumber:$n, includeDeleted:false){ id type content contentHtml createdDate isPinned isCompletion workOrderNoteSource createdBy { firstName lastName } } }';
-  var STATUS_Q = 'query($n:Int!){ workOrder(workOrderNumber:$n){ statusName } }';
-  function woNotes(number) {
+  var HEADER_Q = 'query($n:Int!){ workOrder(workOrderNumber:$n){ statusName phase remainingDays nextOnsiteDate priority{ label category responseMinutes expectedCompletionDate } doNotExceed{ amount precision } totalNTE{ amount precision } grossProfitInfo{ estimatedGrossProfitPercent trueGrossProfitPercent } hasNonTerminatedPurchaseOrders purchaseOrders{ id } trades{ name } } }';
+
+  // ===== BWN AUDIT FLAGS START (pure; sliced by scripts/test-wo-audit-flags.js) =================
+  // Money arrives as minor units + its own precision ({amount:1448564, precision:2} = 14485.64).
+  function moneyDollars(m) {
+    if (!m || m.amount == null) return null;
+    var p = (typeof m.precision === 'number') ? m.precision : 2;
+    var n = Number(m.amount);
+    return isFinite(n) ? n / Math.pow(10, p) : null;
+  }
+  // GP% is a STRING FRACTION of DNE revenue, not a 0-100 number (pin: est = (DNE-NTE)/DNE). Prefer
+  // the true (invoiced) GP when present, else estimated. Returns a percent (x100) or null.
+  function gpPercent(h) {
+    var g = h && h.grossProfitInfo; if (!g) return null;
+    var raw = (g.trueGrossProfitPercent != null && g.trueGrossProfitPercent !== '') ? g.trueGrossProfitPercent : g.estimatedGrossProfitPercent;
+    if (raw == null || raw === '') return null;
+    var n = Number(raw);
+    return isFinite(n) ? n * 100 : null;
+  }
+  // Deterministic exception flags from the LIVE header + notes - no LLM, no rate limit, no cost, so
+  // they survive an AI outage (the 2026-08-18 credit failure would still have delivered these).
+  // `nowMs` is INJECTED, never Date.now(), so the harness asserts ages on a fixed clock
+  // ([[fixture-clock-time-day-age]] / [[headless-harness-cannot-time]]). A null header returns []
+  // (say nothing rather than fabricate a clean bill of health - unread is not empty).
+  var GP_LOW_PCT = 15;   // ponytail: business threshold - flag GP below this %. tune here.
+  var STALE_DAYS = 7;    // ponytail: business threshold - flag if the newest note is older. tune here.
+  function computeFlags(h, notes, nowMs) {
+    var f = [];
+    if (!h) return f;
+    if (typeof h.remainingDays === 'number' && h.remainingDays < 0) f.push('OVERDUE ' + Math.abs(h.remainingDays) + 'd');
+    var gp = gpPercent(h);
+    if (gp != null) { if (gp < 0) f.push('NEG GP'); else if (gp < GP_LOW_PCT) f.push('LOW GP ' + Math.round(gp) + '%'); }
+    var dne = moneyDollars(h.doNotExceed), nte = moneyDollars(h.totalNTE);
+    if (dne != null && nte != null && dne > 0 && nte > dne) f.push('NTE>DNE');
+    var hasVendor = (typeof h.hasNonTerminatedPurchaseOrders === 'boolean')
+      ? h.hasNonTerminatedPurchaseOrders
+      : !!(h.purchaseOrders && h.purchaseOrders.length);
+    if (!hasVendor) f.push('NO VENDOR');
+    if (String(h.phase || '') === 'Open' && !h.nextOnsiteDate) f.push('UNSCHEDULED');
+    if (notes && notes.length) {
+      var newest = _date(notes[0] && notes[0].createdDate);
+      if (newest) { var age = Math.floor((nowMs - (+newest)) / MS_DAY); if (age > STALE_DAYS) f.push('STALE ' + age + 'd'); }
+    } else if (notes) {
+      f.push('NO NOTES');
+    }
+    return f;
+  }
+  // ===== BWN AUDIT FLAGS END ====================================================================
+
+  function woFetch(number) {
     var n = parseInt(String(number).replace(/^W-?/i, '').replace(/[^0-9]/g, ''), 10);
     if (!n || isNaN(n)) return Promise.reject(new Error('not a WO number: "' + number + '"'));
-    var statusP = gql(STATUS_Q, { n: n }).then(function (d) { return (d && d.workOrder && d.workOrder.statusName) || ''; }).catch(function () { return ''; });
+    var headerP = gql(HEADER_Q, { n: n }).then(function (d) { return (d && d.workOrder) || null; }).catch(function () { return null; });
     var notesP = gql(NOTES_Q, { n: n }).then(function (d) { return (d && d.jobNotes) || []; });
-    return Promise.all([statusP, notesP]).then(function (a) {
+    return Promise.all([headerP, notesP]).then(function (a) {
+      var header = a[0];
       var notes = a[1].slice().sort(function (x, y) {
         return (_date(y && y.createdDate) || 0) - (_date(x && x.createdDate) || 0);
       }).map(function (x) {
@@ -143,7 +195,7 @@
           source: x.workOrderNoteSource || '',
         };
       });
-      return { id: n, statusName: a[0], notes: notes };
+      return { id: n, header: header, statusName: (header && header.statusName) || '', notes: notes };
     });
   }
 
@@ -370,18 +422,27 @@
       return head + '\n' + (txt || '(empty)');
     });
     var loc = [String(wo.location || '').trim(), [String(wo.city || '').trim(), String(wo.state || '').trim()].filter(Boolean).join(', ')].filter(Boolean).join(' ');
-    return [
+    // Client-appropriate LIVE header facts only. GP / DNE / NTE / system flags are internal audit
+    // signals (they land in the Audit Flags column) and are deliberately NOT fed to the client note.
+    var lines = [
       'WO #: ' + (String(wo.raw || wo.number || '').trim() || '(unknown)'),
       'Status: ' + (String(wo.status || '').trim() || '(unknown)'),
+      'Phase: ' + (String(wo.phase || '').trim() || '(unknown)'),
+      'Priority: ' + (String(wo.priority || '').trim() || '(unknown)'),
       'Location: ' + (loc || '(unknown)'),
       'Days open: ' + (String(wo.days || '').trim() || '(unknown)'),
       'Assigned: ' + (String(wo.assignedTo || '').trim() || '(unknown)'),
+      'Scheduled on-site: ' + (String(wo.schedule || '').trim() || '(none on file)')
+    ];
+    if (String(wo.overdue || '').trim()) lines.push('Overdue: ' + String(wo.overdue).trim());
+    lines.push(
       '',
       'Most recent notes (newest first):',
       noteLines.length ? noteLines.join('\n\n') : '(no notes provided)',
       '',
       'Write ONLY the 1-3 sentence client-ready status note.'
-    ].join('\n');
+    );
+    return lines.join('\n');
   }
 
   // Parse `retry-after` out of GM_xmlhttpRequest's raw CRLF header blob. Accepts either form
@@ -685,6 +746,13 @@
     }
     return last;
   }
+  // Flags column: prefer an explicit "Audit Flags"/"Flags"/"Exceptions" header (so a recurring
+  // audit reuses its own column instead of appending a duplicate each run); else -1 -> append.
+  function findFlagCol(hdr) {
+    var pref = [/^audit\s*flags?$/i, /^flags?$/i, /^exceptions?$/i, /audit.*flags?|flags?.*audit/i];
+    for (var p = 0; p < pref.length; p++) { for (var c = 0; c < hdr.length; c++) { if (pref[p].test(hdr[c])) return c; } }
+    return -1;
+  }
   function mapSheet(ws) {
     var aoa = XLSX.utils.sheet_to_json(ws, { header: 1, raw: true, blankrows: false });
     // Locate the header row: the first row (of the first 15) that matches a key pattern.
@@ -710,8 +778,11 @@
       assigned: findCol(hdr, [/assigned|coordinator|owner/i]),
       note: findNoteCol(hdr),
       noteAppended: false,
+      flag: findFlagCol(hdr),
+      flagAppended: false,
     };
     map.noteName = map.note > -1 ? hdr[map.note] : null;
+    map.flagName = map.flag > -1 ? hdr[map.flag] : null;
     map.aoa = aoa;
     return map;
   }
@@ -724,6 +795,17 @@
     range.e.c = col;
     ws['!ref'] = XLSX.utils.encode_range(range);
     map.note = col; map.noteName = 'Audit Notes'; map.noteAppended = true;
+    return map;
+  }
+  // Ensure an Audit Flags column; append one if none was detected. Mirrors ensureNoteCol.
+  function ensureFlagCol(ws, map) {
+    if (map.flag > -1) return map;
+    var range = XLSX.utils.decode_range(ws['!ref']);
+    var col = range.e.c + 1;
+    ws[XLSX.utils.encode_cell({ c: col, r: map.headerRow })] = { t: 's', v: 'Audit Flags' };
+    range.e.c = col;
+    ws['!ref'] = XLSX.utils.encode_range(range);
+    map.flag = col; map.flagName = 'Audit Flags'; map.flagAppended = true;
     return map;
   }
   function cellStr(aoa, r, c) {
@@ -875,6 +957,7 @@
       var info = [
         'WO # column: ' + (map.keyName != null ? '"' + map.keyName + '"' : 'NOT FOUND (cannot run)'),
         'Work orders detected: ' + dataRows.length,
+        'Audit Flags column: ' + (map.flagName != null ? '"' + map.flagName + '"' : 'will append "Audit Flags"'),
       ].join('\n');
       $('bwn-woaudit-mapinfo').textContent = info;
       $('bwn-woaudit-start').disabled = !(map.key > -1 && dataRows.length);
@@ -913,6 +996,10 @@
         else { session.map.note = parseInt(pick, 10); if (isNaN(session.map.note)) { session.map.note = -1; ensureNoteCol(ws, session.map); } }
       }
 
+      // Flags column: detect-or-append once (no picker - flags are new output, low clobber risk).
+      // Guard on flagAppended so a resume/retry does not append a second "Audit Flags" column.
+      if (session.map.flag === -1 && !session.map.flagAppended) ensureFlagCol(ws, session.map);
+
       // Resume, not just retry: rows a cancel skipped owe a note exactly as much as errored rows
       // do, and matching `.error` alone left them permanently unfinishable.
       var targets = retryOnly
@@ -946,12 +1033,23 @@
             ', waiting ' + Math.round(ms / 1000) + 's' +
             (throttled ? (hadHeader ? ' (server retry-after)' : ' (no retry-after header)') : ''));
         };
-        return woNotes(row.key)
+        return woFetch(row.key)
           .then(function (data) {
+            var h = data.header;
+            // Deterministic flags first, written straight to the sheet - they need no AI, so they
+            // survive even if the summarize below fails (credits/throttle). A header miss -> [].
+            if (session.map.flag > -1) {
+              var flags = computeFlags(h, data.notes, Date.now());
+              ws[XLSX.utils.encode_cell({ c: session.map.flag, r: row.rowIdx })] = { t: 's', v: flags.join(', ') };
+            }
             var woFacts = {
               raw: row.key,
               number: row.key,
-              status: data.statusName || cellStr(session.map.aoa, row.rowIdx, session.map.status),
+              status: (h && h.statusName) || cellStr(session.map.aoa, row.rowIdx, session.map.status),
+              phase: h ? (h.phase || '') : '',
+              priority: (h && h.priority && h.priority.label) || '',
+              schedule: (h && h.nextOnsiteDate) || '',
+              overdue: (h && typeof h.remainingDays === 'number' && h.remainingDays < 0) ? (Math.abs(h.remainingDays) + ' days past expected completion') : '',
               city: cellStr(session.map.aoa, row.rowIdx, session.map.city),
               state: cellStr(session.map.aoa, row.rowIdx, session.map.state),
               location: cellStr(session.map.aoa, row.rowIdx, session.map.location),
