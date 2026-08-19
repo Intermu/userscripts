@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         BWN Proposal Copy (Broadway National)
 // @namespace    broadwaynational.bwn
-// @version      0.1.9
+// @version      0.1.10
 // @downloadURL  https://raw.githubusercontent.com/Intermu/userscripts/main/bwn-proposal-copy.user.js
 // @updateURL    https://raw.githubusercontent.com/Intermu/userscripts/main/bwn-proposal-copy.user.js
 // @description  Copy a client proposal from an aged-out work order onto a chosen replacement WO as an un-submitted Draft, in one confirmed action. Replays Umbrava's own createDraftProposal + editProposal mutations (line items copied verbatim); never submits, deletes, or retries. Manager-gated visibility. @grant none.
@@ -15,7 +15,7 @@
 (function () {
   'use strict';
 
-  var VER = '0.1.9';   // keep in step with @version
+  var VER = '0.1.10';   // keep in step with @version
   var DRY_RUN = false; // when true, the two WRITE mutations are logged, not sent
   console.info('[BWN PROPOSAL COPY] v' + VER + ' - copy client proposal to another WO as a Draft (createDraftProposal + editProposal replay)');
 
@@ -354,69 +354,70 @@
     });
     return btn;
   }
-  // ---- Copy gets its OWN column --------------------------------------------
-  // Earlier builds injected Copy INTO the first cell (the "More"/actions column). That cell also
-  // hosts Umbrava's native hover-reveal "..." menu; sharing it made Copy eat the menu's width, so
-  // the "..." spilled under the next column and read as truncated. Fix: give Copy a dedicated
-  // leftmost column - a real <th> in the header row plus one <td> per body row - so it never
-  // touches the actions cell again. React re-renders wipe injected nodes (measured live
-  // 2026-08-14), so the header cell and every body cell are re-added on PRESENCE, driven by the
-  // MutationObserver + interval below. Injected cells borrow a sibling's className so the grid's
-  // padding/border/typography match; the auto-layout table then sizes the new column to fit.
+  // ---- Copy lives in the native actions ("More") cell - NO new column --------
+  // History: 0.1.3-0.1.9 gave Copy its OWN leftmost column. That was wrong for THIS table.
+  // Measured live 2026-08-19: the client-proposals grid is `table-layout:fixed` with a <colgroup>
+  // of explicit <col> widths. In fixed layout the column width comes from the <col>, NOT the cell -
+  // so cell padding / width:1% did nothing, and worse, an injected cell with no matching <col>
+  // grabbed the first <col>'s width AND shifted every native column's width assignment right by one,
+  // starving the LAST native column (the operator's Gross Profit %). That is the "GP% clipped at
+  // 100% zoom" report. A narrower button could never fix it - the column itself was the cost.
+  //
+  // Fix: add no column at all. Inject the Copy icon INTO the native actions cell (the "More" column,
+  // which already holds Umbrava's hover "..." kebab in a .context-menu-wrapper). Because the table
+  // is fixed-layout, cell CONTENT cannot change that column's width - so this adds ZERO table width
+  // and the native columns keep their intended <col> widths (verified live: More cell stays 80px,
+  // our 26px icon sits beside the 32px kebab, no overlap, same row). The old "..." spill that made
+  // us leave this cell in the first place was an AUTO-layout artifact; it cannot recur here.
+  //
+  // React re-renders wipe injected nodes, so we re-add on button ABSENCE each pass (MutationObserver
+  // + interval below). Anchor on .context-menu-wrapper (the actions container), falling back to the
+  // "More" header's column index; if neither resolves, inject nothing (fail closed - never guess a
+  // cell). Legacy [data-bwn-pc-hdr]/[data-bwn-pc-cell] artifacts from <=0.1.9 are swept on sight.
+  function moreColumnIndex(table) {
+    var head = (table && table.tHead && table.tHead.rows.length) ? table.tHead.rows[0] : null;
+    if (!head) return -1;
+    for (var i = 0; i < head.children.length; i++) {
+      if (/^\s*more\s*$/i.test(head.children[i].textContent || '')) return i;
+    }
+    return -1;
+  }
+  function actionsCellForRow(row, moreIdx) {
+    var wrap = row.querySelector('.context-menu-wrapper');
+    if (wrap && wrap.closest) { var td = wrap.closest('td'); if (td) return td; }
+    if (moreIdx != null && moreIdx >= 0 && row.children[moreIdx]) return row.children[moreIdx];
+    return null;
+  }
   function injectCopyColumn() {
     if (!onClientProposalsList()) return;
+    // Sweep any dedicated-column artifacts left by <=0.1.9 (upgraders may still have them mid-render).
+    Array.prototype.forEach.call(
+      document.querySelectorAll('[' + COL_HDR_MARK + '],[' + COL_CELL_MARK + ']'),
+      function (n) { try { n.remove(); } catch (e) { } });
     if (!gated()) {
-      // Rank dropped (or never known): drop the WHOLE column - header and every body cell
-      // together - so no row is left short a cell (which would shift its other columns).
-      // Re-injected in full if rank recovers.
-      Array.prototype.forEach.call(
-        document.querySelectorAll('[' + COL_HDR_MARK + '],[' + COL_CELL_MARK + ']'),
+      // Rank dropped (or never known): remove our buttons from the actions cells.
+      Array.prototype.forEach.call(document.querySelectorAll('.' + ROW_BTN_CLASS),
         function (n) { try { n.remove(); } catch (e) { } });
       return;
     }
     var rows = proposalRows();
     if (!rows.length) return;
     var table = rows[0].closest ? rows[0].closest('table') : null;
-
-    // Header cell (once).
-    var headRow = (table && table.tHead && table.tHead.rows.length) ? table.tHead.rows[0] : null;
-    if (headRow && !headRow.querySelector('th[' + COL_HDR_MARK + ']')) {
-      var th = document.createElement('th');
-      th.setAttribute(COL_HDR_MARK, '1');
-      var sampleHdr = headRow.children[0];
-      if (sampleHdr) th.className = sampleHdr.className;   // match the grid's header chrome
-      th.style.whiteSpace = 'nowrap';
-      th.style.width = '1%';          // shrink-to-fit: claim only what the label/icon needs
-      th.style.padding = '2px 6px';   // override MUI's wide cell padding - reclaim horizontal room
-      th.style.textAlign = 'center';
-      th.textContent = 'Copy';
-      headRow.insertBefore(th, headRow.firstChild);
-    }
-
-    // One body cell per row - Copy lives ALONE here, never in the actions cell.
+    var moreIdx = moreColumnIndex(table);
     rows.forEach(function (row) {
       if (!isClientProposalRow(row)) return;
-      var cell = row.querySelector('td[' + COL_CELL_MARK + ']');
-      if (cell) {
-        // Cell survived; React may have wiped only the button inside it. Re-add on presence.
-        var b = cell.querySelector('.' + ROW_BTN_CLASS);
-        if (!b) { var pid0 = proposalIdFromRow(row); if (pid0 != null) cell.appendChild(buildRowButton(pid0)); }
-        else b.style.display = '';
-        return;
-      }
+      var cell = actionsCellForRow(row, moreIdx);
+      if (!cell) return;                                     // fail safe: no actions cell, inject nothing
+      if (cell.querySelector('.' + ROW_BTN_CLASS)) return;   // already present (survives React wipes)
       var pid = proposalIdFromRow(row);
-      if (pid == null) return;   // fail safe: no confirmed id, no cell
-      var td = document.createElement('td');
-      td.setAttribute(COL_CELL_MARK, '1');
-      var sampleTd = row.children[0];
-      if (sampleTd) td.className = sampleTd.className;   // match the grid's cell chrome
-      td.style.whiteSpace = 'nowrap';
-      td.style.overflow = 'visible';
-      td.style.width = '1%';          // shrink-to-fit: keep the column as narrow as the icon
-      td.style.padding = '2px 6px';   // override MUI's wide cell padding - reclaim horizontal room
-      td.style.textAlign = 'center';
-      td.appendChild(buildRowButton(pid));
-      row.insertBefore(td, row.firstChild);
+      if (pid == null) return;                               // fail safe: no confirmed id
+      var btn = buildRowButton(pid);
+      btn.style.marginRight = '4px';
+      // The kebab wrapper is display:block and would push our button onto its own line; make both
+      // inline so they sit side by side within the fixed-width cell.
+      var wrap = cell.querySelector('.context-menu-wrapper');
+      if (wrap) { wrap.style.display = 'inline-block'; wrap.style.verticalAlign = 'middle'; }
+      cell.insertBefore(btn, cell.firstChild);
     });
   }
 
