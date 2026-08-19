@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         BWN Suite - Note Templates (Broadway National)
 // @namespace    broadwaynational.bwn
-// @version      0.3.0
+// @version      0.6.1
 // @description  Canned dispatch-note templates in a "Templates" dropdown beside the "+ Add" note button in the Umbrava Dispatch Board's work-order detail panel (Notes tab). Picking a template opens Umbrava's own Add Note composer and DRAFTS the note into it (signed with your first name, ______ blanks left for you to fill) - it is NEVER auto-posted; you review, set the Type, and click Save. STANDALONE: carries its own tiptap/ProseMirror inserter, so in-house techs install this one script alone - no drop-upload dependency. Still prefers drop-upload's hook (window.__bwnFillNoteEditor) when that script is also installed, so coordinator machines keep a single live-tested fill path. @grant none, zero egress.
 // @match        https://app.umbrava.com/*
 // @run-at       document-idle
@@ -34,7 +34,7 @@
     { group: 'Call outs', items: [
       { label: 'Tech called out - redirect (week full)', signed: false,
         body: 'Good morning,\nUnfortunately, our technician called out today and his schedule for the rest of the week is full.\nThis work order will need to be redirected. Sorry for any inconvenience.' },
-      { label: 'Tech called out - reschedule for ___', signed: false,
+      { label: 'Tech called out - reschedule for ___', signed: false, date: 'day',
         body: 'Good morning,\nUnfortunately, our technician called out today and this work order will need to be rescheduled for ______ . Apologies for the inconvenience.' }
     ] },
     { group: 'Completed work', items: [
@@ -46,11 +46,11 @@
         body: 'Hi team, we will get this quote over to your shortly.\nThank you for your patience' }
     ] },
     { group: 'New work to schedule', items: [
-      { label: 'Scheduled for ___', signed: true,
+      { label: 'Scheduled for ___', signed: true, date: 'day',
         body: 'Hi Team, this has been scheduled for ______\nThank you' },
-      { label: 'No availability until week of ___ - redirect', signed: true,
+      { label: 'No availability until week of ___ - redirect', signed: true, date: 'weekOf',
         body: "Hi team, at this time we don't have availability in this area until the week of _______ , apologies please redirect" },
-      { label: 'Soonest on-site ___ - schedule or redirect', signed: true,
+      { label: 'Soonest on-site ___ - schedule or redirect', signed: true, date: 'day',
         body: 'Good afternoon,\nUnfortunately, the soonest we could have someone on site for this work order would be ________\nIf the store can wait until then we can get this schedule, otherwise this will need to be redirected.\nPlease advise' },
       { label: 'Too far / not cost-effective - redirect', signed: true,
         body: "Hi team,\nThis location is _____ hours from our nearest technician, which would round-trip travel of __________ in addition to the assessment fee. Given the scope of work, I don't believe this is cost-effective for either your team or ours.\nPlease redirect\nThank you." }
@@ -63,6 +63,28 @@
     var t = tpl.body;
     if (tpl.signed) t += '\n-' + (firstName || '______');
     return t;
+  }
+
+  // ---- Date-fill for templates that carry a `date` blank -----------------------------------
+  // A native <input type="date"> gives the picker; these turn its y/m/d into the text that
+  // replaces the blank, so nobody types the date. Build the Date LOCALLY (new Date(y, m-1, d))
+  // - parsing "yyyy-mm-dd" as a string is UTC and lands a day early in western time zones.
+  //   date:'day'    -> "Friday 8/21" (weekday + M/D, the way the notes read)
+  //   date:'weekOf' -> "8/18", snapped to that week's Monday (body already says "week of")
+  var DOW = ['Sunday', 'Monday', 'Tuesday', 'Wednesday', 'Thursday', 'Friday', 'Saturday'];
+  function fmtDay(y, m, d) {
+    var dt = new Date(y, m - 1, d);
+    return DOW[dt.getDay()] + ' ' + (dt.getMonth() + 1) + '/' + dt.getDate();
+  }
+  function fmtWeekOf(y, m, d) {
+    var dt = new Date(y, m - 1, d);
+    dt.setDate(dt.getDate() - ((dt.getDay() + 6) % 7));   // back up to Monday (Mon=0 ... Sun=6)
+    return (dt.getMonth() + 1) + '/' + dt.getDate();
+  }
+  // Replace the FIRST underscore-run blank with the formatted date. No blank -> body unchanged
+  // (a mislabelled template just drafts as-is rather than throwing).
+  function applyDate(body, kind, y, m, d) {
+    return body.replace(/_{3,}/, kind === 'weekOf' ? fmtWeekOf(y, m, d) : fmtDay(y, m, d));
   }
   // BWN-NOTES-SLICE-END
 
@@ -177,16 +199,107 @@
   // On the dispatch-board detail panel: click the note "+ Add" button to open Umbrava's own Add Note
   // modal (the SAME tiptap/ProseMirror composer as the WO page), then fill it. The dispatcher reviews,
   // fills the ______ blanks, sets the Type, and clicks Umbrava's Add/Save. We NEVER post.
+  // Entry point for a picked template. Date templates (reschedule / scheduled / soonest / week-of)
+  // pop a native date picker first so the blank is filled from a calendar, not typed; the rest draft
+  // straight away. Either way we open Umbrava's own Add Note composer and DRAFT - we NEVER post.
   function pickTemplate(tpl) {
+    if (tpl.date) { promptDateThenDraft(tpl); return; }
+    draftTemplate(tpl, tpl.body);
+  }
+  function draftTemplate(tpl, body) {
     var addBtn = noteAddButton();
-    if (!addBtn) { alert('Open a work order on the board and its Notes tab first, then pick a template.'); return; }
-    var text = buildNote(tpl, currentFirstName());
+    if (!addBtn) { alert('Open a work order (board panel or WO page) on its Notes tab, then pick a template.'); return; }
+    var text = buildNote({ body: body, signed: tpl.signed }, currentFirstName());
     addBtn.click();                              // open Umbrava's Add Note composer
     // Prefer drop-upload's live-tested hook when that script is also installed (coordinators); else use
     // our own inlined fill (in-house techs run this script alone). '' noteType = leave Type for the user.
     var fill = (typeof window.__bwnFillNoteEditor === 'function') ? window.__bwnFillNoteEditor : fillNoteEditor;
     try { fill(text, ''); } catch (e) { alert('Could not draft the note: ' + ((e && e.message) || e)); }
   }
+  // A small popover with a native <input type="date">. Picking a date substitutes the blank and drafts;
+  // "Leave blank" drafts with the ______ intact (the old behaviour). Escape / click-out cancels.
+  function promptDateThenDraft(tpl) {
+    var old = document.getElementById('bwn-notes-datepop'); if (old) old.remove();
+    var pop = document.createElement('div');
+    pop.id = 'bwn-notes-datepop';
+    pop.style.cssText = 'position:fixed;z-index:99999;top:96px;left:50%;transform:translateX(-50%);min-width:264px;background:#fff;border:1px solid #e2e8f0;border-radius:10px;box-shadow:0 12px 34px rgba(0,0,0,.22);padding:14px 16px;font-family:-apple-system,BlinkMacSystemFont,"Segoe UI",Arial,sans-serif;';
+    var title = document.createElement('div');
+    title.textContent = tpl.date === 'weekOf' ? 'Pick the week' : 'Pick the date';
+    title.style.cssText = 'font:600 13px inherit;color:#1e293b;margin-bottom:8px;';
+    var inp = document.createElement('input');
+    inp.type = 'date';
+    inp.style.cssText = 'font:500 14px inherit;padding:7px 9px;border:1px solid #cbd5e1;border-radius:7px;width:100%;box-sizing:border-box;color:#1e293b;';
+    var row = document.createElement('div');
+    row.style.cssText = 'display:flex;gap:8px;justify-content:flex-end;align-items:center;margin-top:12px;';
+    if (tpl.date === 'weekOf') {
+      var hint = document.createElement('div');
+      hint.textContent = "Any day in the week - we'll use that week's Monday.";
+      hint.style.cssText = 'font:500 11px inherit;color:#64748b;margin-top:6px;';
+      pop.appendChild(title); pop.appendChild(inp); pop.appendChild(hint);
+    } else {
+      pop.appendChild(title); pop.appendChild(inp);
+    }
+    var blank = document.createElement('button');
+    blank.type = 'button'; blank.textContent = 'Leave blank';
+    blank.style.cssText = 'padding:6px 10px;border:1px solid #cbd5e1;background:#fff;border-radius:7px;cursor:pointer;font:500 12px inherit;color:#475569;';
+    var use = document.createElement('button');
+    use.type = 'button'; use.textContent = 'Use date';
+    use.style.cssText = 'padding:6px 12px;border:none;border-radius:7px;cursor:pointer;font:600 12px inherit;color:#fff;background:' + GREEN + ';';
+    row.appendChild(blank); row.appendChild(use);
+    pop.appendChild(row);
+
+    function close() {
+      pop.remove();
+      document.removeEventListener('mousedown', onOut, true);
+      document.removeEventListener('keydown', onKey, true);
+    }
+    function onOut(e) { if (!pop.contains(e.target)) close(); }
+    function onKey(e) { if (e.key === 'Escape') { e.preventDefault(); close(); } }
+    function commit() {
+      if (!inp.value) { inp.focus(); return; }
+      var p = inp.value.split('-');            // yyyy-mm-dd
+      var body = applyDate(tpl.body, tpl.date, +p[0], +p[1], +p[2]);
+      close(); draftTemplate(tpl, body);
+    }
+    use.addEventListener('click', commit);
+    inp.addEventListener('change', function () { if (inp.value) commit(); });
+    blank.addEventListener('click', function () { close(); draftTemplate(tpl, tpl.body); });
+    document.body.appendChild(pop);
+    setTimeout(function () {
+      document.addEventListener('mousedown', onOut, true);
+      document.addEventListener('keydown', onKey, true);
+      try { inp.focus(); if (inp.showPicker) inp.showPicker(); } catch (e) { }   // open the OS calendar
+    }, 0);
+  }
+
+  // Cross-script bridge to the AI script over the DOM event bus. The AI script is GM_-sandboxed and
+  // cannot read this @grant-none script's page-window globals, so we don't expose a global - we answer
+  // the bus: on `notes:tpl:req` reply with a serializable list (no functions cross the sandbox), and on
+  // `notes:tpl:pick` run our own pickTemplate (the bodies, the calendar and the fill all live here). A
+  // req also tells us an AI script is present and will render the merged "Draft", so we stand our own
+  // WO-page button down (aiWantsMerge) to avoid a double button.
+  var aiWantsMerge = false;
+  function tplList() {
+    return TEMPLATES.map(function (g, gi) {
+      return { group: g.group, items: g.items.map(function (t, ii) { return { id: gi + ':' + ii, label: t.label, date: t.date || null }; }) };
+    });
+  }
+  function tplById(id) {
+    var p = String(id).split(':'), g = TEMPLATES[+p[0]];
+    return g ? g.items[+p[1]] : null;
+  }
+  function announceTpl() { try { document.dispatchEvent(new CustomEvent('bwn:evt', { detail: { id: 'notes:tpl:list', groups: tplList() } })); } catch (e) { } }
+  document.addEventListener('bwn:cmd', function (e) {
+    var d = e && e.detail; if (!d) return;
+    if (d.id === 'notes:tpl:req') {
+      aiWantsMerge = true;
+      var own = document.getElementById(WO_BTN_ID); if (own) own.remove();   // AI owns the merged Draft
+      announceTpl();
+    } else if (d.id === 'notes:tpl:pick') {
+      var t = tplById(d.tplId); if (t) pickTemplate(t);
+    }
+  });
+  announceTpl();   // broadcast once on load too, for an AI script that mounted before it could ask
 
   // ===== The dropdown (self-contained; fixed-positioned so no ancestor clips it) ============
   function buildDropdown() {
@@ -263,9 +376,11 @@
     }
     return null;
   }
-  function noteAddButton() {
-    var s = noteSearchInput();
-    if (!s) return null;
+  // The clickable note "Add" trigger, in EITHER notes state:
+  //  - populated: the toolbar "+ Add" button beside the "note description" search box (live-tested).
+  //  - empty ("No Notes / Click Add to create a new Note"): the inline "Add" link - the panel has no
+  //    search box or toolbar then. pickTemplate clicks whichever we return to open the Add composer.
+  function toolbarAdd(s) {
     var row = s;
     for (var d = 0; d < 5 && row; d++) {
       var btns = row.querySelectorAll ? row.querySelectorAll('button') : [];
@@ -276,27 +391,119 @@
     }
     return null;
   }
+  // The "Add" word inside the empty-notes prompt. Match an element whose WHOLE text is "Add" and that
+  // sits within the "...create a new Note" prompt, so we never grab some other "Add" on the panel.
+  function emptyStateAdd() {
+    var els = document.querySelectorAll('a,button,[role="button"],span');
+    for (var i = 0; i < els.length; i++) {
+      var el = els[i];
+      if (!el.offsetParent || (el.textContent || '').trim().toLowerCase() !== 'add') continue;
+      var ctx = el;
+      for (var d = 0; d < 4 && ctx; d++) {
+        if (/create a new note/i.test(ctx.textContent || '')) return el;
+        ctx = ctx.parentElement;
+      }
+    }
+    return null;
+  }
+  // The full WO page (/work-orders/<id>) has an "Add Note" button (not the board's "+ Add"). Needed so
+  // a template picked from the merged "Draft" flyout can open the composer there too.
+  function woAddNote() {
+    var btns = document.querySelectorAll('button');
+    for (var i = 0; i < btns.length; i++) {
+      if (btns[i].offsetParent && /^add note$/i.test((btns[i].textContent || '').trim())) return btns[i];
+    }
+    return null;
+  }
+  function noteAddButton() {
+    var s = noteSearchInput();
+    if (s) return toolbarAdd(s);              // board, populated
+    return woAddNote() || emptyStateAdd();    // WO page "Add Note", else board empty-state "Add"
+  }
+  // The Trips/Notes/Docs/Proposals tab strip - the band the toolbar (and Templates) normally sits
+  // under. Used to place the button there in the empty state, where there is no toolbar to anchor to,
+  // so it lands as close to its populated spot (screenshot: left of "+ Add") as the empty DOM allows.
+  function notesTabStrip() {
+    var els = document.querySelectorAll('button,a,[role="tab"]');
+    for (var i = 0; i < els.length; i++) {
+      var el = els[i];
+      if (!el.offsetParent || (el.textContent || '').trim() !== 'Notes') continue;
+      var strip = el.parentElement;
+      for (var d = 0; d < 3 && strip; d++) {
+        var t = strip.textContent || '';
+        if (/Trips/.test(t) && /Docs/.test(t)) return strip;
+        strip = strip.parentElement;
+      }
+    }
+    return null;
+  }
   function mount() {
     var existing = document.getElementById(BTN_ID);
     if (existing && existing.isConnected) return true;
-    var addBtn = noteAddButton();
+    var search = noteSearchInput();
+    var addBtn = search ? toolbarAdd(search) : emptyStateAdd();
     if (!addBtn || !addBtn.parentNode) return false;
     var bar = document.createElement('span');
     bar.id = BTN_ID;
-    bar.style.cssText = 'display:inline-flex;align-items:center;vertical-align:middle;margin-right:8px;';
     bar.appendChild(buildDropdown());
-    addBtn.parentNode.insertBefore(bar, addBtn);   // sit just left of "+ Add"
-    console.info('[BWN NOTES] template dropdown mounted (dispatch board notes)');
+    if (search) {
+      // Populated: a real toolbar exists - sit just left of "+ Add" (screenshot: Search | Templates | + Add).
+      bar.style.cssText = 'display:inline-flex;align-items:center;vertical-align:middle;margin-right:8px;';
+      addBtn.parentNode.insertBefore(bar, addBtn);
+    } else {
+      // Empty ("No Notes"): no toolbar to anchor to. Drop it into the Trips/Notes/Docs tab-strip band so
+      // it lands as close to the populated spot as the empty DOM allows, instead of wedging mid-sentence
+      // beside the inline "Add". Fall back to beside "Add" only if the strip isn't found, so it still shows.
+      var strip = notesTabStrip();
+      if (strip && strip.parentNode) {
+        // ponytail: float:right right-aligns it in the band without knowing the strip's flex/grid setup;
+        // swap to the container's own layout once the empty-state DOM is measured live.
+        bar.style.cssText = 'display:inline-flex;align-items:center;float:right;margin:6px 6px 0 8px;';
+        strip.parentNode.insertBefore(bar, strip.nextSibling);
+      } else {
+        bar.style.cssText = 'display:inline-flex;align-items:center;vertical-align:middle;margin:0 6px;';
+        addBtn.parentNode.insertBefore(bar, addBtn);
+      }
+    }
+    console.info('[BWN NOTES] template dropdown mounted (notes ' + (search ? 'toolbar' : 'empty state') + ')');
     return true;
   }
 
+  // The regular WO page (/work-orders/<id>) has no board toolbar - anchor a "Templates" button left of
+  // "Add Note". Only for techs whose machine has NO AI script: when the AI script is present it asks us
+  // over the bus (aiWantsMerge) and renders the merged "Draft" instead, so we stand down.
+  var WO_BTN_ID = 'bwn-notes-wo-dd';
+  function aiDraftPresent() { return !!document.getElementById('bwn-client-update-btn'); }
+  function woMount() {
+    // Stand our standalone button down whenever the AI script's Draft button is up (it renders the
+    // merged flyout). Check the DOM, not just the bus flag: the AI script can pick up our load-time
+    // broadcast without ever sending a req we hear, so the flag alone missed it and both mounted.
+    if (aiWantsMerge || aiDraftPresent()) { var claimed = document.getElementById(WO_BTN_ID); if (claimed) claimed.remove(); return true; }
+    var ex = document.getElementById(WO_BTN_ID);
+    if (ex && ex.isConnected) return true;
+    var add = woAddNote();
+    if (!add || !add.parentNode) return false;
+    var bar = document.createElement('span');
+    bar.id = WO_BTN_ID;
+    bar.style.cssText = 'display:inline-flex;align-items:center;vertical-align:middle;margin-right:8px;';
+    bar.appendChild(buildDropdown());
+    add.parentNode.insertBefore(bar, add);            // sit just left of "Add Note"
+    console.info('[BWN NOTES] template dropdown mounted (WO page, standalone)');
+    return true;
+  }
+  // Route-aware tick: the board panel uses mount() (search / empty-state / tab-strip anchors), the WO
+  // page uses woMount(). Returns true when nothing is left to do so the poll can rest.
+  function tick() {
+    if (/dispatch-board/.test(location.pathname)) return mount();
+    if (/\/work-orders\//.test(location.pathname)) return woMount();
+    return true;
+  }
   var pollTimer = null;
   function schedule() {
-    if (mount()) { if (pollTimer) { clearInterval(pollTimer); pollTimer = null; } return; }
+    if (tick()) { if (pollTimer) { clearInterval(pollTimer); pollTimer = null; } return; }
     if (pollTimer) return;
     pollTimer = setInterval(function () {
-      // stop polling once mounted, or when we leave the dispatch board (the notes toolbar is gone)
-      if (mount() || !/dispatch-board/.test(location.pathname)) { clearInterval(pollTimer); pollTimer = null; }
+      if (tick()) { clearInterval(pollTimer); pollTimer = null; }
     }, 400);
   }
   var obs = new MutationObserver(schedule);

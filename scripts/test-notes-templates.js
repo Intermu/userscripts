@@ -38,11 +38,12 @@ var SRC = slice(readLF(path.join(__dirname, '..', 'bwn-notes.user.js')),
 
 function build(src) {
   var ctx = vm.createContext({ console: console });
-  vm.runInContext(src + '\nthis.firstNameFromUser = firstNameFromUser; this.TEMPLATES = TEMPLATES; this.buildNote = buildNote;', ctx);
+  vm.runInContext(src + '\nthis.firstNameFromUser = firstNameFromUser; this.TEMPLATES = TEMPLATES; this.buildNote = buildNote; this.fmtDay = fmtDay; this.fmtWeekOf = fmtWeekOf; this.applyDate = applyDate;', ctx);
   return ctx;
 }
 var env = build(SRC);
 var TEMPLATES = env.TEMPLATES, buildNote = env.buildNote, firstNameFromUser = env.firstNameFromUser;
+var fmtDay = env.fmtDay, fmtWeekOf = env.fmtWeekOf, applyDate = env.applyDate;
 function allItems(t) { return t.reduce(function (a, g) { return a.concat(g.items); }, []); }
 
 // ---- groups + templates intact -----------------------------------------------------------
@@ -78,9 +79,30 @@ A.eq('unsigned note gets NO signature (body unchanged)', buildNote(callout, 'Aly
 A.ok('no template body bakes in a literal name (signature is always dynamic)',
   allItems(TEMPLATES).every(function (t) { return !/-\s*Alyssa\b/i.test(t.body); }));
 
+// ---- date-fill: the picker turns y/m/d into the blank's text -----------------------------
+// The four date templates declare a `date` kind; the rest declare none (money/hours stay manual).
+A.eq('exactly 4 templates carry a date blank', allItems(TEMPLATES).filter(function (t) { return t.date; }).length, 4);
+A.eq('reschedule is a day', byLabel(/reschedule/).date, 'day');
+A.eq('scheduled-for is a day', byLabel(/^Scheduled for/).date, 'day');
+A.eq('soonest-on-site is a day', byLabel(/Soonest on-site/).date, 'day');
+A.eq('week-of is weekOf', byLabel(/week of/).date, 'weekOf');
+A.ok('completed FC ($, not a date) has no date kind', !byLabel(/Completed/).date);
+// Aug 21 2026 is a Friday; Monday of its week is Aug 17. Built LOCALLY so weekday is TZ-stable.
+A.eq('fmtDay -> weekday + M/D', fmtDay(2026, 8, 21), 'Friday 8/21');
+A.eq('fmtWeekOf -> that week\'s Monday, M/D', fmtWeekOf(2026, 8, 21), '8/17');
+A.eq('fmtWeekOf snaps a Monday to itself', fmtWeekOf(2026, 8, 17), '8/17');
+A.eq('fmtWeekOf snaps a Sunday back to its Monday', fmtWeekOf(2026, 8, 23), '8/17');
+A.ok('applyDate fills the reschedule blank', /rescheduled for Friday 8\/21 \./.test(applyDate(byLabel(/reschedule/).body, 'day', 2026, 8, 21)));
+A.ok('applyDate fills the week-of blank', /week of 8\/17 ,/.test(applyDate(byLabel(/week of/).body, 'weekOf', 2026, 8, 21)));
+A.eq('applyDate leaves a blank-less body untouched', applyDate('no blank here', 'day', 2026, 8, 21), 'no blank here');
+
 // ---- negative control: revert the signed-gate, assert red --------------------------------
 var g1 = build(mutate(SRC, 'if (tpl.signed) t += ', 'if (true) t += '));
 A.ok('[neg] without the signed gate, an unsigned call-out wrongly gets a signature',
   /\n-Alyssa$/.test(g1.buildNote(env.TEMPLATES[0].items[0], 'Alyssa')));
+
+// ---- negative control: drop the Monday snap, assert weekOf no longer lands on Monday ------
+var g2 = build(mutate(SRC, 'dt.setDate(dt.getDate() - ((dt.getDay() + 6) % 7));', ''));
+A.eq('[neg] without the Monday snap, a Friday stays a Friday (8/21, not 8/17)', g2.fmtWeekOf(2026, 8, 21), '8/21');
 
 A.finish();
