@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         BWN Drop Upload (Broadway National)
 // @namespace    broadwaynational.bwn
-// @version      1.15.7
+// @version      1.16.0
 // @downloadURL  https://raw.githubusercontent.com/Intermu/userscripts/main/bwn-drop-upload.user.js
 // @updateURL    https://raw.githubusercontent.com/Intermu/userscripts/main/bwn-drop-upload.user.js
 // @description  Drop files anywhere on an Umbrava work order to upload them. Opens the Documents tab and upload dialog, hands over the files, and builds each file's description from its contents. Emails are parsed locally (.msg via an OLE/MAPI reader, .eml via RFC822) into an Outlook-style block - From/Sent/To/Cc/Subject and the body - that becomes the WO note, led by a one-line summary from Chrome's on-device built-in AI (zero cost, zero egress, nothing leaves the browser), falling back to local WO-field extraction (store, city/state, priority, PO, NTE, problem, requester) when the on-device model is unavailable. That same summary fills each file's Description. The WO note's Type is chosen from the email's parties: inbound is typed by the sender (client -> Client, else Vendor); outbound from Broadway is typed by the recipients (a client recipient -> Client, any vendor recipient -> Vendor, all-internal -> Internal). Umbrava's Description field is a TipTap/ProseMirror rich-text editor. It rejects synthetic paste, beforeinput, insertHTML and raw innerHTML, but honours execCommand('insertText') plus a synthetic Enter keydown - so the note is filled line by line (Enter between lines to keep paragraphs), paced ~12ms/line so ProseMirror's async commit doesn't drop lines (measured live 2026-08-10). The text is also placed on your clipboard as a backup, and if every fill method fails a "Copy the WO note" button appears (its click supplies the gesture for a reliable copy, then Ctrl+V). A console diagnostic reports which editor was found and which fill method stuck. When WO Intake hands off a just-created WO's request email, each uploaded file's Label (document type) is set to "Work Order Request" and the note Type is forced to Client (a WO Intake handoff is a client's request, even when the sender is a broker like Fairmarkit that reads as a Vendor domain). Fairmarkit / bulk-email footer boilerplate (the Fairmarkit company block: tagline + Boston address + FAQ/Privacy/Terms/Unsubscribe, and the -----!{...}!----- machine tail) plus ALL tracking URLs (safelinks/awstrack/logo) are stripped from the note body, keeping content through the suppliers@ email. A Fairmarkit RFQ body is also condensed to one line per entry - single-spaced, with each line-item rejoined to its QTY and each Details label (Buyer/Close date/RFQ ID/Shipping address) rejoined to its value. Files upload via Umbrava's own API (initializeJobDocument -> Azure blob PUT -> bulkAddWorkOrderDocuments, captured live 2026-08-12), Label set by id, so the brittle upload-dialog combobox is bypassed; the dialog remains the automatic fallback if the API is unavailable. The email note is shown in a BWN review box (editable, Type selectable) and posted via addEditJobNote ONLY when you click Post - it is never auto-posted, and posts under your own Umbrava session for correct attribution. Network calls are same-origin to app.umbrava.com's own /api/graphql (the app's Auth0 bearer, no @connect/GM) plus the SAS-authorized blob PUT the SPA itself makes - nothing goes to any third party. @grant none.
@@ -15,7 +15,7 @@
 (function () {
   'use strict';
 
-  var VER = '1.15.7';   // keep in step with @version (drift caught earlier: banner had lagged two releases)
+  var VER = '1.16.0';   // keep in step with @version (drift caught earlier: banner had lagged two releases)
   console.info('[BWN DROP UPLOAD] v' + VER + ' · Uploads via Umbrava API (initializeJobDocument→blob PUT→bulkAddWorkOrderDocuments, Label by id), DOM dialog is the fallback · email→note in a human-gated BWN review box, posted via addEditJobNote on an explicit Post click (never auto-posted) · note Type by parties (inbound=sender, outbound=recipient) · note box shows instantly with a mechanical lead; the slow on-device AI brief (Gemini Nano / Edge Phi) fills in async · bwn:cmd dropupload:files bridge');
 
   // Active only on WO pages; checked at drag time so SPA navigation needs no watcher.
@@ -525,38 +525,63 @@
   }
 
   // ---- Note Type from the email's parties ------------------------------------
-  // classifyDomain: a client domain -> "Client", Broadway-internal -> "Internal", any
-  // other external domain -> "Vendor", unknown -> ''. Extend CLIENT_DOMAINS as clients
-  // onboard.
-  var CLIENT_DOMAINS = { 'pilottravelcenters.com': 1, 'caleres.com': 1, 'staples.com': 1 };
+  // classifyDomain: a client-side domain -> "Client", Broadway-internal -> "Internal", any
+  // OTHER real domain -> "External" (undecided - vendor vs supplier is settled by content,
+  // not assumed), no parseable address -> ''. It used to assume every non-client external
+  // domain was a Vendor; that mislabeled all client work arriving through a broker/CMMS as
+  // "Vendor Correspondence". CLIENT_DOMAINS is CLIENT-SIDE: our clients AND the brokers /
+  // work-order platforms that route their WOs (a Corrigo/Fairmarkit email on a client WO is
+  // the CLIENT's traffic). Extend this as clients and platforms surface - it is the one list
+  // we maintain by hand.
+  var CLIENT_DOMAINS = {
+    // direct clients
+    'pilottravelcenters.com': 1, 'caleres.com': 1, 'staples.com': 1,
+    // brokers / CMMS / work-order platforms that carry client work (client-side, not vendors)
+    'corrigo.com': 1, 'corrigopro.com': 1, 'fairmarkit.com': 1, 'servicechannel.com': 1,
+    'famis.com': 1
+    // ponytail: hand-maintained allowlist. Add domains here as they appear; an unlisted
+    // external domain falls to the AI vendor/supplier classifier, not to a wrong guess.
+  };
   var INTERNAL_DOMAIN = 'broadwaynational.com';
   function classifyDomain(email) {
     var dom = (String(email || '').split('@')[1] || '').toLowerCase().trim();
     if (!dom) return '';
     if (CLIENT_DOMAINS[dom]) return 'Client';
     if (dom === INTERNAL_DOMAIN) return 'Internal';
-    return 'Vendor';
+    return 'External';
   }
-  // Per ops: type the note by the OTHER party, not just the sender.
-  // - Inbound (external sender): classify the sender - client -> Client, else Vendor.
-  // - Outbound (Broadway-internal sender): classify the recipients - a client recipient
-  //   -> Client, any external/vendor recipient -> Vendor (so outbound-to-vendor is
-  //   "Vendor", not "Internal"), all-internal (or no recipient signal) -> Internal.
-  // - Unknown sender with no useful recipients -> "Client" (prior default; keeps the
-  //   WO-intake handoff's always-Client behavior when nothing is parseable).
-  function noteTypeForEmail(m) {
-    if (!m) return 'Client';
+  // The party we are corresponding WITH, from domains + direction, deterministic (no AI):
+  //   'Client'   - a client-side domain is sender or recipient
+  //   'Internal' - Broadway on both ends
+  //   'External' - a real but unrecognized external domain (a vendor or a supplier - content decides)
+  //   ''         - nothing parseable (caller applies its own default)
+  function partyByDomain(m) {
+    if (!m) return '';
     var from = classifyDomain(m.fromEmail);
-    if (from && from !== 'Internal') return from;          // inbound from a client or vendor
-    var recips = [].concat(m.to || [], m.cc || []), sawVendor = false;
+    if (from === 'Client') return 'Client';        // inbound from a client-side party
+    if (from === 'External') return 'External';    // inbound from an unknown external party
+    // from is Internal (outbound) or '' - decide by who it went to
+    var recips = [].concat(m.to || [], m.cc || []), sawExternal = false;
     for (var i = 0; i < recips.length; i++) {
       var c = classifyDomain(recips[i] && recips[i].email);
-      if (c === 'Client') return 'Client';                 // a client recipient wins
-      if (c === 'Vendor') sawVendor = true;
+      if (c === 'Client') return 'Client';         // outbound to a client-side party
+      if (c === 'External') sawExternal = true;
     }
-    if (sawVendor) return 'Vendor';                        // outbound to a vendor
-    if (from === 'Internal') return 'Internal';            // internal->internal, or no recip signal
-    return 'Client';                                       // truly unknown -> prior default
+    if (sawExternal) return 'External';            // outbound to an unknown external party
+    if (from === 'Internal') return 'Internal';    // internal <-> internal
+    return '';
+  }
+  // Note Type is Client / Vendor / Internal only - there is no "Supplier" note type, so an
+  // external party (vendor OR supplier) types the note as Vendor. The vendor-vs-supplier split
+  // matters only for the document LABEL (see classifyEmail / docLabelForFiles). Nothing
+  // parseable keeps the prior "Client" default (the WO-intake handoff's always-Client behavior).
+  function noteTypeForEmail(m) {
+    if (!m) return 'Client';
+    var p = partyByDomain(m);
+    if (p === 'Client') return 'Client';
+    if (p === 'External') return 'Vendor';
+    if (p === 'Internal') return 'Internal';
+    return 'Client';
   }
   function noteTypeForFiles(files) {
     for (var i = 0; i < files.length; i++) {
@@ -1664,19 +1689,45 @@
   // toggle and shows the upload status. If the API post fails it falls back to the DOM composer
   // (insertNote) so the note is never lost. One box at a time; it outlives the drop but not `pending`.
   var DEFAULT_DOC_LABEL = 'Work Order Request';  // non-email drops + the WO-intake handoff default here
-  // Auto-pick the doc Label for a manual drop. An email is CORRESPONDENCE, labeled by the other party
-  // (the same Client/Vendor call the note Type uses): a client email -> Client Correspondence, a vendor
-  // email -> Vendor Correspondence. A drop with no email (a photo, a PDF) keeps the WO-request default,
-  // and so does an internal/unknown email. Only the WO-intake HANDOFF forces 'Work Order Request'
-  // explicitly (it really is the request that created the WO) - it never calls this.
+  var PARTY_LABEL = {
+    'Client': 'Client Correspondence', 'Vendor': 'Vendor Correspondence',
+    'Supplier': 'Supplier Correspondence', 'Internal': DEFAULT_DOC_LABEL
+  };
+  // Vendor vs Supplier for an unrecognized external party. On-device only (@grant none / zero
+  // egress): Chrome's Gemini Nano or Edge's Phi via the shared bwnAI router, short-bounded so it
+  // cannot stall the upload. A miss (model off / timeout / empty) -> 'Vendor', the far more common
+  // external party on a dispatch WO (a subcontractor doing the work, not a parts supplier).
+  function vendorOrSupplier(m) {
+    var from = (m.fromName || smtpAddr(m.fromEmail) || '').trim();
+    var body = tidyBody(m.body).slice(0, 2000);   // the new message only; enough to tell the roles apart
+    var content = 'From: ' + from + '\nSubject: ' + String(m.subject || '') + '\n\n' + body;
+    return bwnAI({
+      task: 'classify', tier: 'ondevice', oneLine: true, maxChars: 40,
+      system: 'You label ONE email on a facilities work order. Its sender is an outside company that is either a VENDOR (a subcontractor performing on-site labor or service) or a SUPPLIER (sells parts, materials, or equipment, no on-site labor). Reply with ONLY one word: vendor or supplier.',
+      prompt: content, fallback: ['ondevice'], timeoutMs: 2500
+    }).then(function (out) { return /supplier/i.test(String(out || '')) ? 'Supplier' : 'Vendor'; });
+  }
+  // The corresponding party for an email, as a doc-label party: 'Client'|'Vendor'|'Supplier'|'Internal'.
+  // Deterministic from domains where it can be (instant); only an unrecognized external party costs the
+  // on-device AI call. Memoized per email object so label + any re-resolve never runs the model twice.
+  function classifyEmail(m) {
+    if (!m) return Promise.resolve('Client');
+    if (m.__party) return Promise.resolve(m.__party);
+    var p = partyByDomain(m);
+    if (p !== 'External') { p = p || 'Client'; m.__party = p; return Promise.resolve(p); }
+    return vendorOrSupplier(m).then(function (r) { m.__party = r; return r; });
+  }
+  // Auto-pick the doc Label for a manual drop. An email is CORRESPONDENCE, labeled by the other party:
+  // a client (or broker/CMMS) email -> Client Correspondence, an external company -> Vendor or Supplier
+  // Correspondence (AI-decided). A drop with no email (a photo, a PDF), or an internal-only email, keeps
+  // the WO-request default. Only the WO-intake HANDOFF forces 'Work Order Request' explicitly (it really
+  // is the request that created the WO) - it never calls this. Async: resolves the label (the AI leg is
+  // awaited by runApiUpload before the label is committed in bulkAdd; there is no update-label mutation).
   function docLabelForFiles(files) {
-    var hasEmail = false;
-    for (var i = 0; i < (files || []).length; i++) { if (files[i] && files[i].isEmail && files[i].email) { hasEmail = true; break; } }
-    if (!hasEmail) return DEFAULT_DOC_LABEL;
-    var t = noteTypeForFiles(files);
-    if (t === 'Client') return 'Client Correspondence';
-    if (t === 'Vendor') return 'Vendor Correspondence';
-    return DEFAULT_DOC_LABEL;
+    var email = null;
+    for (var i = 0; i < (files || []).length; i++) { if (files[i] && files[i].isEmail && files[i].email) { email = files[i].email; break; } }
+    if (!email) return Promise.resolve(DEFAULT_DOC_LABEL);
+    return classifyEmail(email).then(function (p) { return PARTY_LABEL[p] || DEFAULT_DOC_LABEL; });
   }
   var noteBox = null, noteBoxTimer = null;
   function clearNoteBox() {
@@ -1804,9 +1855,14 @@
     var resolvedLabel = labelName || DEFAULT_DOC_LABEL;
     return described.then(function (files) {
       if (ctx.aborted) throw new Error('aborted');
-      resolvedLabel = labelName || docLabelForFiles(files);
-      noteBoxStatus('Uploading ' + rawFiles.length + ' file' + (rawFiles.length > 1 ? 's' : '') + '…');
-      return uploadViaApi(rawFiles, files, resolvedLabel, woNum);
+      // docLabelForFiles is async (an unrecognized external email asks the on-device AI vendor-vs-
+      // supplier); await it here so the RIGHT label lands in bulkAdd - there is no update-label
+      // mutation, so the label must be correct at upload time. A forced label skips the resolve.
+      return (labelName ? Promise.resolve(labelName) : docLabelForFiles(files)).then(function (lbl) {
+        resolvedLabel = lbl;
+        noteBoxStatus('Uploading ' + rawFiles.length + ' file' + (rawFiles.length > 1 ? 's' : '') + '…');
+        return uploadViaApi(rawFiles, files, resolvedLabel, woNum);
+      });
     }).then(function (ids) {
       var n = (ids && ids.length) || rawFiles.length;
       noteBoxStatus('Uploaded ' + n + ' file' + (n > 1 ? 's' : '') + ' ✓  - review the note, then Post.');
