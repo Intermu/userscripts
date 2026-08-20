@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         BWN Proposal Copy (Broadway National)
 // @namespace    broadwaynational.bwn
-// @version      0.1.8
+// @version      0.1.11
 // @downloadURL  https://raw.githubusercontent.com/Intermu/userscripts/main/bwn-proposal-copy.user.js
 // @updateURL    https://raw.githubusercontent.com/Intermu/userscripts/main/bwn-proposal-copy.user.js
 // @description  Copy a client proposal from an aged-out work order onto a chosen replacement WO as an un-submitted Draft, in one confirmed action. Replays Umbrava's own createDraftProposal + editProposal mutations (line items copied verbatim); never submits, deletes, or retries. Manager-gated visibility. @grant none.
@@ -15,7 +15,7 @@
 (function () {
   'use strict';
 
-  var VER = '0.1.8';   // keep in step with @version
+  var VER = '0.1.11';   // keep in step with @version
   var DRY_RUN = false; // when true, the two WRITE mutations are logged, not sent
   console.info('[BWN PROPOSAL COPY] v' + VER + ' - copy client proposal to another WO as a Draft (createDraftProposal + editProposal replay)');
 
@@ -256,7 +256,7 @@
   }
 
   // ===== ui =================================================================
-  // Row button injection, drawer, target picker, confirm card + progress.
+  // Actions-menu item injection, drawer, target picker, confirm card + progress.
   //
   // DESIGN NOTE (no live WO snapshot was available while building this - see
   // task-5-report.md): the drawer is a fully SELF-CONTAINED overlay (own inline
@@ -267,10 +267,8 @@
   // in the suite's one-panel-at-a-time bus contract (bwn:drawer:open) so it
   // doesn't stack with a real Core drawer when Core IS present.
   //
-  // Every selector/extraction below that touches the Proposals section is marked
-  // UNVERIFIED and is written to FAIL SAFE: if the expected row/anchor/id is not
-  // found, injectCopyColumn() injects nothing rather than guessing. Confirm each
-  // UNVERIFIED marker against a live WO snapshot before the live gate (Task 6).
+  // Selectors that touch the Proposals section FAIL SAFE: if the expected row/menu/anchor is not
+  // found, the injector adds nothing rather than guessing (see the actions-menu block below).
 
   // ---- console entry point for the live gate (DOM-independent) --------------
   // Registered HERE, early and before any DOM/injection code runs, so a throw in
@@ -308,9 +306,7 @@
   // MUI table whose rows are <tr id="table-row-<proposalId>"> (the row id carries the real
   // proposal id, e.g. table-row-517386). The route lists ONLY client proposals (vendor
   // proposals are a sibling route), so route membership is the client-ness signal.
-  var ROW_BTN_CLASS = 'bwn-pc-row-btn';
-  var COL_CELL_MARK = 'data-bwn-pc-cell';   // our injected <td> (Copy's own column)
-  var COL_HDR_MARK = 'data-bwn-pc-hdr';     // our injected <th> header
+  var MENU_ITEM_CLASS = 'bwn-pc-menu-item';   // our injected "Copy to another WO..." <li>
   function onClientProposalsList() {
     // LIST route ONLY. The old prefix form also matched .../client-proposals/<id>/details
     // and .../client-proposals/<id>/notes - those subpages render the SAME
@@ -319,91 +315,101 @@
     // /<proposalId>/ subroute now fails closed (keeps Copy off Details + Notes tabs).
     return /\/work-orders\/\d+\/proposals\/client-proposals\/?$/.test(location.pathname || '');
   }
-  function proposalRows() {
-    return Array.prototype.slice.call(document.querySelectorAll('tr[id^="table-row-"]'));
-  }
   function proposalIdFromRow(row) {
     // The proposal id is in the row's own id ("table-row-517386"). NEVER scrape the visible
     // "number" column - that shows the proposal NUMBER (1,2,3), not the id copyProposal needs.
     var m = /table-row-(\d+)/.exec((row && row.id) || '');
     return m ? parseInt(m[1], 10) : null;
   }
-  function isClientProposalRow() {
-    // The client-proposals route lists only client proposals; fails closed off that route.
-    return onClientProposalsList();
+  // ---- Copy as a native item in the row's "..." (More) menu ------------------
+  // History: 0.1.3-0.1.10 gave Copy its own cell/column, which on this table-layout:fixed +
+  // <colgroup> grid starved the operator's Gross Profit % column (an extra cell with no matching
+  // <col> stole a column's width and shifted every native column right by one). 0.1.11 drops the
+  // standalone control entirely and instead adds a native-styled "Copy to another WO..." item to
+  // the row's EXISTING actions menu - the same MUI menu the "..." kebab opens (View Audit /
+  // Duplicate / Send Email / ...). Zero table footprint; it reads as one of Umbrava's own actions.
+  //
+  // That menu is a <ul role="menu"> portaled to <body>, built on kebab click and destroyed on
+  // close (verified live 2026-08-19). It carries no row id, so: (1) a capture-phase click listener
+  // records which proposal row's kebab was clicked, and (2) a MutationObserver on <body> appends
+  // our item when the menu element appears. Both re-run every open. Closing: the menu ignores
+  // synthetic events, so on select we HIDE its portal node and let React unmount it (see
+  // closeActionsMenu).
+  var _pcPendingPid = null, _pcPendingAt = 0;
+  var PC_PENDING_TTL_MS = 4000;   // a recorded kebab click counts as "fresh" only this long
+
+  // (1) Record the row's proposal id the instant its kebab is clicked - capture phase, so it runs
+  // before React opens the menu. Gated + route-scoped; never guesses a row.
+  try {
+    document.addEventListener('click', function (e) {
+      try {
+        if (!onClientProposalsList() || !gated()) return;
+        var t = e.target;
+        var wrap = t && t.closest ? t.closest('.context-menu-wrapper') : null;
+        if (!wrap) return;
+        var row = wrap.closest ? wrap.closest('tr[id^="table-row-"]') : null;
+        if (!row) return;
+        var pid = proposalIdFromRow(row);
+        if (pid != null) { _pcPendingPid = pid; _pcPendingAt = Date.now(); }
+      } catch (err) { }
+    }, true);
+  } catch (e) { }
+
+  // Distinguish the proposal actions menu from any other MUI menu that might open, by its native
+  // items - so we never inject our item into an unrelated menu.
+  function isProposalActionsMenu(menu) {
+    var txt = (menu && menu.textContent) || '';
+    return /View Audit/i.test(txt) || /Convert to Invoice/i.test(txt) || /Work Order Notes/i.test(txt);
   }
-  function buildRowButton(sourceProposalId) {
-    var btn = document.createElement('button');
-    btn.type = 'button';
-    btn.className = ROW_BTN_CLASS;
-    btn.textContent = 'Copy';
-    btn.title = 'Copy this proposal to another work order';
-    btn.style.cssText = 'display:inline-flex;align-items:center;vertical-align:middle;flex:0 0 auto;' +
-      'margin:0;padding:3px 8px;border:1px solid #1a5f3e;border-radius:6px;white-space:nowrap;' +
-      'background:#f0fdf4;color:#0d3d26;font:600 11px -apple-system,BlinkMacSystemFont,"Segoe UI",Arial,sans-serif;cursor:pointer;';
-    btn.addEventListener('click', function (e) {
+  function closeActionsMenu() {
+    // This menu trusts only REAL events - synthetic Escape / click-away / kebab-toggle are all
+    // ignored (measured live 2026-08-19), so we cannot script the native close. Instead HIDE the
+    // menu's portal node immediately; React still owns it and unmounts it cleanly on the user's next
+    // real interaction (inevitable once the drawer is up). Hiding is safe here where REMOVING the
+    // node would make React throw on its later unmount.
+    try {
+      var menu = document.querySelector('ul[role="menu"]');
+      if (!menu) return;
+      var node = menu;
+      while (node.parentElement && node.parentElement !== document.body) node = node.parentElement;
+      node.style.display = 'none';   // the MuiPopper-root portal wrapper
+    } catch (e) { }
+  }
+  // (2) Add our "Copy to another WO..." item to a freshly opened actions menu. Idempotent.
+  function injectMenuItem(menu) {
+    if (!menu || !gated() || !onClientProposalsList()) return;
+    if (_pcPendingPid == null || (Date.now() - _pcPendingAt) > PC_PENDING_TTL_MS) return;  // no fresh row context
+    if (!isProposalActionsMenu(menu)) return;   // menu may still be rendering its items - a retry catches it
+    var pid = _pcPendingPid;
+    var existing = menu.querySelector('.' + MENU_ITEM_CLASS);
+    if (existing) { if (existing.getAttribute('data-pid') === String(pid)) return; existing.remove(); }
+    // Borrow a live native item's className so ours matches the menu chrome exactly (the MUI/emotion
+    // hash changes per build, so copy it at runtime rather than hardcoding it).
+    var sib = menu.querySelector('li[role="menuitem"]:not(.Mui-disabled), a[role="menuitem"]');
+    var li = document.createElement('li');
+    li.className = (sib ? sib.className : 'MuiButtonBase-root MuiMenuItem-root MuiMenuItem-gutters') + ' ' + MENU_ITEM_CLASS;
+    li.setAttribute('role', 'menuitem');
+    li.setAttribute('tabindex', '-1');
+    li.setAttribute('data-pid', String(pid));
+    li.style.gap = '8px';
+    li.title = 'Copy this proposal onto another work order as a Draft';
+    // Feather "copy" icon + label. Static markup (no user data) - innerHTML is safe here; the label
+    // itself is set via textContent.
+    li.innerHTML = '<svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" style="flex:0 0 auto" aria-hidden="true"><rect x="9" y="9" width="13" height="13" rx="2"></rect><path d="M5 15H4a2 2 0 0 1-2-2V4a2 2 0 0 1 2-2h9a2 2 0 0 1 2 2v1"></path></svg><span></span>';
+    var span = li.querySelector('span'); if (span) span.textContent = 'Copy to another WO…';
+    li.addEventListener('click', function (e) {
       e.preventDefault(); e.stopPropagation();
-      openDrawer(sourceProposalId);
+      closeActionsMenu();
+      openDrawer(pid);
     });
-    return btn;
+    // Place it just under the first native item (below "View Audit").
+    var first = menu.querySelector('li[role="menuitem"],a[role="menuitem"]');
+    if (first && first.nextSibling) menu.insertBefore(li, first.nextSibling);
+    else menu.appendChild(li);
   }
-  // ---- Copy gets its OWN column --------------------------------------------
-  // Earlier builds injected Copy INTO the first cell (the "More"/actions column). That cell also
-  // hosts Umbrava's native hover-reveal "..." menu; sharing it made Copy eat the menu's width, so
-  // the "..." spilled under the next column and read as truncated. Fix: give Copy a dedicated
-  // leftmost column - a real <th> in the header row plus one <td> per body row - so it never
-  // touches the actions cell again. React re-renders wipe injected nodes (measured live
-  // 2026-08-14), so the header cell and every body cell are re-added on PRESENCE, driven by the
-  // MutationObserver + interval below. Injected cells borrow a sibling's className so the grid's
-  // padding/border/typography match; the auto-layout table then sizes the new column to fit.
-  function injectCopyColumn() {
-    if (!onClientProposalsList()) return;
-    if (!gated()) {
-      // Rank dropped (or never known): drop the WHOLE column - header and every body cell
-      // together - so no row is left short a cell (which would shift its other columns).
-      // Re-injected in full if rank recovers.
-      Array.prototype.forEach.call(
-        document.querySelectorAll('[' + COL_HDR_MARK + '],[' + COL_CELL_MARK + ']'),
-        function (n) { try { n.remove(); } catch (e) { } });
-      return;
-    }
-    var rows = proposalRows();
-    if (!rows.length) return;
-    var table = rows[0].closest ? rows[0].closest('table') : null;
-
-    // Header cell (once).
-    var headRow = (table && table.tHead && table.tHead.rows.length) ? table.tHead.rows[0] : null;
-    if (headRow && !headRow.querySelector('th[' + COL_HDR_MARK + ']')) {
-      var th = document.createElement('th');
-      th.setAttribute(COL_HDR_MARK, '1');
-      var sampleHdr = headRow.children[0];
-      if (sampleHdr) th.className = sampleHdr.className;   // match the grid's header chrome
-      th.style.whiteSpace = 'nowrap';
-      th.textContent = 'Copy';
-      headRow.insertBefore(th, headRow.firstChild);
-    }
-
-    // One body cell per row - Copy lives ALONE here, never in the actions cell.
-    rows.forEach(function (row) {
-      if (!isClientProposalRow(row)) return;
-      var cell = row.querySelector('td[' + COL_CELL_MARK + ']');
-      if (cell) {
-        // Cell survived; React may have wiped only the button inside it. Re-add on presence.
-        var b = cell.querySelector('.' + ROW_BTN_CLASS);
-        if (!b) { var pid0 = proposalIdFromRow(row); if (pid0 != null) cell.appendChild(buildRowButton(pid0)); }
-        else b.style.display = '';
-        return;
-      }
-      var pid = proposalIdFromRow(row);
-      if (pid == null) return;   // fail safe: no confirmed id, no cell
-      var td = document.createElement('td');
-      td.setAttribute(COL_CELL_MARK, '1');
-      var sampleTd = row.children[0];
-      if (sampleTd) td.className = sampleTd.className;   // match the grid's cell chrome
-      td.style.whiteSpace = 'nowrap';
-      td.style.overflow = 'visible';
-      td.appendChild(buildRowButton(pid));
-      row.insertBefore(td, row.firstChild);
+  function scanMenus() {
+    Array.prototype.forEach.call(document.querySelectorAll('ul[role="menu"]'), function (m) {
+      try { injectMenuItem(m); } catch (e) { }
     });
   }
 
@@ -749,22 +755,33 @@
     });
   }
 
-  // ---- injection lifecycle: rank-gated, idempotent, SPA-nav aware ----------
+  // ---- lifecycle: inject our item whenever the actions menu opens -----------
+  // The menu is portaled to <body> on kebab click. Watch for the <ul role="menu"> being added and
+  // inject then. Because React may attach the menu container a tick before it fills in its items,
+  // a couple of short retries catch the case where isProposalActionsMenu() was not yet true.
+  function pcOnMenuMaybeOpened() {
+    scanMenus();
+    setTimeout(scanMenus, 60);
+    setTimeout(scanMenus, 200);
+  }
   try {
-    document.addEventListener('bwn:evt', function (e) {
-      var d = e && e.detail;
-      if (d && d.id === 'bwn:role') injectCopyColumn();
+    var pcObs = new MutationObserver(function (muts) {
+      for (var i = 0; i < muts.length; i++) {
+        var added = muts[i].addedNodes;
+        for (var j = 0; j < added.length; j++) {
+          var n = added[j];
+          if (!n || n.nodeType !== 1) continue;
+          if ((n.matches && n.matches('ul[role="menu"]')) ||
+              (n.querySelector && n.querySelector('ul[role="menu"]'))) {
+            pcOnMenuMaybeOpened();
+            break;
+          }
+        }
+      }
     });
-  } catch (e) { }
-  try {
-    var pcObs = new MutationObserver(function () { injectCopyColumn(); });
     pcObs.observe(document.body, { childList: true, subtree: true });
   } catch (e) { }
-  var _pcLastPath = location.pathname;
-  setInterval(function () {
-    if (location.pathname !== _pcLastPath) _pcLastPath = location.pathname;
-    injectCopyColumn();
-  }, 900);
-  injectCopyColumn();
+  // Catch a menu that was already open when we loaded (or that the observer missed).
+  scanMenus();
 
 })();
