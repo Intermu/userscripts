@@ -337,7 +337,7 @@ async function probeAssist(src) {
   // The assist @version and its internal `var VER` banner (shown in support triage) MUST agree.
   // VER had drifted to 0.3.0 while @version read 0.3.3; the 2026-08-18 surgical-fix pass set them
   // in lockstep at 0.3.4, and these pins keep them from drifting apart again.
-  A.ok('core @version is 1.78.25', coreFull.indexOf('// @version      1.78.25') !== -1, 'core version drift');
+  A.ok('core @version is 1.78.26', coreFull.indexOf('// @version      1.78.26') !== -1, 'core version drift');
   A.ok('core banner says WO Assist 2.71', coreFull.indexOf('WO Assist 2.71') !== -1, 'module banner drift');
   A.ok('assist @version is 0.3.5', assistFull.indexOf('// @version      0.3.5') !== -1, 'assist version drift');
   A.ok("assist VER is '0.3.5'", assistFull.indexOf("var VER = '0.3.5';") !== -1, 'assist VER drift');

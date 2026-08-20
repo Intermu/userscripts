@@ -112,6 +112,7 @@ var LEDGER = {
   'bwn-cc-purchase.user.js':   { drawer: 'HAS',       toast: 'HAS',       rmotion: 'NA',  rail: 'NA'  },
   'bwn-dispatch.user.js':      { drawer: 'HAS',       toast: 'HAS',       rmotion: 'NA',  rail: 'NA'  },
   'bwn-drop-upload.user.js':   { drawer: 'NA',        toast: 'DIVERGENT', rmotion: 'NA',  rail: 'NA'  },
+  'bwn-inventory.user.js':     { drawer: 'HAS',       toast: 'HAS',       rmotion: 'NA',  rail: 'NA'  },
   'bwn-kanban.user.js':        { drawer: 'NA',        toast: 'NA',        rmotion: 'NA',  rail: 'NA'  },
   // Self-contained fixed-position confirm card (#bwn-lowgp-panel, own inline cssText); closes by plain
   // remove (closePanel), no shared drawerDismiss, no toast(), no animation:, no --bwn-dock-shift.

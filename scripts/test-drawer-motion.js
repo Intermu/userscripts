@@ -97,7 +97,7 @@ var CORE = read('bwn-suite-core.user.js');
 // bwn-ask is deliberately absent from this list: it REUSES its node to keep the conversation, so
 // its variant is reversible and is probed separately below.
 var MODULES = ['bwn-cc-auth.user.js', 'bwn-cc-purchase.user.js', 'bwn-dispatch.user.js',
-  'bwn-wo-assist.user.js', 'bwn-wo-audit.user.js'];
+  'bwn-inventory.user.js', 'bwn-wo-assist.user.js', 'bwn-wo-audit.user.js'];
 
 console.log('\n-- drawer exit, per module (the shipped helper, run) --');
 MODULES.forEach(function (m) {
@@ -228,7 +228,7 @@ A.ok('and it kills the transition, not only the old animation', rmQuery.indexOf(
 // states. A copy that drifts is the failure this section exists to catch.
 console.log('\n-- shared toast motion, per module --');
 var TOAST_MODULES = ['bwn-dispatch.user.js', 'bwn-cc-auth.user.js', 'bwn-cc-purchase.user.js',
-  'bwn-wo-assist.user.js', 'bwn-wo-intake.user.js'];
+  'bwn-inventory.user.js', 'bwn-wo-assist.user.js', 'bwn-wo-intake.user.js'];
 
 function runToast(src, reduce) {
   var styleWrites = [];
