@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         BWN Suite - AI (Broadway National)
 // @namespace    broadwaynational.bwn
-// @version      1.45.13
+// @version      1.45.14
 // @downloadURL  https://raw.githubusercontent.com/Intermu/userscripts/main/bwn-suite-ai.user.js
 // @updateURL    https://raw.githubusercontent.com/Intermu/userscripts/main/bwn-suite-ai.user.js
 // @description  The Umbrava tools that call outside APIs, kept separate from the zero-egress Core script. Client Update and WO Audit drafts (Anthropic Claude; draft-only, scrubbed before sending, you review before posting); Find Techs / Find Suppliers (Google Places; vendor leads near a WO); and Job View (opens the Ops-Dashboard job card on the WO page - WO details from Umbrava plus the authored case file and next actions, read-only). Network access is limited by the browser to the declared API hosts and the BWN Static Web App. API keys are stored in Tampermonkey's storage via the menu commands and never enter the page. Toggle modules in BWN_MODULES below.
@@ -299,8 +299,11 @@
           car2.style.cssText = 'float:right;opacity:.6;font-size:11px;margin-left:10px;';
           row.appendChild(car2);
         }
-        row.addEventListener('mouseenter', function () { row.style.background = 'var(--bwn-tint)'; if (kids) openSub(row, kids); else scheduleSubClose(); });
-        row.addEventListener('mouseleave', function () { row.style.background = 'transparent'; if (kids) scheduleSubClose(); });
+        // Hovering a childless sibling must NOT close an open flyout - that killed diagonal travel from
+        // the parent row to its submenu (cursor crosses siblings / pauses on one). The flyout closes only
+        // when the pointer leaves BOTH the parent menu and the submenu (see openMenu + the sub listeners).
+        row.addEventListener('mouseenter', function () { row.style.background = 'var(--bwn-tint)'; if (kids) openSub(row, kids); });
+        row.addEventListener('mouseleave', function () { row.style.background = 'transparent'; });
         row.addEventListener('click', function (e) {
           e.preventDefault();
           if (kids) { openSub(row, kids); focusList(subRows, 0); return; }   // reveal the flyout, don't close
@@ -372,6 +375,11 @@
         rows = [];
         items.forEach(function (it) { menu.appendChild(makeItem(it, rows)); });
         document.body.appendChild(menu);
+        // Keep the flyout open while the pointer is anywhere in the parent menu; only arm the close
+        // when it leaves the menu entirely. Re-entering the menu (or the submenu) cancels it, so a
+        // menu<->submenu round trip never flickers.
+        menu.addEventListener('mouseenter', function () { if (subCloseT) { clearTimeout(subCloseT); subCloseT = null; } });
+        menu.addEventListener('mouseleave', scheduleSubClose);
         var r = trig.getBoundingClientRect();
         var left = Math.min(Math.round(r.left), window.innerWidth - menu.offsetWidth - 8);   // keep on-screen
         menu.style.left = Math.max(8, left) + 'px';

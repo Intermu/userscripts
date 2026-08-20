@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         BWN Suite - Core (Broadway National)
 // @namespace    broadwaynational.bwn
-// @version      1.78.23
+// @version      1.78.24
 // @downloadURL  https://raw.githubusercontent.com/Intermu/userscripts/main/bwn-suite-core.user.js
 // @updateURL    https://raw.githubusercontent.com/Intermu/userscripts/main/bwn-suite-core.user.js
 // @description  Runs several Umbrava helpers for BWN coordinators, in the browser with no privileged grants. Includes: PO Approval + ETA Builder; WO Assist (GP/ETA, a stall watchdog, DNE calculator, and a next-action playbook); Email Leak Guard (checks recipients against vendor names, PO amounts, and client budget references before an outbound email sends); WO List Heat (a triage overlay + My Day strip on the work-order list, with an optional same-origin Umbrava API scan for deterministic full-board coverage); and the BWN Launcher (opens the Azure Static Web App tools with the current WO's context). Modules share state through sessionStorage/localStorage. The only network calls are same-origin Umbrava GraphQL requests (app.umbrava.com/api/graphql, the app's own session): List Heat's full-board scan and WO Assist's work-order / trip / clock-in / document reads, plus ONE write - BWN Views saves the column layout through Umbrava's own putUserPreference, the same preference the column chooser writes; everything else is offline. Toggle modules in BWN_MODULES below.
@@ -281,8 +281,11 @@
           car2.style.cssText = 'float:right;opacity:.6;font-size:11px;margin-left:10px;';
           row.appendChild(car2);
         }
-        row.addEventListener('mouseenter', function () { row.style.background = 'var(--bwn-tint)'; if (kids) openSub(row, kids); else scheduleSubClose(); });
-        row.addEventListener('mouseleave', function () { row.style.background = 'transparent'; if (kids) scheduleSubClose(); });
+        // Hovering a childless sibling must NOT close an open flyout - that killed diagonal travel from
+        // the parent row to its submenu (cursor crosses siblings / pauses on one). The flyout closes only
+        // when the pointer leaves BOTH the parent menu and the submenu (see openMenu + the sub listeners).
+        row.addEventListener('mouseenter', function () { row.style.background = 'var(--bwn-tint)'; if (kids) openSub(row, kids); });
+        row.addEventListener('mouseleave', function () { row.style.background = 'transparent'; });
         row.addEventListener('click', function (e) {
           e.preventDefault();
           if (kids) { openSub(row, kids); focusList(subRows, 0); return; }   // reveal the flyout, don't close
@@ -354,6 +357,11 @@
         rows = [];
         items.forEach(function (it) { menu.appendChild(makeItem(it, rows)); });
         document.body.appendChild(menu);
+        // Keep the flyout open while the pointer is anywhere in the parent menu; only arm the close
+        // when it leaves the menu entirely. Re-entering the menu (or the submenu) cancels it, so a
+        // menu<->submenu round trip never flickers.
+        menu.addEventListener('mouseenter', function () { if (subCloseT) { clearTimeout(subCloseT); subCloseT = null; } });
+        menu.addEventListener('mouseleave', scheduleSubClose);
         var r = trig.getBoundingClientRect();
         var left = Math.min(Math.round(r.left), window.innerWidth - menu.offsetWidth - 8);   // keep on-screen
         menu.style.left = Math.max(8, left) + 'px';
