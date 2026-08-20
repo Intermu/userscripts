@@ -57,6 +57,7 @@ function rec(over) {
     id: '386559', wo: '386559', tracking: '1286108', status: 'Pending Dispatch', prio: 'STANDARD-2',
     client: 'Best Buy', assignee: 'Michelle Black', city: 'Baldwin', state: 'NY',
     street1: '123 Main St', street2: 'Ste 4', zip: '11510',
+    woCreatedAt: '2026-08-19T19:23:14.58+00:00', trade: 'Plumbing; Toilets', tradeSys: 'Plumbing', locationNumber: 'DTN6',
     vendors: 'Broadway National Maintenance LLC', vendorsKnown: true, dneAmt: 750
   }, over || {});
 }
@@ -77,6 +78,20 @@ A.eq('street2 carried (geocode feed)', w.street2, 'Ste 4');
 A.eq('zip carried (geocode feed)', w.zip, '11510');
 A.eq('vendors carried when known', w.vendors, 'Broadway National Maintenance LLC');
 A.eq('dne = dneAmt (already dollars)', w.dne, 750);
+
+// ---- In-House Dispatch upgrade: window + trade coverage + location + team split ----------
+A.eq('woCreatedAt carried (window filter key, keeps the time)', w.woCreatedAt, '2026-08-19T19:23:14.58+00:00');
+A.eq('trade carried (coverage key)', w.trade, 'Plumbing; Toilets');
+A.eq('tradeSys carried (coverage key)', w.tradeSys, 'Plumbing');
+A.eq('locationNumber carried (fixes blank Location #)', w.locationNumber, 'DTN6');
+A.ok('a person assignee rides coordinator, not team', w.coordinator === 'Michelle Black' && !('team' in w));
+var wteam = dispatchDatasetRows(store([rec({ assignee: 'Team P' })]))[0];
+A.eq('a "Team P" owner rides row.team', wteam.team, 'Team P');
+A.ok('a team owner is NOT also a coordinator', !('coordinator' in wteam));
+A.ok('empty woCreatedAt omitted', !('woCreatedAt' in dispatchDatasetRows(store([rec({ woCreatedAt: '' })]))[0]));
+A.ok('empty trade omitted', !('trade' in dispatchDatasetRows(store([rec({ trade: '' })]))[0]));
+A.ok('empty tradeSys omitted', !('tradeSys' in dispatchDatasetRows(store([rec({ tradeSys: '' })]))[0]));
+A.ok('empty locationNumber omitted', !('locationNumber' in dispatchDatasetRows(store([rec({ locationNumber: '' })]))[0]));
 
 // ---- vendorsKnown gate -------------------------------------------------------------------
 A.ok('vendors OMITTED when the column was not read', !('vendors' in dispatchDatasetRows(store([rec({ vendorsKnown: false, vendors: '' })]))[0]));
@@ -103,9 +118,13 @@ for (var i = 0; i < env.DISPATCH_DATASET_MAX + 500; i++) many['/work-orders/' + 
 A.eq('row cap enforced at DISPATCH_DATASET_MAX', dispatchDatasetRows(many).length, env.DISPATCH_DATASET_MAX);
 
 // ---- negative controls: revert a guarantee, assert red -----------------------------------
-var g1 = build(mutate(SRC, "if (r.assignee && r.assignee !== '(unresolved member)') row.coordinator = r.assignee;", "row.coordinator = r.assignee;"));
+var g1 = build(mutate(SRC, "r.assignee !== '(unresolved member)'", "true"));
 A.ok('[neg] without the guard, "(unresolved member)" leaks as coordinator',
   g1.dispatchDatasetRows(store([rec({ assignee: '(unresolved member)' })]))[0].coordinator === '(unresolved member)');
+
+var g4 = build(mutate(SRC, "if (/^team\\b/i.test(r.assignee)) row.team = r.assignee;", "if (false) row.team = r.assignee;"));
+A.ok('[neg] without the team split, a "Team P" owner leaks into coordinator',
+  g4.dispatchDatasetRows(store([rec({ assignee: 'Team P' })]))[0].coordinator === 'Team P');
 
 var g2 = build(mutate(SRC, "if (!row.woNumber && !row.tracking) continue;", ""));
 A.eq('[neg] without the identity check, an id-less-key row is not dropped',
