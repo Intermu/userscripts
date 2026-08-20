@@ -387,6 +387,14 @@ jobs:
       - name: Low GP note harness (mention contentHtml + note-type + assignee gate)
         run: node scripts/test-low-gp.js
 
+      # Transform SR Brands (TransformCo / Sears / Kmart) intake path (bwn-wo-intake 0.9.22): the
+      # store number in the subject = the Umbrava locationNumber, the TransformCo WO/PO ref = BOTH
+      # Source Job # and Source PO #, NTE -> Client DNE ($1K/$2K + "NTE - $400" hyphen the generic
+      # regex misses), WO Type fixed Reactive, Priority left blank. Slices the real extractor cluster
+      # (+ genericBodyScope) and runs it over the 10-email corpus, cross-checked to the live WOs.
+      - name: Transform SR Brands intake harness (store#=locationNumber, both source fields, NTE)
+        run: node scripts/test-transform-intake.js
+
   lint:
     name: Lint
     runs-on: ubuntu-latest
