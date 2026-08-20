@@ -187,7 +187,7 @@ var PRELUDE = [
   // is precisely the case where the API total has to carry the coverage gate.
   'var __events = [];',
   'function CustomEvent(t, o) { this.type = t; this.detail = o && o.detail; }',
-  'var document = { getElementById: function () { return null; }, querySelectorAll: function () { return []; }, dispatchEvent: function (e) { __events.push(e && e.detail && e.detail.id); return true; } };',
+  'var document = { getElementById: function () { return null; }, querySelectorAll: function () { return []; }, addEventListener: function () {}, dispatchEvent: function (e) { __events.push(e && e.detail && e.detail.id); return true; } };',
   'var totCache = { path: "", v: null };',
   'function isListPage() { var p = location.pathname; return p.indexOf("/work-orders") === 0 && !/\\/work-orders\\/\\d/.test(p); }',
   'function heatAutoScanSoon(v) { __autoScans.push(v); }',
@@ -215,6 +215,8 @@ var PRELUDE = [
   'var __actStates = [], __actsOut = null, __actsThrow = false;',
   'var bwnActsEngine = function (state, C) { __actStates.push(state); if (__actsThrow) throw new Error("thin state"); return __actsOut; };',
   'var BWN = {',
+  '  guard: function (f) { return f; },',
+  '  lsGetJSON: function () { return null; },',
   '  parseUSDate: function (s) { var m = /^(\\d{1,2})\\/(\\d{1,2})\\/(\\d{4})$/.exec(String(s == null ? "" : s)); if (!m) return null; var d = new Date(Number(m[3]), Number(m[1]) - 1, Number(m[2])); d.setHours(0, 0, 0, 0); return d.getTime(); },',
   // The REAL formatter, not an approximation: it is what decides whether a minor-unit bug is
   // visible. `toFixed(2)` would have hidden the thousands separators the panel actually shows.
