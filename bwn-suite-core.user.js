@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         BWN Suite - Core (Broadway National)
 // @namespace    broadwaynational.bwn
-// @version      1.78.23
+// @version      1.78.24
 // @downloadURL  https://raw.githubusercontent.com/Intermu/userscripts/main/bwn-suite-core.user.js
 // @updateURL    https://raw.githubusercontent.com/Intermu/userscripts/main/bwn-suite-core.user.js
 // @description  Runs several Umbrava helpers for BWN coordinators, in the browser with no privileged grants. Includes: PO Approval + ETA Builder; WO Assist (GP/ETA, a stall watchdog, DNE calculator, and a next-action playbook); Email Leak Guard (checks recipients against vendor names, PO amounts, and client budget references before an outbound email sends); WO List Heat (a triage overlay + My Day strip on the work-order list, with an optional same-origin Umbrava API scan for deterministic full-board coverage); and the BWN Launcher (opens the Azure Static Web App tools with the current WO's context). Modules share state through sessionStorage/localStorage. The only network calls are same-origin Umbrava GraphQL requests (app.umbrava.com/api/graphql, the app's own session): List Heat's full-board scan and WO Assist's work-order / trip / clock-in / document reads, plus ONE write - BWN Views saves the column layout through Umbrava's own putUserPreference, the same preference the column chooser writes; everything else is offline. Toggle modules in BWN_MODULES below.
@@ -6402,6 +6402,14 @@
       var projectType = String(g(/(^|\.)projecttypename$|(^|\.)projecttype$|(^|\.)project\.type$/i) || '');
       var dneAmt = moneyNum(dne, g(/donotexceed.*precision/i));
       var nteAmt = moneyNum(nte, g(/totalnte.*precision/i));
+      // In-House Dispatch upgrade (window + trade coverage + location). locationNumber is a
+      // top-level scalar. Trade names come straight off the RAW row.trades array: heatFlatten
+      // collapses an array-of-objects to a single comma-joined `.name` and drops
+      // systemTradeName entirely, so the flattened keys can't give both. Joined with "; ".
+      var locationNumber = String(g(/(^|\.)locationnumber$/i) || '');
+      var tradeArr = (row && Array.isArray(row.trades)) ? row.trades : [];
+      var trade = tradeArr.map(function (t) { return t && t.name; }).filter(Boolean).join('; ');
+      var tradeSys = tradeArr.map(function (t) { return t && t.systemTradeName; }).filter(Boolean).join('; ');
       return {
         // Through heatKey so the API writer and the DOM writer cannot drift apart again.
         href: heatKey('/work-orders/' + num),
@@ -6422,7 +6430,9 @@
           },
           sched: heatDateStr(sched), lastNote: heatDateStr(lastNote), exp: heatDateStr(exp),
           // v2 dataset fields - carried into heatStore by absorb() and emitted by heatDatasetRows.
-          sourceJob: sourceJob, sourcePo: sourcePo, projectType: projectType, woDate: heatDateStr(created)
+          sourceJob: sourceJob, sourcePo: sourcePo, projectType: projectType, woDate: heatDateStr(created),
+          // In-House Dispatch upgrade: raw created timestamp (woDate truncates the time), location #, trades.
+          woCreatedAt: (created == null ? '' : String(created)), locationNumber: locationNumber, trade: trade, tradeSys: tradeSys
         }
       };
     }
@@ -7237,10 +7247,21 @@
         if (r.status) row.status = r.status;
         if (r.prio) row.priority = r.prio;
         if (r.client) row.client = r.client;
-        // A resolved human name only - never a GUID, never "(unresolved member)".
-        if (r.assignee && r.assignee !== '(unresolved member)') row.coordinator = r.assignee;
+        // A resolved human name only - never a GUID, never "(unresolved member)". Split a pod
+        // owner ("Team P") into row.team from a person into row.coordinator. No person->team
+        // roster exists, so a person-assigned WO carries a coordinator but no team - known ceiling.
+        if (r.assignee && r.assignee !== '(unresolved member)') {
+          if (/^team\b/i.test(r.assignee)) row.team = r.assignee;
+          else row.coordinator = r.assignee;
+        }
         if (r.city) row.city = r.city;
         if (r.state) row.state = r.state;
+        // In-House Dispatch upgrade: created window + trade coverage + location #. Guarded like the
+        // other column-dependent fields - omitted (not blanked) when a scan path never read them.
+        if (r.woCreatedAt) row.woCreatedAt = r.woCreatedAt;
+        if (r.trade) row.trade = r.trade;
+        if (r.tradeSys) row.tradeSys = r.tradeSys;
+        if (r.locationNumber) row.locationNumber = r.locationNumber;
         // Street + zip for the geocode step (SWA composes the geocodable address from these).
         if (r.street1) row.street1 = r.street1;
         if (r.street2) row.street2 = r.street2;
@@ -8410,6 +8431,8 @@
             // v2 dataset fields - present from BOTH scan paths (DOM columns or wire), so they sit in
             // the shared block, not the API-only one below.
             sourceJob: e.sourceJob, sourcePo: e.sourcePo, projectType: e.projectType, woDate: e.woDate,
+            // In-House Dispatch upgrade: window/trade/location facts (present from the API scan).
+            woCreatedAt: e.woCreatedAt, locationNumber: e.locationNumber, trade: e.trade, tradeSys: e.tradeSys,
             // API-only facts. The DOM scan leaves these undefined and every consumer
             // treats undefined as "not read" rather than as a zero.
             assigneeId: e.assigneeId, nte: e.nte, dneAmt: e.dneAmt, nteAmt: e.nteAmt,

@@ -774,6 +774,37 @@ console.log('\n-- dispatch geocode feed: address extraction (city/state/street/z
   A.eq('no address -> all parts blank', [bare.street1, bare.street2, bare.city, bare.state, bare.zip], ['', '', '', '', '']);
 })();
 
+console.log('\n-- In-House Dispatch upgrade: created window + trade coverage + location # --');
+(function () {
+  var s = build({});
+  // The scan SELECTS workOrderDate, trades{name systemTradeName}, locationNumber. woCreatedAt keeps
+  // the RAW timestamp (window filter needs the time) while woDate stays truncated. trade/tradeSys are
+  // read straight off the raw row.trades array: heatFlatten collapses it to a single comma-joined
+  // `.name` and DROPS systemTradeName, so both must come from the array, joined with "; ".
+  var row = omitKeys(makeRow(0), []);
+  row.locationNumber = 'DTN6';
+  row.trades = [
+    { __typename: 'Trade', name: 'Parking Lot', systemTradeName: 'Concrete and Asphalt' },
+    { __typename: 'Trade', name: 'Toilets', systemTradeName: 'Plumbing' }
+  ];
+  var e = s.heatApiRowToEntry(row).entry;
+  A.eq('workOrderDate -> woCreatedAt keeps the raw timestamp', e.woCreatedAt, '2026-01-15T12:00:00Z');
+  A.eq('woDate still truncates to the date', e.woDate, '1/15/2026');
+  A.eq('trades -> trade (names, joined)', e.trade, 'Parking Lot; Toilets');
+  A.eq('trades -> tradeSys (system names, joined, NOT dropped by heatFlatten)', e.tradeSys, 'Concrete and Asphalt; Plumbing');
+  A.eq('locationNumber -> locationNumber (fixes blank Location #)', e.locationNumber, 'DTN6');
+  // A trade with no systemTradeName contributes a name but no system token (filter(Boolean)).
+  var partial = omitKeys(makeRow(0), []);
+  partial.trades = [{ __typename: 'Trade', name: 'HVAC' }];
+  var ep = s.heatApiRowToEntry(partial).entry;
+  A.eq('a trade with no systemTradeName still yields the name', ep.trade, 'HVAC');
+  A.eq('and an empty system token, not "undefined"', ep.tradeSys, '');
+  // makeRow carries no trades / locationNumber: every new field blank, woCreatedAt still present.
+  var bare = s.heatApiRowToEntry(makeRow(1)).entry;
+  A.eq('no trades/locationNumber -> those blank', [bare.trade, bare.tradeSys, bare.locationNumber], ['', '', '']);
+  A.eq('woCreatedAt is present even with no address/trades (from workOrderDate)', bare.woCreatedAt, '2026-01-15T12:00:00Z');
+})();
+
 console.log('\n-- v3.19: the status clock scales off the client SLA, not a parsed label --');
 (function () {
   var s = buildVerdict({});
