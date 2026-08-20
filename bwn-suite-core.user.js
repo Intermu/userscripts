@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         BWN Suite - Core (Broadway National)
 // @namespace    broadwaynational.bwn
-// @version      1.78.26
+// @version      1.78.27
 // @downloadURL  https://raw.githubusercontent.com/Intermu/userscripts/main/bwn-suite-core.user.js
 // @updateURL    https://raw.githubusercontent.com/Intermu/userscripts/main/bwn-suite-core.user.js
 // @description  Runs several Umbrava helpers for BWN coordinators, in the browser with no privileged grants. Includes: PO Approval + ETA Builder; WO Assist (GP/ETA, a stall watchdog, DNE calculator, and a next-action playbook); Email Leak Guard (checks recipients against vendor names, PO amounts, and client budget references before an outbound email sends); WO List Heat (a triage overlay + My Day strip on the work-order list, with an optional same-origin Umbrava API scan for deterministic full-board coverage); and the BWN Launcher (opens the Azure Static Web App tools with the current WO's context). Modules share state through sessionStorage/localStorage. The only network calls are same-origin Umbrava GraphQL requests (app.umbrava.com/api/graphql, the app's own session): List Heat's full-board scan and WO Assist's work-order / trip / clock-in / document reads, plus ONE write - BWN Views saves the column layout through Umbrava's own putUserPreference, the same preference the column chooser writes; everything else is offline. Toggle modules in BWN_MODULES below.
@@ -8589,11 +8589,13 @@
     // ---- In-House Dispatch sync trigger --------------------------------------------
     // Runs the tenant-wide OPEN seed scan on demand and pushes bwn:dispatchq (drained by the
     // connector to the SWA). The seeded scan is otherwise a passive fallback a real per-user
-    // board capture pre-empts, so the dispatch feed needs an explicit runner. Console entry
-    // point today; a strip button can call the same function. Side effect: the live heat strip
-    // shows whole-open-book numbers until the next real board capture displaces the seed (self-
-    // heals, same as the seed fallback). Resolves apiScanAll's promise (true on a clean scan).
-    if (typeof window !== 'undefined') window.__bwnDispatchSyncNow = function () {
+    // board capture pre-empts, so the dispatch feed needs an explicit runner. Two entry points:
+    // the console global below, and the bwn:cmd bus so the connector's one-click menu can drive
+    // the SCAN (it lives in bwn-suite-ai, a separate @grant sandbox, and cannot call this global).
+    // Side effect: the live heat strip shows whole-open-book numbers until the next real board
+    // capture displaces the seed (self-heals, same as the seed fallback). Resolves apiScanAll's
+    // promise (true on a clean scan).
+    function dispatchSyncNow() {
       if (!isListPage()) { console.warn('[BWN DISPATCH] open the Work Orders LIST first.'); return Promise.resolve(false); }
       if (!authToken()) { console.warn('[BWN DISPATCH] no auth bearer captured yet - load the WO list once, then retry.'); return Promise.resolve(false); }
       apiList = null;   // drop any per-user capture so the tenant-wide OPEN seed is what runs
@@ -8601,7 +8603,25 @@
       var btn = document.getElementById('bwn-heat-scan') || { disabled: false, textContent: '' };
       console.info('[BWN DISPATCH] syncing the whole open book for the In-House Dispatch Report...');
       return apiScanAll(btn);
-    };
+    }
+    if (typeof window !== 'undefined') window.__bwnDispatchSyncNow = dispatchSyncNow;
+    // One-click sync from the connector: bwn-suite-ai dispatches bwn:cmd 'bwn:dispatch:sync' (it can't
+    // reach the page global from its sandbox), we run the scan, and on finish emit bwn:evt
+    // 'bwn:dispatch:synced' {ok, rows} so the connector drains bwn:dispatchq. A clean scan has already
+    // rewritten bwn:dispatchq (dispatchQueueDataset); rows is that fresh count, 0 on a failed scan.
+    var dispatchBusRunning = false;
+    document.addEventListener('bwn:cmd', BWN.guard(function (e) {
+      var d = e && e.detail; if (!d || d.id !== 'bwn:dispatch:sync') return;
+      if (dispatchBusRunning) return;   // one scan at a time
+      dispatchBusRunning = true;
+      function announce(ok) {
+        dispatchBusRunning = false;
+        var ds = ok ? BWN.lsGetJSON('bwn:dispatchq', null) : null;
+        var rows = (ds && Array.isArray(ds.rows)) ? ds.rows.length : 0;
+        try { document.dispatchEvent(new CustomEvent('bwn:evt', { detail: { id: 'bwn:dispatch:synced', ok: !!ok, rows: rows } })); } catch (e2) { }
+      }
+      Promise.resolve(dispatchSyncNow()).then(function (ok) { announce(!!ok); }, function () { announce(false); });
+    }, 'dispatch:cmd'));
 
     // ---- Scan All (scroll fallback) -------------------------------------------------
     function listScroller() {

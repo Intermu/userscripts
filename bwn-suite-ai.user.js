@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         BWN Suite - AI (Broadway National)
 // @namespace    broadwaynational.bwn
-// @version      1.45.14
+// @version      1.45.15
 // @downloadURL  https://raw.githubusercontent.com/Intermu/userscripts/main/bwn-suite-ai.user.js
 // @updateURL    https://raw.githubusercontent.com/Intermu/userscripts/main/bwn-suite-ai.user.js
 // @description  The Umbrava tools that call outside APIs, kept separate from the zero-egress Core script. Client Update and WO Audit drafts (Anthropic Claude; draft-only, scrubbed before sending, you review before posting); Find Techs / Find Suppliers (Google Places; vendor leads near a WO); and Job View (opens the Ops-Dashboard job card on the WO page - WO details from Umbrava plus the authored case file and next actions, read-only). Network access is limited by the browser to the declared API hosts and the BWN Static Web App. API keys are stored in Tampermonkey's storage via the menu commands and never enter the page. Toggle modules in BWN_MODULES below.
@@ -1291,12 +1291,33 @@
   }
   setTimeout(BWN.guard(dispatchDrain, 'dispatchDrain'), 11000);
   setInterval(BWN.guard(dispatchDrain, 'dispatchDrain'), 45000);
+  // One click = SCAN then push. The scan lives in Core (@grant none, a separate sandbox), so we
+  // drive it over the shared bwn:cmd/bwn:evt document bus rather than a page global: fire
+  // 'bwn:dispatch:sync', wait for Core's 'bwn:dispatch:synced', then drain the fresh queue. Fixes the
+  // old trap where this menu only DRAINED a stale bwn:dispatchq (see in-house-dispatch-report memory).
   GM_registerMenuCommand('BWN: Sync In-House Dispatch report now', function () {
-    var ds = BWN.lsGetJSON('bwn:dispatchq', null);
-    if (!ds || !Array.isArray(ds.rows) || !ds.rows.length) { alert('No dispatch scan yet. Open the Work Orders list and run __bwnDispatchSyncNow() (or press Sync Dispatch), then try again.'); return; }
     if (!GM_getValue('ingest_key', '')) { alert('Set the SWA ingest key first (Tampermonkey menu -> "Set SWA ingest key").'); return; }
-    dispatchDrain(true);
-    alert('Pushing ' + ds.rows.length + ' open WOs to the In-House Dispatch report…');
+    if (!connectorEnabled()) { alert('The SWA connector is turned OFF (Ops Suite toggle). Enable it, then sync again.'); return; }
+    var before = (BWN.lsGetJSON('bwn:dispatchq', null) || {}).generatedAt || '';
+    var settled = false;
+    function finishSync(ok, rows) {
+      if (settled) return; settled = true;
+      document.removeEventListener('bwn:evt', onSynced); clearTimeout(to);
+      if (!ok) { alert('The dispatch scan did not complete. Open the Work Orders LIST page, keep it on screen (do not navigate away mid-scan), then run this again.'); return; }
+      dispatchDrain(true);
+      alert('Synced ' + (rows || 0) + ' open WOs to the In-House Dispatch report.');
+    }
+    function onSynced(e) { var d = e && e.detail; if (!d || d.id !== 'bwn:dispatch:synced') return; finishSync(!!d.ok, d.rows); }
+    document.addEventListener('bwn:evt', onSynced);
+    // Fallback if the cross-sandbox event is missed: a bwn:dispatchq with a NEW generatedAt proves the
+    // scan ran, so drain it instead of a false "did not complete". The open-book scan pages ~5k WOs.
+    var to = setTimeout(function () {
+      var ds = BWN.lsGetJSON('bwn:dispatchq', null);
+      var fresh = !!(ds && ds.generatedAt && ds.generatedAt !== before && Array.isArray(ds.rows));
+      finishSync(fresh, fresh ? ds.rows.length : 0);
+    }, 120000);
+    document.dispatchEvent(new CustomEvent('bwn:cmd', { detail: { id: 'bwn:dispatch:sync' } }));
+    console.info('[BWN DISPATCH] requested a fresh open-book scan; will push when it completes (keep the WO list open).');
   });
 
   // ===== BWN AI TRANSPORT (Phase 2 - unified bwnAI transport) =========================
