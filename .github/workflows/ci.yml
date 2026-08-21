@@ -121,6 +121,14 @@ jobs:
       - name: dispatch patchWorkOrder engine harness (status/assign/ECD writes)
         run: node scripts/test-dispatch-patch.js
 
+      # temp-vendor 0.3.0: the vendor activate/deactivate writes routed through bwnGqlOp. Slices the
+      # real write block (real bwnGqlOp runs, not a stub) and pins: activate resolves the reason id by
+      # NAME then fires activateVendor with an audit entry (high-risk, confirmed:true from its panel);
+      # deactivate fires + audits (moderate); success:false rejects; and two controls prove the
+      # confirm gate is load-bearing (drop confirmed:true / rename the op -> no call goes out).
+      - name: Temp-vendor activate/deactivate harness (bwnGqlOp routing + confirm gate)
+        run: node scripts/test-temp-vendor.js
+
       - name: bus identity publish harness (identity ahead of the anchor gate)
         run: node scripts/test-bus-identity-publish.js
 

@@ -375,7 +375,7 @@ function main() {
     // paste has no mechanism behind it, so this gate goes red if a fix lands in one copy and
     // not the other - same discipline as the bwnAI and BWN-SHARED SHA gates.
     console.log('\n-- BWN-OPS-WRAP paste-identical across adopters --');
-    var ADOPTERS = ['bwn-suite-core.user.js', 'bwn-drop-upload.user.js', 'bwn-dispatch.user.js'];
+    var ADOPTERS = ['bwn-suite-core.user.js', 'bwn-drop-upload.user.js', 'bwn-dispatch.user.js', 'bwn-temp-vendor.user.js'];
     var wraps = ADOPTERS.map(function (f) {
       var s = fs.readFileSync(path.join(__dirname, '..', f), 'utf8').replace(/\r\n/g, '\n');
       var a = s.indexOf('// ===== BWN-OPS-WRAP START v2');
