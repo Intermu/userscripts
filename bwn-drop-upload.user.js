@@ -16,6 +16,7 @@
   'use strict';
 
   var VER = '1.17.0';   // keep in step with @version (drift caught earlier: banner had lagged two releases)
+  var BWN_VER = VER;   // stamped into BWN-OPS audit entries; the wrapper references BWN_VER
   console.info('[BWN DROP UPLOAD] v' + VER + ' · Uploads via Umbrava API (initializeJobDocument→blob PUT→bulkAddWorkOrderDocuments, Label by id), DOM dialog is the fallback · email→note in a human-gated BWN review box, posted via addEditJobNote on an explicit Post click (never auto-posted) · note Type by parties (inbound=sender, outbound=recipient) · note box shows instantly with a mechanical lead; the slow on-device AI brief (Gemini Nano / Edge Phi) fills in async · bwn:cmd dropupload:files bridge');
 
   // Active only on WO pages; checked at drag time so SPA navigation needs no watcher.
