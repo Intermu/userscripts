@@ -86,7 +86,7 @@ function run() {
     .then(function () { ctx.setAI(''); return ctx.docLabelForFiles([emailFile(inbound('who@mystery.com'))]); })
     .then(function (l) { A.eq('label: unknown external + AI MISS -> Vendor Correspondence (fallback)', l, 'Vendor Correspondence'); })
     .then(function () { ctx.setAI('supplier'); return ctx.docLabelForFiles([emailFile(outbound('boss@broadwaynational.com'))]); })
-    .then(function (l) { A.eq('label: internal email -> Work Order Request (no AI)', l, 'Work Order Request'); })
+    .then(function (l) { A.eq('label: internal email -> Internal (no AI; not a client Work Order Request)', l, 'Internal'); })
     .then(function () { return ctx.docLabelForFiles([{ isEmail: false }]); })
     .then(function (l) { A.eq('label: no email (photo/PDF) -> Work Order Request', l, 'Work Order Request'); });
 }
