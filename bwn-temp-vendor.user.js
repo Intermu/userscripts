@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         BWN Suite - Temp-Activate Vendor for PO (Broadway National)
 // @namespace    broadwaynational.bwn
-// @version      0.2.0
+// @version      0.3.0
 // @description  Inside the "Create Purchase Order" modal, adds a "Temp-Activate Vendor" button. Type an inactive vendor's name or number; it finds them, temporarily activates them via Umbrava's own API (reason ALWAYS "Temporary Activation") so they become assignable in the PO. After you assign them and click Create, it watches the PO save and auto-prompts a one-click re-deactivation (reason ALWAYS "Pending Compliance"). A persistent reminder pill keeps the temporarily-active vendor visible until you deactivate, so nobody is left active by mistake. Same-origin /api/graphql with the app's Auth0 bearer, @grant none, zero egress. Every write is one click behind a confirm.
 // @match        https://app.umbrava.com/*
 // @run-at       document-idle
@@ -70,6 +70,179 @@
     });
   }
 
+  // ---- BWN-OPS: audited GraphQL wrapper for this sandbox --------------------
+  // Routes the vendor activate/deactivate writes through bwnGqlOp (the paste-identical
+  // BWN-OPS-WRAP below, SHA-gated to Core): correlation id + shared audit entry + the high-risk
+  // confirm gate. tvGql is 3-arg (op,query,variables); this adapter gives the wrapper the uniform
+  // bwnGql(query,variables) it calls, recovering the op name from the query. temp-vendor confirms
+  // each write in its own panel (vendor + reason spelled out), so it passes confirmed:true.
+  function bwnGql(query, variables) { var m = /\b(?:query|mutation)\s+([A-Za-z0-9_]+)/.exec(query); return tvGql(m ? m[1] : null, query, variables); }
+  var BWN_VER = (typeof GM_info !== 'undefined' && GM_info.script && GM_info.script.version) || '0.3.0';
+  var BWN_MODULES = (function () { try { return JSON.parse(localStorage.getItem('bwn:modules') || '{}') || {}; } catch (e) { return {}; } })();
+  var BWN_OPS = {
+    activateVendor: { kind: 'write', target: 'vendor', risk: 'high', idempotent: true, retry: 'none',
+      ok: 'Vendor activated.', fail: 'The vendor was not activated.' },
+    deactivateVendor: { kind: 'write', target: 'vendor', risk: 'moderate', idempotent: true, retry: 'none',
+      ok: 'Vendor deactivated.', fail: 'The vendor was not deactivated.' }
+  };
+  // ===== BWN-OPS-WRAP START v2 (paste-identical across adopters; SHA-gated by scripts/test-bwn-ops.js) =====
+  // Generic machinery only - NO registry, NO window hook - so it is byte-identical in every
+  // sandbox that adopts it (Core, drop-upload, ...). It closes over four things each sandbox
+  // supplies on its own: BWN_OPS (that file's registry), BWN_MODULES (kill switches), BWN_VER,
+  // and bwnGql(query, variables) (that file's same-origin transport). The audit ring buffer
+  // writes to the shared localStorage key, so every sandbox's writes land in ONE audit trail.
+  function bwnCorrId() {
+    try { if (window.crypto && window.crypto.randomUUID) return 'bwn-' + window.crypto.randomUUID(); }
+    catch (e) { /* fall through to the timestamp form */ }
+    return 'bwn-' + Date.now().toString(36) + '-' + Math.random().toString(36).slice(2, 10);
+  }
+
+  // Bounded, PII-free audit ring buffer in localStorage. Records ONLY what the caller passes
+  // (ids + scalar before/after) plus operation metadata - NEVER the raw variables or the
+  // response, which can carry note text, addresses, or vendor identity.
+  var BWN_AUDIT_KEY = 'bwn:audit', BWN_AUDIT_MAX = 200, BWN_AUDIT_SCHEMA = 1;
+  function bwnAuditAll() {
+    try { var a = JSON.parse(localStorage.getItem(BWN_AUDIT_KEY) || '[]'); return Array.isArray(a) ? a : []; }
+    catch (e) { return []; }
+  }
+  function bwnAuditRecord(entry) {
+    try {
+      var a = bwnAuditAll();
+      a.push(entry);
+      if (a.length > BWN_AUDIT_MAX) a = a.slice(a.length - BWN_AUDIT_MAX);
+      localStorage.setItem(BWN_AUDIT_KEY, JSON.stringify(a));
+    } catch (e) { /* audit is best-effort - it must never block or fail a write */ }
+    return entry;
+  }
+  function bwnAuditExport() {
+    return JSON.stringify({ schema: BWN_AUDIT_SCHEMA, ver: BWN_VER, exportedTs: Date.now(), entries: bwnAuditAll() }, null, 2);
+  }
+  function bwnAuditClear() { try { localStorage.removeItem(BWN_AUDIT_KEY); } catch (e) { /* best-effort */ } }
+  function bwnAuditActor() {
+    try {
+      var r = JSON.parse(localStorage.getItem('bwn:role:last') || 'null');
+      return (r && (r.label || r.role)) || 'unknown';
+    } catch (e) { return 'unknown'; }
+  }
+
+  // Only a network-level failure is transient. A GraphQL validation error comes back through
+  // bwnGql as a thrown Error carrying the server's message (deterministic - retrying just
+  // repeats it), and a write refused with success:false is flagged bwnNonTransient below.
+  // ponytail: bwnGql does not surface the HTTP status, so 429/5xx are not distinguished here;
+  // attach r.status in bwnGql and widen this test if status-aware backoff is ever needed.
+  function bwnIsTransient(err) {
+    if (err && err.bwnNonTransient) return false;
+    return /network|failed to fetch|load failed|timeout|timed out/i.test(String(err && err.message || err));
+  }
+  function bwnBackoff(tryNo) { return Math.min(4000, 400 * Math.pow(2, tryNo - 1)); }
+  function bwnDelay(ms) { return new Promise(function (r) { setTimeout(r, ms); }); }
+
+  // bwnGqlOp(op, query, variables, opts) -> Promise(data)
+  //   op        BWN_OPS key. THROWS if unregistered - a captured op must be classified before
+  //             it can be sent, which is what keeps guessed selectors out of the suite.
+  //   query     the captured GraphQL document TEXT - the caller owns it, never invented here.
+  //   variables the variables object (sent as-is to bwnGql; never copied into the audit).
+  //   opts      { feature, validate, ids, before, after, actor } - all optional:
+  //     feature   BWN_MODULES key; if that module is switched off the op is REFUSED and, for a
+  //               write, audited outcome:'denied' - this is the per-feature kill switch.
+  //     validate  fn(variables) -> true | 'message'; a write is blocked before it is sent.
+  //     ids       { wo, po, vendorId, ... } scalar identifiers for the audit trail (NO PII).
+  //     before    scalar snapshot of the value(s) about to change (NO PII, NO bulk data).
+  //     after     scalar snapshot of the intended new value(s).
+  //     actor     who initiated; defaults to the last-known rank label, else 'unknown'.
+  // Reads resolve to `data`. A write whose {success,message} envelope says success:false is
+  // REJECTED (never a silent false - the exact bug class the op-catalog warns about) and
+  // audited outcome:'error'.
+  // Injected per-sandbox by a caller that owns a high-risk write's confirmation UI, via
+  // bwnGqlOp.setConfirm(fn). A risk:'high' write is refused unless the caller either passes
+  // opts.confirmed===true (it confirmed through its own UI) OR a confirm handler returns truthy.
+  var _confirmFn = null;
+  function bwnGqlOp(op, query, variables, opts) {
+    opts = opts || {};
+    var meta = BWN_OPS[op];
+    if (!meta) return Promise.reject(new Error('bwnGqlOp: unregistered operation "' + op + '"'));
+    var isWrite = meta.kind === 'write';
+    var corrId = bwnCorrId();
+    var t0 = Date.now();
+    var actor = opts.actor || bwnAuditActor();
+
+    function writeAudit(outcome, extra) {
+      if (!isWrite) return;
+      var e = {
+        ts: Date.now(), corrId: corrId, op: op, kind: meta.kind, target: meta.target,
+        risk: meta.risk || null, actor: actor, ids: opts.ids || null,
+        before: (opts.before === undefined ? null : opts.before),
+        after: (opts.after === undefined ? null : opts.after),
+        outcome: outcome, ms: Date.now() - t0, ver: BWN_VER
+      };
+      if (extra) { for (var k in extra) { if (Object.prototype.hasOwnProperty.call(extra, k)) e[k] = extra[k]; } }
+      bwnAuditRecord(e);
+    }
+
+    // Per-feature kill switch: a disabled module must not mutate even if its UI leaked in.
+    if (opts.feature && BWN_MODULES[opts.feature] === false) {
+      writeAudit('denied', { reason: 'feature-off:' + opts.feature });
+      return Promise.reject(new Error('bwnGqlOp: feature "' + opts.feature + '" is disabled'));
+    }
+    // Validate a write BEFORE it leaves the browser.
+    if (isWrite && typeof opts.validate === 'function') {
+      var vr = opts.validate(variables);
+      if (vr !== true) {
+        writeAudit('denied', { reason: 'validation:' + vr });
+        return Promise.reject(new Error('bwnGqlOp: validation failed for "' + op + '": ' + vr));
+      }
+    }
+
+    var maxTries = (meta.retry === 'safe' && (meta.kind === 'read' || meta.idempotent === true)) ? 3 : 1;
+    function attempt(tryNo) {
+      return bwnGql(query, variables).then(function (data) {
+        if (isWrite) {
+          var env = data && data[op];
+          if (env && env.success === false) {
+            var refused = new Error(env.message || (op + ' was refused'));
+            refused.bwnNonTransient = true;
+            writeAudit('error', { tries: tryNo, reason: refused.message });
+            throw refused;
+          }
+          writeAudit('ok', { tries: tryNo });
+        }
+        return data;
+      }, function (err) {
+        if (bwnIsTransient(err) && tryNo < maxTries) {
+          return bwnDelay(bwnBackoff(tryNo)).then(function () { return attempt(tryNo + 1); });
+        }
+        writeAudit('error', { tries: tryNo, reason: String(err && err.message || err) });
+        throw err;
+      });
+    }
+    // High-risk confirmation gate (fail-closed). A risk:'high' write must be proven confirmed:
+    // either the caller passes opts.confirmed===true (it ran its own confirm UI, e.g. dispatch's
+    // modal) OR an injected _confirmFn returns truthy. Neither -> refused, never a silent send.
+    if (isWrite && meta.risk === 'high' && opts.confirmed !== true) {
+      if (typeof _confirmFn !== 'function') {
+        writeAudit('denied', { reason: 'confirm-required' });
+        return Promise.reject(new Error('bwnGqlOp: "' + op + '" is high-risk and needs confirmation (no confirm handler set)'));
+      }
+      var details = {
+        op: op, target: meta.target, risk: meta.risk, ids: opts.ids || null,
+        current: (opts.current === undefined ? null : opts.current),
+        proposed: (opts.proposed === undefined ? null : opts.proposed),
+        count: (opts.count === undefined ? null : opts.count),
+        reason: opts.reason || null, irreversible: !!opts.irreversible
+      };
+      return Promise.resolve().then(function () { return _confirmFn(details); }).then(function (okd) {
+        if (!okd) {
+          writeAudit('denied', { reason: 'user-cancelled' });
+          throw new Error('bwnGqlOp: "' + op + '" cancelled at confirmation');
+        }
+        return attempt(1);
+      });
+    }
+    return attempt(1);
+  }
+  bwnGqlOp.setConfirm = function (fn) { _confirmFn = (typeof fn === 'function') ? fn : null; };
+  // ===== BWN-OPS-WRAP END v2 =====
+
   // ---- queries / mutations (introspected + live-verified 2026-08-18) ----
   var Q_LOOKUP = 'query TvLookupVendors($page:PageInput!,$search:String,$includeInactive:Boolean){ lookupVendors(page:$page,search:$search,includeInactive:$includeInactive){ rowCount items{ id number companyName status isDependent } } }';
   var Q_ACT_REASONS = 'query TvActReasons{ vendorActivationReasons(includeInactive:false){ success value{ id value isActive } } }';
@@ -102,20 +275,27 @@
 
   function tvActivate(vendor) {
     return tvReasonId('act').then(function (rid) {
-      return tvGql('TvActivateVendor', M_ACTIVATE, { data: { vendorId: vendor.id, activationReasonId: rid, notes: ACT_NOTE } });
+      // Routed through bwnGqlOp: audit + corrId + the high-risk confirm gate. temp-vendor already
+      // confirmed via its panel (vendor + reason spelled out), so it passes confirmed:true; the
+      // wrapper owns the success:false rejection.
+      return bwnGqlOp('activateVendor', M_ACTIVATE, { data: { vendorId: vendor.id, activationReasonId: rid, notes: ACT_NOTE } }, {
+        confirmed: true,
+        ids: { vendorId: vendor.id },
+        before: { status: 'Inactive' }, after: { status: 'Active' }, reason: ACT_REASON_NAME
+      });
     }).then(function (d) {
-      var r = d && d.activateVendor;
-      if (!r || r.success !== true) throw new Error((r && r.message) || 'activateVendor reported no success');
-      return r;
+      return d && d.activateVendor;
     });
   }
   function tvDeactivate(vendor) {
     return tvReasonId('deact').then(function (rid) {
-      return tvGql('TvDeactivateVendor', M_DEACTIVATE, { data: { vendorId: vendor.id, deactivationReasonId: rid, notes: DEACT_NOTE } });
+      // Moderate write - routed through bwnGqlOp for the audit trail + centralized success handling.
+      return bwnGqlOp('deactivateVendor', M_DEACTIVATE, { data: { vendorId: vendor.id, deactivationReasonId: rid, notes: DEACT_NOTE } }, {
+        ids: { vendorId: vendor.id },
+        before: { status: 'Active' }, after: { status: 'Inactive' }, reason: DEACT_REASON_NAME
+      });
     }).then(function (d) {
-      var r = d && d.deactivateVendor;
-      if (!r || r.success !== true) throw new Error((r && r.message) || 'deactivateVendor reported no success');
-      return r;
+      return d && d.deactivateVendor;
     });
   }
 
