@@ -60,6 +60,17 @@ jobs:
         # bwn-drop-upload / bwn-suite-ai / bwn-wo-audit. Makes that a real gate.
         run: node scripts/test-bwn-ai-phase3.js
 
+      # BWN-OPS (Core 1.78.28): the operation registry + audited GraphQL wrapper (bwnGqlOp) - the
+      # safety spine for /api/graphql writes. Slices the shipped BWN-OPS block and pins: an
+      # unregistered op is refused (no guessed selectors); a non-idempotent write is NEVER
+      # auto-retried while a read / idempotent-safe write retries a TRANSIENT failure only; a
+      # success:false envelope REJECTS + audits 'error' (no swallow-to-a-fact); the per-feature
+      # kill switch + validate() block a write before it is sent; the audit entry is PII-free
+      # (ids + scalar before/after only, never the variables); the ring buffer is bounded.
+      # Eight mutation controls each turn it red. Tripwire if the block regresses or vanishes.
+      - name: BWN-OPS registry + audited GraphQL wrapper harness
+        run: node scripts/test-bwn-ops.js
+
       # The four steps below close the 2026-07-31 audit finding that harnesses were
       # committed but NEVER EXECUTED by CI - a green checkmark said nothing about them.
       - name: Launcher dock latent-fix harness
