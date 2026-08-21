@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         BWN Suite - Core (Broadway National)
 // @namespace    broadwaynational.bwn
-// @version      1.78.28
+// @version      1.78.29
 // @downloadURL  https://raw.githubusercontent.com/Intermu/userscripts/main/bwn-suite-core.user.js
 // @updateURL    https://raw.githubusercontent.com/Intermu/userscripts/main/bwn-suite-core.user.js
 // @description  Runs several Umbrava helpers for BWN coordinators, in the browser with no privileged grants. Includes: PO Approval + ETA Builder; WO Assist (GP/ETA, a stall watchdog, DNE calculator, and a next-action playbook); Email Leak Guard (checks recipients against vendor names, PO amounts, and client budget references before an outbound email sends); WO List Heat (a triage overlay + My Day strip on the work-order list, with an optional same-origin Umbrava API scan for deterministic full-board coverage); and the BWN Launcher (opens the Azure Static Web App tools with the current WO's context). Modules share state through sessionStorage/localStorage. The only network calls are same-origin Umbrava GraphQL requests (app.umbrava.com/api/graphql, the app's own session): List Heat's full-board scan and WO Assist's work-order / trip / clock-in / document reads, plus ONE write - BWN Views saves the column layout through Umbrava's own putUserPreference, the same preference the column chooser writes; everything else is offline. Toggle modules in BWN_MODULES below.
@@ -10558,14 +10558,24 @@
       });
     }
 
+    // FIRST adopter of bwnGqlOp (the BWN-OPS registry + audited wrapper). Routing this
+    // one write through it gives the column-layout save a correlation id, a structured
+    // audit entry, a pre-send validate(), the viewManager kill switch, and centralized
+    // success:false rejection - the wrapper rejects a refused write itself, so the old
+    // inline `res.success !== true` throw is gone. Behaviour is otherwise identical: the
+    // same PutUserPreferenceInput, resolving true on a verified write.
     function writePref(version, valueStr) {
-      return bwnGql(PREF_WRITE_Q, {
+      return bwnGqlOp('putUserPreference', PREF_WRITE_Q, {
         d: { applicationId: PREF_APP, key: PREF_KEY, version: version, value: valueStr, isTenantSpecific: true }
-      }).then(function (d) {
-        var res = d && d.putUserPreference;
-        if (!res || res.success !== true) throw new Error('putUserPreference refused: ' + (res && res.message));
-        return true;
-      });
+      }, {
+        feature: 'viewManager',
+        ids: { key: PREF_KEY },
+        validate: function (v) {
+          var d = v && v.d;
+          if (!d || !d.key || !d.version || typeof d.value !== 'string') return 'missing key/version/value';
+          return true;
+        }
+      }).then(function () { return true; });
     }
 
     // Apply a SAVED value byte-for-byte. The version comes from a FRESH read, never

@@ -88,7 +88,13 @@ function mutate(src, from, to) {
 
 // ---- Environment ------------------------------------------------------------
 function makeApi(apiSrc) {
-  var env = { calls: [], store: {} };
+  var env = { calls: [], store: {}, modules: { viewManager: true } };
+  function gql(query, variables) {
+    var rec = { query: query, vars: variables };
+    rec.p = new Promise(function (res, rej) { rec.resolve = res; rec.reject = rej; });
+    env.calls.push(rec);
+    return rec.p;
+  }
   var sandbox = {
     Object: Object, Array: Array, Number: Number, JSON: JSON, Promise: Promise,
     Error: Error, Date: Date, console: { info: function () { }, warn: function () { }, error: function () { } },
@@ -97,11 +103,20 @@ function makeApi(apiSrc) {
       setItem: function (k, v) { env.store[k] = String(v); },
       removeItem: function (k) { delete env.store[k]; }
     },
-    bwnGql: function (query, variables) {
-      var rec = { query: query, vars: variables };
-      rec.p = new Promise(function (res, rej) { rec.resolve = res; rec.reject = rej; });
-      env.calls.push(rec);
-      return rec.p;
+    bwnGql: gql,
+    // The Views write now routes through bwnGqlOp (Core 1.78.29). bwnGqlOp is proven
+    // against the real bytes in test-bwn-ops.js; here a faithful stub reproduces its
+    // caller-visible contract - feature kill switch, pre-send validate, delegate to
+    // bwnGql, reject a success:false envelope - so this harness stays focused on Views.
+    bwnGqlOp: function (op, query, variables, opts) {
+      opts = opts || {};
+      if (opts.feature && env.modules[opts.feature] === false) return Promise.reject(new Error('feature "' + opts.feature + '" is disabled'));
+      if (typeof opts.validate === 'function') { var vr = opts.validate(variables); if (vr !== true) return Promise.reject(new Error('validation: ' + vr)); }
+      return gql(query, variables).then(function (data) {
+        var envd = data && data[op];
+        if (envd && envd.success === false) return Promise.reject(new Error(envd.message || (op + ' was refused')));
+        return data;
+      });
     }
   };
   sandbox.localStorage = {
@@ -292,7 +307,18 @@ async function runCases(apiSrc) {
   await tick(); await tick();
   e3.calls[1].resolve({ putUserPreference: { success: false, message: 'nope' } });
   await tick(); await tick();
-  ok('success:false rejects instead of reading as done', /refused/.test(fail3 || ''), fail3);
+  ok('a success:false write rejects (surfaced by bwnGqlOp, not swallowed)', /nope/.test(fail3 || ''), fail3);
+
+  // --- viewManager kill switch: a disabled module refuses the WRITE (read still runs) ---
+  var eKill = makeApi(apiSrc);
+  eKill.modules = { viewManager: false };
+  var killErr = null;
+  eKill.api.apiApplyColumns(['Tracking #']).then(null, function (err) { killErr = String(err && err.message); });
+  await tick();
+  eKill.calls[0].resolve({ userPreference: { key: 'k', version: 'v', value: JSON.stringify(cur) } });
+  await tick(); await tick();
+  ok('a disabled viewManager refuses the pref WRITE (kill switch)', /disabled/.test(killErr || ''), killErr);
+  eq('only the read fired - the write was blocked before send', eKill.calls.length, 1);
 
   // --- continuation stash
   var e4 = makeApi(apiSrc);
@@ -480,8 +506,11 @@ function expectRed(label, results) {
     await runCases(mutate(S_API, 'if (at >= 0) list[at] = v; else list.push(v);', 'list.push(v);')));
   failures += expectRed('saveViews clobbers the rest of bwn:config',
     await runCases(mutate(S_API, 'try { c = JSON.parse(localStorage.getItem(\'bwn:config\') || \'{}\') || {}; } catch (e) { c = {}; }', 'c = {};')));
-  failures += expectRed('success:false read as done',
-    await runCases(mutate(S_API, 'res.success !== true', 'false')));
+  // The old inline `res.success !== true` throw is gone - bwnGqlOp owns success:false
+  // rejection now (its own control is in test-bwn-ops.js). This control proves the
+  // migration wired the viewManager kill switch onto the write.
+  failures += expectRed('the write kill switch removed - a disabled viewManager writes anyway',
+    await runCases(mutate(S_API, "feature: 'viewManager'", "feature: 'viewManagerX'")));
   failures += expectRed('stash not consumed before applying',
     await runCases(mutate(S_API, 'sessionStorage.removeItem(PENDING_KEY);   // remove BEFORE applying - no retry loops', '')));
   failures += expectRed('unmapped titles silently dropped',
