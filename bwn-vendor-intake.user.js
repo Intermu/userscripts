@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         BWN Vendor Intake (Broadway National)
 // @namespace    broadwaynational.bwn
-// @version      0.9.5
+// @version      0.9.6
 // @downloadURL  https://raw.githubusercontent.com/Intermu/userscripts/main/bwn-vendor-intake.user.js
 // @updateURL    https://raw.githubusercontent.com/Intermu/userscripts/main/bwn-vendor-intake.user.js
 // @description  Prefills Umbrava's Create Vendor form (and the detail-page Tax ID) from a Prospect Set-Up Form or a W-9. Fillable PDFs are read straight from their form fields; SCANNED W-9s are read by on-device OCR (Tesseract + pdf.js, fetched once at install, run entirely in the browser). The document and its tax ID never leave your machine. Adds a "Prefill from document" button; every extracted field is a suggestion to review before saving - the TIN especially, since OCR can misread digits.
@@ -21,7 +21,29 @@
 (function () {
   'use strict';
 
-  var VER = '0.9.5';
+  var VER = '0.9.6';
+  // v0.9.6 - the W-9 comb-crop scanned-Tax-ID pass (0.9.3 + 0.9.4 below) ported onto current main,
+  // which had realigned @version to 0.9.5 without the crop code. @updateURL stays on Intermu/userscripts;
+  // the dead parseProspect symbol main removed stays removed; only the crop logic and its harness
+  // (scripts/test-w9-tin-crop.js) come over. STILL UNVALIDATED on a real scanned W-9 - see below.
+  // v0.9.4 - the two blockers a four-lens council raised against 0.9.3, neither of which was a
+  // theory: (1) an EMPTY comb could fabricate a Tax ID, because a digits-only whitelist forces
+  // every glyph to a digit and 0.9.3 caught only the all-same-digit artifact - now the row's PIXELS
+  // are counted (printed rules discounted) and one corroborating read runs with the whitelist
+  // DROPPED, which is 0.9.2's digit-majority guard restored rather than reinvented; (2) the 4-pad
+  // consensus asserted an independence the pads do not have - two crops 6px apart on a 40px row see
+  // the same ink - so identical crop geometry now counts once, a malformed read can only lower the
+  // count, and only >=3 agreeing measurements spread >=8px apart are CONFIRMED. Anything less is
+  // filled as BARE DIGITS and announced, restoring the uncertainty signal 0.9.3 deleted: before
+  // this, a wrong Tax ID looked exactly like a right one. TIN_PADS also drops the unmeasured 0.5
+  // and restores the measured-good 0.4. Harness: scripts/test-w9-tin-crop.js.
+  // v0.9.3 - the SCANNED path stops searching a flat string for the Tax ID and reads the comb
+  // rectangle instead. Measured against the real Rev. March 2024 form at this script's own pinned
+  // engine: tesseract.js defaults to PSM 6 (one uniform text block) and this script never changed
+  // it, so the two-column Part I was read ACROSS the columns - the right-hand box labels were never
+  // recognised at all and the comb digits came back welded onto a left-column prose line with the
+  // printed cell edges read as 1s ("514131211" where the truth was 987654321). findTIN could not
+  // fire on that text at all. See ocrTinByCrop below.
   // v0.4.0 - real IRS fillable W-9 support: map by FIELD NAME (UTF-16BE-decoded f1_/c1_1 names)
   // after inflating compressed object streams, since the IRS form carries no /TU tooltips; the
   // tooltip mapping stays as a fallback for other fillable forms. Also fixed stream inflation to
@@ -535,19 +557,279 @@
     } finally { try { await task.destroy(); } catch (e) { } }
     return canvases;
   }
-  async function ocrPdf(file, onProgress) {
+  // ---- Scanned W-9: read the Tax ID RECTANGLE, not the page text ----------
+  // Measured 2026-07-30 against the real IRS Form W-9 (Rev. March 2024) with this script's own
+  // pinned engine (all six assets SHA-384 verified against the @require/@resource pins above), so
+  // this is not another default-traineddata probe like the one whose findings had to be thrown out.
+  //
+  //  1. tesseract.js defaults to PSM 6, ONE uniform text block, and nothing here ever changed it.
+  //     Verified: no setParameters and an explicit psm=6 give byte-identical output. PSM 6 reads
+  //     ACROSS a two-column form. Part I is two columns, so the right-hand box labels were never
+  //     recognised and the comb digits arrived welded onto a left-column prose line.
+  //  2. PSM 3 recovers exactly what PSM 6 loses: both box labels within a point of their measured
+  //     positions, and the filled comb row as its OWN line. It does NOT reliably give the Part I /
+  //     Part II heading lines, so no heading test is used here.
+  //  3. Neither full-page mode reads the digits correctly. A crop of one comb row with PSM 13 and a
+  //     digits-only whitelist does. The crop's VERTICAL pad decides it: too tight and the printed
+  //     cell separators come back as 1s, too loose and digits vanish. Measured as a multiple of the
+  //     row's line height - EIN row exact at 0.4/0.7/0.85/1.0 and broken at 1.3, SSN row exact only
+  //     at 0.7/0.85 - so several pads are read and required to AGREE rather than trusting one.
+  //
+  // The kind is decided by WHICH LABEL the row hangs under. That deletes the caption-to-number
+  // attribution step, which is where every previous round of this bug lived.
+  var TIN_SSN_WORDS = ['social', 'security', 'number'];
+  var TIN_EIN_WORDS = ['employer', 'identification', 'number'];
+  var TIN_DEFAULT_PSM = '6';   // tesseract.js's default, and therefore what every other extractor here reads
+  var TIN_COL_TOL = 14;        // px slack for "same left edge" at 300dpi (~3.4pt)
+  var TIN_ROW_DX = 40;         // px slack between a label's left edge and its comb row's
+  // MEASURED pads only. 0.9.3 shipped an unmeasured 0.5 and dropped the measured-good 0.4; the
+  // sweep read the EIN row exact at 0.4/0.7/0.85/1.0 and the SSN row exact at 0.7/0.85.
+  var TIN_PADS = [0.4, 0.7, 0.85, 1.0];
+  var TIN_MIN_VOTES = 2;         // fewer agreeing measurements than this and the row is refused
+  var TIN_CONFIRM_VOTES = 3;     // at or above this, AND spread apart, the read is CONFIRMED
+  var TIN_PAD_SEP = 8;           // px of crop height; closer than this is the same ink read twice
+  var TIN_INK_MIN = 0.004;       // dark fraction outside the printed cell rules for a row to be "filled"
+  var TIN_RULE_FRAC = 0.7;       // a column dark over this much of the crop height is a printed rule
+  var TIN_DIGIT_MAJORITY = 5;    // of the characters that formed the run - 0.9.2's guard, restored
+  function tinNorm(s) { return String(s || '').toLowerCase().replace(/[^a-z0-9]/g, ''); }
+  function tinLines(data) {
+    var out = [];
+    ((data && data.blocks) || []).forEach(function (b) {
+      (b.paragraphs || []).forEach(function (p) { (p.lines || []).forEach(function (l) { out.push(l); }); });
+    });
+    return out;
+  }
+  // A phrase is N consecutive words on one line; returns the union bbox of each occurrence.
+  function tinFindPhrase(lines, words) {
+    var hits = [];
+    lines.forEach(function (l) {
+      var ws = l.words || [];
+      for (var i = 0; i + words.length <= ws.length; i++) {
+        var ok = true;
+        for (var j = 0; j < words.length; j++) { if (tinNorm(ws[i + j].text) !== words[j]) { ok = false; break; } }
+        if (!ok) continue;
+        var seg = ws.slice(i, i + words.length);
+        hits.push({
+          x0: Math.min.apply(null, seg.map(function (s) { return s.bbox.x0; })),
+          x1: Math.max.apply(null, seg.map(function (s) { return s.bbox.x1; })),
+          y0: Math.min.apply(null, seg.map(function (s) { return s.bbox.y0; })),
+          y1: Math.max.apply(null, seg.map(function (s) { return s.bbox.y1; }))
+        });
+      }
+    });
+    return hits;
+  }
+  function tinCropBox(src, b) {
+    var x0 = Math.max(0, Math.round(b.x0)), y0 = Math.max(0, Math.round(b.y0));
+    var x1 = Math.min(src.width, Math.round(b.x1)), y1 = Math.min(src.height, Math.round(b.y1));
+    var cv = document.createElement('canvas');
+    cv.width = Math.max(1, x1 - x0); cv.height = Math.max(1, y1 - y0);
+    cv.getContext('2d', { willReadFrequently: true, alpha: false })
+      .drawImage(src, x0, y0, cv.width, cv.height, 0, 0, cv.width, cv.height);
+    return cv;
+  }
+  // ---- Is there anything IN this comb row? ---------------------------------
+  // The one input that can FABRICATE a Tax ID is an EMPTY comb. With tessedit_char_whitelist set to
+  // digits, every glyph the engine sees is forced to a digit, so the printed cell separators can
+  // come back as a well-formed nine-digit number and no amount of whitelisted OCR can contradict
+  // it - 0.9.2's guard ("a majority of the nine characters must have been digits BEFORE any
+  // substitution") has no whitelisted equivalent, because non-digit evidence never arrives. 0.9.3
+  // caught only the all-same-digit artifact, and non-uniform is what a scan makes.
+  //
+  // Two independent defences replace it, neither of which needs the engine's cooperation:
+  //   1. tinInkStats - count the PIXELS. Full-height dark columns are the comb's printed rules;
+  //      ink anywhere else is content. An empty comb has rules and (near) nothing else.
+  //   2. tinCorroborate - one read of the winning crop with the whitelist DROPPED, so the engine
+  //      is allowed to say "not a digit". That is 0.9.2's guard, literally restored.
+  // Defence 1 is deliberately permissive (a noisy scan speckles), so it is not carried alone.
+  function tinInkStats(data, w, h) {
+    var colDark = [], isRule = [], x, y, o, dark = 0, other = 0, ruleCols = 0, band = 0;
+    for (x = 0; x < w; x++) colDark[x] = 0;
+    for (y = 0; y < h; y++) {
+      for (x = 0; x < w; x++) {
+        o = (y * w + x) * 4;
+        // Luma. The rasterizer already writes grayscale, so this is exact enough and cheap.
+        if ((data[o] * 299 + data[o + 1] * 587 + data[o + 2] * 114) / 1000 < 128) { colDark[x]++; dark++; }
+      }
+    }
+    // "Full height" means full height OF THE PRINTED ROW, not of the crop. The crop is padded well
+    // past the row (a 1.0 pad makes it three times the row's height), so measuring against `h`
+    // classified the comb's own rules as content and handed an EMPTY comb straight to the engine -
+    // caught by this file's harness, not by inspection. The tallest column IS the rule height, so
+    // everything below is measured against that and the test becomes scale-free.
+    for (x = 0; x < w; x++) if (colDark[x] > band) band = colDark[x];
+    for (x = 0; x < w; x++) { isRule[x] = band > 0 && colDark[x] >= band * TIN_RULE_FRAC; if (isRule[x]) ruleCols++; }
+    // A rule is 1-3px wide at 300dpi and its neighbours carry the anti-aliasing, so discount those
+    // too. Discounting by COLUMN rather than by pixel count is what keeps a rule shared between two
+    // neighbours from being subtracted twice.
+    for (x = 0; x < w; x++) if (!(isRule[x] || isRule[x - 1] || isRule[x + 1])) other += colDark[x];
+    // Density is per unit of BAND, for the same reason: padding the crop must not dilute the
+    // measurement of what is inside the row.
+    var denom = w * (band || h);
+    return { dark: dark, ruleCols: ruleCols, otherDark: other, band: band, px: w * h, otherFrac: denom ? other / denom : 0 };
+  }
+  function tinRowHasInk(stats) { return !!stats && stats.otherFrac >= TIN_INK_MIN; }
+  function tinCanvasInk(cv) {
+    try {
+      var d = cv.getContext('2d', { willReadFrequently: true, alpha: false }).getImageData(0, 0, cv.width, cv.height);
+      return tinInkStats(d.data, d.width, d.height);
+    } catch (e) { return null; }   // no pixels readable: fall through to the OCR defences
+  }
+  // Nine characters formed the run; a majority of them must have been digits. An empty comb reads
+  // as `| | | |` / `I l I l` here - zero digits - which is exactly the evidence the whitelist eats.
+  function tinDigitMajority(t) {
+    var run = String(t || '').replace(/\s+/g, '');
+    var d = (run.match(/\d/g) || []).length;
+    return { text: run, digits: d, chars: run.length, ok: d >= TIN_DIGIT_MAJORITY && d * 2 >= run.length };
+  }
+  async function tinCorroborate(worker, canvas, bbox, pad) {
+    var cv = tinCropBox(canvas, { x0: bbox.x0 - 6, x1: bbox.x1 + 6, y0: bbox.y0 - pad, y1: bbox.y1 + pad });
+    try {
+      await worker.setParameters({ tessedit_char_whitelist: '' });
+      var r = await worker.recognize(cv, {}, { text: true });
+      return tinDigitMajority((r && r.data && r.data.text) || '');
+    } finally {
+      cv.width = cv.height = 0;
+      await worker.setParameters({ tessedit_char_whitelist: '0123456789' });
+    }
+  }
+  // Read one comb row and say how strongly the reads agree: { digits, confident, why }.
+  //
+  // 0.9.3 counted one vote per pad and accepted two, which asserted an independence the pads do not
+  // have - on a 40px row 0.7 and 0.85 are 6px apart and read the same pixels, so their agreement is
+  // ONE measurement reported as two. It was also non-monotonic (three-to-one refused, two votes
+  // plus two malformed reads accepted) and it deleted 0.9.2's uncertainty signal, so a wrong Tax ID
+  // came out looking exactly like a right one.
+  //
+  // What replaces it:
+  //   - crops that round to the same pixel height are ONE measurement, counted once
+  //   - any two well-formed reads that DISAGREE still refuse the row outright
+  //   - >= TIN_MIN_VOTES accepts, but only >= TIN_CONFIRM_VOTES spanning >= TIN_PAD_SEP px of crop
+  //     height is CONFIRMED; anything less is returned for the caller to render unformatted, which
+  //     is 0.9.2's convention - bare nine digits mean "these digits, unsure"
+  //   - a malformed read can only ever lower the count, never raise it, so adding evidence cannot
+  //     turn a refusal into an acceptance
+  async function tinReadRow(worker, canvas, bbox) {
+    var lh = bbox.y1 - bbox.y0, votes = {}, seenPad = {}, inked = 0, i, keys;
+    for (i = 0; i < TIN_PADS.length; i++) {
+      var p = Math.round(lh * TIN_PADS[i]);
+      if (seenPad[p]) continue;                     // identical crop geometry is not a second opinion
+      seenPad[p] = 1;
+      var cv = tinCropBox(canvas, { x0: bbox.x0 - 6, x1: bbox.x1 + 6, y0: bbox.y0 - p, y1: bbox.y1 + p });
+      var ink = tinCanvasInk(cv);
+      if (ink && !tinRowHasInk(ink)) { cv.width = cv.height = 0; continue; }
+      inked++;
+      var r = await worker.recognize(cv, {}, { text: true });
+      var d = String((r && r.data && r.data.text) || '').replace(/\D/g, '');
+      cv.width = cv.height = 0;
+      if (d.length !== 9) continue;
+      if (/^(\d)\1{8}$/.test(d)) continue;          // nine identical digits is box edges, not a TIN
+      (votes[d] = votes[d] || []).push(p);
+    }
+    if (!inked) return { digits: '', confident: false, why: 'empty-comb' };
+    keys = Object.keys(votes);
+    if (keys.length > 1) return { digits: '', confident: false, why: 'disagree' };
+    if (!keys.length) return { digits: '', confident: false, why: 'no-well-formed-read' };
+    var pads = votes[keys[0]], n = pads.length;
+    if (n < TIN_MIN_VOTES) return { digits: '', confident: false, why: 'votes:' + n };
+    var maj = await tinCorroborate(worker, canvas, bbox, Math.min.apply(null, pads));
+    if (!maj.ok) return { digits: '', confident: false, why: 'digit-minority:' + maj.digits + '/' + maj.chars };
+    var spread = Math.max.apply(null, pads) - Math.min.apply(null, pads);
+    return { digits: keys[0], confident: n >= TIN_CONFIRM_VOTES && spread >= TIN_PAD_SEP, why: '' };
+  }
+  // canvas: the rasterized page carrying the form. psm3Data: a PSM 3 pass over that same canvas.
+  // Returns { tin, kind, confident, reject }; a blank tin is the designed-safe outcome throughout,
+  // and `confident: false` on a non-blank tin means the digits are unformatted on purpose.
+  async function ocrTinByCrop(canvas, psm3Data, worker) {
+    var why = [];
+    try {
+      var lines = tinLines(psm3Data);
+      var ssnCaps = tinFindPhrase(lines, TIN_SSN_WORDS);
+      var einCaps = tinFindPhrase(lines, TIN_EIN_WORDS);
+      // Each caption occurs TWICE - once in Part I's instruction prose, once as the box label. The
+      // two BOX LABELS share a left edge (x=422pt on the real form) while the prose occurrences
+      // start wherever the sentence puts them, so pair by agreeing left edge plus correct vertical
+      // order. No page-fraction constant, and it self-calibrates to the scan.
+      var pairs = [];
+      ssnCaps.forEach(function (s) {
+        einCaps.forEach(function (e) {
+          if (Math.abs(s.x0 - e.x0) <= TIN_COL_TOL && e.y0 > s.y1) pairs.push({ ssn: s, ein: e });
+        });
+      });
+      // Exactly one pair. Zero means the TIN block was not found. More than one means a caption was
+      // printed in line with the real column - the only remaining way to aim this - so refuse
+      // rather than pick, because picking is what the whole class of bug is made of.
+      if (pairs.length !== 1) return { tin: '', kind: '', confident: false, reject: 'label-pairs:' + pairs.length };
+      var labels = { ssn: pairs[0].ssn, ein: pairs[0].ein };
+
+      await worker.setParameters({ tessedit_pageseg_mode: '13', tessedit_char_whitelist: '0123456789' });
+      var found = [], kinds = ['ssn', 'ein'];
+      for (var i = 0; i < kinds.length; i++) {
+        var kind = kinds[i], lab = labels[kind], lh = lab.y1 - lab.y0;
+        // The comb row is the nearest line under this label in the same column. 0.9.3 relied on an
+        // EMPTY comb producing no line at all here - an assumption, never measured, and the whole
+        // fabrication risk rested on it. It is still the first thing that keeps a blank row blank,
+        // but tinReadRow no longer trusts it: the ink profile and the unwhitelisted read decide.
+        var below = lines.filter(function (l) {
+          return l.bbox.y0 > lab.y1 - 2 && Math.abs(l.bbox.x0 - lab.x0) <= TIN_ROW_DX && l.bbox.y0 - lab.y1 < lh * 3;
+        }).sort(function (a, b) { return a.bbox.y0 - b.bbox.y0; });
+        if (!below.length) { why.push(kind + ':no-line'); continue; }
+        var got = await tinReadRow(worker, canvas, below[0].bbox);
+        if (got.digits) found.push({ kind: kind, digits: got.digits, confident: got.confident });
+        else why.push(kind + ':' + got.why);
+      }
+      // A W-9 carries ONE TIN. Two filled rows is ambiguous, and picking is the bug class itself.
+      if (found.length !== 1) return { tin: '', kind: '', confident: false, reject: found.length ? 'both-rows-filled' : (why.join(',') || 'no-row-read') };
+      // CONFIRMED reads are hyphenated to the kind the LABEL established. An unconfirmed read is
+      // emitted as bare digits on purpose: that is 0.9.2's uncertainty signal, and without it a
+      // wrong Tax ID renders identically to a right one.
+      return {
+        tin: found[0].confident ? fmtTIN(found[0].digits, found[0].kind) : found[0].digits,
+        kind: found[0].kind, confident: found[0].confident, reject: ''
+      };
+    } finally {
+      // Every other extractor reads the PSM 6 text. Leaving the worker on 13/digits-only would
+      // silently blank name, DBA and address on the NEXT document dropped in this session.
+      await worker.setParameters({ tessedit_pageseg_mode: TIN_DEFAULT_PSM, tessedit_char_whitelist: '' });
+    }
+  }
+  // Which of the (up to 2) rasterized pages carries the W-9. Mirrors pickFormPage's test, but
+  // returns the INDEX, because the crop pass needs that page's canvas and not its text.
+  function pickFormPageIndex(pageTexts) {
+    if (pageTexts.length < 2) return 0;
+    var IS_FORM = /taxpayer identification number|name of entity\/individual|name \(as shown/i;
+    for (var i = 0; i < pageTexts.length; i++) { if (IS_FORM.test(pageTexts[i])) return i; }
+    return 0;
+  }
+  // Returns { text, tin, tinKind, tinConfident, tinWhy }. `text` is byte-for-byte what ocrPdf used
+  // to return, so every text-based extractor is unaffected; the Tax ID comes from the crop pass
+  // alone. `tinConfident` false with a non-blank `tin` means bare digits the operator must check
+  // digit by digit - callers MUST say so, or the signal is decoration.
+  async function ocrPdfDetailed(file, onProgress) {
     if (typeof pdfjsLib === 'undefined') throw new Error('PDF engine not loaded - reinstall this script from its URL.');
     var canvases = await rasterizePages(file, 2);
     var worker = await ocrWorker(onProgress);
-    var text = '';
-    for (var i = 0; i < canvases.length; i++) {
-      var r = await worker.recognize(canvases[i]);
-      // \f marks the page break so findTIN can scope itself to page 1; \n around it keeps every
-      // line-based extractor seeing the same lines it saw before.
-      text += (i ? '\n\f\n' : '\n') + ((r && r.data && r.data.text) || '');
-      canvases[i].width = canvases[i].height = 0;   // release the backing store
+    var pageTexts = [], text = '', tin = { tin: '', kind: '', confident: false, reject: 'not-run' };
+    try {
+      for (var i = 0; i < canvases.length; i++) {
+        var r = await worker.recognize(canvases[i]);
+        // \f marks the page break so the text extractors can scope themselves to one page; \n around
+        // it keeps every line-based extractor seeing the same lines it saw before.
+        pageTexts.push((r && r.data && r.data.text) || '');
+        text += (i ? '\n\f\n' : '\n') + pageTexts[i];
+      }
+      var pick = pickFormPageIndex(pageTexts);
+      if (canvases[pick]) {
+        // Second pass over the SAME canvas, for geometry only. Costs one more OCR run on one page.
+        await worker.setParameters({ tessedit_pageseg_mode: '3', tessedit_char_whitelist: '' });
+        var p3 = await worker.recognize(canvases[pick], {}, { text: true, blocks: true });
+        await worker.setParameters({ tessedit_pageseg_mode: TIN_DEFAULT_PSM, tessedit_char_whitelist: '' });
+        tin = await ocrTinByCrop(canvases[pick], p3 && p3.data, worker);
+      }
+    } finally {
+      for (var j = 0; j < canvases.length; j++) canvases[j].width = canvases[j].height = 0;   // release the backing stores
     }
-    return text;
+    return { text: text, tin: tin.tin, tinKind: tin.kind, tinConfident: !!tin.confident, tinWhy: tin.reject };
   }
   // Of the (up to 2) rasterized pages, pick the ONE that carries the W-9 being intaken, and read
   // every field from that page. Reading across the break let a second form in the packet supply the
@@ -1024,15 +1306,25 @@
       if (doc.kind === 'prospect') { fillFromProspect(root, doc.prospect, armed); return { ok: true, label: 'Prospect Form', fields: prospectFields(doc.prospect) }; }
       if (doc.kind === 'scan') {
         toast('Scanned W-9 - running on-device OCR (~10-30s; the file stays in your browser)...', 45000);
-        var text = await ocrPdf(file);
-        var w9 = extractW9FromText(text);
+        var ocr = await ocrPdfDetailed(file);
+        var w9 = extractW9FromText(ocr.text);
+        // The scanned path's Tax ID now comes from the comb crop ALONE. findTIN cannot fire on this
+        // text at all - at PSM 6 the box labels are never recognised, so there is no caption line
+        // for tinRegion to floor on - and falling back to a text scan would re-open the exact class
+        // of bug this replaces, where a number the vendor prints outranks the real comb.
+        w9.tin = ocr.tin; w9.tinKind = ocr.tinKind;
         if (w9.name || w9.tin || w9.dba || w9.street) {
           fillFromW9(root, w9, armed);
           // "the Tax ID especially" told the operator to check a number that is often not there:
           // it is dropped when no TIN was read, and what DID fail to read is named instead.
           var miss = w9Missing(w9);
+          // An UNCONFIRMED read is filled unhyphenated and said out loud. Silence here would make
+          // the unformatted digits the only tell, and nobody reads a Tax ID for its punctuation.
           toast('OCR done - REVIEW every field before saving' +
-            (w9.tin ? ', the Tax ID especially (OCR can misread digits)' : '') + '.' +
+            (w9.tin && !ocr.tinConfident
+              ? '. The Tax ID is UNCONFIRMED - too few independent crops agreed on it, so it is filled as bare digits: check every one against the form'
+              : '') +
+            (w9.tin && ocr.tinConfident ? ', the Tax ID especially (OCR can misread digits)' : '') + '.' +
             (miss.length ? ' NOT read: ' + miss.join(', ') + ' - enter ' + (miss.length > 1 ? 'them' : 'it') + ' manually.' : ''), 15000);
           return { ok: true, label: 'Scanned W-9 (OCR)', fields: w9Fields(w9) };
         }
@@ -1130,7 +1422,12 @@
         if (doc.w9 && doc.w9.tin) return fillTax(doc.w9.tin, 'from W-9');
         if (doc.kind === 'scan') {
           toast('Scanned W-9 - running on-device OCR (~10-30s, stays local)...', 45000);
-          return ocrPdf(f).then(function (text) { var w9 = extractW9FromText(text); if (w9.tin) fillTax(w9.tin, 'OCR - verify the digits'); else toast('OCR could not read a Tax ID - enter it manually.', 10000); });
+          // Tax ID from the comb crop only, same as the Create Vendor path above - including the
+          // unconfirmed case, which fills bare digits and has to SAY it is unconfirmed.
+          return ocrPdfDetailed(f).then(function (ocr) {
+            if (ocr.tin) fillTax(ocr.tin, ocr.tinConfident ? 'OCR - verify the digits' : 'OCR UNCONFIRMED - bare digits, check every one');
+            else toast('OCR could not read a Tax ID - enter it manually.', 10000);
+          });
         }
         toast('Could not read a Tax ID from that file. Use a fillable IRS W-9 or a scanned W-9.', 9000);
       }).catch(function (e) { toast('Read failed: ' + ((e && e.message) || e), 9000); });
