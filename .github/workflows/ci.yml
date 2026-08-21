@@ -79,6 +79,9 @@ jobs:
       - name: W-9 TIN region harness
         run: node scripts/test-w9-tin-region.js
 
+      - name: W-9 TIN crop harness
+        run: node scripts/test-w9-tin-crop.js
+
       - name: WO Audit accounting harness
         run: node scripts/test-wo-audit-accounting.js
 
