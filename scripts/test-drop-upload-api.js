@@ -121,9 +121,13 @@ function makeEnv(opts) {
 function loadApi(src, env) {
   var sandbox = {
     Object: Object, Array: Array, Number: Number, String: String, JSON: JSON,
-    Promise: Promise, Error: Error, RegExp: RegExp, Date: Date, parseInt: parseInt,
+    Promise: Promise, Error: Error, RegExp: RegExp, Date: Date, Math: Math, parseInt: parseInt,
     console: { info: function () {}, warn: function () {}, log: function () {} },
     atob: function (s) { return Buffer.from(s, 'base64').toString('binary'); },
+    // The API block now includes the paste-identical BWN-OPS-WRAP (postNoteViaApi routes
+    // through bwnGqlOp); it needs these too. window has no crypto, so corrId uses its
+    // timestamp form; setTimeout is only reached by retry backoff (not exercised here).
+    window: {}, setTimeout: function (fn) { return setTimeout(fn, 0); }, BWN_VER: '1.17.0',
     fetch: env.fetch,
     localStorage: env.ls
   };
@@ -268,8 +272,8 @@ var MUTATIONS = [
     m: function (s) { return mutate(s, 'content: String(text),', "content: 'X',"); } },
   { what: 'contentHtml sent flat (no paragraph split)',
     m: function (s) { return mutate(s, "split(/\\n{2,}/)\n      .map", "split(/\\nNEVER/)\n      .map"); } },
-  { what: 'the note success gate inverted',
-    m: function (s) { return mutate(s, "res.success !== true) throw new Error((res && res.message) || 'addEditJobNote", "res.success === true) throw new Error((res && res.message) || 'addEditJobNote"); } },
+  { what: 'the note write bypasses the bwnGqlOp registry (unregistered op)',
+    m: function (s) { return mutate(s, "bwnGqlOp('addEditJobNote'", "bwnGqlOp('addEditJobNoteX'"); } },
   { what: 'the doc label hardcoded wrong',
     m: function (s) { return mutate(s, 'entry.label = labelId;', 'entry.label = 99;'); } },
   { what: 'the documentInfoId dropped from the bulkAdd entry',

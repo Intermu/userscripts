@@ -319,6 +319,26 @@ function main() {
       });
     }, Promise.resolve());
   }).then(function () {
+    // BWN-OPS-WRAP is the generic machinery, pasted byte-identical into every sandbox that
+    // adopts bwnGqlOp (the registry + transport differ per file; the wrapper must not). A
+    // paste has no mechanism behind it, so this gate goes red if a fix lands in one copy and
+    // not the other - same discipline as the bwnAI and BWN-SHARED SHA gates.
+    console.log('\n-- BWN-OPS-WRAP paste-identical across adopters --');
+    var ADOPTERS = ['bwn-suite-core.user.js', 'bwn-drop-upload.user.js'];
+    var wraps = ADOPTERS.map(function (f) {
+      var s = fs.readFileSync(path.join(__dirname, '..', f), 'utf8').replace(/\r\n/g, '\n');
+      var a = s.indexOf('// ===== BWN-OPS-WRAP START v1');
+      var b = s.indexOf('// ===== BWN-OPS-WRAP END v1 =====');
+      return { f: f, w: (a !== -1 && b !== -1 && b > a) ? s.slice(a, b) : null };
+    });
+    var haveAll = wraps.every(function (x) { return x.w !== null; });
+    A.ok('every listed adopter carries the BWN-OPS-WRAP block', haveAll,
+      wraps.filter(function (x) { return !x.w; }).map(function (x) { return x.f; }).join(','));
+    if (haveAll) {
+      wraps.slice(1).forEach(function (x) {
+        A.ok('BWN-OPS-WRAP is byte-identical in ' + x.f + ' (drift = a fix in one sandbox not the other)', x.w === wraps[0].w);
+      });
+    }
     A.finish();
   }).catch(function (err) {
     console.log('HARNESS ERROR: ' + (err && err.stack || err));

@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         BWN Suite - Core (Broadway National)
 // @namespace    broadwaynational.bwn
-// @version      1.78.29
+// @version      1.78.30
 // @downloadURL  https://raw.githubusercontent.com/Intermu/userscripts/main/bwn-suite-core.user.js
 // @updateURL    https://raw.githubusercontent.com/Intermu/userscripts/main/bwn-suite-core.user.js
 // @description  Runs several Umbrava helpers for BWN coordinators, in the browser with no privileged grants. Includes: PO Approval + ETA Builder; WO Assist (GP/ETA, a stall watchdog, DNE calculator, and a next-action playbook); Email Leak Guard (checks recipients against vendor names, PO amounts, and client budget references before an outbound email sends); WO List Heat (a triage overlay + My Day strip on the work-order list, with an optional same-origin Umbrava API scan for deterministic full-board coverage); and the BWN Launcher (opens the Azure Static Web App tools with the current WO's context). Modules share state through sessionStorage/localStorage. The only network calls are same-origin Umbrava GraphQL requests (app.umbrava.com/api/graphql, the app's own session): List Heat's full-board scan and WO Assist's work-order / trip / clock-in / document reads, plus ONE write - BWN Views saves the column layout through Umbrava's own putUserPreference, the same preference the column chooser writes; everything else is offline. Toggle modules in BWN_MODULES below.
@@ -1205,6 +1205,12 @@
       ok: 'Vendor activated.', fail: 'The vendor was not activated.' }
   };
 
+  // ===== BWN-OPS-WRAP START v1 (paste-identical across adopters; SHA-gated by scripts/test-bwn-ops.js) =====
+  // Generic machinery only - NO registry, NO window hook - so it is byte-identical in every
+  // sandbox that adopts it (Core, drop-upload, ...). It closes over four things each sandbox
+  // supplies on its own: BWN_OPS (that file's registry), BWN_MODULES (kill switches), BWN_VER,
+  // and bwnGql(query, variables) (that file's same-origin transport). The audit ring buffer
+  // writes to the shared localStorage key, so every sandbox's writes land in ONE audit trail.
   function bwnCorrId() {
     try { if (window.crypto && window.crypto.randomUUID) return 'bwn-' + window.crypto.randomUUID(); }
     catch (e) { /* fall through to the timestamp form */ }
@@ -1327,10 +1333,12 @@
     }
     return attempt(1);
   }
+  // ===== BWN-OPS-WRAP END v1 =====
 
   // Console diagnostics/export hook - lets a coordinator or admin read and export the local
   // audit trail today, before any writer adopts the wrapper. Read-only; carries no PII beyond
   // what a write chose to record. (Same shape as the suite's other window.__bwn* dev hooks.)
+  // Core-only: NOT part of the paste-identical WRAP block above.
   try {
     window.__bwnOps = {
       registry: BWN_OPS, run: bwnGqlOp, corrId: bwnCorrId,
