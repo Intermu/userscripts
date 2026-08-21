@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         BWN Suite - Core (Broadway National)
 // @namespace    broadwaynational.bwn
-// @version      1.78.30
+// @version      1.78.31
 // @downloadURL  https://raw.githubusercontent.com/Intermu/userscripts/main/bwn-suite-core.user.js
 // @updateURL    https://raw.githubusercontent.com/Intermu/userscripts/main/bwn-suite-core.user.js
 // @description  Runs several Umbrava helpers for BWN coordinators, in the browser with no privileged grants. Includes: PO Approval + ETA Builder; WO Assist (GP/ETA, a stall watchdog, DNE calculator, and a next-action playbook); Email Leak Guard (checks recipients against vendor names, PO amounts, and client budget references before an outbound email sends); WO List Heat (a triage overlay + My Day strip on the work-order list, with an optional same-origin Umbrava API scan for deterministic full-board coverage); and the BWN Launcher (opens the Azure Static Web App tools with the current WO's context). Modules share state through sessionStorage/localStorage. The only network calls are same-origin Umbrava GraphQL requests (app.umbrava.com/api/graphql, the app's own session): List Heat's full-board scan and WO Assist's work-order / trip / clock-in / document reads, plus ONE write - BWN Views saves the column layout through Umbrava's own putUserPreference, the same preference the column chooser writes; everything else is offline. Toggle modules in BWN_MODULES below.
@@ -1205,7 +1205,7 @@
       ok: 'Vendor activated.', fail: 'The vendor was not activated.' }
   };
 
-  // ===== BWN-OPS-WRAP START v1 (paste-identical across adopters; SHA-gated by scripts/test-bwn-ops.js) =====
+  // ===== BWN-OPS-WRAP START v2 (paste-identical across adopters; SHA-gated by scripts/test-bwn-ops.js) =====
   // Generic machinery only - NO registry, NO window hook - so it is byte-identical in every
   // sandbox that adopts it (Core, drop-upload, ...). It closes over four things each sandbox
   // supplies on its own: BWN_OPS (that file's registry), BWN_MODULES (kill switches), BWN_VER,
@@ -1273,6 +1273,10 @@
   // Reads resolve to `data`. A write whose {success,message} envelope says success:false is
   // REJECTED (never a silent false - the exact bug class the op-catalog warns about) and
   // audited outcome:'error'.
+  // Injected per-sandbox by a caller that owns a high-risk write's confirmation UI, via
+  // bwnGqlOp.setConfirm(fn). A risk:'high' write is refused unless the caller either passes
+  // opts.confirmed===true (it confirmed through its own UI) OR a confirm handler returns truthy.
+  var _confirmFn = null;
   function bwnGqlOp(op, query, variables, opts) {
     opts = opts || {};
     var meta = BWN_OPS[op];
@@ -1331,9 +1335,33 @@
         throw err;
       });
     }
+    // High-risk confirmation gate (fail-closed). A risk:'high' write must be proven confirmed:
+    // either the caller passes opts.confirmed===true (it ran its own confirm UI, e.g. dispatch's
+    // modal) OR an injected _confirmFn returns truthy. Neither -> refused, never a silent send.
+    if (isWrite && meta.risk === 'high' && opts.confirmed !== true) {
+      if (typeof _confirmFn !== 'function') {
+        writeAudit('denied', { reason: 'confirm-required' });
+        return Promise.reject(new Error('bwnGqlOp: "' + op + '" is high-risk and needs confirmation (no confirm handler set)'));
+      }
+      var details = {
+        op: op, target: meta.target, risk: meta.risk, ids: opts.ids || null,
+        current: (opts.current === undefined ? null : opts.current),
+        proposed: (opts.proposed === undefined ? null : opts.proposed),
+        count: (opts.count === undefined ? null : opts.count),
+        reason: opts.reason || null, irreversible: !!opts.irreversible
+      };
+      return Promise.resolve().then(function () { return _confirmFn(details); }).then(function (okd) {
+        if (!okd) {
+          writeAudit('denied', { reason: 'user-cancelled' });
+          throw new Error('bwnGqlOp: "' + op + '" cancelled at confirmation');
+        }
+        return attempt(1);
+      });
+    }
     return attempt(1);
   }
-  // ===== BWN-OPS-WRAP END v1 =====
+  bwnGqlOp.setConfirm = function (fn) { _confirmFn = (typeof fn === 'function') ? fn : null; };
+  // ===== BWN-OPS-WRAP END v2 =====
 
   // Console diagnostics/export hook - lets a coordinator or admin read and export the local
   // audit trail today, before any writer adopts the wrapper. Read-only; carries no PII beyond

@@ -68,6 +68,20 @@ function mutate(src, from, to) {
 // Load an engine block into a fresh vm context. `gql` is injected (settable per test).
 function load(engineSrc) {
   var sandbox = { console: console, gql: null };
+  // patchWorkOrder now routes through bwnGqlOp (Core's BWN-OPS-WRAP, proven byte-for-byte in
+  // test-bwn-ops.js). Here a faithful stub reproduces the caller-visible contract for the one op
+  // dispatch routes: patchWorkOrder is risk:'high', so it is REFUSED unless confirmed (dispatch
+  // passes confirmed:true after its modal's window.confirm); a success:false envelope rejects.
+  // Delegates to the per-test-settable sandbox.gql.
+  sandbox.bwnGqlOp = function (op, query, variables, opts) {
+    opts = opts || {};
+    if (op === 'patchWorkOrder' && opts.confirmed !== true) return Promise.reject(new Error('bwnGqlOp: high-risk write needs confirmation'));
+    return Promise.resolve(sandbox.gql(query, variables)).then(function (data) {
+      var env = data && data[op];
+      if (env && env.success === false) return Promise.reject(new Error(env.message || (op + ' was refused')));
+      return data;
+    });
+  };
   vm.createContext(sandbox);
   vm.runInContext(engineSrc, sandbox);
   return sandbox;
@@ -230,14 +244,16 @@ async function main() {
     'if (false) data.serviceLevelAgreementId = cond(sel.slaId);',
     function (M) { return 'serviceLevelAgreementId' in M.buildPatchData({ woNumber: 1, statusId: '', assignedTo: '', ecd: ecd, priority: readPriority(), slaId: 'sla-guid-1' }); });
 
-  await ctrl('patchWorkOrder stops throwing on success:false',
-    "if (!p || !p.success) throw new Error((p && p.message) || 'patchWorkOrder reported no success');",
-    'if (!p) throw new Error(0);',
+  // success:false rejection now lives in bwnGqlOp (its own control is in test-bwn-ops.js). This
+  // control proves the migration keeps the high-risk confirm gate wired: drop confirmed:true and
+  // the write is refused.
+  await ctrl('patchWorkOrder no longer passes confirmed:true (high-risk confirm gate bypassed)',
+    'confirmed: true,',
+    'confirmed: false,',
     function (M) {
-      M.gql = function () { return Promise.resolve({ patchWorkOrder: { success: false, message: 'nope' } }); };
-      // synchronous inspection is not possible; return whether it REJECTS by racing a sentinel
-      var rejected = false;
-      return M.patchWorkOrder({ workOrderNumber: 1 }).then(function () { return false; }, function () { return true; });
+      M.gql = function () { return Promise.resolve({ patchWorkOrder: { success: true } }); };
+      // original claim = the write resolves; with confirmed:false the wrapper refuses it
+      return M.patchWorkOrder({ workOrderNumber: 1 }).then(function () { return true; }, function () { return false; });
     });
 
   await ctrl('fetchUsers stops filtering technicians',

@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         BWN Dispatch (Broadway National)
 // @namespace    broadwaynational.bwn
-// @version      0.10.1
+// @version      0.11.0
 // @downloadURL  https://raw.githubusercontent.com/Intermu/userscripts/main/bwn-dispatch.user.js
 // @updateURL    https://raw.githubusercontent.com/Intermu/userscripts/main/bwn-dispatch.user.js
 // @description  One-click Dispatch for a work order - replaces manually typing a row into Dispatch_Notifications.xlsx. The Dispatch launcher shows only on a WO that is in "Pending Dispatch". It opens a confirm modal prefilled from the BWN Ops Suite bus (Tracking) and a same-origin Umbrava GraphQL read (Location as the site NUMBER, Priority, and the coordinator to ping): it uses the person this WO is assigned to (whoever a supervisor/manager assigned it to, read live when you open it), and when that is a team or blank it falls back to the coordinator from the most recent work order(s) at the same location. The coordinator name + email are editable before you send. On submit it POSTs the 5 typed fields plus the WO number (read from the URL, never typed - the flow needs it to deep-link the card, because Tracking is the CLIENT's tracking number and points at the wrong record) to the broadway-internal-ops SWA proxy (x-bwn-key gated) which forwards to the HTTP-triggered "Dispatch HTTP" Power Automate flow - the flow adds the row to Dispatch_Notifications.xlsx AND dispatches it (posts a Teams adaptive card to the coordinator and waits for their accept). Dispatching is a coordinator action, so there is no role gate (the x-bwn-key is the boundary). The assignee's email is not on the WO record (Umbrava exposes the coordinator NAME only), so it is resolved from a per-user name->email roster you maintain (seeded with you, and it remembers each coordinator you dispatch to); for a coordinator the roster has never met it falls back to a GUESS derived from the house name pattern and the signed-in user's own domain, shown with a "check it before you send" warning and always editable - never a silent send to an address nobody confirmed. The flow's secret URL stays server-side; nothing sensitive lives in this script. As of 0.10.0 the modal also writes the WO RECORD directly via the same-origin Umbrava GraphQL patchWorkOrder mutation (the write kanban proved live) - an operator-picked target status, an operator-picked assignee (a real Umbrava user, so the assign carries a proper GUID and the card name/email come from the record), and an auto priority-scaled Expected Completion Date - behind a confirm that spells out each write and warns that a status change resets the time-in-status clock. Writes run first and atomically; the Teams card is posted only if the record change succeeds. Registers a single "Dispatch" launcher into the shared dock (bwn:dock:*) - the dock tab is the only launcher; no floating fallback button.
@@ -18,7 +18,7 @@
 (function () {
   'use strict';
 
-  var VER = '0.10.1';   // keep in step with @version - this is what the console banner reports
+  var VER = '0.11.0';   // keep in step with @version - this is what the console banner reports
   var FONT = "-apple-system,BlinkMacSystemFont,'Segoe UI','Helvetica Neue',Arial,sans-serif";
   var GREEN = '#0d3d26';          // BWN Ops Suite brand green - matches CC Request / WO Audit
   var SWA_BASE = 'https://green-stone-0717dab0f.7.azurestaticapps.net';
@@ -135,6 +135,177 @@
   // last resort rather than the normal path. `id` is ID! - passing ID gets a type error.
   var USER_Q = 'query($id:ID!){ user(id:$id){ firstName lastName emailAddress isInactive } }';
 
+  // ---- BWN-OPS: audited GraphQL wrapper for this sandbox --------------------
+  // bwnGqlOp (the paste-identical BWN-OPS-WRAP below, SHA-gated to Core) gives patchWorkOrder a
+  // correlation id + a shared audit entry + the high-risk confirm gate. dispatch transport is the
+  // 2-arg gql(), which matches the wrapper bwnGql(query,variables), so this aliases it. dispatch
+  // confirms the write in its own modal (window.confirm spelling out each field), so it passes
+  // opts.confirmed:true rather than injecting a confirm handler.
+  var bwnGql = gql;
+  var BWN_VER = VER;
+  var BWN_MODULES = (function () { try { return JSON.parse(localStorage.getItem('bwn:modules') || '{}') || {}; } catch (e) { return {}; } })();
+  var BWN_OPS = {
+    patchWorkOrder: { kind: 'write', target: 'workOrder', risk: 'high', idempotent: false, retry: 'none',
+      ok: 'Work order updated.', fail: 'The work order was not updated.' }
+  };
+  // ===== BWN-OPS-WRAP START v2 (paste-identical across adopters; SHA-gated by scripts/test-bwn-ops.js) =====
+  // Generic machinery only - NO registry, NO window hook - so it is byte-identical in every
+  // sandbox that adopts it (Core, drop-upload, ...). It closes over four things each sandbox
+  // supplies on its own: BWN_OPS (that file's registry), BWN_MODULES (kill switches), BWN_VER,
+  // and bwnGql(query, variables) (that file's same-origin transport). The audit ring buffer
+  // writes to the shared localStorage key, so every sandbox's writes land in ONE audit trail.
+  function bwnCorrId() {
+    try { if (window.crypto && window.crypto.randomUUID) return 'bwn-' + window.crypto.randomUUID(); }
+    catch (e) { /* fall through to the timestamp form */ }
+    return 'bwn-' + Date.now().toString(36) + '-' + Math.random().toString(36).slice(2, 10);
+  }
+
+  // Bounded, PII-free audit ring buffer in localStorage. Records ONLY what the caller passes
+  // (ids + scalar before/after) plus operation metadata - NEVER the raw variables or the
+  // response, which can carry note text, addresses, or vendor identity.
+  var BWN_AUDIT_KEY = 'bwn:audit', BWN_AUDIT_MAX = 200, BWN_AUDIT_SCHEMA = 1;
+  function bwnAuditAll() {
+    try { var a = JSON.parse(localStorage.getItem(BWN_AUDIT_KEY) || '[]'); return Array.isArray(a) ? a : []; }
+    catch (e) { return []; }
+  }
+  function bwnAuditRecord(entry) {
+    try {
+      var a = bwnAuditAll();
+      a.push(entry);
+      if (a.length > BWN_AUDIT_MAX) a = a.slice(a.length - BWN_AUDIT_MAX);
+      localStorage.setItem(BWN_AUDIT_KEY, JSON.stringify(a));
+    } catch (e) { /* audit is best-effort - it must never block or fail a write */ }
+    return entry;
+  }
+  function bwnAuditExport() {
+    return JSON.stringify({ schema: BWN_AUDIT_SCHEMA, ver: BWN_VER, exportedTs: Date.now(), entries: bwnAuditAll() }, null, 2);
+  }
+  function bwnAuditClear() { try { localStorage.removeItem(BWN_AUDIT_KEY); } catch (e) { /* best-effort */ } }
+  function bwnAuditActor() {
+    try {
+      var r = JSON.parse(localStorage.getItem('bwn:role:last') || 'null');
+      return (r && (r.label || r.role)) || 'unknown';
+    } catch (e) { return 'unknown'; }
+  }
+
+  // Only a network-level failure is transient. A GraphQL validation error comes back through
+  // bwnGql as a thrown Error carrying the server's message (deterministic - retrying just
+  // repeats it), and a write refused with success:false is flagged bwnNonTransient below.
+  // ponytail: bwnGql does not surface the HTTP status, so 429/5xx are not distinguished here;
+  // attach r.status in bwnGql and widen this test if status-aware backoff is ever needed.
+  function bwnIsTransient(err) {
+    if (err && err.bwnNonTransient) return false;
+    return /network|failed to fetch|load failed|timeout|timed out/i.test(String(err && err.message || err));
+  }
+  function bwnBackoff(tryNo) { return Math.min(4000, 400 * Math.pow(2, tryNo - 1)); }
+  function bwnDelay(ms) { return new Promise(function (r) { setTimeout(r, ms); }); }
+
+  // bwnGqlOp(op, query, variables, opts) -> Promise(data)
+  //   op        BWN_OPS key. THROWS if unregistered - a captured op must be classified before
+  //             it can be sent, which is what keeps guessed selectors out of the suite.
+  //   query     the captured GraphQL document TEXT - the caller owns it, never invented here.
+  //   variables the variables object (sent as-is to bwnGql; never copied into the audit).
+  //   opts      { feature, validate, ids, before, after, actor } - all optional:
+  //     feature   BWN_MODULES key; if that module is switched off the op is REFUSED and, for a
+  //               write, audited outcome:'denied' - this is the per-feature kill switch.
+  //     validate  fn(variables) -> true | 'message'; a write is blocked before it is sent.
+  //     ids       { wo, po, vendorId, ... } scalar identifiers for the audit trail (NO PII).
+  //     before    scalar snapshot of the value(s) about to change (NO PII, NO bulk data).
+  //     after     scalar snapshot of the intended new value(s).
+  //     actor     who initiated; defaults to the last-known rank label, else 'unknown'.
+  // Reads resolve to `data`. A write whose {success,message} envelope says success:false is
+  // REJECTED (never a silent false - the exact bug class the op-catalog warns about) and
+  // audited outcome:'error'.
+  // Injected per-sandbox by a caller that owns a high-risk write's confirmation UI, via
+  // bwnGqlOp.setConfirm(fn). A risk:'high' write is refused unless the caller either passes
+  // opts.confirmed===true (it confirmed through its own UI) OR a confirm handler returns truthy.
+  var _confirmFn = null;
+  function bwnGqlOp(op, query, variables, opts) {
+    opts = opts || {};
+    var meta = BWN_OPS[op];
+    if (!meta) return Promise.reject(new Error('bwnGqlOp: unregistered operation "' + op + '"'));
+    var isWrite = meta.kind === 'write';
+    var corrId = bwnCorrId();
+    var t0 = Date.now();
+    var actor = opts.actor || bwnAuditActor();
+
+    function writeAudit(outcome, extra) {
+      if (!isWrite) return;
+      var e = {
+        ts: Date.now(), corrId: corrId, op: op, kind: meta.kind, target: meta.target,
+        risk: meta.risk || null, actor: actor, ids: opts.ids || null,
+        before: (opts.before === undefined ? null : opts.before),
+        after: (opts.after === undefined ? null : opts.after),
+        outcome: outcome, ms: Date.now() - t0, ver: BWN_VER
+      };
+      if (extra) { for (var k in extra) { if (Object.prototype.hasOwnProperty.call(extra, k)) e[k] = extra[k]; } }
+      bwnAuditRecord(e);
+    }
+
+    // Per-feature kill switch: a disabled module must not mutate even if its UI leaked in.
+    if (opts.feature && BWN_MODULES[opts.feature] === false) {
+      writeAudit('denied', { reason: 'feature-off:' + opts.feature });
+      return Promise.reject(new Error('bwnGqlOp: feature "' + opts.feature + '" is disabled'));
+    }
+    // Validate a write BEFORE it leaves the browser.
+    if (isWrite && typeof opts.validate === 'function') {
+      var vr = opts.validate(variables);
+      if (vr !== true) {
+        writeAudit('denied', { reason: 'validation:' + vr });
+        return Promise.reject(new Error('bwnGqlOp: validation failed for "' + op + '": ' + vr));
+      }
+    }
+
+    var maxTries = (meta.retry === 'safe' && (meta.kind === 'read' || meta.idempotent === true)) ? 3 : 1;
+    function attempt(tryNo) {
+      return bwnGql(query, variables).then(function (data) {
+        if (isWrite) {
+          var env = data && data[op];
+          if (env && env.success === false) {
+            var refused = new Error(env.message || (op + ' was refused'));
+            refused.bwnNonTransient = true;
+            writeAudit('error', { tries: tryNo, reason: refused.message });
+            throw refused;
+          }
+          writeAudit('ok', { tries: tryNo });
+        }
+        return data;
+      }, function (err) {
+        if (bwnIsTransient(err) && tryNo < maxTries) {
+          return bwnDelay(bwnBackoff(tryNo)).then(function () { return attempt(tryNo + 1); });
+        }
+        writeAudit('error', { tries: tryNo, reason: String(err && err.message || err) });
+        throw err;
+      });
+    }
+    // High-risk confirmation gate (fail-closed). A risk:'high' write must be proven confirmed:
+    // either the caller passes opts.confirmed===true (it ran its own confirm UI, e.g. dispatch's
+    // modal) OR an injected _confirmFn returns truthy. Neither -> refused, never a silent send.
+    if (isWrite && meta.risk === 'high' && opts.confirmed !== true) {
+      if (typeof _confirmFn !== 'function') {
+        writeAudit('denied', { reason: 'confirm-required' });
+        return Promise.reject(new Error('bwnGqlOp: "' + op + '" is high-risk and needs confirmation (no confirm handler set)'));
+      }
+      var details = {
+        op: op, target: meta.target, risk: meta.risk, ids: opts.ids || null,
+        current: (opts.current === undefined ? null : opts.current),
+        proposed: (opts.proposed === undefined ? null : opts.proposed),
+        count: (opts.count === undefined ? null : opts.count),
+        reason: opts.reason || null, irreversible: !!opts.irreversible
+      };
+      return Promise.resolve().then(function () { return _confirmFn(details); }).then(function (okd) {
+        if (!okd) {
+          writeAudit('denied', { reason: 'user-cancelled' });
+          throw new Error('bwnGqlOp: "' + op + '" cancelled at confirmation');
+        }
+        return attempt(1);
+      });
+    }
+    return attempt(1);
+  }
+  bwnGqlOp.setConfirm = function (fn) { _confirmFn = (typeof fn === 'function') ? fn : null; };
+  // ===== BWN-OPS-WRAP END v2 =====
+
   // ---- Direct WO record writes: the "gold key" patchWorkOrder engine ---------
   // Reuses the mutation kanban proved writes status LIVE. PATCH semantics: send ONLY the fields being
   // changed, each wrapped { shouldInclude:true, value:<T> }. The three fields a dispatch writes -
@@ -148,12 +319,16 @@
   // All three may be bundled into ONE data object; the mutation is atomic, which is what dispatch
   // wants (either every chosen write lands or none - no half-dispatched WO).
   var PATCH_M = 'mutation PatchWorkOrder($data: PatchWorkOrderInput!) { patchWorkOrder(data: $data) { success message } }';
-  function patchWorkOrder(data) {
-    return gql(PATCH_M, { data: data }).then(function (d) {
-      var p = d && d.patchWorkOrder;
-      if (!p || !p.success) throw new Error((p && p.message) || 'patchWorkOrder reported no success');
-      return true;
-    });
+  // Routed through bwnGqlOp: correlation id + shared audit entry + the high-risk confirm gate.
+  // dispatch already confirmed via the modal's window.confirm, so it passes confirmed:true; the
+  // wrapper owns the success:false rejection. ctx carries the WO + a scalar before/after for audit.
+  function patchWorkOrder(data, ctx) {
+    ctx = ctx || {};
+    return bwnGqlOp('patchWorkOrder', PATCH_M, { data: data }, {
+      confirmed: true,
+      ids: { wo: ctx.wo },
+      before: ctx.before, after: ctx.after
+    }).then(function () { return true; });
   }
   function cond(v) { return { shouldInclude: true, value: v }; }   // the Conditional*Input wrapper
 
@@ -786,7 +961,11 @@
       // Writes first (atomic); only notify if the record actually changed. A write failure aborts
       // before any card is sent, so a failed dispatch never notifies a coordinator about a WO whose
       // record did not change.
-      var writeStep = hasWrites ? patchWorkOrder(data) : Promise.resolve(true);
+      var writeStep = hasWrites ? patchWorkOrder(data, {
+        wo: sel.woNumber,
+        before: { statusId: (_woRead && _woRead.statusId) || null, assignedTo: (_woRead && _woRead.assignedTo) || null, ecd: (_woRead && _woRead.priority && _woRead.priority.expectedCompletionDate) || null },
+        after: { statusId: sel.statusId || null, assignedTo: sel.assignedTo || null, ecd: sel.ecd || null }
+      }) : Promise.resolve(true);
       writeStep.then(function () {
         if (hasWrites) submit.textContent = 'Dispatching…';
         return postCard();
