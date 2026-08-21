@@ -67,8 +67,21 @@ function mkGql(opts) {
   return paGql;
 }
 function load(engineSrc, gql) {
+  // The PA-WRITES slice now contains the real BWN-OPS-WRAP (writes route through bwnGqlOp), so the
+  // sandbox supplies what the wrapper closes over: ES/browser globals, a fake localStorage for the
+  // audit ring buffer, and VER (the block sets BWN_VER = VER). bwnGqlOp itself is proven in
+  // test-bwn-ops.js; here it runs for real so the routing is exercised end to end.
+  var store = {};
   var sandbox = {
-    console: console,
+    console: console, Object: Object, Array: Array, Number: Number, String: String, JSON: JSON,
+    Promise: Promise, Error: Error, RegExp: RegExp, Date: Date, Math: Math,
+    window: {}, setTimeout: function (fn) { return setTimeout(fn, 0); },
+    localStorage: {
+      getItem: function (k) { return Object.prototype.hasOwnProperty.call(store, k) ? store[k] : null; },
+      setItem: function (k, v) { store[k] = String(v); },
+      removeItem: function (k) { delete store[k]; }
+    },
+    VER: "0.3.0",
     paGql: gql,
     DRY_RUN: false,
     NOTE_TYPE_INTERNAL: 13,
@@ -160,12 +173,12 @@ function callsOf(g, op) { return g.calls.filter(function (c) { return c.op === o
   A.ok("complete task: success:false THROWS", threw);
 
   // ---- NEGATIVE CONTROL 1: disabling the success check makes a failed write pass silently -----
-  var MUT1 = mutate(ENGINE,
-    "if (!r || !r.success) throw new Error((r && r.message) || 'completeTask failed');",
-    "if (false) throw new Error((r && r.message) || 'completeTask failed');");
+  // success:false rejection now lives in bwnGqlOp (the sliced BWN-OPS-WRAP). Disabling it makes a
+  // failed write resolve silently - so the wrapper's check is load-bearing for this path too.
+  var MUT1 = mutate(ENGINE, "if (env && env.success === false) {", "if (false) {");
   var g1 = mkGql({ fail: true }); var S1 = load(MUT1, g1);
   var passed = await S1.completeTask("t").then(function () { return true; }, function () { return false; });
-  A.ok("CONTROL: without the success check, a success:false does NOT throw (so the check is load-bearing)", passed === true);
+  A.ok("CONTROL: without the wrapper's success check, a success:false does NOT throw", passed === true);
 
   // ---- NEGATIVE CONTROL 2: entityType 1 is load-bearing (the WO entity kind) ------------------
   var MUT2 = mutate(ENGINE, "entityType: 1,", "entityType: 2,");
@@ -188,7 +201,7 @@ function callsOf(g, op) { return g.calls.filter(function (c) { return c.op === o
   A.ok("every write still honors DRY_RUN", (full.match(/\[PA DRY_RUN\]/g) || []).length >= 5);
   var mV = full.match(/@version\s+([0-9.]+)/), mR = full.match(/VER\s*=\s*'([0-9.]+)'/);
   A.ok("@version and runtime VER agree", !!(mV && mR && mV[1] === mR[1]));
-  A.eq("shipped at 0.2.5", mV && mV[1], "0.2.5");
+  A.eq("shipped at 0.3.0", mV && mV[1], "0.3.0");
 
   A.finish();
 })().catch(function (e) { console.error(e); process.exit(1); });

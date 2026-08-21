@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         BWN Proposal Actions (Broadway National)
 // @namespace    broadwaynational.bwn
-// @version      0.2.5
+// @version      0.3.0
 // @downloadURL  https://raw.githubusercontent.com/Intermu/userscripts/main/bwn-proposal-actions.user.js
 // @updateURL    https://raw.githubusercontent.com/Intermu/userscripts/main/bwn-proposal-actions.user.js
 // @description  On a Client Proposal DETAILS page, a "Proposal Actions" dropdown runs the internal review workflow in one confirmed action: Approval / TSP Review / Kickback. Each posts a note to the Proposal + the Work Order, sets the WO status, completes open tasks, and files a new task (assigned to the WO coordinator, or Ronny Sharp for TSP). Kickback drafts a rejection reason with the on-device browser AI for the operator to confirm. Every write is shown in a confirm dialog first; nothing fires until Confirm. @grant none.
@@ -15,7 +15,7 @@
 (function () {
   'use strict';
 
-  var VER = '0.2.5';   // keep in step with @version
+  var VER = '0.3.0';   // keep in step with @version
   var DRY_RUN = false; // when true, every WRITE is console.logged instead of sent
   console.info('[BWN PROPOSAL ACTIONS] v' + VER + ' - Approval / TSP Review / Kickback workflow on the Client Proposal details page');
 
@@ -221,15 +221,193 @@
 
   // ===== PA-WRITES START (sliced by scripts/test-proposal-actions.js; references injected paGql / textToHtml / DRY_RUN / NOTE_TYPE_INTERNAL) =====
   // ===== writes: PROVEN =====================================================
+  // ---- BWN-OPS: audited GraphQL wrapper for this sandbox --------------------
+  // Routes proposal-actions writes through bwnGqlOp (paste-identical BWN-OPS-WRAP below, SHA-gated
+  // to Core): correlation id + shared audit entry + the high-risk confirm gate. paGql is 3-arg;
+  // this adapter gives the wrapper the uniform bwnGql(query,variables). proposal-actions confirms
+  // every write in its own dialog, so patchWorkOrder (high) passes confirmed:true.
+  function bwnGql(query, variables) { var m = /\b(?:query|mutation)\s+([A-Za-z0-9_]+)/.exec(query); return paGql(m ? m[1] : null, query, variables); }
+  var BWN_VER = VER;
+  var BWN_MODULES = (function () { try { return JSON.parse(localStorage.getItem('bwn:modules') || '{}') || {}; } catch (e) { return {}; } })();
+  var BWN_OPS = {
+    patchWorkOrder: { kind: 'write', target: 'workOrder', risk: 'high', idempotent: false, retry: 'none',
+      ok: 'Work order updated.', fail: 'The work order was not updated.' },
+    addEditJobNote: { kind: 'write', target: 'note', risk: 'moderate', idempotent: false, retry: 'none',
+      ok: 'Note posted.', fail: 'The note was not posted.' },
+    addClientProposalNote: { kind: 'write', target: 'proposal', risk: 'moderate', idempotent: false, retry: 'none',
+      ok: 'Proposal note posted.', fail: 'The proposal note was not posted.' },
+    addTask: { kind: 'write', target: 'task', risk: 'moderate', idempotent: false, retry: 'none',
+      ok: 'Task created.', fail: 'The task was not created.' },
+    completeTask: { kind: 'write', target: 'task', risk: 'moderate', idempotent: true, retry: 'none',
+      ok: 'Task completed.', fail: 'The task was not completed.' }
+  };
+  // ===== BWN-OPS-WRAP START v2 (paste-identical across adopters; SHA-gated by scripts/test-bwn-ops.js) =====
+  // Generic machinery only - NO registry, NO window hook - so it is byte-identical in every
+  // sandbox that adopts it (Core, drop-upload, ...). It closes over four things each sandbox
+  // supplies on its own: BWN_OPS (that file's registry), BWN_MODULES (kill switches), BWN_VER,
+  // and bwnGql(query, variables) (that file's same-origin transport). The audit ring buffer
+  // writes to the shared localStorage key, so every sandbox's writes land in ONE audit trail.
+  function bwnCorrId() {
+    try { if (window.crypto && window.crypto.randomUUID) return 'bwn-' + window.crypto.randomUUID(); }
+    catch (e) { /* fall through to the timestamp form */ }
+    return 'bwn-' + Date.now().toString(36) + '-' + Math.random().toString(36).slice(2, 10);
+  }
+
+  // Bounded, PII-free audit ring buffer in localStorage. Records ONLY what the caller passes
+  // (ids + scalar before/after) plus operation metadata - NEVER the raw variables or the
+  // response, which can carry note text, addresses, or vendor identity.
+  var BWN_AUDIT_KEY = 'bwn:audit', BWN_AUDIT_MAX = 200, BWN_AUDIT_SCHEMA = 1;
+  function bwnAuditAll() {
+    try { var a = JSON.parse(localStorage.getItem(BWN_AUDIT_KEY) || '[]'); return Array.isArray(a) ? a : []; }
+    catch (e) { return []; }
+  }
+  function bwnAuditRecord(entry) {
+    try {
+      var a = bwnAuditAll();
+      a.push(entry);
+      if (a.length > BWN_AUDIT_MAX) a = a.slice(a.length - BWN_AUDIT_MAX);
+      localStorage.setItem(BWN_AUDIT_KEY, JSON.stringify(a));
+    } catch (e) { /* audit is best-effort - it must never block or fail a write */ }
+    return entry;
+  }
+  function bwnAuditExport() {
+    return JSON.stringify({ schema: BWN_AUDIT_SCHEMA, ver: BWN_VER, exportedTs: Date.now(), entries: bwnAuditAll() }, null, 2);
+  }
+  function bwnAuditClear() { try { localStorage.removeItem(BWN_AUDIT_KEY); } catch (e) { /* best-effort */ } }
+  function bwnAuditActor() {
+    try {
+      var r = JSON.parse(localStorage.getItem('bwn:role:last') || 'null');
+      return (r && (r.label || r.role)) || 'unknown';
+    } catch (e) { return 'unknown'; }
+  }
+
+  // Only a network-level failure is transient. A GraphQL validation error comes back through
+  // bwnGql as a thrown Error carrying the server's message (deterministic - retrying just
+  // repeats it), and a write refused with success:false is flagged bwnNonTransient below.
+  // ponytail: bwnGql does not surface the HTTP status, so 429/5xx are not distinguished here;
+  // attach r.status in bwnGql and widen this test if status-aware backoff is ever needed.
+  function bwnIsTransient(err) {
+    if (err && err.bwnNonTransient) return false;
+    return /network|failed to fetch|load failed|timeout|timed out/i.test(String(err && err.message || err));
+  }
+  function bwnBackoff(tryNo) { return Math.min(4000, 400 * Math.pow(2, tryNo - 1)); }
+  function bwnDelay(ms) { return new Promise(function (r) { setTimeout(r, ms); }); }
+
+  // bwnGqlOp(op, query, variables, opts) -> Promise(data)
+  //   op        BWN_OPS key. THROWS if unregistered - a captured op must be classified before
+  //             it can be sent, which is what keeps guessed selectors out of the suite.
+  //   query     the captured GraphQL document TEXT - the caller owns it, never invented here.
+  //   variables the variables object (sent as-is to bwnGql; never copied into the audit).
+  //   opts      { feature, validate, ids, before, after, actor } - all optional:
+  //     feature   BWN_MODULES key; if that module is switched off the op is REFUSED and, for a
+  //               write, audited outcome:'denied' - this is the per-feature kill switch.
+  //     validate  fn(variables) -> true | 'message'; a write is blocked before it is sent.
+  //     ids       { wo, po, vendorId, ... } scalar identifiers for the audit trail (NO PII).
+  //     before    scalar snapshot of the value(s) about to change (NO PII, NO bulk data).
+  //     after     scalar snapshot of the intended new value(s).
+  //     actor     who initiated; defaults to the last-known rank label, else 'unknown'.
+  // Reads resolve to `data`. A write whose {success,message} envelope says success:false is
+  // REJECTED (never a silent false - the exact bug class the op-catalog warns about) and
+  // audited outcome:'error'.
+  // Injected per-sandbox by a caller that owns a high-risk write's confirmation UI, via
+  // bwnGqlOp.setConfirm(fn). A risk:'high' write is refused unless the caller either passes
+  // opts.confirmed===true (it confirmed through its own UI) OR a confirm handler returns truthy.
+  var _confirmFn = null;
+  function bwnGqlOp(op, query, variables, opts) {
+    opts = opts || {};
+    var meta = BWN_OPS[op];
+    if (!meta) return Promise.reject(new Error('bwnGqlOp: unregistered operation "' + op + '"'));
+    var isWrite = meta.kind === 'write';
+    var corrId = bwnCorrId();
+    var t0 = Date.now();
+    var actor = opts.actor || bwnAuditActor();
+
+    function writeAudit(outcome, extra) {
+      if (!isWrite) return;
+      var e = {
+        ts: Date.now(), corrId: corrId, op: op, kind: meta.kind, target: meta.target,
+        risk: meta.risk || null, actor: actor, ids: opts.ids || null,
+        before: (opts.before === undefined ? null : opts.before),
+        after: (opts.after === undefined ? null : opts.after),
+        outcome: outcome, ms: Date.now() - t0, ver: BWN_VER
+      };
+      if (extra) { for (var k in extra) { if (Object.prototype.hasOwnProperty.call(extra, k)) e[k] = extra[k]; } }
+      bwnAuditRecord(e);
+    }
+
+    // Per-feature kill switch: a disabled module must not mutate even if its UI leaked in.
+    if (opts.feature && BWN_MODULES[opts.feature] === false) {
+      writeAudit('denied', { reason: 'feature-off:' + opts.feature });
+      return Promise.reject(new Error('bwnGqlOp: feature "' + opts.feature + '" is disabled'));
+    }
+    // Validate a write BEFORE it leaves the browser.
+    if (isWrite && typeof opts.validate === 'function') {
+      var vr = opts.validate(variables);
+      if (vr !== true) {
+        writeAudit('denied', { reason: 'validation:' + vr });
+        return Promise.reject(new Error('bwnGqlOp: validation failed for "' + op + '": ' + vr));
+      }
+    }
+
+    var maxTries = (meta.retry === 'safe' && (meta.kind === 'read' || meta.idempotent === true)) ? 3 : 1;
+    function attempt(tryNo) {
+      return bwnGql(query, variables).then(function (data) {
+        if (isWrite) {
+          var env = data && data[op];
+          if (env && env.success === false) {
+            var refused = new Error(env.message || (op + ' was refused'));
+            refused.bwnNonTransient = true;
+            writeAudit('error', { tries: tryNo, reason: refused.message });
+            throw refused;
+          }
+          writeAudit('ok', { tries: tryNo });
+        }
+        return data;
+      }, function (err) {
+        if (bwnIsTransient(err) && tryNo < maxTries) {
+          return bwnDelay(bwnBackoff(tryNo)).then(function () { return attempt(tryNo + 1); });
+        }
+        writeAudit('error', { tries: tryNo, reason: String(err && err.message || err) });
+        throw err;
+      });
+    }
+    // High-risk confirmation gate (fail-closed). A risk:'high' write must be proven confirmed:
+    // either the caller passes opts.confirmed===true (it ran its own confirm UI, e.g. dispatch's
+    // modal) OR an injected _confirmFn returns truthy. Neither -> refused, never a silent send.
+    if (isWrite && meta.risk === 'high' && opts.confirmed !== true) {
+      if (typeof _confirmFn !== 'function') {
+        writeAudit('denied', { reason: 'confirm-required' });
+        return Promise.reject(new Error('bwnGqlOp: "' + op + '" is high-risk and needs confirmation (no confirm handler set)'));
+      }
+      var details = {
+        op: op, target: meta.target, risk: meta.risk, ids: opts.ids || null,
+        current: (opts.current === undefined ? null : opts.current),
+        proposed: (opts.proposed === undefined ? null : opts.proposed),
+        count: (opts.count === undefined ? null : opts.count),
+        reason: opts.reason || null, irreversible: !!opts.irreversible
+      };
+      return Promise.resolve().then(function () { return _confirmFn(details); }).then(function (okd) {
+        if (!okd) {
+          writeAudit('denied', { reason: 'user-cancelled' });
+          throw new Error('bwnGqlOp: "' + op + '" cancelled at confirmation');
+        }
+        return attempt(1);
+      });
+    }
+    return attempt(1);
+  }
+  bwnGqlOp.setConfirm = function (fn) { _confirmFn = (typeof fn === 'function') ? fn : null; };
+  // ===== BWN-OPS-WRAP END v2 =====
+
   var M_PATCH = 'mutation PatchWorkOrder($data: PatchWorkOrderInput!){ patchWorkOrder(data: $data){ success message } }';
   function setStatus(n, statusId) {
     var vars = { data: { workOrderNumber: n, statusId: { shouldInclude: true, value: statusId } } };
     if (DRY_RUN) { console.log('[PA DRY_RUN] setStatus', vars); return Promise.resolve(true); }
-    return paGql('PatchWorkOrder', M_PATCH, vars).then(function (d) {
-      var r = d && d.patchWorkOrder;
-      if (!r || !r.success) throw new Error((r && r.message) || 'patchWorkOrder failed');
-      return true;
-    });
+    // Routed through bwnGqlOp: audit + corrId + the high-risk confirm gate. proposal-actions
+    // confirms every write in its own dialog, so this high-risk write passes confirmed:true.
+    return bwnGqlOp('patchWorkOrder', M_PATCH, vars, {
+      confirmed: true, ids: { wo: n }, after: { statusId: statusId }
+    }).then(function () { return true; });
   }
 
   var M_WONOTE = 'mutation AddEditWONote($addEditInput: WorkOrderNoteInput!){ addEditJobNote(data: $addEditInput){ success message note { id type } } }';
@@ -246,11 +424,7 @@
       targetPurchaseOrderNumbers: []
     };
     if (DRY_RUN) { console.log('[PA DRY_RUN] addWONote', input); return Promise.resolve(true); }
-    return paGql('AddEditWONote', M_WONOTE, { addEditInput: input }).then(function (d) {
-      var r = d && d.addEditJobNote;
-      if (!r || !r.success) throw new Error((r && r.message) || 'addEditJobNote failed');
-      return true;
-    });
+    return bwnGqlOp('addEditJobNote', M_WONOTE, { addEditInput: input }, { ids: { wo: n } }).then(function () { return true; });
   }
 
   // ===== writes: PINNED 2026-08-17 ==========================================
@@ -272,11 +446,7 @@
   function addProposalNote(proposalId, text) {
     if (DRY_RUN) { console.log('[PA DRY_RUN] addProposalNote', { proposalId: proposalId, text: text }); return Promise.resolve(true); }
     var input = { entityId: proposalId, plainTextContent: text, htmlContent: textToHtml(text) };
-    return paGql('AddClientProposalNote', M_ADD_PROP_NOTE, { data: input }).then(function (d) {
-      var r = d && d.addClientProposalNote;
-      if (!r || !r.success) throw new Error((r && r.message) || 'addClientProposalNote failed');
-      return true;
-    });
+    return bwnGqlOp('addClientProposalNote', M_ADD_PROP_NOTE, { data: input }, { ids: { proposalId: proposalId } }).then(function () { return true; });
   }
 
   // createTask - addTask(data: AddTaskInput!). entityType 1 = work order, entityId = the WO number
@@ -299,22 +469,14 @@
       notifyCreator: false,
       metadata: JSON.stringify({ number: String(woNumber) })
     };
-    return paGql('AddTask', M_ADD_TASK, { data: input }).then(function (d) {
-      var r = d && d.addTask;
-      if (!r || !r.success) throw new Error((r && r.message) || 'addTask failed');
-      return true;
-    });
+    return bwnGqlOp('addTask', M_ADD_TASK, { data: input }, { ids: { wo: woNumber } }).then(function () { return true; });
   }
 
   // completeTask - completeTask(data: CompleteTaskInput!). CompleteTaskInput is JUST { id: ID! }.
   var M_COMPLETE_TASK = 'mutation CompleteTask($data: CompleteTaskInput!){ completeTask(data: $data){ success message } }';
   function completeTask(taskId) {
     if (DRY_RUN) { console.log('[PA DRY_RUN] completeTask', { taskId: taskId }); return Promise.resolve(true); }
-    return paGql('CompleteTask', M_COMPLETE_TASK, { data: { id: taskId } }).then(function (d) {
-      var r = d && d.completeTask;
-      if (!r || !r.success) throw new Error((r && r.message) || 'completeTask failed');
-      return true;
-    });
+    return bwnGqlOp('completeTask', M_COMPLETE_TASK, { data: { id: taskId } }, { ids: { taskId: taskId } }).then(function () { return true; });
   }
   function completeAllTasks(tasks) {
     // Promise.all([]) resolves immediately, so a WO with zero open tasks succeeds trivially.
