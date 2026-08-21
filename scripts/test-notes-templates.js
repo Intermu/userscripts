@@ -38,12 +38,13 @@ var SRC = slice(readLF(path.join(__dirname, '..', 'bwn-notes.user.js')),
 
 function build(src) {
   var ctx = vm.createContext({ console: console });
-  vm.runInContext(src + '\nthis.firstNameFromUser = firstNameFromUser; this.TEMPLATES = TEMPLATES; this.buildNote = buildNote; this.fmtDay = fmtDay; this.fmtWeekOf = fmtWeekOf; this.applyDate = applyDate;', ctx);
+  vm.runInContext(src + '\nthis.firstNameFromUser = firstNameFromUser; this.TEMPLATES = TEMPLATES; this.buildNote = buildNote; this.fmtDay = fmtDay; this.fmtWeekOf = fmtWeekOf; this.applyDate = applyDate; this.spokeTag = spokeTag; this.prependSpokeTag = prependSpokeTag; this.mruAdd = mruAdd;', ctx);
   return ctx;
 }
 var env = build(SRC);
 var TEMPLATES = env.TEMPLATES, buildNote = env.buildNote, firstNameFromUser = env.firstNameFromUser;
 var fmtDay = env.fmtDay, fmtWeekOf = env.fmtWeekOf, applyDate = env.applyDate;
+var spokeTag = env.spokeTag, prependSpokeTag = env.prependSpokeTag, mruAdd = env.mruAdd;
 function allItems(t) { return t.reduce(function (a, g) { return a.concat(g.items); }, []); }
 
 // ---- groups + templates intact -----------------------------------------------------------
@@ -95,6 +96,27 @@ A.eq('fmtWeekOf snaps a Sunday back to its Monday', fmtWeekOf(2026, 8, 23), '8/1
 A.ok('applyDate fills the reschedule blank', /rescheduled for Friday 8\/21 \./.test(applyDate(byLabel(/reschedule/).body, 'day', 2026, 8, 21)));
 A.ok('applyDate fills the week-of blank', /week of 8\/17 ,/.test(applyDate(byLabel(/week of/).body, 'weekOf', 2026, 8, 21)));
 A.eq('applyDate leaves a blank-less body untouched', applyDate('no blank here', 'day', 2026, 8, 21), 'no blank here');
+
+// ---- vendor "spoke with" tag -------------------------------------------------------------
+A.eq('spokeTag format', spokeTag('ABC Plumbing'), '[Spoke with: ABC Plumbing]');
+A.eq('spokeTag trims the vendor', spokeTag('  ABC Plumbing  '), '[Spoke with: ABC Plumbing]');
+A.eq('spokeTag on null -> empty vendor', spokeTag(null), '[Spoke with: ]');
+A.ok('tag lands at the TOP, above an existing note', /^\[Spoke with: ABC\]\nHi team, this is done$/.test(prependSpokeTag('Hi team, this is done', 'ABC')));
+A.eq('tag on an empty note = tag + newline (cursor drops below)', prependSpokeTag('', 'ABC'), '[Spoke with: ABC]\n');
+A.eq('tag on a whitespace-only note = tag + newline', prependSpokeTag('   \n  ', 'ABC'), '[Spoke with: ABC]\n');
+A.ok('prepend preserves a multi-line template below the tag', /^\[Spoke with: ABC\]\nline1\nline2$/.test(prependSpokeTag('line1\nline2', 'ABC')));
+
+// ---- recent-vendor MRU (dropdown suggestions) --------------------------------------------
+A.eq('mruAdd puts the newest first', mruAdd(['B'], 'A', 20).join(','), 'A,B');
+A.eq('mruAdd dedupes case-insensitively and moves to front', mruAdd(['A', 'B'], 'a', 20).join(','), 'a,B');
+A.eq('mruAdd caps the list length', mruAdd(['1', '2', '3'], '4', 3).join(','), '4,1,2');
+A.eq('mruAdd ignores an empty/blank vendor', mruAdd(['A', 'B'], '   ', 20).join(','), 'A,B');
+A.eq('mruAdd on a non-array starts fresh', mruAdd(null, 'A', 20).join(','), 'A');
+
+// ---- negative control: put the tag at the BOTTOM, assert the top-of-note test goes red ----
+var g0 = build(mutate(SRC, "return body.trim() ? tag + '\\n' + body : tag + '\\n';", "return body.trim() ? body + '\\n' + tag : tag + '\\n';"));
+A.ok('[neg] with the tag appended at the bottom, it is NOT at the top of an existing note',
+  !/^\[Spoke with: ABC\]\n/.test(g0.prependSpokeTag('Hi team, this is done', 'ABC')));
 
 // ---- negative control: revert the signed-gate, assert red --------------------------------
 var g1 = build(mutate(SRC, 'if (tpl.signed) t += ', 'if (true) t += '));
