@@ -285,7 +285,9 @@ var MUTATIONS = [
   { what: 'the note mutation renamed',
     m: function (s) { return mutate(s, 'addEditJobNote(data: $addEditInput)', 'wrongNote(data: $addEditInput)'); } },
   { what: 'the doc-label map broken for Work Order Request',
-    m: function (s) { return mutate(s, "'Work Order Request': 17,", "'Work Order Request': 999,"); } }
+    m: function (s) { return mutate(s, "'Work Order Request': 17,", "'Work Order Request': 999,"); } },
+  { what: 'the doc upload bypasses the bwnGqlOp registry (audit lost)',
+    m: function (s) { return mutate(s, "bwnGqlOp('initializeJobDocument'", "bwnGqlOp('initializeJobDocumentX'"); } }
 ];
 
 function main() {
