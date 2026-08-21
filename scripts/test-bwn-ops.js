@@ -180,9 +180,10 @@ function runCases(opsSrc) {
     eq('the entry has no unexpected keys (no query/response)', extra, []);
 
     // --- a success:false envelope REJECTS and audits error, and is not retried ---
-    e.plan = [{ data: { patchWorkOrder: { success: false, message: 'not allowed' } } }];
+    // (moderate op; the success:false path is independent of the high-risk confirm gate)
+    e.plan = [{ data: { addEditJobNote: { success: false, message: 'not allowed' } } }];
     e.calls = [];
-    return settle(callRun('patchWorkOrder', 'mutation($d:X){patchWorkOrder(data:$d){success message}}',
+    return settle(callRun('addEditJobNote', 'mutation($d:X){addEditJobNote(data:$d){success message}}',
       { d: {} }, { ids: { wo: 9 } }));
   }).then(function (r) {
     ok('a success:false write REJECTS (never a silent false)', !r.ok && /not allowed/.test(String(r.e && r.e.message)), r.ok ? 'resolved' : String(r.e && r.e.message));
@@ -215,7 +216,7 @@ function runCases(opsSrc) {
     ok('a transient read recovers on retry', r.ok, r.ok ? '' : String(r.e && r.e.message));
     eq('it took two attempts', e.calls.length, 2);
 
-    // --- an idempotent + retry:safe write (putUserPreference) IS retried; activateVendor is NOT ---
+    // --- an idempotent + retry:safe write (putUserPreference) IS retried; completeTask (retry:none) is NOT ---
     e.plan = [{ err: new Error('network') }, { data: { putUserPreference: { success: true, message: '' } } }];
     e.calls = [];
     return settle(callRun('putUserPreference', 'mutation{putUserPreference}', {}, {})).then(function (rr) { return tick().then(function () { return rr; }); });
@@ -225,10 +226,10 @@ function runCases(opsSrc) {
 
     e.plan = [{ err: new Error('network') }];
     e.calls = [];
-    return settle(callRun('activateVendor', 'mutation{activateVendor}', {}, {}));
+    return settle(callRun('completeTask', 'mutation{completeTask}', {}, {}));
   }).then(function (r) {
     ok('an idempotent write with retry:none is NOT retried', !r.ok);
-    eq('activateVendor is tried once despite being idempotent', e.calls.length, 1);
+    eq('completeTask is tried once despite being idempotent', e.calls.length, 1);
 
     // --- the per-feature kill switch refuses a write, before any transport call ---
     var off = makeOps(opsSrc, { woAssist: false, launcher: true });
@@ -242,22 +243,68 @@ function runCases(opsSrc) {
     var log = o.off.api.auditAll();
     ok('the refusal is audited as denied (feature-off)', log.length === 1 && log[0].outcome === 'denied' && /feature-off/.test(String(log[0].reason)), JSON.stringify(log[0]));
 
-    // --- validate() blocks a write before it is sent ---
-    e.plan = [{ data: { patchWorkOrder: { success: true } } }];
+    // --- validate() blocks a write before it is sent (moderate op; independent of the confirm gate) ---
+    e.plan = [{ data: { addEditJobNote: { success: true } } }];
     e.calls = [];
-    return settle(callRun('patchWorkOrder', 'mutation{patchWorkOrder}', { d: {} },
-      { validate: function () { return 'ECD is in the past'; } }));
+    return settle(callRun('addEditJobNote', 'mutation{addEditJobNote}', { d: {} },
+      { validate: function () { return 'content is required'; } }));
   }).then(function (r) {
-    ok('validate() failing blocks the write', !r.ok && /ECD is in the past/.test(String(r.e && r.e.message)), r.ok ? 'resolved' : String(r.e && r.e.message));
+    ok('validate() failing blocks the write', !r.ok && /content is required/.test(String(r.e && r.e.message)), r.ok ? 'resolved' : String(r.e && r.e.message));
     eq('and nothing was sent', e.calls.length, 0);
 
     // validate() passing lets it through
-    e.plan = [{ data: { patchWorkOrder: { success: true } } }];
+    e.plan = [{ data: { addEditJobNote: { success: true } } }];
     e.calls = [];
-    return settle(callRun('patchWorkOrder', 'mutation{patchWorkOrder}', { d: {} }, { validate: function () { return true; } }));
+    return settle(callRun('addEditJobNote', 'mutation{addEditJobNote}', { d: {} }, { validate: function () { return true; } }));
   }).then(function (r) {
     ok('validate() returning true lets the write proceed', r.ok, r.ok ? '' : String(r.e && r.e.message));
     eq('and it was sent once', e.calls.length, 1);
+
+    // --- high-risk confirm gate (WRAP v2): fail-closed without proof of confirmation ---
+    e.plan = [{ data: { patchWorkOrder: { success: true } } }];
+    e.calls = [];
+    return settle(callRun('patchWorkOrder', 'mutation{patchWorkOrder}', { d: {} }, { ids: { wo: 9 } }));
+  }).then(function (r) {
+    ok('a high-risk write with NO confirmation is refused', !r.ok && /confirmation/.test(String(r.e && r.e.message)), r.ok ? 'resolved' : String(r.e && r.e.message));
+    eq('and nothing was sent', e.calls.length, 0);
+    ok('the refusal is audited denied (confirm-required)', (function () { var l = api.auditAll(); var last = l[l.length - 1]; return last && last.outcome === 'denied' && /confirm-required/.test(String(last.reason)); })());
+
+    // confirmed:true (caller confirmed via its own UI, e.g. dispatch's modal) lets it through
+    e.plan = [{ data: { patchWorkOrder: { success: true } } }];
+    e.calls = [];
+    return settle(callRun('patchWorkOrder', 'mutation{patchWorkOrder}', { d: {} }, { confirmed: true, ids: { wo: 9 } }));
+  }).then(function (r) {
+    ok('confirmed:true lets a high-risk write proceed', r.ok, r.ok ? '' : String(r.e && r.e.message));
+    eq('and confirmed:true sent once', e.calls.length, 1);
+
+    // an injected confirm handler returning true also proceeds, and receives the write details
+    e.plan = [{ data: { patchWorkOrder: { success: true } } }];
+    e.calls = [];
+    var seen = null;
+    api.run.setConfirm(function (d) { seen = d; return true; });
+    return settle(callRun('patchWorkOrder', 'mutation{patchWorkOrder}', { d: {} }, { ids: { wo: 42 }, current: { s: 1 }, proposed: { s: 2 }, count: 1 })).then(function (rr) { return { rr: rr, seen: seen }; });
+  }).then(function (o) {
+    ok('an injected confirm returning true lets it proceed', o.rr.ok, o.rr.ok ? '' : String(o.rr.e && o.rr.e.message));
+    ok('the confirm handler received the write details', o.seen && o.seen.op === 'patchWorkOrder' && o.seen.risk === 'high' && o.seen.count === 1 && o.seen.proposed && o.seen.proposed.s === 2, JSON.stringify(o.seen));
+
+    // an injected confirm returning false aborts, audits denied, sends nothing
+    e.plan = [{ data: { patchWorkOrder: { success: true } } }];
+    e.calls = [];
+    api.run.setConfirm(function () { return false; });
+    return settle(callRun('patchWorkOrder', 'mutation{patchWorkOrder}', { d: {} }, { ids: { wo: 42 } }));
+  }).then(function (r) {
+    ok('an injected confirm returning false aborts the write', !r.ok && /cancelled/.test(String(r.e && r.e.message)), r.ok ? 'resolved' : String(r.e && r.e.message));
+    eq('and nothing was sent on cancel', e.calls.length, 0);
+    ok('the cancel is audited denied (user-cancelled)', (function () { var l = api.auditAll(); var last = l[l.length - 1]; return last && last.outcome === 'denied' && /user-cancelled/.test(String(last.reason)); })());
+    api.run.setConfirm(null);
+
+    // a MODERATE write still needs no confirmation
+    e.plan = [{ data: { addEditJobNote: { success: true } } }];
+    e.calls = [];
+    return settle(callRun('addEditJobNote', 'mutation{addEditJobNote}', {}, {}));
+  }).then(function (r) {
+    ok('a moderate write needs no confirmation', r.ok, r.ok ? '' : String(r.e && r.e.message));
+    eq('and the moderate write sent once', e.calls.length, 1);
 
     // --- the audit ring buffer is bounded and keeps the most recent entries ---
     var rb = makeOps(opsSrc);
@@ -297,7 +344,11 @@ var MUTATIONS = [
   { what: 'the ring buffer cap removed (unbounded log)',
     m: function (s) { return mutate(s, 'if (a.length > BWN_AUDIT_MAX) a = a.slice(a.length - BWN_AUDIT_MAX);', 'if (false) { void a; }'); } },
   { what: 'the transient classifier inverted',
-    m: function (s) { return mutate(s, 'return /network|failed to fetch|load failed|timeout|timed out/i.test(', 'return !/network|failed to fetch|load failed|timeout|timed out/i.test('); } }
+    m: function (s) { return mutate(s, 'return /network|failed to fetch|load failed|timeout|timed out/i.test(', 'return !/network|failed to fetch|load failed|timeout|timed out/i.test('); } },
+  { what: 'the high-risk confirm gate removed (high-risk sends unconfirmed)',
+    m: function (s) { return mutate(s, "meta.risk === 'high'", "meta.risk === 'nope'"); } },
+  { what: 'a cancelled confirm proceeds anyway',
+    m: function (s) { return mutate(s, 'if (!okd) {', 'if (false) {'); } }
 ];
 
 function main() {
@@ -324,11 +375,11 @@ function main() {
     // paste has no mechanism behind it, so this gate goes red if a fix lands in one copy and
     // not the other - same discipline as the bwnAI and BWN-SHARED SHA gates.
     console.log('\n-- BWN-OPS-WRAP paste-identical across adopters --');
-    var ADOPTERS = ['bwn-suite-core.user.js', 'bwn-drop-upload.user.js'];
+    var ADOPTERS = ['bwn-suite-core.user.js', 'bwn-drop-upload.user.js', 'bwn-dispatch.user.js'];
     var wraps = ADOPTERS.map(function (f) {
       var s = fs.readFileSync(path.join(__dirname, '..', f), 'utf8').replace(/\r\n/g, '\n');
-      var a = s.indexOf('// ===== BWN-OPS-WRAP START v1');
-      var b = s.indexOf('// ===== BWN-OPS-WRAP END v1 =====');
+      var a = s.indexOf('// ===== BWN-OPS-WRAP START v2');
+      var b = s.indexOf('// ===== BWN-OPS-WRAP END v2 =====');
       return { f: f, w: (a !== -1 && b !== -1 && b > a) ? s.slice(a, b) : null };
     });
     var haveAll = wraps.every(function (x) { return x.w !== null; });
