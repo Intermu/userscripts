@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         BWN Drop Upload (Broadway National)
 // @namespace    broadwaynational.bwn
-// @version      1.16.0
+// @version      1.17.0
 // @downloadURL  https://raw.githubusercontent.com/Intermu/userscripts/main/bwn-drop-upload.user.js
 // @updateURL    https://raw.githubusercontent.com/Intermu/userscripts/main/bwn-drop-upload.user.js
 // @description  Drop files anywhere on an Umbrava work order to upload them. Opens the Documents tab and upload dialog, hands over the files, and builds each file's description from its contents. Emails are parsed locally (.msg via an OLE/MAPI reader, .eml via RFC822) into an Outlook-style block - From/Sent/To/Cc/Subject and the body - that becomes the WO note, led by a one-line summary from Chrome's on-device built-in AI (zero cost, zero egress, nothing leaves the browser), falling back to local WO-field extraction (store, city/state, priority, PO, NTE, problem, requester) when the on-device model is unavailable. That same summary fills each file's Description. The WO note's Type is chosen from the email's parties: inbound is typed by the sender (client -> Client, else Vendor); outbound from Broadway is typed by the recipients (a client recipient -> Client, any vendor recipient -> Vendor, all-internal -> Internal). Umbrava's Description field is a TipTap/ProseMirror rich-text editor. It rejects synthetic paste, beforeinput, insertHTML and raw innerHTML, but honours execCommand('insertText') plus a synthetic Enter keydown - so the note is filled line by line (Enter between lines to keep paragraphs), paced ~12ms/line so ProseMirror's async commit doesn't drop lines (measured live 2026-08-10). The text is also placed on your clipboard as a backup, and if every fill method fails a "Copy the WO note" button appears (its click supplies the gesture for a reliable copy, then Ctrl+V). A console diagnostic reports which editor was found and which fill method stuck. When WO Intake hands off a just-created WO's request email, each uploaded file's Label (document type) is set to "Work Order Request" and the note Type is forced to Client (a WO Intake handoff is a client's request, even when the sender is a broker like Fairmarkit that reads as a Vendor domain). Fairmarkit / bulk-email footer boilerplate (the Fairmarkit company block: tagline + Boston address + FAQ/Privacy/Terms/Unsubscribe, and the -----!{...}!----- machine tail) plus ALL tracking URLs (safelinks/awstrack/logo) are stripped from the note body, keeping content through the suppliers@ email. A Fairmarkit RFQ body is also condensed to one line per entry - single-spaced, with each line-item rejoined to its QTY and each Details label (Buyer/Close date/RFQ ID/Shipping address) rejoined to its value. Files upload via Umbrava's own API (initializeJobDocument -> Azure blob PUT -> bulkAddWorkOrderDocuments, captured live 2026-08-12), Label set by id, so the brittle upload-dialog combobox is bypassed; the dialog remains the automatic fallback if the API is unavailable. The email note is shown in a BWN review box (editable, Type selectable) and posted via addEditJobNote ONLY when you click Post - it is never auto-posted, and posts under your own Umbrava session for correct attribution. Network calls are same-origin to app.umbrava.com's own /api/graphql (the app's Auth0 bearer, no @connect/GM) plus the SAS-authorized blob PUT the SPA itself makes - nothing goes to any third party. @grant none.
@@ -15,7 +15,8 @@
 (function () {
   'use strict';
 
-  var VER = '1.16.0';   // keep in step with @version (drift caught earlier: banner had lagged two releases)
+  var VER = '1.17.0';   // keep in step with @version (drift caught earlier: banner had lagged two releases)
+  var BWN_VER = VER;   // stamped into BWN-OPS audit entries; the wrapper references BWN_VER
   console.info('[BWN DROP UPLOAD] v' + VER + ' · Uploads via Umbrava API (initializeJobDocument→blob PUT→bulkAddWorkOrderDocuments, Label by id), DOM dialog is the fallback · email→note in a human-gated BWN review box, posted via addEditJobNote on an explicit Post click (never auto-posted) · note Type by parties (inbound=sender, outbound=recipient) · note box shows instantly with a mechanical lead; the slow on-device AI brief (Gemini Nano / Edge Phi) fills in async · bwn:cmd dropupload:files bridge');
 
   // Active only on WO pages; checked at drag time so SPA navigation needs no watcher.
@@ -663,6 +664,149 @@
     });
   }
 
+  // ---- BWN-OPS: audited GraphQL wrapper for this sandbox --------------------
+  // bwnGqlOp lives in the paste-identical BWN-OPS-WRAP block below (SHA-gated to Core).
+  // It needs a uniform bwnGql(query, variables); drop-upload transport is the 3-arg
+  // duGql(op, query, variables), so this is the adapter. BWN_OPS is this file registry
+  // (only the ops it routes); BWN_MODULES is the shared kill-switch blob (only an explicit
+  // false disables). The audit ring buffer writes the shared bwn:audit key, so a note
+  // posted here lands in the SAME audit trail as Core writes.
+  function bwnGql(query, variables) { var m = /\b(?:query|mutation)\s+([A-Za-z0-9_]+)/.exec(query); return duGql(m ? m[1] : null, query, variables); }
+  var BWN_MODULES = (function () { try { return JSON.parse(localStorage.getItem('bwn:modules') || '{}') || {}; } catch (e) { return {}; } })();
+  var BWN_OPS = {
+    addEditJobNote: { kind: 'write', target: 'note', risk: 'moderate', idempotent: false, retry: 'none',
+      ok: 'Note posted.', fail: 'The note was not posted.' }
+  };
+  // ===== BWN-OPS-WRAP START v1 (paste-identical across adopters; SHA-gated by scripts/test-bwn-ops.js) =====
+  // Generic machinery only - NO registry, NO window hook - so it is byte-identical in every
+  // sandbox that adopts it (Core, drop-upload, ...). It closes over four things each sandbox
+  // supplies on its own: BWN_OPS (that file's registry), BWN_MODULES (kill switches), BWN_VER,
+  // and bwnGql(query, variables) (that file's same-origin transport). The audit ring buffer
+  // writes to the shared localStorage key, so every sandbox's writes land in ONE audit trail.
+  function bwnCorrId() {
+    try { if (window.crypto && window.crypto.randomUUID) return 'bwn-' + window.crypto.randomUUID(); }
+    catch (e) { /* fall through to the timestamp form */ }
+    return 'bwn-' + Date.now().toString(36) + '-' + Math.random().toString(36).slice(2, 10);
+  }
+
+  // Bounded, PII-free audit ring buffer in localStorage. Records ONLY what the caller passes
+  // (ids + scalar before/after) plus operation metadata - NEVER the raw variables or the
+  // response, which can carry note text, addresses, or vendor identity.
+  var BWN_AUDIT_KEY = 'bwn:audit', BWN_AUDIT_MAX = 200, BWN_AUDIT_SCHEMA = 1;
+  function bwnAuditAll() {
+    try { var a = JSON.parse(localStorage.getItem(BWN_AUDIT_KEY) || '[]'); return Array.isArray(a) ? a : []; }
+    catch (e) { return []; }
+  }
+  function bwnAuditRecord(entry) {
+    try {
+      var a = bwnAuditAll();
+      a.push(entry);
+      if (a.length > BWN_AUDIT_MAX) a = a.slice(a.length - BWN_AUDIT_MAX);
+      localStorage.setItem(BWN_AUDIT_KEY, JSON.stringify(a));
+    } catch (e) { /* audit is best-effort - it must never block or fail a write */ }
+    return entry;
+  }
+  function bwnAuditExport() {
+    return JSON.stringify({ schema: BWN_AUDIT_SCHEMA, ver: BWN_VER, exportedTs: Date.now(), entries: bwnAuditAll() }, null, 2);
+  }
+  function bwnAuditClear() { try { localStorage.removeItem(BWN_AUDIT_KEY); } catch (e) { /* best-effort */ } }
+  function bwnAuditActor() {
+    try {
+      var r = JSON.parse(localStorage.getItem('bwn:role:last') || 'null');
+      return (r && (r.label || r.role)) || 'unknown';
+    } catch (e) { return 'unknown'; }
+  }
+
+  // Only a network-level failure is transient. A GraphQL validation error comes back through
+  // bwnGql as a thrown Error carrying the server's message (deterministic - retrying just
+  // repeats it), and a write refused with success:false is flagged bwnNonTransient below.
+  // ponytail: bwnGql does not surface the HTTP status, so 429/5xx are not distinguished here;
+  // attach r.status in bwnGql and widen this test if status-aware backoff is ever needed.
+  function bwnIsTransient(err) {
+    if (err && err.bwnNonTransient) return false;
+    return /network|failed to fetch|load failed|timeout|timed out/i.test(String(err && err.message || err));
+  }
+  function bwnBackoff(tryNo) { return Math.min(4000, 400 * Math.pow(2, tryNo - 1)); }
+  function bwnDelay(ms) { return new Promise(function (r) { setTimeout(r, ms); }); }
+
+  // bwnGqlOp(op, query, variables, opts) -> Promise(data)
+  //   op        BWN_OPS key. THROWS if unregistered - a captured op must be classified before
+  //             it can be sent, which is what keeps guessed selectors out of the suite.
+  //   query     the captured GraphQL document TEXT - the caller owns it, never invented here.
+  //   variables the variables object (sent as-is to bwnGql; never copied into the audit).
+  //   opts      { feature, validate, ids, before, after, actor } - all optional:
+  //     feature   BWN_MODULES key; if that module is switched off the op is REFUSED and, for a
+  //               write, audited outcome:'denied' - this is the per-feature kill switch.
+  //     validate  fn(variables) -> true | 'message'; a write is blocked before it is sent.
+  //     ids       { wo, po, vendorId, ... } scalar identifiers for the audit trail (NO PII).
+  //     before    scalar snapshot of the value(s) about to change (NO PII, NO bulk data).
+  //     after     scalar snapshot of the intended new value(s).
+  //     actor     who initiated; defaults to the last-known rank label, else 'unknown'.
+  // Reads resolve to `data`. A write whose {success,message} envelope says success:false is
+  // REJECTED (never a silent false - the exact bug class the op-catalog warns about) and
+  // audited outcome:'error'.
+  function bwnGqlOp(op, query, variables, opts) {
+    opts = opts || {};
+    var meta = BWN_OPS[op];
+    if (!meta) return Promise.reject(new Error('bwnGqlOp: unregistered operation "' + op + '"'));
+    var isWrite = meta.kind === 'write';
+    var corrId = bwnCorrId();
+    var t0 = Date.now();
+    var actor = opts.actor || bwnAuditActor();
+
+    function writeAudit(outcome, extra) {
+      if (!isWrite) return;
+      var e = {
+        ts: Date.now(), corrId: corrId, op: op, kind: meta.kind, target: meta.target,
+        risk: meta.risk || null, actor: actor, ids: opts.ids || null,
+        before: (opts.before === undefined ? null : opts.before),
+        after: (opts.after === undefined ? null : opts.after),
+        outcome: outcome, ms: Date.now() - t0, ver: BWN_VER
+      };
+      if (extra) { for (var k in extra) { if (Object.prototype.hasOwnProperty.call(extra, k)) e[k] = extra[k]; } }
+      bwnAuditRecord(e);
+    }
+
+    // Per-feature kill switch: a disabled module must not mutate even if its UI leaked in.
+    if (opts.feature && BWN_MODULES[opts.feature] === false) {
+      writeAudit('denied', { reason: 'feature-off:' + opts.feature });
+      return Promise.reject(new Error('bwnGqlOp: feature "' + opts.feature + '" is disabled'));
+    }
+    // Validate a write BEFORE it leaves the browser.
+    if (isWrite && typeof opts.validate === 'function') {
+      var vr = opts.validate(variables);
+      if (vr !== true) {
+        writeAudit('denied', { reason: 'validation:' + vr });
+        return Promise.reject(new Error('bwnGqlOp: validation failed for "' + op + '": ' + vr));
+      }
+    }
+
+    var maxTries = (meta.retry === 'safe' && (meta.kind === 'read' || meta.idempotent === true)) ? 3 : 1;
+    function attempt(tryNo) {
+      return bwnGql(query, variables).then(function (data) {
+        if (isWrite) {
+          var env = data && data[op];
+          if (env && env.success === false) {
+            var refused = new Error(env.message || (op + ' was refused'));
+            refused.bwnNonTransient = true;
+            writeAudit('error', { tries: tryNo, reason: refused.message });
+            throw refused;
+          }
+          writeAudit('ok', { tries: tryNo });
+        }
+        return data;
+      }, function (err) {
+        if (bwnIsTransient(err) && tryNo < maxTries) {
+          return bwnDelay(bwnBackoff(tryNo)).then(function () { return attempt(tryNo + 1); });
+        }
+        writeAudit('error', { tries: tryNo, reason: String(err && err.message || err) });
+        throw err;
+      });
+    }
+    return attempt(1);
+  }
+  // ===== BWN-OPS-WRAP END v1 =====
+
   // Doc-label id map, read live off the MUI Autocomplete options (the SPA loads it once at boot,
   // never on the wire). The names are stable tenant reference data; drop-upload only ever needs
   // "Work Order Request" (17), but the whole map is kept so a caller can pass any label by name.
@@ -720,10 +864,17 @@
       actionNoteEmails: null,
       targetPurchaseOrderNumbers: []
     };
-    return duGql('AddEditWONote', MUT_ADD_NOTE, { addEditInput: input }).then(function (d) {
-      var res = d && d.addEditJobNote;
-      if (!res || res.success !== true) throw new Error((res && res.message) || 'addEditJobNote reported no success');
-      return res.note;
+    // Routed through bwnGqlOp (BWN-OPS): correlation id + shared audit entry + pre-send
+    // validate; the wrapper rejects a success:false envelope, so no inline success check.
+    return bwnGqlOp('addEditJobNote', MUT_ADD_NOTE, { addEditInput: input }, {
+      ids: { wo: woNumber },
+      validate: function (v) {
+        var a = v && v.addEditInput;
+        if (!a || a.workOrderNumber == null || typeof a.content !== 'string' || !a.content) return 'missing WO number or note content';
+        return true;
+      }
+    }).then(function (d) {
+      return d && d.addEditJobNote && d.addEditJobNote.note;
     });
   }
 
