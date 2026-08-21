@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         BWN Suite - Core (Broadway National)
 // @namespace    broadwaynational.bwn
-// @version      1.78.27
+// @version      1.78.29
 // @downloadURL  https://raw.githubusercontent.com/Intermu/userscripts/main/bwn-suite-core.user.js
 // @updateURL    https://raw.githubusercontent.com/Intermu/userscripts/main/bwn-suite-core.user.js
 // @description  Runs several Umbrava helpers for BWN coordinators, in the browser with no privileged grants. Includes: PO Approval + ETA Builder; WO Assist (GP/ETA, a stall watchdog, DNE calculator, and a next-action playbook); Email Leak Guard (checks recipients against vendor names, PO amounts, and client budget references before an outbound email sends); WO List Heat (a triage overlay + My Day strip on the work-order list, with an optional same-origin Umbrava API scan for deterministic full-board coverage); and the BWN Launcher (opens the Azure Static Web App tools with the current WO's context). Modules share state through sessionStorage/localStorage. The only network calls are same-origin Umbrava GraphQL requests (app.umbrava.com/api/graphql, the app's own session): List Heat's full-board scan and WO Assist's work-order / trip / clock-in / document reads, plus ONE write - BWN Views saves the column layout through Umbrava's own putUserPreference, the same preference the column chooser writes; everything else is offline. Toggle modules in BWN_MODULES below.
@@ -1127,6 +1127,217 @@
       return j && j.data;
     });
   }
+
+  // ===== BWN-OPS START v1 (operation registry + audited GraphQL wrapper; sliced by scripts/test-bwn-ops.js) =====
+  // The suite's safety spine for /api/graphql. bwnGqlOp() classifies an operation against
+  // BWN_OPS, stamps a correlation id, applies a conservative retry policy, and - for writes -
+  // records a structured audit entry (before/after, outcome, corrId) in a bounded local ring
+  // buffer. ADDITIVE: bwnGql() above stays the raw transport and every existing caller is
+  // untouched; a module opts in by routing its write through bwnGqlOp(). Nothing here invents a
+  // selector - the caller always passes the CAPTURED query text (Hard Rule 6; the op catalog is
+  // wiki/umbrava-graphql-operations.md). The registry is metadata, never a query store.
+  // ponytail: Core-only for now (bwnGql is Core-only). Duplicate into the suite-ai sandbox,
+  // SHA-gated like BWN-SHARED, only once a suite-ai writer adopts it.
+  //
+  // Registry entry fields:
+  //   kind       'read' | 'write'
+  //   target     the object type touched (for the audit trail)
+  //   risk       'low' | 'moderate' | 'high' (writes only) - drives the confirm UI in a later slice
+  //   idempotent same call, same end state - safe to repeat
+  //   retry      'safe' | 'none'. 'safe' auto-retries a TRANSIENT failure, and ONLY when
+  //              kind==='read' OR idempotent===true. A non-idempotent write is NEVER auto-retried
+  //              (there is no idempotency key for these Umbrava mutations).
+  //   metered    a paid / server-side-LLM call - never retried, never looped over a board
+  //   ok / fail  user-facing toast text a caller may surface
+  var BWN_OPS = {
+    // ---- reads (idempotent; a transient failure may be retried) ----
+    workOrder:               { kind: 'read', target: 'workOrder',  retry: 'safe' },
+    jobNotes:                { kind: 'read', target: 'note',       retry: 'safe' },
+    workOrderNotes:          { kind: 'read', target: 'note',       retry: 'safe' },
+    jobDocuments:            { kind: 'read', target: 'document',   retry: 'safe' },
+    purchaseOrders:          { kind: 'read', target: 'po',         retry: 'safe' },
+    workOrderTrips:          { kind: 'read', target: 'trip',       retry: 'safe' },
+    purchaseOrderTrips:      { kind: 'read', target: 'trip',       retry: 'safe' },
+    jobIVRs:                 { kind: 'read', target: 'ivr',        retry: 'safe' },
+    listWorkOrdersPaginated: { kind: 'read', target: 'workOrder',  retry: 'safe' },
+    lookupJob:               { kind: 'read', target: 'workOrder',  retry: 'safe' },
+    lookupVendors:           { kind: 'read', target: 'vendor',     retry: 'safe' },
+    getAssignableVendors:    { kind: 'read', target: 'vendor',     retry: 'safe' },
+    tasks:                   { kind: 'read', target: 'task',       retry: 'safe' },
+    tasksByEntityTypeAndId:  { kind: 'read', target: 'task',       retry: 'safe' },
+    user:                    { kind: 'read', target: 'user',       retry: 'safe' },
+    userPreference:          { kind: 'read', target: 'preference', retry: 'safe' },
+    listVendorProposals:     { kind: 'read', target: 'proposal',   retry: 'safe' },
+    listClientProposals:     { kind: 'read', target: 'proposal',   retry: 'safe' },
+    // metered server-side LLM summary, keyed by INTERNAL jobId - do NOT loop it over a board
+    workOrderNotesSummary:   { kind: 'read', target: 'note', retry: 'none', metered: true },
+
+    // ---- low-risk writes (personal UI state) ----
+    putUserPreference: { kind: 'write', target: 'preference', risk: 'low', idempotent: true, retry: 'safe',
+      ok: 'View saved.', fail: 'Could not save the view.' },
+
+    // ---- moderate-risk writes ----
+    addEditJobNote: { kind: 'write', target: 'note', risk: 'moderate', idempotent: false, retry: 'none',
+      ok: 'Note posted.', fail: 'The note was not posted.' },
+    addClientProposalNote: { kind: 'write', target: 'proposal', risk: 'moderate', idempotent: false, retry: 'none',
+      ok: 'Proposal note posted.', fail: 'The proposal note was not posted.' },
+    addVendorProposalNote: { kind: 'write', target: 'proposal', risk: 'moderate', idempotent: false, retry: 'none',
+      ok: 'Vendor-proposal note posted.', fail: 'The note was not posted.' },
+    initializeJobDocument: { kind: 'write', target: 'document', risk: 'moderate', idempotent: false, retry: 'none',
+      ok: 'Document upload started.', fail: 'The upload could not start.' },
+    bulkAddWorkOrderDocuments: { kind: 'write', target: 'document', risk: 'moderate', idempotent: false, retry: 'none',
+      ok: 'Documents attached.', fail: 'The documents were not attached.' },
+    addTask: { kind: 'write', target: 'task', risk: 'moderate', idempotent: false, retry: 'none',
+      ok: 'Task created.', fail: 'The task was not created.' },
+    completeTask: { kind: 'write', target: 'task', risk: 'moderate', idempotent: true, retry: 'none',
+      ok: 'Task completed.', fail: 'The task was not completed.' },
+    deactivateVendor: { kind: 'write', target: 'vendor', risk: 'moderate', idempotent: true, retry: 'none',
+      ok: 'Vendor deactivated.', fail: 'The vendor was not deactivated.' },
+
+    // ---- high-risk writes (dispatch, status/ECD, create, activation) ----
+    patchWorkOrder: { kind: 'write', target: 'workOrder', risk: 'high', idempotent: false, retry: 'none',
+      ok: 'Work order updated.', fail: 'The work order was not updated.' },
+    addWorkOrder: { kind: 'write', target: 'workOrder', risk: 'high', idempotent: false, retry: 'none',
+      ok: 'Work order created.', fail: 'The work order was not created.' },
+    addDependentVendor: { kind: 'write', target: 'vendor', risk: 'high', idempotent: false, retry: 'none',
+      ok: 'Vendor created.', fail: 'The vendor was not created.' },
+    activateVendor: { kind: 'write', target: 'vendor', risk: 'high', idempotent: true, retry: 'none',
+      ok: 'Vendor activated.', fail: 'The vendor was not activated.' }
+  };
+
+  function bwnCorrId() {
+    try { if (window.crypto && window.crypto.randomUUID) return 'bwn-' + window.crypto.randomUUID(); }
+    catch (e) { /* fall through to the timestamp form */ }
+    return 'bwn-' + Date.now().toString(36) + '-' + Math.random().toString(36).slice(2, 10);
+  }
+
+  // Bounded, PII-free audit ring buffer in localStorage. Records ONLY what the caller passes
+  // (ids + scalar before/after) plus operation metadata - NEVER the raw variables or the
+  // response, which can carry note text, addresses, or vendor identity.
+  var BWN_AUDIT_KEY = 'bwn:audit', BWN_AUDIT_MAX = 200, BWN_AUDIT_SCHEMA = 1;
+  function bwnAuditAll() {
+    try { var a = JSON.parse(localStorage.getItem(BWN_AUDIT_KEY) || '[]'); return Array.isArray(a) ? a : []; }
+    catch (e) { return []; }
+  }
+  function bwnAuditRecord(entry) {
+    try {
+      var a = bwnAuditAll();
+      a.push(entry);
+      if (a.length > BWN_AUDIT_MAX) a = a.slice(a.length - BWN_AUDIT_MAX);
+      localStorage.setItem(BWN_AUDIT_KEY, JSON.stringify(a));
+    } catch (e) { /* audit is best-effort - it must never block or fail a write */ }
+    return entry;
+  }
+  function bwnAuditExport() {
+    return JSON.stringify({ schema: BWN_AUDIT_SCHEMA, ver: BWN_VER, exportedTs: Date.now(), entries: bwnAuditAll() }, null, 2);
+  }
+  function bwnAuditClear() { try { localStorage.removeItem(BWN_AUDIT_KEY); } catch (e) { /* best-effort */ } }
+  function bwnAuditActor() {
+    try {
+      var r = JSON.parse(localStorage.getItem('bwn:role:last') || 'null');
+      return (r && (r.label || r.role)) || 'unknown';
+    } catch (e) { return 'unknown'; }
+  }
+
+  // Only a network-level failure is transient. A GraphQL validation error comes back through
+  // bwnGql as a thrown Error carrying the server's message (deterministic - retrying just
+  // repeats it), and a write refused with success:false is flagged bwnNonTransient below.
+  // ponytail: bwnGql does not surface the HTTP status, so 429/5xx are not distinguished here;
+  // attach r.status in bwnGql and widen this test if status-aware backoff is ever needed.
+  function bwnIsTransient(err) {
+    if (err && err.bwnNonTransient) return false;
+    return /network|failed to fetch|load failed|timeout|timed out/i.test(String(err && err.message || err));
+  }
+  function bwnBackoff(tryNo) { return Math.min(4000, 400 * Math.pow(2, tryNo - 1)); }
+  function bwnDelay(ms) { return new Promise(function (r) { setTimeout(r, ms); }); }
+
+  // bwnGqlOp(op, query, variables, opts) -> Promise(data)
+  //   op        BWN_OPS key. THROWS if unregistered - a captured op must be classified before
+  //             it can be sent, which is what keeps guessed selectors out of the suite.
+  //   query     the captured GraphQL document TEXT - the caller owns it, never invented here.
+  //   variables the variables object (sent as-is to bwnGql; never copied into the audit).
+  //   opts      { feature, validate, ids, before, after, actor } - all optional:
+  //     feature   BWN_MODULES key; if that module is switched off the op is REFUSED and, for a
+  //               write, audited outcome:'denied' - this is the per-feature kill switch.
+  //     validate  fn(variables) -> true | 'message'; a write is blocked before it is sent.
+  //     ids       { wo, po, vendorId, ... } scalar identifiers for the audit trail (NO PII).
+  //     before    scalar snapshot of the value(s) about to change (NO PII, NO bulk data).
+  //     after     scalar snapshot of the intended new value(s).
+  //     actor     who initiated; defaults to the last-known rank label, else 'unknown'.
+  // Reads resolve to `data`. A write whose {success,message} envelope says success:false is
+  // REJECTED (never a silent false - the exact bug class the op-catalog warns about) and
+  // audited outcome:'error'.
+  function bwnGqlOp(op, query, variables, opts) {
+    opts = opts || {};
+    var meta = BWN_OPS[op];
+    if (!meta) return Promise.reject(new Error('bwnGqlOp: unregistered operation "' + op + '"'));
+    var isWrite = meta.kind === 'write';
+    var corrId = bwnCorrId();
+    var t0 = Date.now();
+    var actor = opts.actor || bwnAuditActor();
+
+    function writeAudit(outcome, extra) {
+      if (!isWrite) return;
+      var e = {
+        ts: Date.now(), corrId: corrId, op: op, kind: meta.kind, target: meta.target,
+        risk: meta.risk || null, actor: actor, ids: opts.ids || null,
+        before: (opts.before === undefined ? null : opts.before),
+        after: (opts.after === undefined ? null : opts.after),
+        outcome: outcome, ms: Date.now() - t0, ver: BWN_VER
+      };
+      if (extra) { for (var k in extra) { if (Object.prototype.hasOwnProperty.call(extra, k)) e[k] = extra[k]; } }
+      bwnAuditRecord(e);
+    }
+
+    // Per-feature kill switch: a disabled module must not mutate even if its UI leaked in.
+    if (opts.feature && BWN_MODULES[opts.feature] === false) {
+      writeAudit('denied', { reason: 'feature-off:' + opts.feature });
+      return Promise.reject(new Error('bwnGqlOp: feature "' + opts.feature + '" is disabled'));
+    }
+    // Validate a write BEFORE it leaves the browser.
+    if (isWrite && typeof opts.validate === 'function') {
+      var vr = opts.validate(variables);
+      if (vr !== true) {
+        writeAudit('denied', { reason: 'validation:' + vr });
+        return Promise.reject(new Error('bwnGqlOp: validation failed for "' + op + '": ' + vr));
+      }
+    }
+
+    var maxTries = (meta.retry === 'safe' && (meta.kind === 'read' || meta.idempotent === true)) ? 3 : 1;
+    function attempt(tryNo) {
+      return bwnGql(query, variables).then(function (data) {
+        if (isWrite) {
+          var env = data && data[op];
+          if (env && env.success === false) {
+            var refused = new Error(env.message || (op + ' was refused'));
+            refused.bwnNonTransient = true;
+            writeAudit('error', { tries: tryNo, reason: refused.message });
+            throw refused;
+          }
+          writeAudit('ok', { tries: tryNo });
+        }
+        return data;
+      }, function (err) {
+        if (bwnIsTransient(err) && tryNo < maxTries) {
+          return bwnDelay(bwnBackoff(tryNo)).then(function () { return attempt(tryNo + 1); });
+        }
+        writeAudit('error', { tries: tryNo, reason: String(err && err.message || err) });
+        throw err;
+      });
+    }
+    return attempt(1);
+  }
+
+  // Console diagnostics/export hook - lets a coordinator or admin read and export the local
+  // audit trail today, before any writer adopts the wrapper. Read-only; carries no PII beyond
+  // what a write chose to record. (Same shape as the suite's other window.__bwn* dev hooks.)
+  try {
+    window.__bwnOps = {
+      registry: BWN_OPS, run: bwnGqlOp, corrId: bwnCorrId,
+      audit: { all: bwnAuditAll, export: bwnAuditExport, clear: bwnAuditClear }
+    };
+  } catch (e) { /* non-fatal */ }
+  // ===== BWN-OPS END v1 =====
 
   // ---- Core-local shared helpers (PO Approval + Leak Guard) --------------------
   // Distinctive-token vendor matching: "does this recipient text belong to this
@@ -10347,14 +10558,24 @@
       });
     }
 
+    // FIRST adopter of bwnGqlOp (the BWN-OPS registry + audited wrapper). Routing this
+    // one write through it gives the column-layout save a correlation id, a structured
+    // audit entry, a pre-send validate(), the viewManager kill switch, and centralized
+    // success:false rejection - the wrapper rejects a refused write itself, so the old
+    // inline `res.success !== true` throw is gone. Behaviour is otherwise identical: the
+    // same PutUserPreferenceInput, resolving true on a verified write.
     function writePref(version, valueStr) {
-      return bwnGql(PREF_WRITE_Q, {
+      return bwnGqlOp('putUserPreference', PREF_WRITE_Q, {
         d: { applicationId: PREF_APP, key: PREF_KEY, version: version, value: valueStr, isTenantSpecific: true }
-      }).then(function (d) {
-        var res = d && d.putUserPreference;
-        if (!res || res.success !== true) throw new Error('putUserPreference refused: ' + (res && res.message));
-        return true;
-      });
+      }, {
+        feature: 'viewManager',
+        ids: { key: PREF_KEY },
+        validate: function (v) {
+          var d = v && v.d;
+          if (!d || !d.key || !d.version || typeof d.value !== 'string') return 'missing key/version/value';
+          return true;
+        }
+      }).then(function () { return true; });
     }
 
     // Apply a SAVED value byte-for-byte. The version comes from a FRESH read, never
