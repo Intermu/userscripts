@@ -1,10 +1,10 @@
 // ==UserScript==
 // @name         BWN Inventory (Broadway National)
 // @namespace    broadwaynational.bwn
-// @version      0.2.0
+// @version      0.3.0
 // @downloadURL  https://raw.githubusercontent.com/Intermu/userscripts/main/bwn-inventory.user.js
 // @updateURL    https://raw.githubusercontent.com/Intermu/userscripts/main/bwn-inventory.user.js
-// @description  Logs a stock movement into the Broadway inventory subledger from inside Umbrava. Pick a movement (receive / issue / transfer), a SKU, a quantity and warehouse(s); a receipt also takes a unit cost. Submit POSTs to the broadway-internal-ops SWA (x-bwn-key gated, your Umbrava session token vouched server-side), which appends to an append-only movement ledger on Azure Table Storage - updating live per-warehouse on-hand + moving-average value and posting the double-entry GL. The same modal looks up current on-hand (qty + value) per warehouse for a SKU (the thing the old Excel log could not answer). Warehouse names are a per-user pick-list you maintain (be consistent - the name keys the on-hand bin). Opened on a work order, it prefills the Work Order # into the movement note. Each submit carries a stable id so a retry after a dropped response never double-posts. Nothing sensitive lives in this script. Open it from the suite dock (📦 Inventory) or the Tampermonkey menu.
+// @description  Logs a stock movement into the Broadway inventory subledger from inside Umbrava. Pick a movement (receive / issue / transfer), a SKU, a quantity and warehouse(s); a receipt also takes a unit cost. Submit POSTs to the broadway-internal-ops SWA (x-bwn-key gated, your Umbrava session token vouched server-side), which appends to an append-only movement ledger on Azure Table Storage - updating live per-warehouse on-hand + moving-average value and posting the double-entry GL. The same modal looks up current on-hand (qty + value) per warehouse for a SKU (the thing the old Excel log could not answer). Item codes and warehouses come from the shared master catalog (curated on the SWA Inventory page): the SKU field suggests known items and the warehouse pickers list active warehouses, so a typo cannot silently fork a bin; if the catalog is unreachable it falls back to a per-user warehouse pick-list. Opened on a work order, it prefills the Work Order # into the movement note. Each submit carries a stable id so a retry after a dropped response never double-posts. Nothing sensitive lives in this script. Open it from the suite dock (📦 Inventory) or the Tampermonkey menu.
 // @match        https://app.umbrava.com/*
 // @run-at       document-idle
 // @noframes
@@ -18,12 +18,13 @@
 (function () {
   'use strict';
 
-  var VER = '0.2.0';
+  var VER = '0.3.0';
   var FONT = "-apple-system,BlinkMacSystemFont,'Segoe UI','Helvetica Neue',Arial,sans-serif";
   var SWA_BASE = 'https://green-stone-0717dab0f.7.azurestaticapps.net';
   var PROXY_URL = SWA_BASE + '/api/inventory-stock';
   var ONHAND_URL = SWA_BASE + '/api/inventory-onhand';
-  console.info('[BWN INVENTORY] v' + VER + ' - stock movement modal -> SWA -> Table Storage subledger (movement ledger + moving-avg on-hand + double-entry GL). Dock: 📦 Inventory.');
+  var MASTERS_URL = SWA_BASE + '/api/inventory-masters';
+  console.info('[BWN INVENTORY] v' + VER + ' - stock movement modal -> SWA -> Table Storage subledger (movement ledger + moving-avg on-hand + double-entry GL). Item/warehouse dropdowns from the master catalog. Dock: 📦 Inventory.');
 
   // Movement -> the route's MovementType + which warehouses it needs + whether it takes a unit cost.
   // Mirrors api/inventory-stock: receipt/reconcile need a Rate (dollars); issue/transfer cost out at
@@ -51,11 +52,35 @@
     return m ? m[1] : null;
   }
 
-  // ---- Warehouses (the pick-list the user maintains) --------------------------
-  // Stored in Tampermonkey (GM), NOT page storage - a per-user preference. The name KEYS the on-hand
-  // bin (RowKey "bin:<warehouse>"), so be consistent - "Main" and "main" are two different bins.
-  // ponytail: once a warehouse-master route exists, this becomes a live lookup instead of a hand-kept
-  // list - the modal wiring stays the same.
+  // ---- Master catalog (items + warehouses) ------------------------------------
+  // Curated on the SWA Inventory page and served by /api/inventory-masters (x-bwn-key + Umbrava vouch,
+  // same auth as the on-hand/stock routes). Fetched best-effort on modal open and cached for the
+  // session. When present it is the SOURCE for the SKU suggestions + the warehouse pickers, so codes
+  // and warehouse names stay consistent (the name KEYS the on-hand bin - "Main" and "main" are two
+  // different bins). If it is unreachable or still empty, the modal falls back to the per-user GM
+  // warehouse pick-list below, so the tool keeps working before the catalog is populated.
+  var masterItems = [];        // [{ code, desc, uom }] active only
+  var masterWarehouses = [];   // [name] active only
+  function fetchMasters() {
+    var key = GM_getValue('ingest_key', ''); var userToken = authToken();
+    if (!key || !userToken) return Promise.resolve(null);   // cannot call - keep the GM fallback
+    return gmPost(MASTERS_URL, { 'Content-Type': 'application/json', 'x-bwn-key': key }, { userToken: userToken }, 15000)
+      .then(function (r) {
+        if (r.status >= 200 && r.status < 300 && r.json && r.json.ok) {
+          masterItems = (r.json.items || []).filter(function (i) { return i && i.active !== false; });
+          masterWarehouses = (r.json.warehouses || []).filter(function (w) { return w && w.active !== false; })
+            .map(function (w) { return w.name; });
+          return r.json;
+        }
+        return null;
+      })
+      .catch(function () { return null; });   // fail silent -> GM fallback
+  }
+  function haveMasterWarehouses() { return masterWarehouses && masterWarehouses.length > 0; }
+
+  // ---- Warehouses: per-user GM fallback (used only when the master catalog is empty/unreachable) ----
+  // Stored in Tampermonkey (GM), NOT page storage - a per-user preference. Superseded by the shared
+  // master catalog above; kept so the modal still works before the catalog is populated.
   function warehouses() {
     try { var a = JSON.parse(GM_getValue('inv_warehouses', '[]')); return Array.isArray(a) ? a.filter(Boolean) : []; }
     catch (e) { return []; }
@@ -74,13 +99,15 @@
     toast(saved.length ? 'Saved ' + saved.length + ' warehouse' + (saved.length === 1 ? '' : 's') + '.' : 'Warehouse list cleared.');
     return saved;
   }
-  // (Re)build a warehouse <select>: blank, one option per saved warehouse, then a manage entry.
+  // (Re)build a warehouse <select>: blank, one option per warehouse (from the master catalog when
+  // present, else the GM pick-list), then the GM add/manage entry ONLY in fallback mode.
   var ADD_WH = '__add_wh__';
+  function warehouseNames() { return haveMasterWarehouses() ? masterWarehouses : warehouses(); }
   function rebuildWarehouseOptions(sel, selected) {
     sel.innerHTML = '';
     sel.appendChild(new Option('- select a warehouse -', ''));
-    warehouses().forEach(function (w) { sel.appendChild(new Option(w, w)); });
-    sel.appendChild(new Option('+ Add / manage warehouses…', ADD_WH));
+    warehouseNames().forEach(function (w) { sel.appendChild(new Option(w, w)); });
+    if (!haveMasterWarehouses()) sel.appendChild(new Option('+ Add / manage warehouses…', ADD_WH));
     sel.value = (selected && Array.prototype.some.call(sel.options, function (o) { return o.value === selected; })) ? selected : '';
   }
 
@@ -227,13 +254,23 @@
     // SKU + on-hand lookup
     var skuF = fieldWrap('SKU (Item Code)', true);
     var skuRow = document.createElement('div'); skuRow.style.cssText = 'display:flex;gap:8px;';
-    var sku = document.createElement('input'); sku.type = 'text'; sku.placeholder = 'e.g. PFJ-LED-48'; sku.style.cssText = inCss;
-    sku.id = 'inv_sku'; skuF.lbl.setAttribute('for', 'inv_sku');
+    var sku = document.createElement('input'); sku.type = 'text'; sku.placeholder = 'type or pick a SKU (e.g. PFJ-LED-48)'; sku.style.cssText = inCss;
+    sku.id = 'inv_sku'; sku.setAttribute('autocomplete', 'off'); sku.setAttribute('list', 'inv_sku_list'); skuF.lbl.setAttribute('for', 'inv_sku');
+    // Datalist of catalog items (suggestions only - free text is still accepted so a NEW item can be
+    // received before it is added to the master). Populated from masterItems, refreshed when the fetch lands.
+    var skuList = document.createElement('datalist'); skuList.id = 'inv_sku_list';
+    function fillSkuList() {
+      skuList.innerHTML = '';
+      masterItems.forEach(function (it) {
+        var o = document.createElement('option'); o.value = it.code; if (it.desc) o.label = it.desc; skuList.appendChild(o);
+      });
+    }
+    fillSkuList();
     var onhandBtn = document.createElement('button');
     onhandBtn.type = 'button'; onhandBtn.textContent = 'On hand';
     onhandBtn.style.cssText = 'flex:0 0 auto;padding:9px 12px;border:1px solid #c6d2cc;background:#fff;color:#33473d;border-radius:8px;font:600 13px ' + FONT + ';cursor:pointer;white-space:nowrap;';
     skuRow.appendChild(sku); skuRow.appendChild(onhandBtn);
-    skuF.wrap.appendChild(skuRow);
+    skuF.wrap.appendChild(skuRow); skuF.wrap.appendChild(skuList);
     var onhandOut = document.createElement('div');
     onhandOut.style.cssText = 'font-size:12.5px;color:#33473d;margin:6px 0 0;min-height:16px;';
     skuF.wrap.appendChild(onhandOut);
@@ -410,6 +447,15 @@
           }
         })
         .catch(function (err) { reenable(); msg.textContent = (err && err.message ? err.message : 'could not reach the proxy') + '.'; });
+    });
+
+    // Load the master catalog (best-effort) and repopulate the SKU suggestions + warehouse pickers when
+    // it lands. Cached across opens, so a re-open shows them immediately; this just refreshes.
+    fetchMasters().then(function (m) {
+      if (!m) return;   // unreachable / not signed in -> keep the GM fallback already rendered
+      fillSkuList();
+      rebuildWarehouseOptions(srcSel, srcSel.value || '');
+      rebuildWarehouseOptions(tgtSel, tgtSel.value || '');
     });
 
     card.appendChild(head); card.appendChild(form);
