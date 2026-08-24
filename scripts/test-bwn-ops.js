@@ -351,6 +351,46 @@ var MUTATIONS = [
     m: function (s) { return mutate(s, 'if (!okd) {', 'if (false) {'); } }
 ];
 
+// Confirm-gate coverage for the writes newly adopted in F2. createDraftProposal + editProposal
+// are registered high-risk in bwn-proposal-copy's OWN registry; load that registry over the same
+// (SHA-gated) WRAP via makeOps and prove the gate applies to them: fail-closed with no
+// confirmation, through with confirmed:true. (kanban's patchWorkOrder + low-gp's addEditJobNote
+// reuse ops already covered above via Core's registry.)
+function runProposalGateCases() {
+  console.log('\n-- newly high-risk proposal writes are gated (bwn-proposal-copy registry) --');
+  var PC = fs.readFileSync(path.join(__dirname, '..', 'bwn-proposal-copy.user.js'), 'utf8').replace(/\r\n/g, '\n');
+  var a = PC.indexOf('  var BWN_OPS = {'), b = PC.indexOf('  // ===== BWN-OPS-WRAP END v2 =====');
+  if (a === -1 || b === -1 || b < a) { A.ok('proposal-copy BWN-OPS block is sliceable', false, 'markers not found'); return Promise.resolve(); }
+  var pc = makeOps(PC.slice(a, b));
+  function settle(p) { return p.then(function (v) { return { ok: true, v: v }; }, function (e) { return { ok: false, e: e }; }); }
+  var cdp = pc.api.OPS.createDraftProposal, edp = pc.api.OPS.editProposal;
+  A.ok('proposal-copy registers createDraftProposal as a high-risk write', cdp && cdp.kind === 'write' && cdp.risk === 'high', JSON.stringify(cdp));
+  A.ok('proposal-copy registers editProposal as a high-risk write', edp && edp.kind === 'write' && edp.risk === 'high', JSON.stringify(edp));
+  var Q_C = 'mutation CreateDraftProposal { createDraftProposal { success } }';
+  var Q_E = 'mutation EditProposal { editProposal { success } }';
+  pc.plan = [{ data: { createDraftProposal: { success: true } } }]; pc.calls = [];
+  return settle(pc.api.run('createDraftProposal', Q_C, {}, { ids: { wo: 1 } })).then(function (r) {
+    A.ok('createDraftProposal with NO confirmation is refused', !r.ok && /confirmation/.test(String(r.e && r.e.message)), r.ok ? 'resolved' : String(r.e && r.e.message));
+    A.eq('and nothing was sent for the unconfirmed create', pc.calls.length, 0);
+    var la = pc.api.auditAll(); A.ok('the unconfirmed create is audited denied (confirm-required)', la.length > 0 && la[la.length - 1].outcome === 'denied' && /confirm-required/.test(String(la[la.length - 1].reason)), JSON.stringify(la[la.length - 1]));
+    pc.plan = [{ data: { createDraftProposal: { success: true } } }]; pc.calls = [];
+    return settle(pc.api.run('createDraftProposal', Q_C, {}, { confirmed: true, ids: { wo: 1 } }));
+  }).then(function (r) {
+    A.ok('createDraftProposal with confirmed:true proceeds', r.ok, r.ok ? '' : String(r.e && r.e.message));
+    A.eq('and the confirmed create sent exactly once', pc.calls.length, 1);
+    pc.plan = [{ data: { editProposal: { success: true } } }]; pc.calls = [];
+    return settle(pc.api.run('editProposal', Q_E, {}, { ids: { proposalId: 9 } }));
+  }).then(function (r) {
+    A.ok('editProposal with NO confirmation is refused', !r.ok && /confirmation/.test(String(r.e && r.e.message)), r.ok ? 'resolved' : String(r.e && r.e.message));
+    A.eq('and nothing was sent for the unconfirmed edit', pc.calls.length, 0);
+    pc.plan = [{ data: { editProposal: { success: true } } }]; pc.calls = [];
+    return settle(pc.api.run('editProposal', Q_E, {}, { confirmed: true, ids: { proposalId: 9 } }));
+  }).then(function (r) {
+    A.ok('editProposal with confirmed:true proceeds', r.ok, r.ok ? '' : String(r.e && r.e.message));
+    A.eq('and the confirmed edit sent exactly once', pc.calls.length, 1);
+  });
+}
+
 function main() {
   console.log('\n-- the shipped BWN-OPS block --');
   return runCases(S_OPS).then(function (results) {
@@ -375,7 +415,7 @@ function main() {
     // paste has no mechanism behind it, so this gate goes red if a fix lands in one copy and
     // not the other - same discipline as the bwnAI and BWN-SHARED SHA gates.
     console.log('\n-- BWN-OPS-WRAP paste-identical across adopters --');
-    var ADOPTERS = ['bwn-suite-core.user.js', 'bwn-drop-upload.user.js', 'bwn-dispatch.user.js', 'bwn-temp-vendor.user.js', 'bwn-proposal-actions.user.js'];
+    var ADOPTERS = ['bwn-suite-core.user.js', 'bwn-drop-upload.user.js', 'bwn-dispatch.user.js', 'bwn-temp-vendor.user.js', 'bwn-proposal-actions.user.js', 'bwn-kanban.user.js', 'bwn-proposal-copy.user.js', 'bwn-low-gp.user.js'];
     var wraps = ADOPTERS.map(function (f) {
       var s = fs.readFileSync(path.join(__dirname, '..', f), 'utf8').replace(/\r\n/g, '\n');
       var a = s.indexOf('// ===== BWN-OPS-WRAP START v2');
@@ -390,6 +430,8 @@ function main() {
         A.ok('BWN-OPS-WRAP is byte-identical in ' + x.f + ' (drift = a fix in one sandbox not the other)', x.w === wraps[0].w);
       });
     }
+    return runProposalGateCases();
+  }).then(function () {
     A.finish();
   }).catch(function (err) {
     console.log('HARNESS ERROR: ' + (err && err.stack || err));
