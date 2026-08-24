@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         BWN Vendor Intake (Broadway National)
 // @namespace    broadwaynational.bwn
-// @version      0.9.5
+// @version      0.9.6
 // @downloadURL  https://raw.githubusercontent.com/Intermu/userscripts/main/bwn-vendor-intake.user.js
 // @updateURL    https://raw.githubusercontent.com/Intermu/userscripts/main/bwn-vendor-intake.user.js
 // @description  Prefills Umbrava's Create Vendor form (and the detail-page Tax ID) from a Prospect Set-Up Form or a W-9. Fillable PDFs are read straight from their form fields; SCANNED W-9s are read by on-device OCR (Tesseract + pdf.js, fetched once at install, run entirely in the browser). The document and its tax ID never leave your machine. Adds a "Prefill from document" button; every extracted field is a suggestion to review before saving - the TIN especially, since OCR can misread digits.
@@ -21,7 +21,14 @@
 (function () {
   'use strict';
 
-  var VER = '0.9.5';
+  var VER = '0.9.6';
+  // v0.9.6 - SECURITY (audit F1): the fillable Tax ID is now read from pdf.js getFieldObjects(),
+  // the AUTHORITATIVE AcroForm /Fields tree, not the raw first-in-byte-order /T(name)../V(value)
+  // sweep. A decoy or orphaned /T planted anywhere in the vendor-supplied bytes is no longer
+  // trusted, so a vendor can no longer steer the recorded Tax ID (which drives payment/1099). The
+  // raw sweep is kept only as a FALLBACK when getFieldObjects returns nothing (image-only or
+  // non-AcroForm PDF); the field object's charLimit is used as a comb-width validator a byte regex
+  // cannot see. See wiki/security-audit-untested-writes-2026-08-24 (F1).
   // v0.4.0 - real IRS fillable W-9 support: map by FIELD NAME (UTF-16BE-decoded f1_/c1_1 names)
   // after inflating compressed object streams, since the IRS form carries no /TU tooltips; the
   // tooltip mapping stays as a fallback for other fillable forms. Also fixed stream inflation to
@@ -431,8 +438,18 @@
       if (mz) { out.city = mz[1].replace(/,\s*$/, '').trim(); out.state = mz[2].toUpperCase(); out.zip = mz[3]; }
       else out.city = csz;
     }
-    var e1 = (t.f1_14 || '').replace(/\D/g, ''), e2 = (t.f1_15 || '').replace(/\D/g, '');
-    var s1 = (t.f1_11 || '').replace(/\D/g, ''), s2 = (t.f1_12 || '').replace(/\D/g, ''), s3 = (t.f1_13 || '').replace(/\D/g, '');
+    // charLimit is present only when ff came from pdf.js getFieldObjects (the authoritative reader);
+    // it is the comb width the form itself declares for each box. A value whose digit count
+    // disagrees with its declared width is not a valid comb entry, so blank it - this rejects a
+    // wrong-length plant and survives a revision that renumbered the fields. When charLimit is
+    // unknown (the raw-sweep fallback) the hardcoded IRS lengths below still gate.
+    var cl = ff.charLimit || {};
+    function tinPart(key) {
+      var d = (t[key] || '').replace(/\D/g, '');
+      return (typeof cl[key] === 'number' && d.length !== cl[key]) ? '' : d;
+    }
+    var e1 = tinPart('f1_14'), e2 = tinPart('f1_15');
+    var s1 = tinPart('f1_11'), s2 = tinPart('f1_12'), s3 = tinPart('f1_13');
     if (e1.length === 2 && e2.length === 7) { out.tin = e1 + '-' + e2; out.tinKind = 'ein'; }
     else if (s1.length === 3 && s2.length === 2 && s3.length === 4) { out.tin = s1 + '-' + s2 + '-' + s3; out.tinKind = 'ssn'; }
     else {
@@ -452,18 +469,88 @@
     return a;
   }
 
+  // ---- Fillable W-9: authoritative reader (pdf.js getFieldObjects) ---------
+  // SECURITY (audit F1). fillableFields() above reads /T(name)../V(value) pairs out of the ENTIRE
+  // vendor-supplied byte stream, first occurrence in byte order winning, with NO test that the
+  // field is a live member of the document's AcroForm /Fields tree. A vendor can plant a decoy /T
+  // earlier in byte order (or leave an orphaned field object) so the Tax ID this tool extracts
+  // differs from the one the form actually renders - and the operator is then prefilled and steered
+  // to accept it, on a value that drives vendor payment and 1099 reporting. getFieldObjects()
+  // resolves fields through the catalog /AcroForm /Fields tree, so it returns ONLY the fields a
+  // viewer renders: a planted or orphaned /T that is not in that tree is simply absent here.
+  function leafName(fqn) {
+    // pdf.js keys are fully-qualified dotted names; the IRS leaf is the last segment.
+    var parts = String(fqn || '').split('.');
+    return parts[parts.length - 1];   // topmostSubform[0].Page1[0].f1_11[0] -> f1_11[0]
+  }
+  // Map getFieldObjects() output to the SAME { text, radioN, names, charLimit } shape
+  // fillableFields produces, so extractW9Fillable / looksLikeW9Fields consume it unchanged.
+  function w9FromFieldObjects(objs) {
+    var text = {}, names = [], charLimit = {}, radioN = '';
+    if (!objs) return { text: text, radioN: radioN, names: names, charLimit: charLimit };
+    Object.keys(objs).forEach(function (fqn) {
+      var arr = objs[fqn]; if (!arr || !arr.length) return;
+      var f = arr[0], short = leafName(fqn);
+      names.push(short);
+      if (/^c1_1\[/.test(short)) {
+        // classification radio group: pdf.js exposes the selected export value as f.value ("1".."7").
+        var mv = /([1-9])/.exec(String((f && f.value) || ''));
+        if (mv) radioN = mv[1];
+        return;
+      }
+      var k = normKey(short);
+      var val = (f && f.value != null) ? String(f.value).trim() : '';
+      if (val && !(k in text)) text[k] = val;   // first non-empty per normalized name
+      if (f && typeof f.charLimit === 'number' && f.charLimit > 0 && !(k in charLimit)) charLimit[k] = f.charLimit;
+    });
+    return { text: text, radioN: radioN, names: names, charLimit: charLimit };
+  }
+  // PRIMARY-plus-fallback selector. Authoritative pdf.js fields win whenever the document has any;
+  // the raw /T../V byte sweep is the fallback used ONLY when getFieldObjects returned nothing.
+  // DECISION LEFT FOR MIKE (sole-reader vs fallback): the raw sweep IS the vulnerability, so it can
+  // be deleted outright and getFieldObjects made the SOLE fillable reader. It is kept as a fallback
+  // here so this fix ships without changing behaviour for non-AcroForm fillable PDFs; see the audit
+  // note. Note the fallback only ever runs when there are no AcroForm fields at all, so a genuine
+  // IRS fillable W-9 (which always exposes its fields) never reaches the vulnerable path.
+  function chooseFillable(authoritative, raw) {
+    return (authoritative && authoritative.names && authoritative.names.length) ? authoritative : fillableFields(raw);
+  }
+  // Load the PDF once through pdf.js and return the authoritative field map, or null when pdf.js is
+  // unavailable or the document has no AcroForm fields (an image-only scan, handled by OCR). The
+  // buffer is copied because getDocument may transfer it to the worker and the raw-sweep fallback
+  // still needs the original bytes. Zero-egress: pdf.js runs entirely in-page, as it already does
+  // for OCR rasterization.
+  async function readFieldObjects(u8) {
+    if (typeof pdfjsLib === 'undefined') return null;
+    try {
+      pdfjsLib.GlobalWorkerOptions.workerSrc = GM_getResourceURL('pdfWorker');
+      var task = pdfjsLib.getDocument({ data: u8, isEvalSupported: false, disableFontFace: true });
+      var doc = await task.promise, objs = null;
+      try { objs = await doc.getFieldObjects(); } catch (e) { objs = null; }
+      try { await task.destroy(); } catch (e) { }
+      if (!objs) return null;
+      var ff = w9FromFieldObjects(objs);
+      return ff.names.length ? ff : null;   // no AcroForm fields -> let the raw/OCR paths decide
+    } catch (e) { return null; }
+  }
+
   async function readDoc(file) {
     var u8 = new Uint8Array(await file.arrayBuffer());
     var raw = latin1(u8);
     var prospect = fieldsFromStr(raw);
-    var af = acroFieldsFromStr(raw);            // tooltip path (fallback)
-    var ff = fillableFields(raw);               // field-name path (IRS W-9)
-    // Only inflate if this is actually a fillable form (has an AcroForm). A scanned/image PDF has
-    // none, so we skip inflating its (large) image streams and fall straight to 'scan' -> OCR.
-    // The real IRS W-9 keeps its field values in compressed object streams, so we inflate unless
-    // we've already recognised the doc from the raw bytes.
+    var af = acroFieldsFromStr(raw);            // tooltip path (fallback), never the TIN
+    // PRIMARY fillable reader (audit F1): the authoritative AcroForm field values from pdf.js
+    // getFieldObjects(). Only fields reachable through the catalog /AcroForm /Fields tree are
+    // returned, so a decoy or orphaned /T planted in the raw bytes cannot be read as the Tax ID -
+    // which the raw first-in-byte-order sweep below admitted. Pass a copy: getDocument may transfer
+    // the buffer, and the inflate fallback still needs the original.
+    var authoritative = await readFieldObjects(u8.slice(0));   // null when unavailable / no fields
+    var ff = chooseFillable(authoritative, raw);
+    // The raw-sweep fallback needs the inflate dance for the IRS W-9's compressed object streams;
+    // pdf.js already handled that natively, so only run it when getFieldObjects gave us nothing
+    // (an image-only scan has no AcroForm and falls straight to 'scan' -> OCR).
     var hasForm = /\/AcroForm|\/FT\s*\/(?:Tx|Btn|Ch)|\/TU\s*\(/.test(raw);
-    if (hasForm && !prospect.company_name && !looksLikeW9(af) && !looksLikeW9Fields(ff.names)) {
+    if (!authoritative && hasForm && !prospect.company_name && !looksLikeW9(af) && !looksLikeW9Fields(ff.names)) {
       var infl = await inflateAll(u8);
       if (infl) {
         var r2 = latin1(infl);

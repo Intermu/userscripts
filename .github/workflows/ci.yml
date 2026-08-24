@@ -105,6 +105,17 @@ jobs:
       - name: vendor-intake flow-guard harness (cross-vendor leak)
         run: node scripts/test-vendor-intake-flow.js
 
+      # vendor-intake 0.9.6 (audit F1): the fillable W-9 Tax ID is now read from pdf.js
+      # getFieldObjects() - the authoritative AcroForm /Fields tree - instead of the raw
+      # first-in-byte-order /T(name)../V(value) sweep, so a vendor cannot plant a decoy /T that
+      # steers the recorded Tax ID (which drives payment/1099). Slices the shipped pure reader
+      # (w9FromFieldObjects / chooseFillable / extractW9Fillable / fillableFields) and pins:
+      # authoritative fields beat a byte-order-earlier decoy, charLimit rejects a wrong-width comb
+      # field the length check would accept, and the raw sweep survives as the fallback only. Three
+      # negative controls revert each guarantee (reverting to the raw reader lets the decoy win).
+      - name: vendor-intake fillable W-9 field-object reader harness (audit F1)
+        run: node scripts/test-w9-fillable-fieldobjects.js
+
       - name: assist state round-trip harness (queue-spec step 3)
         run: node scripts/test-assist-roundtrip.js
 
