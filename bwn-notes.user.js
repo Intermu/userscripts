@@ -637,7 +637,7 @@
   // left to do so the poll can rest (run both WO mounts each tick - don't short-circuit one).
   function tick() {
     if (/dispatch-board/.test(location.pathname)) return mount();
-    if (/\/work-orders\//.test(location.pathname)) { var tpl = woMount(); var spoke = mountSpoke(); return tpl && spoke; }
+    if (/\/work-orders\//.test(location.pathname)) return [woMount(), mountSpoke()].every(Boolean);
     return true;
   }
   var pollTimer = null;
