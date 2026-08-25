@@ -1,8 +1,8 @@
 // ==UserScript==
 // @name         BWN Suite - Note Templates (Broadway National)
 // @namespace    broadwaynational.bwn
-// @version      0.6.1
-// @description  Canned dispatch-note templates in a "Templates" dropdown beside the "+ Add" note button in the Umbrava Dispatch Board's work-order detail panel (Notes tab). Picking a template opens Umbrava's own Add Note composer and DRAFTS the note into it (signed with your first name, ______ blanks left for you to fill) - it is NEVER auto-posted; you review, set the Type, and click Save. STANDALONE: carries its own tiptap/ProseMirror inserter, so in-house techs install this one script alone - no drop-upload dependency. Still prefers drop-upload's hook (window.__bwnFillNoteEditor) when that script is also installed, so coordinator machines keep a single live-tested fill path. @grant none, zero egress.
+// @version      0.7.0
+// @description  Canned dispatch-note templates in a "Templates" dropdown beside the "+ Add" note button in the Umbrava Dispatch Board's work-order detail panel (Notes tab). Picking a template opens Umbrava's own Add Note composer and DRAFTS the note into it (signed with your first name, ______ blanks left for you to fill) - it is NEVER auto-posted; you review, set the Type, and click Save. STANDALONE: carries its own tiptap/ProseMirror inserter, so in-house techs install this one script alone - no drop-upload dependency. Still prefers drop-upload's hook (window.__bwnFillNoteEditor) when that script is also installed, so coordinator machines keep a single live-tested fill path. Also, on the regular WO page, a "Spoke with" button stamps a [Spoke with: <Vendor>] tag at the TOP of a note (vendor picked from your recent vendors or typed) so you can record which of several WO vendors you spoke with - same human-gated draft, never auto-posted. @grant none, zero egress.
 // @match        https://app.umbrava.com/*
 // @run-at       document-idle
 // @grant        none
@@ -85,6 +85,25 @@
   // (a mislabelled template just drafts as-is rather than throwing).
   function applyDate(body, kind, y, m, d) {
     return body.replace(/_{3,}/, kind === 'weekOf' ? fmtWeekOf(y, m, d) : fmtDay(y, m, d));
+  }
+
+  // ---- Vendor "spoke with" tag (pure; sliced + unit-tested) --------------------------------
+  // A coordinator on a multi-vendor WO tags a note with which vendor they spoke with. Structurally an
+  // Umbrava note attaches to the WO, not a vendor, so this is a standardized TEXT tag stamped at the
+  // TOP of the note; the vendor is picked (recent list) or typed, never linked to an entity.
+  function spokeTag(vendor) { return '[Spoke with: ' + String(vendor == null ? '' : vendor).trim() + ']'; }
+  // Put the tag on its own first line, above whatever is already drafted (a template, or nothing).
+  function prependSpokeTag(existing, vendor) {
+    var tag = spokeTag(vendor);
+    var body = String(existing == null ? '' : existing);
+    return body.trim() ? tag + '\n' + body : tag + '\n';
+  }
+  // Most-recently-used vendor list: newest first, case-insensitive dedupe, capped. Empty is ignored.
+  function mruAdd(list, vendor, cap) {
+    var v = String(vendor == null ? '' : vendor).trim();
+    var out = (Array.isArray(list) ? list : []).filter(function (x) { return String(x).toLowerCase() !== v.toLowerCase(); });
+    if (v) out.unshift(v);
+    return out.slice(0, cap || 20);
   }
   // BWN-NOTES-SLICE-END
 
@@ -301,6 +320,110 @@
   });
   announceTpl();   // broadcast once on load too, for an AI script that mounted before it could ask
 
+  // ===== "Spoke with" vendor tag (WO page only) ===========================================
+  // Coordinator flow: click "Spoke with" -> pick/type the vendor -> we open Umbrava's Add Note
+  // composer (or reuse an open one), stamp "[Spoke with: <Vendor>]" at the TOP (above any template
+  // already drafted), and leave it for the human to finish + Save. NEVER auto-posted, like templates.
+  var VENDOR_MRU_KEY = 'bwn:notes:vendors';
+  function recentVendors() { try { var a = JSON.parse(localStorage.getItem(VENDOR_MRU_KEY)); return Array.isArray(a) ? a : []; } catch (e) { return []; } }
+  function rememberVendor(v) { try { localStorage.setItem(VENDOR_MRU_KEY, JSON.stringify(mruAdd(recentVendors(), v, 20))); } catch (e) { } }
+
+  // The visible note editor, if the composer is open (mirrors fillNoteEditor's own probe).
+  function visibleEditor() {
+    var eds = document.querySelectorAll('.tiptap.ProseMirror');
+    for (var i = eds.length - 1; i >= 0; i--) { if (eds[i].offsetParent && eds[i].offsetWidth > 0) return eds[i]; }
+    return null;
+  }
+  // Plain text currently in the open composer, so the tag can be prepended without clobbering a
+  // template already drafted. innerText keeps line breaks; collapse runaway blank lines, trim tail.
+  function currentEditorText() {
+    var ed = visibleEditor();
+    if (!ed) return '';
+    return (ed.innerText || ed.textContent || '').replace(/ /g, ' ').replace(/\n{3,}/g, '\n\n').replace(/\s+$/, '');
+  }
+  // Open the composer if needed, then re-fill it with the tag prepended to whatever is there.
+  function tagSpokeWith(vendor) {
+    if (!visibleEditor()) {
+      var add = noteAddButton();
+      if (!add) { alert('Open a work order on its Notes tab, then use "Spoke with".'); return; }
+      add.click();                              // open Umbrava's Add Note composer
+    }
+    var fill = (typeof window.__bwnFillNoteEditor === 'function') ? window.__bwnFillNoteEditor : fillNoteEditor;
+    waitFor(visibleEditor, 6000).then(function (ed) {
+      if (!ed) { alert('Could not find the note editor - open the note composer, then use "Spoke with".'); return; }
+      var text = prependSpokeTag(currentEditorText(), vendor);
+      try { fill(text, ''); } catch (e) { alert('Could not draft the note: ' + ((e && e.message) || e)); }
+    });
+  }
+  // Small popover: a vendor text field with a <datalist> of the user's recent vendors (pick or type
+  // any name). "Add tag" stamps it; Escape / click-out cancels. Sibling of promptDateThenDraft.
+  // ponytail: the suggestion list is the user's own recent vendors (localStorage), zero network. To
+  // offer ALL area vendors for the WO instead, seed the datalist from getAssignableVendors via a
+  // same-origin /api/graphql read (BWN-SHARED authToken + WO number from the URL) - a bigger change to
+  // this @grant-none standalone script, added only if recents + free-type prove not enough.
+  function promptVendorThenTag() {
+    var old = document.getElementById('bwn-notes-vendorpop'); if (old) old.remove();
+    var pop = document.createElement('div');
+    pop.id = 'bwn-notes-vendorpop';
+    pop.style.cssText = 'position:fixed;z-index:99999;top:96px;left:50%;transform:translateX(-50%);min-width:280px;background:#fff;border:1px solid #e2e8f0;border-radius:10px;box-shadow:0 12px 34px rgba(0,0,0,.22);padding:14px 16px;font-family:-apple-system,BlinkMacSystemFont,"Segoe UI",Arial,sans-serif;';
+    var title = document.createElement('div');
+    title.textContent = 'Which vendor did you speak with?';
+    title.style.cssText = 'font:600 13px inherit;color:#1e293b;margin-bottom:8px;';
+    var recents = recentVendors();
+    var inp = document.createElement('input');
+    inp.type = 'text'; inp.setAttribute('list', 'bwn-notes-vendorlist'); inp.setAttribute('autocomplete', 'off');
+    inp.placeholder = 'Vendor name';
+    inp.style.cssText = 'font:500 14px inherit;padding:7px 9px;border:1px solid #cbd5e1;border-radius:7px;width:100%;box-sizing:border-box;color:#1e293b;';
+    var dl = document.createElement('datalist'); dl.id = 'bwn-notes-vendorlist';
+    recents.forEach(function (v) { var o = document.createElement('option'); o.value = v; dl.appendChild(o); });
+    var hint = document.createElement('div');
+    hint.textContent = recents.length ? 'Pick a recent vendor or type any name.' : 'Type the vendor name.';
+    hint.style.cssText = 'font:500 11px inherit;color:#64748b;margin-top:6px;';
+    var row = document.createElement('div');
+    row.style.cssText = 'display:flex;gap:8px;justify-content:flex-end;align-items:center;margin-top:12px;';
+    var cancel = document.createElement('button');
+    cancel.type = 'button'; cancel.textContent = 'Cancel';
+    cancel.style.cssText = 'padding:6px 10px;border:1px solid #cbd5e1;background:#fff;border-radius:7px;cursor:pointer;font:500 12px inherit;color:#475569;';
+    var use = document.createElement('button');
+    use.type = 'button'; use.textContent = 'Add tag';
+    use.style.cssText = 'padding:6px 12px;border:none;border-radius:7px;cursor:pointer;font:600 12px inherit;color:#fff;background:' + GREEN + ';';
+    row.appendChild(cancel); row.appendChild(use);
+    pop.appendChild(title); pop.appendChild(inp); pop.appendChild(dl); pop.appendChild(hint); pop.appendChild(row);
+
+    function close() {
+      pop.remove();
+      document.removeEventListener('mousedown', onOut, true);
+      document.removeEventListener('keydown', onKey, true);
+    }
+    function onOut(e) { if (!pop.contains(e.target)) close(); }
+    function onKey(e) { if (e.key === 'Escape') { e.preventDefault(); close(); } }
+    function commit() {
+      var vendor = inp.value.trim();
+      if (!vendor) { inp.focus(); return; }
+      rememberVendor(vendor);
+      close();
+      tagSpokeWith(vendor);
+    }
+    use.addEventListener('click', commit);
+    cancel.addEventListener('click', function () { close(); });
+    inp.addEventListener('keydown', function (e) { if (e.key === 'Enter') { e.preventDefault(); commit(); } });
+    document.body.appendChild(pop);
+    setTimeout(function () {
+      document.addEventListener('mousedown', onOut, true);
+      document.addEventListener('keydown', onKey, true);
+      try { inp.focus(); } catch (e) { }
+    }, 0);
+  }
+  function buildSpokeButton() {
+    var b = document.createElement('button');
+    b.type = 'button';
+    b.textContent = 'Spoke with';
+    b.title = 'Tag this note with the vendor you spoke with';
+    b.style.cssText = 'min-width:96px;padding:6px 12px;font:500 14px/1 -apple-system,BlinkMacSystemFont,"Segoe UI",Arial,sans-serif;color:#1a5f3e;background:#fff;border:1px solid #1a5f3e;border-radius:6px;cursor:pointer;display:inline-flex;align-items:center;';
+    b.addEventListener('click', function (e) { e.preventDefault(); promptVendorThenTag(); });
+    return b;
+  }
+
   // ===== The dropdown (self-contained; fixed-positioned so no ancestor clips it) ============
   function buildDropdown() {
     var wrap = document.createElement('span');
@@ -491,11 +614,30 @@
     console.info('[BWN NOTES] template dropdown mounted (WO page, standalone)');
     return true;
   }
+  // The WO-page "Spoke with" button - stamps a [Spoke with: <Vendor>] tag at the top of a note so a
+  // coordinator can record which of several WO vendors they spoke with. WO PAGE ONLY (not the board).
+  // Independent of the Templates / AI-Draft merge above: it is a distinct affordance, so it mounts
+  // beside "Add Note" whether or not the AI Draft button is present.
+  var SPOKE_BTN_ID = 'bwn-notes-spoke';
+  function mountSpoke() {
+    var ex = document.getElementById(SPOKE_BTN_ID);
+    if (ex && ex.isConnected) return true;
+    var add = woAddNote();
+    if (!add || !add.parentNode) return false;
+    var bar = document.createElement('span');
+    bar.id = SPOKE_BTN_ID;
+    bar.style.cssText = 'display:inline-flex;align-items:center;vertical-align:middle;margin-right:8px;';
+    bar.appendChild(buildSpokeButton());
+    add.parentNode.insertBefore(bar, add);            // sit just left of "Add Note"
+    console.info('[BWN NOTES] "Spoke with" button mounted (WO page)');
+    return true;
+  }
   // Route-aware tick: the board panel uses mount() (search / empty-state / tab-strip anchors), the WO
-  // page uses woMount(). Returns true when nothing is left to do so the poll can rest.
+  // page uses woMount() for templates + mountSpoke() for the vendor tag. Returns true when nothing is
+  // left to do so the poll can rest (run both WO mounts each tick - don't short-circuit one).
   function tick() {
     if (/dispatch-board/.test(location.pathname)) return mount();
-    if (/\/work-orders\//.test(location.pathname)) return woMount();
+    if (/\/work-orders\//.test(location.pathname)) return [woMount(), mountSpoke()].every(Boolean);
     return true;
   }
   var pollTimer = null;
