@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         BWN Suite - AI (Broadway National)
 // @namespace    broadwaynational.bwn
-// @version      1.45.17
+// @version      1.45.18
 // @downloadURL  https://raw.githubusercontent.com/Intermu/userscripts/main/bwn-suite-ai.user.js
 // @updateURL    https://raw.githubusercontent.com/Intermu/userscripts/main/bwn-suite-ai.user.js
 // @description  The Umbrava tools that call outside APIs, kept separate from the zero-egress Core script. Client Update and WO Audit drafts (Anthropic Claude; draft-only, scrubbed before sending, you review before posting); Find Techs / Find Suppliers (Google Places; vendor leads near a WO); and Job View (opens the Ops-Dashboard job card on the WO page - WO details from Umbrava plus the authored case file and next actions, read-only). Network access is limited by the browser to the declared API hosts and the BWN Static Web App. API keys are stored in Tampermonkey's storage via the menu commands and never enter the page. Toggle modules in BWN_MODULES below.
@@ -38,6 +38,32 @@
       if (typeof _mp[k] === 'boolean' && k in BWN_MODULES) BWN_MODULES[k] = _mp[k];
     });
   } catch (e) { /* defaults */ }
+
+  // ---- One-time GM key migration (Task 4) --------------------------------
+  // GM storage keys are namespaced under bwn: (parity with the localStorage bwn:
+  // convention). Migrate ONCE from the old bare names: if the namespaced key is
+  // absent, adopt the old value, then every call site reads/writes the namespaced
+  // key. Values are only copied between GM keys - never read into anything logged
+  // or surfaced. A SENTINEL distinguishes a truly-absent key from one deliberately
+  // cleared to '' (which must NOT be re-seeded from the old). Old bare keys are left
+  // in place (no GM_deleteValue grant); they are simply never read again.
+  (function migrateGmKeys() {
+    try {
+      var SENT = ' bwn-absent';
+      // SCOPE: only this script's PRIVATE keys. ingest_key (SWA connector, shared by 9
+      // scripts) and places_key (shared by suite-ai + bid-out) are CROSS-SCRIPT - renaming
+      // them here alone would split the shared value, so they stay bare and are flagged for
+      // a coordinated cross-script rename. Do NOT add them here without every sibling.
+      var pairs = { 'sr_nte_pct': 'bwn:sr_nte_pct', 'sr_contact_email': 'bwn:sr_contact_email' };
+      for (var oldK in pairs) {
+        if (!Object.prototype.hasOwnProperty.call(pairs, oldK)) continue;
+        var newK = pairs[oldK];
+        if (GM_getValue(newK, SENT) !== SENT) continue;   // namespaced key already exists - leave it
+        var old = GM_getValue(oldK, SENT);
+        if (old !== SENT) GM_setValue(newK, old);          // adopt the old value under the new name
+      }
+    } catch (e) { /* best-effort; call sites default cleanly when absent */ }
+  })();
 
   // Publish version + whether each API key is set (booleans only \u2014 never the
   // keys) so Core's Ops Suite panel can show status. Re-published after a save.
@@ -6205,15 +6231,15 @@ if (BWN_MODULES.jobView) BWN.safeModule('jobView', function () {
   if (BWN_MODULES.serviceRequest) BWN.safeModule('serviceRequest', function () {
     'use strict';
 
-    function srPct() { var n = parseInt(GM_getValue('sr_nte_pct', '60'), 10); return (isNaN(n) || n < 0 || n > 100) ? 60 : n; }
-    function srEmail() { return String(GM_getValue('sr_contact_email', '') || '').trim(); }
+    function srPct() { var n = parseInt(GM_getValue('bwn:sr_nte_pct', '60'), 10); return (isNaN(n) || n < 0 || n > 100) ? 60 : n; }
+    function srEmail() { return String(GM_getValue('bwn:sr_contact_email', '') || '').trim(); }
 
     GM_registerMenuCommand('Set SR vendor-NTE % (of Client DNE)', function () {
       var v = prompt('Vendor NTE is auto-filled in the Build Requests modal as this % of the Client DNE (rounded to the nearest $10).\n\nEnter a whole number 0-100:', String(srPct()));
       if (v === null) return;
       var n = parseInt(v, 10);
       if (isNaN(n) || n < 0 || n > 100) { alert('Enter a whole number between 0 and 100.'); return; }
-      GM_setValue('sr_nte_pct', String(n));
+      GM_setValue('bwn:sr_nte_pct', String(n));
       alert('Service Request: vendor NTE preset set to ' + n + '% of Client DNE.');
     });
     GM_registerMenuCommand('Set SR contact email (team inbox)', function () {
@@ -6221,7 +6247,7 @@ if (BWN_MODULES.jobView) BWN.safeModule('jobView', function () {
       if (v === null) return;
       v = v.trim();
       if (v && !/^[^@\s]+@[^@\s]+\.[^@\s]+$/.test(v)) { alert('That does not look like an email address.'); return; }
-      GM_setValue('sr_contact_email', v);
+      GM_setValue('bwn:sr_contact_email', v);
       alert(v ? ('Service Request: contact email will default to ' + v) : 'Service Request: contact email will stay the work order assignee.');
     });
 
