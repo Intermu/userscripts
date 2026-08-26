@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         BWN Suite - Core (Broadway National)
 // @namespace    broadwaynational.bwn
-// @version      1.78.33
+// @version      1.78.34
 // @downloadURL  https://raw.githubusercontent.com/Intermu/userscripts/main/bwn-suite-core.user.js
 // @updateURL    https://raw.githubusercontent.com/Intermu/userscripts/main/bwn-suite-core.user.js
 // @description  Runs several Umbrava helpers for BWN coordinators, in the browser with no privileged grants. Includes: PO Approval + ETA Builder; WO Assist (GP/ETA, a stall watchdog, DNE calculator, and a next-action playbook); Email Leak Guard (checks recipients against vendor names, PO amounts, and client budget references before an outbound email sends); WO List Heat (a triage overlay + My Day strip on the work-order list, with an optional same-origin Umbrava API scan for deterministic full-board coverage); and the BWN Launcher (opens the Azure Static Web App tools with the current WO's context). Modules share state through sessionStorage/localStorage. The only network calls are same-origin Umbrava GraphQL requests (app.umbrava.com/api/graphql, the app's own session): List Heat's full-board scan and WO Assist's work-order / trip / clock-in / document reads, plus ONE write - BWN Views saves the column layout through Umbrava's own putUserPreference, the same preference the column chooser writes; everything else is offline. Toggle modules in BWN_MODULES below.
@@ -9519,12 +9519,48 @@
       section('Modules', 'turn a tool on/off · reload to apply');
       var modPref = lsGet('bwn:modules', {}); if (!modPref || typeof modPref !== 'object') modPref = {};
       var reloadNote = null;
+      var modCbs = {};   // k -> checkbox, so the master kill/restore can reflect state live
+
+      // Master kill switch (Task 5): one emergency control that turns EVERY module off
+      // (the SWA connector included). Connector-off is honored LIVE by the AI script each
+      // tick; the rest of the modules gate at boot, so they apply on the next reload (the
+      // reloadNote below says so). Restore returns the modules to their PRE-KILL state
+      // (snapshotted once into bwn:modules:prekill), or to all-default-on if none was saved.
+      (function () {
+        var PREKILL = 'bwn:modules:prekill';
+        function applyChecks() { SUITE_MODULES.forEach(function (m) { var c = modCbs[m.k]; if (c) c.checked = (m.k in modPref) ? !!modPref[m.k] : true; }); }
+        var row = document.createElement('div'); row.className = 'bwn-ops-row';
+        var lbl = document.createElement('span'); lbl.className = 'lbl'; lbl.textContent = 'Emergency';
+        var wrap = document.createElement('span'); wrap.style.cssText = 'display:inline-flex;gap:6px;flex:none;';
+        var kill = document.createElement('button'); kill.type = 'button'; kill.className = 'bwn-ops-btn'; kill.textContent = 'ALL BWN FEATURES OFF';
+        kill.style.cssText = 'background:var(--bwn-bad,#c0392b);border-color:var(--bwn-bad,#c0392b);color:#fff;';
+        var restore = document.createElement('button'); restore.type = 'button'; restore.className = 'bwn-ops-btn ghost'; restore.textContent = 'Restore';
+        kill.addEventListener('click', function () {
+          if (!window.confirm('Turn OFF every BWN feature (all modules + the SWA connector)?\n\nThe connector stops immediately; the rest apply after a page reload. Use Restore to bring them back.')) return;
+          try { if (!localStorage.getItem(PREKILL)) localStorage.setItem(PREKILL, JSON.stringify(modPref)); } catch (e) { }   // snapshot the pre-kill state once
+          SUITE_MODULES.forEach(function (m) { modPref[m.k] = false; });
+          try { localStorage.setItem('bwn:modules', JSON.stringify(modPref)); } catch (e) { }
+          applyChecks(); if (reloadNote) reloadNote.style.display = '';
+          try { BWN.toast('warning', 'All BWN features off. Connector stopped now; reload to fully apply.', { timeout: 8000 }); } catch (e) { }
+        });
+        restore.addEventListener('click', function () {
+          var snap = null; try { snap = JSON.parse(localStorage.getItem(PREKILL) || 'null'); } catch (e) { }
+          if (snap && typeof snap === 'object') { modPref = snap; try { localStorage.setItem('bwn:modules', JSON.stringify(modPref)); localStorage.removeItem(PREKILL); } catch (e) { } }
+          else { modPref = {}; try { localStorage.removeItem('bwn:modules'); } catch (e) { } }
+          applyChecks(); if (reloadNote) reloadNote.style.display = '';
+          try { BWN.toast('success', 'BWN features restored. Reload to fully apply.', { timeout: 6000 }); } catch (e) { }
+        });
+        wrap.appendChild(kill); wrap.appendChild(restore);
+        row.appendChild(lbl); row.appendChild(wrap); body.appendChild(row);
+      })();
+
       SUITE_MODULES.forEach(function (mod) {
         var on = (mod.k in modPref) ? !!modPref[mod.k] : true;
         var row = document.createElement('div'); row.className = 'bwn-ops-row';
         var lbl = document.createElement('span'); lbl.className = 'lbl'; lbl.textContent = mod.label;
         var scr = document.createElement('span'); scr.className = 'scr'; scr.textContent = mod.script;
         var cb = document.createElement('input'); cb.type = 'checkbox'; cb.checked = on; cb.setAttribute('aria-label', mod.label + ' enabled');
+        modCbs[mod.k] = cb;   // ref for the master kill/restore (Task 5)
         cb.addEventListener('change', function () {
           if (mod.k === 'launcher' && !cb.checked &&
               !window.confirm('Disabling the Tools launcher hides this settings panel after reload (recover by clearing the "bwn:modules" localStorage key). Continue?')) {
