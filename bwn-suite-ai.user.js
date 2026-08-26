@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         BWN Suite - AI (Broadway National)
 // @namespace    broadwaynational.bwn
-// @version      1.45.15
+// @version      1.45.20
 // @downloadURL  https://raw.githubusercontent.com/Intermu/userscripts/main/bwn-suite-ai.user.js
 // @updateURL    https://raw.githubusercontent.com/Intermu/userscripts/main/bwn-suite-ai.user.js
 // @description  The Umbrava tools that call outside APIs, kept separate from the zero-egress Core script. Client Update and WO Audit drafts (Anthropic Claude; draft-only, scrubbed before sending, you review before posting); Find Techs / Find Suppliers (Google Places; vendor leads near a WO); and Job View (opens the Ops-Dashboard job card on the WO page - WO details from Umbrava plus the authored case file and next actions, read-only). Network access is limited by the browser to the declared API hosts and the BWN Static Web App. API keys are stored in Tampermonkey's storage via the menu commands and never enter the page. Toggle modules in BWN_MODULES below.
@@ -38,6 +38,32 @@
       if (typeof _mp[k] === 'boolean' && k in BWN_MODULES) BWN_MODULES[k] = _mp[k];
     });
   } catch (e) { /* defaults */ }
+
+  // ---- One-time GM key migration (Task 4) --------------------------------
+  // GM storage keys are namespaced under bwn: (parity with the localStorage bwn:
+  // convention). Migrate ONCE from the old bare names: if the namespaced key is
+  // absent, adopt the old value, then every call site reads/writes the namespaced
+  // key. Values are only copied between GM keys - never read into anything logged
+  // or surfaced. A SENTINEL distinguishes a truly-absent key from one deliberately
+  // cleared to '' (which must NOT be re-seeded from the old). Old bare keys are left
+  // in place (no GM_deleteValue grant); they are simply never read again.
+  (function migrateGmKeys() {
+    try {
+      var SENT = ' bwn-absent';
+      // SCOPE: only this script's PRIVATE keys. ingest_key (SWA connector, shared by 9
+      // scripts) and places_key (shared by suite-ai + bid-out) are CROSS-SCRIPT - renaming
+      // them here alone would split the shared value, so they stay bare and are flagged for
+      // a coordinated cross-script rename. Do NOT add them here without every sibling.
+      var pairs = { 'sr_nte_pct': 'bwn:sr_nte_pct', 'sr_contact_email': 'bwn:sr_contact_email' };
+      for (var oldK in pairs) {
+        if (!Object.prototype.hasOwnProperty.call(pairs, oldK)) continue;
+        var newK = pairs[oldK];
+        if (GM_getValue(newK, SENT) !== SENT) continue;   // namespaced key already exists - leave it
+        var old = GM_getValue(oldK, SENT);
+        if (old !== SENT) GM_setValue(newK, old);          // adopt the old value under the new name
+      }
+    } catch (e) { /* best-effort; call sites default cleanly when absent */ }
+  })();
 
   // Publish version + whether each API key is set (booleans only \u2014 never the
   // keys) so Core's Ops Suite panel can show status. Re-published after a save.
@@ -141,7 +167,8 @@
       gpWarn: 30, gpBad: 20,
       hrsWarn: 72, hrsBad: 240,
       activeMult: 0.5,
-      dueWarnDays: 3, schedGraceDays: 1, noteStaleDays: 7
+      dueWarnDays: 3, schedGraceDays: 1, noteStaleDays: 7,
+      unbilledStaleDays: 3   // T8-B1: days a Work-Complete WO may sit before an "advance to invoicing" row
     };
     function cfg() {
       var out = {};
@@ -163,6 +190,60 @@
         localStorage.setItem('bwn:config', JSON.stringify(cur));
         document.dispatchEvent(new CustomEvent('bwn:config'));   // WO Assist + List Heat live-refresh on this
       } catch (e) { /* best-effort */ }
+    }
+
+    // ---- Per-client status/closeout config layer (T10) ------------------------
+    // An empty `clients` table is a NO-OP: bwnClientProfile falls back to
+    // CLIENT_DEFAULTS_SEED, so every consumer that reads a default value behaves
+    // exactly as before. Overrides live in bwn:config under `clients` (and an optional
+    // `clientDefaults`), preserved through cfg()/cfgSave like any other unknown key -
+    // cfg()'s numeric-coercion loop only touches CFG_DEFAULTS keys, never `clients`.
+    var CLIENT_DEFAULTS_SEED = {
+      requiredStatuses: [],
+      closeout: { docs: ['signed ticket', 'sign-in/out', 'before/after photos'], enforce: true },
+      refFields: { sourceJob: false, sourcePo: false },
+      cadenceDays: null
+    };
+    // Seed profiles keyed by alpha-only-lowercased client name (bwnClientKey). clientId is
+    // recorded for cross-checking against the live clientTenantProfileId; the resolver still
+    // matches by NAME. refFields opt a client into the intake source-ref gate.
+    var CLIENT_PROFILE_SEED = {
+      'amazon': { clientId: '20321', refFields: { sourceJob: true } },
+      'cwamazon': { clientId: '20432', refFields: { sourceJob: true, sourcePo: false } },
+      'jllamazon': { clientId: '20394', refFields: { sourceJob: true } },
+      'caleresinc': { clientId: null },
+      'transformsrbrandsllc': { clientId: '23914', refFields: { sourceJob: true, sourcePo: true } }
+    };
+    // Shallow merge with ONE level of depth over the two nested config objects (closeout,
+    // refFields) so a partial override (e.g. {refFields:{sourceJob:true}}) keeps its sibling
+    // defaults. Every other key is replaced wholesale. Nested objects are cloned so a merge
+    // never mutates CLIENT_DEFAULTS_SEED.
+    function deepMerge() {
+      var out = {};
+      for (var i = 0; i < arguments.length; i++) {
+        var src = arguments[i];
+        if (!src || typeof src !== 'object') continue;
+        Object.keys(src).forEach(function (k) {
+          var v = src[k];
+          if ((k === 'closeout' || k === 'refFields') && v && typeof v === 'object') {
+            out[k] = Object.assign({}, out[k] || {}, v);
+          } else {
+            out[k] = v;
+          }
+        });
+      }
+      return out;
+    }
+    // Client name -> profile-table key: alpha-only, lowercased (reuses alphaOnly / BWN.alphaOnly).
+    function bwnClientKey(name) { return alphaOnly(name).toLowerCase(); }
+    // Resolved per-WO client profile: defaults <- optional cfg().clientDefaults <- the client's
+    // own row from cfg().clients (or the seed table when none is stored). Unknown client ->
+    // CLIENT_DEFAULTS_SEED unchanged.
+    function bwnClientProfile(state) {
+      var c = cfg();
+      var table = c.clients || CLIENT_PROFILE_SEED;
+      var over = table[bwnClientKey((state && state.hd && state.hd.client) || '')] || {};
+      return deepMerge(CLIENT_DEFAULTS_SEED, c.clientDefaults || {}, over);
     }
 
     // ---- Money / date / vendor-name parsing -----------------------------------
@@ -768,6 +849,7 @@
       VERSION: VERSION,
       woId: woId, busGet: busGet, busPut: busPut, busPatch: busPatch, busHeatGet: busHeatGet, busVendors: busVendors,
       CFG_DEFAULTS: CFG_DEFAULTS, cfg: cfg, cfgSave: cfgSave,
+      CLIENT_DEFAULTS_SEED: CLIENT_DEFAULTS_SEED, CLIENT_PROFILE_SEED: CLIENT_PROFILE_SEED, bwnClientProfile: bwnClientProfile,
       money: money, parseMoney: parseMoney, parseBare: parseBare, parseUSDate: parseUSDate,
       alphaOnly: alphaOnly, lcsLen: lcsLen,
       inputVal: inputVal, setNativeValue: setNativeValue,
@@ -4498,6 +4580,14 @@ if (BWN_MODULES.jobView) BWN.safeModule('jobView', function () {
     if (b.gpPct != null) { var gk = b.gpPct < 0 ? 'bad' : b.gpPct < 20 ? 'warn' : 'ok'; add('gp', gk, 'GP ' + b.gpPct.toFixed(0) + '%', 'Gross profit on this WO'); }
     if (b.dne != null) pills.push('<span class="jm-pill p-gray" title="Do-not-exceed / NTE ceiling">DNE ' + escapeHtml(fmt$0(b.dne)) + '</span>');
     if (b.stall && b.stall.vendor) add('stall', 'bad', 'Stalled: ' + b.stall.vendor + ' ' + b.stall.days + 'd', 'Vendor visit not confirmed');
+    // Display-only facts (no detail/click) - same pattern as the DNE pill above.
+    // priority rides the bus (Core busPatch); open-tasks/open-proposals counts come from
+    // Core's per-WO scan stores. All read-only; absent store -> pill omitted.
+    if (b.priority) pills.push('<span class="jm-pill ' + jvPillKind('info') + '" title="Work order priority">Priority: ' + escapeHtml(String(b.priority)) + '</span>');
+    var _tk = null; try { _tk = BWN.lsGetJSON('bwn:tasks:' + woNum, null); } catch (e) { }
+    if (_tk && typeof _tk.open === 'number') pills.push('<span class="jm-pill ' + (_tk.open ? jvPillKind('warn') : jvPillKind('ok')) + '" title="Open tasks on this work order (BWN scan)">' + _tk.open + ' open task' + (_tk.open === 1 ? '' : 's') + '</span>');
+    var _pr = null; try { _pr = BWN.lsGetJSON('bwn:props:' + woNum, null); } catch (e) { }
+    if (_pr && typeof _pr.open === 'number') pills.push('<span class="jm-pill ' + jvPillKind('info') + '" title="Open proposals on this work order (BWN scan)">' + _pr.open + ' open proposal' + (_pr.open === 1 ? '' : 's') + '</span>');
     if (!pills.length) return '';
     return '<div class="jm-pills" data-jv-pills>' + pills.join('') + '</div><div class="jm-pill-details">' + details.join('') + '</div>';
   }
@@ -5054,7 +5144,21 @@ if (BWN_MODULES.jobView) BWN.safeModule('jobView', function () {
     };
   }
 
+  // Cross-script bridge (Task 2): prefer Core's unified BWN.toast, which renders in the
+  // page's main world so AI toasts match the rest of the suite. This script is @grant'd,
+  // so it reaches the main-world global via unsafeWindow; if Core is absent/older the
+  // call returns false and each caller falls back to its own in-page toast. Only a level
+  // + string cross the boundary here (no callbacks), so nothing needs cloning.
+  function coreToast(level, msg, opts) {
+    try {
+      var host = (typeof unsafeWindow !== 'undefined') ? unsafeWindow : window;
+      if (host && typeof host.bwnToast === 'function') { host.bwnToast(level, msg, opts || {}); return true; }
+    } catch (e) { }
+    return false;
+  }
+
   function toast(msg) {
+    if (coreToast('success', msg)) return;
     try {
       var t = document.createElement('div');
       t.textContent = msg;
@@ -6183,15 +6287,15 @@ if (BWN_MODULES.jobView) BWN.safeModule('jobView', function () {
   if (BWN_MODULES.serviceRequest) BWN.safeModule('serviceRequest', function () {
     'use strict';
 
-    function srPct() { var n = parseInt(GM_getValue('sr_nte_pct', '60'), 10); return (isNaN(n) || n < 0 || n > 100) ? 60 : n; }
-    function srEmail() { return String(GM_getValue('sr_contact_email', '') || '').trim(); }
+    function srPct() { var n = parseInt(GM_getValue('bwn:sr_nte_pct', '60'), 10); return (isNaN(n) || n < 0 || n > 100) ? 60 : n; }
+    function srEmail() { return String(GM_getValue('bwn:sr_contact_email', '') || '').trim(); }
 
     GM_registerMenuCommand('Set SR vendor-NTE % (of Client DNE)', function () {
       var v = prompt('Vendor NTE is auto-filled in the Build Requests modal as this % of the Client DNE (rounded to the nearest $10).\n\nEnter a whole number 0-100:', String(srPct()));
       if (v === null) return;
       var n = parseInt(v, 10);
       if (isNaN(n) || n < 0 || n > 100) { alert('Enter a whole number between 0 and 100.'); return; }
-      GM_setValue('sr_nte_pct', String(n));
+      GM_setValue('bwn:sr_nte_pct', String(n));
       alert('Service Request: vendor NTE preset set to ' + n + '% of Client DNE.');
     });
     GM_registerMenuCommand('Set SR contact email (team inbox)', function () {
@@ -6199,11 +6303,15 @@ if (BWN_MODULES.jobView) BWN.safeModule('jobView', function () {
       if (v === null) return;
       v = v.trim();
       if (v && !/^[^@\s]+@[^@\s]+\.[^@\s]+$/.test(v)) { alert('That does not look like an email address.'); return; }
-      GM_setValue('sr_contact_email', v);
+      GM_setValue('bwn:sr_contact_email', v);
       alert(v ? ('Service Request: contact email will default to ' + v) : 'Service Request: contact email will stay the work order assignee.');
     });
 
     function srToast(msg) {
+      // Task 2: prefer Core's unified toast (main world via unsafeWindow); own fallback below.
+      // Inlined bridge because this SR module is a separate BWN.safeModule closure and does not
+      // see the jobView module's coreToast() helper.
+      try { var _h = (typeof unsafeWindow !== 'undefined') ? unsafeWindow : window; if (_h && typeof _h.bwnToast === 'function') { _h.bwnToast('success', msg); return; } } catch (_e) { }
       try {
         var t = document.createElement('div');
         t.textContent = msg;

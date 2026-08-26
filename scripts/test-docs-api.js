@@ -104,9 +104,14 @@ function makeReader(readerSrc) {
 
 // The gate block verbatim, given only the state the real caller gives it.
 function makeGate(gateSrc) {
+  // T10: the gate now reads a resolved client `profile`. An EMPTY closeout.docs list makes the
+  // doc-TYPE advisory branch inert, so the confident-empty docs:none path is exercised verbatim -
+  // the byte-identical fallback these cases assert. (The advisory path is covered in
+  // test-client-profile.js with a non-empty closeout.docs.)
   return vm.runInNewContext(
     '(function (woPhase, docs) {\n' +
     '  var acts = [], ref = "W-1", ACT_SIGNALS = { stall: "stall" };\n' +
+    '  var profile = { closeout: { docs: [], enforce: true }, refFields: { sourceJob: false, sourcePo: false } };\n' +
     '  var state = { docs: docs };\n' +
     gateSrc + '\n' +
     '  return acts.length;\n})',

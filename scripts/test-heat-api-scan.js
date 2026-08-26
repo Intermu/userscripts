@@ -430,13 +430,18 @@ var VERDICT_PRELUDE = [
   '  money: function (n) { return "$" + n.toLocaleString("en-US", { minimumFractionDigits: 2, maximumFractionDigits: 2 }); },',
   '  parseMoney: function (s) { var m = (s || "").match(/\\$\\s*([\\d,]+(?:\\.\\d{1,2})?)/); return m ? parseFloat(m[1].replace(/,/g, "")) : null; },',
   '  parseBare: function (s) { var n = parseFloat(String(s || "").replace(/[$,\\s]/g, "")); return isNaN(n) ? null : n; },',
-  '  parseNoteDateLoose: function () { return null; }',
+  '  parseNoteDateLoose: function () { return null; },',
+  // T10: the engine resolves a per-client profile. A board row carries no client config, so the
+  // stub returns default-equivalent fields (refFields off, empty closeout.docs, cadence 7) -
+  // keeping the heat scan output byte-identical to before the profile layer existed.
+  '  bwnClientProfile: function () { return { requiredStatuses: [], closeout: { docs: [], enforce: true }, refFields: { sourceJob: false, sourcePo: false }, cadenceDays: null }; }',
   '};'
 ].join('\n');
 // Everything the real engine leans on that is NOT the engine: DOM reads, money formatting,
 // note-date parsing, the escalation tier. Stubbed as leaves - none of them decides WHETHER a
 // step fires, they only decorate one that already did.
 var ENGINE_PRELUDE = [
+  'var parseUSDate = BWN.parseUSDate;',                   // the module alias the engine leans on (T8-A1's ECD parse)
   'function nvVendor(s) { return (s || "").replace(/\\s+/g, " ").trim().toUpperCase(); }',
   'function readDocs() { return null; }',                 // DOM read; a list row has none
   'function statPrefix(a) { return String(a.key || "").split(":")[0]; }',
@@ -1331,7 +1336,7 @@ console.log('\n-- the shipped call site --');
   // run its body at document-start, with no document.body - the exact failure this
   // restructure exists to avoid, and one that shows up as a module silently not mounting.
   var dispatch = core.match(/^  bwnBoot\('\w+', BWN_MODULES\.\w+, function \(\) \{$/gm) || [];
-  A.eq('all 12 modules are registered through bwnBoot', dispatch.length, 12);   // +domHandle (phase 4)
+  A.eq('all 13 modules are registered through bwnBoot', dispatch.length, 13);   // +domHandle (phase 4), +bulkOps (Bulk Operations Console)
   A.eq('and none is dispatched inline', (core.match(/^  if \(BWN_MODULES\.\w+\) BWN\.safeModule\(/gm) || []).length, 0);
   // Cheap proof the ids still line up with their kill switches after a bulk rewrite.
   var mismatched = dispatch.filter(function (d) {
