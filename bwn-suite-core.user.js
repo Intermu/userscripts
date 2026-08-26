@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         BWN Suite - Core (Broadway National)
 // @namespace    broadwaynational.bwn
-// @version      1.78.32
+// @version      1.78.33
 // @downloadURL  https://raw.githubusercontent.com/Intermu/userscripts/main/bwn-suite-core.user.js
 // @updateURL    https://raw.githubusercontent.com/Intermu/userscripts/main/bwn-suite-core.user.js
 // @description  Runs several Umbrava helpers for BWN coordinators, in the browser with no privileged grants. Includes: PO Approval + ETA Builder; WO Assist (GP/ETA, a stall watchdog, DNE calculator, and a next-action playbook); Email Leak Guard (checks recipients against vendor names, PO amounts, and client budget references before an outbound email sends); WO List Heat (a triage overlay + My Day strip on the work-order list, with an optional same-origin Umbrava API scan for deterministic full-board coverage); and the BWN Launcher (opens the Azure Static Web App tools with the current WO's context). Modules share state through sessionStorage/localStorage. The only network calls are same-origin Umbrava GraphQL requests (app.umbrava.com/api/graphql, the app's own session): List Heat's full-board scan and WO Assist's work-order / trip / clock-in / document reads, plus ONE write - BWN Views saves the column layout through Umbrava's own putUserPreference, the same preference the column chooser writes; everything else is offline. Toggle modules in BWN_MODULES below.
@@ -9747,6 +9747,32 @@
           for (var iS = 0; iS < sessionStorage.length; iS++) { var kS = sessionStorage.key(iS); if (/^bwn[:_-]/.test(kS)) { usage.session += (sessionStorage.getItem(kS) || '').length; usage.keys++; } }
         } catch (eU) { /* blocked storage: report without usage */ }
         rep.push('Storage (bwn keys): ' + usage.keys + ' keys · ' + usage.local + 'B local · ' + usage.session + 'B session');
+        // Audit-ring digest (Task 3): the shared bwn:audit trail already records a corrId +
+        // per-write latency (ms) + outcome per op. Fold a SANITIZED summary in - only corrId,
+        // op NAME (a fixed registry key, not WO/vendor data), outcome, and latency. NEVER
+        // ids/before/after/actor/target (those can carry WO/vendor/client scalars), never keys.
+        // Keeps the "No WO/vendor/client data, no keys" promise on the report above.
+        try {
+          var aud = bwnAuditAll();
+          rep.push('Audit ring (bwn:audit): ' + aud.length + ' entr' + (aud.length === 1 ? 'y' : 'ies') + ' (max ' + BWN_AUDIT_MAX + ', schema ' + BWN_AUDIT_SCHEMA + ')');
+          if (aud.length) {
+            var byOut = {}, lat = [];
+            aud.forEach(function (e) {
+              var o = String((e && e.outcome) || '?'); byOut[o] = (byOut[o] || 0) + 1;
+              if (e && typeof e.ms === 'number') lat.push(e.ms);
+            });
+            rep.push('  outcomes: ' + (Object.keys(byOut).sort().map(function (k) { return k + ':' + byOut[k]; }).join(' ') || 'none'));
+            if (lat.length) {
+              lat.sort(function (a, b) { return a - b; });
+              rep.push('  latency ms: p50 ' + lat[Math.floor((lat.length - 1) * 0.5)] + ' · max ' + lat[lat.length - 1] + ' (n=' + lat.length + ')');
+            }
+            rep.push('  recent (corrId · op · outcome · ms · age):');
+            aud.slice(-8).reverse().forEach(function (e) {
+              var age = (e && e.ts) ? Math.round((Date.now() - e.ts) / 1000) + 's' : '?';
+              rep.push('    ' + ((e && e.corrId) || '?') + ' · ' + ((e && e.op) || '?') + ' · ' + ((e && e.outcome) || '?') + ' · ' + ((e && typeof e.ms === 'number') ? e.ms + 'ms' : '?') + ' · ' + age);
+            });
+          }
+        } catch (eA) { rep.push('Audit ring: unavailable'); }
         BWN.copyText(rep.join('\n'), reportBtn, 'Copy health report');
       });
       body.appendChild(reportBtn);
