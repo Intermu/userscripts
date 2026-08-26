@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         BWN Suite - AI (Broadway National)
 // @namespace    broadwaynational.bwn
-// @version      1.45.15
+// @version      1.45.16
 // @downloadURL  https://raw.githubusercontent.com/Intermu/userscripts/main/bwn-suite-ai.user.js
 // @updateURL    https://raw.githubusercontent.com/Intermu/userscripts/main/bwn-suite-ai.user.js
 // @description  The Umbrava tools that call outside APIs, kept separate from the zero-egress Core script. Client Update and WO Audit drafts (Anthropic Claude; draft-only, scrubbed before sending, you review before posting); Find Techs / Find Suppliers (Google Places; vendor leads near a WO); and Job View (opens the Ops-Dashboard job card on the WO page - WO details from Umbrava plus the authored case file and next actions, read-only). Network access is limited by the browser to the declared API hosts and the BWN Static Web App. API keys are stored in Tampermonkey's storage via the menu commands and never enter the page. Toggle modules in BWN_MODULES below.
@@ -4498,6 +4498,14 @@ if (BWN_MODULES.jobView) BWN.safeModule('jobView', function () {
     if (b.gpPct != null) { var gk = b.gpPct < 0 ? 'bad' : b.gpPct < 20 ? 'warn' : 'ok'; add('gp', gk, 'GP ' + b.gpPct.toFixed(0) + '%', 'Gross profit on this WO'); }
     if (b.dne != null) pills.push('<span class="jm-pill p-gray" title="Do-not-exceed / NTE ceiling">DNE ' + escapeHtml(fmt$0(b.dne)) + '</span>');
     if (b.stall && b.stall.vendor) add('stall', 'bad', 'Stalled: ' + b.stall.vendor + ' ' + b.stall.days + 'd', 'Vendor visit not confirmed');
+    // Display-only facts (no detail/click) - same pattern as the DNE pill above.
+    // priority rides the bus (Core busPatch); open-tasks/open-proposals counts come from
+    // Core's per-WO scan stores. All read-only; absent store -> pill omitted.
+    if (b.priority) pills.push('<span class="jm-pill ' + jvPillKind('info') + '" title="Work order priority">Priority: ' + escapeHtml(String(b.priority)) + '</span>');
+    var _tk = null; try { _tk = BWN.lsGetJSON('bwn:tasks:' + woNum, null); } catch (e) { }
+    if (_tk && typeof _tk.open === 'number') pills.push('<span class="jm-pill ' + (_tk.open ? jvPillKind('warn') : jvPillKind('ok')) + '" title="Open tasks on this work order (BWN scan)">' + _tk.open + ' open task' + (_tk.open === 1 ? '' : 's') + '</span>');
+    var _pr = null; try { _pr = BWN.lsGetJSON('bwn:props:' + woNum, null); } catch (e) { }
+    if (_pr && typeof _pr.open === 'number') pills.push('<span class="jm-pill ' + jvPillKind('info') + '" title="Open proposals on this work order (BWN scan)">' + _pr.open + ' open proposal' + (_pr.open === 1 ? '' : 's') + '</span>');
     if (!pills.length) return '';
     return '<div class="jm-pills" data-jv-pills>' + pills.join('') + '</div><div class="jm-pill-details">' + details.join('') + '</div>';
   }
