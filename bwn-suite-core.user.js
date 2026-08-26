@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         BWN Suite - Core (Broadway National)
 // @namespace    broadwaynational.bwn
-// @version      1.78.37
+// @version      1.78.38
 // @downloadURL  https://raw.githubusercontent.com/Intermu/userscripts/main/bwn-suite-core.user.js
 // @updateURL    https://raw.githubusercontent.com/Intermu/userscripts/main/bwn-suite-core.user.js
 // @description  Runs several Umbrava helpers for BWN coordinators, in the browser with no privileged grants. Includes: PO Approval + ETA Builder; WO Assist (GP/ETA, a stall watchdog, DNE calculator, and a next-action playbook); Email Leak Guard (checks recipients against vendor names, PO amounts, and client budget references before an outbound email sends); WO List Heat (a triage overlay + My Day strip on the work-order list, with an optional same-origin Umbrava API scan for deterministic full-board coverage); and the BWN Launcher (opens the Azure Static Web App tools with the current WO's context). Modules share state through sessionStorage/localStorage. The only network calls are same-origin Umbrava GraphQL requests (app.umbrava.com/api/graphql, the app's own session): List Heat's full-board scan and WO Assist's work-order / trip / clock-in / document reads, plus ONE write - BWN Views saves the column layout through Umbrava's own putUserPreference, the same preference the column chooser writes; everything else is offline. Toggle modules in BWN_MODULES below.
@@ -9,7 +9,13 @@
 // @match        https://*.umbrava.com/*
 // @run-at       document-start
 // @grant        none
+// @require      https://cdnjs.cloudflare.com/ajax/libs/xlsx/0.18.5/xlsx.full.min.js#sha384=bed8dab3289d528d245bde0ae4c5c35e7b73389a50801297984eded866b82c6d2c9134cb7818bdede1405eca9ec098f0
 // ==/UserScript==
+// ponytail: XLSX is @require'd for the Bulk Operations Console's .xlsx intake (same pinned+SRI
+// cdnjs build bwn-wo-audit already requires, so a coordinator running both pays it from cache
+// once). It loads for everyone even while bulkOps is OFF - @require cannot be flag-gated. Ceiling:
+// eager load of a dark feature's dependency; upgrade path if the standalone-core weight ever bites
+// is an on-demand <script> inject when the drawer's file picker is first used (subject to page CSP).
 
 (function () {
   'use strict';
@@ -33,7 +39,17 @@
     reminders: true,     // local time-based follow-up nudges for a WO
     notesTimeline: true, // read-only chronological notes overlay with gap markers
     tripCal: true,       // export a WO's scheduled trips to .ics (Trips tab)
-    domHandle: true      // read-only page snapshots for Ask, over the bwn:cmd/bwn:evt bus
+    domHandle: true,     // read-only page snapshots for Ask, over the bwn:cmd/bwn:evt bus
+    bulkOps: false,      // SHIPPING DEFAULT OFF: the Bulk Operations Console (batch GraphQL WRITES
+                         // from an audit .xlsx). The WHOLE module - dock entry, drawer, every read
+                         // and every write - mounts only when this is on, so nothing writes for any
+                         // user until it is flipped after a live smoke test. Even then each batch
+                         // passes through a dry-run + a typed confirm, and every write routes through
+                         // bwnGqlOp with feature:'bulkOps' (its per-feature kill switch + audit ring).
+    bulkOpsDestructive: false // SHIPPING DEFAULT OFF, and NOT wired in v1: reserved scaffolding for
+                         // the destructive bulk ops (status change / reassign). v1 exposes only
+                         // add-note + set-ECD; this flag gates nothing yet - it exists so the
+                         // destructive ops land behind a SECOND, separately-flipped gate later.
   };
 
   var BWN_VER = (typeof GM_info !== 'undefined' && GM_info.script && GM_info.script.version) || '1.51.2';
@@ -51,7 +67,7 @@
   try { localStorage.setItem('bwn:status:core', JSON.stringify({ ver: BWN_VER, ts: Date.now() })); } catch (e) { /* best-effort */ }
 
   console.info('[BWN SUITE CORE] v' + BWN_VER + ' |',
-    'Shared Core 7 \u00b7 DOM Handles 1.0 \u00b7 PO Approval 1.13 \u00b7 WO Assist 2.71 \u00b7 Leak Guard 2.0 \u00b7 List Heat 3.28 \u00b7 Launcher 2.0 \u00b7 Views 3.1 \u00b7 Palette 1.1 \u00b7 Visit 1.2 \u00b7 Reminders 1.1 \u00b7 Timeline 1.1 \u00b7 TripCal 1.4 \u00b7 Connector 1.2 |',
+    'Shared Core 7 \u00b7 DOM Handles 1.0 \u00b7 PO Approval 1.13 \u00b7 WO Assist 2.71 \u00b7 Leak Guard 2.0 \u00b7 List Heat 3.28 \u00b7 Launcher 2.0 \u00b7 Views 3.1 \u00b7 Palette 1.1 \u00b7 Visit 1.2 \u00b7 Reminders 1.1 \u00b7 Timeline 1.1 \u00b7 TripCal 1.4 \u00b7 Bulk Ops 1.0 \u00b7 Connector 1.2 |',
     'enabled:', Object.keys(BWN_MODULES).filter(function (k) { return BWN_MODULES[k]; }).join(', '));
 
   // ===== BWN SHARED CORE v7 - KEEP IN SYNC across both suite scripts =====
@@ -15332,6 +15348,764 @@
     }, 'domHandle:cmd'));
 
     BWN.beat('domHandle', 'ok', 'read-only responder listening');
+  });
+
+  // ==========================================================================
+  // MODULE: Bulk Operations Console v1.0  (batch GraphQL WRITES, flag-gated OFF)
+  // ==========================================================================
+  // One coordinator, one audited .xlsx of work orders, one bulk write. v1 does two ops:
+  // add an internal note, or set the expected-completion date (ECD). The whole module -
+  // dock entry, drawer, every read, every write - mounts ONLY when BWN_MODULES.bulkOps is
+  // on (shipping default OFF), so nothing writes for any user until the flag is flipped
+  // after a live smoke test. Even then a batch cannot write until a DRY-RUN has rendered
+  // for the exact (target, op, value) and the operator has typed "APPLY <n>" verbatim.
+  //
+  // Ponytail: the pure engine below is copied VERBATIM from two already-proven sandboxes -
+  // bwn-write-queue (the write shapes + note idempotency, wire-proven) and bwn-wo-audit
+  // (the bounded-concurrency runner + run accounting, shipped). They live in separate
+  // Tampermonkey scopes that share no JS globals, so this is a COPY, not a cross-sandbox
+  // call. Core is the only scope that holds bwnGqlOp + the bwn:audit ring, which is why the
+  // console lives here. If a payload below is not verbatim-findable in its named source it
+  // is a bug, not a new selector.
+  bwnBoot('bulkOps', BWN_MODULES.bulkOps, function () {
+
+    // ===== BULK-OPS-ENGINE START v1 (pure, DOM-FREE; sliced + exercised for real against the
+    //        BWN-OPS wrapper by scripts/test-bulk-ops.js. Closes over ONLY bwnGqlOp + bwnGql +
+    //        bwnAuditAll from the enclosing scope - never the DOM - so the test slices this region,
+    //        concats it with the BWN-OPS block, and drives the write path end to end, not a stub.) =====
+
+    // ---- Pinned GraphQL docs + note idempotency (copied VERBATIM from bwn-write-queue.user.js) ----
+    var INTERNAL_NOTE_TYPE = 13;   // Internal (drop-upload's fallback map). v1 posts every note as Internal.
+    var WO_READ_Q = "query($n:Int!){ workOrder(workOrderNumber:$n){ assignedTo statusId serviceLevelAgreementId priority{ label responseMinutes firstTripDate serviceLevelAgreementMinutes expirationMinutes expectedCompletionDate hasPriorityOverride category skipWeekends } } }";
+    var NOTES_Q = "query BwnWorkOrderNotes($n: Int!) { workOrderNotes(workOrderNumber: $n) { id type content isDeleted } }";
+    var PATCH_M = "mutation PatchWorkOrder($data: PatchWorkOrderInput!) { patchWorkOrder(data: $data) { success message } }";
+    var ADD_NOTE_M = "mutation AddEditWONote($addEditInput: WorkOrderNoteInput!) { addEditJobNote(data: $addEditInput) { success message note { id type } } }";
+
+    function cond(v) { return { shouldInclude: true, value: v }; }   // the Conditional*Input wrapper
+    function num(v) { var n = Number(v); return isFinite(n) ? n : null; }
+
+    function esc(s) { return String(s).replace(/&/g, "&amp;").replace(/</g, "&lt;").replace(/>/g, "&gt;"); }
+    function textToHtml(t) {
+      return String(t).split(/\n\n+/).map(function (par) {
+        return "<p>" + par.split("\n").map(esc).join("<br>") + "</p>";
+      }).join("");
+    }
+
+    function markerFor(idemKey) { return "[bwn:" + String(idemKey) + "]"; }
+    function noteHasMarker(notes, idemKey) {
+      var m = markerFor(idemKey);
+      return (notes || []).some(function (n) { return n && !n.isDeleted && String(n.content || "").indexOf(m) !== -1; });
+    }
+
+    // Whole-object priority replace for an ECD write: patchWorkOrder replaces the ENTIRE priority
+    // object, so every sibling field must be copied or it is blanked (the captured hazard). Read field
+    // hasPriorityOverride flips to input field hasOverridePriority. Copied VERBATIM from bwn-write-queue.
+    function priorityWriteValue(readPriority, newEcd) {
+      var p = readPriority || {};
+      return {
+        label: (p.label == null ? null : String(p.label)),
+        responseMinutes: num(p.responseMinutes),
+        firstTripDate: (p.firstTripDate == null ? null : String(p.firstTripDate)),
+        serviceLevelAgreementMinutes: num(p.serviceLevelAgreementMinutes),
+        expirationMinutes: num(p.expirationMinutes),
+        expectedCompletionDate: newEcd,
+        hasOverridePriority: true,
+        category: (p.category == null ? null : String(p.category)),
+        skipWeekends: !!p.skipWeekends
+      };
+    }
+
+    // Human-readable one-liner for the log + confirm. Copied VERBATIM from bwn-write-queue.user.js
+    // (it already covers wo.note + wo.ecd); the console builds write-queue-shaped {verb,woNumber,args}
+    // objects to feed it, so the phrasing is the same the queue drains to.
+    function describeCommand(cmd) {
+      var a = cmd.args || {};
+      if (cmd.verb === "wo.status") return "Set status to #" + a.statusId + " on W-" + cmd.woNumber + " (this RESETS the time-in-status clock)";
+      if (cmd.verb === "wo.assign") return "Reassign W-" + cmd.woNumber + " to user " + a.assignedTo;
+      if (cmd.verb === "wo.ecd") return "Set expected completion date to " + String(a.expectedCompletionDate).slice(0, 10) + " on W-" + cmd.woNumber;
+      if (cmd.verb === "wo.note") return "Post an internal note to W-" + cmd.woNumber + ": " + String(a.noteText || "").slice(0, 120);
+      return cmd.verb + " on W-" + cmd.woNumber;
+    }
+
+    // ---- Bounded-concurrency runner (copied VERBATIM from bwn-wo-audit.user.js) ----
+    function runPool(items, worker, concurrency, onProgress, shouldStop) {
+      return new Promise(function (resolve) {
+        var i = 0, done = 0, results = new Array(items.length);
+        function next() {
+          if (i >= items.length) return Promise.resolve();
+          // Cancel stops handing out NEW rows; rows already in flight finish so their notes are
+          // not lost. Backoff waits can run to minutes, so a batch must be interruptible.
+          if (shouldStop && shouldStop()) return Promise.resolve();
+          var idx = i++;
+          return Promise.resolve().then(function () { return worker(items[idx], idx); })
+            .then(function (v) { results[idx] = v; }, function (e) { results[idx] = { error: (e && e.message) || String(e) }; })
+            .then(function () { done++; if (onProgress) onProgress(done, items.length); return next(); });
+        }
+        var runners = [];
+        for (var k = 0; k < Math.min(Math.max(1, concurrency), items.length || 1); k++) runners.push(next());
+        Promise.all(runners).then(function () { resolve(results); });
+      });
+    }
+
+    // ---- Run accounting (copied VERBATIM from bwn-wo-audit.user.js) ----
+    // Index loop, not `.filter`/`.reduce`: `results` is a SPARSE array (assigned by index, never
+    // pushed) and the iterator methods skip holes entirely - the exact rows this counts.
+    function auditTally(results, total) {
+      var ok = 0, errs = 0;
+      for (var i = 0; i < total; i++) {
+        var r = results[i];
+        if (!r) continue;
+        if (r.error) errs++; else ok++;
+      }
+      return { ok: ok, errs: errs, skipped: total - ok - errs };
+    }
+    // Everything that still owes a write: errored rows AND rows the cancel never reached.
+    // Positional - `results` is indexed by position in `rows`.
+    function pendingRows(rows, results) {
+      return rows.filter(function (row, i) {
+        var r = results[i];
+        return !r || !!r.error;
+      });
+    }
+
+    // ---- Bulk-op specifics (NEW - the console's own governance, tested like everything above) ----
+    // Per-risk record caps. A moderate op (add-note) tops out higher than a high-risk one (set-ECD).
+    // Over the cap the run is REFUSED, never silently truncated - a partial bulk write with no signal
+    // is the worst outcome. Numbers live here so the test and the UI read ONE source.
+    var BULK_MAX_RECORDS = { note: 50, ecd: 25 };
+    function capForOp(op) { return op === 'ecd' ? BULK_MAX_RECORDS.ecd : BULK_MAX_RECORDS.note; }
+    function overCap(op, count) {
+      var cap = capForOp(op);
+      return { refused: count > cap, cap: cap, count: count, over: Math.max(0, count - cap) };
+    }
+
+    // idemKey = runId + ':' + woNumber. Stable across a Retry that REUSES the same runId, so the
+    // note marker dedups a row that already posted instead of double-posting it.
+    function idemKeyFor(runId, wo) { return String(runId) + ':' + String(wo); }
+
+    // ADD-NOTE (moderate). Read NOTES_Q first; if the row already carries this run's marker -> NO-OP.
+    // Otherwise post through bwnGqlOp (corrId + bwn:audit inherited). The mutation input object is
+    // byte-identical to bwn-write-queue's wo.note branch. mode:'dry' stops before the write and
+    // returns the exact variables it WOULD send.
+    function bulkExecNote(mode, runId, woNumber, noteText) {
+      var wo = parseInt(woNumber, 10);
+      var idemKey = idemKeyFor(runId, wo);
+      var marked = String(noteText) + "\n\n" + markerFor(idemKey);
+      var vars = { addEditInput: {
+        workOrderNumber: wo, type: INTERNAL_NOTE_TYPE, content: marked, contentHtml: textToHtml(marked),
+        isCompletion: false, isInvoice: false, isPinned: false, actionNoteEmails: null, targetPurchaseOrderNumbers: []
+      } };
+      return bwnGql(NOTES_Q, { n: wo }).then(function (nd) {
+        var notes = (nd && nd.workOrderNotes) || [];
+        if (noteHasMarker(notes, idemKey)) return { op: 'note', wo: wo, outcome: 'noop', reason: 'already-posted', before: { hasMarker: true }, after: null, vars: vars };
+        if (mode === 'dry') return { op: 'note', wo: wo, outcome: 'would-send', before: { hasMarker: false }, after: { noteType: INTERNAL_NOTE_TYPE }, vars: vars };
+        return bwnGqlOp('addEditJobNote', ADD_NOTE_M, vars, {
+          feature: 'bulkOps', ids: { wo: wo }, before: { hasMarker: false }, after: { noteType: INTERNAL_NOTE_TYPE }
+        }).then(function (d) {
+          var res = d && d.addEditJobNote;
+          return { op: 'note', wo: wo, outcome: 'done', noteId: res && res.note && res.note.id, before: { hasMarker: false }, after: { noteType: INTERNAL_NOTE_TYPE }, vars: vars };
+        });
+      });
+    }
+
+    // SET-ECD (high). Read WO_READ_Q first; NO-OP if the read's ECD date-part already equals newEcd.
+    // Otherwise WHOLE-OBJECT priority replace (priorityWriteValue carries every sibling or they blank),
+    // bundling serviceLevelAgreementId ONLY when the read carried it. The batch typed-confirm satisfies
+    // the high-risk gate via confirmed:true (Core wires no _confirmFn). mode:'dry' stops before the write.
+    function bulkExecEcd(mode, runId, woNumber, newEcd) {
+      var wo = parseInt(woNumber, 10);
+      return bwnGql(WO_READ_Q, { n: wo }).then(function (rd) {
+        var rec = rd && rd.workOrder;
+        if (!rec) { var e = new Error("workOrder " + wo + " not found"); e.bwnNonTransient = true; throw e; }
+        var oldEcd = rec.priority && rec.priority.expectedCompletionDate;
+        if (oldEcd && String(oldEcd).slice(0, 10) === String(newEcd).slice(0, 10)) {
+          return { op: 'ecd', wo: wo, outcome: 'noop', reason: 'already-ecd', before: { ecd: oldEcd }, after: null };
+        }
+        var data = { workOrderNumber: wo, priority: cond(priorityWriteValue(rec.priority, newEcd)) };
+        if (rec.serviceLevelAgreementId) data.serviceLevelAgreementId = cond(rec.serviceLevelAgreementId);
+        var vars = { data: data };
+        if (mode === 'dry') return { op: 'ecd', wo: wo, outcome: 'would-send', before: { ecd: oldEcd || null }, after: { ecd: newEcd }, vars: vars };
+        return bwnGqlOp('patchWorkOrder', PATCH_M, vars, {
+          feature: 'bulkOps', confirmed: true, ids: { wo: wo },
+          current: { ecd: oldEcd || null }, proposed: { ecd: newEcd }, irreversible: true,
+          before: { ecd: oldEcd || null }, after: { ecd: newEcd }
+        }).then(function () {
+          return { op: 'ecd', wo: wo, outcome: 'done', before: { ecd: oldEcd || null }, after: { ecd: newEcd }, vars: vars };
+        });
+      });
+    }
+
+    // 4-state tally (done / no-op / failed / not-run). REUSES the verbatim auditTally for the
+    // ok/failed/not-run split, then peels the no-ops out of the ok bucket - so the two never
+    // disagree on the total and a hole can never escape the count.
+    function bulkTally(results, total) {
+      var t = auditTally(results, total);   // { ok, errs, skipped }
+      var noop = 0;
+      for (var i = 0; i < total; i++) {
+        var r = results[i];
+        if (r && !r.error && r.outcome === 'noop') noop++;
+      }
+      return { done: t.ok - noop, noop: noop, failed: t.errs, notRun: t.skipped };
+    }
+    // ===== BULK-OPS-ENGINE END v1 =====
+
+    // ---- Workbook mapping (WO#-column detection copied VERBATIM from bwn-wo-audit.user.js) ----
+    // findCol + the KEY patterns + the header-row scan are byte-identical to WO Audit's mapSheet;
+    // trimmed to the WO# key column only (the console never writes note/flag columns back into the
+    // sheet, so those detectors are not carried). This is a subset of a proven selector, not a new one.
+    var KEY_PATTERNS = [/^wo\s*#?$/i, /work\s*order\s*#/i, /^wo\s*number/i];
+    var KEY_FALLBACK = [/source\s*job\s*#?/i, /^job\s*id$/i, /^job\s*#?$/i];
+    function findCol(hdr, patterns) {
+      for (var p = 0; p < patterns.length; p++) {
+        for (var c = 0; c < hdr.length; c++) { if (patterns[p].test(hdr[c])) return c; }
+      }
+      return -1;
+    }
+    function mapSheet(ws) {
+      var aoa = XLSX.utils.sheet_to_json(ws, { header: 1, raw: true, blankrows: false });
+      // Locate the header row: the first row (of the first 15) that matches a key pattern.
+      var headerRow = 0, keyCol = -1;
+      for (var r = 0; r < Math.min(15, aoa.length); r++) {
+        var row = (aoa[r] || []).map(function (x) { return String(x == null ? '' : x); });
+        var k = findCol(row, KEY_PATTERNS);
+        if (k === -1) k = findCol(row, KEY_FALLBACK);
+        if (k !== -1) { headerRow = r; keyCol = k; break; }
+      }
+      var hdr = (aoa[headerRow] || []).map(function (x) { return String(x == null ? '' : x); });
+      if (keyCol === -1) keyCol = findCol(hdr, KEY_PATTERNS);
+      if (keyCol === -1) keyCol = findCol(hdr, KEY_FALLBACK);
+      return { headerRow: headerRow, key: keyCol, keyName: keyCol > -1 ? hdr[keyCol] : null, hdr: hdr, aoa: aoa };
+    }
+    function cellStr(aoa, r, c) {
+      if (c < 0) return '';
+      var row = aoa[r] || [];
+      var v = row[c];
+      return v == null ? '' : String(v).trim();
+    }
+
+    // ---- Shared launcher dock (bwn:dock:*) - mirrors how bwn-wo-audit registers its tab. The dock
+    // host lives in Core's Launcher module (same script), so this register/open handshake runs over
+    // the same document bus whether the launcher is in this scope or another sandbox. ----
+    var DOCK_KEY = 'bulk-ops';
+    function dockRegister() {
+      try {
+        document.dispatchEvent(new CustomEvent('bwn:evt', { detail: {
+          id: 'bwn:dock:register', key: DOCK_KEY, label: 'Bulk Ops', icon: '📦', weight: 22,
+          title: 'BWN Bulk Operations Console - batch note / ECD writes from an .xlsx (dry-run + typed confirm)'
+        } }));
+      } catch (e) { /* dock host not up yet - the heartbeat will re-register us */ }
+    }
+
+    // Module-scope run state so the drawer-eviction listener sees it: a batch can span minutes, and
+    // dropping the drawer mid-run must never be a silent way to abandon rows.
+    var _running = false, _paused = false, _cancelled = false;
+
+    // Fade the drawer instead of removing it (the .bwn-drawer exit contract). Reduced motion detaches
+    // at once. Copied from the contract documented above Core's .bwn-drawer stylesheet.
+    function drawerDismiss(el) {
+      var reduce = false;
+      try { reduce = !!(window.matchMedia && window.matchMedia('(prefers-reduced-motion: reduce)').matches); } catch (e) { /* default to motion */ }
+      if (reduce) { el.remove(); return; }
+      el.removeAttribute('id'); el.setAttribute('aria-hidden', 'true');
+      el.classList.add('bwn-closing');
+      setTimeout(function () { el.remove(); }, 170);
+    }
+
+    try {
+      document.addEventListener('bwn:evt', function (e) {
+        var d = e && e.detail; if (!d) return;
+        if (d.id === 'bwn:dock:host' || d.id === 'bwn:dock:ping') dockRegister();
+        if (d.id === 'bwn:dock:open' && d.key === DOCK_KEY) buildDrawer();
+        // Another tool took the drawer slot - close ours, UNLESS a batch is in flight.
+        if (d.id === 'bwn:drawer:open' && d.key !== DOCK_KEY && !_running) {
+          var o = document.getElementById('bwn-bulk-drawer'); if (o) drawerDismiss(o);
+        }
+      });
+    } catch (e) { /* bus unavailable */ }
+    dockRegister();
+
+    // ---- Drawer (the ONLY DOM this module builds; nothing above touches the DOM) -------------
+    // Every piece of dynamic text is set via textContent / input value / createElement - never
+    // innerHTML with runtime data. The static skeleton below carries no runtime values.
+    function buildDrawer() {
+      if (document.getElementById('bwn-bulk-drawer')) return;   // idempotent mount
+      try { document.dispatchEvent(new CustomEvent('bwn:evt', { detail: { id: 'bwn:drawer:open', key: DOCK_KEY } })); } catch (e) { /* others will close their own */ }
+
+      var el = document.createElement('aside');
+      el.className = 'bwn-drawer';
+      el.id = 'bwn-bulk-drawer';
+      el.setAttribute('role', 'dialog');
+      el.setAttribute('aria-label', 'Bulk Operations Console');
+      el.innerHTML =
+        '<div class="bwn-drawer-hd"><div><div class="t">Bulk Operations Console</div>' +
+        '<div class="s">batch GraphQL writes · dry-run + typed confirm</div></div>' +
+        '<button class="bwn-drawer-x" id="bwn-bulk-x" aria-label="Close" type="button">×</button></div>' +
+        '<div class="bwn-drawer-body">' +
+          '<div class="bwn-ops-sec">1 · Target<span class="d">upload the audit .xlsx, map the WO# column, choose the write</span></div>' +
+          '<input type="file" id="bwn-bulk-file" accept=".xlsx,.xls" style="display:block;margin:2px 0 8px;font-size:12px">' +
+          '<div id="bwn-bulk-sheetwrap" style="display:none;margin-bottom:8px"><label style="font:500 10px ui-monospace,monospace;color:var(--bwn-green)">Sheet</label>' +
+            '<select id="bwn-bulk-sheet" style="width:100%;box-sizing:border-box;padding:6px 8px;border:1px solid var(--bwn-border);border-radius:7px;background:var(--bwn-surface);color:var(--bwn-text)"></select></div>' +
+          '<div id="bwn-bulk-mapinfo" style="white-space:pre-line;font:500 11px ui-monospace,monospace;color:var(--bwn-text-muted);margin:4px 0 10px"></div>' +
+          '<label style="font:500 10px ui-monospace,monospace;color:var(--bwn-green)">Operation</label>' +
+          '<select id="bwn-bulk-op" style="width:100%;box-sizing:border-box;padding:6px 8px;margin:2px 0 10px;border:1px solid var(--bwn-border);border-radius:7px;background:var(--bwn-surface);color:var(--bwn-text)">' +
+            '<option value="note">Add internal note (moderate)</option>' +
+            '<option value="ecd">Set expected completion date / ECD (high)</option>' +
+          '</select>' +
+          '<label style="font:500 10px ui-monospace,monospace;color:var(--bwn-green)">Value source</label>' +
+          '<div style="margin:3px 0 8px;font-size:12px;color:var(--bwn-text)">' +
+            '<label style="margin-right:14px"><input type="radio" name="bwn-bulk-src" value="const" checked> one value for all rows</label>' +
+            '<label><input type="radio" name="bwn-bulk-src" value="col"> a column from the sheet</label></div>' +
+          '<textarea id="bwn-bulk-note" rows="3" placeholder="Internal note text, posted to every mapped WO" style="width:100%;box-sizing:border-box;padding:7px 9px;border:1px solid var(--bwn-border);border-radius:7px;font-size:13px;background:var(--bwn-surface);color:var(--bwn-text)"></textarea>' +
+          '<input type="date" id="bwn-bulk-date" style="display:none;width:100%;box-sizing:border-box;padding:6px 8px;border:1px solid var(--bwn-border);border-radius:7px;background:var(--bwn-surface);color:var(--bwn-text)">' +
+          '<div id="bwn-bulk-colwrap" style="display:none;margin-top:4px"><label style="font:500 10px ui-monospace,monospace;color:var(--bwn-green)">Value column</label>' +
+            '<select id="bwn-bulk-col" style="width:100%;box-sizing:border-box;padding:6px 8px;border:1px solid var(--bwn-border);border-radius:7px;background:var(--bwn-surface);color:var(--bwn-text)"></select></div>' +
+          '<div id="bwn-bulk-cap" class="bwn-ops-note" role="status" aria-live="polite" style="display:none"></div>' +
+
+          '<div class="bwn-ops-sec">2 · Preview + 3 · Dry run<span class="d">reads only, zero writes - resolves each row and its idempotency verdict</span></div>' +
+          '<div style="display:flex;gap:8px;align-items:center;flex-wrap:wrap;margin-bottom:6px">' +
+            '<button class="bwn-ops-btn ghost" id="bwn-bulk-dry" type="button" disabled>Dry run (reads only)</button>' +
+            '<input id="bwn-bulk-filter" placeholder="filter WO#" style="flex:1;min-width:90px;padding:5px 8px;border:1px solid var(--bwn-border);border-radius:7px;font-size:12px;background:var(--bwn-surface);color:var(--bwn-text)">' +
+          '</div>' +
+          '<div id="bwn-bulk-drycount" style="font:500 11px ui-monospace,monospace;color:var(--bwn-text-muted);margin:0 0 6px"></div>' +
+          '<div id="bwn-bulk-preview" style="max-height:190px;overflow:auto;border:1px solid var(--bwn-border-2);border-radius:8px"></div>' +
+
+          '<div id="bwn-bulk-confirmwrap" style="display:none">' +
+            '<div class="bwn-ops-sec">4 · Confirm<span class="d">type the phrase EXACTLY to arm the run</span></div>' +
+            '<div id="bwn-bulk-confirmtarget" style="font:600 13px ui-monospace,monospace;color:var(--bwn-text);margin-bottom:4px"></div>' +
+            '<div style="display:flex;gap:8px;align-items:center;flex-wrap:wrap">' +
+              '<input id="bwn-bulk-confirm" placeholder="APPLY n" style="flex:1;min-width:110px;padding:6px 9px;border:1px solid var(--bwn-border);border-radius:7px;font:600 13px ui-monospace,monospace;background:var(--bwn-surface);color:var(--bwn-text)">' +
+              '<label style="font:500 10px ui-monospace,monospace;color:var(--bwn-green)">conc</label>' +
+              '<input type="number" id="bwn-bulk-conc" value="2" min="1" max="6" style="width:52px;padding:6px;border:1px solid var(--bwn-border);border-radius:7px;text-align:center;background:var(--bwn-surface);color:var(--bwn-text)">' +
+              '<button class="bwn-ops-btn primary" id="bwn-bulk-approve" type="button" disabled>Approve</button>' +
+            '</div>' +
+          '</div>' +
+
+          '<div id="bwn-bulk-runwrap" style="display:none">' +
+            '<div class="bwn-ops-sec">5-6 · Run<span class="d">live progress · pause finishes the in-flight row · cancel stops new rows</span></div>' +
+            '<div style="height:8px;border-radius:5px;background:var(--bwn-surface-3);overflow:hidden;margin-bottom:6px"><div id="bwn-bulk-progfill" style="height:100%;width:0%;background:var(--bwn-green);transition:width .15s linear"></div></div>' +
+            '<div style="display:flex;gap:8px;margin-bottom:6px">' +
+              '<button class="bwn-ops-btn ghost" id="bwn-bulk-pause" type="button">Pause</button>' +
+              '<button class="bwn-ops-btn ghost" id="bwn-bulk-cancel" type="button">Cancel</button>' +
+            '</div>' +
+            '<div id="bwn-bulk-log" style="max-height:150px;overflow:auto;font:500 11px ui-monospace,monospace;color:var(--bwn-text-muted);white-space:pre-wrap;border:1px solid var(--bwn-border-2);border-radius:8px;padding:7px 9px"></div>' +
+          '</div>' +
+
+          '<div id="bwn-bulk-resultwrap" style="display:none">' +
+            '<div class="bwn-ops-sec">7 · Results<span class="d">done / no-op / failed / not-run · export the run-log</span></div>' +
+            '<div id="bwn-bulk-tally" style="font:600 12px ui-monospace,monospace;color:var(--bwn-text);margin-bottom:8px"></div>' +
+            '<div style="display:flex;gap:8px;flex-wrap:wrap">' +
+              '<button class="bwn-ops-btn ghost" id="bwn-bulk-csv" type="button">Export CSV</button>' +
+              '<button class="bwn-ops-btn ghost" id="bwn-bulk-json" type="button">Export JSON</button>' +
+              '<button class="bwn-ops-btn ghost" id="bwn-bulk-retry" type="button" style="display:none">Retry Unfinished</button>' +
+            '</div>' +
+          '</div>' +
+        '</div>' +
+        '<div class="bwn-drawer-ft"><button class="bwn-ops-btn ghost" id="bwn-bulk-close" type="button">Close</button></div>';
+      document.body.appendChild(el);
+      wireDrawer(el);
+    }
+
+    function wireDrawer(root) {
+      function $(id) { return root.querySelector('#' + id); }
+      function close() {
+        if (_running) { logln('! A run is in progress - Cancel it before closing.'); return; }
+        try { root.removeAttribute('id'); } catch (e) { /* noop */ }
+        drawerDismiss(root);
+      }
+      $('bwn-bulk-x').onclick = close;
+      $('bwn-bulk-close').onclick = close;
+
+      // ---- session state ----
+      var loaded = null;   // { wb, name }
+      var session = null;  // { map, rows:[{rowIdx, wo, value, valid}], sheet }
+      var dryStamp = null; // fingerprint the current dry-run was rendered for
+      var dry = null;      // parallel array of dry results (by session.rows index) for WRITABLE rows
+      var results = null;  // parallel array of run results (by session.rows index)
+      var runId = null, runStartTs = 0;
+
+      function op() { return $('bwn-bulk-op').value; }
+      function srcMode() { var r = root.querySelector('input[name="bwn-bulk-src"]:checked'); return r ? r.value : 'const'; }
+      function constVal() { return op() === 'ecd' ? $('bwn-bulk-date').value : $('bwn-bulk-note').value; }
+      function valueColIdx() { var v = $('bwn-bulk-col').value; return v === '' ? -1 : parseInt(v, 10); }
+
+      function logln(s) { var log = $('bwn-bulk-log'); if (!log) return; log.appendChild(document.createTextNode(s + '\n')); log.scrollTop = log.scrollHeight; }
+
+      // A row is WRITABLE when it has a WO# and a non-empty resolved value.
+      function resolveRows() {
+        if (!session) return [];
+        var col = valueColIdx();
+        var cv = constVal();
+        var mode = srcMode();
+        return session.rows.map(function (row) {
+          var value = mode === 'col' ? cellStr(session.map.aoa, row.rowIdx, col) : cv;
+          return { rowIdx: row.rowIdx, wo: row.wo, value: value, valid: !!(row.wo && String(value).trim()) };
+        });
+      }
+      function writable(rr) { return rr.filter(function (r) { return r.valid; }); }
+
+      // Fingerprint of (target, op, value): the dry-run is valid ONLY for this exact tuple; any change
+      // invalidates it and re-hides Approve. Includes the mapped WO set so swapping the sheet counts.
+      function fingerprint() {
+        if (!session) return '';
+        var rr = writable(resolveRows());
+        return JSON.stringify({
+          name: loaded && loaded.name, sheet: session.sheet, op: op(), src: srcMode(),
+          val: op() === 'ecd' ? String(constVal()).slice(0, 10) : constVal(), col: valueColIdx(),
+          wos: rr.map(function (r) { return r.wo + '=' + r.value; })
+        });
+      }
+
+      // Any change to file / sheet / op / value source / value / column throws the dry-run away.
+      function invalidateDry() {
+        dry = null; dryStamp = null;
+        $('bwn-bulk-confirmwrap').style.display = 'none';
+        $('bwn-bulk-approve').disabled = true;
+        $('bwn-bulk-confirm').value = '';
+        if (!_running) { $('bwn-bulk-runwrap').style.display = 'none'; $('bwn-bulk-resultwrap').style.display = 'none'; }
+        refreshTargetUi();
+        renderPreview();
+      }
+
+      // Show/hide the value inputs for the chosen op + source, populate the column picker, and run the
+      // cap check. Disables Dry run whenever the batch cannot proceed (no rows, or over the cap).
+      function refreshTargetUi() {
+        var isEcd = op() === 'ecd';
+        var isCol = srcMode() === 'col';
+        $('bwn-bulk-note').style.display = (!isEcd && !isCol) ? 'block' : 'none';
+        $('bwn-bulk-date').style.display = (isEcd && !isCol) ? 'block' : 'none';
+        $('bwn-bulk-colwrap').style.display = isCol ? 'block' : 'none';
+        $('bwn-bulk-note').placeholder = 'Internal note text, posted to every mapped WO';
+
+        var rr = session ? resolveRows() : [];
+        var w = writable(rr);
+        var capEl = $('bwn-bulk-cap');
+        var cap = overCap(op(), w.length);
+        var canDry = false;
+        if (!session || session.map.key < 0) {
+          capEl.style.display = 'none';
+        } else if (rr.length === 0) {
+          capEl.style.display = 'none';
+        } else if (w.length === 0) {
+          capEl.style.display = 'block';
+          capEl.textContent = 'No writable rows: ' + rr.length + ' mapped, but none have a value yet. Enter a value or pick a value column.';
+        } else if (cap.refused) {
+          capEl.style.display = 'block';
+          capEl.textContent = 'REFUSED: ' + cap.count + ' writable rows exceed the ' + cap.cap + '-record cap for ' +
+            (isEcd ? 'set-ECD (high risk)' : 'add-note') + '. ' + cap.over + ' over the cap. Trim the workbook to ' + cap.cap + ' rows or fewer - the run will not truncate.';
+        } else {
+          capEl.style.display = 'block';
+          capEl.textContent = w.length + ' writable row' + (w.length === 1 ? '' : 's') + ' within the ' + cap.cap + '-record cap for ' + (isEcd ? 'set-ECD (high risk)' : 'add-note') + '.';
+          canDry = true;
+        }
+        $('bwn-bulk-dry').disabled = !canDry || _running;
+      }
+
+      function verdictOf(r, dr) {
+        if (!r.valid) return { txt: 'skip: no value', cls: 'no' };
+        if (!dr) return { txt: '(dry run pending)', cls: '' };
+        if (dr.error) return { txt: 'read failed', cls: 'no' };
+        if (dr.outcome === 'noop') return { txt: dr.reason === 'already-posted' ? 'skip: already posted' : 'skip: already set', cls: '' };
+        return { txt: 'would write', cls: 'ok' };
+      }
+      function currentOf(op_, r, dr) {
+        if (op_ === 'note') { if (dr && dr.before) return dr.before.hasMarker ? 'note present' : 'no marker'; return ''; }
+        if (dr && dr.before) return dr.before.ecd ? String(dr.before.ecd).slice(0, 10) : '(none)';
+        return '';
+      }
+
+      function renderPreview() {
+        var box = $('bwn-bulk-preview');
+        box.textContent = '';
+        if (!session) return;
+        var filter = String($('bwn-bulk-filter').value || '').trim().toLowerCase();
+        var rr = resolveRows();
+        var shown = 0;
+        rr.forEach(function (r, i) {
+          if (filter && String(r.wo).toLowerCase().indexOf(filter) === -1) return;
+          if (shown >= 300) return;   // ponytail: preview caps at 300 painted rows; the run is not capped by this
+          shown++;
+          var dr = dry ? dry[i] : null;
+          var v = verdictOf(r, dr);
+          var line = document.createElement('div');
+          line.style.cssText = 'display:flex;gap:8px;align-items:center;padding:5px 9px;border-bottom:1px solid var(--bwn-surface-3);font:500 11px ui-monospace,monospace';
+          var wo = document.createElement('span'); wo.style.cssText = 'flex:none;width:78px;color:var(--bwn-text)'; wo.textContent = 'W-' + r.wo;
+          var cur = document.createElement('span'); cur.style.cssText = 'flex:1;min-width:0;color:var(--bwn-text-faint);overflow:hidden;text-overflow:ellipsis;white-space:nowrap'; cur.textContent = currentOf(op(), r, dr);
+          var intended = document.createElement('span'); intended.style.cssText = 'flex:1;min-width:0;color:var(--bwn-text-muted);overflow:hidden;text-overflow:ellipsis;white-space:nowrap'; intended.textContent = op() === 'ecd' ? String(r.value).slice(0, 10) : String(r.value).slice(0, 40);
+          var verd = document.createElement('span'); verd.style.cssText = 'flex:none;width:118px;text-align:right'; verd.textContent = v.txt;
+          verd.style.color = v.cls === 'ok' ? 'var(--bwn-green)' : (v.cls === 'no' ? 'var(--bwn-bad)' : 'var(--bwn-text-faint)');
+          line.appendChild(wo); line.appendChild(cur); line.appendChild(intended); line.appendChild(verd);
+          box.appendChild(line);
+        });
+        if (!shown) { var em = document.createElement('div'); em.style.cssText = 'padding:9px;color:var(--bwn-text-faint);font-size:12px'; em.textContent = session.rows.length ? 'No rows match the filter.' : 'No work orders mapped.'; box.appendChild(em); }
+      }
+
+      // ---- file intake ----
+      $('bwn-bulk-file').onchange = function (e) {
+        if (_running) { logln('! Finish or cancel the run before loading another workbook.'); e.target.value = ''; return; }
+        var f = e.target.files && e.target.files[0];
+        if (!f) return;
+        var fr = new FileReader();
+        fr.onload = function () {
+          try {
+            if (typeof XLSX === 'undefined') throw new Error('spreadsheet library not loaded - reload the page');
+            var wb = XLSX.read(new Uint8Array(fr.result), { type: 'array' });
+            loaded = { wb: wb, name: (f.name || 'bulk.xlsx').replace(/\.(xlsx|xls)$/i, '') };
+            var ss = $('bwn-bulk-sheet'); ss.textContent = '';
+            wb.SheetNames.forEach(function (nm) { var o = document.createElement('option'); o.value = nm; o.textContent = nm; ss.appendChild(o); });
+            $('bwn-bulk-sheetwrap').style.display = wb.SheetNames.length > 1 ? 'block' : 'none';
+            ss.onchange = describe;
+            describe();
+          } catch (err) { $('bwn-bulk-mapinfo').textContent = 'Could not read workbook: ' + ((err && err.message) || err); }
+        };
+        fr.readAsArrayBuffer(f);
+      };
+      function currentSheet() { return loaded ? ($('bwn-bulk-sheet').value || loaded.wb.SheetNames[0]) : null; }
+      function describe() {
+        if (!loaded || _running) return;
+        var ws = loaded.wb.Sheets[currentSheet()];
+        var map = mapSheet(ws);
+        var rows = [];
+        for (var r = map.headerRow + 1; r < map.aoa.length; r++) {
+          var key = cellStr(map.aoa, r, map.key);
+          var wo = parseInt(key, 10);
+          if (key && isFinite(wo)) rows.push({ rowIdx: r, wo: wo });
+        }
+        session = { map: map, rows: rows, sheet: currentSheet() };
+        // Populate the value-column picker from the detected headers.
+        var cs = $('bwn-bulk-col'); cs.textContent = '';
+        map.hdr.forEach(function (h, i) { if (i === map.key) return; var o = document.createElement('option'); o.value = String(i); o.textContent = h || ('(col ' + (i + 1) + ')'); cs.appendChild(o); });
+        $('bwn-bulk-mapinfo').textContent = [
+          'WO# column: ' + (map.keyName != null ? '"' + map.keyName + '"' : 'NOT FOUND (cannot run)'),
+          'Work orders mapped: ' + rows.length
+        ].join('\n');
+        invalidateDry();
+      }
+
+      // ---- dry run (READ leg only, zero writes) ----
+      $('bwn-bulk-dry').onclick = function () {
+        if (!session || _running) return;
+        var stamp = fingerprint();
+        var rr = resolveRows();
+        var wr = writable(rr);
+        if (overCap(op(), wr.length).refused || wr.length === 0) { refreshTargetUi(); return; }
+        $('bwn-bulk-dry').disabled = true;
+        $('bwn-bulk-drycount').textContent = 'Dry run: reading ' + wr.length + ' rows...';
+        var thisOp = op();
+        var draft = new Array(session.rows.length);   // parallel to session.rows
+        runPool(wr, function (rrow) {
+          return (thisOp === 'ecd' ? bulkExecEcd('dry', 'DRY', rrow.wo, rrow.value) : bulkExecNote('dry', 'DRY', rrow.wo, rrow.value));
+        }, 2, null, function () { return false; }).then(function (out) {
+          // Map each writable result back onto its session.rows index.
+          var byIdx = {};
+          rr.forEach(function (r, i) { byIdx[r.rowIdx] = i; });
+          wr.forEach(function (r, j) { draft[byIdx[r.rowIdx]] = out[j]; });
+          dry = draft; dryStamp = stamp;
+          var wouldSend = out.filter(function (o) { return o && !o.error && o.outcome === 'would-send'; }).length;
+          var noops = out.filter(function (o) { return o && !o.error && o.outcome === 'noop'; }).length;
+          var failed = out.filter(function (o) { return o && o.error; }).length;
+          $('bwn-bulk-drycount').textContent = 'Dry run complete: ' + wouldSend + ' would write, ' + noops + ' no-op, ' + failed + ' read failed. ZERO writes sent.';
+          renderPreview();
+          armConfirm(wouldSend);
+        }, function () {
+          $('bwn-bulk-drycount').textContent = 'Dry run failed to read - check the session and retry.';
+          $('bwn-bulk-dry').disabled = false;
+        });
+      };
+
+      // ---- typed confirm ----
+      var confirmCount = 0;
+      function armConfirm(wouldSend) {
+        confirmCount = wouldSend;
+        if (wouldSend <= 0) {
+          $('bwn-bulk-confirmwrap').style.display = 'block';
+          $('bwn-bulk-confirmtarget').textContent = 'Nothing to apply - every writable row is a no-op. Change the target or value.';
+          $('bwn-bulk-confirm').style.display = 'none';
+          $('bwn-bulk-approve').style.display = 'none';
+          return;
+        }
+        $('bwn-bulk-confirm').style.display = '';
+        $('bwn-bulk-approve').style.display = '';
+        $('bwn-bulk-confirmwrap').style.display = 'block';
+        $('bwn-bulk-confirmtarget').textContent = 'Type exactly:  APPLY ' + wouldSend;
+        $('bwn-bulk-confirm').placeholder = 'APPLY ' + wouldSend;
+        $('bwn-bulk-confirm').value = '';
+        $('bwn-bulk-approve').disabled = true;
+      }
+      function confirmTarget() { return 'APPLY ' + confirmCount; }
+      $('bwn-bulk-confirm').oninput = function () {
+        var armed = dryStamp === fingerprint() && confirmCount > 0 && $('bwn-bulk-confirm').value === confirmTarget();
+        $('bwn-bulk-approve').disabled = !armed;
+      };
+
+      // ---- approve -> mint runId -> run ----
+      $('bwn-bulk-approve').onclick = function () {
+        if ($('bwn-bulk-approve').disabled) return;
+        if (dryStamp !== fingerprint()) { invalidateDry(); return; }   // last-line guard: inputs moved
+        var rr = resolveRows();
+        var wr = writable(rr);
+        if (overCap(op(), wr.length).refused || wr.length === 0) { invalidateDry(); return; }
+        runId = 'bulk-' + Date.now().toString(36) + '-' + Math.random().toString(36).slice(2, 8);
+        runStartTs = Date.now();
+        results = new Array(session.rows.length);
+        // session.rows carries ALL mapped rows; targets are the writable subset for THIS run.
+        session._targets = wr;
+        session._targetIdx = rr.map(function (r) { return r.rowIdx; });
+        $('bwn-bulk-confirmwrap').style.display = 'none';
+        $('bwn-bulk-log').textContent = '';
+        runBatch(wr, false);
+      };
+
+      // ---- run (runPool, pause/cancel) ----
+      function targetsForRetry() {
+        // Retry the not-run + failed rows, REUSING the same runId so add-note markers dedup.
+        var rr = resolveRows();
+        var wr = writable(rr);
+        // pendingRows works on the writable-target list against a results array indexed the same way.
+        var wres = wr.map(function (r) { var i = session._targetIdx.indexOf(r.rowIdx); return results[i]; });
+        return pendingRows(wr, wres);
+      }
+      function runBatch(targets, retryOnly) {
+        if (!targets.length) { renderResults(); return; }
+        _running = true; _paused = false; _cancelled = false;
+        $('bwn-bulk-runwrap').style.display = 'block';
+        $('bwn-bulk-resultwrap').style.display = 'none';
+        $('bwn-bulk-pause').textContent = 'Pause';
+        $('bwn-bulk-dry').disabled = true;
+        $('bwn-bulk-file').disabled = true;
+        var thisOp = op();
+        var total = targets.length, doneN = 0;
+        setProg(0, total);
+        logln((retryOnly ? 'Retry' : 'Run') + ' ' + runId + ' - ' + total + ' ' + (thisOp === 'ecd' ? 'ECD' : 'note') + ' writes, concurrency ' + concurrency());
+
+        runPool(targets, function (rrow) {
+          // Pause gate at worker entry: a row already past this point (in flight) finishes; while
+          // paused, a runner parks HERE and pulls no new row. Cancel releases the gate and skips.
+          return waitWhilePaused().then(function () {
+            if (_cancelled) { var ce = new Error('cancelled before write'); ce.bwnCancelled = true; throw ce; }
+            var cmd = { verb: thisOp === 'ecd' ? 'wo.ecd' : 'wo.note', woNumber: rrow.wo, args: thisOp === 'ecd' ? { expectedCompletionDate: rrow.value } : { noteText: rrow.value } };
+            return (thisOp === 'ecd' ? bulkExecEcd('run', runId, rrow.wo, rrow.value) : bulkExecNote('run', runId, rrow.wo, rrow.value))
+              .then(function (r) {
+                logln('W-' + rrow.wo + ': ' + (r.outcome === 'noop' ? ('no-op (' + r.reason + ')') : 'done') + ' - ' + describeCommand(cmd));
+                return r;
+              }, function (err) {
+                logln('W-' + rrow.wo + ': FAILED - ' + ((err && err.message) || err));
+                throw err;
+              });
+          });
+        }, concurrency(), function (d, t) { doneN = d; setProg(d, t); }, function () { return _cancelled; })
+          .then(function (out) {
+            // Fold this batch's results back onto the full-row results array by rowIdx.
+            targets.forEach(function (r, j) { var i = session._targetIdx.indexOf(r.rowIdx); results[i] = out[j]; });
+            _running = false;
+            $('bwn-bulk-file').disabled = false;
+            renderResults();
+          });
+      }
+      function concurrency() { var n = parseInt($('bwn-bulk-conc').value, 10); if (!isFinite(n)) n = 2; return Math.min(6, Math.max(1, n)); }
+      function setProg(d, t) { $('bwn-bulk-progfill').style.width = (t ? Math.round(d / t * 100) : 0) + '%'; }
+      function waitWhilePaused() {
+        return new Promise(function (resolve) {
+          (function poll() { if (!_paused || _cancelled) return resolve(); setTimeout(poll, 150); })();
+        });
+      }
+      $('bwn-bulk-pause').onclick = function () {
+        if (!_running) return;
+        _paused = !_paused;
+        $('bwn-bulk-pause').textContent = _paused ? 'Resume' : 'Pause';
+        logln(_paused ? '-- paused (in-flight row will finish) --' : '-- resumed --');
+      };
+      $('bwn-bulk-cancel').onclick = function () {
+        if (!_running) return;
+        _cancelled = true; _paused = false;   // release parked gates so the pool can settle
+        logln('-- cancelling: no new rows will start --');
+      };
+
+      // ---- results + export ----
+      function renderResults() {
+        var tal = bulkTally(results, session.rows.length);
+        // Only the rows we actually TARGETED this run can be "not-run"; unmapped/non-writable rows
+        // are simply out of scope, not owed. Report the tally over the TARGET set.
+        var targetTotal = session._targets.length;
+        var tres = session._targets.map(function (r) { var i = session._targetIdx.indexOf(r.rowIdx); return results[i]; });
+        var tt = bulkTally(tres, targetTotal);
+        $('bwn-bulk-tally').textContent = tt.done + ' done · ' + tt.noop + ' no-op · ' + tt.failed + ' failed · ' + tt.notRun + ' not-run  (of ' + targetTotal + ')';
+        $('bwn-bulk-runwrap').style.display = _running ? 'block' : 'block';
+        $('bwn-bulk-resultwrap').style.display = 'block';
+        var pend = tt.failed + tt.notRun;
+        $('bwn-bulk-retry').style.display = pend > 0 ? '' : 'none';
+      }
+      $('bwn-bulk-retry').onclick = function () {
+        if (_running) return;
+        var pending = targetsForRetry();
+        if (!pending.length) return;
+        logln('Retry Unfinished: ' + pending.length + ' row(s), same runId ' + runId + ' (add-note markers dedup).');
+        runBatch(pending, true);
+      };
+
+      // Build the run-log rows: session.results joined to bwn:audit by corrId (per-op, per-WO, within
+      // this run's window). No second audit store - the corrId + audited before/after come from the ring.
+      function buildRunLog() {
+        var au = (typeof bwnAuditAll === 'function') ? bwnAuditAll() : [];
+        var byWo = {};
+        au.forEach(function (e) {
+          if (!e || e.ts < runStartTs) return;
+          if (e.op !== 'addEditJobNote' && e.op !== 'patchWorkOrder') return;
+          var w = e.ids && e.ids.wo; if (w == null) return;
+          byWo[w] = e;   // last attempt wins (covers a retried row)
+        });
+        var rows = [];
+        session._targets.forEach(function (r) {
+          var i = session._targetIdx.indexOf(r.rowIdx);
+          var res = results[i];
+          var au1 = byWo[r.wo] || null;
+          var outcome = !res ? 'not-run' : (res.error ? 'failed' : (res.outcome === 'noop' ? 'no-op' : 'done'));
+          rows.push({
+            woNumber: r.wo,
+            op: op(),
+            corrId: au1 ? au1.corrId : '',
+            outcome: outcome,
+            before: au1 ? au1.before : (res && res.before) || null,
+            after: au1 ? au1.after : (res && res.after) || null,
+            error: (res && res.error) || (au1 && au1.reason) || '',
+            ts: au1 ? au1.ts : (res ? runStartTs : '')
+          });
+        });
+        return rows;
+      }
+      function download(text, fn, mime) {
+        try {
+          var blob = new Blob([text], { type: mime });
+          var url = URL.createObjectURL(blob);
+          var a = document.createElement('a'); a.href = url; a.download = fn; document.body.appendChild(a); a.click();
+          setTimeout(function () { URL.revokeObjectURL(url); a.remove(); }, 1500);
+        } catch (e) { logln('! Could not generate the export file.'); }
+      }
+      function csvCell(v) { var s = (v == null ? '' : (typeof v === 'object' ? JSON.stringify(v) : String(v))); return '"' + s.replace(/"/g, '""') + '"'; }
+      $('bwn-bulk-csv').onclick = function () {
+        var rows = buildRunLog();
+        var head = ['woNumber', 'op', 'corrId', 'outcome', 'before', 'after', 'error', 'ts'];
+        var lines = [head.join(',')];
+        rows.forEach(function (r) { lines.push(head.map(function (k) { return csvCell(r[k]); }).join(',')); });
+        download(lines.join('\r\n'), (loaded && loaded.name || 'bulk') + '-runlog-' + runId + '.csv', 'text/csv;charset=utf-8');
+      };
+      $('bwn-bulk-json').onclick = function () {
+        download(JSON.stringify({ runId: runId, startedTs: runStartTs, op: op(), records: buildRunLog() }, null, 2),
+          (loaded && loaded.name || 'bulk') + '-runlog-' + runId + '.json', 'application/json;charset=utf-8');
+      };
+
+      // ---- input wiring: any target change invalidates the dry-run ----
+      $('bwn-bulk-op').onchange = invalidateDry;
+      $('bwn-bulk-note').oninput = invalidateDry;
+      $('bwn-bulk-date').oninput = invalidateDry;
+      $('bwn-bulk-col').onchange = invalidateDry;
+      Array.prototype.forEach.call(root.querySelectorAll('input[name="bwn-bulk-src"]'), function (rb) { rb.onchange = invalidateDry; });
+      $('bwn-bulk-filter').oninput = renderPreview;
+
+      refreshTargetUi();
+      renderPreview();
+    }
+
+    BWN.beat('bulkOps', 'ok', 'console ready (flag on)');
   });
 
   // ---- Flush the module queue -------------------------------------------------
