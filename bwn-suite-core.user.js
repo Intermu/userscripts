@@ -18,6 +18,12 @@
   var BWN_MODULES = {
     poApproval: true,    // approval/ETA text buttons in the Send PO modal
     woAssist: true,      // side-docked GP + ETA watchdog + playbook on WO pages
+    woAssistWrites: false, // SHIPPING DEFAULT OFF: renders the WO-Assist guided-WRITE buttons
+                           // (Create task / Change status). When false the buttons never mount,
+                           // so nothing writes for any user until this is flipped after a live
+                           // smoke test. The mutations themselves still route through bwnGqlOp
+                           // with feature:'woAssist' (its kill switch + audit gate) - two gates:
+                           // this flag hides the UI, bwnGqlOp enforces the write governance.
     leakGuard: true,     // outbound email cross-contamination guard
     listHeat: true,      // heat overlay + audit on the Work Orders list
     launcher: true,      // BWN tools dock (left edge)
@@ -4935,6 +4941,20 @@
             eb.addEventListener('click', function () { ecdHelperOpen(state); });
             btns.appendChild(eb);
           }
+          // Guided-WRITE buttons - gated by BWN_MODULES.woAssistWrites (shipping default OFF).
+          // The flag hides the UI; the mutations still pass feature:'woAssist' to bwnGqlOp, so
+          // Core's kill switch + audit gate governs the write even if a button ever leaked in.
+          if (BWN_MODULES.woAssistWrites) {
+            // "Create task…" - on every non-anchor act row (spin a follow-up off any next action).
+            (function (act) {
+              var tkb = document.createElement('button');
+              tkb.type = 'button'; tkb.className = 'bwn-wa-btn ghost'; tkb.textContent = 'Create task…';
+              tkb.style.cssText = 'padding:3px 9px;font-size:10px;';
+              tkb.title = 'Create a follow-up task on this work order (assigned to the coordinator)';
+              tkb.addEventListener('click', function () { taskHelperOpen(state, act); });
+              btns.appendChild(tkb);
+            })(a);
+          }
           r.appendChild(cb); r.appendChild(main); r.appendChild(btns);
           body.appendChild(r);
         });
@@ -5197,6 +5217,145 @@
       ov.appendChild(card); document.body.appendChild(ov);
       document.addEventListener('keydown', onKey);
       releaseA11y = BWN.a11yDialog(card, { label: 'Set expected completion', modal: true });
+    }
+
+    // ===== WA-WRITES START v1 (WO-Assist guided writes; sliced + exercised for real against the
+    //        BWN-OPS wrapper by scripts/test-a2-taskcreate.js and scripts/test-b2-statuswrite.js) =====
+    // Pure payload-builders + re-entry-guarded submits. They close over ONLY bwnGqlOp (the shared
+    // audited wrapper) and the two FROZEN mutation docs below - never the DOM - so the tests slice
+    // this region, concat it with the BWN-OPS block, and drive the write path end to end. Each
+    // mutation string is copied VERBATIM from its proven source (do NOT re-shape a selector):
+    //   M_ADD_TASK  <- bwn-proposal-actions.user.js  (createTask,     wire-proven 2026-08-17)
+    //   PATCH_M     <- bwn-dispatch.user.js           (patchWorkOrder, wire-proven 2026-08-12)
+    // Both mutations pass feature:'woAssist' so Core's per-feature kill switch + audit ring govern
+    // the write; the BWN_MODULES.woAssistWrites flag only gates whether the BUTTONS render.
+
+    // A2 - addTask(data: AddTaskInput!). entityType 1 = work order; entityId = the WO number as a
+    // String. Do NOT drop metadata: the REST backend 500s without it (proposal-actions capture).
+    // addTask is retry:'none' in BWN_OPS, so a double-send would file TWO tasks - waTaskSubmit's
+    // button guard is the only stop, never a wrapper retry.
+    var M_ADD_TASK = 'mutation AddTask($data: AddTaskInput!){ addTask(data: $data){ success message } }';
+    function waCreateTask(woNumber, assigneeGuid, taskText) {
+      return bwnGqlOp('addTask', M_ADD_TASK, { data: {
+        entityId: String(woNumber),
+        entityType: 1,
+        description: taskText,
+        targetStartDate: new Date().toISOString(),
+        assignedTo: assigneeGuid || null,
+        notifyCreator: false,
+        metadata: JSON.stringify({ number: String(woNumber) })
+      } }, {
+        feature: 'woAssist',
+        validate: function (v) { var d = v && v.data || {}; if (!d.entityId) return 'no WO number'; if (!String(d.description || '').trim()) return 'empty task text'; return true; },
+        ids: { wo: woNumber },
+        after: { task: String(taskText || '').slice(0, 40) }
+      });
+    }
+    // Re-entry-guarded Create: the FIRST click disables the button before the async write lands; a
+    // second click while it is in flight is a no-op (addTask is not idempotent). The hooks let the
+    // DOM dialog - and the test - observe the outcome without this function touching the DOM.
+    function waTaskSubmit(btn, woNumber, assigneeGuid, taskText, hooks) {
+      hooks = hooks || {};
+      if (btn.disabled) return null;
+      btn.disabled = true;
+      return waCreateTask(woNumber, assigneeGuid, taskText).then(function (r) {
+        if (hooks.ok) hooks.ok(r);
+        return r;
+      }, function (e) {
+        btn.disabled = false;   // a real failure - let them fix and retry
+        if (hooks.fail) hooks.fail(e);
+        throw e;
+      });
+    }
+
+    // ===== WA-WRITES END v1 =====
+
+    // ---- Guided-WRITE dialogs (mount only when BWN_MODULES.woAssistWrites is on) -------------
+    // Both reuse ensureEcdStyle()'s overlay shell, the #bwn-ecd-overlay single-instance id, and the
+    // .bwn-ecd* classes, and mirror ecdHelperOpen's structure (a11y dialog, Esc / backdrop close).
+    // Every piece of dynamic text is set via textContent / input value - never innerHTML.
+
+    // Assignee init for the task dialog: the WO's current coordinator (assignedTo GUID) + the
+    // active-user list, both PROVEN read selectors composed into ONE round-trip -
+    // workOrder(workOrderNumber){ assignedTo } (dispatch DISP_WO_Q / proposal-actions Q_WO) and
+    // users(...){ ... } (dispatch USERS_Q). Reads only; no field invented.
+    var WA_TASK_INIT_Q = 'query WATaskInit($n: Int!){ workOrder(workOrderNumber: $n){ assignedTo } users(includeInactiveUsers:false, includeSystemUsers:false){ id firstName lastName isInactive isTechnician } }';
+    function waFetchTaskInit(woNum) {
+      return bwnGql(WA_TASK_INIT_Q, { n: Number(woNum) }).then(function (d) {
+        var assignedTo = (d && d.workOrder && d.workOrder.assignedTo) || null;
+        var users = ((d && d.users) || []).filter(function (u) { return u && u.id && !u.isInactive && !u.isTechnician; })
+          .map(function (u) { return { id: u.id, name: ((u.firstName || '') + ' ' + (u.lastName || '')).replace(/\s+/g, ' ').trim() }; })
+          .filter(function (u) { return u.name; })
+          .sort(function (a, b) { return a.name.localeCompare(b.name); });
+        return { assignedTo: assignedTo, users: users };
+      }, function () { return { assignedTo: null, users: [] }; });
+    }
+
+    function taskHelperOpen(state, act) {
+      if (!onWO() || !currentWOId()) { alert('Open a work order to create a task on it.'); return; }
+      ensureEcdStyle();
+      var woNum = currentWOId();
+      var hd0 = state.hd || {};
+      var old = document.getElementById('bwn-ecd-overlay'); if (old) old.remove();
+      var ov = document.createElement('div'); ov.id = 'bwn-ecd-overlay';
+      var card = document.createElement('div'); card.className = 'bwn-ecd';
+      var releaseA11y = null;
+      function close() { document.removeEventListener('keydown', onKey); if (releaseA11y) { releaseA11y(); releaseA11y = null; } ov.remove(); }
+      function onKey(e) { if (e.key === 'Escape') { e.stopPropagation(); close(); } }
+      ov.addEventListener('mousedown', function (e) { if (e.target === ov) close(); });
+
+      var hd = document.createElement('div'); hd.className = 'bwn-ecd-hd'; hd.textContent = 'Create follow-up task'; card.appendChild(hd);
+      var body = document.createElement('div'); body.className = 'bwn-ecd-body';
+      var tgt = document.createElement('div'); tgt.className = 'bwn-ecd-cur';
+      tgt.textContent = 'Target: W-' + woNum + (hd0.tracking ? '  ·  Tracking #' + hd0.tracking : '');
+      body.appendChild(tgt);
+
+      var tl = document.createElement('label'); tl.className = 'bwn-ecd-lbl'; tl.textContent = 'Task (editable)'; body.appendChild(tl);
+      var ti = document.createElement('input'); ti.type = 'text'; ti.className = 'bwn-ecd-date';
+      ti.value = String((act && act.label) || '').slice(0, 300);   // prefilled from the act's label
+      body.appendChild(ti);
+
+      var al = document.createElement('label'); al.className = 'bwn-ecd-lbl'; al.textContent = 'Assign to'; body.appendChild(al);
+      var asel = document.createElement('select'); asel.className = 'bwn-ecd-date';
+      var o0 = document.createElement('option'); o0.value = ''; o0.textContent = 'Unassigned'; asel.appendChild(o0);
+      body.appendChild(asel);
+      // Async: fill the assignee dropdown, then default-select the coordinator THIS WO is assigned
+      // to (matches proposal-actions' "task assigned to the WO coordinator").
+      waFetchTaskInit(woNum).then(function (init) {
+        if (document.getElementById('bwn-ecd-overlay') !== ov) return;   // dialog already closed
+        init.users.forEach(function (u) {
+          var op = document.createElement('option'); op.value = u.id; op.textContent = u.name; asel.appendChild(op);
+        });
+        if (init.assignedTo) {
+          if (!init.users.some(function (u) { return u.id === init.assignedTo; })) {
+            var opc = document.createElement('option'); opc.value = init.assignedTo; opc.textContent = (hd0.coordinator || 'WO coordinator'); asel.appendChild(opc);
+          }
+          asel.value = init.assignedTo;
+        }
+      });
+      card.appendChild(body);
+
+      var ft = document.createElement('div'); ft.className = 'bwn-ecd-ft';
+      var sp = document.createElement('span'); sp.className = 'sp'; sp.textContent = 'Files a task on this WO now.'; ft.appendChild(sp);
+      var create = document.createElement('button'); create.type = 'button'; create.className = 'pri'; create.textContent = 'Create task';
+      create.addEventListener('click', function () {
+        var text = ti.value.trim();
+        if (!text) { alert('Enter the task text.'); return; }
+        waTaskSubmit(create, woNum, asel.value || null, text, {
+          ok: function () {
+            close();
+            try { delete TASKS_DONE[woNum]; fetchTasks(woNum); } catch (e) { }   // re-read the open-task count
+            BWN.toast('success', 'Task created on W-' + woNum + '.');
+          },
+          fail: function (e) { BWN.toast('error', 'Task not created: ' + (e && e.message || 'unknown error')); }
+        });
+      });
+      var cancel = document.createElement('button'); cancel.type = 'button'; cancel.textContent = 'Cancel'; cancel.addEventListener('click', close);
+      ft.appendChild(create); ft.appendChild(cancel); card.appendChild(ft);
+
+      ov.appendChild(card); document.body.appendChild(ov);
+      document.addEventListener('keydown', onKey);
+      releaseA11y = BWN.a11yDialog(card, { label: 'Create follow-up task', modal: true });
     }
 
     // Auto-pop once per WO visit when the ECD is missing/overdue AND the info the
