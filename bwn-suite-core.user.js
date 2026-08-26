@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         BWN Suite - Core (Broadway National)
 // @namespace    broadwaynational.bwn
-// @version      1.78.34
+// @version      1.78.35
 // @downloadURL  https://raw.githubusercontent.com/Intermu/userscripts/main/bwn-suite-core.user.js
 // @updateURL    https://raw.githubusercontent.com/Intermu/userscripts/main/bwn-suite-core.user.js
 // @description  Runs several Umbrava helpers for BWN coordinators, in the browser with no privileged grants. Includes: PO Approval + ETA Builder; WO Assist (GP/ETA, a stall watchdog, DNE calculator, and a next-action playbook); Email Leak Guard (checks recipients against vendor names, PO amounts, and client budget references before an outbound email sends); WO List Heat (a triage overlay + My Day strip on the work-order list, with an optional same-origin Umbrava API scan for deterministic full-board coverage); and the BWN Launcher (opens the Azure Static Web App tools with the current WO's context). Modules share state through sessionStorage/localStorage. The only network calls are same-origin Umbrava GraphQL requests (app.umbrava.com/api/graphql, the app's own session): List Heat's full-board scan and WO Assist's work-order / trip / clock-in / document reads, plus ONE write - BWN Views saves the column layout through Umbrava's own putUserPreference, the same preference the column chooser writes; everything else is offline. Toggle modules in BWN_MODULES below.
@@ -9577,6 +9577,25 @@
       reloadNote.textContent = 'Reload the page to apply module changes.';
       body.appendChild(reloadNote);
 
+      // Shortcuts (Task 6): edit the command-palette hotkey (bwn:config.keys.palette).
+      // Saved via cfgSave, which fires bwn:config so the palette rebinds live (no reload).
+      section('Shortcuts', 'command palette hotkey · applies live');
+      (function () {
+        var row = document.createElement('div'); row.className = 'bwn-ops-row';
+        var lbl = document.createElement('span'); lbl.className = 'lbl'; lbl.textContent = 'Command palette';
+        var inp = document.createElement('input'); inp.type = 'text'; inp.style.cssText = 'flex:none;width:140px;';
+        var keysCur = (lsGet('bwn:config', {}) || {}).keys;
+        inp.value = (keysCur && keysCur.palette) || 'mod+k';
+        inp.setAttribute('aria-label', 'Command palette hotkey');
+        inp.title = 'Needs a modifier. e.g. mod+k (mod = Ctrl on Windows, Cmd on Mac), ctrl+shift+p, alt+k';
+        inp.addEventListener('change', function () {
+          var v = inp.value.trim() || 'mod+k'; inp.value = v;
+          var keys = Object.assign({}, keysCur || {}); keys.palette = v;
+          opsConfigSave({ keys: keys });   // dispatches bwn:config -> the palette rebinds live
+        });
+        row.appendChild(lbl); row.appendChild(inp); body.appendChild(row);
+      })();
+
       // Thresholds
       section('Thresholds', 'shared by WO Assist + List Heat');
       var grid = document.createElement('div'); grid.className = 'bwn-ops-grid';
@@ -11455,17 +11474,47 @@
       setTimeout(function () { try { inp.focus(); } catch (e) { } }, 0);
     }
 
-    // Ctrl/Cmd-K anywhere. WINDOW capture fires before document-capture handlers
-    // (the suite's own dialog traps and panel Esc handlers register on document),
-    // so the palette's stopPropagation cleanly shields everything beneath it -
-    // one Esc closes only the palette, Tab can't be stolen by a covered trap.
+    // Configurable hotkey (Task 6). bwn:config.keys.palette (default 'mod+k') sets the
+    // binding; 'mod' = Ctrl on Windows / Cmd on macOS. Read once, then refreshed on the
+    // bwn:config change event (live rebind, no reload) rather than per-keystroke. A
+    // binding with no modifier (mod/ctrl/meta/alt) is rejected back to mod+k so a stray
+    // config can never make a plain key open the palette on every keystroke.
+    // WINDOW capture fires before document-capture handlers (the suite's own dialog traps
+    // and panel Esc handlers register on document), so the palette's stopPropagation
+    // cleanly shields everything beneath it - one Esc closes only the palette.
+    function parseHotkey(str) {
+      var spec = { mod: false, ctrl: false, meta: false, shift: false, alt: false, key: '' };
+      String(str || '').toLowerCase().split('+').forEach(function (p) {
+        p = p.trim(); if (!p) return;
+        if (p === 'mod') spec.mod = true;
+        else if (p === 'ctrl' || p === 'control') spec.ctrl = true;
+        else if (p === 'meta' || p === 'cmd' || p === 'command' || p === 'win') spec.meta = true;
+        else if (p === 'shift') spec.shift = true;
+        else if (p === 'alt' || p === 'option' || p === 'opt') spec.alt = true;
+        else spec.key = p;
+      });
+      return spec.key ? spec : null;
+    }
+    function matchHotkey(e, spec) {
+      if (!spec || String(e.key || '').toLowerCase() !== spec.key) return false;
+      var modOk = spec.mod ? (e.ctrlKey || e.metaKey) : (!!e.ctrlKey === spec.ctrl && !!e.metaKey === spec.meta);
+      return modOk && !!e.shiftKey === spec.shift && !!e.altKey === spec.alt;
+    }
+    function readPaletteSpec() {
+      var cfgKeys = BWN.cfg().keys, raw = (cfgKeys && cfgKeys.palette) || 'mod+k';
+      var s = parseHotkey(raw);
+      if (!s || (!s.mod && !s.ctrl && !s.meta && !s.alt)) s = parseHotkey('mod+k');   // must carry a modifier
+      return s;
+    }
+    var paletteSpec = readPaletteSpec();
+    document.addEventListener('bwn:config', BWN.guard(function () { paletteSpec = readPaletteSpec(); }, 'palette:rebind'));
     window.addEventListener('keydown', BWN.guard(function (e) {
-      if ((e.ctrlKey || e.metaKey) && !e.shiftKey && !e.altKey && (e.key === 'k' || e.key === 'K')) {
+      if (matchHotkey(e, paletteSpec)) {
         e.preventDefault(); e.stopPropagation();
         openPal();
       }
     }, 'palette:hotkey'), true);
-    BWN.beat('palette', 'ok', 'hotkey armed (Ctrl/Cmd-K)');
+    BWN.beat('palette', 'ok', 'hotkey armed (' + ((BWN.cfg().keys && BWN.cfg().keys.palette) || 'mod+k') + ')');
   });
 
 
