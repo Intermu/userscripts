@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         BWN Suite - Core (Broadway National)
 // @namespace    broadwaynational.bwn
-// @version      1.78.35
+// @version      1.78.36
 // @downloadURL  https://raw.githubusercontent.com/Intermu/userscripts/main/bwn-suite-core.user.js
 // @updateURL    https://raw.githubusercontent.com/Intermu/userscripts/main/bwn-suite-core.user.js
 // @description  Runs several Umbrava helpers for BWN coordinators, in the browser with no privileged grants. Includes: PO Approval + ETA Builder; WO Assist (GP/ETA, a stall watchdog, DNE calculator, and a next-action playbook); Email Leak Guard (checks recipients against vendor names, PO amounts, and client budget references before an outbound email sends); WO List Heat (a triage overlay + My Day strip on the work-order list, with an optional same-origin Umbrava API scan for deterministic full-board coverage); and the BWN Launcher (opens the Azure Static Web App tools with the current WO's context). Modules share state through sessionStorage/localStorage. The only network calls are same-origin Umbrava GraphQL requests (app.umbrava.com/api/graphql, the app's own session): List Heat's full-board scan and WO Assist's work-order / trip / clock-in / document reads, plus ONE write - BWN Views saves the column layout through Umbrava's own putUserPreference, the same preference the column chooser writes; everything else is offline. Toggle modules in BWN_MODULES below.
@@ -123,7 +123,8 @@
       gpWarn: 30, gpBad: 20,
       hrsWarn: 72, hrsBad: 240,
       activeMult: 0.5,
-      dueWarnDays: 3, schedGraceDays: 1, noteStaleDays: 7
+      dueWarnDays: 3, schedGraceDays: 1, noteStaleDays: 7,
+      unbilledStaleDays: 3   // T8-B1: days a Work-Complete WO may sit before an "advance to invoicing" row
     };
     function cfg() {
       var out = {};
@@ -3046,7 +3047,7 @@
       // Phase 2: docs (missing completion package at closure) sorts just under escalate
       // - closing without the signed ticket/photos is a hard block. intake (unactionable
       // WO at inception) sorts above the generic phase chase so "fix the WO" leads.
-      var base = { noshow: 100, stall: 96, ecdrisk: 95, escalate: 94, docs: 92, intake: 90, task: 88, dne: 82, ecd: 78, pocost: 72, poacc: 68, pomat: 66, poconf: 64, eta: 60, advance: 58, phase: 50, clientcad: 46, note: 44, anchor: 12 };
+      var base = { noshow: 100, stall: 96, ecdrisk: 95, escalate: 94, docs: 92, intake: 90, task: 88, unbilled: 84, dne: 82, ecd: 78, pocost: 72, poacc: 68, pomat: 66, poconf: 64, eta: 60, advance: 58, phase: 50, clientcad: 46, note: 44, anchor: 12 };
       var s = base[p]; if (s === undefined) s = 50;
       var cap = function (n) { return Math.max(0, Math.min(30, n || 0)); };
       if (p === 'noshow' && state.noShow) s += cap(Math.round((Date.now() - state.noShow.ms) / 86400000));
@@ -3292,6 +3293,34 @@
       // Map the WO status to its canonical phase (full taxonomy). A terminal phase
       // (closed/canceled/declined/revoked/paid) has nothing to chase → no actions.
       var woPhase = WO_PHASE[(state.status || '').trim().toLowerCase()] || null;
+
+      // ---- Unbilled: work complete but no billing movement (T8-B1, NO WRITE) ----
+      // Work Complete is terminal for this tool (billing owns invoice -> paid), so it would
+      // otherwise return no actions below. But a WO that sits Work Complete past unbilledStaleDays
+      // with no movement is unbilled revenue the coordinator still owns. Surface ONE row to
+      // advance it to invoicing plus the standing completion anchor, then RETURN - the full
+      // playbook is NOT opened for a finished WO. Shown to all coordinators (no manager gate).
+      // Read-only. The terminal early-return just below is unchanged and still catches every
+      // other terminal status (closed / canceled / invoiced / paid).
+      var isWorkComplete = /\bwork\s*complete\b/i.test(state.status || '');
+      var unbilledStaleDays = (C && C.unbilledStaleDays != null) ? C.unbilledStaleDays : 3;
+      if (isWorkComplete && state.hrs != null && state.hrs > unbilledStaleDays * 24) {
+        var ubDays = Math.round(state.hrs / 24);
+        acts.push({
+          key: 'unbilled:' + ubDays,
+          label: 'Advance to invoicing - work complete ' + ubDays + 'd with no billing movement',
+          why: 'Status "' + (state.status || '') + '" for ' + ubDays + 'd (' + Math.round(state.hrs) + 'h) - a completed WO not moving to invoice is unbilled revenue; verify the completion package, then create/submit the client invoice',
+          text: 'Re: ' + ref + '. This WO has been Work Complete for ' + ubDays + ' days with no billing movement. Please verify the completion documents are attached, then create/submit the client invoice so it does not sit unbilled.'
+        });
+        acts.push({
+          key: 'anchor:unbilled',
+          label: 'Not closed until the WO is invoiced and paid',
+          why: 'Work is complete but the WO is not yet invoiced/paid - advance it to billing',
+          text: null, anchor: true
+        });
+        return acts;
+      }
+
       // Terminal phase, OR an unmapped/custom status that reads as terminal (regex
       // safety net so a future "Cancelled - Duplicate"-type status cannot leak chases).
       if (woPhase === 'terminal' || (!woPhase && /\b(closed|cancell?ed|declined|revoked|void)\b/i.test(state.status || ''))) return acts;
