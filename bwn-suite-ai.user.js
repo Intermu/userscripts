@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         BWN Suite - AI (Broadway National)
 // @namespace    broadwaynational.bwn
-// @version      1.45.16
+// @version      1.45.17
 // @downloadURL  https://raw.githubusercontent.com/Intermu/userscripts/main/bwn-suite-ai.user.js
 // @updateURL    https://raw.githubusercontent.com/Intermu/userscripts/main/bwn-suite-ai.user.js
 // @description  The Umbrava tools that call outside APIs, kept separate from the zero-egress Core script. Client Update and WO Audit drafts (Anthropic Claude; draft-only, scrubbed before sending, you review before posting); Find Techs / Find Suppliers (Google Places; vendor leads near a WO); and Job View (opens the Ops-Dashboard job card on the WO page - WO details from Umbrava plus the authored case file and next actions, read-only). Network access is limited by the browser to the declared API hosts and the BWN Static Web App. API keys are stored in Tampermonkey's storage via the menu commands and never enter the page. Toggle modules in BWN_MODULES below.
@@ -5062,7 +5062,21 @@ if (BWN_MODULES.jobView) BWN.safeModule('jobView', function () {
     };
   }
 
+  // Cross-script bridge (Task 2): prefer Core's unified BWN.toast, which renders in the
+  // page's main world so AI toasts match the rest of the suite. This script is @grant'd,
+  // so it reaches the main-world global via unsafeWindow; if Core is absent/older the
+  // call returns false and each caller falls back to its own in-page toast. Only a level
+  // + string cross the boundary here (no callbacks), so nothing needs cloning.
+  function coreToast(level, msg, opts) {
+    try {
+      var host = (typeof unsafeWindow !== 'undefined') ? unsafeWindow : window;
+      if (host && typeof host.bwnToast === 'function') { host.bwnToast(level, msg, opts || {}); return true; }
+    } catch (e) { }
+    return false;
+  }
+
   function toast(msg) {
+    if (coreToast('success', msg)) return;
     try {
       var t = document.createElement('div');
       t.textContent = msg;
@@ -6212,6 +6226,7 @@ if (BWN_MODULES.jobView) BWN.safeModule('jobView', function () {
     });
 
     function srToast(msg) {
+      if (coreToast('success', msg)) return;   // Task 2: prefer Core's unified toast; own fallback below
       try {
         var t = document.createElement('div');
         t.textContent = msg;

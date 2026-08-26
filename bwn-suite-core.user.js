@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         BWN Suite - Core (Broadway National)
 // @namespace    broadwaynational.bwn
-// @version      1.78.31
+// @version      1.78.32
 // @downloadURL  https://raw.githubusercontent.com/Intermu/userscripts/main/bwn-suite-core.user.js
 // @updateURL    https://raw.githubusercontent.com/Intermu/userscripts/main/bwn-suite-core.user.js
 // @description  Runs several Umbrava helpers for BWN coordinators, in the browser with no privileged grants. Includes: PO Approval + ETA Builder; WO Assist (GP/ETA, a stall watchdog, DNE calculator, and a next-action playbook); Email Leak Guard (checks recipients against vendor names, PO amounts, and client budget references before an outbound email sends); WO List Heat (a triage overlay + My Day strip on the work-order list, with an optional same-origin Umbrava API scan for deterministic full-board coverage); and the BWN Launcher (opens the Azure Static Web App tools with the current WO's context). Modules share state through sessionStorage/localStorage. The only network calls are same-origin Umbrava GraphQL requests (app.umbrava.com/api/graphql, the app's own session): List Heat's full-board scan and WO Assist's work-order / trip / clock-in / document reads, plus ONE write - BWN Views saves the column layout through Umbrava's own putUserPreference, the same preference the column chooser writes; everything else is offline. Toggle modules in BWN_MODULES below.
@@ -770,6 +770,61 @@
   BWN.applyTheme(BWN.getTheme());
   BWN.announceCore('core');
   // ===== END BWN SHARED CORE =====
+
+  // ---- Unified toast (Task 2) -------------------------------------------------
+  // BWN.toast(level, msg, opts). Deliberately OUTSIDE the byte-identical shared
+  // block above (so those bytes stay paste-identical across scripts). Levels:
+  // success (house green - the default look) | warning | error | info. opts:
+  //   undo:    fn        -> renders an "Undo" button that runs fn() then dismisses
+  //   action:  {label,onClick(dismiss)} -> a labeled button (Save/Open/etc.)
+  //   timeout: ms        -> auto-dismiss (default 6000; 0 = sticky)
+  //   id:      token     -> single-instance: a new toast with the same id replaces
+  // Returns a dismiss() the caller can invoke. Exposed on window.bwnToast so the
+  // @grant'd AI sandbox can reach it via unsafeWindow (else it uses its own).
+  var BWN_TOAST_LEVELS = { success: '', warning: 'warn', error: 'error', info: 'info' };
+  function bwnEnsureToastStyle() {
+    if (document.getElementById('bwn-toast-css')) return;
+    var s = document.createElement('style'); s.id = 'bwn-toast-css';
+    s.textContent =
+      '.bwn-toast{position:fixed;left:50%;bottom:22px;transform:translateX(-50%);z-index:100003;display:flex;align-items:center;gap:10px;max-width:90vw;background:var(--bwn-green-dk,#0d3d26);color:#fff;border-radius:10px;padding:10px 14px;box-shadow:0 12px 40px rgba(0,0,0,.4);font:500 13px -apple-system,BlinkMacSystemFont,"Segoe UI","Helvetica Neue",Arial,sans-serif;}' +
+      '.bwn-toast span{flex:1;line-height:1.4;}' +
+      '.bwn-toast.warn{background:var(--bwn-warn,#e67e22);}' +
+      '.bwn-toast.error{background:var(--bwn-bad,#c0392b);}' +
+      '.bwn-toast.info{background:#245e8a;}' +
+      '.bwn-toast button{border:1px solid rgba(255,255,255,.3);background:rgba(255,255,255,.12);color:#fff;border-radius:7px;padding:4px 10px;font:500 11px -apple-system,BlinkMacSystemFont,"Segoe UI","Helvetica Neue",Arial,sans-serif;cursor:pointer;white-space:nowrap;}' +
+      '.bwn-toast button.x{border:none;background:transparent;font-size:15px;padding:2px 4px;opacity:.85;}';
+    (document.head || document.documentElement).appendChild(s);
+  }
+  BWN.toast = function (level, msg, opts) {
+    opts = opts || {};
+    try { bwnEnsureToastStyle(); } catch (e) { }
+    var lvl = BWN_TOAST_LEVELS.hasOwnProperty(level) ? level : 'info';
+    if (opts.id) { var prev = document.getElementById('bwn-toast-' + opts.id); if (prev) prev.remove(); }
+    var t = document.createElement('div');
+    t.className = 'bwn-toast' + (BWN_TOAST_LEVELS[lvl] ? ' ' + BWN_TOAST_LEVELS[lvl] : '');
+    if (opts.id) t.id = 'bwn-toast-' + opts.id;
+    t.setAttribute('role', (lvl === 'error' || lvl === 'warning') ? 'alert' : 'status');
+    var span = document.createElement('span'); span.textContent = String(msg == null ? '' : msg); t.appendChild(span);
+    var done = false;
+    function dismiss() { if (done) return; done = true; if (t.parentNode) t.remove(); }
+    if (typeof opts.undo === 'function') {
+      var ub = document.createElement('button'); ub.type = 'button'; ub.textContent = 'Undo';
+      ub.addEventListener('click', function () { try { opts.undo(); } catch (e) { } dismiss(); });
+      t.appendChild(ub);
+    }
+    if (opts.action && opts.action.label && typeof opts.action.onClick === 'function') {
+      var ab = document.createElement('button'); ab.type = 'button'; ab.textContent = String(opts.action.label);
+      ab.addEventListener('click', function () { try { opts.action.onClick(dismiss); } catch (e) { } });
+      t.appendChild(ab);
+    }
+    var x = document.createElement('button'); x.type = 'button'; x.className = 'x'; x.textContent = '✕';
+    x.addEventListener('click', dismiss); t.appendChild(x);
+    (document.body || document.documentElement).appendChild(t);
+    var ms = typeof opts.timeout === 'number' ? opts.timeout : 6000;
+    if (ms > 0) setTimeout(dismiss, ms);
+    return dismiss;
+  };
+  try { window.bwnToast = BWN.toast; } catch (e) { }
 
   // ==========================================================================
   // BOOT: document-start for the network hook, load event for the modules
@@ -4887,19 +4942,12 @@
     // Dismissible, non-blocking toast (the module has no shared toast - the reminders
     // module's is out of scope). Optional Save button gets a "Show Save" jump.
     function ecdToast(msg, saveBtn) {
-      ensureEcdStyle();
-      var old = document.getElementById('bwn-ecd-toast'); if (old) old.remove();
-      var t = document.createElement('div'); t.className = 'bwn-ecd-toast'; t.id = 'bwn-ecd-toast';
-      var span = document.createElement('span'); span.textContent = msg; t.appendChild(span);
-      if (saveBtn) {
-        var go = document.createElement('button'); go.type = 'button'; go.textContent = 'Show Save';
-        go.addEventListener('click', function () { try { saveBtn.scrollIntoView({ block: 'center', behavior: 'smooth' }); } catch (e) { } ecdPulse(saveBtn); });
-        t.appendChild(go);
-      }
-      var x = document.createElement('button'); x.type = 'button'; x.className = 'x'; x.textContent = '✕';
-      x.addEventListener('click', function () { t.remove(); }); t.appendChild(x);
-      document.body.appendChild(t);
-      setTimeout(function () { if (t.parentNode) t.remove(); }, 16000);
+      // Routed through the unified BWN.toast (Task 2). Extra preserved: the "Show Save"
+      // button that scrolls to + pulses the WO-header Save. id keeps it single-instance
+      // (a follow-up toast replaces the prior one, as the old getElementById did).
+      var opts = { id: 'ecd', timeout: 16000 };
+      if (saveBtn) opts.action = { label: 'Show Save', onClick: function () { try { saveBtn.scrollIntoView({ block: 'center', behavior: 'smooth' }); } catch (e) { } ecdPulse(saveBtn); } };
+      BWN.toast('success', msg, opts);
     }
     // Auto-persist (coordinator opted in 2026-07-13): Umbrava doesn't autosave the
     // Complete-By field on blur, so click the WO header Save ourselves. React marks the
@@ -11778,13 +11826,14 @@
       if (changed) save(arr.filter(function (r) { return !r.fired || (now - r.fireAt) < 86400000; }));   // keep fired 24h, then drop
     }
     function toast(msg, url) {
-      ensureStyle();
-      var t = document.createElement('div'); t.className = 'bwn-rem-toast';
-      var span = document.createElement('span'); span.textContent = msg; t.appendChild(span);
-      if (url) { var go = document.createElement('button'); go.type = 'button'; go.textContent = 'Open'; go.addEventListener('click', function () { location.href = url; }); t.appendChild(go); }
-      var x = document.createElement('button'); x.type = 'button'; x.textContent = '✕'; x.addEventListener('click', function () { t.remove(); }); t.appendChild(x);
-      document.body.appendChild(t);
-      setTimeout(function () { if (t.parentNode) t.remove(); }, 20000);
+      // In-page fallback when desktop Notifications are blocked (notify() owns the
+      // Notification API path and still calls this). Routed through the unified
+      // BWN.toast (Task 2); green preserved. Extra: the "Open" button -> the WO url.
+      // (The legacy .bwn-rem-toast CSS rule is now unused but left inert.)
+      BWN.toast('success', msg, {
+        timeout: 20000,
+        action: url ? { label: 'Open', onClick: function () { try { location.href = url; } catch (e) { } } } : undefined
+      });
     }
 
     // ---- set / manage ------------------------------------------------------
