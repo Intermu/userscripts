@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         BWN Suite - Core (Broadway National)
 // @namespace    broadwaynational.bwn
-// @version      1.78.31
+// @version      1.78.32
 // @downloadURL  https://raw.githubusercontent.com/Intermu/userscripts/main/bwn-suite-core.user.js
 // @updateURL    https://raw.githubusercontent.com/Intermu/userscripts/main/bwn-suite-core.user.js
 // @description  Runs several Umbrava helpers for BWN coordinators, in the browser with no privileged grants. Includes: PO Approval + ETA Builder; WO Assist (GP/ETA, a stall watchdog, DNE calculator, and a next-action playbook); Email Leak Guard (checks recipients against vendor names, PO amounts, and client budget references before an outbound email sends); WO List Heat (a triage overlay + My Day strip on the work-order list, with an optional same-origin Umbrava API scan for deterministic full-board coverage); and the BWN Launcher (opens the Azure Static Web App tools with the current WO's context). Modules share state through sessionStorage/localStorage. The only network calls are same-origin Umbrava GraphQL requests (app.umbrava.com/api/graphql, the app's own session): List Heat's full-board scan and WO Assist's work-order / trip / clock-in / document reads, plus ONE write - BWN Views saves the column layout through Umbrava's own putUserPreference, the same preference the column chooser writes; everything else is offline. Toggle modules in BWN_MODULES below.
@@ -1318,10 +1318,23 @@
       return bwnGql(query, variables).then(function (data) {
         if (isWrite) {
           var env = data && data[op];
+          // F3: fail closed on an unrecognized write response. A registered write MUST return
+          // { success: <bool>, ... } under its own field name (op === the response field name
+          // for every adopter). A missing data[op] (a name/alias mismatch) or a non-boolean
+          // success means the write cannot be confirmed to have landed - classify it as an
+          // error, never a silent 'ok'. Verified safe: every current adopter selects `success`.
+          if (!env || typeof env.success !== 'boolean') {
+            var badShape = new Error(op + ': unrecognized write response (no {success} under data.' + op + ')');
+            badShape.bwnNonTransient = true;
+            writeAudit('error', { tries: tryNo, reason: 'unexpected-response-shape' });
+            throw badShape;
+          }
           if (env && env.success === false) {
             var refused = new Error(env.message || (op + ' was refused'));
             refused.bwnNonTransient = true;
-            writeAudit('error', { tries: tryNo, reason: refused.message });
+            // F5: record a fixed category, never the server message (env.message can echo
+            // input-derived text). The message still rides the thrown `refused` to the caller.
+            writeAudit('error', { tries: tryNo, reason: 'write-refused' });
             throw refused;
           }
           writeAudit('ok', { tries: tryNo });
@@ -1331,32 +1344,46 @@
         if (bwnIsTransient(err) && tryNo < maxTries) {
           return bwnDelay(bwnBackoff(tryNo)).then(function () { return attempt(tryNo + 1); });
         }
-        writeAudit('error', { tries: tryNo, reason: String(err && err.message || err) });
+        // F5: audit a fixed category, never the raw error text (which can echo input-derived
+        // server strings into the "PII-free" trail). The full error still rides the thrown err
+        // to the caller for its toast/log.
+        writeAudit('error', { tries: tryNo, reason: bwnIsTransient(err) ? 'transient-failure' : 'request-failed' });
         throw err;
       });
     }
-    // High-risk confirmation gate (fail-closed). A risk:'high' write must be proven confirmed:
-    // either the caller passes opts.confirmed===true (it ran its own confirm UI, e.g. dispatch's
-    // modal) OR an injected _confirmFn returns truthy. Neither -> refused, never a silent send.
-    if (isWrite && meta.risk === 'high' && opts.confirmed !== true) {
-      if (typeof _confirmFn !== 'function') {
-        writeAudit('denied', { reason: 'confirm-required' });
-        return Promise.reject(new Error('bwnGqlOp: "' + op + '" is high-risk and needs confirmation (no confirm handler set)'));
-      }
-      var details = {
-        op: op, target: meta.target, risk: meta.risk, ids: opts.ids || null,
-        current: (opts.current === undefined ? null : opts.current),
-        proposed: (opts.proposed === undefined ? null : opts.proposed),
-        count: (opts.count === undefined ? null : opts.count),
-        reason: opts.reason || null, irreversible: !!opts.irreversible
-      };
-      return Promise.resolve().then(function () { return _confirmFn(details); }).then(function (okd) {
-        if (!okd) {
-          writeAudit('denied', { reason: 'user-cancelled' });
-          throw new Error('bwnGqlOp: "' + op + '" cancelled at confirmation');
+    // High-risk confirmation gate (fail-closed, by construction). F4: a risk:'high' write has
+    // NO path to the transport except through this block - it returns in every sub-case (send
+    // or reject), so the trailing `return attempt(1)` below is reachable only by non-high-risk
+    // ops. A future high-risk writer therefore cannot skip the gate by omission: an absent
+    // confirmation is refused, never silently sent. Confirmation is proven EITHER by the
+    // caller's own UI (opts.confirmed===true, e.g. dispatch's modal) OR by an injected _confirmFn
+    // returning truthy.
+    // KNOWN RESIDUAL (flagged, NOT closed here): opts.confirmed===true is a caller assertion the
+    // wrapper trusts - it cannot tell a genuine confirm from a hardcoded literal. Closing that
+    // would mean dropping bare-boolean trust and mandating an injected _confirmFn, which every
+    // current high-risk adopter would fail (none inject one) - a live-behavior change, out of scope.
+    if (isWrite && meta.risk === 'high') {
+      if (opts.confirmed !== true) {
+        if (typeof _confirmFn !== 'function') {
+          writeAudit('denied', { reason: 'confirm-required' });
+          return Promise.reject(new Error('bwnGqlOp: "' + op + '" is high-risk and needs confirmation (no confirm handler set)'));
         }
-        return attempt(1);
-      });
+        var details = {
+          op: op, target: meta.target, risk: meta.risk, ids: opts.ids || null,
+          current: (opts.current === undefined ? null : opts.current),
+          proposed: (opts.proposed === undefined ? null : opts.proposed),
+          count: (opts.count === undefined ? null : opts.count),
+          reason: opts.reason || null, irreversible: !!opts.irreversible
+        };
+        return Promise.resolve().then(function () { return _confirmFn(details); }).then(function (okd) {
+          if (!okd) {
+            writeAudit('denied', { reason: 'user-cancelled' });
+            throw new Error('bwnGqlOp: "' + op + '" cancelled at confirmation');
+          }
+          return attempt(1);
+        });
+      }
+      return attempt(1);
     }
     return attempt(1);
   }
