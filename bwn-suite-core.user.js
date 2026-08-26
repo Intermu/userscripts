@@ -147,6 +147,60 @@
       } catch (e) { /* best-effort */ }
     }
 
+    // ---- Per-client status/closeout config layer (T10) ------------------------
+    // An empty `clients` table is a NO-OP: bwnClientProfile falls back to
+    // CLIENT_DEFAULTS_SEED, so every consumer that reads a default value behaves
+    // exactly as before. Overrides live in bwn:config under `clients` (and an optional
+    // `clientDefaults`), preserved through cfg()/cfgSave like any other unknown key -
+    // cfg()'s numeric-coercion loop only touches CFG_DEFAULTS keys, never `clients`.
+    var CLIENT_DEFAULTS_SEED = {
+      requiredStatuses: [],
+      closeout: { docs: ['signed ticket', 'sign-in/out', 'before/after photos'], enforce: true },
+      refFields: { sourceJob: false, sourcePo: false },
+      cadenceDays: null
+    };
+    // Seed profiles keyed by alpha-only-lowercased client name (bwnClientKey). clientId is
+    // recorded for cross-checking against the live clientTenantProfileId; the resolver still
+    // matches by NAME. refFields opt a client into the intake source-ref gate.
+    var CLIENT_PROFILE_SEED = {
+      'amazon': { clientId: '20321', refFields: { sourceJob: true } },
+      'cwamazon': { clientId: '20432', refFields: { sourceJob: true, sourcePo: false } },
+      'jllamazon': { clientId: '20394', refFields: { sourceJob: true } },
+      'caleresinc': { clientId: null },
+      'transformsrbrandsllc': { clientId: '23914', refFields: { sourceJob: true, sourcePo: true } }
+    };
+    // Shallow merge with ONE level of depth over the two nested config objects (closeout,
+    // refFields) so a partial override (e.g. {refFields:{sourceJob:true}}) keeps its sibling
+    // defaults. Every other key is replaced wholesale. Nested objects are cloned so a merge
+    // never mutates CLIENT_DEFAULTS_SEED.
+    function deepMerge() {
+      var out = {};
+      for (var i = 0; i < arguments.length; i++) {
+        var src = arguments[i];
+        if (!src || typeof src !== 'object') continue;
+        Object.keys(src).forEach(function (k) {
+          var v = src[k];
+          if ((k === 'closeout' || k === 'refFields') && v && typeof v === 'object') {
+            out[k] = Object.assign({}, out[k] || {}, v);
+          } else {
+            out[k] = v;
+          }
+        });
+      }
+      return out;
+    }
+    // Client name -> profile-table key: alpha-only, lowercased (reuses alphaOnly / BWN.alphaOnly).
+    function bwnClientKey(name) { return alphaOnly(name).toLowerCase(); }
+    // Resolved per-WO client profile: defaults <- optional cfg().clientDefaults <- the client's
+    // own row from cfg().clients (or the seed table when none is stored). Unknown client ->
+    // CLIENT_DEFAULTS_SEED unchanged.
+    function bwnClientProfile(state) {
+      var c = cfg();
+      var table = c.clients || CLIENT_PROFILE_SEED;
+      var over = table[bwnClientKey((state && state.hd && state.hd.client) || '')] || {};
+      return deepMerge(CLIENT_DEFAULTS_SEED, c.clientDefaults || {}, over);
+    }
+
     // ---- Money / date / vendor-name parsing -----------------------------------
     function money(n) {
       return '$' + n.toLocaleString('en-US', { minimumFractionDigits: 2, maximumFractionDigits: 2 });
@@ -750,6 +804,7 @@
       VERSION: VERSION,
       woId: woId, busGet: busGet, busPut: busPut, busPatch: busPatch, busHeatGet: busHeatGet, busVendors: busVendors,
       CFG_DEFAULTS: CFG_DEFAULTS, cfg: cfg, cfgSave: cfgSave,
+      CLIENT_DEFAULTS_SEED: CLIENT_DEFAULTS_SEED, CLIENT_PROFILE_SEED: CLIENT_PROFILE_SEED, bwnClientProfile: bwnClientProfile,
       money: money, parseMoney: parseMoney, parseBare: parseBare, parseUSDate: parseUSDate,
       alphaOnly: alphaOnly, lcsLen: lcsLen,
       inputVal: inputVal, setNativeValue: setNativeValue,
@@ -3241,6 +3296,11 @@
       // safety net so a future "Cancelled - Duplicate"-type status cannot leak chases).
       if (woPhase === 'terminal' || (!woPhase && /\b(closed|cancell?ed|declined|revoked|void)\b/i.test(state.status || ''))) return acts;
 
+      // Per-client profile (T10): resolved from bwn:config. An unconfigured client returns
+      // CLIENT_DEFAULTS_SEED, so the refField / closeout-doc-type / cadence consumers below
+      // are inert (byte-identical output) until a client is actually configured.
+      var profile = BWN.bwnClientProfile(state);
+
       // AUTHORED PLAN merges into the playbook (Phase 1 - the takeover early-return is
       // gone). When the coordinator (or the AI 'Recent Update') has posted a specific
       // "Next Actions Required" list, those items join the generated steps in ONE
@@ -3331,6 +3391,11 @@
         if (!(state.nte && state.nte.amount > 0)) miss.push('NTE / client budget');
         if (!bwnPrioNum(state.priority)) miss.push('priority (P1-P4)');
         if (!(hd.location || hd.addr)) miss.push('site / location');
+        // Per-client required source refs (T10): a client that files WOs against its own job/PO
+        // numbers needs them at intake for downstream matching. Blocking (joins miss[]); off by
+        // default (refFields all false) so an unconfigured client is unaffected.
+        if (profile.refFields.sourceJob && !String(hd.sourceJob || '').trim()) miss.push('source job #');
+        if (profile.refFields.sourcePo && !String(hd.sourcePo || '').trim()) miss.push('source PO #');
         if (!String(hd.trade || '').trim()) softMiss.push('trade');
         if (!String(hd.scope || '').trim()) softMiss.push('scope of work');
         var allMiss = miss.concat(softMiss);
@@ -3439,6 +3504,25 @@
       // (the same signal the confirm steps use).
       if (woPhase === 'confirmcomplete' || woPhase === 'costreview') {
         var docs = state.docs;
+        // Doc-TYPE advisory (T10): when the client profile lists required closeout doc types
+        // and docs ARE on file, flag any required type not matched (case-insensitive substring)
+        // against a document's label/displayFileName. ADVISORY only - it never blocks the advance
+        // gate; ships soft (per approval) until validated on real docs, because matching by OCR'd
+        // labels is unproven. The confident-empty docs:none block below is UNCHANGED and stays the
+        // blocking signal; the `docs === null` unknown guard is preserved by the `docs &&` tests.
+        var coDocs = (profile.closeout && profile.closeout.docs) || [];
+        if (docs && docs.count > 0 && coDocs.length && profile.closeout.enforce) {
+          var coLabels = (docs.docs || []).map(function (d) { return ((d.label || '') + ' ' + (d.displayFileName || '')).toLowerCase(); });
+          var coMiss = coDocs.filter(function (t) { var tl = String(t).toLowerCase(); return !coLabels.some(function (L) { return L.indexOf(tl) !== -1; }); });
+          if (coMiss.length) {
+            acts.push({
+              key: 'docsverify:' + coMiss.join(','),
+              label: 'Verify closeout docs (' + coMiss.join(', ') + ')',
+              why: 'Documents are on file but these required closeout types were not matched: ' + coMiss.join(', ') + '. Advisory only - confirm they are attached before closing (does not block advancing).',
+              text: 'Hi - re: ' + ref + '. Before we close out, please confirm these closeout documents are attached: ' + coMiss.join(', ') + '.'
+            });
+          }
+        }
         if (docs && docs.count === 0) {
           acts.push({
             key: 'docs:none',
@@ -3537,7 +3621,9 @@
       // refresh - a structured field signal, not note-wording matching. Fires only
       // when notes are actually loaded (noteCount > 0) so an unscanned WO is not nagged.
       if (!waitOnClient && state.noteCount > 0 && state.pos.some(function (p) { return p.amount > 0 && !p.done; })) {
-        var cad = Math.max(2, Math.round(7 * bwnPrioMult(state.priority)));
+        // Base cadence: the client profile's override when set, else the default 7d (T10).
+        var cadBase = profile.cadenceDays != null ? profile.cadenceDays : 7;
+        var cad = Math.max(2, Math.round(cadBase * bwnPrioMult(state.priority)));
         var ccd = state.lastClientNoteDays;
         if (ccd === null || ccd > cad) {
           acts.push({
@@ -6735,7 +6821,10 @@
           // v2 dataset fields - carried into heatStore by absorb() and emitted by heatDatasetRows.
           sourceJob: sourceJob, sourcePo: sourcePo, projectType: projectType, woDate: heatDateStr(created),
           // In-House Dispatch upgrade: raw created timestamp (woDate truncates the time), location #, trades.
-          woCreatedAt: (created == null ? '' : String(created)), locationNumber: locationNumber, trade: trade, tradeSys: tradeSys
+          woCreatedAt: (created == null ? '' : String(created)), locationNumber: locationNumber, trade: trade, tradeSys: tradeSys,
+          // T10: the client's tenant profile id (the query already selects it) - carried so the
+          // next-step engine can record it alongside the resolved client profile.
+          clientTenantProfileId: String(g(/(^|\.)clienttenantprofileid$/i) || '')
         }
       };
     }
@@ -7719,7 +7808,10 @@
       var noteTs = BWN.parseUSDate(e.lastNote);
       try {
         var acts = bwnActsEngine({
-          hd: { wo: e.wo ? 'W-' + e.wo : '', tracking: e.tracking || '', location: e.client || '' },
+          // T10: hd.client feeds the per-client profile resolver; sourceJob/sourcePo are carried
+          // from the row so the intake ref-gate does not false-positive when the refs ARE set.
+          hd: { wo: e.wo ? 'W-' + e.wo : '', tracking: e.tracking || '', location: e.client || '', client: e.client || '', sourceJob: e.sourceJob || '', sourcePo: e.sourcePo || '' },
+          clientId: e.clientTenantProfileId || '',
           status: e.status || '', priority: e.prio || '',
           hrs: isNaN(hrs) ? null : hrs,
           due: due,
@@ -8340,6 +8432,20 @@
         w.appendChild(l); w.appendChild(inp); grid.appendChild(w);
       });
       panel.appendChild(grid);
+      // Per-client profiles (T10): a JSON override table for bwn:config `clients`. Empty/unset
+      // falls back to the seed table. Prefilled from the live value; parsed + validated on Save.
+      var cw = document.createElement('div'); cw.className = 'jsonw';
+      cw.style.marginTop = '8px';
+      var cl2 = document.createElement('label');
+      cl2.textContent = 'Per-client profiles (JSON) — closeout docs, ref-field gates, cadence';
+      cl2.style.display = 'block';
+      var cta = document.createElement('textarea');
+      cta.rows = 10; cta.spellcheck = false;
+      cta.style.width = '100%'; cta.style.boxSizing = 'border-box';
+      cta.style.fontFamily = 'var(--bwn-mono, ui-monospace, monospace)'; cta.style.fontSize = '11px';
+      try { cta.value = JSON.stringify(C.clients || BWN.CLIENT_PROFILE_SEED, null, 2); } catch (eJ) { cta.value = '{}'; }
+      cw.appendChild(cl2); cw.appendChild(cta);
+      panel.appendChild(cw);
       var pf = document.createElement('div'); pf.className = 'pf';
       var hint = document.createElement('span'); hint.className = 'hint';
       hint.textContent = 'saving invalidates scan results \u2014 rescan after';
@@ -8361,6 +8467,12 @@
           if (isNaN(n) || n < 0) { inputs[f[0]].style.borderColor = 'var(--bwn-bad)'; ok = false; }
           else { inputs[f[0]].style.borderColor = ''; partial[f[0]] = n; }
         });
+        // Per-client profiles (T10): parse the JSON; red-border on a parse error, same as the
+        // numeric fields. An object is saved under `clients`; cfgSave preserves the rest.
+        var parsedClients;
+        try { parsedClients = JSON.parse(cta.value); cta.style.borderColor = ''; }
+        catch (eP) { cta.style.borderColor = 'var(--bwn-bad)'; ok = false; }
+        if (ok && parsedClients && typeof parsedClients === 'object') partial.clients = parsedClients;
         if (!ok) return;
         bwnConfigSave(partial);
         saveBtn.textContent = 'Saved \u2713';

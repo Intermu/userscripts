@@ -72,7 +72,7 @@ function build(prioSrc, gateSrc) {
   var src =
     '(function () {\n' +
     prioSrc + '\n' +
-    'function intakeFrag(woPhase, state, hd, ref) {\n  var acts = [];\n' + gateSrc + '\n  return acts;\n}\n' +
+    'function intakeFrag(woPhase, state, hd, ref, profile) {\n  profile = profile || { refFields: { sourceJob: false, sourcePo: false } };\n  var acts = [];\n' + gateSrc + '\n  return acts;\n}\n' +
     'return { intakeFrag: intakeFrag };\n})()';
   return vm.runInContext(src, sandbox, { filename: 'intake-gate.js' });
 }
@@ -124,6 +124,33 @@ function runCases(prioSrc, gateSrc) {
   eq('the gate also fires at schedule', gate('schedule', null, 'P2', FULL_HD).length, 1);
   eq('and at accept', gate('accept', null, 'P2', FULL_HD).length, 1);
 
+  // --- T10: per-client source-ref gate (blocking, off by default) --------------
+  // A profile with refFields opts a client into requiring source job/PO # at intake.
+  function gateP(woPhase, hd, profile) { return m.intakeFrag(woPhase, { nte: NTE_OK, priority: 'P2' }, hd || {}, 'W-1', profile); }
+  var DEFAULT_PROFILE = { refFields: { sourceJob: false, sourcePo: false } };
+  var AMAZON_PROFILE = { refFields: { sourceJob: true, sourcePo: false } };
+  var SR_PROFILE = { refFields: { sourceJob: true, sourcePo: true } };
+
+  // default profile: a fully-specified WO with no source refs still clears (byte-identical)
+  eq('default profile never asks for a source job #', gateP('intake', FULL_HD, DEFAULT_PROFILE).length, 0);
+
+  // amazon profile, source job # missing -> a blocking miss listing it
+  var amzMiss = gateP('intake', FULL_HD, AMAZON_PROFILE);
+  eq('amazon profile flags a missing source job #', amzMiss.length, 1);
+  eq('and the key names it in the missing SET', amzMiss[0].key, 'intake:source job #');
+  ok('and it is phrased as a REQUIRED-field block, not advisory', (amzMiss[0].why || '').indexOf('Required field(s) not set') !== -1, amzMiss[0].why);
+
+  // amazon profile, source job # present -> self-clears (no false positive)
+  eq('a present source job # clears the amazon gate', gateP('intake', { location: 'S1', trade: 'HVAC', scope: 'x', sourceJob: 'J-9' }, AMAZON_PROFILE).length, 0);
+
+  // SR profile requires BOTH refs; both missing -> both listed, in order after site
+  var srMiss = gateP('intake', { location: 'S1', trade: 'HVAC', scope: 'x' }, SR_PROFILE);
+  eq('SR profile lists both source refs, after the site fields', srMiss[0].key, 'intake:source job #,source PO #');
+
+  // sourcePo only fires when the profile asks for it
+  eq('sourcePo is never demanded under the amazon (sourceJob-only) profile',
+    (gateP('intake', { location: 'S1', trade: 'HVAC', scope: 'x', sourceJob: 'J-9' }, AMAZON_PROFILE)[0] || { key: '' }).key.indexOf('source PO #'), -1);
+
   return out;
 }
 
@@ -140,7 +167,11 @@ var MUTATIONS = [
   { what: 'trade promoted from advisory to a hard block',
     gate: function (s) { return mutate(s, "if (!String(hd.trade || '').trim()) softMiss.push('trade');", "if (!String(hd.trade || '').trim()) miss.push('trade');"); } },
   { what: 'the key delimiter changed (checked-state migration would break)',
-    gate: function (s) { return mutate(s, "key: 'intake:' + allMiss.join(',')", "key: 'intake:' + allMiss.join(';')"); } }
+    gate: function (s) { return mutate(s, "key: 'intake:' + allMiss.join(',')", "key: 'intake:' + allMiss.join(';')"); } },
+  { what: 'the per-client source-job gate silently disabled',
+    gate: function (s) { return mutate(s, "if (profile.refFields.sourceJob && !String(hd.sourceJob || '').trim()) miss.push('source job #');", "if (false) miss.push('source job #');"); } },
+  { what: 'the per-client source-PO gate silently disabled',
+    gate: function (s) { return mutate(s, "if (profile.refFields.sourcePo && !String(hd.sourcePo || '').trim()) miss.push('source PO #');", "if (false) miss.push('source PO #');"); } }
 ];
 
 function main() {

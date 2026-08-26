@@ -430,7 +430,11 @@ var VERDICT_PRELUDE = [
   '  money: function (n) { return "$" + n.toLocaleString("en-US", { minimumFractionDigits: 2, maximumFractionDigits: 2 }); },',
   '  parseMoney: function (s) { var m = (s || "").match(/\\$\\s*([\\d,]+(?:\\.\\d{1,2})?)/); return m ? parseFloat(m[1].replace(/,/g, "")) : null; },',
   '  parseBare: function (s) { var n = parseFloat(String(s || "").replace(/[$,\\s]/g, "")); return isNaN(n) ? null : n; },',
-  '  parseNoteDateLoose: function () { return null; }',
+  '  parseNoteDateLoose: function () { return null; },',
+  // T10: the engine resolves a per-client profile. A board row carries no client config, so the
+  // stub returns default-equivalent fields (refFields off, empty closeout.docs, cadence 7) -
+  // keeping the heat scan output byte-identical to before the profile layer existed.
+  '  bwnClientProfile: function () { return { requiredStatuses: [], closeout: { docs: [], enforce: true }, refFields: { sourceJob: false, sourcePo: false }, cadenceDays: null }; }',
   '};'
 ].join('\n');
 // Everything the real engine leans on that is NOT the engine: DOM reads, money formatting,
