@@ -4953,6 +4953,15 @@
               tkb.title = 'Create a follow-up task on this work order (assigned to the coordinator)';
               tkb.addEventListener('click', function () { taskHelperOpen(state, act); });
               btns.appendChild(tkb);
+              // "Change status…" - only on the advance-to-complete gate + the phase-chase rows.
+              if (act.key === 'advance:workcomplete' || act.key.indexOf('phase:') === 0) {
+                var csb = document.createElement('button');
+                csb.type = 'button'; csb.className = 'bwn-wa-btn ghost'; csb.textContent = 'Change status…';
+                csb.style.cssText = 'padding:3px 9px;font-size:10px;';
+                csb.title = 'Change this work order’s status (guided, logged, typed confirm)';
+                csb.addEventListener('click', function () { statusHelperOpen(state, act); });
+                btns.appendChild(csb);
+              }
             })(a);
           }
           r.appendChild(cb); r.appendChild(main); r.appendChild(btns);
@@ -5268,6 +5277,48 @@
       });
     }
 
+    // B2 - patchWorkOrder(data: PatchWorkOrderInput!). statusId goes ALONE in data (bundling other
+    // fields blanks them - dispatch's pin). patchWorkOrder is risk:'high' in BWN_OPS: the wrapper
+    // refuses it unless confirmed:true (this own-dialog path) OR an injected _confirmFn returns
+    // truthy. Core wires NO _confirmFn, so confirmed:true is the sanctioned gate - exactly the path
+    // bwn-dispatch uses after its own modal confirm.
+    var PATCH_M = 'mutation PatchWorkOrder($data: PatchWorkOrderInput!) { patchWorkOrder(data: $data) { success message } }';
+    function waChangeStatus(woNumber, targetId, targetName, currentStatusName, currentStatusId) {
+      // Noop pre-check: already at the target status -> skip the write entirely. A high-risk
+      // mutation that changes nothing but resets the time-in-status clock is pure downside.
+      if (currentStatusId != null && Number(currentStatusId) === Number(targetId)) {
+        return Promise.resolve({ noop: true });
+      }
+      return bwnGqlOp('patchWorkOrder', PATCH_M, { data: {
+        workOrderNumber: Number(woNumber),
+        statusId: { shouldInclude: true, value: targetId }
+      } }, {
+        confirmed: true,
+        feature: 'woAssist',
+        validate: function (v) { var d = v && v.data || {}; if (!d.workOrderNumber) return 'no WO number'; if (!(d.statusId && Number.isInteger(d.statusId.value))) return 'no target status id'; return true; },
+        ids: { wo: woNumber },
+        current: currentStatusName, proposed: targetName, irreversible: true,
+        before: currentStatusName, after: targetName
+      });
+    }
+    // Re-entry-guarded status change: disables on submit; on a REAL change drafts the reason as an
+    // internal WO note through hooks.draftNote and reports ok; on a noop reports it WITHOUT a write;
+    // re-enables the button on error. Note text is built here so it is identical in prod and test.
+    function waStatusSubmit(btn, woNumber, targetId, targetName, currentStatusName, currentStatusId, reason, hooks) {
+      hooks = hooks || {};
+      if (btn.disabled) return null;
+      btn.disabled = true;
+      return waChangeStatus(woNumber, targetId, targetName, currentStatusName, currentStatusId).then(function (r) {
+        if (r && r.noop) { if (hooks.noop) hooks.noop(); return r; }
+        if (hooks.draftNote) hooks.draftNote('Status changed to "' + targetName + '" (from "' + currentStatusName + '"). ' + reason);
+        if (hooks.ok) hooks.ok(r);
+        return r;
+      }, function (e) {
+        btn.disabled = false;
+        if (hooks.fail) hooks.fail(e);
+        throw e;
+      });
+    }
     // ===== WA-WRITES END v1 =====
 
     // ---- Guided-WRITE dialogs (mount only when BWN_MODULES.woAssistWrites is on) -------------
@@ -5275,6 +5326,19 @@
     // .bwn-ecd* classes, and mirror ecdHelperOpen's structure (a11y dialog, Esc / backdrop close).
     // Every piece of dynamic text is set via textContent / input value - never innerHTML.
 
+    // The tenant WO status list, for the Change-status dropdown + the noop pre-check. WA_STATUS_Q
+    // is copied verbatim from bwn-dispatch.user.js (STATUS_Q, proven live). Session-cached; active.
+    var WA_STATUS_Q = 'query{ workOrderStatuses{ id name isActive } }';
+    var _waStatuses = null;
+    function waFetchStatuses() {
+      if (_waStatuses) return Promise.resolve(_waStatuses);
+      return bwnGql(WA_STATUS_Q, {}).then(function (d) {
+        var arr = (d && d.workOrderStatuses) || [];
+        _waStatuses = arr.filter(function (s) { return s && s.id != null && s.isActive !== false; })
+          .sort(function (a, b) { return String(a.name).localeCompare(String(b.name)); });
+        return _waStatuses;
+      }, function () { return []; });
+    }
     // Assignee init for the task dialog: the WO's current coordinator (assignedTo GUID) + the
     // active-user list, both PROVEN read selectors composed into ONE round-trip -
     // workOrder(workOrderNumber){ assignedTo } (dispatch DISP_WO_Q / proposal-actions Q_WO) and
@@ -5356,6 +5420,91 @@
       ov.appendChild(card); document.body.appendChild(ov);
       document.addEventListener('keydown', onKey);
       releaseA11y = BWN.a11yDialog(card, { label: 'Create follow-up task', modal: true });
+    }
+
+    function statusHelperOpen(state, act) {
+      if (!onWO() || !currentWOId()) { alert('Open a work order to change its status.'); return; }
+      ensureEcdStyle();
+      var woNum = currentWOId();
+      var curName = (state.status || '').trim();
+      var old = document.getElementById('bwn-ecd-overlay'); if (old) old.remove();
+      var ov = document.createElement('div'); ov.id = 'bwn-ecd-overlay';
+      var card = document.createElement('div'); card.className = 'bwn-ecd';
+      var releaseA11y = null;
+      function close() { document.removeEventListener('keydown', onKey); if (releaseA11y) { releaseA11y(); releaseA11y = null; } ov.remove(); }
+      function onKey(e) { if (e.key === 'Escape') { e.stopPropagation(); close(); } }
+      ov.addEventListener('mousedown', function (e) { if (e.target === ov) close(); });
+
+      var hd = document.createElement('div'); hd.className = 'bwn-ecd-hd'; hd.textContent = 'Change work-order status'; card.appendChild(hd);
+      var body = document.createElement('div'); body.className = 'bwn-ecd-body';
+      var cur = document.createElement('div'); cur.className = 'bwn-ecd-cur';
+      cur.textContent = 'Current status: ' + (curName || '(unknown)') + ((state.hrs !== null && state.hrs !== undefined) ? '  ·  ' + Math.round(state.hrs) + 'h in status' : '');
+      body.appendChild(cur);
+
+      var sl = document.createElement('label'); sl.className = 'bwn-ecd-lbl'; sl.textContent = 'New status'; body.appendChild(sl);
+      var ssel = document.createElement('select'); ssel.className = 'bwn-ecd-date';
+      var lo = document.createElement('option'); lo.value = ''; lo.textContent = 'Loading statuses…'; ssel.appendChild(lo);
+      body.appendChild(ssel);
+
+      var warn = document.createElement('div'); warn.className = 'bwn-ecd-basis';
+      warn.textContent = '⚠ Changing status resets the time-in-status clock and cannot be undone.';
+      body.appendChild(warn);
+
+      var rl = document.createElement('label'); rl.className = 'bwn-ecd-lbl'; rl.textContent = 'Reason (required - drafted as an internal WO note)'; body.appendChild(rl);
+      var ri = document.createElement('textarea'); ri.className = 'bwn-ecd-reason'; ri.rows = 2; body.appendChild(ri);
+
+      var cl = document.createElement('label'); cl.className = 'bwn-ecd-lbl'; cl.textContent = 'Type the new status name exactly to confirm'; body.appendChild(cl);
+      var ci = document.createElement('input'); ci.type = 'text'; ci.className = 'bwn-ecd-date'; ci.autocomplete = 'off'; body.appendChild(ci);
+      card.appendChild(body);
+
+      var ft = document.createElement('div'); ft.className = 'bwn-ecd-ft';
+      var sp = document.createElement('span'); sp.className = 'sp'; sp.textContent = 'High-risk: typed confirm required.'; ft.appendChild(sp);
+      var go = document.createElement('button'); go.type = 'button'; go.className = 'pri'; go.textContent = 'Change status'; go.disabled = true;
+      var cancel = document.createElement('button'); cancel.type = 'button'; cancel.textContent = 'Cancel'; cancel.addEventListener('click', close);
+      ft.appendChild(go); ft.appendChild(cancel); card.appendChild(ft);
+
+      var currentStatusId = null;
+      function selOption() { return ssel.options[ssel.selectedIndex] || null; }
+      function selName() { var op = selOption(); return op ? (op.getAttribute('data-name') || '') : ''; }
+      function refreshGate() {
+        var tName = selName();
+        // enabled ONLY when a real target is picked, a reason is typed, and the typed name matches
+        go.disabled = !(tName && ri.value.trim() && ci.value.trim() === tName);
+      }
+      ssel.addEventListener('change', function () { ci.value = ''; refreshGate(); });
+      ri.addEventListener('input', refreshGate);
+      ci.addEventListener('input', refreshGate);
+
+      waFetchStatuses().then(function (list) {
+        if (document.getElementById('bwn-ecd-overlay') !== ov) return;
+        ssel.textContent = '';
+        var o = document.createElement('option'); o.value = ''; o.textContent = 'Select a status…'; ssel.appendChild(o);
+        list.forEach(function (s) {
+          var op = document.createElement('option'); op.value = String(s.id); op.setAttribute('data-name', s.name); op.textContent = s.name; ssel.appendChild(op);
+          if (curName && String(s.name).trim().toLowerCase() === curName.toLowerCase()) currentStatusId = s.id;
+        });
+        refreshGate();
+      });
+
+      go.addEventListener('click', function () {
+        var op = selOption();
+        if (!op || !op.value) { alert('Pick a target status.'); return; }
+        var targetId = parseInt(op.value, 10);
+        var targetName = op.getAttribute('data-name') || '';
+        var reason = ri.value.trim();
+        if (!reason) { alert('A reason is required.'); return; }
+        if (ci.value.trim() !== targetName) { alert('Type the target status name exactly to confirm.'); return; }
+        waStatusSubmit(go, woNum, targetId, targetName, curName, currentStatusId, reason, {
+          draftNote: function (txt) { try { insertWONote(txt, function () { /* posted manually by the coordinator */ }, 'Internal'); } catch (e) { } },
+          ok: function () { close(); BWN.toast('success', 'Status set to "' + targetName + '" on W-' + woNum + '. Reason drafted as an internal note.'); },
+          noop: function () { close(); BWN.toast('info', 'Already at "' + targetName + '" - nothing changed.'); },
+          fail: function (e) { BWN.toast('error', 'Status not changed: ' + (e && e.message || 'unknown error')); }
+        });
+      });
+
+      ov.appendChild(card); document.body.appendChild(ov);
+      document.addEventListener('keydown', onKey);
+      releaseA11y = BWN.a11yDialog(card, { label: 'Change work-order status', modal: true });
     }
 
     // Auto-pop once per WO visit when the ECD is missing/overdue AND the info the
