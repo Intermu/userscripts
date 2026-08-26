@@ -167,7 +167,8 @@
       gpWarn: 30, gpBad: 20,
       hrsWarn: 72, hrsBad: 240,
       activeMult: 0.5,
-      dueWarnDays: 3, schedGraceDays: 1, noteStaleDays: 7
+      dueWarnDays: 3, schedGraceDays: 1, noteStaleDays: 7,
+      unbilledStaleDays: 3   // T8-B1: days a Work-Complete WO may sit before an "advance to invoicing" row
     };
     function cfg() {
       var out = {};
@@ -189,6 +190,60 @@
         localStorage.setItem('bwn:config', JSON.stringify(cur));
         document.dispatchEvent(new CustomEvent('bwn:config'));   // WO Assist + List Heat live-refresh on this
       } catch (e) { /* best-effort */ }
+    }
+
+    // ---- Per-client status/closeout config layer (T10) ------------------------
+    // An empty `clients` table is a NO-OP: bwnClientProfile falls back to
+    // CLIENT_DEFAULTS_SEED, so every consumer that reads a default value behaves
+    // exactly as before. Overrides live in bwn:config under `clients` (and an optional
+    // `clientDefaults`), preserved through cfg()/cfgSave like any other unknown key -
+    // cfg()'s numeric-coercion loop only touches CFG_DEFAULTS keys, never `clients`.
+    var CLIENT_DEFAULTS_SEED = {
+      requiredStatuses: [],
+      closeout: { docs: ['signed ticket', 'sign-in/out', 'before/after photos'], enforce: true },
+      refFields: { sourceJob: false, sourcePo: false },
+      cadenceDays: null
+    };
+    // Seed profiles keyed by alpha-only-lowercased client name (bwnClientKey). clientId is
+    // recorded for cross-checking against the live clientTenantProfileId; the resolver still
+    // matches by NAME. refFields opt a client into the intake source-ref gate.
+    var CLIENT_PROFILE_SEED = {
+      'amazon': { clientId: '20321', refFields: { sourceJob: true } },
+      'cwamazon': { clientId: '20432', refFields: { sourceJob: true, sourcePo: false } },
+      'jllamazon': { clientId: '20394', refFields: { sourceJob: true } },
+      'caleresinc': { clientId: null },
+      'transformsrbrandsllc': { clientId: '23914', refFields: { sourceJob: true, sourcePo: true } }
+    };
+    // Shallow merge with ONE level of depth over the two nested config objects (closeout,
+    // refFields) so a partial override (e.g. {refFields:{sourceJob:true}}) keeps its sibling
+    // defaults. Every other key is replaced wholesale. Nested objects are cloned so a merge
+    // never mutates CLIENT_DEFAULTS_SEED.
+    function deepMerge() {
+      var out = {};
+      for (var i = 0; i < arguments.length; i++) {
+        var src = arguments[i];
+        if (!src || typeof src !== 'object') continue;
+        Object.keys(src).forEach(function (k) {
+          var v = src[k];
+          if ((k === 'closeout' || k === 'refFields') && v && typeof v === 'object') {
+            out[k] = Object.assign({}, out[k] || {}, v);
+          } else {
+            out[k] = v;
+          }
+        });
+      }
+      return out;
+    }
+    // Client name -> profile-table key: alpha-only, lowercased (reuses alphaOnly / BWN.alphaOnly).
+    function bwnClientKey(name) { return alphaOnly(name).toLowerCase(); }
+    // Resolved per-WO client profile: defaults <- optional cfg().clientDefaults <- the client's
+    // own row from cfg().clients (or the seed table when none is stored). Unknown client ->
+    // CLIENT_DEFAULTS_SEED unchanged.
+    function bwnClientProfile(state) {
+      var c = cfg();
+      var table = c.clients || CLIENT_PROFILE_SEED;
+      var over = table[bwnClientKey((state && state.hd && state.hd.client) || '')] || {};
+      return deepMerge(CLIENT_DEFAULTS_SEED, c.clientDefaults || {}, over);
     }
 
     // ---- Money / date / vendor-name parsing -----------------------------------
@@ -794,6 +849,7 @@
       VERSION: VERSION,
       woId: woId, busGet: busGet, busPut: busPut, busPatch: busPatch, busHeatGet: busHeatGet, busVendors: busVendors,
       CFG_DEFAULTS: CFG_DEFAULTS, cfg: cfg, cfgSave: cfgSave,
+      CLIENT_DEFAULTS_SEED: CLIENT_DEFAULTS_SEED, CLIENT_PROFILE_SEED: CLIENT_PROFILE_SEED, bwnClientProfile: bwnClientProfile,
       money: money, parseMoney: parseMoney, parseBare: parseBare, parseUSDate: parseUSDate,
       alphaOnly: alphaOnly, lcsLen: lcsLen,
       inputVal: inputVal, setNativeValue: setNativeValue,
