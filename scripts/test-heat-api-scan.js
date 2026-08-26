@@ -441,6 +441,7 @@ var VERDICT_PRELUDE = [
 // note-date parsing, the escalation tier. Stubbed as leaves - none of them decides WHETHER a
 // step fires, they only decorate one that already did.
 var ENGINE_PRELUDE = [
+  'var parseUSDate = BWN.parseUSDate;',                   // the module alias the engine leans on (T8-A1's ECD parse)
   'function nvVendor(s) { return (s || "").replace(/\\s+/g, " ").trim().toUpperCase(); }',
   'function readDocs() { return null; }',                 // DOM read; a list row has none
   'function statPrefix(a) { return String(a.key || "").split(":")[0]; }',

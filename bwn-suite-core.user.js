@@ -3046,7 +3046,7 @@
       // Phase 2: docs (missing completion package at closure) sorts just under escalate
       // - closing without the signed ticket/photos is a hard block. intake (unactionable
       // WO at inception) sorts above the generic phase chase so "fix the WO" leads.
-      var base = { noshow: 100, stall: 96, escalate: 94, docs: 92, intake: 90, task: 88, dne: 82, ecd: 78, pocost: 72, poacc: 68, pomat: 66, poconf: 64, eta: 60, advance: 58, phase: 50, clientcad: 46, note: 44, anchor: 12 };
+      var base = { noshow: 100, stall: 96, ecdrisk: 95, escalate: 94, docs: 92, intake: 90, task: 88, dne: 82, ecd: 78, pocost: 72, poacc: 68, pomat: 66, poconf: 64, eta: 60, advance: 58, phase: 50, clientcad: 46, note: 44, anchor: 12 };
       var s = base[p]; if (s === undefined) s = 50;
       var cap = function (n) { return Math.max(0, Math.min(30, n || 0)); };
       if (p === 'noshow' && state.noShow) s += cap(Math.round((Date.now() - state.noShow.ms) / 86400000));
@@ -3475,6 +3475,30 @@
           acts.push({ key: 'poconf:' + p.sid + ':' + p.vendor, poNum: p.num, label: 'Confirm ' + p.vendor + ' completion + collect docs', why: 'PO ' + p.num + ' marked Confirm Complete', text: 'Hi - re: ' + ref + '. PO ' + p.num + ' is marked complete - please upload the completion package (signed ticket, sign-in/out, before/after photos) so we can confirm and invoice.', resolve: ACT_SIGNALS.stall });
         }
       });
+
+      // ---- ECD imminent + vendor unconfirmed + no completion (T8-A1, NO WRITE) ----
+      // A composite live-risk rule: the expected completion date is within 24h, active PO work
+      // exists, but no vendor visit is CONFIRMED (a structured schedDate on a non-'accept' PO)
+      // and nothing marks the job complete - so the ECD will blow unless the vendor is chased
+      // NOW. Read-only. Deliberately has NO ACT_SIGNALS entry: a note must not fake-clear it -
+      // it self-clears structurally when the ECD moves out of the window, a visit is confirmed,
+      // or the WO advances. Scores just under a stall (see scoreAct's ecdrisk base).
+      var ecdRiskMs = (state.due && state.due.raw) ? parseUSDate(state.due.raw) : null;
+      if (ecdRiskMs !== null) {
+        var hrsToEcd = (ecdRiskMs - Date.now()) / 3.6e6;
+        var ecdImminent = hrsToEcd > 0 && hrsToEcd <= 24;
+        var activeWork = state.pos.some(function (p) { return !p.done && p.amount > 0; });
+        var vendorConfirmed = state.pos.some(function (p) { return !p.done && p.amount > 0 && p.schedDate && p.poStatus !== 'accept'; });
+        var noCompletion = activeWork && woPhase !== 'confirmcomplete' && woPhase !== 'costreview' && !state.pos.some(function (p) { return p.poStatus === 'confirm'; });
+        if (ecdImminent && activeWork && !vendorConfirmed && noCompletion) {
+          acts.push({
+            key: 'ecdrisk:' + (state.due.raw || ''),
+            label: 'Chase vendor NOW - completion date within 24h and no visit confirmed',
+            why: 'Complete-by ' + state.due.raw + ' is ' + Math.round(hrsToEcd) + 'h away with active PO work but no confirmed visit - the ECD will blow without a scheduled tech on site',
+            text: 'Hi - URGENT re: ' + ref + '. The expected completion date (' + state.due.raw + ') is under 24 hours away and I have no confirmed visit on file. Please confirm today whether a tech is scheduled and on track to complete by then; if not, I need the real date immediately so I can update the client.'
+          });
+        }
+      }
 
       // Clocked Out: Complete = the tech has finished on-site. Before this WO can be
       // marked Work Complete, the coordinator confirms the FINAL cost on each PO line
