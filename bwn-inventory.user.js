@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         BWN Inventory (Broadway National)
 // @namespace    broadwaynational.bwn
-// @version      0.3.0
+// @version      0.3.1
 // @downloadURL  https://raw.githubusercontent.com/Intermu/userscripts/main/bwn-inventory.user.js
 // @updateURL    https://raw.githubusercontent.com/Intermu/userscripts/main/bwn-inventory.user.js
 // @description  Logs a stock movement into the Broadway inventory subledger from inside Umbrava. Pick a movement (receive / issue / transfer), a SKU, a quantity and warehouse(s); a receipt also takes a unit cost. Submit POSTs to the broadway-internal-ops SWA (x-bwn-key gated, your Umbrava session token vouched server-side), which appends to an append-only movement ledger on Azure Table Storage - updating live per-warehouse on-hand + moving-average value and posting the double-entry GL. The same modal looks up current on-hand (qty + value) per warehouse for a SKU (the thing the old Excel log could not answer). Item codes and warehouses come from the shared master catalog (curated on the SWA Inventory page): the SKU field suggests known items and the warehouse pickers list active warehouses, so a typo cannot silently fork a bin; if the catalog is unreachable it falls back to a per-user warehouse pick-list. Opened on a work order, it prefills the Work Order # into the movement note. Each submit carries a stable id so a retry after a dropped response never double-posts. Nothing sensitive lives in this script. Open it from the suite dock (📦 Inventory) or the Tampermonkey menu.
@@ -18,7 +18,7 @@
 (function () {
   'use strict';
 
-  var VER = '0.3.0';
+  var VER = '0.3.1';
   var FONT = "-apple-system,BlinkMacSystemFont,'Segoe UI','Helvetica Neue',Arial,sans-serif";
   var SWA_BASE = 'https://green-stone-0717dab0f.7.azurestaticapps.net';
   var PROXY_URL = SWA_BASE + '/api/inventory-stock';
@@ -196,6 +196,62 @@
 
   // ---- Drawer plumbing (Core owns the stylesheet; these lines are duplicated per module) ----
   var openEl = null;
+  // --- bwnFocusTrap: shared a11y focus manager for the BWN drawer-modal family (RM-B3 / ACC1) ---
+  // Sandboxes can't share a runtime object across the @grant boundary (see Core's BWN block), so
+  // each drawer-modal carries this BYTE-IDENTICAL copy; scripts/test-a11y-focus.js asserts the
+  // copies stay identical (drift guard) and runs the behaviour. On open it records the
+  // previously-focused element and, if focus is not already inside, moves it to the first
+  // focusable. It traps Tab / Shift-Tab within the modal's focusables. It self-releases when the
+  // modal gains .bwn-closing (the drawer exit contract) or leaves the DOM, restoring focus to the
+  // opener. Idempotent; returns release and also stashes it on el._bwnFocusRelease. Call it AFTER
+  // the modal is in the DOM and BEFORE the module's own initial .focus(), so the recorded element
+  // is the real opener, not an inner field.
+  function bwnFocusTrap(modalEl) {
+    if (!modalEl || !modalEl.addEventListener) return function () { };
+    var SEL = 'a[href],area[href],input:not([disabled]),select:not([disabled]),textarea:not([disabled]),button:not([disabled]),[tabindex]:not([tabindex="-1"]),[contenteditable="true"],[contenteditable=""]';
+    var prev = document.activeElement;
+    var released = false, mo = null, pmo = null;
+    function visible(el) { return el.offsetWidth > 0 || el.offsetHeight > 0 || (el.getClientRects && el.getClientRects().length > 0); }
+    function focusables() { return [].slice.call(modalEl.querySelectorAll(SEL)).filter(visible); }
+    function onKey(e) {
+      if (e.key !== 'Tab') return;
+      var f = focusables();
+      if (!f.length) { e.preventDefault(); return; }
+      var first = f[0], last = f[f.length - 1], a = document.activeElement;
+      if (e.shiftKey) { if (a === first || !modalEl.contains(a)) { e.preventDefault(); last.focus(); } }
+      else if (a === last || !modalEl.contains(a)) { e.preventDefault(); first.focus(); }
+    }
+    function release() {
+      if (released) return; released = true;
+      try { modalEl.removeEventListener('keydown', onKey, true); } catch (e) { }
+      try { if (mo) mo.disconnect(); } catch (e) { }
+      try { if (pmo) pmo.disconnect(); } catch (e) { }
+      if (modalEl._bwnFocusRelease === release) modalEl._bwnFocusRelease = null;
+      try { if (prev && prev.focus && prev.isConnected !== false) prev.focus(); } catch (e) { }
+    }
+    modalEl.addEventListener('keydown', onKey, true);
+    modalEl._bwnFocusRelease = release;
+    try {
+      mo = new MutationObserver(function () { if (modalEl.classList && modalEl.classList.contains('bwn-closing')) release(); });
+      mo.observe(modalEl, { attributes: true, attributeFilter: ['class'] });
+      if (modalEl.parentNode) {
+        pmo = new MutationObserver(function (recs) {
+          for (var i = 0; i < recs.length; i++) {
+            var rm = recs[i].removedNodes || [];
+            for (var j = 0; j < rm.length; j++) { if (rm[j] === modalEl) { release(); return; } }
+          }
+        });
+        pmo.observe(modalEl.parentNode, { childList: true });
+      }
+    } catch (e) { }
+    if (!modalEl.contains(document.activeElement)) {
+      var f0 = focusables();
+      if (f0.length) { try { f0[0].focus(); } catch (e) { } }
+      else { try { if (!modalEl.hasAttribute('tabindex')) modalEl.setAttribute('tabindex', '-1'); modalEl.focus(); } catch (e) { } }
+    }
+    return release;
+  }
+
   function drawerDismiss(el) {
     var reduce = false;
     try { reduce = !!(window.matchMedia && window.matchMedia('(prefers-reduced-motion: reduce)').matches); } catch (e) { }
@@ -461,6 +517,7 @@
     card.appendChild(head); card.appendChild(form);
     back.appendChild(card);
     document.body.appendChild(back);
+    bwnFocusTrap(back);
     openEl = back;
     document.addEventListener('keydown', onKey);
     setTimeout(function () { sku.focus(); }, 30);
