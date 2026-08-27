@@ -269,6 +269,17 @@ jobs:
       - name: Shared token-picker block ledger harness
         run: node scripts/test-shared-block-ledger.js
 
+      # RM-A1 (findings M1 + ACC3): ONE canonical, attribute-safe HTML escaper. The esc/escapeHtml
+      # helper was hand-duplicated across ~11 scripts and DIVERGED on QUOTE escaping - several copies
+      # escaped only & < > (or only the double quote), so a value rendered into an HTML ATTRIBUTE could
+      # break out of it (attribute XSS via "><script> or ' onmouseover=...). This harness AUTO-DISCOVERS
+      # every escaper in the suite and RUNS each against breakout payloads in text and in single- AND
+      # double-quoted attribute contexts, so a copy can never drift unsafe again. Negative controls
+      # reproduce the exact removed divergences (&<>-only, double-quote-only) and require the judge to
+      # reject them, so the guard cannot rot into a no-op.
+      - name: Canonical HTML-escaper harness (attribute-safe esc across the suite)
+        run: node scripts/test-esc-canonical.js
+
       # These six harnesses were committed to scripts/ but never wired here, so CI ran a green check
       # that said nothing about them — the exact "committed but never executed" rot the 2026-07-31
       # audit closed for the four steps near the top. All six pass a local sweep; wired here so a

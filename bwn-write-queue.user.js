@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         BWN Write Queue (Broadway National)
 // @namespace    broadwaynational.bwn
-// @version      0.2.1
+// @version      0.2.2
 // @downloadURL  https://raw.githubusercontent.com/Intermu/userscripts/main/bwn-write-queue.user.js
 // @updateURL    https://raw.githubusercontent.com/Intermu/userscripts/main/bwn-write-queue.user.js
 // @description  Drains the Track C write-back queue: claims THIS coordinator's own queued Umbrava write commands from the SWA, confirms each irreversible write, executes it via patchWorkOrder/addEditJobNote, and reports the result. Self-drain; every write is human-confirmed; disabled until you turn it on.
@@ -38,7 +38,7 @@
 
 (function () {
   "use strict";
-  var VER = "0.2.1";   // keep in lockstep with @version (TM compares versions, not contents)
+  var VER = "0.2.2";   // keep in lockstep with @version (TM compares versions, not contents)
 
   var SWA_BASE = "https://green-stone-0717dab0f.7.azurestaticapps.net";
   var PROXY_URL = SWA_BASE + "/api/wo-write-queue";
@@ -104,7 +104,7 @@
   function gqlError(msg) { var e = new Error(msg); e.business = true; return e; }   // a verb-level refusal, never retryable
   function classifyError(err) { return !(err && (err.business || err.graphql)); }   // retryable iff it is a transport error
 
-  function esc(s) { return String(s).replace(/&/g, "&amp;").replace(/</g, "&lt;").replace(/>/g, "&gt;"); }
+  function esc(s) { return String(s == null ? '' : s).replace(/[&<>"']/g, function (c) { return { '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;' }[c]; }); }
   function textToHtml(t) {
     return String(t).split(/\n\n+/).map(function (par) {
       return "<p>" + par.split("\n").map(esc).join("<br>") + "</p>";

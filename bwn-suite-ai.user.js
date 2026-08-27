@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         BWN Suite - AI (Broadway National)
 // @namespace    broadwaynational.bwn
-// @version      1.45.20
+// @version      1.45.21
 // @downloadURL  https://raw.githubusercontent.com/Intermu/userscripts/main/bwn-suite-ai.user.js
 // @updateURL    https://raw.githubusercontent.com/Intermu/userscripts/main/bwn-suite-ai.user.js
 // @description  The Umbrava tools that call outside APIs, kept separate from the zero-egress Core script. Client Update and WO Audit drafts (Anthropic Claude; draft-only, scrubbed before sending, you review before posting); Find Techs / Find Suppliers (Google Places; vendor leads near a WO); and Job View (opens the Ops-Dashboard job card on the WO page - WO details from Umbrava plus the authored case file and next actions, read-only). Network access is limited by the browser to the declared API hosts and the BWN Static Web App. API keys are stored in Tampermonkey's storage via the menu commands and never enter the page. Toggle modules in BWN_MODULES below.
@@ -6382,7 +6382,7 @@ if (BWN_MODULES.jobView) BWN.safeModule('jobView', function () {
     // if React re-renders the list away; sourced leads (SR_LEADS) survive the re-inject.
     var SR_MASK = 'places.id,places.displayName,places.formattedAddress,places.nationalPhoneNumber,places.websiteUri,places.rating,places.userRatingCount,places.location';
     var SR_LEADS = [];
-    function srEsc(s) { return String(s == null ? '' : s).replace(/[&<>"]/g, function (m) { return { '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;' }[m]; }); }
+    function srEsc(s) { return String(s == null ? '' : s).replace(/[&<>"']/g, function (c) { return { '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;' }[c]; }); }
     function srNorm(s) { return String(s || '').toLowerCase().replace(/&/g, ' and ').replace(/\./g, '').replace(/\b(inc|llc|corp|co|company|ltd|the|and|of)\b/g, ' ').replace(/[^a-z0-9]+/g, ''); }
     function srMiles(aLat, aLng, bLat, bLng) {
       if (![aLat, aLng, bLat, bLng].every(function (n) { return typeof n === 'number'; })) return null;
