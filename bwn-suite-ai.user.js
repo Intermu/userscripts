@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         BWN Suite - AI (Broadway National)
 // @namespace    broadwaynational.bwn
-// @version      1.45.20
+// @version      1.45.21
 // @downloadURL  https://raw.githubusercontent.com/Intermu/userscripts/main/bwn-suite-ai.user.js
 // @updateURL    https://raw.githubusercontent.com/Intermu/userscripts/main/bwn-suite-ai.user.js
 // @description  The Umbrava tools that call outside APIs, kept separate from the zero-egress Core script. Client Update and WO Audit drafts (Anthropic Claude; draft-only, scrubbed before sending, you review before posting); Find Techs / Find Suppliers (Google Places; vendor leads near a WO); and Job View (opens the Ops-Dashboard job card on the WO page - WO details from Umbrava plus the authored case file and next actions, read-only). Network access is limited by the browser to the declared API hosts and the BWN Static Web App. API keys are stored in Tampermonkey's storage via the menu commands and never enter the page. Toggle modules in BWN_MODULES below.
@@ -6129,14 +6129,55 @@ if (BWN_MODULES.jobView) BWN.safeModule('jobView', function () {
         }
       });
     }
+    // BWN-VP-UPSERT-SLICE-START (RM-D3/G3: kill-switch + audit + debounce; sliced by scripts/test-vp-upsert-governance.js)
+    // This bulk prospect write (up to 120 upserts per paid Find Techs / Find Suppliers search) used to
+    // fire SILENTLY: no kill-switch check, no audit, no debounce - so a burst of searches re-POSTed the
+    // whole batch every time with no record and no way to stop it. Now it (1) honors the SAME connector
+    // kill switch as every other SWA egress (bwn:modules.connector===false), (2) records ONE PII-free
+    // bwn:audit entry per bulk, and (3) debounces an identical re-fire so re-running the same search
+    // does not re-blast the shared pipeline.
+    var VP_UPSERT_DEBOUNCE_MS = 60000;
+    var vpLastUpsert = { sig: '', ts: 0 };
+    // PII-FREE actor, mirroring Core's bwnAuditActor (role label, never an email or a person's name).
+    function vpAuditActor() {
+      try { var r = JSON.parse(localStorage.getItem('bwn:role:last') || 'null'); return (r && (r.label || r.role)) || 'unknown'; }
+      catch (e) { return 'unknown'; }
+    }
+    // One PII-free entry into the SHARED bwn:audit ring (the key Core's bwnGqlOp writes, so the Ops
+    // console export shows this SWA bulk beside the GraphQL writes). Records ONLY op + count + kind +
+    // outcome - NEVER a prospect name / address / phone / website. Bounded to the same 200 cap;
+    // best-effort so it can never block or throw into the write path.
+    function vpAudit(outcome, count, mode, reason) {
+      try {
+        var a = JSON.parse(localStorage.getItem('bwn:audit') || '[]'); if (!Array.isArray(a)) a = [];
+        a.push({ ts: Date.now(), corrId: 'bwn-' + Date.now().toString(36) + '-' + Math.random().toString(36).slice(2, 8),
+                 op: 'vpUpsert', kind: 'write', target: 'prospect', risk: 'moderate', actor: vpAuditActor(),
+                 ids: { kind: mode && mode.kind }, count: count, outcome: outcome, reason: reason || null, ver: BWN_VER });
+        if (a.length > 200) a = a.slice(a.length - 200);
+        localStorage.setItem('bwn:audit', JSON.stringify(a));
+      } catch (e) { /* best-effort - the audit must never break a write */ }
+    }
+    // Debounce signature: kind + count + the first & last record keys. An identical batch re-fired
+    // inside the window is a duplicate re-search, not new discovery.
+    function vpUpsertSig(recs, mode) {
+      var f = recs[0] || {}, l = recs[recs.length - 1] || {};
+      return mode.kind + '|' + recs.length + '|' + vpKeyOf({ site: f.website, name: f.name }) + '|' + vpKeyOf({ site: l.website, name: l.name });
+    }
     function vpUpsert(list, mode, trade) {
       var k = vpKey(); if (!k || !list || !list.length) return;
+      if (!connectorEnabled()) { vpAudit('denied', 0, mode, 'connector-off'); return; }   // KILL SWITCH: no SWA egress when the connector is off
       var recs = list.slice(0, 120).map(function (r) {
         return { name: r.name, website: r.site || '', phone: r.phone || '', addr: r.addr || '',
                  lat: r.lat, lng: r.lng, rating: r.rating, ratingCount: r.reviews,
                  kind: mode.kind, trades: trade ? [String(trade).split(',')[0].trim()] : [],
                  source: mode.kind === 'supplier' ? 'findsuppliers' : 'findtechs' };
       });
+      var sig = vpUpsertSig(recs, mode), now = Date.now();
+      if (sig === vpLastUpsert.sig && (now - vpLastUpsert.ts) < VP_UPSERT_DEBOUNCE_MS) {
+        vpAudit('debounced', recs.length, mode, 'duplicate-within-' + VP_UPSERT_DEBOUNCE_MS + 'ms'); return;   // a burst re-search does not re-blast
+      }
+      vpLastUpsert = { sig: sig, ts: now };
+      vpAudit('ok', recs.length, mode, null);   // one entry per bulk, before the batches fire
       (function send(i) {
         if (i >= recs.length) return;
         GM_xmlhttpRequest({
@@ -6147,6 +6188,7 @@ if (BWN_MODULES.jobView) BWN.safeModule('jobView', function () {
         });
       })(0);
     }
+    // BWN-VP-UPSERT-SLICE-END
     // Record an outcome (reached-out / declined / no-response / joined / do-not-contact) for one
     // prospect, saved to the SHARED pipeline so every future Find Techs / Bid-Out search near
     // that area shows the history. The server only appends to an EXISTING record, so we upsert

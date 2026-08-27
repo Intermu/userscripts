@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         BWN Suite - Core (Broadway National)
 // @namespace    broadwaynational.bwn
-// @version      1.78.38
+// @version      1.78.39
 // @downloadURL  https://raw.githubusercontent.com/Intermu/userscripts/main/bwn-suite-core.user.js
 // @updateURL    https://raw.githubusercontent.com/Intermu/userscripts/main/bwn-suite-core.user.js
 // @description  Runs several Umbrava helpers for BWN coordinators, in the browser with no privileged grants. Includes: PO Approval + ETA Builder; WO Assist (GP/ETA, a stall watchdog, DNE calculator, and a next-action playbook); Email Leak Guard (checks recipients against vendor names, PO amounts, and client budget references before an outbound email sends); WO List Heat (a triage overlay + My Day strip on the work-order list, with an optional same-origin Umbrava API scan for deterministic full-board coverage); and the BWN Launcher (opens the Azure Static Web App tools with the current WO's context). Modules share state through sessionStorage/localStorage. The only network calls are same-origin Umbrava GraphQL requests (app.umbrava.com/api/graphql, the app's own session): List Heat's full-board scan and WO Assist's work-order / trip / clock-in / document reads, plus ONE write - BWN Views saves the column layout through Umbrava's own putUserPreference, the same preference the column chooser writes; everything else is offline. Toggle modules in BWN_MODULES below.
@@ -1314,8 +1314,6 @@
       ok: 'Note posted.', fail: 'The note was not posted.' },
     addClientProposalNote: { kind: 'write', target: 'proposal', risk: 'moderate', idempotent: false, retry: 'none',
       ok: 'Proposal note posted.', fail: 'The proposal note was not posted.' },
-    addVendorProposalNote: { kind: 'write', target: 'proposal', risk: 'moderate', idempotent: false, retry: 'none',
-      ok: 'Vendor-proposal note posted.', fail: 'The note was not posted.' },
     initializeJobDocument: { kind: 'write', target: 'document', risk: 'moderate', idempotent: false, retry: 'none',
       ok: 'Document upload started.', fail: 'The upload could not start.' },
     bulkAddWorkOrderDocuments: { kind: 'write', target: 'document', risk: 'moderate', idempotent: false, retry: 'none',
@@ -1327,13 +1325,15 @@
     deactivateVendor: { kind: 'write', target: 'vendor', risk: 'moderate', idempotent: true, retry: 'none',
       ok: 'Vendor deactivated.', fail: 'The vendor was not deactivated.' },
 
-    // ---- high-risk writes (dispatch, status/ECD, create, activation) ----
+    // ---- high-risk writes (dispatch, status/ECD, activation) ----
+    // G4/RM-D4: addWorkOrder, addDependentVendor and addVendorProposalNote were registered here
+    // with NO caller anywhere in the suite (dead entries). Dropped 2026-08-27 so the registry
+    // reflects the actually-wired writers; test-registry-authoritative.js now fails CI if a
+    // registry write entry has no bwnGqlOp call-site (or a call-site has no entry). Their captured
+    // mutation shapes live in wiki/umbrava-graphql-operations.md - re-add an entry here only when a
+    // real caller is wired.
     patchWorkOrder: { kind: 'write', target: 'workOrder', risk: 'high', idempotent: false, retry: 'none',
       ok: 'Work order updated.', fail: 'The work order was not updated.' },
-    addWorkOrder: { kind: 'write', target: 'workOrder', risk: 'high', idempotent: false, retry: 'none',
-      ok: 'Work order created.', fail: 'The work order was not created.' },
-    addDependentVendor: { kind: 'write', target: 'vendor', risk: 'high', idempotent: false, retry: 'none',
-      ok: 'Vendor created.', fail: 'The vendor was not created.' },
     activateVendor: { kind: 'write', target: 'vendor', risk: 'high', idempotent: true, retry: 'none',
       ok: 'Vendor activated.', fail: 'The vendor was not activated.' }
   };
@@ -1432,6 +1432,15 @@
       bwnAuditRecord(e);
     }
 
+    // Fail-closed write classification (G5): a WRITE must carry a RECOGNIZED risk tier. An
+    // unclassified write - a registry entry whose risk is missing or misspelled - is REFUSED here
+    // rather than sent unlabelled, so a new mutation cannot slip past the governance by omitting
+    // its risk. 'low'/'moderate' skip the confirm gate below; 'high' hits it; anything else fails
+    // closed. Reads are unaffected (isWrite guards this). Audited denied so the refusal is visible.
+    if (isWrite && meta.risk !== 'low' && meta.risk !== 'moderate' && meta.risk !== 'high') {
+      writeAudit('denied', { reason: 'unclassified-write:' + (meta.risk || 'none') });
+      return Promise.reject(new Error('bwnGqlOp: write "' + op + '" has no recognized risk classification'));
+    }
     // Per-feature kill switch: a disabled module must not mutate even if its UI leaked in.
     if (opts.feature && BWN_MODULES[opts.feature] === false) {
       writeAudit('denied', { reason: 'feature-off:' + opts.feature });

@@ -81,7 +81,7 @@ function load(engineSrc, gql) {
       setItem: function (k, v) { store[k] = String(v); },
       removeItem: function (k) { delete store[k]; }
     },
-    VER: "0.3.0",
+    VER: "0.4.0",
     paGql: gql,
     DRY_RUN: false,
     NOTE_TYPE_INTERNAL: 13,
@@ -139,6 +139,24 @@ function callsOf(g, op) { return g.calls.filter(function (c) { return c.op === o
   // The REST backend (taskrestapi/api/Task/AddTask) 500s without metadata; the SPA sends both. Captured 2026-08-17.
   A.eq("create task: metadata is the WO number as a JSON string (backend REST requires it)", tc[0].v.data.metadata, JSON.stringify({ number: "385048" }));
   A.eq("create task: notifyCreator false (matches the SPA payload)", tc[0].v.data.notifyCreator, false);
+
+  // ---- RM-A3: setStatus fails CLOSED on an unresolved (null/NaN) status id --------------------
+  // readStatusId now returns null when a status name does not resolve against the live
+  // workOrderStatuses (rollback flag off). setStatus is the single write chokepoint and must REFUSE
+  // a null/NaN id rather than patch the WO to a null/stale status.
+  g = mkGql(); S = load(ENGINE, g);
+  var scThrew = false, scErr = null;
+  try { await S.setStatus(385048, null); } catch (e) { scThrew = true; scErr = e; }
+  A.ok("setStatus REFUSES a null status id (fail-closed)", scThrew && /did not resolve/.test(String(scErr && scErr.message)), scThrew ? String(scErr && scErr.message) : "did not throw");
+  A.eq("setStatus with a null id sends NO patchWorkOrder", callsOf(g, "PatchWorkOrder").length, 0);
+  g = mkGql(); S = load(ENGINE, g);
+  var svThrew = false; try { await S.setStatus(385048, NaN); } catch (e) { svThrew = true; }
+  A.ok("setStatus REFUSES a NaN status id too", svThrew);
+  A.eq("...and sends nothing on NaN", callsOf(g, "PatchWorkOrder").length, 0);
+  g = mkGql(); S = load(ENGINE, g);
+  r = await S.setStatus(385048, 51);
+  A.eq("setStatus with a resolved numeric id resolves true", r, true);
+  A.eq("setStatus with a valid id sends exactly one patchWorkOrder", callsOf(g, "PatchWorkOrder").length, 1);
 
   // assignedTo falls back to null (unassigned) rather than "" or undefined when no GUID
   g = mkGql(); S = load(ENGINE, g);
@@ -201,7 +219,7 @@ function callsOf(g, op) { return g.calls.filter(function (c) { return c.op === o
   A.ok("every write still honors DRY_RUN", (full.match(/\[PA DRY_RUN\]/g) || []).length >= 5);
   var mV = full.match(/@version\s+([0-9.]+)/), mR = full.match(/VER\s*=\s*'([0-9.]+)'/);
   A.ok("@version and runtime VER agree", !!(mV && mR && mV[1] === mR[1]));
-  A.eq("shipped at 0.3.0", mV && mV[1], "0.3.0");
+  A.eq("shipped at 0.4.0", mV && mV[1], "0.4.0");
 
   A.finish();
 })().catch(function (e) { console.error(e); process.exit(1); });

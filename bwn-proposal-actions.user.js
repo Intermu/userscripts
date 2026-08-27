@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         BWN Proposal Actions (Broadway National)
 // @namespace    broadwaynational.bwn
-// @version      0.3.0
+// @version      0.4.0
 // @downloadURL  https://raw.githubusercontent.com/Intermu/userscripts/main/bwn-proposal-actions.user.js
 // @updateURL    https://raw.githubusercontent.com/Intermu/userscripts/main/bwn-proposal-actions.user.js
 // @description  On a Client Proposal DETAILS page, a "Proposal Actions" dropdown runs the internal review workflow in one confirmed action: Approval / TSP Review / Kickback. Each posts a note to the Proposal + the Work Order, sets the WO status, completes open tasks, and files a new task (assigned to the WO coordinator, or Ronny Sharp for TSP). Kickback drafts a rejection reason with the on-device browser AI for the operator to confirm. Every write is shown in a confirm dialog first; nothing fires until Confirm. @grant none.
@@ -15,7 +15,7 @@
 (function () {
   'use strict';
 
-  var VER = '0.3.0';   // keep in step with @version
+  var VER = '0.4.0';   // keep in step with @version
   var DRY_RUN = false; // when true, every WRITE is console.logged instead of sent
   console.info('[BWN PROPOSAL ACTIONS] v' + VER + ' - Approval / TSP Review / Kickback workflow on the Client Proposal details page');
 
@@ -195,18 +195,31 @@
     });
   }
 
+  // ===== PA-RESOLVE-SLICE-START (RM-A3: live-resolve status ids + the TSP assignee, FAIL-CLOSED;
+  // sliced by scripts/test-pa-live-resolve.js; references injected paGql / STATUS_FALLBACK / RONNY_GUID) =====
+  // R3/RM-A3: status ids and the TSP assignee used to come from hardcoded constants (STATUS_FALLBACK,
+  // RONNY_GUID). If the tenant reconfigures a status id, or Ronny leaves / his user id changes, a
+  // hardcoded value silently MISROUTES a live write (wrong status, task filed on a ghost user). Now
+  // both resolve LIVE and FAIL CLOSED when they cannot - no write goes out on a stale id. The rollback
+  // flag (bwn:modules.paLegacyFallback=true) reinstates the constants as a last resort, no reship.
+  function paLegacyFallback() { try { return JSON.parse(localStorage.getItem('bwn:modules') || '{}').paLegacyFallback === true; } catch (e) { return false; } }
+
   var Q_STATUSES = 'query PA_Statuses{ workOrderStatuses { id name isActive } }';
   var _statusCache = null;
+  // Resolve a status NAME to its live tenant id. Fail-closed: a name not present in the live
+  // workOrderStatuses (or a failed read) yields null so setStatus ABORTS, rather than patching to a
+  // stale hardcoded id. The rollback flag reinstates STATUS_FALLBACK.
   function readStatusId(name) {
     function pick(list) {
       var hit = (list || []).filter(function (s) { return s.name === name; })[0];
-      return hit ? hit.id : STATUS_FALLBACK[name];
+      if (hit) return hit.id;
+      return paLegacyFallback() ? STATUS_FALLBACK[name] : null;   // fail-closed unless the rollback flag is on
     }
     if (_statusCache) return Promise.resolve(pick(_statusCache));
     return paGql('PA_Statuses', Q_STATUSES, {}).then(function (d) {
       _statusCache = (d && d.workOrderStatuses) || [];
       return pick(_statusCache);
-    }).catch(function () { return STATUS_FALLBACK[name]; });
+    }).catch(function () { return paLegacyFallback() ? STATUS_FALLBACK[name] : null; });   // read failed: fail-closed
   }
 
   var Q_USER = 'query PA_User($id: ID!){ user(id: $id){ firstName lastName } }';
@@ -218,6 +231,21 @@
       return ((u.firstName || '') + ' ' + (u.lastName || '')).trim() || guid.slice(0, 8);
     }).catch(function () { return guid.slice(0, 8); });
   }
+
+  // The TSP (Trade Specialist) assignee. RONNY_GUID is only a SEED: verified LIVE against the proven
+  // user(id:) read before any task is assigned to it. If the seed no longer resolves to a user named
+  // TSP_ASSIGNEE_NAME (Ronny left, or his id changed), resolution FAILS CLOSED (returns null) so the
+  // TSP action aborts rather than filing a task on a ghost id. The rollback flag reinstates the seed.
+  var TSP_ASSIGNEE_NAME = 'Ronny Sharp';
+  function resolveTspAssignee() {
+    return paGql('PA_User', Q_USER, { id: RONNY_GUID }).then(function (d) {
+      var u = d && d.user;
+      var nm = u ? (((u.firstName || '') + ' ' + (u.lastName || '')).trim()) : '';
+      if (u && nm.toLowerCase() === TSP_ASSIGNEE_NAME.toLowerCase()) return { guid: RONNY_GUID, name: nm };
+      return paLegacyFallback() ? { guid: RONNY_GUID, name: TSP_ASSIGNEE_NAME } : null;   // seed stale -> fail-closed
+    }).catch(function () { return paLegacyFallback() ? { guid: RONNY_GUID, name: TSP_ASSIGNEE_NAME } : null; });
+  }
+  // ===== PA-RESOLVE-SLICE-END =====
 
   // ===== PA-WRITES START (sliced by scripts/test-proposal-actions.js; references injected paGql / textToHtml / DRY_RUN / NOTE_TYPE_INTERNAL) =====
   // ===== writes: PROVEN =====================================================
@@ -335,6 +363,15 @@
       bwnAuditRecord(e);
     }
 
+    // Fail-closed write classification (G5): a WRITE must carry a RECOGNIZED risk tier. An
+    // unclassified write - a registry entry whose risk is missing or misspelled - is REFUSED here
+    // rather than sent unlabelled, so a new mutation cannot slip past the governance by omitting
+    // its risk. 'low'/'moderate' skip the confirm gate below; 'high' hits it; anything else fails
+    // closed. Reads are unaffected (isWrite guards this). Audited denied so the refusal is visible.
+    if (isWrite && meta.risk !== 'low' && meta.risk !== 'moderate' && meta.risk !== 'high') {
+      writeAudit('denied', { reason: 'unclassified-write:' + (meta.risk || 'none') });
+      return Promise.reject(new Error('bwnGqlOp: write "' + op + '" has no recognized risk classification'));
+    }
     // Per-feature kill switch: a disabled module must not mutate even if its UI leaked in.
     if (opts.feature && BWN_MODULES[opts.feature] === false) {
       writeAudit('denied', { reason: 'feature-off:' + opts.feature });
@@ -401,6 +438,13 @@
 
   var M_PATCH = 'mutation PatchWorkOrder($data: PatchWorkOrderInput!){ patchWorkOrder(data: $data){ success message } }';
   function setStatus(n, statusId) {
+    // Fail-closed (RM-A3): a status write MUST carry a live-resolved numeric id. A null/NaN id means
+    // readStatusId could not resolve the status name against the live workOrderStatuses (rollback flag
+    // off), so REFUSE here rather than patch the WO to a null/stale status. This is the single write
+    // chokepoint, so the guard covers every caller.
+    if (statusId == null || !isFinite(Number(statusId))) {
+      return Promise.reject(new Error('status id did not resolve to a live value - not writing (set bwn:modules.paLegacyFallback=true to use the built-in fallback ids)'));
+    }
     var vars = { data: { workOrderNumber: n, statusId: { shouldInclude: true, value: statusId } } };
     if (DRY_RUN) { console.log('[PA DRY_RUN] setStatus', vars); return Promise.resolve(true); }
     // Routed through bwnGqlOp: audit + corrId + the high-risk confirm gate. proposal-actions
@@ -815,7 +859,9 @@
       }
       if (kind === 'tsp') {
         var tNote = function () { return tspNote(ctx.gp, ctx.total); };
-        return resolveUserName(RONNY_GUID).then(function (name) {
+        // RM-A3: resolve the TSP assignee LIVE and fail closed - never file a task on a stale RONNY_GUID.
+        return resolveTspAssignee().then(function (tsp) {
+          if (!tsp) { paToast('TSP assignee "' + TSP_ASSIGNEE_NAME + '" could not be verified live - nothing sent. (Set bwn:modules.paLegacyFallback=true to override.)'); return; }
           openConfirm({
             title: 'Send to Trade Specialist - Pending Trade Specialist',
             subtitle: 'W-' + ctx.n + '  ·  Proposal #' + ctx.pid + '  ·  ' + ctx.total + '  ·  ' + ctx.gp,
@@ -825,7 +871,7 @@
               buildProposalNoteStep(ctx, tNote),
               buildWONoteStep(ctx, tNote),
               buildCompleteStep(ctx),
-              buildCreateTaskStep(ctx, RONNY_GUID, name, tNote)   // TSP is the ONLY action that reassigns the task (to Ronny)
+              buildCreateTaskStep(ctx, tsp.guid, tsp.name, tNote)   // TSP is the ONLY action that reassigns the task (to Ronny)
             ]
           });
         });

@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         BWN Suite - Temp-Activate Vendor for PO (Broadway National)
 // @namespace    broadwaynational.bwn
-// @version      0.3.0
+// @version      0.3.1
 // @description  Inside the "Create Purchase Order" modal, adds a "Temp-Activate Vendor" button. Type an inactive vendor's name or number; it finds them, temporarily activates them via Umbrava's own API (reason ALWAYS "Temporary Activation") so they become assignable in the PO. After you assign them and click Create, it watches the PO save and auto-prompts a one-click re-deactivation (reason ALWAYS "Pending Compliance"). A persistent reminder pill keeps the temporarily-active vendor visible until you deactivate, so nobody is left active by mistake. Same-origin /api/graphql with the app's Auth0 bearer, @grant none, zero egress. Every write is one click behind a confirm.
 // @match        https://app.umbrava.com/*
 // @run-at       document-idle
@@ -77,7 +77,7 @@
   // bwnGql(query,variables) it calls, recovering the op name from the query. temp-vendor confirms
   // each write in its own panel (vendor + reason spelled out), so it passes confirmed:true.
   function bwnGql(query, variables) { var m = /\b(?:query|mutation)\s+([A-Za-z0-9_]+)/.exec(query); return tvGql(m ? m[1] : null, query, variables); }
-  var BWN_VER = (typeof GM_info !== 'undefined' && GM_info.script && GM_info.script.version) || '0.3.0';
+  var BWN_VER = (typeof GM_info !== 'undefined' && GM_info.script && GM_info.script.version) || '0.3.1';
   var BWN_MODULES = (function () { try { return JSON.parse(localStorage.getItem('bwn:modules') || '{}') || {}; } catch (e) { return {}; } })();
   var BWN_OPS = {
     activateVendor: { kind: 'write', target: 'vendor', risk: 'high', idempotent: true, retry: 'none',
@@ -179,6 +179,15 @@
       bwnAuditRecord(e);
     }
 
+    // Fail-closed write classification (G5): a WRITE must carry a RECOGNIZED risk tier. An
+    // unclassified write - a registry entry whose risk is missing or misspelled - is REFUSED here
+    // rather than sent unlabelled, so a new mutation cannot slip past the governance by omitting
+    // its risk. 'low'/'moderate' skip the confirm gate below; 'high' hits it; anything else fails
+    // closed. Reads are unaffected (isWrite guards this). Audited denied so the refusal is visible.
+    if (isWrite && meta.risk !== 'low' && meta.risk !== 'moderate' && meta.risk !== 'high') {
+      writeAudit('denied', { reason: 'unclassified-write:' + (meta.risk || 'none') });
+      return Promise.reject(new Error('bwnGqlOp: write "' + op + '" has no recognized risk classification'));
+    }
     // Per-feature kill switch: a disabled module must not mutate even if its UI leaked in.
     if (opts.feature && BWN_MODULES[opts.feature] === false) {
       writeAudit('denied', { reason: 'feature-off:' + opts.feature });

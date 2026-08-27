@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         BWN Suite - Low GP Note (Broadway National)
 // @namespace    broadwaynational.bwn
-// @version      0.2.2
+// @version      0.2.3
 // @description  A "Low GP" button beside the global "Search Work Orders" box. Enter a WO#, Tracking#, Source PO#, or Source Job#; it finds the work order, shows a one-click CONFIRM card (WO / client / location / assignee), then posts TWO notes via Umbrava's own API: a Billing-type note reading "Low GP", and a second note that @-mentions the WO's assignee ("@Name Low GP note added") so they are notified. The @-mention is the real TipTap mention span the SPA sends (captured live 2026-08-17); actionNoteEmails stays null - the span alone notifies. Same-origin /api/graphql with the app's Auth0 bearer, @grant none, zero egress. Nothing posts until you click Confirm.
 // @match        https://app.umbrava.com/*
 // @run-at       document-idle
@@ -178,7 +178,7 @@
     while (j < n) { var c = q.charAt(j); if ((c >= 'A' && c <= 'Z') || (c >= 'a' && c <= 'z') || (c >= '0' && c <= '9') || c === '_') j++; else break; }
     return lgGql(q.slice(i, j) || null, query, variables);
   };
-  var BWN_VER = '0.2.2';
+  var BWN_VER = '0.2.3';
   var BWN_MODULES = (function () { try { return JSON.parse(localStorage.getItem('bwn:modules') || '{}') || {}; } catch (e) { return {}; } })();
   var BWN_OPS = {
     addEditJobNote: { kind: 'write', target: 'note', risk: 'moderate', idempotent: false, retry: 'none',
@@ -278,6 +278,15 @@
       bwnAuditRecord(e);
     }
 
+    // Fail-closed write classification (G5): a WRITE must carry a RECOGNIZED risk tier. An
+    // unclassified write - a registry entry whose risk is missing or misspelled - is REFUSED here
+    // rather than sent unlabelled, so a new mutation cannot slip past the governance by omitting
+    // its risk. 'low'/'moderate' skip the confirm gate below; 'high' hits it; anything else fails
+    // closed. Reads are unaffected (isWrite guards this). Audited denied so the refusal is visible.
+    if (isWrite && meta.risk !== 'low' && meta.risk !== 'moderate' && meta.risk !== 'high') {
+      writeAudit('denied', { reason: 'unclassified-write:' + (meta.risk || 'none') });
+      return Promise.reject(new Error('bwnGqlOp: write "' + op + '" has no recognized risk classification'));
+    }
     // Per-feature kill switch: a disabled module must not mutate even if its UI leaked in.
     if (opts.feature && BWN_MODULES[opts.feature] === false) {
       writeAudit('denied', { reason: 'feature-off:' + opts.feature });

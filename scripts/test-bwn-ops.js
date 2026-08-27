@@ -391,6 +391,55 @@ function runProposalGateCases() {
   });
 }
 
+// G5: the wrapper must FAIL CLOSED for a WRITE that carries no recognized risk tier. A registry entry
+// whose `risk` is missing or misspelled must be REFUSED (audited denied), never sent unlabelled - so a
+// new mutation cannot slip past the governance by omitting its classification. Reads are unaffected.
+// Inject an unclassified write op into a copy of the registry and drive it through the REAL wrapper.
+function runUnclassifiedGateCases() {
+  console.log('\n-- G5: an unclassified WRITE fails closed (no risk tier -> refused, audited) --');
+  function settle(p) { return p.then(function (v) { return { ok: true, v: v }; }, function (e) { return { ok: false, e: e }; }); }
+  // Add a write op with NO risk field, right after the last registry entry.
+  var INJECT = mutate(S_OPS,
+    "      ok: 'Vendor activated.', fail: 'The vendor was not activated.' }\n  };",
+    "      ok: 'Vendor activated.', fail: 'The vendor was not activated.' },\n    testUnclassifiedWrite: { kind: 'write', target: 'test', idempotent: false, retry: 'none' }\n  };");
+
+  var e = makeOps(INJECT);
+  A.ok('the injected op is registered as a write with no risk', e.api.OPS.testUnclassifiedWrite &&
+    e.api.OPS.testUnclassifiedWrite.kind === 'write' && e.api.OPS.testUnclassifiedWrite.risk === undefined);
+  e.plan = [{ data: { testUnclassifiedWrite: { success: true } } }];
+  e.calls = [];
+  return settle(e.api.run('testUnclassifiedWrite', 'mutation{testUnclassifiedWrite{success}}', {}, { ids: { wo: 1 } })).then(function (r) {
+    A.ok('an unclassified write is REFUSED', !r.ok && /no recognized risk classification/.test(String(r.e && r.e.message)), r.ok ? 'resolved' : String(r.e && r.e.message));
+    A.eq('and NOTHING was sent (fail-closed before transport)', e.calls.length, 0);
+    var log = e.api.auditAll();
+    var last = log[log.length - 1];
+    A.ok('the refusal is audited denied (unclassified-write)', last && last.outcome === 'denied' && /unclassified-write/.test(String(last.reason)), JSON.stringify(last));
+
+    // A recognized moderate write in the SAME registry is unaffected (proves the guard is scoped).
+    e.plan = [{ data: { addEditJobNote: { success: true } } }]; e.calls = [];
+    return settle(e.api.run('addEditJobNote', 'mutation{addEditJobNote{success}}', {}, {}));
+  }).then(function (r) {
+    A.ok('a recognized moderate write still proceeds (guard is scoped to unclassified)', r.ok, r.ok ? '' : String(r.e && r.e.message));
+    A.eq('and the moderate write sent once', e.calls.length, 1);
+
+    // A read in the same registry is unaffected (reads never carry a risk tier).
+    e.plan = [{ data: { workOrder: { id: 7 } } }]; e.calls = [];
+    return settle(e.api.run('workOrder', 'query{workOrder{id}}', {}, {}));
+  }).then(function (r) {
+    A.ok('a read is unaffected by the write-classification guard', r.ok && r.v && r.v.workOrder && r.v.workOrder.id === 7, r.ok ? '' : String(r.e && r.e.message));
+
+    // Negative control: remove ONLY the fail-closed guard; the same unclassified write now SENDS.
+    var NOGUARD = mutate(INJECT,
+      "    if (isWrite && meta.risk !== 'low' && meta.risk !== 'moderate' && meta.risk !== 'high') {",
+      "    if (false && isWrite && meta.risk !== 'low' && meta.risk !== 'moderate' && meta.risk !== 'high') {");
+    var c = makeOps(NOGUARD);
+    c.plan = [{ data: { testUnclassifiedWrite: { success: true } } }]; c.calls = [];
+    return settle(c.api.run('testUnclassifiedWrite', 'mutation{testUnclassifiedWrite{success}}', {}, { ids: { wo: 1 } })).then(function (rr) { return { rr: rr, c: c }; });
+  }).then(function (o) {
+    A.ok('CONTROL: without the guard the unclassified write SENDS (so the guard is load-bearing)', o.rr.ok && o.c.calls.length === 1, o.rr.ok ? ('calls=' + o.c.calls.length) : String(o.rr.e && o.rr.e.message));
+  });
+}
+
 function main() {
   console.log('\n-- the shipped BWN-OPS block --');
   return runCases(S_OPS).then(function (results) {
@@ -415,7 +464,7 @@ function main() {
     // paste has no mechanism behind it, so this gate goes red if a fix lands in one copy and
     // not the other - same discipline as the bwnAI and BWN-SHARED SHA gates.
     console.log('\n-- BWN-OPS-WRAP paste-identical across adopters --');
-    var ADOPTERS = ['bwn-suite-core.user.js', 'bwn-drop-upload.user.js', 'bwn-dispatch.user.js', 'bwn-temp-vendor.user.js', 'bwn-proposal-actions.user.js', 'bwn-kanban.user.js', 'bwn-proposal-copy.user.js', 'bwn-low-gp.user.js'];
+    var ADOPTERS = ['bwn-suite-core.user.js', 'bwn-drop-upload.user.js', 'bwn-dispatch.user.js', 'bwn-temp-vendor.user.js', 'bwn-proposal-actions.user.js', 'bwn-kanban.user.js', 'bwn-proposal-copy.user.js', 'bwn-low-gp.user.js', 'bwn-write-queue.user.js'];
     var wraps = ADOPTERS.map(function (f) {
       var s = fs.readFileSync(path.join(__dirname, '..', f), 'utf8').replace(/\r\n/g, '\n');
       var a = s.indexOf('// ===== BWN-OPS-WRAP START v2');
@@ -431,6 +480,8 @@ function main() {
       });
     }
     return runProposalGateCases();
+  }).then(function () {
+    return runUnclassifiedGateCases();
   }).then(function () {
     A.finish();
   }).catch(function (err) {
