@@ -535,6 +535,9 @@ jobs:
       - name: CC Purchase write harness (receipt-first + gates + kill switch + negative controls)
         run: node scripts/test-cc-purchase.js
 
+      - name: A11y focus-trap harness (bwnFocusTrap byte-identity + focus move/wrap/restore across dialog sandboxes)
+        run: node scripts/test-a11y-focus.js
+
   lint:
     name: Lint
     runs-on: ubuntu-latest
