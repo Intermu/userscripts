@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         BWN WO Assist (Broadway National)
 // @namespace    broadwaynational.bwn
-// @version      0.3.5
+// @version      0.3.6
 // @downloadURL  https://raw.githubusercontent.com/Intermu/userscripts/main/bwn-wo-assist.user.js
 // @updateURL    https://raw.githubusercontent.com/Intermu/userscripts/main/bwn-wo-assist.user.js
 // @description  Escalate a work order to management from inside Umbrava, and round-trip its state back onto the page. Pick why and say what you need; it POSTs to the broadway-internal-ops SWA proxy (x-bwn-key gated) which proves your Umbrava session token, injects your verified email as the requester, works out WHO it goes to from your rank (a coordinator escalates to a supervisor, a supervisor to management, a director owns the call), sets a due clock scaled by the job's priority, records the item in the shared assist queue, and only then sends the notify. Escalating the same work order twice while the first is still open is rejected server-side, so two tabs cannot double-fire. While an escalation is open, this script also reads its state back (op:'status') and publishes it on the suite bus, so the WO Assist checklist shows "Escalated - awaiting mgmt" and the drawer becomes an acknowledge/resolve panel instead of a duplicate form. Registers one "Escalate" entry in the shared dock tab and adds an Escalate button to the WO Assist checklist's escalation step; a Tampermonkey menu item opens it too, so it is never stranded. The flow's secret URL stays server-side; nothing sensitive lives in this script.
@@ -18,7 +18,7 @@
 (function () {
   'use strict';
 
-  var VER = '0.3.5';
+  var VER = '0.3.6';
   var FONT = "-apple-system,BlinkMacSystemFont,'Segoe UI','Helvetica Neue',Arial,sans-serif";
   var SWA_BASE = 'https://green-stone-0717dab0f.7.azurestaticapps.net';
   var PROXY_URL = SWA_BASE + '/api/wo-assist';
@@ -52,18 +52,21 @@
   function toast(msg, ms, bg) {
     var t = document.createElement('div');
     t.textContent = msg;
-    t.style.cssText = 'position:fixed;z-index:2147483647;left:50%;bottom:26px;transform:translate(-50%,10px);opacity:0;background:' + (bg || GREEN) + ';color:#fff;font:400 14px ' + FONT + ';padding:11px 16px;border-radius:9px;max-width:74vw;box-shadow:0 6px 24px rgba(0,0,0,.3);line-height:1.5;';
+    t.style.cssText = 'position:fixed;z-index:2147483647;left:50%;bottom:26px;transform:translate(-50%,10px);opacity:0;background:' + (bg || '#0d3d26') + ';color:#fff;font:400 14px ' + FONT + ';padding:11px 16px;border-radius:9px;max-width:74vw;box-shadow:0 6px 24px rgba(0,0,0,.3);line-height:1.5;';
     document.body.appendChild(t);
-    // The suite's shared toast motion (animation review 2026-08-10, five identical copies - the
-    // sandboxes cannot share one). It used to pop in and fade out; it now enters the way it
-    // leaves, on transitions so a replacement retargets, with reduced motion keeping the fade
-    // and dropping the travel. Full rationale sits at the same block in bwn-dispatch.user.js.
+    // Enter the way it leaves (animation review 2026-08-10). It used to POP in and fade out -
+    // half an animation, and the missing half is the one the eye actually catches. Transitions,
+    // not keyframes, so a toast replaced mid-flight retargets instead of restarting from zero.
+    // `ease` rather than a strong ease-out on purpose: a toast reads as elegant slightly slower
+    // than the rest of the UI. The transform composes with the centring translateX, which is why
+    // both states write the full translate() - one axis cannot be animated past the other.
+    // Reduced motion keeps the fade and drops the travel: gentler, not gone.
     var reduce = false;
     try { reduce = !!(window.matchMedia && window.matchMedia('(prefers-reduced-motion: reduce)').matches); } catch (e) { }
     void t.offsetHeight;                                   // flush the start state or the transition never runs
     t.style.transition = reduce ? 'opacity .3s ease' : 'opacity .3s ease, transform .3s ease';
     t.style.opacity = '1';
-    t.style.transform = 'translate(-50%,0)';
+    t.style.transform = 'translate(-50%,0)';               // under reduce this jumps: transform is not in the transition
     setTimeout(function () {
       t.style.transition = reduce ? 'opacity .4s ease' : 'opacity .4s ease, transform .4s ease';
       t.style.opacity = '0';

@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         BWN Inventory (Broadway National)
 // @namespace    broadwaynational.bwn
-// @version      0.3.0
+// @version      0.3.1
 // @downloadURL  https://raw.githubusercontent.com/Intermu/userscripts/main/bwn-inventory.user.js
 // @updateURL    https://raw.githubusercontent.com/Intermu/userscripts/main/bwn-inventory.user.js
 // @description  Logs a stock movement into the Broadway inventory subledger from inside Umbrava. Pick a movement (receive / issue / transfer), a SKU, a quantity and warehouse(s); a receipt also takes a unit cost. Submit POSTs to the broadway-internal-ops SWA (x-bwn-key gated, your Umbrava session token vouched server-side), which appends to an append-only movement ledger on Azure Table Storage - updating live per-warehouse on-hand + moving-average value and posting the double-entry GL. The same modal looks up current on-hand (qty + value) per warehouse for a SKU (the thing the old Excel log could not answer). Item codes and warehouses come from the shared master catalog (curated on the SWA Inventory page): the SKU field suggests known items and the warehouse pickers list active warehouses, so a typo cannot silently fork a bin; if the catalog is unreachable it falls back to a per-user warehouse pick-list. Opened on a work order, it prefills the Work Order # into the movement note. Each submit carries a stable id so a retry after a dropped response never double-posts. Nothing sensitive lives in this script. Open it from the suite dock (📦 Inventory) or the Tampermonkey menu.
@@ -18,7 +18,7 @@
 (function () {
   'use strict';
 
-  var VER = '0.3.0';
+  var VER = '0.3.1';
   var FONT = "-apple-system,BlinkMacSystemFont,'Segoe UI','Helvetica Neue',Arial,sans-serif";
   var SWA_BASE = 'https://green-stone-0717dab0f.7.azurestaticapps.net';
   var PROXY_URL = SWA_BASE + '/api/inventory-stock';
@@ -117,12 +117,19 @@
     t.textContent = msg;
     t.style.cssText = 'position:fixed;z-index:2147483647;left:50%;bottom:26px;transform:translate(-50%,10px);opacity:0;background:' + (bg || '#0d3d26') + ';color:#fff;font:400 14px ' + FONT + ';padding:11px 16px;border-radius:9px;max-width:74vw;box-shadow:0 6px 24px rgba(0,0,0,.3);line-height:1.5;';
     document.body.appendChild(t);
+    // Enter the way it leaves (animation review 2026-08-10). It used to POP in and fade out -
+    // half an animation, and the missing half is the one the eye actually catches. Transitions,
+    // not keyframes, so a toast replaced mid-flight retargets instead of restarting from zero.
+    // `ease` rather than a strong ease-out on purpose: a toast reads as elegant slightly slower
+    // than the rest of the UI. The transform composes with the centring translateX, which is why
+    // both states write the full translate() - one axis cannot be animated past the other.
+    // Reduced motion keeps the fade and drops the travel: gentler, not gone.
     var reduce = false;
     try { reduce = !!(window.matchMedia && window.matchMedia('(prefers-reduced-motion: reduce)').matches); } catch (e) { }
-    void t.offsetHeight;
+    void t.offsetHeight;                                   // flush the start state or the transition never runs
     t.style.transition = reduce ? 'opacity .3s ease' : 'opacity .3s ease, transform .3s ease';
     t.style.opacity = '1';
-    t.style.transform = 'translate(-50%,0)';
+    t.style.transform = 'translate(-50%,0)';               // under reduce this jumps: transform is not in the transition
     setTimeout(function () {
       t.style.transition = reduce ? 'opacity .4s ease' : 'opacity .4s ease, transform .4s ease';
       t.style.opacity = '0';
@@ -200,7 +207,7 @@
     var reduce = false;
     try { reduce = !!(window.matchMedia && window.matchMedia('(prefers-reduced-motion: reduce)').matches); } catch (e) { }
     if (reduce) { el.remove(); return; }
-    el.removeAttribute('id'); el.setAttribute('aria-hidden', 'true');
+    el.removeAttribute('id'); el.setAttribute('aria-hidden', 'true');   // id freed now: a reopen builds a fresh node
     el.classList.add('bwn-closing');
     setTimeout(function () { try { el.remove(); } catch (e) { } }, 170);
   }
