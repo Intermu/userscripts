@@ -296,7 +296,7 @@
       ask: String(d.ask || '').slice(0, 4000),
       docRef: String(d.docRef || '').slice(0, 300),
       location: bus.location || '', trade: bus.trade || '',
-      priority: bus.priority || '', woStatus: bus.status || '',
+      priority: bus.priority || '', woStatus: bus.status || '', clientName: bus.client || '',
       source: 'drop'
     }, 30000)
       .then(function (r) {
