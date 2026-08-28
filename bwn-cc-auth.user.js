@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         BWN CC Request (Broadway National)
 // @namespace    broadwaynational.bwn
-// @version      0.4.5
+// @version      0.4.6
 // @downloadURL  https://raw.githubusercontent.com/Intermu/userscripts/main/bwn-cc-auth.user.js
 // @updateURL    https://raw.githubusercontent.com/Intermu/userscripts/main/bwn-cc-auth.user.js
 // @description  Replaces the "CC Authorization Form" Microsoft Form with an in-page CC Request modal. Requesting a card purchase is a coordinator action (any vouched Broadway Umbrava user): fill the fields and submit; it POSTs to the broadway-internal-ops SWA proxy (x-bwn-key gated) which proves your Umbrava session token with Umbrava's own current-user API, injects your verified email as the Requester, and forwards to the HTTP-triggered Power Automate flow "CC Authorization (HTTP)". That flow starts an approval (mnajarro@, GKohlmann@, LPorzelt@) and, on approve, emails you back that the order will be placed. This script OWNS the single Credit Card entry in the shared dock tab: coordinators and leads see just "CC Request"; supervisors and above get a dropdown that also opens the Supervisor-only "Log CC Purchase" modal (provided by bwn-cc-purchase, driven over the bwn:evt bus so there is only ever one button). Opened on a work order it prefills the Tracking # and drops the client/location into the description, and defaults Supplier to whichever PO line you flipped to "Supplier" in the BWN Ops Suite. The flow's secret URL stays server-side; nothing sensitive lives in this script.
@@ -282,6 +282,62 @@
 
   // Suite drawer exit, per the contract in Core's ensureStyle. Core's stylesheet owns the fade;
   // sandboxes cannot share the helper, so these five lines are duplicated in every drawer module.
+  // --- bwnFocusTrap: shared a11y focus manager for the BWN drawer-modal family (RM-B3 / ACC1) ---
+  // Sandboxes can't share a runtime object across the @grant boundary (see Core's BWN block), so
+  // each drawer-modal carries this BYTE-IDENTICAL copy; scripts/test-a11y-focus.js asserts the
+  // copies stay identical (drift guard) and runs the behaviour. On open it records the
+  // previously-focused element and, if focus is not already inside, moves it to the first
+  // focusable. It traps Tab / Shift-Tab within the modal's focusables. It self-releases when the
+  // modal gains .bwn-closing (the drawer exit contract) or leaves the DOM, restoring focus to the
+  // opener. Idempotent; returns release and also stashes it on el._bwnFocusRelease. Call it AFTER
+  // the modal is in the DOM and BEFORE the module's own initial .focus(), so the recorded element
+  // is the real opener, not an inner field.
+  function bwnFocusTrap(modalEl) {
+    if (!modalEl || !modalEl.addEventListener) return function () { };
+    var SEL = 'a[href],area[href],input:not([disabled]),select:not([disabled]),textarea:not([disabled]),button:not([disabled]),[tabindex]:not([tabindex="-1"]),[contenteditable="true"],[contenteditable=""]';
+    var prev = document.activeElement;
+    var released = false, mo = null, pmo = null;
+    function visible(el) { return el.offsetWidth > 0 || el.offsetHeight > 0 || (el.getClientRects && el.getClientRects().length > 0); }
+    function focusables() { return [].slice.call(modalEl.querySelectorAll(SEL)).filter(visible); }
+    function onKey(e) {
+      if (e.key !== 'Tab') return;
+      var f = focusables();
+      if (!f.length) { e.preventDefault(); return; }
+      var first = f[0], last = f[f.length - 1], a = document.activeElement;
+      if (e.shiftKey) { if (a === first || !modalEl.contains(a)) { e.preventDefault(); last.focus(); } }
+      else if (a === last || !modalEl.contains(a)) { e.preventDefault(); first.focus(); }
+    }
+    function release() {
+      if (released) return; released = true;
+      try { modalEl.removeEventListener('keydown', onKey, true); } catch (e) { }
+      try { if (mo) mo.disconnect(); } catch (e) { }
+      try { if (pmo) pmo.disconnect(); } catch (e) { }
+      if (modalEl._bwnFocusRelease === release) modalEl._bwnFocusRelease = null;
+      try { if (prev && prev.focus && prev.isConnected !== false) prev.focus(); } catch (e) { }
+    }
+    modalEl.addEventListener('keydown', onKey, true);
+    modalEl._bwnFocusRelease = release;
+    try {
+      mo = new MutationObserver(function () { if (modalEl.classList && modalEl.classList.contains('bwn-closing')) release(); });
+      mo.observe(modalEl, { attributes: true, attributeFilter: ['class'] });
+      if (modalEl.parentNode) {
+        pmo = new MutationObserver(function (recs) {
+          for (var i = 0; i < recs.length; i++) {
+            var rm = recs[i].removedNodes || [];
+            for (var j = 0; j < rm.length; j++) { if (rm[j] === modalEl) { release(); return; } }
+          }
+        });
+        pmo.observe(modalEl.parentNode, { childList: true });
+      }
+    } catch (e) { }
+    if (!modalEl.contains(document.activeElement)) {
+      var f0 = focusables();
+      if (f0.length) { try { f0[0].focus(); } catch (e) { } }
+      else { try { if (!modalEl.hasAttribute('tabindex')) modalEl.setAttribute('tabindex', '-1'); modalEl.focus(); } catch (e) { } }
+    }
+    return release;
+  }
+
   function drawerDismiss(el) {
     var reduce = false;
     try { reduce = !!(window.matchMedia && window.matchMedia('(prefers-reduced-motion: reduce)').matches); } catch (e) { }
@@ -463,6 +519,7 @@
     card.appendChild(head); card.appendChild(form);
     back.appendChild(card);
     document.body.appendChild(back);
+    bwnFocusTrap(back);
     openEl = back;
     document.addEventListener('keydown', onKey);
     var first = inputs.SupplierName && !inputs.SupplierName.value ? inputs.SupplierName : inputs.LineItemDescription;

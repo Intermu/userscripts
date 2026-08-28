@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         BWN Ask (Coordinator Copilot)
 // @namespace    https://broadwaynational.com/bwn
-// @version      0.7.4
+// @version      0.7.5
 // @description  Ask questions about the work order you're viewing. Reads the WO live from Umbrava via same-origin GraphQL (details + full note / site-visit history) AND a summary roster of the other work orders at the same location, plus the team knowledge doc, and answers through the Broadway AI proxy with dates and references. Phase 1.5 = page-scoped + location roster (Path A); no data leaves the trusted Broadway path.
 // @match        https://app.umbrava.com/*
 // @run-at       document-idle
@@ -578,6 +578,62 @@
   // pending removal has to be cancellable. It also keeps its id for the same reason - a reused
   // node cannot collide with itself.
   var fadeTimer = null;
+  // --- bwnFocusTrap: shared a11y focus manager for the BWN drawer-modal family (RM-B3 / ACC1) ---
+  // Sandboxes can't share a runtime object across the @grant boundary (see Core's BWN block), so
+  // each drawer-modal carries this BYTE-IDENTICAL copy; scripts/test-a11y-focus.js asserts the
+  // copies stay identical (drift guard) and runs the behaviour. On open it records the
+  // previously-focused element and, if focus is not already inside, moves it to the first
+  // focusable. It traps Tab / Shift-Tab within the modal's focusables. It self-releases when the
+  // modal gains .bwn-closing (the drawer exit contract) or leaves the DOM, restoring focus to the
+  // opener. Idempotent; returns release and also stashes it on el._bwnFocusRelease. Call it AFTER
+  // the modal is in the DOM and BEFORE the module's own initial .focus(), so the recorded element
+  // is the real opener, not an inner field.
+  function bwnFocusTrap(modalEl) {
+    if (!modalEl || !modalEl.addEventListener) return function () { };
+    var SEL = 'a[href],area[href],input:not([disabled]),select:not([disabled]),textarea:not([disabled]),button:not([disabled]),[tabindex]:not([tabindex="-1"]),[contenteditable="true"],[contenteditable=""]';
+    var prev = document.activeElement;
+    var released = false, mo = null, pmo = null;
+    function visible(el) { return el.offsetWidth > 0 || el.offsetHeight > 0 || (el.getClientRects && el.getClientRects().length > 0); }
+    function focusables() { return [].slice.call(modalEl.querySelectorAll(SEL)).filter(visible); }
+    function onKey(e) {
+      if (e.key !== 'Tab') return;
+      var f = focusables();
+      if (!f.length) { e.preventDefault(); return; }
+      var first = f[0], last = f[f.length - 1], a = document.activeElement;
+      if (e.shiftKey) { if (a === first || !modalEl.contains(a)) { e.preventDefault(); last.focus(); } }
+      else if (a === last || !modalEl.contains(a)) { e.preventDefault(); first.focus(); }
+    }
+    function release() {
+      if (released) return; released = true;
+      try { modalEl.removeEventListener('keydown', onKey, true); } catch (e) { }
+      try { if (mo) mo.disconnect(); } catch (e) { }
+      try { if (pmo) pmo.disconnect(); } catch (e) { }
+      if (modalEl._bwnFocusRelease === release) modalEl._bwnFocusRelease = null;
+      try { if (prev && prev.focus && prev.isConnected !== false) prev.focus(); } catch (e) { }
+    }
+    modalEl.addEventListener('keydown', onKey, true);
+    modalEl._bwnFocusRelease = release;
+    try {
+      mo = new MutationObserver(function () { if (modalEl.classList && modalEl.classList.contains('bwn-closing')) release(); });
+      mo.observe(modalEl, { attributes: true, attributeFilter: ['class'] });
+      if (modalEl.parentNode) {
+        pmo = new MutationObserver(function (recs) {
+          for (var i = 0; i < recs.length; i++) {
+            var rm = recs[i].removedNodes || [];
+            for (var j = 0; j < rm.length; j++) { if (rm[j] === modalEl) { release(); return; } }
+          }
+        });
+        pmo.observe(modalEl.parentNode, { childList: true });
+      }
+    } catch (e) { }
+    if (!modalEl.contains(document.activeElement)) {
+      var f0 = focusables();
+      if (f0.length) { try { f0[0].focus(); } catch (e) { } }
+      else { try { if (!modalEl.hasAttribute('tabindex')) modalEl.setAttribute('tabindex', '-1'); modalEl.focus(); } catch (e) { } }
+    }
+    return release;
+  }
+
   function hidePanel() {
     if (!panelEl || !panelEl.parentNode) return;
     var reduce = false;
@@ -598,12 +654,16 @@
       // wherever it got to, which is the whole reason the exit is a transition and not a keyframe.
       clearTimeout(fadeTimer); fadeTimer = null;
       panelEl.classList.remove('bwn-closing'); panelEl.removeAttribute('aria-hidden');
-      document.body.appendChild(panelEl); inputEl && inputEl.focus(); return;
+      document.body.appendChild(panelEl); bwnFocusTrap(panelEl); inputEl && inputEl.focus(); return;
     }
 
     panelEl = document.createElement('aside');
     panelEl.id = 'bwn-drawer-ask'; panelEl.className = 'bwn-drawer';
     panelEl.setAttribute('role', 'dialog'); panelEl.setAttribute('aria-label', 'Ask BWN');
+    // RM-A2 (ACC2): Escape closes through the existing hidePanel() so the fade + cleanup fire.
+    // Bound once on the reused node (buildPanel keeps panelEl alive across reopens), and focus is
+    // trapped inside so a panel-scoped listener always sees the key.
+    panelEl.addEventListener('keydown', function (e) { if (e.key === 'Escape') { e.preventDefault(); hidePanel(); } });
 
     var head = document.createElement('div');
     head.className = 'bwn-drawer-hd';
@@ -643,6 +703,7 @@
     panelEl.appendChild(foot);
 
     document.body.appendChild(panelEl);
+    bwnFocusTrap(panelEl);
     addMsg('assistant', 'Hi. Open a work order, then ask - I read that WO live from Umbrava (details + full note / site-visit history) and a summary of the other work orders at the same location, plus Broadway\'s knowledge doc, and answer with dates and references. I never guess; if it\'s not in the record I\'ll say so.');
     inputEl.focus();
   }
