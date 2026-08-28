@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         BWN Proposal Actions (Broadway National)
 // @namespace    broadwaynational.bwn
-// @version      0.3.0
+// @version      0.3.1
 // @downloadURL  https://raw.githubusercontent.com/Intermu/userscripts/main/bwn-proposal-actions.user.js
 // @updateURL    https://raw.githubusercontent.com/Intermu/userscripts/main/bwn-proposal-actions.user.js
 // @description  On a Client Proposal DETAILS page, a "Proposal Actions" dropdown runs the internal review workflow in one confirmed action: Approval / TSP Review / Kickback. Each posts a note to the Proposal + the Work Order, sets the WO status, completes open tasks, and files a new task (assigned to the WO coordinator, or Ronny Sharp for TSP). Kickback drafts a rejection reason with the on-device browser AI for the operator to confirm. Every write is shown in a confirm dialog first; nothing fires until Confirm. @grant none.
@@ -15,7 +15,7 @@
 (function () {
   'use strict';
 
-  var VER = '0.3.0';   // keep in step with @version
+  var VER = '0.3.1';   // keep in step with @version
   var DRY_RUN = false; // when true, every WRITE is console.logged instead of sent
   console.info('[BWN PROPOSAL ACTIONS] v' + VER + ' - Approval / TSP Review / Kickback workflow on the Client Proposal details page');
 
@@ -98,9 +98,7 @@
   function onProposalDetailsPage() {
     return /\/work-orders\/\d+\/proposals\/client-proposals\/\d+\/details/.test(location.pathname || '');
   }
-  function escapeHtml(s) {
-    return String(s == null ? '' : s).replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;');
-  }
+  function escapeHtml(s) { return String(s == null ? '' : s).replace(/[&<>"']/g, function (c) { return { '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;' }[c]; }); }
   function money(m) {
     if (!m || m.amount == null) return '$0.00';
     var p = (m.precision != null) ? m.precision : 2;

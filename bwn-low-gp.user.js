@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         BWN Suite - Low GP Note (Broadway National)
 // @namespace    broadwaynational.bwn
-// @version      0.2.2
+// @version      0.2.3
 // @description  A "Low GP" button beside the global "Search Work Orders" box. Enter a WO#, Tracking#, Source PO#, or Source Job#; it finds the work order, shows a one-click CONFIRM card (WO / client / location / assignee), then posts TWO notes via Umbrava's own API: a Billing-type note reading "Low GP", and a second note that @-mentions the WO's assignee ("@Name Low GP note added") so they are notified. The @-mention is the real TipTap mention span the SPA sends (captured live 2026-08-17); actionNoteEmails stays null - the span alone notifies. Same-origin /api/graphql with the app's Auth0 bearer, @grant none, zero egress. Nothing posts until you click Confirm.
 // @match        https://app.umbrava.com/*
 // @run-at       document-idle
@@ -22,10 +22,7 @@
   // LOW-GP-SLICE-START
   function lgIsGuid(s) { return /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i.test(String(s == null ? '' : s)); }
 
-  function lgEsc(s) {
-    return String(s == null ? '' : s)
-      .replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;').replace(/"/g, '&quot;');
-  }
+  function lgEsc(s) { return String(s == null ? '' : s).replace(/[&<>"']/g, function (c) { return { '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;' }[c]; }); }
 
   // Note-type id resolved by NAME from Core's bwn:noteTypes cache (82 types; Core populates it).
   // cacheRaw is the raw localStorage string (or null). Floor covers the two types this script needs,
@@ -178,7 +175,7 @@
     while (j < n) { var c = q.charAt(j); if ((c >= 'A' && c <= 'Z') || (c >= 'a' && c <= 'z') || (c >= '0' && c <= '9') || c === '_') j++; else break; }
     return lgGql(q.slice(i, j) || null, query, variables);
   };
-  var BWN_VER = '0.2.2';
+  var BWN_VER = '0.2.3';
   var BWN_MODULES = (function () { try { return JSON.parse(localStorage.getItem('bwn:modules') || '{}') || {}; } catch (e) { return {}; } })();
   var BWN_OPS = {
     addEditJobNote: { kind: 'write', target: 'note', risk: 'moderate', idempotent: false, retry: 'none',

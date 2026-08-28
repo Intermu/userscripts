@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         BWN Suite - Temp-Activate Vendor for PO (Broadway National)
 // @namespace    broadwaynational.bwn
-// @version      0.3.0
+// @version      0.3.1
 // @description  Inside the "Create Purchase Order" modal, adds a "Temp-Activate Vendor" button. Type an inactive vendor's name or number; it finds them, temporarily activates them via Umbrava's own API (reason ALWAYS "Temporary Activation") so they become assignable in the PO. After you assign them and click Create, it watches the PO save and auto-prompts a one-click re-deactivation (reason ALWAYS "Pending Compliance"). A persistent reminder pill keeps the temporarily-active vendor visible until you deactivate, so nobody is left active by mistake. Same-origin /api/graphql with the app's Auth0 bearer, @grant none, zero egress. Every write is one click behind a confirm.
 // @match        https://app.umbrava.com/*
 // @run-at       document-idle
@@ -26,10 +26,7 @@
   var PEND_KEY = 'bwn:tempVendorPending';   // sessionStorage: survives a re-render / accidental close within the tab
 
   // ===== Pure helpers ============================================================================
-  function tvEsc(s) {
-    return String(s == null ? '' : s)
-      .replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;').replace(/"/g, '&quot;');
-  }
+  function tvEsc(s) { return String(s == null ? '' : s).replace(/[&<>"']/g, function (c) { return { '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;' }[c]; }); }
 
   // ===== Auth + GraphQL (same-origin, app bearer - the drop-upload write path, proven) ===========
   // ===== BWN-SHARED START v1 (paste-identical; pinned by scripts/test-shared-block-ledger.js) =====
@@ -77,7 +74,7 @@
   // bwnGql(query,variables) it calls, recovering the op name from the query. temp-vendor confirms
   // each write in its own panel (vendor + reason spelled out), so it passes confirmed:true.
   function bwnGql(query, variables) { var m = /\b(?:query|mutation)\s+([A-Za-z0-9_]+)/.exec(query); return tvGql(m ? m[1] : null, query, variables); }
-  var BWN_VER = (typeof GM_info !== 'undefined' && GM_info.script && GM_info.script.version) || '0.3.0';
+  var BWN_VER = (typeof GM_info !== 'undefined' && GM_info.script && GM_info.script.version) || '0.3.1';
   var BWN_MODULES = (function () { try { return JSON.parse(localStorage.getItem('bwn:modules') || '{}') || {}; } catch (e) { return {}; } })();
   var BWN_OPS = {
     activateVendor: { kind: 'write', target: 'vendor', risk: 'high', idempotent: true, retry: 'none',
