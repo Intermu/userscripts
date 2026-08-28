@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         BWN Proposal Actions (Broadway National)
 // @namespace    broadwaynational.bwn
-// @version      0.3.0
+// @version      0.3.1
 // @downloadURL  https://raw.githubusercontent.com/Intermu/userscripts/main/bwn-proposal-actions.user.js
 // @updateURL    https://raw.githubusercontent.com/Intermu/userscripts/main/bwn-proposal-actions.user.js
 // @description  On a Client Proposal DETAILS page, a "Proposal Actions" dropdown runs the internal review workflow in one confirmed action: Approval / TSP Review / Kickback. Each posts a note to the Proposal + the Work Order, sets the WO status, completes open tasks, and files a new task (assigned to the WO coordinator, or Ronny Sharp for TSP). Kickback drafts a rejection reason with the on-device browser AI for the operator to confirm. Every write is shown in a confirm dialog first; nothing fires until Confirm. @grant none.
@@ -15,7 +15,7 @@
 (function () {
   'use strict';
 
-  var VER = '0.3.0';   // keep in step with @version
+  var VER = '0.3.1';   // keep in step with @version
   var DRY_RUN = false; // when true, every WRITE is console.logged instead of sent
   console.info('[BWN PROPOSAL ACTIONS] v' + VER + ' - Approval / TSP Review / Kickback workflow on the Client Proposal details page');
 
@@ -944,7 +944,9 @@
     });
   } catch (e) { }
   try {
-    var paObs = new MutationObserver(function () { injectDropdown(); });
+    // Trailing debounce (RM-B5): coalesce the SPA re-render bursts instead of firing on every mutation.
+    var paObsT = null;
+    var paObs = new MutationObserver(function () { clearTimeout(paObsT); paObsT = setTimeout(injectDropdown, 300); });
     paObs.observe(document.body, { childList: true, subtree: true });
   } catch (e) { }
   setInterval(injectDropdown, 900);

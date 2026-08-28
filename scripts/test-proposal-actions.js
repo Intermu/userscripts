@@ -81,7 +81,7 @@ function load(engineSrc, gql) {
       setItem: function (k, v) { store[k] = String(v); },
       removeItem: function (k) { delete store[k]; }
     },
-    VER: "0.3.0",
+    VER: "0.3.1",
     paGql: gql,
     DRY_RUN: false,
     NOTE_TYPE_INTERNAL: 13,
@@ -201,7 +201,7 @@ function callsOf(g, op) { return g.calls.filter(function (c) { return c.op === o
   A.ok("every write still honors DRY_RUN", (full.match(/\[PA DRY_RUN\]/g) || []).length >= 5);
   var mV = full.match(/@version\s+([0-9.]+)/), mR = full.match(/VER\s*=\s*'([0-9.]+)'/);
   A.ok("@version and runtime VER agree", !!(mV && mR && mV[1] === mR[1]));
-  A.eq("shipped at 0.3.0", mV && mV[1], "0.3.0");
+  A.eq("shipped at 0.3.1", mV && mV[1], "0.3.1");
 
   A.finish();
 })().catch(function (e) { console.error(e); process.exit(1); });

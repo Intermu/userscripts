@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         BWN Suite - Low GP Note (Broadway National)
 // @namespace    broadwaynational.bwn
-// @version      0.2.2
+// @version      0.2.3
 // @description  A "Low GP" button beside the global "Search Work Orders" box. Enter a WO#, Tracking#, Source PO#, or Source Job#; it finds the work order, shows a one-click CONFIRM card (WO / client / location / assignee), then posts TWO notes via Umbrava's own API: a Billing-type note reading "Low GP", and a second note that @-mentions the WO's assignee ("@Name Low GP note added") so they are notified. The @-mention is the real TipTap mention span the SPA sends (captured live 2026-08-17); actionNoteEmails stays null - the span alone notifies. Same-origin /api/graphql with the app's Auth0 bearer, @grant none, zero egress. Nothing posts until you click Confirm.
 // @match        https://app.umbrava.com/*
 // @run-at       document-idle
@@ -583,7 +583,9 @@
     if (pollTimer) return;
     pollTimer = setInterval(function () { if (mount()) { clearInterval(pollTimer); pollTimer = null; } }, 500);
   }
-  var obs = new MutationObserver(schedule);
+  // Trailing debounce (RM-B5): coalesce the SPA re-render bursts instead of firing on every mutation.
+  var obsT = null;
+  var obs = new MutationObserver(function () { clearTimeout(obsT); obsT = setTimeout(schedule, 300); });
   obs.observe(document.body, { childList: true, subtree: true });
   schedule();
 })();
