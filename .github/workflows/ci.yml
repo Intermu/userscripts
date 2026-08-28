@@ -80,6 +80,14 @@ jobs:
       - name: BWN-OPS registry + audited GraphQL wrapper harness
         run: node scripts/test-bwn-ops.js
 
+      # RM-D4 / G4: the BWN_OPS registry must MATCH the wired writers. Statically checks, across every
+      # *.user.js that carries a registry, that (A) every bwnGqlOp('<op>') call-site is registered in
+      # its own file and (B) every registry kind:'write' entry has a real call-site somewhere in the
+      # suite (reads are exempt). Fails on an unregistered call or a dead write entry, and pins that the
+      # 3 dropped dead ops (addWorkOrder / addDependentVendor / addVendorProposalNote) never return.
+      - name: Registry-authoritative harness (G4: every write op maps to a real call-site)
+        run: node scripts/test-registry-authoritative.js
+
       # The four steps below close the 2026-07-31 audit finding that harnesses were
       # committed but NEVER EXECUTED by CI - a green checkmark said nothing about them.
       - name: Launcher dock latent-fix harness
@@ -413,6 +421,15 @@ jobs:
       - name: Proposal Actions write harness (addClientProposalNote / addTask / completeTask)
         run: node scripts/test-proposal-actions.js
 
+      # RM-A3 / R3: bwn-proposal-actions de-hardcodes the STATUS_FALLBACK status-id map and the
+      # RONNY_GUID TSP assignee. Both now resolve LIVE and FAIL CLOSED when they cannot (no write on a
+      # stale id), with a bwn:modules.paLegacyFallback rollback flag reinstating the constants. Slices
+      # the PA-RESOLVE block and pins: live resolution wins, an unresolved status/assignee -> null,
+      # the flag reinstates the constant, and the seed GUID is verified by name. (setStatus's null-id
+      # refusal is pinned in test-proposal-actions.js.)
+      - name: Proposal Actions live-resolve harness (RM-A3: status id + TSP assignee, fail-closed)
+        run: node scripts/test-pa-live-resolve.js
+
       # Track C write-back DRAIN half (bwn-write-queue.user.js): the coordinator's-tab executor that
       # claims a queued command from /api/wo-write-queue, confirms it, and turns it into a real
       # patchWorkOrder / addEditJobNote write. Slices the exec block into a vm with an injected gql and
@@ -423,6 +440,14 @@ jobs:
       # disabling the marker check double-posts, RED. 40 assertions.
       - name: "Write-queue drain harness (Track C executor: patchWorkOrder/addEditJobNote + idempotency)"
         run: node scripts/test-write-queue-drain.js
+
+      # RM-D3 / G3: the silent bulk vpUpsert in bwn-suite-ai (up to 120 prospect upserts per paid Find
+      # Techs / Find Suppliers search) is now governed: it honors the SAME connector kill switch as every
+      # other SWA egress, records ONE PII-free bwn:audit entry per bulk, and debounces an identical
+      # re-fire so a burst of searches does not re-blast the pipeline. Slices the real vpUpsert block and
+      # pins each guarantee, with controls that revert the kill switch / debounce / PII-free audit.
+      - name: vpUpsert governance harness (RM-D3: kill switch + PII-free audit + debounce)
+        run: node scripts/test-vp-upsert-governance.js
 
       # Track C write-back phase 2: the catalog pusher in bwn-write-queue.user.js. Reads the tenant
       # status list + user directory and pushes them to /api/catalog-ingest so the Dashboard's write-back

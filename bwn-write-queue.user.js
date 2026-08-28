@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         BWN Write Queue (Broadway National)
 // @namespace    broadwaynational.bwn
-// @version      0.2.2
+// @version      0.3.0
 // @downloadURL  https://raw.githubusercontent.com/Intermu/userscripts/main/bwn-write-queue.user.js
 // @updateURL    https://raw.githubusercontent.com/Intermu/userscripts/main/bwn-write-queue.user.js
 // @description  Drains the Track C write-back queue: claims THIS coordinator's own queued Umbrava write commands from the SWA, confirms each irreversible write, executes it via patchWorkOrder/addEditJobNote, and reports the result. Self-drain; every write is human-confirmed; disabled until you turn it on.
@@ -38,7 +38,7 @@
 
 (function () {
   "use strict";
-  var VER = "0.2.2";   // keep in lockstep with @version (TM compares versions, not contents)
+  var VER = "0.3.0";   // keep in lockstep with @version (TM compares versions, not contents)
 
   var SWA_BASE = "https://green-stone-0717dab0f.7.azurestaticapps.net";
   var PROXY_URL = SWA_BASE + "/api/wo-write-queue";
@@ -91,7 +91,220 @@
       });
   }
 
-  // ==== BWN-WQ EXEC START (sliced by test-write-queue-drain.js; references the injected `gql`) ====
+  // ---- BWN-OPS: audited GraphQL wrapper for this sandbox --------------------
+  // RM-D1/G1: the two LIVE writes (patchWorkOrder + addEditJobNote) route through bwnGqlOp - the
+  // paste-identical BWN-OPS-WRAP below, SHA-gated byte-for-byte to Core by scripts/test-bwn-ops.js -
+  // so each gets a correlation id + the shared bwn:audit entry + the centralized success:false
+  // rejection, and patchWorkOrder additionally the fail-closed high-risk confirm gate. The queue's
+  // own Approve strip IS this write's confirmation, so it passes opts.confirmed:true (same pattern as
+  // dispatch/kanban). write-queue's 2-arg gql() matches the wrapper's bwnGql(query,variables), so
+  // this aliases it; the READS (WO_READ_Q / NOTES_Q / the catalog queries) stay on raw gql. Passing
+  // feature:'writeQueue' wires the queue into the shared bwn:modules kill switch, so setting
+  // bwn:modules {"writeQueue":false} halts every queued write suite-wide, audited outcome:'denied'.
+  var bwnGql = gql;
+  var BWN_VER = VER;
+  var BWN_MODULES = (function () { try { return JSON.parse(localStorage.getItem('bwn:modules') || '{}') || {}; } catch (e) { return {}; } })();
+  var BWN_OPS = {
+    patchWorkOrder: { kind: 'write', target: 'workOrder', risk: 'high', idempotent: false, retry: 'none',
+      ok: 'Work order updated.', fail: 'The work order was not updated.' },
+    addEditJobNote: { kind: 'write', target: 'note', risk: 'moderate', idempotent: false, retry: 'none',
+      ok: 'Note posted.', fail: 'The note was not posted.' }
+  };
+  // ===== BWN-OPS-WRAP START v2 (paste-identical across adopters; SHA-gated by scripts/test-bwn-ops.js) =====
+  // Generic machinery only - NO registry, NO window hook - so it is byte-identical in every
+  // sandbox that adopts it (Core, drop-upload, ...). It closes over four things each sandbox
+  // supplies on its own: BWN_OPS (that file's registry), BWN_MODULES (kill switches), BWN_VER,
+  // and bwnGql(query, variables) (that file's same-origin transport). The audit ring buffer
+  // writes to the shared localStorage key, so every sandbox's writes land in ONE audit trail.
+  function bwnCorrId() {
+    try { if (window.crypto && window.crypto.randomUUID) return 'bwn-' + window.crypto.randomUUID(); }
+    catch (e) { /* fall through to the timestamp form */ }
+    return 'bwn-' + Date.now().toString(36) + '-' + Math.random().toString(36).slice(2, 10);
+  }
+
+  // Bounded, PII-free audit ring buffer in localStorage. Records ONLY what the caller passes
+  // (ids + scalar before/after) plus operation metadata - NEVER the raw variables or the
+  // response, which can carry note text, addresses, or vendor identity.
+  var BWN_AUDIT_KEY = 'bwn:audit', BWN_AUDIT_MAX = 200, BWN_AUDIT_SCHEMA = 1;
+  function bwnAuditAll() {
+    try { var a = JSON.parse(localStorage.getItem(BWN_AUDIT_KEY) || '[]'); return Array.isArray(a) ? a : []; }
+    catch (e) { return []; }
+  }
+  function bwnAuditRecord(entry) {
+    try {
+      var a = bwnAuditAll();
+      a.push(entry);
+      if (a.length > BWN_AUDIT_MAX) a = a.slice(a.length - BWN_AUDIT_MAX);
+      localStorage.setItem(BWN_AUDIT_KEY, JSON.stringify(a));
+    } catch (e) { /* audit is best-effort - it must never block or fail a write */ }
+    return entry;
+  }
+  function bwnAuditExport() {
+    return JSON.stringify({ schema: BWN_AUDIT_SCHEMA, ver: BWN_VER, exportedTs: Date.now(), entries: bwnAuditAll() }, null, 2);
+  }
+  function bwnAuditClear() { try { localStorage.removeItem(BWN_AUDIT_KEY); } catch (e) { /* best-effort */ } }
+  function bwnAuditActor() {
+    try {
+      var r = JSON.parse(localStorage.getItem('bwn:role:last') || 'null');
+      return (r && (r.label || r.role)) || 'unknown';
+    } catch (e) { return 'unknown'; }
+  }
+
+  // Only a network-level failure is transient. A GraphQL validation error comes back through
+  // bwnGql as a thrown Error carrying the server's message (deterministic - retrying just
+  // repeats it), and a write refused with success:false is flagged bwnNonTransient below.
+  // ponytail: bwnGql does not surface the HTTP status, so 429/5xx are not distinguished here;
+  // attach r.status in bwnGql and widen this test if status-aware backoff is ever needed.
+  function bwnIsTransient(err) {
+    if (err && err.bwnNonTransient) return false;
+    return /network|failed to fetch|load failed|timeout|timed out/i.test(String(err && err.message || err));
+  }
+  function bwnBackoff(tryNo) { return Math.min(4000, 400 * Math.pow(2, tryNo - 1)); }
+  function bwnDelay(ms) { return new Promise(function (r) { setTimeout(r, ms); }); }
+
+  // bwnGqlOp(op, query, variables, opts) -> Promise(data)
+  //   op        BWN_OPS key. THROWS if unregistered - a captured op must be classified before
+  //             it can be sent, which is what keeps guessed selectors out of the suite.
+  //   query     the captured GraphQL document TEXT - the caller owns it, never invented here.
+  //   variables the variables object (sent as-is to bwnGql; never copied into the audit).
+  //   opts      { feature, validate, ids, before, after, actor } - all optional:
+  //     feature   BWN_MODULES key; if that module is switched off the op is REFUSED and, for a
+  //               write, audited outcome:'denied' - this is the per-feature kill switch.
+  //     validate  fn(variables) -> true | 'message'; a write is blocked before it is sent.
+  //     ids       { wo, po, vendorId, ... } scalar identifiers for the audit trail (NO PII).
+  //     before    scalar snapshot of the value(s) about to change (NO PII, NO bulk data).
+  //     after     scalar snapshot of the intended new value(s).
+  //     actor     who initiated; defaults to the last-known rank label, else 'unknown'.
+  // Reads resolve to `data`. A write whose {success,message} envelope says success:false is
+  // REJECTED (never a silent false - the exact bug class the op-catalog warns about) and
+  // audited outcome:'error'.
+  // Injected per-sandbox by a caller that owns a high-risk write's confirmation UI, via
+  // bwnGqlOp.setConfirm(fn). A risk:'high' write is refused unless the caller either passes
+  // opts.confirmed===true (it confirmed through its own UI) OR a confirm handler returns truthy.
+  var _confirmFn = null;
+  function bwnGqlOp(op, query, variables, opts) {
+    opts = opts || {};
+    var meta = BWN_OPS[op];
+    if (!meta) return Promise.reject(new Error('bwnGqlOp: unregistered operation "' + op + '"'));
+    var isWrite = meta.kind === 'write';
+    var corrId = bwnCorrId();
+    var t0 = Date.now();
+    var actor = opts.actor || bwnAuditActor();
+
+    function writeAudit(outcome, extra) {
+      if (!isWrite) return;
+      var e = {
+        ts: Date.now(), corrId: corrId, op: op, kind: meta.kind, target: meta.target,
+        risk: meta.risk || null, actor: actor, ids: opts.ids || null,
+        before: (opts.before === undefined ? null : opts.before),
+        after: (opts.after === undefined ? null : opts.after),
+        outcome: outcome, ms: Date.now() - t0, ver: BWN_VER
+      };
+      if (extra) { for (var k in extra) { if (Object.prototype.hasOwnProperty.call(extra, k)) e[k] = extra[k]; } }
+      bwnAuditRecord(e);
+    }
+
+    // Fail-closed write classification (G5): a WRITE must carry a RECOGNIZED risk tier. An
+    // unclassified write - a registry entry whose risk is missing or misspelled - is REFUSED here
+    // rather than sent unlabelled, so a new mutation cannot slip past the governance by omitting
+    // its risk. 'low'/'moderate' skip the confirm gate below; 'high' hits it; anything else fails
+    // closed. Reads are unaffected (isWrite guards this). Audited denied so the refusal is visible.
+    if (isWrite && meta.risk !== 'low' && meta.risk !== 'moderate' && meta.risk !== 'high') {
+      writeAudit('denied', { reason: 'unclassified-write:' + (meta.risk || 'none') });
+      return Promise.reject(new Error('bwnGqlOp: write "' + op + '" has no recognized risk classification'));
+    }
+    // Per-feature kill switch: a disabled module must not mutate even if its UI leaked in.
+    if (opts.feature && BWN_MODULES[opts.feature] === false) {
+      writeAudit('denied', { reason: 'feature-off:' + opts.feature });
+      return Promise.reject(new Error('bwnGqlOp: feature "' + opts.feature + '" is disabled'));
+    }
+    // Validate a write BEFORE it leaves the browser.
+    if (isWrite && typeof opts.validate === 'function') {
+      var vr = opts.validate(variables);
+      if (vr !== true) {
+        writeAudit('denied', { reason: 'validation:' + vr });
+        return Promise.reject(new Error('bwnGqlOp: validation failed for "' + op + '": ' + vr));
+      }
+    }
+
+    var maxTries = (meta.retry === 'safe' && (meta.kind === 'read' || meta.idempotent === true)) ? 3 : 1;
+    function attempt(tryNo) {
+      return bwnGql(query, variables).then(function (data) {
+        if (isWrite) {
+          var env = data && data[op];
+          // F3: fail closed on an unrecognized write response. A registered write MUST return
+          // { success: <bool>, ... } under its own field name (op === the response field name
+          // for every adopter). A missing data[op] (a name/alias mismatch) or a non-boolean
+          // success means the write cannot be confirmed to have landed - classify it as an
+          // error, never a silent 'ok'. Verified safe: every current adopter selects `success`.
+          if (!env || typeof env.success !== 'boolean') {
+            var badShape = new Error(op + ': unrecognized write response (no {success} under data.' + op + ')');
+            badShape.bwnNonTransient = true;
+            writeAudit('error', { tries: tryNo, reason: 'unexpected-response-shape' });
+            throw badShape;
+          }
+          if (env && env.success === false) {
+            var refused = new Error(env.message || (op + ' was refused'));
+            refused.bwnNonTransient = true;
+            // F5: record a fixed category, never the server message (env.message can echo
+            // input-derived text). The message still rides the thrown `refused` to the caller.
+            writeAudit('error', { tries: tryNo, reason: 'write-refused' });
+            throw refused;
+          }
+          writeAudit('ok', { tries: tryNo });
+        }
+        return data;
+      }, function (err) {
+        if (bwnIsTransient(err) && tryNo < maxTries) {
+          return bwnDelay(bwnBackoff(tryNo)).then(function () { return attempt(tryNo + 1); });
+        }
+        // F5: audit a fixed category, never the raw error text (which can echo input-derived
+        // server strings into the "PII-free" trail). The full error still rides the thrown err
+        // to the caller for its toast/log.
+        writeAudit('error', { tries: tryNo, reason: bwnIsTransient(err) ? 'transient-failure' : 'request-failed' });
+        throw err;
+      });
+    }
+    // High-risk confirmation gate (fail-closed, by construction). F4: a risk:'high' write has
+    // NO path to the transport except through this block - it returns in every sub-case (send
+    // or reject), so the trailing `return attempt(1)` below is reachable only by non-high-risk
+    // ops. A future high-risk writer therefore cannot skip the gate by omission: an absent
+    // confirmation is refused, never silently sent. Confirmation is proven EITHER by the
+    // caller's own UI (opts.confirmed===true, e.g. dispatch's modal) OR by an injected _confirmFn
+    // returning truthy.
+    // KNOWN RESIDUAL (flagged, NOT closed here): opts.confirmed===true is a caller assertion the
+    // wrapper trusts - it cannot tell a genuine confirm from a hardcoded literal. Closing that
+    // would mean dropping bare-boolean trust and mandating an injected _confirmFn, which every
+    // current high-risk adopter would fail (none inject one) - a live-behavior change, out of scope.
+    if (isWrite && meta.risk === 'high') {
+      if (opts.confirmed !== true) {
+        if (typeof _confirmFn !== 'function') {
+          writeAudit('denied', { reason: 'confirm-required' });
+          return Promise.reject(new Error('bwnGqlOp: "' + op + '" is high-risk and needs confirmation (no confirm handler set)'));
+        }
+        var details = {
+          op: op, target: meta.target, risk: meta.risk, ids: opts.ids || null,
+          current: (opts.current === undefined ? null : opts.current),
+          proposed: (opts.proposed === undefined ? null : opts.proposed),
+          count: (opts.count === undefined ? null : opts.count),
+          reason: opts.reason || null, irreversible: !!opts.irreversible
+        };
+        return Promise.resolve().then(function () { return _confirmFn(details); }).then(function (okd) {
+          if (!okd) {
+            writeAudit('denied', { reason: 'user-cancelled' });
+            throw new Error('bwnGqlOp: "' + op + '" cancelled at confirmation');
+          }
+          return attempt(1);
+        });
+      }
+      return attempt(1);
+    }
+    return attempt(1);
+  }
+  bwnGqlOp.setConfirm = function (fn) { _confirmFn = (typeof fn === 'function') ? fn : null; };
+  // ===== BWN-OPS-WRAP END v2 =====
+
+  // ==== BWN-WQ EXEC START (sliced by test-write-queue-drain.js; references injected `gql` (reads) + `bwnGqlOp` (writes)) ====
   var INTERNAL_NOTE_TYPE = 13;   // Internal (drop-upload's fallback map). v1 posts every note as Internal.
 
   var WO_READ_Q = "query($n:Int!){ workOrder(workOrderNumber:$n){ assignedTo statusId serviceLevelAgreementId priority{ label responseMinutes firstTripDate serviceLevelAgreementMinutes expirationMinutes expectedCompletionDate hasPriorityOverride category skipWeekends } } }";
@@ -102,7 +315,10 @@
   function cond(v) { return { shouldInclude: true, value: v }; }   // the Conditional*Input wrapper
   function num(v) { var n = Number(v); return isFinite(n) ? n : null; }
   function gqlError(msg) { var e = new Error(msg); e.business = true; return e; }   // a verb-level refusal, never retryable
-  function classifyError(err) { return !(err && (err.business || err.graphql)); }   // retryable iff it is a transport error
+  // Retryable iff it is a transport error. A write refused by the wrapper (success:false) rejects with
+  // .bwnNonTransient set (the BWN-OPS-WRAP contract) - a deterministic refusal that must NOT be retried,
+  // same class as .business / .graphql. Omitting it would let a governance refusal loop on the queue.
+  function classifyError(err) { return !(err && (err.business || err.graphql || err.bwnNonTransient)); }
 
   function esc(s) { return String(s == null ? '' : s).replace(/[&<>"']/g, function (c) { return { '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;' }[c]; }); }
   function textToHtml(t) {
@@ -136,8 +352,9 @@
   }
 
   // Execute ONE claimed command. Returns { outcome:'done', result } or throws (the caller classifies
-  // and reports failed). Confirmation is the caller's job - this function is confirm-free so it is
-  // fully unit-testable in a vm with an injected gql.
+  // and reports failed). Confirmation is the caller's job - the queue's Approve strip runs BEFORE
+  // this, so the write passes confirmed:true. Reads use raw gql; writes route through bwnGqlOp. Fully
+  // unit-testable in a vm with an injected gql (reads) + bwnGqlOp (writes; a faithful stub in the harness).
   function executeCommand(cmd) {
     var wo = parseInt(cmd.woNumber, 10);
     var args = cmd.args || {};
@@ -153,7 +370,10 @@
           workOrderNumber: wo, type: INTERNAL_NOTE_TYPE, content: marked, contentHtml: textToHtml(marked),
           isCompletion: false, isInvoice: false, isPinned: false, actionNoteEmails: null, targetPurchaseOrderNumbers: []
         };
-        return gql(ADD_NOTE_M, { addEditInput: input }).then(function (d) {
+        // addEditJobNote is a moderate write: routed through bwnGqlOp for the corrId + shared
+        // bwn:audit entry + success:false rejection (no confirm gate). ids carry the scalar WO number
+        // only; the note text stays in variables, never the audit trail.
+        return bwnGqlOp('addEditJobNote', ADD_NOTE_M, { addEditInput: input }, { feature: 'writeQueue', ids: { wo: wo } }).then(function (d) {
           var res = d && d.addEditJobNote;
           if (!res || res.success !== true) throw gqlError((res && res.message) || "addEditJobNote reported no success");
           return { outcome: "done", result: { noteId: res.note && res.note.id } };
@@ -166,26 +386,33 @@
       var rec = rd && rd.workOrder;
       if (!rec) throw gqlError("workOrder " + wo + " not found");
       var data = { workOrderNumber: wo };
+      var before = null, after = null;   // scalar before/after for the audit trail (PII-free)
 
       if (cmd.verb === "wo.status") {
         var target = parseInt(args.statusId, 10);
         if (Number(rec.statusId) === target) return { outcome: "done", result: { skipped: "already-status", statusId: target } };
         data.statusId = cond(target);
+        before = { statusId: rec.statusId }; after = { statusId: target };
       } else if (cmd.verb === "wo.assign") {
         var who = String(args.assignedTo);
         if (String(rec.assignedTo) === who) return { outcome: "done", result: { skipped: "already-assigned" } };
         data.assignedTo = cond(who);
+        before = { assignedTo: rec.assignedTo }; after = { assignedTo: who };
       } else if (cmd.verb === "wo.ecd") {
         var date = String(args.expectedCompletionDate);
         var cur = rec.priority && rec.priority.expectedCompletionDate;
         if (cur && String(cur).slice(0, 10) === date.slice(0, 10)) return { outcome: "done", result: { skipped: "already-ecd" } };
         data.priority = cond(priorityWriteValue(rec.priority, date));
         if (rec.serviceLevelAgreementId) data.serviceLevelAgreementId = cond(rec.serviceLevelAgreementId);
+        before = { ecd: cur || null }; after = { ecd: date };
       } else {
         throw gqlError("unknown verb: " + cmd.verb);
       }
 
-      return gql(PATCH_M, { data: data }).then(function (d) {
+      // patchWorkOrder is a high-risk write: routed through bwnGqlOp for the corrId + shared bwn:audit
+      // entry + the fail-closed confirm gate + success:false rejection. The Approve strip already
+      // confirmed, so confirmed:true; before/after carry the scalar change for the audit trail.
+      return bwnGqlOp('patchWorkOrder', PATCH_M, { data: data }, { confirmed: true, feature: 'writeQueue', ids: { wo: wo }, before: before, after: after }).then(function (d) {
         var p = d && d.patchWorkOrder;
         if (!p || !p.success) throw gqlError((p && p.message) || "patchWorkOrder reported no success");
         return { outcome: "done", result: { verb: cmd.verb } };
