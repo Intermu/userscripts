@@ -191,6 +191,38 @@ function runCases(opsSrc) {
     var log = api.auditAll();
     eq('the audit now has two entries', log.length, 2);
     ok('the second entry is an error outcome', log[1] && log[1].outcome === 'error', JSON.stringify(log[1]));
+    // F5: the error audit reason is a fixed category, NOT the raw server message text.
+    ok('F5: the success:false audit reason is a scrubbed category (write-refused)', log[1] && log[1].reason === 'write-refused', JSON.stringify(log[1]));
+    ok('F5: the server message text never enters the audit trail', JSON.stringify(log[1] || {}).indexOf('not allowed') === -1, JSON.stringify(log[1]));
+
+    // --- F3: an unrecognized write response fails CLOSED (never a silent ok) ---
+    // data['addEditJobNote'] is undefined here - the name-coupling hole: a future op whose
+    // field name differs from its key, or whose envelope omits success, must NOT be classified
+    // as success. (Verified separately that every CURRENT adopter returns {success} under its
+    // own field name, so this fail-closed change touches no live caller.)
+    e.plan = [{ data: { notTheOpField: { success: true } } }];
+    e.calls = [];
+    return settle(callRun('addEditJobNote', 'mutation($d:X){addEditJobNote(data:$d){success message}}', { d: {} }, { ids: { wo: 7 } }));
+  }).then(function (r) {
+    ok('F3: a write with no {success} under data[op] REJECTS (not a silent ok)', !r.ok && /unrecognized write response/.test(String(r.e && r.e.message)), r.ok ? 'resolved' : String(r.e && r.e.message));
+    var log = api.auditAll();
+    ok('F3: the unrecognized-shape write is audited error (unexpected-response-shape)', (function () { var la = log[log.length - 1]; return la && la.outcome === 'error' && la.reason === 'unexpected-response-shape'; })(), JSON.stringify(log[log.length - 1]));
+
+    // F3 second sub-case: data[op] present but success is not a boolean also fails closed.
+    e.plan = [{ data: { addEditJobNote: { note: { id: 1 } } } }];
+    e.calls = [];
+    return settle(callRun('addEditJobNote', 'mutation($d:X){addEditJobNote(data:$d){success message}}', { d: {} }, { ids: { wo: 8 } }));
+  }).then(function (r) {
+    ok('F3: a write whose data[op] carries no boolean success REJECTS', !r.ok && /unrecognized write response/.test(String(r.e && r.e.message)), r.ok ? 'resolved' : String(r.e && r.e.message));
+
+    // --- F4: a high-risk write with OMITTED opts (pure omission) is fail-closed refused ---
+    // Locks the "cannot skip the gate by omission" invariant the by-construction restructure gives.
+    e.plan = [{ data: { patchWorkOrder: { success: true } } }];
+    e.calls = [];
+    return settle(callRun('patchWorkOrder', 'mutation{patchWorkOrder}'));
+  }).then(function (r) {
+    ok('F4: a high-risk write with omitted opts is refused (gate not skippable by omission)', !r.ok && /confirmation/.test(String(r.e && r.e.message)), r.ok ? 'resolved' : String(r.e && r.e.message));
+    eq('F4: and nothing was sent on omission', e.calls.length, 0);
 
     // --- a non-idempotent write is NOT retried on a transient failure ---
     e.plan = [{ err: new Error('network down') }];
@@ -348,7 +380,11 @@ var MUTATIONS = [
   { what: 'the high-risk confirm gate removed (high-risk sends unconfirmed)',
     m: function (s) { return mutate(s, "meta.risk === 'high'", "meta.risk === 'nope'"); } },
   { what: 'a cancelled confirm proceeds anyway',
-    m: function (s) { return mutate(s, 'if (!okd) {', 'if (false) {'); } }
+    m: function (s) { return mutate(s, 'if (!okd) {', 'if (false) {'); } },
+  { what: 'F3: the unrecognized-write-envelope guard removed (silent ok on a no-success response)',
+    m: function (s) { return mutate(s, "if (!env || typeof env.success !== 'boolean') {", "if (false) {"); } },
+  { what: 'F5: the audit reason copies the raw server message back in (PII leak)',
+    m: function (s) { return mutate(s, "writeAudit('error', { tries: tryNo, reason: 'write-refused' });", "writeAudit('error', { tries: tryNo, reason: refused.message });"); } }
 ];
 
 // Confirm-gate coverage for the writes newly adopted in F2. createDraftProposal + editProposal
