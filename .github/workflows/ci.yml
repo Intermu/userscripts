@@ -538,6 +538,21 @@ jobs:
       - name: A11y focus-trap harness (bwnFocusTrap byte-identity + focus move/wrap/restore across dialog sandboxes)
         run: node scripts/test-a11y-focus.js
 
+      # RM-B4: Core's central route/lifecycle helper (BWN.onRoute / window.bwnOnRoute). Slices the
+      # shipped helper + bwn-kanban's flag-gated kbRouteHooks adopter and drives both against a fake
+      # window/history with a controllable timer: one debounced history patch shared by N subscribers,
+      # pathname-diff dedup, unsubscribe, thrower isolation, and the migrated consumer's flag-OFF =
+      # legacy / flag-ON = central behavior - with four load-bearing negative controls.
+      - name: Route helper harness (BWN.onRoute foundation + kanban migration + negative controls)
+        run: node scripts/test-route-helper.js
+
+      # RM-B2: Core's shared error reporter (BWN.report / window.bwnReport). Slices the shipped
+      # reporter and drives it against a fake localStorage + fake toast: one toast + one bounded,
+      # PII-free bwn:errlog entry per failure, the bwn:audit ring untouched, flag-OFF fail-safe (toast
+      # shows, nothing logged) - with three negative controls (PII leak, uncapped ring, gate removed).
+      - name: Error reporter harness (BWN.report toast + PII-free capped ring + negative controls)
+        run: node scripts/test-error-reporter.js
+
   lint:
     name: Lint
     runs-on: ubuntu-latest
