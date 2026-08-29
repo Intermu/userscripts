@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         BWN WO Kanban (Broadway National)
 // @namespace    broadwaynational.bwn
-// @version      0.7.6
+// @version      0.7.7
 // @description  Turns Umbrava's Work Orders list into a kanban board without leaving the page. A Board/List toggle sits next to the list's own search box; switching to Board hides the table (the toolbar stays, so the app's own filtering still drives everything) and lays the same work orders out as cards in lanes. Lanes are WO Status by default and regroup to Priority, Assignee, Client or Age from a dropdown. The board never invents its own filter system, and as of 0.5.0 it does not query at all: it reads both rows and verdicts from the full-board scan bwn-suite-core's List Heat already runs on the same page, so whatever the list is filtered to (phase, statuses, search, assignee chips, sort) is exactly what the board shows, and one list page now costs one full-board query instead of two. It still captures the SPA's own PagedWorkOrders request off the wire, because that capture is where the auth headers for the status write come from. Cards carry the triage picture: the status clock against the limit that WO was actually judged against, the reasons it is flagged, whether its onsite date has already passed, DNE vs vendor NTE with GP, vendors and trades. Severity is never computed here - it is read from the verdicts List Heat publishes in bwn-suite-core, so the board and the list can never disagree. Dragging a card between status lanes DOES change the work order, through Umbrava's own captured PatchWorkOrder mutation - it asks first, states that the WO's time-in-status clock will reset, verifies the server reported success, re-scans rather than trusting the optimistic move, and leaves the card where it was if anything fails. Everything is same-origin using the page's own session: no @connect, no keys, nothing leaves the browser.
 // @downloadURL  https://raw.githubusercontent.com/Intermu/userscripts/main/bwn-kanban.user.js
 // @updateURL    https://raw.githubusercontent.com/Intermu/userscripts/main/bwn-kanban.user.js
@@ -26,7 +26,7 @@
   // update check another. There is no GM_info without a grant (and a grant would sandbox the
   // script away from the page's fetch - see the header note), so the fallback is a literal
   // that must be bumped WITH @version; the harness pins the two together.
-  var VER = '0.7.6';
+  var VER = '0.7.7';
   console.info('[BWN KANBAN] v' + VER + ' - board rows AND verdicts read from bwn-suite-core\'s List Heat scan (no second full-board query); drag between status lanes writes via captured PatchWorkOrder');
 
   // ---------------------------------------------------------------------------
@@ -1296,16 +1296,33 @@
     }, 200);
   }
 
+  // RM-B4 route hooks (sliced by scripts/test-route-helper.js). Route-change detection is the ONE
+  // piece this slice centralizes: when BWN_MODULES.routeHelper is on AND Core has published the
+  // shared helper (window.bwnOnRoute - both scripts are @grant none, same page window, same bridge
+  // as window.__bwnHeatRows this file already reads), subscribe to Core's single history patch
+  // instead of installing our own popstate + pushState/replaceState trio. Flag off, or Core absent/
+  // disabled, => the legacy trio installs, byte-for-byte the old behavior (fail-safe: an unresolved
+  // flag or a missing helper both take the legacy path, never a silent half-migration).
+  // NOTE: the body MutationObserver in boot() STAYS either way - it does re-render recovery (React
+  // drops our node on a same-route rerender), which route detection does not cover; folding that
+  // into the helper is the phased follow-up, not this slice.
+  function kbRouteHooks(onChange) {
+    if (BWN_MODULES.routeHelper === true && typeof window.bwnOnRoute === 'function') {
+      try { window.bwnOnRoute(onChange); return; } catch (e) { /* fall through to legacy */ }
+    }
+    window.addEventListener('popstate', onChange);
+    ['pushState', 'replaceState'].forEach(function (m) {
+      var orig = history[m];
+      if (typeof orig !== 'function') return;
+      history[m] = function () { var r = orig.apply(this, arguments); onChange(); return r; };
+    });
+  }
+
   function boot() {
     injectCSS();
     schedule();
     new MutationObserver(schedule).observe(document.body, { childList: true, subtree: true });
-    window.addEventListener('popstate', schedule);
-    ['pushState', 'replaceState'].forEach(function (m) {
-      var orig = history[m];
-      if (typeof orig !== 'function') return;
-      history[m] = function () { var r = orig.apply(this, arguments); schedule(); return r; };
-    });
+    kbRouteHooks(schedule);
     // Core announces a rebuilt snapshot; this is the only push in the contract and it carries
     // no payload, so a missed event costs nothing - the next render pulls anyway.
     document.addEventListener('bwn:evt', function (ev) {
