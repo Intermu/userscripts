@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         BWN Proposal Actions (Broadway National)
 // @namespace    broadwaynational.bwn
-// @version      0.4.0
+// @version      0.4.1
 // @downloadURL  https://raw.githubusercontent.com/Intermu/userscripts/main/bwn-proposal-actions.user.js
 // @updateURL    https://raw.githubusercontent.com/Intermu/userscripts/main/bwn-proposal-actions.user.js
 // @description  On a Client Proposal DETAILS page, a "Proposal Actions" dropdown runs the internal review workflow in one confirmed action: Approval / TSP Review / Kickback. Each posts a note to the Proposal + the Work Order, sets the WO status, completes open tasks, and files a new task (assigned to the WO coordinator, or Ronny Sharp for TSP). Kickback drafts a rejection reason with the on-device browser AI for the operator to confirm. Every write is shown in a confirm dialog first; nothing fires until Confirm. @grant none.
@@ -15,7 +15,7 @@
 (function () {
   'use strict';
 
-  var VER = '0.4.0';   // keep in step with @version
+  var VER = '0.4.1';   // keep in step with @version
   var DRY_RUN = false; // when true, every WRITE is console.logged instead of sent
   console.info('[BWN PROPOSAL ACTIONS] v' + VER + ' - Approval / TSP Review / Kickback workflow on the Client Proposal details page');
 
@@ -1014,12 +1014,25 @@
       if (d && d.id === 'bwn:role') injectDropdown();
     });
   } catch (e) { }
-  try {
-    // Trailing debounce (RM-B5): coalesce the SPA re-render bursts instead of firing on every mutation.
-    var paObsT = null;
-    var paObs = new MutationObserver(function () { clearTimeout(paObsT); paObsT = setTimeout(injectDropdown, 300); });
-    paObs.observe(document.body, { childList: true, subtree: true });
-  } catch (e) { }
+  // RM route helper adoption (phased follow-on to RM-B4). Route-change re-inject centralizes: when
+  // BWN_MODULES.routeHelper is ON and Core published window.bwnOnRoute (both @grant none, same page
+  // window), subscribe to Core's ONE history patch instead of our own per-mutation body observer.
+  // The permanent 900ms poll below stays in BOTH states and is this consumer's re-render recovery net
+  // (injectDropdown re-adds the dropdown React wipes), so no recovery poll is needed in the helper.
+  // Flag OFF, or Core absent/disabled/throwing, => the legacy RM-B5 body observer installs,
+  // byte-for-byte the old behavior (fail-safe).
+  function paRouteHooks(onChange) {
+    if (BWN_MODULES.routeHelper === true && typeof window.bwnOnRoute === 'function') {
+      try { window.bwnOnRoute(onChange); return; } catch (e) { /* fall through to legacy */ }
+    }
+    try {
+      // Trailing debounce (RM-B5): coalesce the SPA re-render bursts instead of firing on every mutation.
+      var paObsT = null;
+      var paObs = new MutationObserver(function () { clearTimeout(paObsT); paObsT = setTimeout(onChange, 300); });
+      paObs.observe(document.body, { childList: true, subtree: true });
+    } catch (e) { }
+  }
+  paRouteHooks(injectDropdown);
   setInterval(injectDropdown, 900);
   injectDropdown();
 

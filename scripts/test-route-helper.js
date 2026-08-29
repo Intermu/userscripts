@@ -234,4 +234,89 @@ var KBNC = mutate(KBSRC,
   A.ok('NC4 red: ungated, kanban skips the legacy patch even with the flag off', env.patchedHistory() === false);
 })();
 
+// ---- phased follow-on consumers: low-gp / notes / proposal-actions ----------------------------
+// The RM-B4 phased follow-up migrates three MORE @grant-none, route-scoped consumers off their own
+// per-mutation body observer onto Core's window.bwnOnRoute (behind the same routeHelper flag). Each
+// exposes a flag-gated `<xx>RouteHooks(onChange)`; this section slices each one and proves the same
+// contract as kanban above PLUS the observer-count-drop and recovery-net specifics:
+//   flag ON + helper present => subscribes to the central helper ONCE and creates NO body observer
+//     (the "fewer body observers" win); low-gp/notes also start ONE steady recovery-poll interval,
+//     proposal-actions starts none (its permanent 900ms poll lives outside the helper);
+//   flag OFF / helper absent / helper throws => installs the legacy body observer, no central call,
+//     no recovery interval (byte-for-byte the old behavior; fail-safe);
+//   NC: break the flag gate => the flag-OFF check sees NO observer and goes red.
+function sliceFn(file, startNeedle, endNeedle) {
+  var t = fs.readFileSync(path.join(__dirname, '..', file), 'utf8').replace(/\r\n/g, '\n');
+  var a = t.indexOf(startNeedle), b = t.indexOf(endNeedle, a === -1 ? 0 : a);
+  if (a === -1 || b === -1) throw new Error(startNeedle + ' not found in ' + file);
+  return t.slice(a, b);
+}
+function consumerEnv(flag, opts) {
+  opts = opts || {};
+  var calls = { central: 0, popstate: 0, observers: 0, intervals: 0 };
+  var win = { addEventListener: function (type) { if (type === 'popstate') calls.popstate++; } };
+  if (opts.helper === 'present') win.bwnOnRoute = function () { calls.central++; };
+  else if (opts.helper === 'throws') win.bwnOnRoute = function () { throw new Error('helper boom'); };
+  function FakeMO() { calls.observers++; this.observe = function () { }; this.disconnect = function () { }; }
+  return {
+    BWN_MODULES: { routeHelper: flag }, window: win, MutationObserver: FakeMO, document: { body: {} },
+    setInterval: function () { calls.intervals++; return 0; }, setTimeout: function () { return 0; }, clearTimeout: function () { },
+    calls: calls
+  };
+}
+function buildConsumer(src, fnName, env) {
+  var body = src + '\n; return ' + fnName + ';';
+  var f = new Function('BWN_MODULES', 'window', 'MutationObserver', 'document', 'setInterval', 'setTimeout', 'clearTimeout', 'mount', 'tick', 'injectDropdown', body);
+  var noop = function () { };
+  return f(env.BWN_MODULES, env.window, env.MutationObserver, env.document, env.setInterval, env.setTimeout, env.clearTimeout, noop, noop, noop);
+}
+// name, file, fn name, slice-end needle, expected recovery-interval count when flag ON
+var CONSUMERS = [
+  { name: 'low-gp', file: 'bwn-low-gp.user.js', fn: 'lowgpRouteHooks', end: 'lowgpRouteHooks(schedule);', recoveryIntervals: 1 },
+  { name: 'notes', file: 'bwn-notes.user.js', fn: 'notesRouteHooks', end: 'notesRouteHooks(schedule);', recoveryIntervals: 1 },
+  { name: 'proposal-actions', file: 'bwn-proposal-actions.user.js', fn: 'paRouteHooks', end: 'paRouteHooks(injectDropdown);', recoveryIntervals: 0 }
+];
+CONSUMERS.forEach(function (c) {
+  var SRC = sliceFn(c.file, 'function ' + c.fn + '(onChange) {', c.end);
+  // flag ON + helper present
+  (function () {
+    var env = consumerEnv(true, { helper: 'present' }), fn = buildConsumer(SRC, c.fn, env);
+    fn(function () { });
+    A.eq(c.name + ' flag ON + helper present: subscribes to the central helper once', env.calls.central, 1);
+    A.eq(c.name + ' flag ON + helper present: creates NO body observer (fewer observers)', env.calls.observers, 0);
+    A.eq(c.name + ' flag ON + helper present: starts the expected recovery-poll count', env.calls.intervals, c.recoveryIntervals);
+    A.eq(c.name + ' flag ON + helper present: adds no popstate listener of its own', env.calls.popstate, 0);
+  })();
+  // flag OFF => legacy observer, no central, no recovery interval
+  (function () {
+    var env = consumerEnv(false, { helper: 'present' }), fn = buildConsumer(SRC, c.fn, env);
+    fn(function () { });
+    A.eq(c.name + ' flag OFF: does not call the central helper', env.calls.central, 0);
+    A.eq(c.name + ' flag OFF: installs exactly one legacy body observer', env.calls.observers, 1);
+    A.eq(c.name + ' flag OFF: starts no recovery interval (legacy)', env.calls.intervals, 0);
+  })();
+  // flag ON but helper absent => fail-safe to legacy observer
+  (function () {
+    var env = consumerEnv(true, {}), fn = buildConsumer(SRC, c.fn, env);
+    fn(function () { });
+    A.eq(c.name + ' flag ON but helper absent: fails safe to the legacy observer', env.calls.observers, 1);
+    A.eq(c.name + ' flag ON but helper absent: no central call', env.calls.central, 0);
+  })();
+  // flag ON but helper throws => fail-safe to legacy observer
+  (function () {
+    var env = consumerEnv(true, { helper: 'throws' }), fn = buildConsumer(SRC, c.fn, env);
+    fn(function () { });
+    A.eq(c.name + ' flag ON but helper throws: fails safe to the legacy observer', env.calls.observers, 1);
+  })();
+  // NC: break the flag gate => ungated, the flag-OFF path must skip the observer (goes red here).
+  var NC = mutate(SRC,
+    "if (BWN_MODULES.routeHelper === true && typeof window.bwnOnRoute === 'function') {",
+    "if (typeof window.bwnOnRoute === 'function') {");
+  (function () {
+    var env = consumerEnv(false, { helper: 'present' }), fn = buildConsumer(NC, c.fn, env);
+    fn(function () { });
+    A.ok(c.name + ' NC red: ungated, skips the legacy observer even with the flag off', env.calls.observers === 0);
+  })();
+});
+
 A.finish();

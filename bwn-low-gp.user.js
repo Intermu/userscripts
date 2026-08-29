@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         BWN Suite - Low GP Note (Broadway National)
 // @namespace    broadwaynational.bwn
-// @version      0.2.3
+// @version      0.2.4
 // @description  A "Low GP" button beside the global "Search Work Orders" box. Enter a WO#, Tracking#, Source PO#, or Source Job#; it finds the work order, shows a one-click CONFIRM card (WO / client / location / assignee), then posts TWO notes via Umbrava's own API: a Billing-type note reading "Low GP", and a second note that @-mentions the WO's assignee ("@Name Low GP note added") so they are notified. The @-mention is the real TipTap mention span the SPA sends (captured live 2026-08-17); actionNoteEmails stays null - the span alone notifies. Same-origin /api/graphql with the app's Auth0 bearer, @grant none, zero egress. Nothing posts until you click Confirm.
 // @match        https://app.umbrava.com/*
 // @run-at       document-idle
@@ -175,7 +175,7 @@
     while (j < n) { var c = q.charAt(j); if ((c >= 'A' && c <= 'Z') || (c >= 'a' && c <= 'z') || (c >= '0' && c <= '9') || c === '_') j++; else break; }
     return lgGql(q.slice(i, j) || null, query, variables);
   };
-  var BWN_VER = '0.2.3';
+  var BWN_VER = '0.2.4';
   var BWN_MODULES = (function () { try { return JSON.parse(localStorage.getItem('bwn:modules') || '{}') || {}; } catch (e) { return {}; } })();
   var BWN_OPS = {
     addEditJobNote: { kind: 'write', target: 'note', risk: 'moderate', idempotent: false, retry: 'none',
@@ -616,9 +616,32 @@
     if (pollTimer) return;
     pollTimer = setInterval(function () { if (mount()) { clearInterval(pollTimer); pollTimer = null; } }, 500);
   }
-  // Trailing debounce (RM-B5): coalesce the SPA re-render bursts instead of firing on every mutation.
-  var obsT = null;
-  var obs = new MutationObserver(function () { clearTimeout(obsT); obsT = setTimeout(schedule, 300); });
-  obs.observe(document.body, { childList: true, subtree: true });
+  // RM route helper adoption (phased follow-on to RM-B4). Route-change re-mount is the piece that
+  // centralizes: when BWN_MODULES.routeHelper is ON and Core published window.bwnOnRoute (both are
+  // @grant none, same page window - the same bridge kanban uses for window.__bwnHeatRows), subscribe
+  // to Core's ONE history patch instead of our own per-mutation body observer, and keep a steady
+  // low-rate poll as the re-render recovery net (React can drop the button mid-route, which route
+  // detection does not cover; a fixed-interval mount() is cheaper and starvation-proof vs a
+  // clear-and-reset observer debounce on a busy SPA - see wiki/observer-debounce-starves.md). Flag
+  // OFF, or Core absent/disabled/throwing, => the legacy RM-B5 body observer installs, byte-for-byte
+  // the old behavior (fail-safe: an unresolved flag or a missing helper both take the legacy path,
+  // never a silent half-migration).
+  function lowgpRouteHooks(onChange) {
+    if (BWN_MODULES.routeHelper === true && typeof window.bwnOnRoute === 'function') {
+      try {
+        window.bwnOnRoute(onChange);
+        // ponytail: permanent 500ms poll as the re-render recovery net the dropped observer used to
+        // give (mount() is idempotent via its isConnected guard, so no double-inject). Matches the
+        // consumer's existing 500ms mount cadence; tighten only if a wipe ever needs faster recovery.
+        setInterval(mount, 500);
+        return;
+      } catch (e) { /* fall through to legacy */ }
+    }
+    // Trailing debounce (RM-B5): coalesce the SPA re-render bursts instead of firing on every mutation.
+    var obsT = null;
+    var obs = new MutationObserver(function () { clearTimeout(obsT); obsT = setTimeout(onChange, 300); });
+    obs.observe(document.body, { childList: true, subtree: true });
+  }
+  lowgpRouteHooks(schedule);
   schedule();
 })();
