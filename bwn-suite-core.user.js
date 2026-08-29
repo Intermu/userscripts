@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         BWN Suite - Core (Broadway National)
 // @namespace    broadwaynational.bwn
-// @version      1.80.0
+// @version      1.80.1
 // @downloadURL  https://raw.githubusercontent.com/Intermu/userscripts/main/bwn-suite-core.user.js
 // @updateURL    https://raw.githubusercontent.com/Intermu/userscripts/main/bwn-suite-core.user.js
 // @description  Runs several Umbrava helpers for BWN coordinators, in the browser with no privileged grants. Includes: PO Approval + ETA Builder; WO Assist (GP/ETA, a stall watchdog, DNE calculator, and a next-action playbook); Email Leak Guard (checks recipients against vendor names, PO amounts, and client budget references before an outbound email sends); WO List Heat (a triage overlay + My Day strip on the work-order list, with an optional same-origin Umbrava API scan for deterministic full-board coverage); and the BWN Launcher (opens the Azure Static Web App tools with the current WO's context). Modules share state through sessionStorage/localStorage. The only network calls are same-origin Umbrava GraphQL requests (app.umbrava.com/api/graphql, the app's own session): List Heat's full-board scan and WO Assist's work-order / trip / clock-in / document reads, plus ONE write - BWN Views saves the column layout through Umbrava's own putUserPreference, the same preference the column chooser writes; everything else is offline. Toggle modules in BWN_MODULES below.
@@ -81,11 +81,33 @@
     });
   } catch (e) { /* defaults */ }
 
+  // Central governance flags (governance-sync): apply the org flags blob that bwn-suite-ai
+  // caches to bwn:gov as ONE-WAY disables over the local module set. Remote may DISABLE a
+  // feature (flags[key]===false) or trip flags.globalKillSwitch, but NEVER enable one - a
+  // stuck, absent, or corrupt bundle can only leave the suite SAFER, never less safe. Runs
+  // after the user-toggle merge (so precedence is: defaults -> user toggle -> remote disable)
+  // and re-applies live on the bwn:gov ping, so a kill blocks new writes with no reload (the
+  // bwnGqlOp per-feature check reads BWN_MODULES live). Absent bundle = local defaults.
+  // BWN-GOV-APPLY-SLICE-START (sliced by scripts/test-governance-sync.js)
+  function bwnApplyGov() {
+    try {
+      var g = JSON.parse(localStorage.getItem('bwn:gov') || 'null');
+      if (!g || typeof g !== 'object' || !g.flags || typeof g.flags !== 'object') return;
+      var f = g.flags, kill = f.globalKillSwitch === true;
+      Object.keys(BWN_MODULES).forEach(function (k) {
+        if (kill || f[k] === false) BWN_MODULES[k] = false;   // one-way: only ever disable
+      });
+    } catch (e) { /* corrupt bundle -> keep local defaults (safe) */ }
+  }
+  bwnApplyGov();
+  // BWN-GOV-APPLY-SLICE-END
+  try { document.addEventListener('bwn:gov', function () { bwnApplyGov(); }); } catch (e) { }
+
   // Publish version for the Ops Suite panel status readout.
   try { localStorage.setItem('bwn:status:core', JSON.stringify({ ver: BWN_VER, ts: Date.now() })); } catch (e) { /* best-effort */ }
 
   console.info('[BWN SUITE CORE] v' + BWN_VER + ' |',
-    'Shared Core 7 \u00b7 DOM Handles 1.0 \u00b7 PO Approval 1.13 \u00b7 WO Assist 2.71 \u00b7 Leak Guard 2.0 \u00b7 List Heat 3.28 \u00b7 Launcher 2.0 \u00b7 Views 3.1 \u00b7 Palette 1.1 \u00b7 Visit 1.2 \u00b7 Reminders 1.1 \u00b7 Timeline 1.1 \u00b7 TripCal 1.4 \u00b7 Bulk Ops 1.0 \u00b7 Connector 1.2 |',
+    'Shared Core 7 \u00b7 DOM Handles 1.0 \u00b7 PO Approval 1.13 \u00b7 WO Assist 2.71 \u00b7 Leak Guard 2.0 \u00b7 List Heat 3.28 \u00b7 Launcher 2.0 \u00b7 Views 3.1 \u00b7 Palette 1.1 \u00b7 Visit 1.2 \u00b7 Reminders 1.1 \u00b7 Timeline 1.1 \u00b7 TripCal 1.4 \u00b7 Bulk Ops 1.0 \u00b7 Connector 1.2 \u00b7 Governance 1.0 |',
     'enabled:', Object.keys(BWN_MODULES).filter(function (k) { return BWN_MODULES[k]; }).join(', '));
 
   // ===== BWN SHARED CORE v7 - KEEP IN SYNC across both suite scripts =====
@@ -10473,6 +10495,22 @@
           for (var iS = 0; iS < sessionStorage.length; iS++) { var kS = sessionStorage.key(iS); if (/^bwn[:_-]/.test(kS)) { usage.session += (sessionStorage.getItem(kS) || '').length; usage.keys++; } }
         } catch (eU) { /* blocked storage: report without usage */ }
         rep.push('Storage (bwn keys): ' + usage.keys + ' keys · ' + usage.local + 'B local · ' + usage.session + 'B session');
+        // Central governance (governance-sync): the org flags/config bundle AI caches to bwn:gov,
+        // the reachability, and the EFFECTIVE module set after remote one-way disables. Flags are
+        // ops-authored booleans only (no WO/vendor/client data, no keys) - safe for the report.
+        try {
+          var gov = lsGet('bwn:gov', null);
+          if (gov && typeof gov === 'object') {
+            var ageG = gov.fetchedAt ? Math.round((Date.now() - gov.fetchedAt) / 1000) + 's ago' : 'never';
+            rep.push('Governance: v' + (gov.v || '?') + ' · reach=' + (gov.reach || '?') + ' · fetched ' + ageG + ' · etag ' + (gov.etag || '-'));
+            var gf = (gov.flags && typeof gov.flags === 'object') ? gov.flags : {};
+            rep.push('  remote flags: ' + (Object.keys(gf).length ? JSON.stringify(gf) : '{} (none)') + (gf.globalKillSwitch === true ? ' · KILL SWITCH ACTIVE' : ''));
+            try { var hw = JSON.parse(localStorage.getItem('bwn:auditHW') || '[]'); rep.push('  audit mirror high-water: ' + (Array.isArray(hw) ? hw.length : 0) + ' corrIds flushed'); } catch (eH) { }
+          } else {
+            rep.push('Governance: no bundle cached (bwn:gov absent) - local defaults in effect');
+          }
+          rep.push('Effective modules (after governance): ' + JSON.stringify(BWN_MODULES));
+        } catch (eG) { rep.push('Governance: unavailable'); }
         // Audit-ring digest (Task 3): the shared bwn:audit trail already records a corrId +
         // per-write latency (ms) + outcome per op. Fold a SANITIZED summary in - only corrId,
         // op NAME (a fixed registry key, not WO/vendor data), outcome, and latency. NEVER

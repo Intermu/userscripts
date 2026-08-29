@@ -80,6 +80,17 @@ jobs:
       - name: BWN-OPS registry + audited GraphQL wrapper harness
         run: node scripts/test-bwn-ops.js
 
+      # Governance-completion (Core 1.78.41 / AI 1.45.22): wires the SHIPPED SWA governance backend
+      # (api/governance + api/audit-ingest) into the suite. Slices the shipped BWN-GOV-APPLY (Core) and
+      # BWN-GOV-CONN / BWN-GOV-SYNC (AI) blocks and pins the SECURITY-critical logic: the flag apply is
+      # ONE-WAY (remote may DISABLE or trip globalKillSwitch, never ENABLE); the remote kill gates SWA
+      # egress LIVE; the governance READ is deliberately NOT gated by the kill (so a kill can always be
+      # LIFTED by a later poll - no self-wedge); the audit mirror needs the SEPARATE audit_key, honors
+      # the kill, dedups against the high-water, caps the batch, and only a real {ok:true} advances it.
+      # A negative control (two-way apply) turns it red.
+      - name: Governance sync + central audit mirror harness
+        run: node scripts/test-governance-sync.js
+
       # RM-D4 / G4: the BWN_OPS registry must MATCH the wired writers. Statically checks, across every
       # *.user.js that carries a registry, that (A) every bwnGqlOp('<op>') call-site is registered in
       # its own file and (B) every registry kind:'write' entry has a real call-site somewhere in the

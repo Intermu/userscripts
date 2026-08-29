@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         BWN Suite - AI (Broadway National)
 // @namespace    broadwaynational.bwn
-// @version      1.45.21
+// @version      1.45.22
 // @downloadURL  https://raw.githubusercontent.com/Intermu/userscripts/main/bwn-suite-ai.user.js
 // @updateURL    https://raw.githubusercontent.com/Intermu/userscripts/main/bwn-suite-ai.user.js
 // @description  The Umbrava tools that call outside APIs, kept separate from the zero-egress Core script. Client Update and WO Audit drafts (Anthropic Claude; draft-only, scrubbed before sending, you review before posting); Find Techs / Find Suppliers (Google Places; vendor leads near a WO); and Job View (opens the Ops-Dashboard job card on the WO page - WO details from Umbrava plus the authored case file and next actions, read-only). Network access is limited by the browser to the declared API hosts and the BWN Static Web App. API keys are stored in Tampermonkey's storage via the menu commands and never enter the page. Toggle modules in BWN_MODULES below.
@@ -1026,9 +1026,21 @@
   // toggle (bwn:modules.connector === false) disables ALL SWA egress - read LIVE each
   // tick, so flipping it takes effect without a reload.
   var CONNECTOR_V = 1;
+  // BWN-GOV-CONN-SLICE-START (governance-sync: remote kill also gates egress; sliced by scripts/test-governance-sync.js)
+  // The local Ops Suite toggle (bwn:modules.connector) OR a central kill (bwn:gov flags
+  // globalKillSwitch / connector:false, cached by govFetch below) disables ALL SWA egress.
+  // Both are read LIVE each tick so a flip takes effect with no reload. Errors fail OPEN to
+  // the user's toggle (the established convention) - a corrupt bundle never silently kills.
   function connectorEnabled() {
-    try { var mp = JSON.parse(localStorage.getItem('bwn:modules') || '{}'); return mp.connector !== false; } catch (e) { return true; }
+    var mp; try { mp = JSON.parse(localStorage.getItem('bwn:modules') || '{}'); } catch (e) { mp = {}; }
+    if (mp && mp.connector === false) return false;
+    try {
+      var g = JSON.parse(localStorage.getItem('bwn:gov') || 'null');
+      if (g && g.flags && (g.flags.globalKillSwitch === true || g.flags.connector === false)) return false;
+    } catch (e) { /* corrupt bwn:gov -> ignore, fall through to enabled */ }
+    return true;
   }
+  // BWN-GOV-CONN-SLICE-END
   // Connector health → Ops Suite Status (BWN.beat writes on change only, so details
   // must stay stable). 3 consecutive failures = 'miss' - a wrong key (403) or a broken
   // deploy no longer fails silently while the queue grows.
@@ -1400,6 +1412,114 @@
     }, 120000);
     document.dispatchEvent(new CustomEvent('bwn:cmd', { detail: { id: 'bwn:dispatch:sync' } }));
     console.info('[BWN DISPATCH] requested a fresh open-book scan; will push when it completes (keep the WO list open).');
+  });
+
+  // ---- Central governance read + audit mirror (governance-sync / governance-audit) -------
+  // Wires the SHIPPED SWA governance backend (api/governance + api/audit-ingest) into the
+  // suite. This script owns the network grant + the connector, so it does the egress; Core
+  // (zero-egress) consumes the cached flags over the bwn:gov ping. Read-only for governance;
+  // append-only, PII-free for the audit mirror. No new @connect host (same green-stone SWA).
+  // BWN-GOV-SYNC-SLICE-START (sliced by scripts/test-governance-sync.js)
+  var GOV_URL = INGEST_URL.replace(/\/wo-ingest$/, '/governance');
+  var AUDIT_URL = INGEST_URL.replace(/\/wo-ingest$/, '/audit-ingest');
+
+  // govFetch is gated ONLY by the user connector toggle + the key - deliberately NOT by the
+  // remote kill, so a globalKillSwitch can always be LIFTED by a later poll (else the kill
+  // would wedge its own release). Feature egress + writes ARE gated by the kill via
+  // connectorEnabled() above.
+  function govFetchAllowed() {
+    var mp; try { mp = JSON.parse(localStorage.getItem('bwn:modules') || '{}'); } catch (e) { mp = {}; }
+    if (mp && mp.connector === false) return false;
+    return !!GM_getValue('ingest_key', '');
+  }
+  function govMark(reach) {
+    try {
+      var g = JSON.parse(localStorage.getItem('bwn:gov') || 'null') || { v: 1, flags: {} };
+      g.reach = reach; g.fetchedAt = Date.now();
+      localStorage.setItem('bwn:gov', JSON.stringify(g));
+    } catch (e) { /* best-effort */ }
+    try { document.dispatchEvent(new CustomEvent('bwn:gov')); } catch (e) { }
+  }
+  var govBusy = false;
+  function govFetch() {
+    if (govBusy) return;
+    if (!govFetchAllowed()) return;
+    var key = GM_getValue('ingest_key', ''); if (!key) return;
+    var prev = null; try { prev = JSON.parse(localStorage.getItem('bwn:gov') || 'null'); } catch (e) { }
+    var headers = { 'x-bwn-key': key };
+    if (prev && prev.etag) headers['If-None-Match'] = prev.etag;   // conditional GET -> 304 on no change
+    govBusy = true;
+    GM_xmlhttpRequest({
+      method: 'GET', url: GOV_URL, headers: headers, timeout: 20000,
+      onload: function (r) {
+        govBusy = false;
+        if (r.status === 304) { govMark('ok'); connOk(); return; }   // unchanged; keep cached bundle
+        if (r.status >= 200 && r.status < 300) {
+          var b = null; try { b = JSON.parse(r.responseText); } catch (e) { }
+          // A chased AAD login page is 200 HTML, not a bundle: require the {v,etag} shape before trusting it.
+          if (b && typeof b === 'object' && b.v && b.etag) {
+            b.reach = 'ok'; b.fetchedAt = Date.now();
+            try { localStorage.setItem('bwn:gov', JSON.stringify(b)); } catch (e) { }
+            try { document.dispatchEvent(new CustomEvent('bwn:gov')); } catch (e) { }   // Core re-applies one-way disables
+            connOk();
+          } else { govMark('unreachable'); connFail('gov-shape'); }
+          return;
+        }
+        // 403/5xx/etc: keep the last-known-good bundle, mark unreachable, NEVER relax flags (fail closed).
+        govMark('unreachable'); connFail(r.status);
+      },
+      onerror: function () { govBusy = false; govMark('unreachable'); connFail('network'); },
+      ontimeout: function () { govBusy = false; govMark('unreachable'); connFail('timeout'); }
+    });
+  }
+  setTimeout(BWN.guard(govFetch, 'govFetch'), 4000);
+  setInterval(BWN.guard(govFetch, 'govFetch'), 600000);   // ~10 min
+
+  // Central audit mirror: flush NEW PII-free bwn:audit ring entries to /api/audit-ingest under a
+  // SEPARATE key (AUDIT_INGEST_KEY, independently revocable). The server dedups by corrId, so a
+  // resend is harmless; a small local high-water avoids re-sending the whole ring each tick. v1
+  // mirrors only entries that carry a corrId (every bwnGqlOp-governed write does). Egress, so it
+  // honors connectorEnabled() (incl. the remote kill). Only a real {ok:true} advances the high-water.
+  var auditBusy = false, AUDIT_HW_MAX = 400;
+  function auditFlush() {
+    if (auditBusy) return;
+    if (!connectorEnabled()) return;                       // kill-switch (local toggle OR remote kill)
+    var key = GM_getValue('audit_key', ''); if (!key) return;
+    var ring; try { ring = JSON.parse(localStorage.getItem('bwn:audit') || '[]'); } catch (e) { return; }
+    if (!Array.isArray(ring) || !ring.length) return;
+    var hw; try { hw = JSON.parse(localStorage.getItem('bwn:auditHW') || '[]'); } catch (e) { hw = []; }
+    if (!Array.isArray(hw)) hw = [];
+    var seen = Object.create(null); hw.forEach(function (c) { seen[c] = 1; });
+    var fresh = ring.filter(function (e) { return e && e.corrId && !seen[e.corrId]; }).slice(0, 50);
+    if (!fresh.length) return;
+    var body; try { body = JSON.stringify({ actor: ingestActor(), entries: fresh }); } catch (e) { return; }
+    auditBusy = true;
+    GM_xmlhttpRequest({
+      method: 'POST', url: AUDIT_URL,
+      headers: { 'Content-Type': 'application/json', 'x-bwn-key': key },
+      data: body, timeout: 20000,
+      onload: function (r) {
+        auditBusy = false;
+        var ok = false;
+        if (r.status >= 200 && r.status < 300) { try { ok = JSON.parse(r.responseText).ok === true; } catch (e) { } }
+        if (ok) {
+          var next = hw.concat(fresh.map(function (e) { return e.corrId; }));
+          if (next.length > AUDIT_HW_MAX) next = next.slice(-AUDIT_HW_MAX);
+          try { localStorage.setItem('bwn:auditHW', JSON.stringify(next)); } catch (e) { }
+          connOk();
+        } else { connFail(r.status); }   // 403/5xx: leave ring + high-water for the next tick
+      },
+      onerror: function () { auditBusy = false; connFail('network'); },
+      ontimeout: function () { auditBusy = false; connFail('timeout'); }
+    });
+  }
+  setTimeout(BWN.guard(auditFlush, 'auditFlush'), 8000);
+  setInterval(BWN.guard(auditFlush, 'auditFlush'), 60000);
+  // BWN-GOV-SYNC-SLICE-END
+  GM_registerMenuCommand('Set SWA audit key', function () {
+    var cur = GM_getValue('audit_key', '');
+    var v = prompt('Paste the AUDIT_INGEST_KEY (SWA central-audit function key; stored locally in Tampermonkey, never in the page):', cur || '');
+    if (v !== null) { GM_setValue('audit_key', v.trim()); alert(v.trim() ? 'Saved.' : 'Cleared.'); }
   });
 
   // ===== BWN AI TRANSPORT (Phase 2 - unified bwnAI transport) =========================
