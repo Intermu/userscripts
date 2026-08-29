@@ -616,7 +616,9 @@
     if (pollTimer) return;
     pollTimer = setInterval(function () { if (mount()) { clearInterval(pollTimer); pollTimer = null; } }, 500);
   }
-  var obs = new MutationObserver(schedule);
+  // Trailing debounce (RM-B5): coalesce the SPA re-render bursts instead of firing on every mutation.
+  var obsT = null;
+  var obs = new MutationObserver(function () { clearTimeout(obsT); obsT = setTimeout(schedule, 300); });
   obs.observe(document.body, { childList: true, subtree: true });
   schedule();
 })();

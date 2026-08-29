@@ -117,12 +117,19 @@
     t.textContent = msg;
     t.style.cssText = 'position:fixed;z-index:2147483647;left:50%;bottom:26px;transform:translate(-50%,10px);opacity:0;background:' + (bg || '#0d3d26') + ';color:#fff;font:400 14px ' + FONT + ';padding:11px 16px;border-radius:9px;max-width:74vw;box-shadow:0 6px 24px rgba(0,0,0,.3);line-height:1.5;';
     document.body.appendChild(t);
+    // Enter the way it leaves (animation review 2026-08-10). It used to POP in and fade out -
+    // half an animation, and the missing half is the one the eye actually catches. Transitions,
+    // not keyframes, so a toast replaced mid-flight retargets instead of restarting from zero.
+    // `ease` rather than a strong ease-out on purpose: a toast reads as elegant slightly slower
+    // than the rest of the UI. The transform composes with the centring translateX, which is why
+    // both states write the full translate() - one axis cannot be animated past the other.
+    // Reduced motion keeps the fade and drops the travel: gentler, not gone.
     var reduce = false;
     try { reduce = !!(window.matchMedia && window.matchMedia('(prefers-reduced-motion: reduce)').matches); } catch (e) { }
-    void t.offsetHeight;
+    void t.offsetHeight;                                   // flush the start state or the transition never runs
     t.style.transition = reduce ? 'opacity .3s ease' : 'opacity .3s ease, transform .3s ease';
     t.style.opacity = '1';
-    t.style.transform = 'translate(-50%,0)';
+    t.style.transform = 'translate(-50%,0)';               // under reduce this jumps: transform is not in the transition
     setTimeout(function () {
       t.style.transition = reduce ? 'opacity .4s ease' : 'opacity .4s ease, transform .4s ease';
       t.style.opacity = '0';
@@ -256,7 +263,7 @@
     var reduce = false;
     try { reduce = !!(window.matchMedia && window.matchMedia('(prefers-reduced-motion: reduce)').matches); } catch (e) { }
     if (reduce) { el.remove(); return; }
-    el.removeAttribute('id'); el.setAttribute('aria-hidden', 'true');
+    el.removeAttribute('id'); el.setAttribute('aria-hidden', 'true');   // id freed now: a reopen builds a fresh node
     el.classList.add('bwn-closing');
     setTimeout(function () { try { el.remove(); } catch (e) { } }, 170);
   }

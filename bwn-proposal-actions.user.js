@@ -1015,7 +1015,9 @@
     });
   } catch (e) { }
   try {
-    var paObs = new MutationObserver(function () { injectDropdown(); });
+    // Trailing debounce (RM-B5): coalesce the SPA re-render bursts instead of firing on every mutation.
+    var paObsT = null;
+    var paObs = new MutationObserver(function () { clearTimeout(paObsT); paObsT = setTimeout(injectDropdown, 300); });
     paObs.observe(document.body, { childList: true, subtree: true });
   } catch (e) { }
   setInterval(injectDropdown, 900);

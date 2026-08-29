@@ -677,7 +677,9 @@
   function schedule() {
     mount();   // modal comes and goes; keep trying, but don't stop the observer (unlike a one-shot nav button)
   }
-  var obs = new MutationObserver(schedule);
+  // Trailing debounce (RM-B5): coalesce the SPA re-render bursts instead of firing on every mutation.
+  var obsT = null;
+  var obs = new MutationObserver(function () { clearTimeout(obsT); obsT = setTimeout(schedule, 300); });
   obs.observe(document.body, { childList: true, subtree: true });
   // poll fallback (React can fill the modal without a body mutation the observer sees)
   pollTimer = setInterval(schedule, 700);
