@@ -11,6 +11,14 @@ on:
   pull_request:
     branches: [main]
 
+# RM-B6 (finding M4): the cross-repo DOM-parity gate is ADVISORY. Both continue-on-error lines in the
+# test job (the sibling-repo checkout and the parity harness step) are keyed off this ONE flag, so the
+# gate is a single-line flip. It stays advisory until the BWN_OPS_REPO_TOKEN secret grants read access
+# to the private Intermu/broadway-internal-ops repo - only Mike/IT can set that secret.
+# >>> TO MAKE THE GATE BLOCKING: change the value below to 'false' (this one line, nothing else). <<<
+env:
+  BWN_DOM_PARITY_ADVISORY: 'true'
+
 jobs:
   test:
     name: Test
@@ -27,10 +35,11 @@ jobs:
       # this path — the harness's relative-path fallback resolves outside the Actions workspace.
       # TEMPORARY (2026-08-10): advisory until BWN_OPS_REPO_TOKEN grants read on the private ops repo.
       # continue-on-error lets the rest of the job run and gate even while this cross-repo checkout
-      # 403s; the parity step below is advisory for the same reason. Flip BOTH back to blocking (remove
-      # the two continue-on-error lines) once the token works.
+      # 403s; the parity step below is advisory for the same reason. RM-B6 (2026-08-27): both
+      # continue-on-error lines are now keyed off the single BWN_DOM_PARITY_ADVISORY env flag at the
+      # top of this file - set that ONE value to 'false' to make the gate blocking (needs the token first).
       - name: Checkout broadway-internal-ops (sibling repo, for the DOM-protocol parity check)
-        continue-on-error: true
+        continue-on-error: ${{ env.BWN_DOM_PARITY_ADVISORY == 'true' }}   # RM-B6: single flip point is the env flag at the top of this file
         uses: actions/checkout@v7
         with:
           repository: Intermu/broadway-internal-ops
@@ -70,6 +79,14 @@ jobs:
       # Eight mutation controls each turn it red. Tripwire if the block regresses or vanishes.
       - name: BWN-OPS registry + audited GraphQL wrapper harness
         run: node scripts/test-bwn-ops.js
+
+      # RM-D4 / G4: the BWN_OPS registry must MATCH the wired writers. Statically checks, across every
+      # *.user.js that carries a registry, that (A) every bwnGqlOp('<op>') call-site is registered in
+      # its own file and (B) every registry kind:'write' entry has a real call-site somewhere in the
+      # suite (reads are exempt). Fails on an unregistered call or a dead write entry, and pins that the
+      # 3 dropped dead ops (addWorkOrder / addDependentVendor / addVendorProposalNote) never return.
+      - name: "Registry-authoritative harness (G4: every write op maps to a real call-site)"
+        run: node scripts/test-registry-authoritative.js
 
       # The four steps below close the 2026-07-31 audit finding that harnesses were
       # committed but NEVER EXECUTED by CI - a green checkmark said nothing about them.
@@ -269,6 +286,17 @@ jobs:
       - name: Shared token-picker block ledger harness
         run: node scripts/test-shared-block-ledger.js
 
+      # RM-A1 (findings M1 + ACC3): ONE canonical, attribute-safe HTML escaper. The esc/escapeHtml
+      # helper was hand-duplicated across ~11 scripts and DIVERGED on QUOTE escaping - several copies
+      # escaped only & < > (or only the double quote), so a value rendered into an HTML ATTRIBUTE could
+      # break out of it (attribute XSS via "><script> or ' onmouseover=...). This harness AUTO-DISCOVERS
+      # every escaper in the suite and RUNS each against breakout payloads in text and in single- AND
+      # double-quoted attribute contexts, so a copy can never drift unsafe again. Negative controls
+      # reproduce the exact removed divergences (&<>-only, double-quote-only) and require the judge to
+      # reject them, so the guard cannot rot into a no-op.
+      - name: Canonical HTML-escaper harness (attribute-safe esc across the suite)
+        run: node scripts/test-esc-canonical.js
+
       # These six harnesses were committed to scripts/ but never wired here, so CI ran a green check
       # that said nothing about them — the exact "committed but never executed" rot the 2026-07-31
       # audit closed for the four steps near the top. All six pass a local sweep; wired here so a
@@ -297,7 +325,7 @@ jobs:
       # Needs the sibling checkout above; BWN_OPS_REPO points the harness at it (the relative fallback
       # lands outside the workspace). Exits non-zero rather than skipping if the source is unreachable.
       - name: DOM-protocol parity harness (Core paste vs broadway-internal-ops source)
-        continue-on-error: true   # TEMPORARY (2026-08-10): advisory until the ops checkout above succeeds
+        continue-on-error: ${{ env.BWN_DOM_PARITY_ADVISORY == 'true' }}   # RM-B6: advisory via the BWN_DOM_PARITY_ADVISORY env flag at the top of this file (single flip point)
         env:
           BWN_OPS_REPO: ${{ github.workspace }}/broadway-internal-ops
         run: node scripts/test-domproj-parity.js
@@ -393,6 +421,15 @@ jobs:
       - name: Proposal Actions write harness (addClientProposalNote / addTask / completeTask)
         run: node scripts/test-proposal-actions.js
 
+      # RM-A3 / R3: bwn-proposal-actions de-hardcodes the STATUS_FALLBACK status-id map and the
+      # RONNY_GUID TSP assignee. Both now resolve LIVE and FAIL CLOSED when they cannot (no write on a
+      # stale id), with a bwn:modules.paLegacyFallback rollback flag reinstating the constants. Slices
+      # the PA-RESOLVE block and pins: live resolution wins, an unresolved status/assignee -> null,
+      # the flag reinstates the constant, and the seed GUID is verified by name. (setStatus's null-id
+      # refusal is pinned in test-proposal-actions.js.)
+      - name: "Proposal Actions live-resolve harness (RM-A3: status id + TSP assignee, fail-closed)"
+        run: node scripts/test-pa-live-resolve.js
+
       # Track C write-back DRAIN half (bwn-write-queue.user.js): the coordinator's-tab executor that
       # claims a queued command from /api/wo-write-queue, confirms it, and turns it into a real
       # patchWorkOrder / addEditJobNote write. Slices the exec block into a vm with an injected gql and
@@ -403,6 +440,14 @@ jobs:
       # disabling the marker check double-posts, RED. 40 assertions.
       - name: "Write-queue drain harness (Track C executor: patchWorkOrder/addEditJobNote + idempotency)"
         run: node scripts/test-write-queue-drain.js
+
+      # RM-D3 / G3: the silent bulk vpUpsert in bwn-suite-ai (up to 120 prospect upserts per paid Find
+      # Techs / Find Suppliers search) is now governed: it honors the SAME connector kill switch as every
+      # other SWA egress, records ONE PII-free bwn:audit entry per bulk, and debounces an identical
+      # re-fire so a burst of searches does not re-blast the pipeline. Slices the real vpUpsert block and
+      # pins each guarantee, with controls that revert the kill switch / debounce / PII-free audit.
+      - name: "vpUpsert governance harness (RM-D3: kill switch + PII-free audit + debounce)"
+        run: node scripts/test-vp-upsert-governance.js
 
       # Track C write-back phase 2: the catalog pusher in bwn-write-queue.user.js. Reads the tenant
       # status list + user directory and pushes them to /api/catalog-ingest so the Dashboard's write-back
@@ -427,6 +472,86 @@ jobs:
       # (+ genericBodyScope) and runs it over the 10-email corpus, cross-checked to the live WOs.
       - name: Transform SR Brands intake harness (store#=locationNumber, both source fields, NTE)
         run: node scripts/test-transform-intake.js
+
+      # RM-B6 (finding M5): these 14 harnesses were committed to scripts/ but never wired here, so
+      # CI ran a green check that said NOTHING about them - the same "committed but never executed"
+      # rot the 2026-07-31 audit closed for the steps near the top of this job. Every one passes a
+      # local sweep under node (exit 0, self-contained, no network/fixtures), so a regression now
+      # fails CI instead of waiting for someone to run node by hand. Step names carry NO colon-space
+      # (the parser bug that once zeroed every job); parentheses in an unquoted scalar are fine.
+      - name: WO Assist A2 create-task write harness (WA-WRITES addTask via bwnGqlOp)
+        run: node scripts/test-a2-taskcreate.js
+
+      - name: WO Assist B2 status-write harness (patchWorkOrder confirm gate + statusId alone)
+        run: node scripts/test-b2-statuswrite.js
+
+      - name: Bulk Operations Console engine harness (batch writes through the audit ring)
+        run: node scripts/test-bulk-ops.js
+
+      - name: Per-client profile resolver harness (T10 defaults + empty-table inert safety)
+        run: node scripts/test-client-profile.js
+
+      - name: Next Actions ECD-risk composite rule harness (T8-A1, self-clearing)
+        run: node scripts/test-ecdrisk.js
+
+      - name: Next Actions unbilled completion-mismatch rule harness (T8-B1)
+        run: node scripts/test-unbilled.js
+
+      - name: Bid-out sent-state flip harness (confirmed-send gate + GM baseline)
+        run: node scripts/test-bidout-sent-flip.js
+
+      - name: Drop Upload party/label classifier harness (broker is not a vendor)
+        run: node scripts/test-drop-upload-classify.js
+
+      - name: WO Intake .eml MIME-parse harness (parseEml multipart walk)
+        run: node scripts/test-eml-parse.js
+
+      - name: WO Intake Pilot generic free-text intake harness (scope from body not subject)
+        run: node scripts/test-pilot-intake.js
+
+      - name: WO Intake Amazon Fairmarkit RFQ intake harness (Source Job/PO mapping)
+        run: node scripts/test-amazon-rfq-intake.js
+
+      - name: WO Intake CW-Amazon FAMIS 360 intake harness (site-code location + DNE)
+        run: node scripts/test-cw-amazon-intake.js
+
+      - name: WO Intake CW-Amazon CorrigoPro intake harness (full site code, PM to Preventative)
+        run: node scripts/test-cw-corrigo-intake.js
+
+      - name: WO Intake JLL-Amazon CorrigoPro intake harness (property code + both source fields)
+        run: node scripts/test-jll-amazon-intake.js
+
+      # RM-B6 (finding M4): cc-auth and cc-purchase are WRITE-path userscripts (they POST a card
+      # request / a logged purchase to the broadway-internal-ops SWA proxy) that had NO behavioural
+      # test. These slice the REAL submit handler out of each and drive it in a vm - a fake form
+      # captures the shipped handler, then it runs against a fake DOM + spy gmPost. Each pins the
+      # payload shape, the pre-send gates as NO-OPS (no ingest key = the client-side kill switch, no
+      # token, a blank required field, a bad link; cc-purchase also oversized/failed receipt), and
+      # carries two load-bearing negative controls (remove a guard -> the write leaks). The scripts
+      # are imported read-only; the write-logic itself is another branch's to change.
+      - name: CC Request write harness (payload + gates + kill switch + negative controls)
+        run: node scripts/test-cc-auth.js
+
+      - name: CC Purchase write harness (receipt-first + gates + kill switch + negative controls)
+        run: node scripts/test-cc-purchase.js
+
+      - name: A11y focus-trap harness (bwnFocusTrap byte-identity + focus move/wrap/restore across dialog sandboxes)
+        run: node scripts/test-a11y-focus.js
+
+      # RM-B4: Core's central route/lifecycle helper (BWN.onRoute / window.bwnOnRoute). Slices the
+      # shipped helper + bwn-kanban's flag-gated kbRouteHooks adopter and drives both against a fake
+      # window/history with a controllable timer: one debounced history patch shared by N subscribers,
+      # pathname-diff dedup, unsubscribe, thrower isolation, and the migrated consumer's flag-OFF =
+      # legacy / flag-ON = central behavior - with four load-bearing negative controls.
+      - name: Route helper harness (BWN.onRoute foundation + kanban migration + negative controls)
+        run: node scripts/test-route-helper.js
+
+      # RM-B2: Core's shared error reporter (BWN.report / window.bwnReport). Slices the shipped
+      # reporter and drives it against a fake localStorage + fake toast: one toast + one bounded,
+      # PII-free bwn:errlog entry per failure, the bwn:audit ring untouched, flag-OFF fail-safe (toast
+      # shows, nothing logged) - with three negative controls (PII leak, uncapped ring, gate removed).
+      - name: Error reporter harness (BWN.report toast + PII-free capped ring + negative controls)
+        run: node scripts/test-error-reporter.js
 
   lint:
     name: Lint

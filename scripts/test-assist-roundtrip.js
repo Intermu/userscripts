@@ -337,10 +337,10 @@ async function probeAssist(src) {
   // The assist @version and its internal `var VER` banner (shown in support triage) MUST agree.
   // VER had drifted to 0.3.0 while @version read 0.3.3; the 2026-08-18 surgical-fix pass set them
   // in lockstep at 0.3.4, and these pins keep them from drifting apart again.
-  A.ok('core @version is 1.78.38', coreFull.indexOf('// @version      1.78.38') !== -1, 'core version drift');
+  A.ok('core @version is 1.78.40', coreFull.indexOf('// @version      1.78.40') !== -1, 'core version drift');
   A.ok('core banner says WO Assist 2.71', coreFull.indexOf('WO Assist 2.71') !== -1, 'module banner drift');
-  A.ok('assist @version is 0.3.5', assistFull.indexOf('// @version      0.3.5') !== -1, 'assist version drift');
-  A.ok("assist VER is '0.3.5'", assistFull.indexOf("var VER = '0.3.5';") !== -1, 'assist VER drift');
+  A.ok('assist @version is 0.3.6', assistFull.indexOf('// @version      0.3.6') !== -1, 'assist version drift');
+  A.ok("assist VER is '0.3.6'", assistFull.indexOf("var VER = '0.3.6';") !== -1, 'assist VER drift');
   // Step 4 hangs the client-response state read off the SAME tick, deliberately: two queues on
   // one refresh cadence is one thing to reason about, and a second timer would be a second
   // thing to drift. Both calls are pinned so dropping either is a red test, not a quiet loss.

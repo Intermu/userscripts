@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         BWN WO Kanban (Broadway National)
 // @namespace    broadwaynational.bwn
-// @version      0.7.5
+// @version      0.7.7
 // @description  Turns Umbrava's Work Orders list into a kanban board without leaving the page. A Board/List toggle sits next to the list's own search box; switching to Board hides the table (the toolbar stays, so the app's own filtering still drives everything) and lays the same work orders out as cards in lanes. Lanes are WO Status by default and regroup to Priority, Assignee, Client or Age from a dropdown. The board never invents its own filter system, and as of 0.5.0 it does not query at all: it reads both rows and verdicts from the full-board scan bwn-suite-core's List Heat already runs on the same page, so whatever the list is filtered to (phase, statuses, search, assignee chips, sort) is exactly what the board shows, and one list page now costs one full-board query instead of two. It still captures the SPA's own PagedWorkOrders request off the wire, because that capture is where the auth headers for the status write come from. Cards carry the triage picture: the status clock against the limit that WO was actually judged against, the reasons it is flagged, whether its onsite date has already passed, DNE vs vendor NTE with GP, vendors and trades. Severity is never computed here - it is read from the verdicts List Heat publishes in bwn-suite-core, so the board and the list can never disagree. Dragging a card between status lanes DOES change the work order, through Umbrava's own captured PatchWorkOrder mutation - it asks first, states that the WO's time-in-status clock will reset, verifies the server reported success, re-scans rather than trusting the optimistic move, and leaves the card where it was if anything fails. Everything is same-origin using the page's own session: no @connect, no keys, nothing leaves the browser.
 // @downloadURL  https://raw.githubusercontent.com/Intermu/userscripts/main/bwn-kanban.user.js
 // @updateURL    https://raw.githubusercontent.com/Intermu/userscripts/main/bwn-kanban.user.js
@@ -26,7 +26,7 @@
   // update check another. There is no GM_info without a grant (and a grant would sandbox the
   // script away from the page's fetch - see the header note), so the fallback is a literal
   // that must be bumped WITH @version; the harness pins the two together.
-  var VER = '0.7.5';
+  var VER = '0.7.7';
   console.info('[BWN KANBAN] v' + VER + ' - board rows AND verdicts read from bwn-suite-core\'s List Heat scan (no second full-board query); drag between status lanes writes via captured PatchWorkOrder');
 
   // ---------------------------------------------------------------------------
@@ -890,6 +890,15 @@
       bwnAuditRecord(e);
     }
 
+    // Fail-closed write classification (G5): a WRITE must carry a RECOGNIZED risk tier. An
+    // unclassified write - a registry entry whose risk is missing or misspelled - is REFUSED here
+    // rather than sent unlabelled, so a new mutation cannot slip past the governance by omitting
+    // its risk. 'low'/'moderate' skip the confirm gate below; 'high' hits it; anything else fails
+    // closed. Reads are unaffected (isWrite guards this). Audited denied so the refusal is visible.
+    if (isWrite && meta.risk !== 'low' && meta.risk !== 'moderate' && meta.risk !== 'high') {
+      writeAudit('denied', { reason: 'unclassified-write:' + (meta.risk || 'none') });
+      return Promise.reject(new Error('bwnGqlOp: write "' + op + '" has no recognized risk classification'));
+    }
     // Per-feature kill switch: a disabled module must not mutate even if its UI leaked in.
     if (opts.feature && BWN_MODULES[opts.feature] === false) {
       writeAudit('denied', { reason: 'feature-off:' + opts.feature });
@@ -909,10 +918,23 @@
       return bwnGql(query, variables).then(function (data) {
         if (isWrite) {
           var env = data && data[op];
+          // F3: fail closed on an unrecognized write response. A registered write MUST return
+          // { success: <bool>, ... } under its own field name (op === the response field name
+          // for every adopter). A missing data[op] (a name/alias mismatch) or a non-boolean
+          // success means the write cannot be confirmed to have landed - classify it as an
+          // error, never a silent 'ok'. Verified safe: every current adopter selects `success`.
+          if (!env || typeof env.success !== 'boolean') {
+            var badShape = new Error(op + ': unrecognized write response (no {success} under data.' + op + ')');
+            badShape.bwnNonTransient = true;
+            writeAudit('error', { tries: tryNo, reason: 'unexpected-response-shape' });
+            throw badShape;
+          }
           if (env && env.success === false) {
             var refused = new Error(env.message || (op + ' was refused'));
             refused.bwnNonTransient = true;
-            writeAudit('error', { tries: tryNo, reason: refused.message });
+            // F5: record a fixed category, never the server message (env.message can echo
+            // input-derived text). The message still rides the thrown `refused` to the caller.
+            writeAudit('error', { tries: tryNo, reason: 'write-refused' });
             throw refused;
           }
           writeAudit('ok', { tries: tryNo });
@@ -922,32 +944,46 @@
         if (bwnIsTransient(err) && tryNo < maxTries) {
           return bwnDelay(bwnBackoff(tryNo)).then(function () { return attempt(tryNo + 1); });
         }
-        writeAudit('error', { tries: tryNo, reason: String(err && err.message || err) });
+        // F5: audit a fixed category, never the raw error text (which can echo input-derived
+        // server strings into the "PII-free" trail). The full error still rides the thrown err
+        // to the caller for its toast/log.
+        writeAudit('error', { tries: tryNo, reason: bwnIsTransient(err) ? 'transient-failure' : 'request-failed' });
         throw err;
       });
     }
-    // High-risk confirmation gate (fail-closed). A risk:'high' write must be proven confirmed:
-    // either the caller passes opts.confirmed===true (it ran its own confirm UI, e.g. dispatch's
-    // modal) OR an injected _confirmFn returns truthy. Neither -> refused, never a silent send.
-    if (isWrite && meta.risk === 'high' && opts.confirmed !== true) {
-      if (typeof _confirmFn !== 'function') {
-        writeAudit('denied', { reason: 'confirm-required' });
-        return Promise.reject(new Error('bwnGqlOp: "' + op + '" is high-risk and needs confirmation (no confirm handler set)'));
-      }
-      var details = {
-        op: op, target: meta.target, risk: meta.risk, ids: opts.ids || null,
-        current: (opts.current === undefined ? null : opts.current),
-        proposed: (opts.proposed === undefined ? null : opts.proposed),
-        count: (opts.count === undefined ? null : opts.count),
-        reason: opts.reason || null, irreversible: !!opts.irreversible
-      };
-      return Promise.resolve().then(function () { return _confirmFn(details); }).then(function (okd) {
-        if (!okd) {
-          writeAudit('denied', { reason: 'user-cancelled' });
-          throw new Error('bwnGqlOp: "' + op + '" cancelled at confirmation');
+    // High-risk confirmation gate (fail-closed, by construction). F4: a risk:'high' write has
+    // NO path to the transport except through this block - it returns in every sub-case (send
+    // or reject), so the trailing `return attempt(1)` below is reachable only by non-high-risk
+    // ops. A future high-risk writer therefore cannot skip the gate by omission: an absent
+    // confirmation is refused, never silently sent. Confirmation is proven EITHER by the
+    // caller's own UI (opts.confirmed===true, e.g. dispatch's modal) OR by an injected _confirmFn
+    // returning truthy.
+    // KNOWN RESIDUAL (flagged, NOT closed here): opts.confirmed===true is a caller assertion the
+    // wrapper trusts - it cannot tell a genuine confirm from a hardcoded literal. Closing that
+    // would mean dropping bare-boolean trust and mandating an injected _confirmFn, which every
+    // current high-risk adopter would fail (none inject one) - a live-behavior change, out of scope.
+    if (isWrite && meta.risk === 'high') {
+      if (opts.confirmed !== true) {
+        if (typeof _confirmFn !== 'function') {
+          writeAudit('denied', { reason: 'confirm-required' });
+          return Promise.reject(new Error('bwnGqlOp: "' + op + '" is high-risk and needs confirmation (no confirm handler set)'));
         }
-        return attempt(1);
-      });
+        var details = {
+          op: op, target: meta.target, risk: meta.risk, ids: opts.ids || null,
+          current: (opts.current === undefined ? null : opts.current),
+          proposed: (opts.proposed === undefined ? null : opts.proposed),
+          count: (opts.count === undefined ? null : opts.count),
+          reason: opts.reason || null, irreversible: !!opts.irreversible
+        };
+        return Promise.resolve().then(function () { return _confirmFn(details); }).then(function (okd) {
+          if (!okd) {
+            writeAudit('denied', { reason: 'user-cancelled' });
+            throw new Error('bwnGqlOp: "' + op + '" cancelled at confirmation');
+          }
+          return attempt(1);
+        });
+      }
+      return attempt(1);
     }
     return attempt(1);
   }
@@ -1260,16 +1296,33 @@
     }, 200);
   }
 
+  // RM-B4 route hooks (sliced by scripts/test-route-helper.js). Route-change detection is the ONE
+  // piece this slice centralizes: when BWN_MODULES.routeHelper is on AND Core has published the
+  // shared helper (window.bwnOnRoute - both scripts are @grant none, same page window, same bridge
+  // as window.__bwnHeatRows this file already reads), subscribe to Core's single history patch
+  // instead of installing our own popstate + pushState/replaceState trio. Flag off, or Core absent/
+  // disabled, => the legacy trio installs, byte-for-byte the old behavior (fail-safe: an unresolved
+  // flag or a missing helper both take the legacy path, never a silent half-migration).
+  // NOTE: the body MutationObserver in boot() STAYS either way - it does re-render recovery (React
+  // drops our node on a same-route rerender), which route detection does not cover; folding that
+  // into the helper is the phased follow-up, not this slice.
+  function kbRouteHooks(onChange) {
+    if (BWN_MODULES.routeHelper === true && typeof window.bwnOnRoute === 'function') {
+      try { window.bwnOnRoute(onChange); return; } catch (e) { /* fall through to legacy */ }
+    }
+    window.addEventListener('popstate', onChange);
+    ['pushState', 'replaceState'].forEach(function (m) {
+      var orig = history[m];
+      if (typeof orig !== 'function') return;
+      history[m] = function () { var r = orig.apply(this, arguments); onChange(); return r; };
+    });
+  }
+
   function boot() {
     injectCSS();
     schedule();
     new MutationObserver(schedule).observe(document.body, { childList: true, subtree: true });
-    window.addEventListener('popstate', schedule);
-    ['pushState', 'replaceState'].forEach(function (m) {
-      var orig = history[m];
-      if (typeof orig !== 'function') return;
-      history[m] = function () { var r = orig.apply(this, arguments); schedule(); return r; };
-    });
+    kbRouteHooks(schedule);
     // Core announces a rebuilt snapshot; this is the only push in the contract and it carries
     // no payload, so a missed event costs nothing - the next render pulls anyway.
     document.addEventListener('bwn:evt', function (ev) {

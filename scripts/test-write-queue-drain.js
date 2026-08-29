@@ -39,6 +39,26 @@ function mutate(src, from, to) {
 
 function load(engineSrc) {
   var sandbox = { console: console, gql: null };
+  // executeCommand's WRITES now route through bwnGqlOp (Core's BWN-OPS-WRAP, proven byte-for-byte
+  // across every adopter by test-bwn-ops.js's SHA gate). Here a faithful stub reproduces the
+  // caller-visible contract for the two ops write-queue routes and delegates transport to the
+  // per-test-settable sandbox.gql - the reads still use gql directly:
+  //   - patchWorkOrder is risk:'high' -> REFUSED unless opts.confirmed===true (the Approve strip);
+  //   - addEditJobNote is moderate -> no confirmation needed;
+  //   - a {success:false} envelope REJECTS with .bwnNonTransient set, exactly as the real wrapper,
+  //     so classifyError() sees a non-retryable refusal (not a transport error to loop on).
+  // calls[] records every routed write so a test can assert the op/confirmed/feature/before/after.
+  sandbox.bwnGqlOp = function (op, query, variables, opts) {
+    opts = opts || {};
+    if (op === 'patchWorkOrder' && opts.confirmed !== true) return Promise.reject(new Error('bwnGqlOp: high-risk write needs confirmation'));
+    sandbox.bwnGqlOp.calls.push({ op: op, opts: opts });
+    return Promise.resolve(sandbox.gql(query, variables)).then(function (data) {
+      var env = data && data[op];
+      if (env && env.success === false) { var e = new Error(env.message || (op + ' was refused')); e.bwnNonTransient = true; return Promise.reject(e); }
+      return data;
+    });
+  };
+  sandbox.bwnGqlOp.calls = [];
   vm.createContext(sandbox);
   vm.runInContext(engineSrc, sandbox);
   return sandbox;
@@ -164,6 +184,38 @@ function notePostsOf(g) { return g.calls.filter(function (c) { return /addEditJo
   A.ok("draining is DISABLED by default (wq_enabled false)", /GM_getValue\("wq_enabled",\s*false\)/.test(full));
   var _mV = full.match(/@version\s+([0-9.]+)/), _mR = full.match(/VER\s*=\s*"([0-9.]+)"/);
   A.ok("@version and runtime VER agree", !!(_mV && _mR && _mV[1] === _mR[1]));
+
+  // ---- RM-D1/G1: both live writes route THROUGH bwnGqlOp, no raw gql write remains ---------
+  // Static guards first (a regression to a raw gql() write is caught even if the runtime path is not hit):
+  A.ok("no raw gql(PATCH_M ...) write remains in the engine", !/gql\(PATCH_M/.test(S_ENGINE));
+  A.ok("no raw gql(ADD_NOTE_M ...) write remains in the engine", !/gql\(ADD_NOTE_M/.test(S_ENGINE));
+  A.ok("patchWorkOrder is routed via bwnGqlOp('patchWorkOrder')", /bwnGqlOp\('patchWorkOrder'/.test(S_ENGINE));
+  A.ok("addEditJobNote is routed via bwnGqlOp('addEditJobNote')", /bwnGqlOp\('addEditJobNote'/.test(S_ENGINE));
+  A.ok("reads (WO_READ_Q / NOTES_Q) stay on raw gql", /gql\(WO_READ_Q/.test(S_ENGINE) && /gql\(NOTES_Q/.test(S_ENGINE));
+
+  // Behavioural: drive one status write + one note write and inspect what reached the wrapper.
+  S.bwnGqlOp.calls = [];
+  S.gql = mkGql({ wo: { statusId: 10, assignedTo: "g", serviceLevelAgreementId: "s", priority: {} } });
+  await S.executeCommand({ verb: "wo.status", woNumber: "200", idemKey: "k", args: { statusId: 55 } });
+  var pc = S.bwnGqlOp.calls.filter(function (c) { return c.op === "patchWorkOrder"; });
+  A.eq("status write went through bwnGqlOp('patchWorkOrder') exactly once", pc.length, 1);
+  A.ok("...passing confirmed:true (the Approve strip IS the confirmation)", pc[0].opts.confirmed === true);
+  A.ok("...carrying feature:'writeQueue' (the shared kill switch honors it)", pc[0].opts.feature === "writeQueue");
+  A.eq("...with the scalar WO id in ids", pc[0].opts.ids, { wo: 200 });
+  A.eq("...and PII-free before/after status ids for the audit", [pc[0].opts.before, pc[0].opts.after], [{ statusId: 10 }, { statusId: 55 }]);
+
+  S.bwnGqlOp.calls = [];
+  S.gql = mkGql({ notes: [] });
+  await S.executeCommand({ verb: "wo.note", woNumber: "200", idemKey: "KN", args: { noteText: "hello" } });
+  var nc = S.bwnGqlOp.calls.filter(function (c) { return c.op === "addEditJobNote"; });
+  A.eq("note write went through bwnGqlOp('addEditJobNote') exactly once", nc.length, 1);
+  A.ok("...a moderate write passes NO confirmed flag (no high-risk gate)", nc[0].opts.confirmed === undefined);
+  A.ok("...carrying feature:'writeQueue'", nc[0].opts.feature === "writeQueue");
+
+  // The wrapper's success:false -> .bwnNonTransient path is classified NON-retryable (proven above via
+  // patchNoSuccess; assert the classifier directly too so the contract is explicit).
+  var wrapRefusal = new Error("refused"); wrapRefusal.bwnNonTransient = true;
+  A.ok("a wrapper success:false refusal (.bwnNonTransient) is NON-retryable", S.classifyError(wrapRefusal) === false);
 
   A.finish();
 })().catch(function (e) { console.error(e); process.exit(1); });

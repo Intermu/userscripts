@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         BWN Suite - Core (Broadway National)
 // @namespace    broadwaynational.bwn
-// @version      1.78.38
+// @version      1.78.40
 // @downloadURL  https://raw.githubusercontent.com/Intermu/userscripts/main/bwn-suite-core.user.js
 // @updateURL    https://raw.githubusercontent.com/Intermu/userscripts/main/bwn-suite-core.user.js
 // @description  Runs several Umbrava helpers for BWN coordinators, in the browser with no privileged grants. Includes: PO Approval + ETA Builder; WO Assist (GP/ETA, a stall watchdog, DNE calculator, and a next-action playbook); Email Leak Guard (checks recipients against vendor names, PO amounts, and client budget references before an outbound email sends); WO List Heat (a triage overlay + My Day strip on the work-order list, with an optional same-origin Umbrava API scan for deterministic full-board coverage); and the BWN Launcher (opens the Azure Static Web App tools with the current WO's context). Modules share state through sessionStorage/localStorage. The only network calls are same-origin Umbrava GraphQL requests (app.umbrava.com/api/graphql, the app's own session): List Heat's full-board scan and WO Assist's work-order / trip / clock-in / document reads, plus ONE write - BWN Views saves the column layout through Umbrava's own putUserPreference, the same preference the column chooser writes; everything else is offline. Toggle modules in BWN_MODULES below.
@@ -46,10 +46,21 @@
                          // user until it is flipped after a live smoke test. Even then each batch
                          // passes through a dry-run + a typed confirm, and every write routes through
                          // bwnGqlOp with feature:'bulkOps' (its per-feature kill switch + audit ring).
-    bulkOpsDestructive: false // SHIPPING DEFAULT OFF, and NOT wired in v1: reserved scaffolding for
+    bulkOpsDestructive: false, // SHIPPING DEFAULT OFF, and NOT wired in v1: reserved scaffolding for
                          // the destructive bulk ops (status change / reassign). v1 exposes only
                          // add-note + set-ECD; this flag gates nothing yet - it exists so the
                          // destructive ops land behind a SECOND, separately-flipped gate later.
+    routeHelper: false,  // RM-B4, SHIPPING DEFAULT OFF: when on, consumers that have adopted the
+                         // central BWN.onRoute (window.bwnOnRoute) route helper use it INSTEAD of
+                         // pasting their own history.pushState/popstate trio. Off = each adopter
+                         // keeps its own hooks (current behavior, byte-for-byte). The helper itself
+                         // is always DEFINED; this flag only flips whether an adopter routes through
+                         // it, so a stuck/unresolved flag never silently changes lifecycle.
+    errorReporter: false // RM-B2, SHIPPING DEFAULT OFF: when on, BWN.report writes a bounded,
+                         // PII-free breadcrumb to the bwn:errlog ring alongside its toast. Off = the
+                         // toast still shows (unchanged at paths that already toasted) but NOTHING is
+                         // logged, and a formerly-silent path stays silent. The bwn:audit write ring
+                         // is a SEPARATE key and is never touched by the reporter.
   };
 
   var BWN_VER = (typeof GM_info !== 'undefined' && GM_info.script && GM_info.script.version) || '1.51.2';
@@ -904,6 +915,134 @@
   };
   try { window.bwnToast = BWN.toast; } catch (e) { }
 
+  // ---- Central route/lifecycle helper (RM-B4) --------------------------------
+  // BWN-ROUTE START (RM-B4; Core-only, sliced by scripts/test-route-helper.js)
+  // ONE history.pushState/replaceState/popstate hook for the whole suite, shared by every
+  // consumer instead of each pasting its own trio (the "~12 separate history hooks" half of the
+  // duplication this slice targets). A subscriber gets a debounced (trailing) callback ONLY when
+  // location.pathname actually changes - the exact `location.pathname !== lastPath` diff a dozen
+  // body-observers hand-roll. Idempotent: the history patch installs ONCE no matter how many times
+  // onRoute is called, and persists for the page life (survives SPA nav). onRoute returns an
+  // unsubscribe(). Best-effort: a throwing subscriber never blocks the others. Exposed on
+  // window.bwnOnRoute so @grant-none consumers in other sandboxes (kanban, ...) share this ONE
+  // patch - the same window bridge as window.bwnToast / window.__bwnHeatRows.
+  // ponytail: pathname-only diff (search/hash ignored) - matches every current consumer's own diff;
+  // widen to full URL only if a consumer ever needs query-scoped remounts.
+  var BWN_ROUTE_DEBOUNCE_MS = 150;
+  var _routeSubs = [];
+  var _routeLastPath = null;
+  var _routeTimer = null;
+  var _routePatched = false;
+  function _routeFire() {
+    var to = location.pathname, from = _routeLastPath;
+    if (to === from) return;                 // pathname-diff dedup: no change => no fire (no double-inject)
+    _routeLastPath = to;
+    var subs = _routeSubs.slice();           // snapshot: a sub that unsubscribes mid-loop can't skip another
+    for (var i = 0; i < subs.length; i++) {
+      try { subs[i](to, from); } catch (e) { /* one bad subscriber never blocks the rest */ }
+    }
+  }
+  function _routePing() {
+    clearTimeout(_routeTimer);
+    _routeTimer = setTimeout(_routeFire, BWN_ROUTE_DEBOUNCE_MS);   // trailing debounce: a burst of pushStates fires once
+  }
+  function _routeInstall() {
+    if (_routePatched) return;               // idempotent: patch history EXACTLY once for the page
+    _routePatched = true;
+    _routeLastPath = location.pathname;
+    try { window.addEventListener('popstate', _routePing); } catch (e) { }
+    ['pushState', 'replaceState'].forEach(function (m) {
+      try {
+        var orig = history[m];
+        if (typeof orig !== 'function') return;
+        history[m] = function () { var r = orig.apply(this, arguments); _routePing(); return r; };
+      } catch (e) { }
+    });
+  }
+  BWN.onRoute = function (cb) {
+    if (typeof cb !== 'function') return function () { };
+    _routeInstall();
+    _routeSubs.push(cb);
+    return function unsubscribe() {
+      var i = _routeSubs.indexOf(cb);
+      if (i !== -1) _routeSubs.splice(i, 1);
+    };
+  };
+  try { window.bwnOnRoute = BWN.onRoute; } catch (e) { }
+  // BWN-ROUTE END (RM-B4)
+
+  // ---- Shared error reporter (RM-B2) -----------------------------------------
+  // BWN-REPORT START (RM-B2; Core-only, sliced by scripts/test-error-reporter.js)
+  // ONE place a user-facing failure (a write that failed, a load that failed) both SURFACES to the
+  // operator (a toast) AND leaves a bounded, PII-FREE breadcrumb, so the ~half of catches that are
+  // silent stop swallowing real failures invisibly. The log ring is a SEPARATE localStorage key
+  // from the bwn:audit write-governance ring (which the reporter never touches) and follows the same
+  // discipline as bwnGqlOp's audit: ids + short FIXED tags ONLY - NEVER a note body, client name,
+  // token, server message, or any free text.
+  //   BWN.report({ level, tag, toast, feature, ids, code })
+  //     level   'error' (default) | 'warn' - drives the toast style and the entry.
+  //     tag     SHORT fixed category, e.g. 'woAssist.taskCreate.fail' - the ONLY label logged.
+  //     toast   user-facing message shown via BWN.toast (EPHEMERAL UI; NEVER written to the ring).
+  //     feature BWN_MODULES key the failure belongs to (audit trail only).
+  //     ids     { wo, po, ... } scalar identifiers (NO PII; same rule as bwnGqlOp.opts.ids).
+  //     code    optional short machine code (an HTTP status, a stage name); never free text.
+  // The TOAST always shows (that is the user-facing surface, and is current behavior at sites that
+  // already toasted). The LOG WRITE happens ONLY when BWN_MODULES.errorReporter is on - so a
+  // formerly-silent path stays silent with the flag off (fail-safe), and a formerly-toasting path is
+  // byte-for-byte unchanged with the flag off. Best-effort: a storage failure never throws back into
+  // the caller's catch.
+  var BWN_ERRLOG_KEY = 'bwn:errlog', BWN_ERRLOG_MAX = 100, BWN_ERRLOG_SCHEMA = 1;
+  function bwnErrlogAll() {
+    try { var a = JSON.parse(localStorage.getItem(BWN_ERRLOG_KEY) || '[]'); return Array.isArray(a) ? a : []; }
+    catch (e) { return []; }
+  }
+  function bwnErrlogRecord(entry) {
+    try {
+      var a = bwnErrlogAll();
+      a.push(entry);
+      if (a.length > BWN_ERRLOG_MAX) a = a.slice(a.length - BWN_ERRLOG_MAX);   // bounded ring: never grows past MAX
+      localStorage.setItem(BWN_ERRLOG_KEY, JSON.stringify(a));
+    } catch (e) { /* best-effort - a full/blocked store must never fail the caller's write */ }
+    return entry;
+  }
+  // Scalar-only id copy: finite numbers and SHORT strings pass; objects, arrays, booleans, and
+  // long strings are dropped, so a caller cannot smuggle a payload (a note body, a name) through ids.
+  function bwnErrlogIds(ids) {
+    if (!ids || typeof ids !== 'object') return null;
+    var out = null;
+    for (var k in ids) {
+      if (!Object.prototype.hasOwnProperty.call(ids, k)) continue;
+      var v = ids[k];
+      if (typeof v === 'number' && isFinite(v)) { out = out || {}; out[k] = v; }
+      else if (typeof v === 'string' && v.length <= 40) { out = out || {}; out[k] = v; }
+      // anything else (object, array, boolean, long string) is intentionally omitted
+    }
+    return out;
+  }
+  BWN.report = function (o) {
+    o = o || {};
+    var level = (o.level === 'warn') ? 'warn' : 'error';
+    // 1) Surface to the operator. The message is SHOWN, never stored.
+    if (o.toast) { try { BWN.toast(level === 'warn' ? 'warning' : 'error', String(o.toast), o.tag ? { id: String(o.tag) } : undefined); } catch (e) { } }
+    // 2) Bounded, PII-free breadcrumb - only when the reporter is switched on.
+    if (BWN_MODULES.errorReporter !== true) return null;
+    // WHITELIST by construction: the entry is built from named scalar fields ONLY. o.toast (free
+    // text) and every other key on `o` are deliberately NOT copied - a leak would need a new line
+    // here, which the PII negative-control test guards.
+    var entry = {
+      ts: Date.now(), schema: BWN_ERRLOG_SCHEMA, level: level,
+      tag: (o.tag != null) ? String(o.tag).slice(0, 60) : 'unknown',
+      feature: (o.feature != null) ? String(o.feature).slice(0, 40) : null,
+      ids: bwnErrlogIds(o.ids),
+      code: (o.code != null) ? String(o.code).slice(0, 40) : null,
+      ver: BWN_VER
+    };
+    return bwnErrlogRecord(entry);
+  };
+  BWN.errlog = { all: bwnErrlogAll, clear: function () { try { localStorage.removeItem(BWN_ERRLOG_KEY); } catch (e) { } } };
+  try { window.bwnReport = BWN.report; } catch (e) { }
+  // BWN-REPORT END (RM-B2)
+
   // ==========================================================================
   // BOOT: document-start for the network hook, load event for the modules
   // ==========================================================================
@@ -1314,8 +1453,6 @@
       ok: 'Note posted.', fail: 'The note was not posted.' },
     addClientProposalNote: { kind: 'write', target: 'proposal', risk: 'moderate', idempotent: false, retry: 'none',
       ok: 'Proposal note posted.', fail: 'The proposal note was not posted.' },
-    addVendorProposalNote: { kind: 'write', target: 'proposal', risk: 'moderate', idempotent: false, retry: 'none',
-      ok: 'Vendor-proposal note posted.', fail: 'The note was not posted.' },
     initializeJobDocument: { kind: 'write', target: 'document', risk: 'moderate', idempotent: false, retry: 'none',
       ok: 'Document upload started.', fail: 'The upload could not start.' },
     bulkAddWorkOrderDocuments: { kind: 'write', target: 'document', risk: 'moderate', idempotent: false, retry: 'none',
@@ -1327,13 +1464,15 @@
     deactivateVendor: { kind: 'write', target: 'vendor', risk: 'moderate', idempotent: true, retry: 'none',
       ok: 'Vendor deactivated.', fail: 'The vendor was not deactivated.' },
 
-    // ---- high-risk writes (dispatch, status/ECD, create, activation) ----
+    // ---- high-risk writes (dispatch, status/ECD, activation) ----
+    // G4/RM-D4: addWorkOrder, addDependentVendor and addVendorProposalNote were registered here
+    // with NO caller anywhere in the suite (dead entries). Dropped 2026-08-27 so the registry
+    // reflects the actually-wired writers; test-registry-authoritative.js now fails CI if a
+    // registry write entry has no bwnGqlOp call-site (or a call-site has no entry). Their captured
+    // mutation shapes live in wiki/umbrava-graphql-operations.md - re-add an entry here only when a
+    // real caller is wired.
     patchWorkOrder: { kind: 'write', target: 'workOrder', risk: 'high', idempotent: false, retry: 'none',
       ok: 'Work order updated.', fail: 'The work order was not updated.' },
-    addWorkOrder: { kind: 'write', target: 'workOrder', risk: 'high', idempotent: false, retry: 'none',
-      ok: 'Work order created.', fail: 'The work order was not created.' },
-    addDependentVendor: { kind: 'write', target: 'vendor', risk: 'high', idempotent: false, retry: 'none',
-      ok: 'Vendor created.', fail: 'The vendor was not created.' },
     activateVendor: { kind: 'write', target: 'vendor', risk: 'high', idempotent: true, retry: 'none',
       ok: 'Vendor activated.', fail: 'The vendor was not activated.' }
   };
@@ -1432,6 +1571,15 @@
       bwnAuditRecord(e);
     }
 
+    // Fail-closed write classification (G5): a WRITE must carry a RECOGNIZED risk tier. An
+    // unclassified write - a registry entry whose risk is missing or misspelled - is REFUSED here
+    // rather than sent unlabelled, so a new mutation cannot slip past the governance by omitting
+    // its risk. 'low'/'moderate' skip the confirm gate below; 'high' hits it; anything else fails
+    // closed. Reads are unaffected (isWrite guards this). Audited denied so the refusal is visible.
+    if (isWrite && meta.risk !== 'low' && meta.risk !== 'moderate' && meta.risk !== 'high') {
+      writeAudit('denied', { reason: 'unclassified-write:' + (meta.risk || 'none') });
+      return Promise.reject(new Error('bwnGqlOp: write "' + op + '" has no recognized risk classification'));
+    }
     // Per-feature kill switch: a disabled module must not mutate even if its UI leaked in.
     if (opts.feature && BWN_MODULES[opts.feature] === false) {
       writeAudit('denied', { reason: 'feature-off:' + opts.feature });
@@ -1451,10 +1599,23 @@
       return bwnGql(query, variables).then(function (data) {
         if (isWrite) {
           var env = data && data[op];
+          // F3: fail closed on an unrecognized write response. A registered write MUST return
+          // { success: <bool>, ... } under its own field name (op === the response field name
+          // for every adopter). A missing data[op] (a name/alias mismatch) or a non-boolean
+          // success means the write cannot be confirmed to have landed - classify it as an
+          // error, never a silent 'ok'. Verified safe: every current adopter selects `success`.
+          if (!env || typeof env.success !== 'boolean') {
+            var badShape = new Error(op + ': unrecognized write response (no {success} under data.' + op + ')');
+            badShape.bwnNonTransient = true;
+            writeAudit('error', { tries: tryNo, reason: 'unexpected-response-shape' });
+            throw badShape;
+          }
           if (env && env.success === false) {
             var refused = new Error(env.message || (op + ' was refused'));
             refused.bwnNonTransient = true;
-            writeAudit('error', { tries: tryNo, reason: refused.message });
+            // F5: record a fixed category, never the server message (env.message can echo
+            // input-derived text). The message still rides the thrown `refused` to the caller.
+            writeAudit('error', { tries: tryNo, reason: 'write-refused' });
             throw refused;
           }
           writeAudit('ok', { tries: tryNo });
@@ -1464,32 +1625,46 @@
         if (bwnIsTransient(err) && tryNo < maxTries) {
           return bwnDelay(bwnBackoff(tryNo)).then(function () { return attempt(tryNo + 1); });
         }
-        writeAudit('error', { tries: tryNo, reason: String(err && err.message || err) });
+        // F5: audit a fixed category, never the raw error text (which can echo input-derived
+        // server strings into the "PII-free" trail). The full error still rides the thrown err
+        // to the caller for its toast/log.
+        writeAudit('error', { tries: tryNo, reason: bwnIsTransient(err) ? 'transient-failure' : 'request-failed' });
         throw err;
       });
     }
-    // High-risk confirmation gate (fail-closed). A risk:'high' write must be proven confirmed:
-    // either the caller passes opts.confirmed===true (it ran its own confirm UI, e.g. dispatch's
-    // modal) OR an injected _confirmFn returns truthy. Neither -> refused, never a silent send.
-    if (isWrite && meta.risk === 'high' && opts.confirmed !== true) {
-      if (typeof _confirmFn !== 'function') {
-        writeAudit('denied', { reason: 'confirm-required' });
-        return Promise.reject(new Error('bwnGqlOp: "' + op + '" is high-risk and needs confirmation (no confirm handler set)'));
-      }
-      var details = {
-        op: op, target: meta.target, risk: meta.risk, ids: opts.ids || null,
-        current: (opts.current === undefined ? null : opts.current),
-        proposed: (opts.proposed === undefined ? null : opts.proposed),
-        count: (opts.count === undefined ? null : opts.count),
-        reason: opts.reason || null, irreversible: !!opts.irreversible
-      };
-      return Promise.resolve().then(function () { return _confirmFn(details); }).then(function (okd) {
-        if (!okd) {
-          writeAudit('denied', { reason: 'user-cancelled' });
-          throw new Error('bwnGqlOp: "' + op + '" cancelled at confirmation');
+    // High-risk confirmation gate (fail-closed, by construction). F4: a risk:'high' write has
+    // NO path to the transport except through this block - it returns in every sub-case (send
+    // or reject), so the trailing `return attempt(1)` below is reachable only by non-high-risk
+    // ops. A future high-risk writer therefore cannot skip the gate by omission: an absent
+    // confirmation is refused, never silently sent. Confirmation is proven EITHER by the
+    // caller's own UI (opts.confirmed===true, e.g. dispatch's modal) OR by an injected _confirmFn
+    // returning truthy.
+    // KNOWN RESIDUAL (flagged, NOT closed here): opts.confirmed===true is a caller assertion the
+    // wrapper trusts - it cannot tell a genuine confirm from a hardcoded literal. Closing that
+    // would mean dropping bare-boolean trust and mandating an injected _confirmFn, which every
+    // current high-risk adopter would fail (none inject one) - a live-behavior change, out of scope.
+    if (isWrite && meta.risk === 'high') {
+      if (opts.confirmed !== true) {
+        if (typeof _confirmFn !== 'function') {
+          writeAudit('denied', { reason: 'confirm-required' });
+          return Promise.reject(new Error('bwnGqlOp: "' + op + '" is high-risk and needs confirmation (no confirm handler set)'));
         }
-        return attempt(1);
-      });
+        var details = {
+          op: op, target: meta.target, risk: meta.risk, ids: opts.ids || null,
+          current: (opts.current === undefined ? null : opts.current),
+          proposed: (opts.proposed === undefined ? null : opts.proposed),
+          count: (opts.count === undefined ? null : opts.count),
+          reason: opts.reason || null, irreversible: !!opts.irreversible
+        };
+        return Promise.resolve().then(function () { return _confirmFn(details); }).then(function (okd) {
+          if (!okd) {
+            writeAudit('denied', { reason: 'user-cancelled' });
+            throw new Error('bwnGqlOp: "' + op + '" cancelled at confirmation');
+          }
+          return attempt(1);
+        });
+      }
+      return attempt(1);
     }
     return attempt(1);
   }
@@ -3932,7 +4107,7 @@
     // textContent only if the ClipboardEvent APIs are unavailable (the caller also copies to the
     // clipboard, so a manual Ctrl+V is always the final recovery).
     function pasteRichEditor(ed, text) {
-      function esc(s) { return String(s).replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;'); }
+      function esc(s) { return String(s == null ? '' : s).replace(/[&<>"']/g, function (c) { return { '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;' }[c]; }); }
       var html = String(text).replace(/\r\n/g, '\n').split(/\n{2,}/).map(function (p) { return '<p>' + esc(p).replace(/\n/g, '<br>') + '</p>'; }).join('');
       try { ed.focus(); var sel = window.getSelection(); var rg = document.createRange(); rg.selectNodeContents(ed); sel.removeAllRanges(); sel.addRange(rg); } catch (e) { }
       try {
@@ -5427,7 +5602,7 @@
             try { delete TASKS_DONE[woNum]; fetchTasks(woNum); } catch (e) { }   // re-read the open-task count
             BWN.toast('success', 'Task created on W-' + woNum + '.');
           },
-          fail: function (e) { BWN.toast('error', 'Task not created: ' + (e && e.message || 'unknown error')); }
+          fail: function (e) { BWN.report({ level: 'error', tag: 'woAssist.taskCreate.fail', feature: 'woAssist', ids: { wo: woNum }, toast: 'Task not created: ' + (e && e.message || 'unknown error') }); }   // RM-B2: same toast, + a PII-free breadcrumb when errorReporter is on
         });
       });
       var cancel = document.createElement('button'); cancel.type = 'button'; cancel.textContent = 'Cancel'; cancel.addEventListener('click', close);
@@ -5514,7 +5689,7 @@
           draftNote: function (txt) { try { insertWONote(txt, function () { /* posted manually by the coordinator */ }, 'Internal'); } catch (e) { } },
           ok: function () { close(); BWN.toast('success', 'Status set to "' + targetName + '" on W-' + woNum + '. Reason drafted as an internal note.'); },
           noop: function () { close(); BWN.toast('info', 'Already at "' + targetName + '" - nothing changed.'); },
-          fail: function (e) { BWN.toast('error', 'Status not changed: ' + (e && e.message || 'unknown error')); }
+          fail: function (e) { BWN.report({ level: 'error', tag: 'woAssist.statusChange.fail', feature: 'woAssist', ids: { wo: woNum }, toast: 'Status not changed: ' + (e && e.message || 'unknown error') }); }   // RM-B2: same toast, + a PII-free breadcrumb when errorReporter is on
         });
       });
 
@@ -9896,7 +10071,7 @@
     // Teams/Outlook yields a clickable label, not a bare URL. @grant none: uses the
     // native async Clipboard API under the menu-click gesture; degrades to plain text.
     function copyWOLink(ctx, labelNode) {
-      function esc(s) { return String(s).replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;').replace(/"/g, '&quot;'); }
+      function esc(s) { return String(s == null ? '' : s).replace(/[&<>"']/g, function (c) { return { '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;' }[c]; }); }
       var label = 'WO ' + (ctx.wo || ctx.tracking || '?') + (ctx.tracking ? ' · #' + ctx.tracking : '') +
         (ctx.client ? ' · ' + ctx.client : '') + (ctx.location ? ' · ' + ctx.location : '');
       var url = location.href;
@@ -15384,7 +15559,7 @@
     function cond(v) { return { shouldInclude: true, value: v }; }   // the Conditional*Input wrapper
     function num(v) { var n = Number(v); return isFinite(n) ? n : null; }
 
-    function esc(s) { return String(s).replace(/&/g, "&amp;").replace(/</g, "&lt;").replace(/>/g, "&gt;"); }
+    function esc(s) { return String(s == null ? '' : s).replace(/[&<>"']/g, function (c) { return { '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;' }[c]; }); }
     function textToHtml(t) {
       return String(t).split(/\n\n+/).map(function (par) {
         return "<p>" + par.split("\n").map(esc).join("<br>") + "</p>";

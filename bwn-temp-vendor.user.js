@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         BWN Suite - Temp-Activate Vendor for PO (Broadway National)
 // @namespace    broadwaynational.bwn
-// @version      0.3.0
+// @version      0.3.1
 // @description  Inside the "Create Purchase Order" modal, adds a "Temp-Activate Vendor" button. Type an inactive vendor's name or number; it finds them, temporarily activates them via Umbrava's own API (reason ALWAYS "Temporary Activation") so they become assignable in the PO. After you assign them and click Create, it watches the PO save and auto-prompts a one-click re-deactivation (reason ALWAYS "Pending Compliance"). A persistent reminder pill keeps the temporarily-active vendor visible until you deactivate, so nobody is left active by mistake. Same-origin /api/graphql with the app's Auth0 bearer, @grant none, zero egress. Every write is one click behind a confirm.
 // @match        https://app.umbrava.com/*
 // @run-at       document-idle
@@ -26,10 +26,7 @@
   var PEND_KEY = 'bwn:tempVendorPending';   // sessionStorage: survives a re-render / accidental close within the tab
 
   // ===== Pure helpers ============================================================================
-  function tvEsc(s) {
-    return String(s == null ? '' : s)
-      .replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;').replace(/"/g, '&quot;');
-  }
+  function tvEsc(s) { return String(s == null ? '' : s).replace(/[&<>"']/g, function (c) { return { '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;' }[c]; }); }
 
   // ===== Auth + GraphQL (same-origin, app bearer - the drop-upload write path, proven) ===========
   // ===== BWN-SHARED START v1 (paste-identical; pinned by scripts/test-shared-block-ledger.js) =====
@@ -77,7 +74,7 @@
   // bwnGql(query,variables) it calls, recovering the op name from the query. temp-vendor confirms
   // each write in its own panel (vendor + reason spelled out), so it passes confirmed:true.
   function bwnGql(query, variables) { var m = /\b(?:query|mutation)\s+([A-Za-z0-9_]+)/.exec(query); return tvGql(m ? m[1] : null, query, variables); }
-  var BWN_VER = (typeof GM_info !== 'undefined' && GM_info.script && GM_info.script.version) || '0.3.0';
+  var BWN_VER = (typeof GM_info !== 'undefined' && GM_info.script && GM_info.script.version) || '0.3.1';
   var BWN_MODULES = (function () { try { return JSON.parse(localStorage.getItem('bwn:modules') || '{}') || {}; } catch (e) { return {}; } })();
   var BWN_OPS = {
     activateVendor: { kind: 'write', target: 'vendor', risk: 'high', idempotent: true, retry: 'none',
@@ -179,6 +176,15 @@
       bwnAuditRecord(e);
     }
 
+    // Fail-closed write classification (G5): a WRITE must carry a RECOGNIZED risk tier. An
+    // unclassified write - a registry entry whose risk is missing or misspelled - is REFUSED here
+    // rather than sent unlabelled, so a new mutation cannot slip past the governance by omitting
+    // its risk. 'low'/'moderate' skip the confirm gate below; 'high' hits it; anything else fails
+    // closed. Reads are unaffected (isWrite guards this). Audited denied so the refusal is visible.
+    if (isWrite && meta.risk !== 'low' && meta.risk !== 'moderate' && meta.risk !== 'high') {
+      writeAudit('denied', { reason: 'unclassified-write:' + (meta.risk || 'none') });
+      return Promise.reject(new Error('bwnGqlOp: write "' + op + '" has no recognized risk classification'));
+    }
     // Per-feature kill switch: a disabled module must not mutate even if its UI leaked in.
     if (opts.feature && BWN_MODULES[opts.feature] === false) {
       writeAudit('denied', { reason: 'feature-off:' + opts.feature });
@@ -198,10 +204,23 @@
       return bwnGql(query, variables).then(function (data) {
         if (isWrite) {
           var env = data && data[op];
+          // F3: fail closed on an unrecognized write response. A registered write MUST return
+          // { success: <bool>, ... } under its own field name (op === the response field name
+          // for every adopter). A missing data[op] (a name/alias mismatch) or a non-boolean
+          // success means the write cannot be confirmed to have landed - classify it as an
+          // error, never a silent 'ok'. Verified safe: every current adopter selects `success`.
+          if (!env || typeof env.success !== 'boolean') {
+            var badShape = new Error(op + ': unrecognized write response (no {success} under data.' + op + ')');
+            badShape.bwnNonTransient = true;
+            writeAudit('error', { tries: tryNo, reason: 'unexpected-response-shape' });
+            throw badShape;
+          }
           if (env && env.success === false) {
             var refused = new Error(env.message || (op + ' was refused'));
             refused.bwnNonTransient = true;
-            writeAudit('error', { tries: tryNo, reason: refused.message });
+            // F5: record a fixed category, never the server message (env.message can echo
+            // input-derived text). The message still rides the thrown `refused` to the caller.
+            writeAudit('error', { tries: tryNo, reason: 'write-refused' });
             throw refused;
           }
           writeAudit('ok', { tries: tryNo });
@@ -211,32 +230,46 @@
         if (bwnIsTransient(err) && tryNo < maxTries) {
           return bwnDelay(bwnBackoff(tryNo)).then(function () { return attempt(tryNo + 1); });
         }
-        writeAudit('error', { tries: tryNo, reason: String(err && err.message || err) });
+        // F5: audit a fixed category, never the raw error text (which can echo input-derived
+        // server strings into the "PII-free" trail). The full error still rides the thrown err
+        // to the caller for its toast/log.
+        writeAudit('error', { tries: tryNo, reason: bwnIsTransient(err) ? 'transient-failure' : 'request-failed' });
         throw err;
       });
     }
-    // High-risk confirmation gate (fail-closed). A risk:'high' write must be proven confirmed:
-    // either the caller passes opts.confirmed===true (it ran its own confirm UI, e.g. dispatch's
-    // modal) OR an injected _confirmFn returns truthy. Neither -> refused, never a silent send.
-    if (isWrite && meta.risk === 'high' && opts.confirmed !== true) {
-      if (typeof _confirmFn !== 'function') {
-        writeAudit('denied', { reason: 'confirm-required' });
-        return Promise.reject(new Error('bwnGqlOp: "' + op + '" is high-risk and needs confirmation (no confirm handler set)'));
-      }
-      var details = {
-        op: op, target: meta.target, risk: meta.risk, ids: opts.ids || null,
-        current: (opts.current === undefined ? null : opts.current),
-        proposed: (opts.proposed === undefined ? null : opts.proposed),
-        count: (opts.count === undefined ? null : opts.count),
-        reason: opts.reason || null, irreversible: !!opts.irreversible
-      };
-      return Promise.resolve().then(function () { return _confirmFn(details); }).then(function (okd) {
-        if (!okd) {
-          writeAudit('denied', { reason: 'user-cancelled' });
-          throw new Error('bwnGqlOp: "' + op + '" cancelled at confirmation');
+    // High-risk confirmation gate (fail-closed, by construction). F4: a risk:'high' write has
+    // NO path to the transport except through this block - it returns in every sub-case (send
+    // or reject), so the trailing `return attempt(1)` below is reachable only by non-high-risk
+    // ops. A future high-risk writer therefore cannot skip the gate by omission: an absent
+    // confirmation is refused, never silently sent. Confirmation is proven EITHER by the
+    // caller's own UI (opts.confirmed===true, e.g. dispatch's modal) OR by an injected _confirmFn
+    // returning truthy.
+    // KNOWN RESIDUAL (flagged, NOT closed here): opts.confirmed===true is a caller assertion the
+    // wrapper trusts - it cannot tell a genuine confirm from a hardcoded literal. Closing that
+    // would mean dropping bare-boolean trust and mandating an injected _confirmFn, which every
+    // current high-risk adopter would fail (none inject one) - a live-behavior change, out of scope.
+    if (isWrite && meta.risk === 'high') {
+      if (opts.confirmed !== true) {
+        if (typeof _confirmFn !== 'function') {
+          writeAudit('denied', { reason: 'confirm-required' });
+          return Promise.reject(new Error('bwnGqlOp: "' + op + '" is high-risk and needs confirmation (no confirm handler set)'));
         }
-        return attempt(1);
-      });
+        var details = {
+          op: op, target: meta.target, risk: meta.risk, ids: opts.ids || null,
+          current: (opts.current === undefined ? null : opts.current),
+          proposed: (opts.proposed === undefined ? null : opts.proposed),
+          count: (opts.count === undefined ? null : opts.count),
+          reason: opts.reason || null, irreversible: !!opts.irreversible
+        };
+        return Promise.resolve().then(function () { return _confirmFn(details); }).then(function (okd) {
+          if (!okd) {
+            writeAudit('denied', { reason: 'user-cancelled' });
+            throw new Error('bwnGqlOp: "' + op + '" cancelled at confirmation');
+          }
+          return attempt(1);
+        });
+      }
+      return attempt(1);
     }
     return attempt(1);
   }
@@ -644,7 +677,9 @@
   function schedule() {
     mount();   // modal comes and goes; keep trying, but don't stop the observer (unlike a one-shot nav button)
   }
-  var obs = new MutationObserver(schedule);
+  // Trailing debounce (RM-B5): coalesce the SPA re-render bursts instead of firing on every mutation.
+  var obsT = null;
+  var obs = new MutationObserver(function () { clearTimeout(obsT); obsT = setTimeout(schedule, 300); });
   obs.observe(document.body, { childList: true, subtree: true });
   // poll fallback (React can fill the modal without a body mutation the observer sees)
   pollTimer = setInterval(schedule, 700);

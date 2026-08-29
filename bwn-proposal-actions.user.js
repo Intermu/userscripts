@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         BWN Proposal Actions (Broadway National)
 // @namespace    broadwaynational.bwn
-// @version      0.3.0
+// @version      0.4.0
 // @downloadURL  https://raw.githubusercontent.com/Intermu/userscripts/main/bwn-proposal-actions.user.js
 // @updateURL    https://raw.githubusercontent.com/Intermu/userscripts/main/bwn-proposal-actions.user.js
 // @description  On a Client Proposal DETAILS page, a "Proposal Actions" dropdown runs the internal review workflow in one confirmed action: Approval / TSP Review / Kickback. Each posts a note to the Proposal + the Work Order, sets the WO status, completes open tasks, and files a new task (assigned to the WO coordinator, or Ronny Sharp for TSP). Kickback drafts a rejection reason with the on-device browser AI for the operator to confirm. Every write is shown in a confirm dialog first; nothing fires until Confirm. @grant none.
@@ -15,7 +15,7 @@
 (function () {
   'use strict';
 
-  var VER = '0.3.0';   // keep in step with @version
+  var VER = '0.4.0';   // keep in step with @version
   var DRY_RUN = false; // when true, every WRITE is console.logged instead of sent
   console.info('[BWN PROPOSAL ACTIONS] v' + VER + ' - Approval / TSP Review / Kickback workflow on the Client Proposal details page');
 
@@ -98,9 +98,7 @@
   function onProposalDetailsPage() {
     return /\/work-orders\/\d+\/proposals\/client-proposals\/\d+\/details/.test(location.pathname || '');
   }
-  function escapeHtml(s) {
-    return String(s == null ? '' : s).replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;');
-  }
+  function escapeHtml(s) { return String(s == null ? '' : s).replace(/[&<>"']/g, function (c) { return { '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;' }[c]; }); }
   function money(m) {
     if (!m || m.amount == null) return '$0.00';
     var p = (m.precision != null) ? m.precision : 2;
@@ -195,18 +193,31 @@
     });
   }
 
+  // ===== PA-RESOLVE-SLICE-START (RM-A3: live-resolve status ids + the TSP assignee, FAIL-CLOSED;
+  // sliced by scripts/test-pa-live-resolve.js; references injected paGql / STATUS_FALLBACK / RONNY_GUID) =====
+  // R3/RM-A3: status ids and the TSP assignee used to come from hardcoded constants (STATUS_FALLBACK,
+  // RONNY_GUID). If the tenant reconfigures a status id, or Ronny leaves / his user id changes, a
+  // hardcoded value silently MISROUTES a live write (wrong status, task filed on a ghost user). Now
+  // both resolve LIVE and FAIL CLOSED when they cannot - no write goes out on a stale id. The rollback
+  // flag (bwn:modules.paLegacyFallback=true) reinstates the constants as a last resort, no reship.
+  function paLegacyFallback() { try { return JSON.parse(localStorage.getItem('bwn:modules') || '{}').paLegacyFallback === true; } catch (e) { return false; } }
+
   var Q_STATUSES = 'query PA_Statuses{ workOrderStatuses { id name isActive } }';
   var _statusCache = null;
+  // Resolve a status NAME to its live tenant id. Fail-closed: a name not present in the live
+  // workOrderStatuses (or a failed read) yields null so setStatus ABORTS, rather than patching to a
+  // stale hardcoded id. The rollback flag reinstates STATUS_FALLBACK.
   function readStatusId(name) {
     function pick(list) {
       var hit = (list || []).filter(function (s) { return s.name === name; })[0];
-      return hit ? hit.id : STATUS_FALLBACK[name];
+      if (hit) return hit.id;
+      return paLegacyFallback() ? STATUS_FALLBACK[name] : null;   // fail-closed unless the rollback flag is on
     }
     if (_statusCache) return Promise.resolve(pick(_statusCache));
     return paGql('PA_Statuses', Q_STATUSES, {}).then(function (d) {
       _statusCache = (d && d.workOrderStatuses) || [];
       return pick(_statusCache);
-    }).catch(function () { return STATUS_FALLBACK[name]; });
+    }).catch(function () { return paLegacyFallback() ? STATUS_FALLBACK[name] : null; });   // read failed: fail-closed
   }
 
   var Q_USER = 'query PA_User($id: ID!){ user(id: $id){ firstName lastName } }';
@@ -218,6 +229,21 @@
       return ((u.firstName || '') + ' ' + (u.lastName || '')).trim() || guid.slice(0, 8);
     }).catch(function () { return guid.slice(0, 8); });
   }
+
+  // The TSP (Trade Specialist) assignee. RONNY_GUID is only a SEED: verified LIVE against the proven
+  // user(id:) read before any task is assigned to it. If the seed no longer resolves to a user named
+  // TSP_ASSIGNEE_NAME (Ronny left, or his id changed), resolution FAILS CLOSED (returns null) so the
+  // TSP action aborts rather than filing a task on a ghost id. The rollback flag reinstates the seed.
+  var TSP_ASSIGNEE_NAME = 'Ronny Sharp';
+  function resolveTspAssignee() {
+    return paGql('PA_User', Q_USER, { id: RONNY_GUID }).then(function (d) {
+      var u = d && d.user;
+      var nm = u ? (((u.firstName || '') + ' ' + (u.lastName || '')).trim()) : '';
+      if (u && nm.toLowerCase() === TSP_ASSIGNEE_NAME.toLowerCase()) return { guid: RONNY_GUID, name: nm };
+      return paLegacyFallback() ? { guid: RONNY_GUID, name: TSP_ASSIGNEE_NAME } : null;   // seed stale -> fail-closed
+    }).catch(function () { return paLegacyFallback() ? { guid: RONNY_GUID, name: TSP_ASSIGNEE_NAME } : null; });
+  }
+  // ===== PA-RESOLVE-SLICE-END =====
 
   // ===== PA-WRITES START (sliced by scripts/test-proposal-actions.js; references injected paGql / textToHtml / DRY_RUN / NOTE_TYPE_INTERNAL) =====
   // ===== writes: PROVEN =====================================================
@@ -335,6 +361,15 @@
       bwnAuditRecord(e);
     }
 
+    // Fail-closed write classification (G5): a WRITE must carry a RECOGNIZED risk tier. An
+    // unclassified write - a registry entry whose risk is missing or misspelled - is REFUSED here
+    // rather than sent unlabelled, so a new mutation cannot slip past the governance by omitting
+    // its risk. 'low'/'moderate' skip the confirm gate below; 'high' hits it; anything else fails
+    // closed. Reads are unaffected (isWrite guards this). Audited denied so the refusal is visible.
+    if (isWrite && meta.risk !== 'low' && meta.risk !== 'moderate' && meta.risk !== 'high') {
+      writeAudit('denied', { reason: 'unclassified-write:' + (meta.risk || 'none') });
+      return Promise.reject(new Error('bwnGqlOp: write "' + op + '" has no recognized risk classification'));
+    }
     // Per-feature kill switch: a disabled module must not mutate even if its UI leaked in.
     if (opts.feature && BWN_MODULES[opts.feature] === false) {
       writeAudit('denied', { reason: 'feature-off:' + opts.feature });
@@ -354,10 +389,23 @@
       return bwnGql(query, variables).then(function (data) {
         if (isWrite) {
           var env = data && data[op];
+          // F3: fail closed on an unrecognized write response. A registered write MUST return
+          // { success: <bool>, ... } under its own field name (op === the response field name
+          // for every adopter). A missing data[op] (a name/alias mismatch) or a non-boolean
+          // success means the write cannot be confirmed to have landed - classify it as an
+          // error, never a silent 'ok'. Verified safe: every current adopter selects `success`.
+          if (!env || typeof env.success !== 'boolean') {
+            var badShape = new Error(op + ': unrecognized write response (no {success} under data.' + op + ')');
+            badShape.bwnNonTransient = true;
+            writeAudit('error', { tries: tryNo, reason: 'unexpected-response-shape' });
+            throw badShape;
+          }
           if (env && env.success === false) {
             var refused = new Error(env.message || (op + ' was refused'));
             refused.bwnNonTransient = true;
-            writeAudit('error', { tries: tryNo, reason: refused.message });
+            // F5: record a fixed category, never the server message (env.message can echo
+            // input-derived text). The message still rides the thrown `refused` to the caller.
+            writeAudit('error', { tries: tryNo, reason: 'write-refused' });
             throw refused;
           }
           writeAudit('ok', { tries: tryNo });
@@ -367,32 +415,46 @@
         if (bwnIsTransient(err) && tryNo < maxTries) {
           return bwnDelay(bwnBackoff(tryNo)).then(function () { return attempt(tryNo + 1); });
         }
-        writeAudit('error', { tries: tryNo, reason: String(err && err.message || err) });
+        // F5: audit a fixed category, never the raw error text (which can echo input-derived
+        // server strings into the "PII-free" trail). The full error still rides the thrown err
+        // to the caller for its toast/log.
+        writeAudit('error', { tries: tryNo, reason: bwnIsTransient(err) ? 'transient-failure' : 'request-failed' });
         throw err;
       });
     }
-    // High-risk confirmation gate (fail-closed). A risk:'high' write must be proven confirmed:
-    // either the caller passes opts.confirmed===true (it ran its own confirm UI, e.g. dispatch's
-    // modal) OR an injected _confirmFn returns truthy. Neither -> refused, never a silent send.
-    if (isWrite && meta.risk === 'high' && opts.confirmed !== true) {
-      if (typeof _confirmFn !== 'function') {
-        writeAudit('denied', { reason: 'confirm-required' });
-        return Promise.reject(new Error('bwnGqlOp: "' + op + '" is high-risk and needs confirmation (no confirm handler set)'));
-      }
-      var details = {
-        op: op, target: meta.target, risk: meta.risk, ids: opts.ids || null,
-        current: (opts.current === undefined ? null : opts.current),
-        proposed: (opts.proposed === undefined ? null : opts.proposed),
-        count: (opts.count === undefined ? null : opts.count),
-        reason: opts.reason || null, irreversible: !!opts.irreversible
-      };
-      return Promise.resolve().then(function () { return _confirmFn(details); }).then(function (okd) {
-        if (!okd) {
-          writeAudit('denied', { reason: 'user-cancelled' });
-          throw new Error('bwnGqlOp: "' + op + '" cancelled at confirmation');
+    // High-risk confirmation gate (fail-closed, by construction). F4: a risk:'high' write has
+    // NO path to the transport except through this block - it returns in every sub-case (send
+    // or reject), so the trailing `return attempt(1)` below is reachable only by non-high-risk
+    // ops. A future high-risk writer therefore cannot skip the gate by omission: an absent
+    // confirmation is refused, never silently sent. Confirmation is proven EITHER by the
+    // caller's own UI (opts.confirmed===true, e.g. dispatch's modal) OR by an injected _confirmFn
+    // returning truthy.
+    // KNOWN RESIDUAL (flagged, NOT closed here): opts.confirmed===true is a caller assertion the
+    // wrapper trusts - it cannot tell a genuine confirm from a hardcoded literal. Closing that
+    // would mean dropping bare-boolean trust and mandating an injected _confirmFn, which every
+    // current high-risk adopter would fail (none inject one) - a live-behavior change, out of scope.
+    if (isWrite && meta.risk === 'high') {
+      if (opts.confirmed !== true) {
+        if (typeof _confirmFn !== 'function') {
+          writeAudit('denied', { reason: 'confirm-required' });
+          return Promise.reject(new Error('bwnGqlOp: "' + op + '" is high-risk and needs confirmation (no confirm handler set)'));
         }
-        return attempt(1);
-      });
+        var details = {
+          op: op, target: meta.target, risk: meta.risk, ids: opts.ids || null,
+          current: (opts.current === undefined ? null : opts.current),
+          proposed: (opts.proposed === undefined ? null : opts.proposed),
+          count: (opts.count === undefined ? null : opts.count),
+          reason: opts.reason || null, irreversible: !!opts.irreversible
+        };
+        return Promise.resolve().then(function () { return _confirmFn(details); }).then(function (okd) {
+          if (!okd) {
+            writeAudit('denied', { reason: 'user-cancelled' });
+            throw new Error('bwnGqlOp: "' + op + '" cancelled at confirmation');
+          }
+          return attempt(1);
+        });
+      }
+      return attempt(1);
     }
     return attempt(1);
   }
@@ -401,6 +463,13 @@
 
   var M_PATCH = 'mutation PatchWorkOrder($data: PatchWorkOrderInput!){ patchWorkOrder(data: $data){ success message } }';
   function setStatus(n, statusId) {
+    // Fail-closed (RM-A3): a status write MUST carry a live-resolved numeric id. A null/NaN id means
+    // readStatusId could not resolve the status name against the live workOrderStatuses (rollback flag
+    // off), so REFUSE here rather than patch the WO to a null/stale status. This is the single write
+    // chokepoint, so the guard covers every caller.
+    if (statusId == null || !isFinite(Number(statusId))) {
+      return Promise.reject(new Error('status id did not resolve to a live value - not writing (set bwn:modules.paLegacyFallback=true to use the built-in fallback ids)'));
+    }
     var vars = { data: { workOrderNumber: n, statusId: { shouldInclude: true, value: statusId } } };
     if (DRY_RUN) { console.log('[PA DRY_RUN] setStatus', vars); return Promise.resolve(true); }
     // Routed through bwnGqlOp: audit + corrId + the high-risk confirm gate. proposal-actions
@@ -815,7 +884,9 @@
       }
       if (kind === 'tsp') {
         var tNote = function () { return tspNote(ctx.gp, ctx.total); };
-        return resolveUserName(RONNY_GUID).then(function (name) {
+        // RM-A3: resolve the TSP assignee LIVE and fail closed - never file a task on a stale RONNY_GUID.
+        return resolveTspAssignee().then(function (tsp) {
+          if (!tsp) { paToast('TSP assignee "' + TSP_ASSIGNEE_NAME + '" could not be verified live - nothing sent. (Set bwn:modules.paLegacyFallback=true to override.)'); return; }
           openConfirm({
             title: 'Send to Trade Specialist - Pending Trade Specialist',
             subtitle: 'W-' + ctx.n + '  ·  Proposal #' + ctx.pid + '  ·  ' + ctx.total + '  ·  ' + ctx.gp,
@@ -825,7 +896,7 @@
               buildProposalNoteStep(ctx, tNote),
               buildWONoteStep(ctx, tNote),
               buildCompleteStep(ctx),
-              buildCreateTaskStep(ctx, RONNY_GUID, name, tNote)   // TSP is the ONLY action that reassigns the task (to Ronny)
+              buildCreateTaskStep(ctx, tsp.guid, tsp.name, tNote)   // TSP is the ONLY action that reassigns the task (to Ronny)
             ]
           });
         });
@@ -944,7 +1015,9 @@
     });
   } catch (e) { }
   try {
-    var paObs = new MutationObserver(function () { injectDropdown(); });
+    // Trailing debounce (RM-B5): coalesce the SPA re-render bursts instead of firing on every mutation.
+    var paObsT = null;
+    var paObs = new MutationObserver(function () { clearTimeout(paObsT); paObsT = setTimeout(injectDropdown, 300); });
     paObs.observe(document.body, { childList: true, subtree: true });
   } catch (e) { }
   setInterval(injectDropdown, 900);
