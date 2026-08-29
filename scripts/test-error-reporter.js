@@ -155,4 +155,70 @@ var NC3 = mutate(SRC, 'if (BWN_MODULES.errorReporter !== true) return null;', '/
   A.ok('NC3 red: without the gate, an entry is logged even with the flag off', R.errlog.all().length === 1);
 })();
 
+// ---- RM-B2 phased adoption: the consumer reportFail shim + PII/no-toast discipline ------------
+// The follow-up sweep adopts the reporter at USER-FACING write/load failures in @grant-none
+// consumers (wo-intake load failures, proposal-copy write failures + read-back mismatch) via a tiny
+// `reportFail` shim that forwards to Core's window.bwnReport ONLY. Core is a SEPARATE sandbox that
+// may be absent (standalone install) or throw, and the shim runs inside the caller's own catch, so
+// it must be a strict no-op in both cases (never break the failure path it is reporting) and it must
+// NEVER pass a `toast` field (the consumer's own local toast/drawer is the surface; a Core toast
+// would double-fire and change flag-OFF behavior). This section slices the shim, proves its
+// fail-safe forwarding, then STATICALLY checks every adopted call-site is toast-free + PII-free.
+function reportFailShim(file) {
+  var t = fs.readFileSync(path.join(__dirname, '..', file), 'utf8').replace(/\r\n/g, '\n');
+  var m = t.match(/function reportFail\(o\) \{[^\n]*\}/);
+  if (!m) throw new Error('reportFail shim not found in ' + file);
+  return m[0];
+}
+function buildReportFail(src, win) {
+  return new Function('window', src + '\n; return reportFail;')(win);
+}
+(function () {
+  var SHIM = reportFailShim('bwn-wo-intake.user.js');
+  // Core absent (no window.bwnReport): a strict no-op, never throws into the caller's catch.
+  var threw = false;
+  try { buildReportFail(SHIM, {})({ tag: 'x.fail' }); } catch (e) { threw = true; }
+  A.ok('reportFail: Core absent => no-op, never throws (flag-OFF / standalone-install safe)', threw === false);
+  // Core present: forwards exactly once, object unchanged.
+  var got = [];
+  buildReportFail(SHIM, { bwnReport: function (o) { got.push(o); } })({ tag: 'y.fail', feature: 'woIntake' });
+  A.eq('reportFail: Core present => forwards exactly once', got.length, 1);
+  A.eq('reportFail: forwards the object unchanged', got[0].tag, 'y.fail');
+  // Core throwing: swallowed (best-effort), never re-thrown into the caller's catch.
+  var threw2 = false;
+  try { buildReportFail(SHIM, { bwnReport: function () { throw new Error('boom'); } })({ tag: 'z.fail' }); } catch (e) { threw2 = true; }
+  A.ok('reportFail: Core throwing => swallowed, never re-thrown', threw2 === false);
+  // NC: remove the try/catch backstop -> a throwing Core now escapes into the caller's own catch
+  // (the exact failure the shim exists to prevent). Proves the best-effort wrapper is load-bearing.
+  var NC = SHIM.replace(
+    "try { if (typeof window.bwnReport === 'function') window.bwnReport(o); } catch (e) { }",
+    "if (typeof window.bwnReport === 'function') window.bwnReport(o);");
+  if (NC === SHIM) throw new Error('shim NC target absent');
+  var ncThrew = false;
+  try { buildReportFail(NC, { bwnReport: function () { throw new Error('boom'); } })({ tag: 'x.fail' }); } catch (e) { ncThrew = true; }
+  A.ok('NC red: without the try/catch backstop, a throwing Core escapes reportFail', ncThrew === true);
+  // the wo-intake and proposal-copy shims are the same paste:
+  A.eq('the reportFail shim is byte-identical across the adopters', reportFailShim('bwn-proposal-copy.user.js'), SHIM);
+})();
+// Static discipline: every adopted reportFail call-site is toast-free (no Core double-toast) and its
+// ids carry SCALAR identifiers only - no PII-shaped key can smuggle a note/name/amount into the ring.
+function reportFailCalls(file) {
+  var t = fs.readFileSync(path.join(__dirname, '..', file), 'utf8').replace(/\r\n/g, '\n');
+  return t.split('\n').filter(function (ln) { return /\breportFail\(\{/.test(ln) && !/function reportFail/.test(ln); });
+}
+var PII_KEY = /\b(name|body|note|client|message|msg|text|email|address|error|reason|title|subject)\s*:/i;
+function callIsClean(line) {
+  if (/\btoast\s*:/.test(line)) return false;                 // a Core toast would double-fire over the local surface
+  var ids = line.match(/ids\s*:\s*\{([^}]*)\}/);
+  return !(ids && PII_KEY.test(ids[1]));                       // ids object may hold scalars only
+}
+['bwn-wo-intake.user.js', 'bwn-proposal-copy.user.js'].forEach(function (file) {
+  var calls = reportFailCalls(file);
+  A.ok(file + ': has adopted reportFail call-sites', calls.length > 0);
+  A.ok(file + ': every reportFail call is toast-free + ids-scalar-only', calls.every(callIsClean));
+});
+// NC: a call that passes a free-text toast, or a note-body id, MUST be rejected by the discipline check.
+A.ok('NC red: a reportFail call with a toast field is flagged', callIsClean("reportFail({ tag: 'x', toast: 'secret ' + e });") === false);
+A.ok('NC red: a reportFail call with a note-body id is flagged', callIsClean("reportFail({ tag: 'x', ids: { note: bodyText } });") === false);
+
 A.finish();

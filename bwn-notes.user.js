@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         BWN Suite - Note Templates (Broadway National)
 // @namespace    broadwaynational.bwn
-// @version      0.7.1
+// @version      0.7.2
 // @description  Canned dispatch-note templates in a "Templates" dropdown beside the "+ Add" note button in the Umbrava Dispatch Board's work-order detail panel (Notes tab). Picking a template opens Umbrava's own Add Note composer and DRAFTS the note into it (signed with your first name, ______ blanks left for you to fill) - it is NEVER auto-posted; you review, set the Type, and click Save. STANDALONE: carries its own tiptap/ProseMirror inserter, so in-house techs install this one script alone - no drop-upload dependency. Still prefers drop-upload's hook (window.__bwnFillNoteEditor) when that script is also installed, so coordinator machines keep a single live-tested fill path. Also, on the regular WO page, a "Spoke with" button stamps a [Spoke with: <Vendor>] tag at the TOP of a note (vendor picked from your recent vendors or typed) so you can record which of several WO vendors you spoke with - same human-gated draft, never auto-posted. @grant none, zero egress.
 // @match        https://app.umbrava.com/*
 // @run-at       document-idle
@@ -13,6 +13,10 @@
   'use strict';
 
   var GREEN = 'linear-gradient(135deg,#2ECC71,#1a5f3e)';   // Broadway green (Core's --bwn-green/-dk, inlined for a standalone script)
+
+  // Suite module flags (kill switches), read from the shared bwn:modules blob the Ops panel writes.
+  // Only routeHelper is consulted here (RM-B4 route-helper adoption below); default-off, fail-safe.
+  var BWN_MODULES = (function () { try { return JSON.parse(localStorage.getItem('bwn:modules') || '{}') || {}; } catch (e) { return {}; } })();
 
   // ===== Pure logic (sliced + unit-tested by scripts/test-notes-templates.js) ==============
   // BWN-NOTES-SLICE-START
@@ -648,9 +652,31 @@
       if (tick()) { clearInterval(pollTimer); pollTimer = null; }
     }, 400);
   }
-  // Trailing debounce (RM-B5): coalesce the SPA re-render bursts instead of firing on every mutation.
-  var obsT = null;
-  var obs = new MutationObserver(function () { clearTimeout(obsT); obsT = setTimeout(schedule, 300); });
-  obs.observe(document.body, { childList: true, subtree: true });
+  // RM route helper adoption (phased follow-on to RM-B4). Route-change re-mount is the piece that
+  // centralizes: when BWN_MODULES.routeHelper is ON and Core published window.bwnOnRoute (both are
+  // @grant none, same page window - the same bridge kanban uses), subscribe to Core's ONE history
+  // patch instead of our own per-mutation body observer, and keep a steady low-rate poll as the
+  // re-render recovery net (React can drop our controls mid-route, which route detection does not
+  // cover; a fixed-interval tick() is cheaper and starvation-proof vs a clear-and-reset observer
+  // debounce on a busy SPA - see wiki/observer-debounce-starves.md). Flag OFF, or Core
+  // absent/disabled/throwing, => the legacy RM-B5 body observer installs, byte-for-byte the old
+  // behavior (fail-safe: an unresolved flag or a missing helper both take the legacy path).
+  function notesRouteHooks(onChange) {
+    if (BWN_MODULES.routeHelper === true && typeof window.bwnOnRoute === 'function') {
+      try {
+        window.bwnOnRoute(onChange);
+        // ponytail: permanent 400ms poll as the re-render recovery net the dropped observer used to
+        // give (tick() is idempotent - each mount guards on isConnected - so no double-inject).
+        // Matches the consumer's existing 400ms poll cadence.
+        setInterval(tick, 400);
+        return;
+      } catch (e) { /* fall through to legacy */ }
+    }
+    // Trailing debounce (RM-B5): coalesce the SPA re-render bursts instead of firing on every mutation.
+    var obsT = null;
+    var obs = new MutationObserver(function () { clearTimeout(obsT); obsT = setTimeout(onChange, 300); });
+    obs.observe(document.body, { childList: true, subtree: true });
+  }
+  notesRouteHooks(schedule);
   schedule();
 })();

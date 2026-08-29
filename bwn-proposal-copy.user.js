@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         BWN Proposal Copy (Broadway National)
 // @namespace    broadwaynational.bwn
-// @version      0.1.13
+// @version      0.1.14
 // @downloadURL  https://raw.githubusercontent.com/Intermu/userscripts/main/bwn-proposal-copy.user.js
 // @updateURL    https://raw.githubusercontent.com/Intermu/userscripts/main/bwn-proposal-copy.user.js
 // @description  Copy a client proposal from an aged-out work order onto a chosen replacement WO as an un-submitted Draft, in one confirmed action. Replays Umbrava's own createDraftProposal + editProposal mutations (line items copied verbatim); never submits, deletes, or retries. Manager-gated visibility. @grant none.
@@ -15,9 +15,22 @@
 (function () {
   'use strict';
 
-  var VER = '0.1.13';   // keep in step with @version
+  var VER = '0.1.14';   // keep in step with @version
   var DRY_RUN = false; // when true, the two WRITE mutations are logged, not sent
   console.info('[BWN PROPOSAL COPY] v' + VER + ' - copy client proposal to another WO as a Draft (createDraftProposal + editProposal replay)');
+
+  // RM-B2 error-reporter adoption: leave a bounded, PII-FREE bwn:errlog breadcrumb via Core's
+  // window.bwnReport (both @grant none, shared page window) when the errorReporter flag is ON, so a
+  // user-facing WRITE failure/degrade here (the copy failed, or the Draft was created but its
+  // read-back did not match the source money document) is recorded durably instead of living only in
+  // the drawer + a console.warn. The operator still sees THIS script's own drawer message + pcToast
+  // unchanged - we pass NO `toast` field, so Core's toast never fires and the drawer stays the sole
+  // surface. The breadcrumb carries a short FIXED tag, SCALAR ids (proposal id + WO#) and a short
+  // stage `code` ONLY, NEVER line items, amounts, client PO, a client name, or the error text. Core
+  // absent or the flag OFF => a no-op, so flag-OFF behavior is byte-identical. (Pinned by
+  // test-error-reporter.js.) This is SEPARATE from this script's own bwn:audit ring, which the
+  // reporter never touches.
+  function reportFail(o) { try { if (typeof window.bwnReport === 'function') window.bwnReport(o); } catch (e) { } }
 
   function onProposalPage() { return /\/work-orders\/\d+/.test(location.pathname); }
 
@@ -951,6 +964,7 @@
           if (rb.sourceSubtotal != null && rb.newSubtotal !== rb.sourceSubtotal) diffs.push('subtotal changed');
           if (rb.sourcePO !== rb.newPO) diffs.push('client PO ' + (rb.sourcePO || 'none') + ' -> ' + (rb.newPO || 'none'));
           console.warn('[BWN PROPOSAL COPY] read-back did NOT match the source on the new Draft', rb);
+          reportFail({ level: 'warn', tag: 'proposalCopy.readback.mismatch', feature: 'proposalCopy', ids: { proposal: sourceProposalId, wo: Number(target.number) }, code: 'readback-mismatch' });
           pcToast('Copied to W-' + target.number + ', but the read-back did NOT match - verify it.');
           progress.className = 'bwn-pc-warn';
           progress.textContent = 'Created as a Draft, but VERIFY (' + (diffs.join('; ') || 'read-back differs') + ') - ';
@@ -974,12 +988,14 @@
         confirmBtn.textContent = 'Retry';
         progress.className = 'bwn-pc-err';
         progress.textContent = 'Copy failed at "' + ((r && r.stage) || 'unknown') + '": ' + ((r && r.error) || 'unknown error');
+        reportFail({ level: 'error', tag: 'proposalCopy.copy.fail', feature: 'proposalCopy', ids: { proposal: sourceProposalId, wo: Number(target.number) }, code: (r && r.stage) || 'unknown' });   // r.error (free text) stays in the drawer, never logged
       }
     }).catch(function (err) {
       confirmBtn.disabled = false; cancelBtn.disabled = false;
       confirmBtn.textContent = 'Retry';
       progress.className = 'bwn-pc-err';
       progress.textContent = 'Copy failed: ' + ((err && err.message) || err);
+      reportFail({ level: 'error', tag: 'proposalCopy.copy.fail', feature: 'proposalCopy', ids: { proposal: sourceProposalId, wo: Number(target.number) }, code: 'exception' });   // err.message (free text) stays in the drawer, never logged
     });
   }
 
