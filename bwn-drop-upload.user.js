@@ -1,10 +1,10 @@
 // ==UserScript==
 // @name         BWN Drop Upload (Broadway National)
 // @namespace    broadwaynational.bwn
-// @version      1.21.2
+// @version      1.22.0
 // @downloadURL  https://raw.githubusercontent.com/Intermu/userscripts/main/bwn-drop-upload.user.js
 // @updateURL    https://raw.githubusercontent.com/Intermu/userscripts/main/bwn-drop-upload.user.js
-// @description  Drop files anywhere on an Umbrava work order to upload them. Opens the Documents tab and upload dialog, hands over the files, and builds each file's description from its contents. Emails are parsed locally (.msg via an OLE/MAPI reader, .eml via RFC822) into an Outlook-style block - From/Sent/To/Cc/Subject and the body - that becomes the WO note, led by a one-line summary from Chrome's on-device built-in AI (zero cost, zero egress, nothing leaves the browser), falling back to local WO-field extraction (store, city/state, priority, PO, NTE, problem, requester) when the on-device model is unavailable. That same summary fills each file's Description. The WO note's Type is chosen from the email's parties: inbound is typed by the sender (client -> Client, else Vendor); outbound from Broadway is typed by the recipients (a client recipient -> Client, any vendor recipient -> Vendor, all-internal -> Internal). Umbrava's Description field is a TipTap/ProseMirror rich-text editor. It rejects synthetic paste, beforeinput, insertHTML and raw innerHTML, but honours execCommand('insertText') plus a synthetic Enter keydown - so the note is filled line by line (Enter between lines to keep paragraphs), paced ~12ms/line so ProseMirror's async commit doesn't drop lines (measured live 2026-08-10). The text is also placed on your clipboard as a backup, and if every fill method fails a "Copy the WO note" button appears (its click supplies the gesture for a reliable copy, then Ctrl+V). A console diagnostic reports which editor was found and which fill method stuck. When WO Intake hands off a just-created WO's request email, each uploaded file's Label (document type) is set to "Work Order Request" and the note Type is forced to Client (a WO Intake handoff is a client's request, even when the sender is a broker like Fairmarkit that reads as a Vendor domain). Fairmarkit / bulk-email footer boilerplate (the Fairmarkit company block: tagline + Boston address + FAQ/Privacy/Terms/Unsubscribe, and the -----!{...}!----- machine tail) plus ALL tracking URLs (safelinks/awstrack/logo) are stripped from the note body, keeping content through the suppliers@ email. A Fairmarkit RFQ body is also condensed to one line per entry - single-spaced, with each line-item rejoined to its QTY and each Details label (Buyer/Close date/RFQ ID/Shipping address) rejoined to its value. Files upload via Umbrava's own API (initializeJobDocument -> Azure blob PUT -> bulkAddWorkOrderDocuments, captured live 2026-08-12), Label set by id, so the brittle upload-dialog combobox is bypassed; the dialog remains the automatic fallback if the API is unavailable. A manual drop does NOT auto-upload: the review box shows a "Document type" picker plus an Upload button, so the coordinator CHOOSES the document type before it is committed (there is no update-label mutation, so the label must be right at upload time). The picker defaults to MATCH the note Type we assigned (Client -> Client Correspondence, Vendor -> Vendor Correspondence, Internal -> Internal) and stays in sync as the note Type is changed, until the coordinator overrides the doc type directly; for an unknown external party the on-device classifier upgrades Vendor -> Supplier Correspondence when it reads as a parts supplier. The file Description is still filled automatically from the file's contents / the email summary. Only the WO Intake handoff still uploads automatically and forces "Work Order Request". The email note is shown in a BWN review box (editable, Type selectable) and posted via addEditJobNote ONLY when you click Post - it is never auto-posted, and posts under your own Umbrava session for correct attribution. Network calls are same-origin to app.umbrava.com's own /api/graphql (the app's Auth0 bearer, no @connect/GM) plus the SAS-authorized blob PUT the SPA itself makes - nothing goes to any third party. @grant none.
+// @description  Drop files anywhere on an Umbrava work order to upload them. Opens the Documents tab and upload dialog, hands over the files, and builds each file's description from its contents. Emails are parsed locally (.msg via an OLE/MAPI reader, .eml via RFC822) into an Outlook-style block - From/Sent/To/Cc/Subject and the body - that becomes the WO note, led by a one-line summary from Chrome's on-device built-in AI (zero cost, zero egress, nothing leaves the browser), falling back to local WO-field extraction (store, city/state, priority, PO, NTE, problem, requester) when the on-device model is unavailable. That same summary fills each file's Description. The WO note's Type is chosen from the email's parties: inbound is typed by the sender (client -> Client, else Vendor); outbound from Broadway is typed by the recipients (a client recipient -> Client, any vendor recipient -> Vendor, all-internal -> Internal). Umbrava's Description field is a TipTap/ProseMirror rich-text editor. It rejects synthetic paste, beforeinput, insertHTML and raw innerHTML, but honours execCommand('insertText') plus a synthetic Enter keydown - so the note is filled line by line (Enter between lines to keep paragraphs), paced ~12ms/line so ProseMirror's async commit doesn't drop lines (measured live 2026-08-10). The text is also placed on your clipboard as a backup, and if every fill method fails a "Copy the WO note" button appears (its click supplies the gesture for a reliable copy, then Ctrl+V). A console diagnostic reports which editor was found and which fill method stuck. When WO Intake hands off a just-created WO's request email, each uploaded file's Label (document type) is set to "Work Order Request" and the note Type is forced to Client (a WO Intake handoff is a client's request, even when the sender is a broker like Fairmarkit that reads as a Vendor domain). Fairmarkit / bulk-email footer boilerplate (the Fairmarkit company block: tagline + Boston address + FAQ/Privacy/Terms/Unsubscribe, and the -----!{...}!----- machine tail) plus ALL tracking URLs (safelinks/awstrack/logo) are stripped from the note body, keeping content through the suppliers@ email. A Fairmarkit RFQ body is also condensed to one line per entry - single-spaced, with each line-item rejoined to its QTY and each Details label (Buyer/Close date/RFQ ID/Shipping address) rejoined to its value. Files upload via Umbrava's own API (initializeJobDocument -> Azure blob PUT -> bulkAddWorkOrderDocuments, captured live 2026-08-12), Label set by id, so the brittle upload-dialog combobox is bypassed; the dialog remains the automatic fallback if the API is unavailable. A manual drop does NOT auto-upload: the review box shows a "Document type" picker plus an Upload button, so the coordinator CHOOSES the document type before it is committed (there is no update-label mutation, so the label must be right at upload time). The picker defaults to MATCH the note Type we assigned (Client -> Client Correspondence, Vendor -> Vendor Correspondence, Internal -> Internal) and stays in sync as the note Type is changed, until the coordinator overrides the doc type directly; for an unknown external party the on-device classifier upgrades Vendor -> Supplier Correspondence when it reads as a parts supplier. The file Description is still filled automatically from the file's contents / the email summary. Only the WO Intake handoff still uploads automatically and forces "Work Order Request". The email note is shown in a centered BWN review box (editable; the Type picker offers a curated set of the note types a drop is actually filed under, defaulted to the party-derived Client/Vendor/Internal) and posted via addEditJobNote ONLY when you click Post - it is never auto-posted, and posts under your own Umbrava session for correct attribution. Network calls are same-origin to app.umbrava.com's own /api/graphql (the app's Auth0 bearer, no @connect/GM) plus the SAS-authorized blob PUT the SPA itself makes - nothing goes to any third party. @grant none.
 // @match        https://app.umbrava.com/*
 // @match        https://*.umbrava.com/*
 // @run-at       document-idle
@@ -15,7 +15,7 @@
 (function () {
   'use strict';
 
-  var VER = '1.21.2';   // keep in step with @version (drift caught earlier: banner had lagged two releases)
+  var VER = '1.22.0';   // keep in step with @version (drift caught earlier: banner had lagged two releases)
   var BWN_VER = VER;   // stamped into BWN-OPS audit entries; the wrapper references BWN_VER
   console.info('[BWN DROP UPLOAD] v' + VER + ' · Uploads via Umbrava API (initializeJobDocument→blob PUT→bulkAddWorkOrderDocuments, Label by id), DOM dialog is the fallback · manual drop HOLDS the upload: the review box shows a Document type picker (defaulted to MATCH the note Type - Client->Client Correspondence, Vendor->Vendor Correspondence, Internal->Internal - and re-synced as the note Type changes, until overridden) + an Upload button, so the type is CHOSEN, not assumed · email→note in a human-gated BWN review box, posted via addEditJobNote on an explicit Post click (never auto-posted) · note Type by parties (inbound=sender, outbound=recipient) · note box shows instantly with a mechanical lead; the slow on-device AI brief (Gemini Nano / Edge Phi) fills in async · bwn:cmd dropupload:files bridge (handoff still forces Work Order Request)');
 
@@ -903,6 +903,36 @@
     } catch (e) { }
     var f = NOTE_TYPE_FALLBACK[name];
     return (typeof f === 'number') ? f : null;
+  }
+
+  // Curated Type picker for the review box: the note types a coordinator actually files a dropped
+  // email or document under, in relevance order (parties first). Umbrava has 82 note types, most of
+  // them system/workflow (Auto Fax, Chargeback, EMS, Recruit, ...) that never apply to a drop, so we
+  // do NOT dump the whole map. Names must match Umbrava's bwn:noteTypes vocabulary EXACTLY - that is
+  // how postNoteViaApi resolves the numeric id. ponytail: hand-maintained allowlist, same pattern as
+  // CLIENT_DOMAINS; add a name to surface it, remove one to hide it.
+  var CURATED_NOTE_TYPES = [
+    'Client', 'Vendor', 'Internal', 'Supplier', 'Email',
+    'Escalation', 'Hold', 'Client Hold', 'Recap', 'Resolution', 'Action',
+    'Scope Confirmed', 'Reschedule Date', 'Missed ETA', 'Confirmed Complete',
+    'Billing', 'Client NTE Issue', 'Vendor NTE Issue',
+    'Proposal Approved', 'Proposal Declined', 'Other'
+  ];
+  // The curated names Umbrava ACTUALLY has, in curated order (an entry the tenant lacks is dropped
+  // so a picked type always resolves to a real id). Reads the shared bwn:noteTypes cache Core keeps
+  // warm on WO pages; falls back to the party-typer's three when the cache is cold.
+  function noteTypeNames() {
+    try {
+      var cache = JSON.parse(localStorage.getItem('bwn:noteTypes') || 'null');
+      var map = cache && cache.map;
+      if (map) {
+        var have = {};
+        for (var id in map) { var n = String(map[id] == null ? '' : map[id]).trim(); if (n) have[n.toLowerCase()] = 1; }
+        var names = CURATED_NOTE_TYPES.filter(function (n) { return have[n.toLowerCase()]; });
+        if (names.length) return names;
+      }
+    } catch (e) { }
+    return ['Client', 'Vendor', 'Internal'];
   }
 
   // Plain text -> paragraph HTML (blank line = new <p>, single newline = <br>), matching what the
@@ -1993,9 +2023,9 @@
     var box = document.createElement('div');
     box.id = 'bwn-du-note';
     box.style.cssText =
-      'position:fixed;right:22px;bottom:22px;z-index:2147483001;width:360px;max-width:92vw;' +
+      'position:fixed;left:50%;top:50%;transform:translate(-50%,-50%);z-index:2147483001;width:380px;max-width:92vw;max-height:88vh;overflow:auto;' +
       'background:#fff;border:1px solid #c6d2cc;border-left:4px solid #2f6f4f;border-radius:10px;' +
-      'box-shadow:0 8px 28px rgba(0,0,0,.22);padding:12px 13px;' +
+      'box-shadow:0 12px 40px rgba(0,0,0,.28);padding:12px 13px;' +
       'font:400 12.5px/1.45 -apple-system,BlinkMacSystemFont,\'Segoe UI\',\'Helvetica Neue\',Arial,sans-serif;color:#12241b;';
     var h = document.createElement('div');
     h.style.cssText = 'font-weight:600;margin-bottom:6px;';
@@ -2061,8 +2091,10 @@
     typeRow.style.cssText = 'display:flex;align-items:center;gap:7px;margin-top:8px;';
     var tl = document.createElement('span'); tl.textContent = 'Type:'; tl.style.cssText = 'color:#5b6b8c;';
     var sel = document.createElement('select');
-    sel.style.cssText = 'flex:0 0 auto;padding:3px 6px;border:1px solid #c6d2cc;border-radius:6px;font:inherit;';
-    ['Client', 'Vendor', 'Internal'].forEach(function (t) { var o = document.createElement('option'); o.value = t; o.textContent = t; sel.appendChild(o); });
+    sel.style.cssText = 'flex:1 1 auto;min-width:0;padding:3px 6px;border:1px solid #c6d2cc;border-radius:6px;font:inherit;';
+    var typeNames = noteTypeNames();
+    if (typeNames.indexOf(initType) === -1) typeNames = [initType].concat(typeNames);   // party default is always selectable
+    typeNames.forEach(function (t) { var o = document.createElement('option'); o.value = t; o.textContent = t; sel.appendChild(o); });
     sel.value = initType;
     // Keep the document type mapped to the note Type as the coordinator changes it (until they
     // override the doc type directly). The needs-response toggle sets sel.value programmatically,
