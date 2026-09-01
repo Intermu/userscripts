@@ -484,7 +484,7 @@ console.log('\n-- the shipped call sites: all five ask the same question --');
   // bump, so a version can never ride out attached to an unrelated change. It was red on main
   // from 1.66.33 (the mirror-retirement sweep bumped Core without acknowledging it here) until
   // 2026-08-06.
-  A.ok('Core is bumped to 1.80.0', core.indexOf('// @version      1.80.0') !== -1);
+  A.ok('Core is bumped to 1.82.0', core.indexOf('// @version      1.82.0') !== -1);
   A.ok('and List Heat announces v3.28', core.indexOf("console.info('[BWN HEAT] v3.28 loaded on', location.href);") !== -1);
   // Drift guard (1.78.17): the module-inventory banner had read "List Heat 3.24" while the module
   // banner read v3.28 - the two are hand-kept and had silently diverged. Assert they agree so it

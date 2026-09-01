@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         BWN Suite - Core (Broadway National)
 // @namespace    broadwaynational.bwn
-// @version      1.80.0
+// @version      1.82.0
 // @downloadURL  https://raw.githubusercontent.com/Intermu/userscripts/main/bwn-suite-core.user.js
 // @updateURL    https://raw.githubusercontent.com/Intermu/userscripts/main/bwn-suite-core.user.js
 // @description  Runs several Umbrava helpers for BWN coordinators, in the browser with no privileged grants. Includes: PO Approval + ETA Builder; WO Assist (GP/ETA, a stall watchdog, DNE calculator, and a next-action playbook); Email Leak Guard (checks recipients against vendor names, PO amounts, and client budget references before an outbound email sends); WO List Heat (a triage overlay + My Day strip on the work-order list, with an optional same-origin Umbrava API scan for deterministic full-board coverage); and the BWN Launcher (opens the Azure Static Web App tools with the current WO's context). Modules share state through sessionStorage/localStorage. The only network calls are same-origin Umbrava GraphQL requests (app.umbrava.com/api/graphql, the app's own session): List Heat's full-board scan and WO Assist's work-order / trip / clock-in / document reads, plus ONE write - BWN Views saves the column layout through Umbrava's own putUserPreference, the same preference the column chooser writes; everything else is offline. Toggle modules in BWN_MODULES below.
@@ -46,10 +46,14 @@
                          // user until it is flipped after a live smoke test. Even then each batch
                          // passes through a dry-run + a typed confirm, and every write routes through
                          // bwnGqlOp with feature:'bulkOps' (its per-feature kill switch + audit ring).
-    bulkOpsDestructive: false, // SHIPPING DEFAULT OFF, and NOT wired in v1: reserved scaffolding for
-                         // the destructive bulk ops (status change / reassign). v1 exposes only
-                         // add-note + set-ECD; this flag gates nothing yet - it exists so the
-                         // destructive ops land behind a SECOND, separately-flipped gate later.
+    bulkOpsDestructive: false, // SHIPPING DEFAULT OFF: the SECOND, separately-flipped gate for the
+                         // destructive (patchWorkOrder-class, risk:HIGH) bulk ops - set-status and
+                         // reassign. v2 wires them behind BOTH bulkOps (module mount) AND this flag
+                         // (the action), so status/assign stay dark even when the console is on until
+                         // this is flipped too. add-note / set-ECD / doc-request / escalation-task ride
+                         // bulkOps alone. The client rank gate + the armed per-batch confirm are the
+                         // other two layers; Umbrava's server against the operator's bearer is the real
+                         // boundary (needs ops_* roles - see the approval-gate TODO).
     bulkSource: false,   // SHIPPING DEFAULT OFF: Bulk Source Job# - per-row checkboxes on the Work
                          // Orders list + a dock drawer that stamps Source Job# in bulk from a Q/R or
                          // RF shorthand (blanks only). The WHOLE module - checkboxes, dock, drawer,
@@ -15919,22 +15923,30 @@
   });
 
   // ==========================================================================
-  // MODULE: Bulk Operations Console v1.0  (batch GraphQL WRITES, flag-gated OFF)
+  // MODULE: Bulk Operations Console v2.0  (batch GraphQL WRITES, flag-gated OFF)
   // ==========================================================================
-  // One coordinator, one audited .xlsx of work orders, one bulk write. v1 does two ops:
-  // add an internal note, or set the expected-completion date (ECD). The whole module -
-  // dock entry, drawer, every read, every write - mounts ONLY when BWN_MODULES.bulkOps is
-  // on (shipping default OFF), so nothing writes for any user until the flag is flipped
-  // after a live smoke test. Even then a batch cannot write until a DRY-RUN has rendered
-  // for the exact (target, op, value) and the operator has typed "APPLY <n>" verbatim.
+  // THE single Safe Bulk Operations Console (Mike's converge ruling 2026-09-01): write-queue's
+  // operator modal is RETIRED and this is the one console, one flag, one kill-switch, one confirm
+  // contract. Cohort in three ways - upload an audited .xlsx, PASTE WO#s, or SELECT from the current
+  // Work Orders list - then one bulk write. v2 ops:
+  //   moderate:  add internal note · request missing documents (addEditJobNote) · escalation task (addTask)
+  //   high:      reassign (assignedTo) · set status (statusId) · set ECD  (all patchWorkOrder)
+  // The whole module - dock entry, drawer, every read, every write - mounts ONLY when BWN_MODULES.bulkOps
+  // is on (shipping default OFF). The high-risk verbs REASSIGN + SET-STATUS ride a SECOND flag,
+  // bulkOpsDestructive (also OFF), so they stay dark even with the console on. Nothing writes for any
+  // user until the flag(s) are flipped after a live smoke test. Even then a batch cannot write until a
+  // DRY-RUN has rendered for the exact (target, op, value) and the operator has typed "APPLY <n>", and a
+  // patchWorkOrder-class write is authorized per-record by the ARMED per-batch confirm handler below -
+  // NEVER a bare confirmed:true. NOT tags / vendor-follow-up: no captured GraphQL mutation exists for
+  // those (Hard Rule 6) - see the TODO on the op picker.
   //
-  // Ponytail: the pure engine below is copied VERBATIM from two already-proven sandboxes -
-  // bwn-write-queue (the write shapes + note idempotency, wire-proven) and bwn-wo-audit
-  // (the bounded-concurrency runner + run accounting, shipped). They live in separate
-  // Tampermonkey scopes that share no JS globals, so this is a COPY, not a cross-sandbox
-  // call. Core is the only scope that holds bwnGqlOp + the bwn:audit ring, which is why the
-  // console lives here. If a payload below is not verbatim-findable in its named source it
-  // is a bug, not a new selector.
+  // Ponytail: the pure engine below is copied VERBATIM from already-proven sandboxes -
+  // bwn-write-queue (the write shapes + note idempotency + PII-safe export projection, wire-proven),
+  // bwn-wo-audit (the bounded-concurrency runner + run accounting, shipped), and Core's own WA-WRITES
+  // (the addTask + statusId-alone patchWorkOrder shapes, wire-proven). They live in separate
+  // Tampermonkey scopes that share no JS globals, so this is a COPY, not a cross-sandbox call. Core is
+  // the only scope that holds bwnGqlOp + the bwn:audit ring, which is why the console lives here. If a
+  // payload below is not verbatim-findable in its named source it is a bug, not a new selector.
   bwnBoot('bulkOps', BWN_MODULES.bulkOps, function () {
 
     // ===== BULK-OPS-ENGINE START v1 (pure, DOM-FREE; sliced + exercised for real against the
@@ -15983,17 +15995,6 @@
       };
     }
 
-    // Human-readable one-liner for the log + confirm. Copied VERBATIM from bwn-write-queue.user.js
-    // (it already covers wo.note + wo.ecd); the console builds write-queue-shaped {verb,woNumber,args}
-    // objects to feed it, so the phrasing is the same the queue drains to.
-    function describeCommand(cmd) {
-      var a = cmd.args || {};
-      if (cmd.verb === "wo.status") return "Set status to #" + a.statusId + " on W-" + cmd.woNumber + " (this RESETS the time-in-status clock)";
-      if (cmd.verb === "wo.assign") return "Reassign W-" + cmd.woNumber + " to user " + a.assignedTo;
-      if (cmd.verb === "wo.ecd") return "Set expected completion date to " + String(a.expectedCompletionDate).slice(0, 10) + " on W-" + cmd.woNumber;
-      if (cmd.verb === "wo.note") return "Post an internal note to W-" + cmd.woNumber + ": " + String(a.noteText || "").slice(0, 120);
-      return cmd.verb + " on W-" + cmd.woNumber;
-    }
 
     // ---- Bounded-concurrency runner (copied VERBATIM from bwn-wo-audit.user.js) ----
     function runPool(items, worker, concurrency, onProgress, shouldStop) {
@@ -16040,8 +16041,11 @@
     // Per-risk record caps. A moderate op (add-note) tops out higher than a high-risk one (set-ECD).
     // Over the cap the run is REFUSED, never silently truncated - a partial bulk write with no signal
     // is the worst outcome. Numbers live here so the test and the UI read ONE source.
+    // High-risk (patchWorkOrder-class: status / assign / ecd) share the tighter 25 cap; moderate ops
+    // (note / doc-request / escalation-task) share the 50 cap. isHighRisk is defined in CONVERGED OPS
+    // below (function declarations hoist within this engine region).
     var BULK_MAX_RECORDS = { note: 50, ecd: 25 };
-    function capForOp(op) { return op === 'ecd' ? BULK_MAX_RECORDS.ecd : BULK_MAX_RECORDS.note; }
+    function capForOp(op) { return isHighRisk(op) ? BULK_MAX_RECORDS.ecd : BULK_MAX_RECORDS.note; }
     function overCap(op, count) {
       var cap = capForOp(op);
       return { refused: count > cap, cap: cap, count: count, over: Math.max(0, count - cap) };
@@ -16078,9 +16082,12 @@
 
     // SET-ECD (high). Read WO_READ_Q first; NO-OP if the read's ECD date-part already equals newEcd.
     // Otherwise WHOLE-OBJECT priority replace (priorityWriteValue carries every sibling or they blank),
-    // bundling serviceLevelAgreementId ONLY when the read carried it. The batch typed-confirm satisfies
-    // the high-risk gate via confirmed:true (Core wires no _confirmFn). mode:'dry' stops before the write.
-    function bulkExecEcd(mode, runId, woNumber, newEcd) {
+    // bundling serviceLevelAgreementId ONLY when the read carried it. F4-DEEP (v2): this high-risk write
+    // NO LONGER passes a bare confirmed:true - it falls through to the ARMED per-batch confirm handler
+    // (armBatchConfirm below installs it via bwnGqlOp.setConfirm), which authorizes the write only for a
+    // WO in the operator-approved cohort with a reason present. runId + clamped reason/ref ride the audit
+    // `after` (PII-free scalars, never in ids). mode:'dry' stops before the write.
+    function bulkExecEcd(mode, runId, woNumber, newEcd, reason, ref) {
       var wo = parseInt(woNumber, 10);
       return bwnGql(WO_READ_Q, { n: wo }).then(function (rd) {
         var rec = rd && rd.workOrder;
@@ -16094,9 +16101,9 @@
         var vars = { data: data };
         if (mode === 'dry') return { op: 'ecd', wo: wo, outcome: 'would-send', before: { ecd: oldEcd || null }, after: { ecd: newEcd }, vars: vars };
         return bwnGqlOp('patchWorkOrder', PATCH_M, vars, {
-          feature: 'bulkOps', confirmed: true, ids: { wo: wo },
+          feature: 'bulkOps', ids: { wo: wo }, reason: clampReason(reason),
           current: { ecd: oldEcd || null }, proposed: { ecd: newEcd }, irreversible: true,
-          before: { ecd: oldEcd || null }, after: { ecd: newEcd }
+          before: { ecd: oldEcd || null }, after: mergeAudit({ ecd: newEcd }, runId, reason, ref)
         }).then(function () {
           return { op: 'ecd', wo: wo, outcome: 'done', before: { ecd: oldEcd || null }, after: { ecd: newEcd }, vars: vars };
         });
@@ -16114,6 +16121,229 @@
         if (r && !r.error && r.outcome === 'noop') noop++;
       }
       return { done: t.ok - noop, noop: noop, failed: t.errs, notRun: t.skipped };
+    }
+
+    // ========================= CONVERGED OPS v2 (pure, DOM-FREE) ==============================
+    // The write-queue console's operator modal is RETIRED; this is the one console. New ops, the
+    // F4-DEEP per-batch confirm, the advisory rank gate, undo-eligibility labels, and the PII-safe
+    // export projection folded in from bwn-write-queue - all still sliced + driven by test-bulk-ops.js.
+
+    // ---- Risk / op classification ----
+    // patchWorkOrder-class verbs are HIGH risk (they reset a clock and are the destructive gate);
+    // note / doc-request / escalation-task are moderate. isHighRisk drives the reason/ref requirement,
+    // the armed confirm, the bulkOpsDestructive gate (status/assign), and the undo-eligibility label.
+    function isHighRisk(op) { return op === 'status' || op === 'assign' || op === 'ecd'; }
+    // The two brand-new destructive verbs ride a SECOND flag on top of bulkOps. ECD keeps riding
+    // bulkOps alone (it shipped in v1); status + assign are gated by bulkOpsDestructive as well.
+    function needsDestructiveFlag(op) { return op === 'status' || op === 'assign'; }
+    // F3: PRE-ARM gate. A destructive verb cannot even be ARMED while bulkOpsDestructive is off -
+    // defense-in-depth over the runtime shouldStop/validate halt, so the gate is not a single point at
+    // row 0. Pure; the drawer's approveArmable() + refreshTargetUi() call it with the live BWN_MODULES.
+    function destructiveArmBlocked(op, modules) { return needsDestructiveFlag(op) && !!modules && modules.bulkOpsDestructive === false; }
+
+    // ---- High-impact audit context (reason + reference), length-clamped scalars ----
+    // REQUIRED for a patchWorkOrder-class action. They ride the audit `after` as clamped SCALARS
+    // (never in ids, never the note/task body) and the confirm handler requires the reason. Mirrors
+    // WA-WRITES' precedent `after: { task: text.slice(0,40) }`. runId is stamped per batch.
+    var REASON_MAX = 120, REF_MAX = 40;
+    function clampReason(s) { return String(s == null ? '' : s).trim().slice(0, REASON_MAX); }
+    function clampRef(s) { return String(s == null ? '' : s).trim().slice(0, REF_MAX); }
+    function mergeAudit(after, runId, reason, ref) {
+      after.runId = String(runId);
+      var r = clampReason(reason); if (r) after.reason = r;
+      var f = clampRef(ref); if (f) after.ref = f;
+      return after;
+    }
+    function kv(field, v) { var o = {}; o[field] = (v == null ? null : v); return o; }
+
+    // ---- F4-DEEP per-batch confirm gate (highest-amplification caller of the trust gap) ----------
+    // The BWN-OPS-WRAP flags a KNOWN RESIDUAL: opts.confirmed===true is a caller assertion the wrapper
+    // cannot tell from a hardcoded literal. For the BULK path - which fans one click out to many
+    // patchWorkOrder writes - that trust is closed here: the bulk high-risk exec functions NEVER pass a
+    // bare confirmed:true. Each patchWorkOrder falls through to bwnGqlOp's injected _confirmFn
+    // (bulkConfirmHandler), which authorizes a write ONLY when a batch is currently ARMED, the WO is in
+    // the operator-approved cohort, and a reason is present. armBatchConfirm installs the handler at
+    // Approve (after a typed "APPLY n" over a fresh dry-run); disarmBatchConfirm tears it down the
+    // instant the batch settles or cancels. So a high-risk write cannot reach the transport outside an
+    // operator-approved, cohort-bounded interval - and setConfirm(null) on teardown means a stray write
+    // after the batch has no handler and is refused. Only THIS caller is changed; other high-risk
+    // adopters (dispatch, temp-vendor, WA-WRITES, bulk-source) keep their own confirmed:true path.
+    var _armedBatch = null;   // { runId, wos:{woStr:true}, reason } | null
+    function bulkConfirmHandler(details) {
+      var b = _armedBatch;
+      if (!b) return false;                                   // nothing armed -> deny
+      if (!details || details.risk !== 'high') return false;  // only high-risk rides the confirm gate
+      var wo = details.ids && details.ids.wo;
+      if (wo == null || !b.wos[String(wo)]) return false;     // WO not in the approved cohort -> deny
+      if (!details.reason) return false;                      // a high-impact write with no reason -> deny
+      return true;
+    }
+    function armBatchConfirm(runId, wos, reason) {
+      var set = {};
+      for (var i = 0; i < (wos || []).length; i++) set[String(wos[i])] = true;
+      _armedBatch = { runId: runId, wos: set, reason: clampReason(reason) };
+      if (typeof bwnGqlOp === 'function' && bwnGqlOp.setConfirm) bwnGqlOp.setConfirm(bulkConfirmHandler);
+    }
+    function disarmBatchConfirm() {
+      _armedBatch = null;
+      if (typeof bwnGqlOp === 'function' && bwnGqlOp.setConfirm) bwnGqlOp.setConfirm(null);
+    }
+    function batchArmed() { return !!_armedBatch; }
+    // F2: arm the batch, run bodyFn (returns a promise), and ALWAYS disarm - a SYNC throw in bodyFn AND
+    // a rejected promise both restore setConfirm(null), so a failed or wedged run never leaks a live
+    // arm. The drawer's runBatch wraps its high-risk run in this so the disarm is a real finally, not a
+    // settlement handler that only fires because runPool happens never to reject (a throw in onProgress
+    // would leave that handler unreached). bodyFn's result/rejection propagates to the caller.
+    function withArmedBatch(runId, wos, reason, bodyFn) {
+      armBatchConfirm(runId, wos, reason);
+      var p;
+      try { p = Promise.resolve(bodyFn()); }
+      catch (e) { disarmBatchConfirm(); return Promise.reject(e); }
+      return p.then(function (v) { disarmBatchConfirm(); return v; }, function (e) { disarmBatchConfirm(); throw e; });
+    }
+
+    // ---- Advisory action-class approval gate (rank-based, FAIL-CLOSED) ----------------------------
+    // note / doc-request / escalation-task -> coordinator; reassign -> supervisor; status / ECD ->
+    // supervisor, and MANAGER when the batch exceeds a threshold. Unknown rank REFUSES (deny-for-all).
+    // This is ADVISORY - the real write boundary is Umbrava's server against the operator's own bearer;
+    // any script on the page can spoof the bwn:role rank. Pure so the harness drives it with an injected
+    // rank. TODO (server-side enforcement): needs the ops_* Entra app-roles assigned + re-login, then
+    // the SWA/Umbrava layer can enforce these classes for real (swa-rank-roles-never-assigned).
+    var RANK_COORDINATOR = 1, RANK_SUPERVISOR = 3, RANK_MANAGER = 5;
+    var BULK_MGR_THRESHOLD = 10;   // high-risk batches larger than this need a manager
+    var BULK_APPROVAL = {
+      note:   { min: RANK_COORDINATOR, label: 'coordinator' },
+      docreq: { min: RANK_COORDINATOR, label: 'coordinator' },
+      task:   { min: RANK_COORDINATOR, label: 'coordinator' },
+      assign: { min: RANK_SUPERVISOR,  label: 'supervisor' },
+      status: { min: RANK_SUPERVISOR,  label: 'supervisor', mgr: RANK_MANAGER },
+      ecd:    { min: RANK_SUPERVISOR,  label: 'supervisor', mgr: RANK_MANAGER }
+    };
+    function rankLabel(n) { return n >= RANK_MANAGER ? 'manager' : (n >= RANK_SUPERVISOR ? 'supervisor' : 'coordinator'); }
+    function approvalDecision(op, count, rank) {
+      var spec = BULK_APPROVAL[op];
+      if (!spec) return { allowed: false, reason: 'unknown-op', need: null, needLabel: 'n/a' };
+      var needsMgr = !!(spec.mgr && count > BULK_MGR_THRESHOLD);
+      var need = needsMgr ? spec.mgr : spec.min;
+      if (rank === null || rank === undefined || typeof rank !== 'number') {
+        return { allowed: false, reason: 'rank-unknown', need: need, needLabel: rankLabel(need), needsMgr: needsMgr };
+      }
+      if (rank < need) return { allowed: false, reason: 'rank-too-low', need: need, needLabel: rankLabel(need), rank: rank, needsMgr: needsMgr };
+      return { allowed: true, reason: null, need: need, needLabel: rankLabel(need), rank: rank, needsMgr: needsMgr };
+    }
+
+    // ---- Undo-eligibility label (NEVER a bare "undo available") -----------------------------------
+    function undoLabelFor(op) {
+      if (op === 'status') return 'Reversible VALUE (you can set the status back) - NON-reversible CLOCK: this resets the time-in-status clock.';
+      if (op === 'ecd')    return 'Reversible VALUE (you can set the ECD back) - NON-reversible CLOCK: this re-stamps the SLA / priority clock.';
+      if (op === 'assign') return 'Reversible VALUE (you can reassign back). No clock reset; the prior owner loses the assignment.';
+      if (op === 'note' || op === 'docreq') return 'A posted note cannot be unsent (it can be marked deleted, which stays visible in history).';
+      if (op === 'task')   return 'A filed task cannot be un-filed (it can be completed or deleted).';
+      return '';
+    }
+
+    // ---- Mid-batch kill (item 9): a live BWN_MODULES flip halts the in-flight batch on the NEXT row.
+    // Mirrors write-queue's bulkKilled: the runPool shouldStop re-reads BWN_MODULES per record, so a
+    // kill lands immediately - the pool stops handing out rows AND bwnGqlOp's own per-feature check
+    // denies any row already in flight. `modules` is passed in (engine stays pure; the drawer supplies
+    // the live BWN_MODULES). isDestructive halts on the second gate too.
+    function bulkModuleKilled(modules, isDestructive) {
+      if (!modules) return false;
+      if (modules.bulkOps === false) return true;
+      if (isDestructive && modules.bulkOpsDestructive === false) return true;
+      return false;
+    }
+
+    // ---- Shared HIGH-risk patch executor (status + assign): read -> no-op precheck -> (dry ? vars :
+    // ARMED bwnGqlOp write). field is 'statusId' | 'assignedTo'; the value is a ConditionalInput
+    // (statusId coerced to Int - dispatch/B2 pin: it goes ALONE in data or siblings blank). No bare
+    // confirmed:true - the armed handler authorizes it. runId + clamped reason/ref ride the audit.
+    function bulkExecPatch(field, opName, mode, runId, woNumber, newValue, reason, ref) {
+      var wo = parseInt(woNumber, 10);
+      return bwnGql(WO_READ_Q, { n: wo }).then(function (rd) {
+        var rec = rd && rd.workOrder;
+        if (!rec) { var e = new Error("workOrder " + wo + " not found"); e.bwnNonTransient = true; throw e; }
+        var cur = field === 'statusId' ? rec.statusId : rec.assignedTo;
+        var same = String(cur == null ? '' : cur) === String(newValue == null ? '' : newValue);
+        if (same) return { op: opName, wo: wo, outcome: 'noop', reason: 'already-' + opName, before: kv(field, cur), after: null };
+        var data = { workOrderNumber: wo };
+        data[field] = cond(field === 'statusId' ? num(newValue) : newValue);
+        var vars = { data: data };
+        if (mode === 'dry') return { op: opName, wo: wo, outcome: 'would-send', before: kv(field, cur), after: kv(field, newValue), vars: vars };
+        return bwnGqlOp('patchWorkOrder', PATCH_M, vars, {
+          // F1: these destructive verbs pass feature:'bulkOps', so the WRAP's per-feature kill checks
+          // bulkOps - NOT bulkOpsDestructive. To make a mid-batch bulkOpsDestructive flip actually DENY
+          // a write (not just halt NEW rows), validate() re-reads bulkOpsDestructive at send time: every
+          // row not yet past validate is blocked here, before the network call. Rows already past
+          // validate (<= concurrency, default 2) are inherently unrecallable - accepted.
+          feature: 'bulkOps', ids: { wo: wo }, reason: clampReason(reason),
+          validate: function (v) {
+            if (typeof BWN_MODULES !== 'undefined' && BWN_MODULES && BWN_MODULES.bulkOpsDestructive === false) return 'bulkOpsDestructive off';
+            var d = v && v.data || {}; if (!d.workOrderNumber) return 'no WO number'; if (!(d[field] && d[field].value != null && d[field].value !== '')) return 'no ' + field; return true;
+          },
+          current: kv(field, cur), proposed: kv(field, newValue), irreversible: true,
+          before: kv(field, cur), after: mergeAudit(kv(field, newValue), runId, reason, ref)
+        }).then(function () {
+          return { op: opName, wo: wo, outcome: 'done', before: kv(field, cur), after: kv(field, newValue), vars: vars };
+        });
+      });
+    }
+    function bulkExecStatus(mode, runId, woNumber, statusId, reason, ref) { return bulkExecPatch('statusId', 'status', mode, runId, woNumber, statusId, reason, ref); }
+    function bulkExecAssign(mode, runId, woNumber, assignedTo, reason, ref) { return bulkExecPatch('assignedTo', 'assign', mode, runId, woNumber, assignedTo, reason, ref); }
+
+    // ---- ESCALATION TASK (moderate, addTask - verbatim WA-WRITES shape). addTask is NOT idempotent
+    // and its read (OPEN_TASKS_Q) exposes no body to dedup on, so cross-reload dedup is not attempted;
+    // the run's results array is the in-session retry guard (Retry Unfinished re-runs only failed/
+    // not-run rows). The [bwn:runId:wo] marker is embedded in the description so a human can spot a
+    // duplicate. Audit `after.task` is clamped to 40 chars (PII-free). mode:'dry' stops before the write.
+    // ponytail: a captured tasksByEntityTypeAndId read returning `description` would let this dedup like
+    //   the note path (read -> marker present -> no-op); none is captured, so the ceiling is in-session
+    //   retry safety only.
+    var M_ADD_TASK = 'mutation AddTask($data: AddTaskInput!){ addTask(data: $data){ success message } }';
+    function bulkExecTask(mode, runId, woNumber, taskText) {
+      var wo = parseInt(woNumber, 10);
+      var idemKey = idemKeyFor(runId, wo);
+      var body = String(taskText) + ' ' + markerFor(idemKey);
+      var vars = { data: {
+        entityId: String(wo), entityType: 1, description: body,
+        targetStartDate: new Date().toISOString(), assignedTo: null,
+        notifyCreator: false, metadata: JSON.stringify({ number: String(wo) })
+      } };
+      if (mode === 'dry') return Promise.resolve({ op: 'task', wo: wo, outcome: 'would-send', before: null, after: { task: String(taskText).slice(0, 40), runId: String(runId) }, vars: vars });
+      return bwnGqlOp('addTask', M_ADD_TASK, vars, {
+        feature: 'bulkOps',
+        validate: function (v) { var d = v && v.data || {}; if (!d.entityId) return 'no WO number'; if (!String(d.description || '').trim()) return 'empty task text'; return true; },
+        ids: { wo: wo }, after: { task: String(taskText).slice(0, 40), runId: String(runId) }
+      }).then(function () {
+        return { op: 'task', wo: wo, outcome: 'done', before: null, after: { task: String(taskText).slice(0, 40) }, vars: vars };
+      });
+    }
+
+    // ---- REQUEST-MISSING-DOCS (moderate, addEditJobNote). A canned internal note, deduped by the
+    // same run marker as any bulk note. Delegates to the note write path VERBATIM (one addEditJobNote,
+    // PII-free audit: after.noteType, never the body) and re-labels the op for the run-log.
+    var DOCREQ_PREFIX = 'Document request: required documents are still missing on this work order. Please upload them or advise status. ';
+    function bulkExecDocReq(mode, runId, woNumber, docContext) {
+      return bulkExecNote(mode, runId, woNumber, DOCREQ_PREFIX + String(docContext == null ? '' : docContext).trim())
+        .then(function (r) { r.op = 'docreq'; return r; });
+    }
+
+    // ---- PII-safe export projection (folded from bwn-write-queue's authorized-column CSV/JSON) -----
+    // Authorized columns ONLY: wo / op / field / before / after / reason / ref / runId / corrId /
+    // outcome / detail / ts - NEVER the note or task body, NEVER a nested object. before/after are
+    // flattened to their lone scalar. reason/ref come from the audit `after` (high-risk rows only).
+    var BULK_FIELD = { note: 'note', docreq: 'note', task: 'task', status: 'statusId', assign: 'assignedTo', ecd: 'expectedCompletionDate' };
+    function bulkScalar(o, dropKeys) {
+      if (o == null) return null;
+      if (typeof o !== 'object') return o;
+      dropKeys = dropKeys || {};
+      for (var k in o) {
+        if (!Object.prototype.hasOwnProperty.call(o, k)) continue;
+        if (dropKeys[k]) continue;                       // skip the audit annotations (runId/reason/ref)
+        var v = o[k];
+        return (v == null || typeof v === 'object') ? null : v;   // one scalar, never a nested object
+      }
+      return null;
     }
     // ===== BULK-OPS-ENGINE END v1 =====
 
@@ -16168,6 +16398,16 @@
     // dropping the drawer mid-run must never be a silent way to abandon rows.
     var _running = false, _paused = false, _cancelled = false;
 
+    // Advisory operator rank for the approval gate, fed by the bwn:role bus (one module-scope listener,
+    // like domHandle's dompRank). Unknown until a role event arrives; the gate fail-closes on null.
+    var _bulkRank = null;
+    try {
+      document.addEventListener('bwn:evt', function (e) {
+        var d = e && e.detail;
+        if (d && d.id === 'bwn:role' && typeof d.rank === 'number') _bulkRank = d.rank;
+      });
+    } catch (e) { /* bus unavailable */ }
+
     // Fade the drawer instead of removing it (the .bwn-drawer exit contract). Reduced motion detaches
     // at once. Copied from the contract documented above Core's .bwn-drawer stylesheet.
     function drawerDismiss(el) {
@@ -16206,28 +16446,53 @@
       el.setAttribute('aria-label', 'Bulk Operations Console');
       el.innerHTML =
         '<div class="bwn-drawer-hd"><div><div class="t">Bulk Operations Console</div>' +
-        '<div class="s">batch GraphQL writes · dry-run + typed confirm</div></div>' +
+        '<div class="s">the one safe bulk console · dry-run + typed confirm + per-batch armed confirm</div></div>' +
         '<button class="bwn-drawer-x" id="bwn-bulk-x" aria-label="Close" type="button">×</button></div>' +
         '<div class="bwn-drawer-body">' +
-          '<div class="bwn-ops-sec">1 · Target<span class="d">upload the audit .xlsx, map the WO# column, choose the write</span></div>' +
-          '<input type="file" id="bwn-bulk-file" accept=".xlsx,.xls" style="display:block;margin:2px 0 8px;font-size:12px">' +
-          '<div id="bwn-bulk-sheetwrap" style="display:none;margin-bottom:8px"><label style="font:500 10px ui-monospace,monospace;color:var(--bwn-green)">Sheet</label>' +
-            '<select id="bwn-bulk-sheet" style="width:100%;box-sizing:border-box;padding:6px 8px;border:1px solid var(--bwn-border);border-radius:7px;background:var(--bwn-surface);color:var(--bwn-text)"></select></div>' +
-          '<div id="bwn-bulk-mapinfo" style="white-space:pre-line;font:500 11px ui-monospace,monospace;color:var(--bwn-text-muted);margin:4px 0 10px"></div>' +
+          '<div class="bwn-ops-sec">1 · Cohort<span class="d">upload the audit .xlsx, PASTE WO#s, or SELECT from the current list</span></div>' +
+          '<div style="margin:3px 0 8px;font-size:12px;color:var(--bwn-text)">' +
+            '<label style="margin-right:12px"><input type="radio" name="bwn-bulk-cohortsrc" value="upload" checked> upload .xlsx</label>' +
+            '<label style="margin-right:12px"><input type="radio" name="bwn-bulk-cohortsrc" value="paste"> paste WO#s</label>' +
+            '<label><input type="radio" name="bwn-bulk-cohortsrc" value="select"> select from list</label></div>' +
+          '<div id="bwn-bulk-uploadwrap">' +
+            '<input type="file" id="bwn-bulk-file" accept=".xlsx,.xls" style="display:block;margin:2px 0 8px;font-size:12px">' +
+            '<div id="bwn-bulk-sheetwrap" style="display:none;margin-bottom:8px"><label style="font:500 10px ui-monospace,monospace;color:var(--bwn-green)">Sheet</label>' +
+              '<select id="bwn-bulk-sheet" style="width:100%;box-sizing:border-box;padding:6px 8px;border:1px solid var(--bwn-border);border-radius:7px;background:var(--bwn-surface);color:var(--bwn-text)"></select></div>' +
+            '<div id="bwn-bulk-mapinfo" style="white-space:pre-line;font:500 11px ui-monospace,monospace;color:var(--bwn-text-muted);margin:4px 0 10px"></div></div>' +
+          '<div id="bwn-bulk-pastewrap" style="display:none">' +
+            '<textarea id="bwn-bulk-paste" rows="3" placeholder="Paste WO#s - newline, comma or space separated (e.g. 371126 386771 ...)" style="width:100%;box-sizing:border-box;padding:7px 9px;border:1px solid var(--bwn-border);border-radius:7px;font:500 12px ui-monospace,monospace;background:var(--bwn-surface);color:var(--bwn-text)"></textarea></div>' +
+          '<div id="bwn-bulk-selectwrap" style="display:none;margin-bottom:8px">' +
+            '<button class="bwn-ops-btn ghost" id="bwn-bulk-select" type="button">Scan the current Work Orders list</button>' +
+            '<div id="bwn-bulk-selcount" style="font:500 11px ui-monospace,monospace;color:var(--bwn-text-muted);margin-top:4px"></div></div>' +
+          '<div id="bwn-bulk-cohort" style="font:500 11px ui-monospace,monospace;color:var(--bwn-text-muted);margin:2px 0 10px"></div>' +
           '<label style="font:500 10px ui-monospace,monospace;color:var(--bwn-green)">Operation</label>' +
+          // ponytail: NO "tags" / "vendor follow-up" ops - no captured GraphQL mutation exists for
+          // either (Hard Rule 6). Add an <option> + a bulkExec* the same way once one is wire-captured.
           '<select id="bwn-bulk-op" style="width:100%;box-sizing:border-box;padding:6px 8px;margin:2px 0 10px;border:1px solid var(--bwn-border);border-radius:7px;background:var(--bwn-surface);color:var(--bwn-text)">' +
             '<option value="note">Add internal note (moderate)</option>' +
-            '<option value="ecd">Set expected completion date / ECD (high)</option>' +
+            '<option value="docreq">Request missing documents (moderate)</option>' +
+            '<option value="task">File escalation task (moderate)</option>' +
+            '<option value="assign">Reassign coordinator / assignedTo (HIGH)</option>' +
+            '<option value="status">Set status (HIGH)</option>' +
+            '<option value="ecd">Set expected completion date / ECD (HIGH)</option>' +
           '</select>' +
+          '<div id="bwn-bulk-approval" role="status" aria-live="polite" style="display:none;font:500 11px ui-monospace,monospace;padding:6px 8px;border-radius:7px;margin:0 0 8px"></div>' +
           '<label style="font:500 10px ui-monospace,monospace;color:var(--bwn-green)">Value source</label>' +
           '<div style="margin:3px 0 8px;font-size:12px;color:var(--bwn-text)">' +
             '<label style="margin-right:14px"><input type="radio" name="bwn-bulk-src" value="const" checked> one value for all rows</label>' +
             '<label><input type="radio" name="bwn-bulk-src" value="col"> a column from the sheet</label></div>' +
-          '<textarea id="bwn-bulk-note" rows="3" placeholder="Internal note text, posted to every mapped WO" style="width:100%;box-sizing:border-box;padding:7px 9px;border:1px solid var(--bwn-border);border-radius:7px;font-size:13px;background:var(--bwn-surface);color:var(--bwn-text)"></textarea>' +
+          '<textarea id="bwn-bulk-note" rows="3" placeholder="Internal note text, posted to every WO in the cohort" style="width:100%;box-sizing:border-box;padding:7px 9px;border:1px solid var(--bwn-border);border-radius:7px;font-size:13px;background:var(--bwn-surface);color:var(--bwn-text)"></textarea>' +
           '<input type="date" id="bwn-bulk-date" style="display:none;width:100%;box-sizing:border-box;padding:6px 8px;border:1px solid var(--bwn-border);border-radius:7px;background:var(--bwn-surface);color:var(--bwn-text)">' +
+          '<input type="text" id="bwn-bulk-scalar" style="display:none;width:100%;box-sizing:border-box;padding:6px 8px;border:1px solid var(--bwn-border);border-radius:7px;font:500 13px ui-monospace,monospace;background:var(--bwn-surface);color:var(--bwn-text)">' +
           '<div id="bwn-bulk-colwrap" style="display:none;margin-top:4px"><label style="font:500 10px ui-monospace,monospace;color:var(--bwn-green)">Value column</label>' +
             '<select id="bwn-bulk-col" style="width:100%;box-sizing:border-box;padding:6px 8px;border:1px solid var(--bwn-border);border-radius:7px;background:var(--bwn-surface);color:var(--bwn-text)"></select></div>' +
-          '<div id="bwn-bulk-cap" class="bwn-ops-note" role="status" aria-live="polite" style="display:none"></div>' +
+          '<div id="bwn-bulk-hiwrap" style="display:none;margin-top:8px">' +
+            '<label style="font:500 10px ui-monospace,monospace;color:var(--bwn-bad)">Reason (required for a high-impact write)</label>' +
+            '<input type="text" id="bwn-bulk-reason" maxlength="120" placeholder="why this batch is being made - recorded in the audit" style="width:100%;box-sizing:border-box;padding:6px 8px;margin:2px 0 6px;border:1px solid var(--bwn-border);border-radius:7px;font-size:12px;background:var(--bwn-surface);color:var(--bwn-text)">' +
+            '<label style="font:500 10px ui-monospace,monospace;color:var(--bwn-bad)">Ticket / reference (required)</label>' +
+            '<input type="text" id="bwn-bulk-ref" maxlength="40" placeholder="ticket # or approval reference" style="width:100%;box-sizing:border-box;padding:6px 8px;margin:2px 0 0;border:1px solid var(--bwn-border);border-radius:7px;font-size:12px;background:var(--bwn-surface);color:var(--bwn-text)"></div>' +
+          '<div id="bwn-bulk-undo" style="font:500 10px ui-monospace,monospace;color:var(--bwn-text-faint);margin:8px 0 0"></div>' +
+          '<div id="bwn-bulk-cap" class="bwn-ops-note" role="status" aria-live="polite" style="display:none;margin-top:8px"></div>' +
 
           '<div class="bwn-ops-sec">2 · Preview + 3 · Dry run<span class="d">reads only, zero writes - resolves each row and its idempotency verdict</span></div>' +
           '<div style="display:flex;gap:8px;align-items:center;flex-wrap:wrap;margin-bottom:6px">' +
@@ -16292,9 +16557,29 @@
       var runId = null, runStartTs = 0;
 
       function op() { return $('bwn-bulk-op').value; }
-      function srcMode() { var r = root.querySelector('input[name="bwn-bulk-src"]:checked'); return r ? r.value : 'const'; }
-      function constVal() { return op() === 'ecd' ? $('bwn-bulk-date').value : $('bwn-bulk-note').value; }
+      function cohortSrc() { var r = root.querySelector('input[name="bwn-bulk-cohortsrc"]:checked'); return r ? r.value : 'upload'; }
+      // A column value source only exists for an uploaded sheet; paste/select cohorts are const-only.
+      function srcMode() { if (cohortSrc() !== 'upload') return 'const'; var r = root.querySelector('input[name="bwn-bulk-src"]:checked'); return r ? r.value : 'const'; }
+      // Op-aware single value: date for ECD, the scalar input for status/assign, the textarea otherwise
+      // (note / doc-request / escalation-task). doc-request + task use the textarea as their body/context.
+      function constVal() {
+        var o = op();
+        if (o === 'ecd') return $('bwn-bulk-date').value;
+        if (o === 'status' || o === 'assign') return $('bwn-bulk-scalar').value;
+        return $('bwn-bulk-note').value;
+      }
       function valueColIdx() { var v = $('bwn-bulk-col').value; return v === '' ? -1 : parseInt(v, 10); }
+      function reasonVal() { return clampReason($('bwn-bulk-reason').value); }
+      function refVal() { return clampRef($('bwn-bulk-ref').value); }
+      // High-impact ops REQUIRE both a reason and a ticket/reference before a run may be armed.
+      function highInputsOk() { return !isHighRisk(op()) || (!!reasonVal() && !!refVal()); }
+      // Advisory rank read (mirrors domHandle's dompRank): the bwn:role bus rank, else the cached
+      // bwn:role:last within TTL, else null (unknown -> the approval gate fail-closes deny-for-all).
+      function bulkRank() {
+        if (typeof _bulkRank === 'number') return _bulkRank;
+        try { var r = JSON.parse(localStorage.getItem('bwn:role:last') || 'null'); if (r && r.ok && typeof r.rank === 'number' && r.ts && (Date.now() - r.ts) < 6 * 3600 * 1000) return r.rank; } catch (e) { /* unknown */ }
+        return null;
+      }
 
       function logln(s) { var log = $('bwn-bulk-log'); if (!log) return; log.appendChild(document.createTextNode(s + '\n')); log.scrollTop = log.scrollHeight; }
 
@@ -16305,20 +16590,22 @@
         var cv = constVal();
         var mode = srcMode();
         return session.rows.map(function (row) {
-          var value = mode === 'col' ? cellStr(session.map.aoa, row.rowIdx, col) : cv;
+          var value = (mode === 'col' && session.map) ? cellStr(session.map.aoa, row.rowIdx, col) : cv;
           return { rowIdx: row.rowIdx, wo: row.wo, value: value, valid: !!(row.wo && String(value).trim()) };
         });
       }
       function writable(rr) { return rr.filter(function (r) { return r.valid; }); }
 
-      // Fingerprint of (target, op, value): the dry-run is valid ONLY for this exact tuple; any change
-      // invalidates it and re-hides Approve. Includes the mapped WO set so swapping the sheet counts.
+      // Fingerprint of (cohort, op, value, reason/ref): the dry-run is valid ONLY for this exact tuple;
+      // any change invalidates it and re-hides Approve. Includes the mapped WO set so swapping the cohort
+      // counts, and reason/ref for a high op so editing the justification after arming disarms Approve.
       function fingerprint() {
         if (!session) return '';
         var rr = writable(resolveRows());
         return JSON.stringify({
-          name: loaded && loaded.name, sheet: session.sheet, op: op(), src: srcMode(),
+          name: loaded && loaded.name, sheet: session.sheet, cohort: cohortSrc(), op: op(), src: srcMode(),
           val: op() === 'ecd' ? String(constVal()).slice(0, 10) : constVal(), col: valueColIdx(),
+          reason: isHighRisk(op()) ? reasonVal() : '', ref: isHighRisk(op()) ? refVal() : '',
           wos: rr.map(function (r) { return r.wo + '=' + r.value; })
         });
       }
@@ -16334,35 +16621,82 @@
         renderPreview();
       }
 
-      // Show/hide the value inputs for the chosen op + source, populate the column picker, and run the
-      // cap check. Disables Dry run whenever the batch cannot proceed (no rows, or over the cap).
+      var OP_LABEL = { note: 'add-note', docreq: 'request-docs', task: 'escalation-task', assign: 'reassign', status: 'set-status', ecd: 'set-ECD' };
+      // Show/hide the cohort-source blocks (upload / paste / select).
+      function refreshCohortUi() {
+        var cs = cohortSrc();
+        $('bwn-bulk-uploadwrap').style.display = cs === 'upload' ? 'block' : 'none';
+        $('bwn-bulk-pastewrap').style.display = cs === 'paste' ? 'block' : 'none';
+        $('bwn-bulk-selectwrap').style.display = cs === 'select' ? 'block' : 'none';
+        // The column value-source only applies to an uploaded sheet.
+        var srcRow = root.querySelector('input[name="bwn-bulk-src"][value="col"]');
+        if (srcRow) srcRow.parentNode.style.display = cs === 'upload' ? '' : 'none';
+      }
+
+      // Show/hide the value inputs for the chosen op + source, the reason/ref block, the undo label and
+      // the approval banner, populate the column picker, and run the cap check. Disables Dry run whenever
+      // the batch cannot proceed (no rows, over the cap, or - for a high op - missing reason/ref).
       function refreshTargetUi() {
-        var isEcd = op() === 'ecd';
+        refreshCohortUi();
+        var o = op();
+        var isEcd = o === 'ecd';
+        var isScalar = o === 'status' || o === 'assign';
+        var isText = o === 'note' || o === 'docreq' || o === 'task';
         var isCol = srcMode() === 'col';
-        $('bwn-bulk-note').style.display = (!isEcd && !isCol) ? 'block' : 'none';
+        $('bwn-bulk-note').style.display = (isText && !isCol) ? 'block' : 'none';
         $('bwn-bulk-date').style.display = (isEcd && !isCol) ? 'block' : 'none';
+        $('bwn-bulk-scalar').style.display = (isScalar && !isCol) ? 'block' : 'none';
         $('bwn-bulk-colwrap').style.display = isCol ? 'block' : 'none';
-        $('bwn-bulk-note').placeholder = 'Internal note text, posted to every mapped WO';
+        $('bwn-bulk-note').placeholder = o === 'docreq' ? 'Optional: which documents are missing (appended to the canned request)'
+          : o === 'task' ? 'Escalation task text, filed on every WO in the cohort'
+          : 'Internal note text, posted to every WO in the cohort';
+        $('bwn-bulk-scalar').placeholder = o === 'status' ? 'Target status id (integer)' : 'Assignee User GUID';
+
+        // High-impact: reason + ticket required; show the block + the undo-eligibility label. F3: when a
+        // destructive verb is selected while bulkOpsDestructive is off, say so - it cannot be armed.
+        var hi = isHighRisk(o);
+        $('bwn-bulk-hiwrap').style.display = hi ? 'block' : 'none';
+        $('bwn-bulk-undo').textContent = (destructiveArmBlocked(o, BWN_MODULES) ? 'BLOCKED: ' + (OP_LABEL[o] || o) + ' is a destructive verb and bulkOpsDestructive is OFF - it cannot be armed. ' : '') + undoLabelFor(o);
 
         var rr = session ? resolveRows() : [];
         var w = writable(rr);
+        var count = w.length;
+
+        // Advisory approval banner (fail-closed). Blocks the WRITE (Approve), not the read-only dry-run.
+        var appr = approvalDecision(o, count, bulkRank());
+        var apEl = $('bwn-bulk-approval');
+        apEl.style.display = 'block';
+        if (appr.allowed) {
+          apEl.textContent = 'Approval: OK - your rank (' + rankLabel(appr.rank) + ') meets the ' + appr.needLabel + ' bar for ' + (OP_LABEL[o] || o) + (appr.needsMgr ? ' (manager, batch over ' + BULK_MGR_THRESHOLD + ')' : '') + '.';
+          apEl.style.color = 'var(--bwn-green)'; apEl.style.background = 'transparent'; apEl.style.border = '1px solid var(--bwn-border-2)';
+        } else {
+          apEl.textContent = appr.reason === 'rank-unknown'
+            ? 'Approval BLOCKED: your ops rank is unknown, so every write is denied (fail-closed). This lifts once the ops_* roles are assigned + you re-login. ' + (OP_LABEL[o] || o) + ' needs ' + appr.needLabel + '.'
+            : 'Approval BLOCKED: ' + (OP_LABEL[o] || o) + ' needs ' + appr.needLabel + (appr.needsMgr ? ' (manager, batch over ' + BULK_MGR_THRESHOLD + ')' : '') + '; your rank is ' + (typeof appr.rank === 'number' ? rankLabel(appr.rank) : 'unknown') + '.';
+          apEl.style.color = 'var(--bwn-bad)'; apEl.style.background = 'transparent'; apEl.style.border = '1px solid var(--bwn-bad)';
+        }
+
         var capEl = $('bwn-bulk-cap');
-        var cap = overCap(op(), w.length);
+        var cap = overCap(o, count);
+        var noKey = !session || (session.map && session.map.key < 0);
         var canDry = false;
-        if (!session || session.map.key < 0) {
+        if (noKey || !session) {
           capEl.style.display = 'none';
         } else if (rr.length === 0) {
           capEl.style.display = 'none';
-        } else if (w.length === 0) {
+        } else if (count === 0) {
           capEl.style.display = 'block';
-          capEl.textContent = 'No writable rows: ' + rr.length + ' mapped, but none have a value yet. Enter a value or pick a value column.';
+          capEl.textContent = 'No writable rows: ' + rr.length + ' in the cohort, but none have a value yet. Enter a value' + (cohortSrc() === 'upload' ? ' or pick a value column.' : '.');
         } else if (cap.refused) {
           capEl.style.display = 'block';
           capEl.textContent = 'REFUSED: ' + cap.count + ' writable rows exceed the ' + cap.cap + '-record cap for ' +
-            (isEcd ? 'set-ECD (high risk)' : 'add-note') + '. ' + cap.over + ' over the cap. Trim the workbook to ' + cap.cap + ' rows or fewer - the run will not truncate.';
+            (OP_LABEL[o] || o) + (hi ? ' (high risk)' : '') + '. ' + cap.over + ' over the cap. Trim the cohort to ' + cap.cap + ' rows or fewer - the run will not truncate.';
+        } else if (hi && !highInputsOk()) {
+          capEl.style.display = 'block';
+          capEl.textContent = count + ' writable row' + (count === 1 ? '' : 's') + '. A high-impact write needs a Reason AND a Ticket/reference before you can dry-run.';
         } else {
           capEl.style.display = 'block';
-          capEl.textContent = w.length + ' writable row' + (w.length === 1 ? '' : 's') + ' within the ' + cap.cap + '-record cap for ' + (isEcd ? 'set-ECD (high risk)' : 'add-note') + '.';
+          capEl.textContent = count + ' writable row' + (count === 1 ? '' : 's') + ' within the ' + cap.cap + '-record cap for ' + (OP_LABEL[o] || o) + (hi ? ' (high risk)' : '') + '.';
           canDry = true;
         }
         $('bwn-bulk-dry').disabled = !canDry || _running;
@@ -16376,9 +16710,23 @@
         return { txt: 'would write', cls: 'ok' };
       }
       function currentOf(op_, r, dr) {
-        if (op_ === 'note') { if (dr && dr.before) return dr.before.hasMarker ? 'note present' : 'no marker'; return ''; }
-        if (dr && dr.before) return dr.before.ecd ? String(dr.before.ecd).slice(0, 10) : '(none)';
+        if (op_ === 'note' || op_ === 'docreq') { if (dr && dr.before) return dr.before.hasMarker ? 'note present' : 'no marker'; return ''; }
+        if (op_ === 'task') return '';                                            // no prior state read
+        if (op_ === 'status') { if (dr && dr.before) return dr.before.statusId == null ? '(none)' : ('status #' + dr.before.statusId); return ''; }
+        if (op_ === 'assign') { if (dr && dr.before) return dr.before.assignedTo == null ? '(unassigned)' : String(dr.before.assignedTo).slice(0, 12) + '...'; return ''; }
+        if (dr && dr.before) return dr.before.ecd ? String(dr.before.ecd).slice(0, 10) : '(none)';   // ecd
         return '';
+      }
+      // Route one row to the right engine exec for the chosen op, threading reason/ref for high ops.
+      // ONE dispatch table used by both the dry-run and the live run so the two can never diverge.
+      function execFor(mode, thisRunId, rrow) {
+        var o = op();
+        if (o === 'status') return bulkExecStatus(mode, thisRunId, rrow.wo, rrow.value, reasonVal(), refVal());
+        if (o === 'assign') return bulkExecAssign(mode, thisRunId, rrow.wo, rrow.value, reasonVal(), refVal());
+        if (o === 'ecd')    return bulkExecEcd(mode, thisRunId, rrow.wo, rrow.value, reasonVal(), refVal());
+        if (o === 'task')   return bulkExecTask(mode, thisRunId, rrow.wo, rrow.value);
+        if (o === 'docreq') return bulkExecDocReq(mode, thisRunId, rrow.wo, rrow.value);
+        return bulkExecNote(mode, thisRunId, rrow.wo, rrow.value);
       }
 
       function renderPreview() {
@@ -16458,10 +16806,9 @@
         if (overCap(op(), wr.length).refused || wr.length === 0) { refreshTargetUi(); return; }
         $('bwn-bulk-dry').disabled = true;
         $('bwn-bulk-drycount').textContent = 'Dry run: reading ' + wr.length + ' rows...';
-        var thisOp = op();
         var draft = new Array(session.rows.length);   // parallel to session.rows
         runPool(wr, function (rrow) {
-          return (thisOp === 'ecd' ? bulkExecEcd('dry', 'DRY', rrow.wo, rrow.value) : bulkExecNote('dry', 'DRY', rrow.wo, rrow.value));
+          return execFor('dry', 'DRY', rrow);
         }, 2, null, function () { return false; }).then(function (out) {
           // Map each writable result back onto its session.rows index.
           var byIdx = {};
@@ -16500,15 +16847,21 @@
         $('bwn-bulk-approve').disabled = true;
       }
       function confirmTarget() { return 'APPLY ' + confirmCount; }
-      $('bwn-bulk-confirm').oninput = function () {
-        var armed = dryStamp === fingerprint() && confirmCount > 0 && $('bwn-bulk-confirm').value === confirmTarget();
-        $('bwn-bulk-approve').disabled = !armed;
-      };
+      // Approve enables only when: the dry-run still matches the inputs, the typed phrase is exact, the
+      // advisory approval gate allows the op for this cohort size, (for a high op) reason + ref are
+      // present, AND (F3) a destructive verb is NOT blocked by bulkOpsDestructive being off. The armed
+      // per-batch confirm is installed at click time, not here.
+      function approveArmable() {
+        return dryStamp === fingerprint() && confirmCount > 0 && $('bwn-bulk-confirm').value === confirmTarget() &&
+          approvalDecision(op(), confirmCount, bulkRank()).allowed && highInputsOk() &&
+          !destructiveArmBlocked(op(), BWN_MODULES);
+      }
+      $('bwn-bulk-confirm').oninput = function () { $('bwn-bulk-approve').disabled = !approveArmable(); };
 
-      // ---- approve -> mint runId -> run ----
+      // ---- approve -> mint runId -> ARM the per-batch confirm -> run ----
       $('bwn-bulk-approve').onclick = function () {
         if ($('bwn-bulk-approve').disabled) return;
-        if (dryStamp !== fingerprint()) { invalidateDry(); return; }   // last-line guard: inputs moved
+        if (!approveArmable()) { invalidateDry(); return; }             // last-line guard: inputs/approval moved
         var rr = resolveRows();
         var wr = writable(rr);
         if (overCap(op(), wr.length).refused || wr.length === 0) { invalidateDry(); return; }
@@ -16518,6 +16871,8 @@
         // session.rows carries ALL mapped rows; targets are the writable subset for THIS run.
         session._targets = wr;
         session._targetIdx = rr.map(function (r) { return r.rowIdx; });
+        // F4-DEEP: runBatch ARMs the per-batch confirm over exactly this cohort + reason for a high op
+        // (and re-arms on Retry); a moderate op never touches the confirm gate.
         $('bwn-bulk-confirmwrap').style.display = 'none';
         $('bwn-bulk-log').textContent = '';
         runBatch(wr, false);
@@ -16541,33 +16896,47 @@
         $('bwn-bulk-dry').disabled = true;
         $('bwn-bulk-file').disabled = true;
         var thisOp = op();
+        var hi = isHighRisk(thisOp);
         var total = targets.length, doneN = 0;
         setProg(0, total);
-        logln((retryOnly ? 'Retry' : 'Run') + ' ' + runId + ' - ' + total + ' ' + (thisOp === 'ecd' ? 'ECD' : 'note') + ' writes, concurrency ' + concurrency());
+        logln((retryOnly ? 'Retry' : 'Run') + ' ' + runId + ' - ' + total + ' ' + (OP_LABEL[thisOp] || thisOp) + ' write' + (total === 1 ? '' : 's') + ', concurrency ' + concurrency());
 
-        runPool(targets, function (rrow) {
-          // Pause gate at worker entry: a row already past this point (in flight) finishes; while
-          // paused, a runner parks HERE and pulls no new row. Cancel releases the gate and skips.
-          return waitWhilePaused().then(function () {
-            if (_cancelled) { var ce = new Error('cancelled before write'); ce.bwnCancelled = true; throw ce; }
-            var cmd = { verb: thisOp === 'ecd' ? 'wo.ecd' : 'wo.note', woNumber: rrow.wo, args: thisOp === 'ecd' ? { expectedCompletionDate: rrow.value } : { noteText: rrow.value } };
-            return (thisOp === 'ecd' ? bulkExecEcd('run', runId, rrow.wo, rrow.value) : bulkExecNote('run', runId, rrow.wo, rrow.value))
-              .then(function (r) {
-                logln('W-' + rrow.wo + ': ' + (r.outcome === 'noop' ? ('no-op (' + r.reason + ')') : 'done') + ' - ' + describeCommand(cmd));
-                return r;
-              }, function (err) {
-                logln('W-' + rrow.wo + ': FAILED - ' + ((err && err.message) || err));
-                throw err;
-              });
-          });
-        }, concurrency(), function (d, t) { doneN = d; setProg(d, t); }, function () { return _cancelled; })
-          .then(function (out) {
-            // Fold this batch's results back onto the full-row results array by rowIdx.
-            targets.forEach(function (r, j) { var i = session._targetIdx.indexOf(r.rowIdx); results[i] = out[j]; });
-            _running = false;
-            $('bwn-bulk-file').disabled = false;
-            renderResults();
-          });
+        function runBody() {
+          return runPool(targets, function (rrow) {
+            // Pause gate at worker entry: a row already past this point (in flight) finishes; while
+            // paused, a runner parks HERE and pulls no new row. Cancel releases the gate and skips.
+            return waitWhilePaused().then(function () {
+              if (_cancelled) { var ce = new Error('cancelled before write'); ce.bwnCancelled = true; throw ce; }
+              return execFor('run', runId, rrow)
+                .then(function (r) {
+                  logln('W-' + rrow.wo + ': ' + (r.outcome === 'noop' ? ('no-op (' + r.reason + ')') : 'done') + ' - ' + (OP_LABEL[thisOp] || thisOp));
+                  return r;
+                }, function (err) {
+                  logln('W-' + rrow.wo + ': FAILED - ' + ((err && err.message) || err));
+                  throw err;
+                });
+            });
+            // Mid-batch KILL (item 9): shouldStop re-reads BWN_MODULES per record. A bulkOps flip to
+            // false halts the pool on the next row AND the WRAP's per-feature check denies any row
+            // already in flight (feature:'bulkOps'). A bulkOpsDestructive flip halts new rows here AND
+            // the destructive execs' validate() denies every row not yet past validate at send time
+            // (F1); up to `concurrency` rows (default 2) already past validate may still land.
+          }, concurrency(), function (d, t) { doneN = d; setProg(d, t); }, function () { return _cancelled || bulkModuleKilled(BWN_MODULES, needsDestructiveFlag(thisOp)); });
+        }
+
+        // F2: cleanup + result-fold runs on BOTH success AND failure so _running never wedges and the
+        // arm never leaks. For a high op the run is bracketed by withArmedBatch (arm -> run -> ALWAYS
+        // disarm, a real finally) - covering a Retry (same runId) whose initial disarm had torn the
+        // arm down. Moderate ops never arm.
+        function finishBatch(out) {
+          if (out) targets.forEach(function (r, j) { var i = session._targetIdx.indexOf(r.rowIdx); results[i] = out[j]; });
+          _running = false;
+          if (bulkModuleKilled(BWN_MODULES, needsDestructiveFlag(thisOp))) logln('-- HALTED by kill switch: remaining rows are not-run --');
+          $('bwn-bulk-file').disabled = false;
+          renderResults();
+        }
+        var p = hi ? withArmedBatch(runId, targets.map(function (r) { return r.wo; }), reasonVal(), runBody) : runBody();
+        p.then(function (out) { finishBatch(out); }, function (err) { logln('! Run aborted - ' + ((err && err.message) || err)); finishBatch(null); });
       }
       function concurrency() { var n = parseInt($('bwn-bulk-conc').value, 10); if (!isFinite(n)) n = 2; return Math.min(6, Math.max(1, n)); }
       function setProg(d, t) { $('bwn-bulk-progfill').style.width = (t ? Math.round(d / t * 100) : 0) + '%'; }
@@ -16612,29 +16981,42 @@
 
       // Build the run-log rows: session.results joined to bwn:audit by corrId (per-op, per-WO, within
       // this run's window). No second audit store - the corrId + audited before/after come from the ring.
+      // AUTHORIZED COLUMNS ONLY (PII-safe projection folded from bwn-write-queue): wo / op / field /
+      // before / after / reason / ref / runId / corrId / outcome / detail / ts. before/after are the
+      // lone value SCALAR (the runId/reason/ref/task/noteType annotations are dropped, never the body);
+      // reason + ref come from the audit `after`; detail is a STRUCTURAL error string only, clamped.
+      var AUDIT_OPS = { addEditJobNote: true, patchWorkOrder: true, addTask: true };
+      var VALUE_DROP = { runId: true, reason: true, ref: true, task: true, noteType: true, hasMarker: true };
       function buildRunLog() {
         var au = (typeof bwnAuditAll === 'function') ? bwnAuditAll() : [];
         var byWo = {};
         au.forEach(function (e) {
           if (!e || e.ts < runStartTs) return;
-          if (e.op !== 'addEditJobNote' && e.op !== 'patchWorkOrder') return;
+          if (!AUDIT_OPS[e.op]) return;
           var w = e.ids && e.ids.wo; if (w == null) return;
           byWo[w] = e;   // last attempt wins (covers a retried row)
         });
+        var thisOp = op();
+        var field = BULK_FIELD[thisOp] || thisOp;
         var rows = [];
         session._targets.forEach(function (r) {
           var i = session._targetIdx.indexOf(r.rowIdx);
           var res = results[i];
           var au1 = byWo[r.wo] || null;
           var outcome = !res ? 'not-run' : (res.error ? 'failed' : (res.outcome === 'noop' ? 'no-op' : 'done'));
+          var aAfter = (au1 && au1.after) || (res && res.after) || null;   // may carry runId/reason/ref annotations
           rows.push({
-            woNumber: r.wo,
-            op: op(),
+            wo: r.wo,
+            op: thisOp,
+            field: field,
+            before: bulkScalar(au1 ? au1.before : (res && res.before), VALUE_DROP),
+            after: bulkScalar(aAfter, VALUE_DROP),
+            reason: (aAfter && aAfter.reason) || '',
+            ref: (aAfter && aAfter.ref) || '',
+            runId: (aAfter && aAfter.runId) || runId,
             corrId: au1 ? au1.corrId : '',
             outcome: outcome,
-            before: au1 ? au1.before : (res && res.before) || null,
-            after: au1 ? au1.after : (res && res.after) || null,
-            error: (res && res.error) || (au1 && au1.reason) || '',
+            detail: String((res && res.error) || (au1 && au1.reason) || '').slice(0, 140),   // structural only
             ts: au1 ? au1.ts : (res ? runStartTs : '')
           });
         });
@@ -16648,23 +17030,82 @@
           setTimeout(function () { URL.revokeObjectURL(url); a.remove(); }, 1500);
         } catch (e) { logln('! Could not generate the export file.'); }
       }
+      var RUNLOG_COLS = ['wo', 'op', 'field', 'before', 'after', 'reason', 'ref', 'runId', 'corrId', 'outcome', 'detail', 'ts'];
       function csvCell(v) { var s = (v == null ? '' : (typeof v === 'object' ? JSON.stringify(v) : String(v))); return '"' + s.replace(/"/g, '""') + '"'; }
       $('bwn-bulk-csv').onclick = function () {
         var rows = buildRunLog();
-        var head = ['woNumber', 'op', 'corrId', 'outcome', 'before', 'after', 'error', 'ts'];
-        var lines = [head.join(',')];
-        rows.forEach(function (r) { lines.push(head.map(function (k) { return csvCell(r[k]); }).join(',')); });
+        var lines = [RUNLOG_COLS.join(',')];
+        rows.forEach(function (r) { lines.push(RUNLOG_COLS.map(function (k) { return csvCell(r[k]); }).join(',')); });
         download(lines.join('\r\n'), (loaded && loaded.name || 'bulk') + '-runlog-' + runId + '.csv', 'text/csv;charset=utf-8');
       };
       $('bwn-bulk-json').onclick = function () {
-        download(JSON.stringify({ runId: runId, startedTs: runStartTs, op: op(), records: buildRunLog() }, null, 2),
+        // ponytail: an .xlsx run-log would need the XLSX writer wired here (XLSX is @require'd at load
+        //   today for the workbook READ). TODO: lazy-load XLSX + emit .xlsx alongside CSV/JSON.
+        download(JSON.stringify({ schema: 2, tool: 'bwn-bulk-ops', ver: BWN_VER, runId: runId, startedTs: runStartTs, op: op(), records: buildRunLog() }, null, 2),
           (loaded && loaded.name || 'bulk') + '-runlog-' + runId + '.json', 'application/json;charset=utf-8');
       };
+
+      // ---- cohort: PASTE WO#s -----------------------------------------------------------------
+      // Parse WO#s from free text (newline / comma / space / any non-digit separated). Dedup, keep order.
+      function parseWoList(text) {
+        var seen = {}, out = [];
+        String(text || '').split(/[^0-9]+/).forEach(function (t) {
+          if (!t) return; var n = parseInt(t, 10);
+          if (isFinite(n) && n > 0 && !seen[n]) { seen[n] = true; out.push(n); }
+        });
+        return out;
+      }
+      function setCohortFromWos(wos, sourceLabel) {
+        var rows = wos.map(function (wo, i) { return { rowIdx: i, wo: wo }; });   // rowIdx = position (no sheet)
+        session = { map: null, rows: rows, sheet: null, source: sourceLabel };
+        loaded = null;
+        $('bwn-bulk-cohort').textContent = rows.length ? (rows.length + ' work order' + (rows.length === 1 ? '' : 's') + ' from ' + sourceLabel + '.') : ('No work orders found in the ' + sourceLabel + ' input.');
+        invalidateDry();
+      }
+      $('bwn-bulk-paste').oninput = function () {
+        if (_running || cohortSrc() !== 'paste') return;
+        setCohortFromWos(parseWoList($('bwn-bulk-paste').value), 'paste');
+      };
+
+      // ---- cohort: SELECT from the current Work Orders list ------------------------------------
+      // Reuse List Heat's proven row->WO# extraction: every anchor to /work-orders/<n>/... on the page.
+      function scanListWos() {
+        var seen = {}, out = [];
+        try {
+          var as = document.querySelectorAll('a[href^="/work-orders/"]');
+          Array.prototype.forEach.call(as, function (a) {
+            var m = /\/work-orders\/(\d+)/.exec(a.getAttribute('href') || '');
+            if (!m) return; var n = parseInt(m[1], 10);
+            if (isFinite(n) && n > 0 && !seen[n]) { seen[n] = true; out.push(n); }
+          });
+        } catch (e) { /* not on the list page */ }
+        return out;
+      }
+      $('bwn-bulk-select').onclick = function () {
+        if (_running) return;
+        var wos = scanListWos();
+        $('bwn-bulk-selcount').textContent = wos.length ? ('Scanned ' + wos.length + ' work order' + (wos.length === 1 ? '' : 's') + ' from the list.') : 'No /work-orders/ rows found on this page - open the Work Orders list first.';
+        setCohortFromWos(wos, 'the list');
+      };
+
+      // ---- cohort source switch: reset the cohort when the operator changes source ----
+      Array.prototype.forEach.call(root.querySelectorAll('input[name="bwn-bulk-cohortsrc"]'), function (rb) {
+        rb.onchange = function () {
+          if (_running) { rb.checked = false; return; }
+          var cs = cohortSrc();
+          if (cs === 'upload') { $('bwn-bulk-cohort').textContent = ''; if (loaded) describe(); else { session = null; invalidateDry(); } }
+          else if (cs === 'paste') { setCohortFromWos(parseWoList($('bwn-bulk-paste').value), 'paste'); }
+          else { setCohortFromWos([], 'the list'); }
+        };
+      });
 
       // ---- input wiring: any target change invalidates the dry-run ----
       $('bwn-bulk-op').onchange = invalidateDry;
       $('bwn-bulk-note').oninput = invalidateDry;
       $('bwn-bulk-date').oninput = invalidateDry;
+      $('bwn-bulk-scalar').oninput = invalidateDry;
+      $('bwn-bulk-reason').oninput = invalidateDry;
+      $('bwn-bulk-ref').oninput = invalidateDry;
       $('bwn-bulk-col').onchange = invalidateDry;
       Array.prototype.forEach.call(root.querySelectorAll('input[name="bwn-bulk-src"]'), function (rb) { rb.onchange = invalidateDry; });
       $('bwn-bulk-filter').oninput = renderPreview;
