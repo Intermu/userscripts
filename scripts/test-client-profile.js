@@ -47,6 +47,10 @@ var S_ALPHA = slice('    function alphaOnly(s)', '    // Longest common substrin
 var S_CFGBLOCK = slice('    var CFG_DEFAULTS = {', '    // ---- Per-client status/closeout config layer (T10)', 'CFG_DEFAULTS + cfg + cfgSave');
 var S_T10 = slice('    // ---- Per-client status/closeout config layer (T10)', '    // ---- Money / date / vendor-name parsing', 'client-profile seeds + resolver');
 var S_GATE = slice("      if (woPhase === 'confirmcomplete' || woPhase === 'costreview') {", '      // ---- Closure auto-advance:', 'closeout gate');
+// The doc-label id->name helpers the advisory now resolves through (real shipped bytes, sliced from
+// the DOC-COMPLIANCE block). Prepended to the gate function so the numeric-label fix runs for real
+// instead of against a stub.
+var S_LABELS = slice('    var DOC_LABEL_IDS = {', '    // The default check catalogue.', 'doc-label id<->name helpers');
 
 // ---- Resolver harness -------------------------------------------------------
 // The real cfg()/cfgSave over a localStorage stub, plus the T10 seeds + resolver.
@@ -81,9 +85,10 @@ function buildGate(mutations) {
     '(function (woPhase, docs, profile) {\n' +
     '  var acts = [], ref = "W-1", ACT_SIGNALS = { stall: "stall" };\n' +
     '  var state = { docs: docs };\n' +
+    S_LABELS + '\n' +
     g + '\n' +
     '  return acts;\n})',
-    { String: String, Array: Array, Object: Object }, { filename: 'closeout-gate.js' });
+    { String: String, Array: Array, Object: Object, Number: Number, isFinite: isFinite }, { filename: 'closeout-gate.js' });
 }
 
 function runResolverCases(mutations) {
@@ -192,7 +197,7 @@ function runGateCases(mutations) {
 // ---- Negative controls ------------------------------------------------------
 var RESOLVER_MUTATIONS = [
   { what: 'deepMerge replacing (wiping) a nested object instead of merging one level',
-    m: ["if ((k === 'closeout' || k === 'refFields') && v && typeof v === 'object') {", 'if (false) {'] },
+    m: ["if ((k === 'closeout' || k === 'refFields' || k === 'compliance') && v && typeof v === 'object') {", 'if (false) {'] },
   { what: 'the resolver ignoring the stored clients table (always the seed)',
     m: ['var table = c.clients || CLIENT_PROFILE_SEED;', 'var table = CLIENT_PROFILE_SEED;'] },
   { what: 'the client-key case-fold dropped (seed rows never match a real name)',
