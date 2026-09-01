@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         BWN Suite - Core (Broadway National)
 // @namespace    broadwaynational.bwn
-// @version      1.78.40
+// @version      1.79.0
 // @downloadURL  https://raw.githubusercontent.com/Intermu/userscripts/main/bwn-suite-core.user.js
 // @updateURL    https://raw.githubusercontent.com/Intermu/userscripts/main/bwn-suite-core.user.js
 // @description  Runs several Umbrava helpers for BWN coordinators, in the browser with no privileged grants. Includes: PO Approval + ETA Builder; WO Assist (GP/ETA, a stall watchdog, DNE calculator, and a next-action playbook); Email Leak Guard (checks recipients against vendor names, PO amounts, and client budget references before an outbound email sends); WO List Heat (a triage overlay + My Day strip on the work-order list, with an optional same-origin Umbrava API scan for deterministic full-board coverage); and the BWN Launcher (opens the Azure Static Web App tools with the current WO's context). Modules share state through sessionStorage/localStorage. The only network calls are same-origin Umbrava GraphQL requests (app.umbrava.com/api/graphql, the app's own session): List Heat's full-board scan and WO Assist's work-order / trip / clock-in / document reads, plus ONE write - BWN Views saves the column layout through Umbrava's own putUserPreference, the same preference the column chooser writes; everything else is offline. Toggle modules in BWN_MODULES below.
@@ -50,6 +50,13 @@
                          // the destructive bulk ops (status change / reassign). v1 exposes only
                          // add-note + set-ECD; this flag gates nothing yet - it exists so the
                          // destructive ops land behind a SECOND, separately-flipped gate later.
+    bulkSource: false,   // SHIPPING DEFAULT OFF: Bulk Source Job# - per-row checkboxes on the Work
+                         // Orders list + a dock drawer that stamps Source Job# in bulk from a Q/R or
+                         // RF shorthand (blanks only). The WHOLE module - checkboxes, dock, drawer,
+                         // reads and writes - mounts only when this is on, so nothing writes until it
+                         // is flipped after a live smoke test. Even then each batch passes a dry-run +
+                         // a typed confirm, and every write routes through bwnGqlOp feature:'bulkSource'
+                         // (its per-feature kill switch + audit ring) via the proven patchWorkOrder.
     routeHelper: false,  // RM-B4, SHIPPING DEFAULT OFF: when on, consumers that have adopted the
                          // central BWN.onRoute (window.bwnOnRoute) route helper use it INSTEAD of
                          // pasting their own history.pushState/popstate trio. Off = each adopter
@@ -16281,6 +16288,475 @@
     }
 
     BWN.beat('bulkOps', 'ok', 'console ready (flag on)');
+  });
+
+  // ==========================================================================
+  // MODULE: Bulk Source Job# v1.0  (batch Source Job# fill from the WO list, flag OFF)
+  // ==========================================================================
+  // Coordinator ticks a checkbox on each Work Orders list row, then stamps Source Job# in bulk
+  // from a shorthand:
+  //   Q/R -> "Q/R (WO#)"                                      (always the Umbrava work-order number)
+  //   RF  -> "RF (client WO#)"  when the WO carries a clientWorkOrderNumber, else "RF (WO#)"
+  // BLANKS ONLY: a WO whose Source Job# already has a value is skipped, never overwritten - and the
+  // skip is re-checked at write time, so a value that filled in since the dry-run still no-ops.
+  // The whole module - row checkboxes, dock entry, drawer, every read and write - mounts ONLY when
+  // BWN_MODULES.bulkSource is on (shipping default OFF), so nothing writes for any user until the
+  // flag is flipped after a live smoke test. Even then a batch cannot write until a DRY-RUN has
+  // rendered for the exact (selection, op) and the operator has typed "APPLY <n>" verbatim. Every
+  // write routes through bwnGqlOp (feature:'bulkSource' kill switch + bwn:audit ring + fail-closed
+  // confirm gate), the same patchWorkOrder the kanban board proved live.
+  //
+  // Ponytail: cond() + runPool() are copied from the BULK-OPS-ENGINE above (module closures share no
+  // JS scope, so a sibling module cannot call into them) - if a THIRD bulk module lands, hoist these
+  // to a shared scope instead of a third copy. The write is a SINGLE scalar (sourceJobNumber, a
+  // ConditionalStringInput) - no whole-object priority hazard, so unlike the ECD path it sends only
+  // { workOrderNumber, sourceJobNumber }. Source PO# is intentionally NOT written here (Mike's call:
+  // both shorthands target Source Job#); add a sourcePurchaseOrderNumber op the same way if wanted.
+  bwnBoot('bulkSource', BWN_MODULES.bulkSource, function () {
+
+    // ===== BULK-SOURCE-ENGINE START v1 (pure, DOM-FREE; sliced + exercised for real against the
+    //        BWN-OPS wrapper by scripts/test-bulk-source.js. Closes over ONLY bwnGqlOp + bwnGql from
+    //        the enclosing scope - never the DOM - so the harness slices this region, concats it with
+    //        the BWN-OPS block, and drives the write path end to end, not a stub.) =====
+    var WOSRC_READ_Q = 'query($n:Int!){ workOrder(workOrderNumber:$n){ sourceJobNumber clientWorkOrderNumber } }';
+    var WOSRC_PATCH_M = 'mutation PatchWorkOrder($data: PatchWorkOrderInput!) { patchWorkOrder(data: $data) { success message } }';
+
+    function cond(v) { return { shouldInclude: true, value: v }; }   // Conditional*Input wrapper (copied from BULK-OPS-ENGINE)
+
+    var BULK_SRC_MAX = 50;   // per-run record cap. Over the cap the run is REFUSED, never truncated.
+    function overCap(count) { return { refused: count > BULK_SRC_MAX, cap: BULK_SRC_MAX, count: count, over: Math.max(0, count - BULK_SRC_MAX) }; }
+
+    // The shorthand -> Source Job# value. Pure and total. op is 'qr' | 'rf'.
+    function srcValueFor(op, woNumber, clientWorkOrderNumber) {
+      var wo = parseInt(woNumber, 10);
+      if (op === 'qr') return 'Q/R (' + wo + ')';
+      var client = clientWorkOrderNumber == null ? '' : String(clientWorkOrderNumber).trim();
+      return 'RF (' + (client || wo) + ')';
+    }
+
+    // Execute one WO. mode 'dry' | 'run'. Reads the WO first: current sourceJobNumber drives the
+    // blanks-only skip, clientWorkOrderNumber drives the RF value. The read runs in BOTH modes so a
+    // value that filled in since the dry-run still no-ops (never overwrite). Shape mirrors bulkExecEcd:
+    // read -> compute -> (dry ? return the exact vars : bwnGqlOp write). patchWorkOrder is a PATCH, so
+    // sending only { workOrderNumber, sourceJobNumber } leaves every other field untouched.
+    function bulkExecSrc(mode, op, woNumber) {
+      var wo = parseInt(woNumber, 10);
+      return bwnGql(WOSRC_READ_Q, { n: wo }).then(function (rd) {
+        var rec = rd && rd.workOrder;
+        if (!rec) { var e = new Error('workOrder ' + wo + ' not found'); e.bwnNonTransient = true; throw e; }
+        var cur = rec.sourceJobNumber == null ? '' : String(rec.sourceJobNumber).trim();
+        if (cur) return { op: 'src', wo: wo, outcome: 'noop', reason: 'already-set', before: { sourceJob: cur }, after: null };
+        var val = srcValueFor(op, wo, rec.clientWorkOrderNumber);
+        var vars = { data: { workOrderNumber: wo, sourceJobNumber: cond(val) } };
+        if (mode === 'dry') return { op: 'src', wo: wo, outcome: 'would-send', before: { sourceJob: '' }, after: { sourceJob: val }, vars: vars };
+        return bwnGqlOp('patchWorkOrder', WOSRC_PATCH_M, vars, {
+          feature: 'bulkSource', confirmed: true, ids: { wo: wo },
+          before: { sourceJob: '' }, after: { sourceJob: val },
+          validate: function (v) {
+            var d = v && v.data;
+            if (!d || !isFinite(d.workOrderNumber) || d.workOrderNumber <= 0) return 'bad workOrderNumber';
+            var sv = d.sourceJobNumber && d.sourceJobNumber.value;
+            if (!sv || typeof sv !== 'string') return 'empty sourceJobNumber';
+            return true;
+          }
+        }).then(function () { return { op: 'src', wo: wo, outcome: 'done', before: { sourceJob: '' }, after: { sourceJob: val }, vars: vars }; });
+      });
+    }
+
+    // Bounded-concurrency runner (copied from BULK-OPS-ENGINE / bwn-wo-audit). shouldStop cancels
+    // handing out NEW rows; rows already in flight finish. results is SPARSE (assigned by index).
+    function runPool(items, worker, concurrency, onProgress, shouldStop) {
+      return new Promise(function (resolve) {
+        var i = 0, done = 0, results = new Array(items.length);
+        function next() {
+          if (i >= items.length) return Promise.resolve();
+          if (shouldStop && shouldStop()) return Promise.resolve();
+          var idx = i++;
+          return Promise.resolve().then(function () { return worker(items[idx], idx); })
+            .then(function (v) { results[idx] = v; }, function (e) { results[idx] = { error: (e && e.message) || String(e) }; })
+            .then(function () { done++; if (onProgress) onProgress(done, items.length); return next(); });
+        }
+        var runners = [];
+        for (var k = 0; k < Math.min(Math.max(1, concurrency), items.length || 1); k++) runners.push(next());
+        Promise.all(runners).then(function () { resolve(results); });
+      });
+    }
+
+    // done / no-op / failed / not-run over a target list (index loop; results is sparse so .filter
+    // would skip the holes this must count).
+    function bulkTally(results, total) {
+      var done = 0, noop = 0, failed = 0;
+      for (var i = 0; i < total; i++) {
+        var r = results[i];
+        if (!r) continue;
+        if (r.error) failed++;
+        else if (r.outcome === 'noop') noop++;
+        else done++;
+      }
+      return { done: done, noop: noop, failed: failed, notRun: total - done - noop - failed };
+    }
+    // ===== BULK-SOURCE-ENGINE END v1 =====
+
+    // ---- selection state (WO numbers; the source of truth, decoupled from the virtualized grid) ----
+    var selected = new Set();
+    function selCount() { return selected.size; }
+    function selList() { return Array.prototype.slice.call(selected); }
+
+    function isListPage() { return /\/work-orders\/?$/.test(location.pathname); }
+    var WO_ANCHOR = 'a[href^="/work-orders/"]';
+    function findListTable() {
+      var tables = document.querySelectorAll('table');
+      for (var i = 0; i < tables.length; i++) { if (tables[i].querySelector(WO_ANCHOR)) return tables[i]; }
+      return null;
+    }
+    function woOf(tr) {
+      var a = tr.querySelector(WO_ANCHOR); if (!a) return null;
+      var m = (a.getAttribute('href') || '').match(/\/work-orders\/(\d+)/);
+      return m ? parseInt(m[1], 10) : null;
+    }
+    // Set while the drawer is open, so ticking a row on the LIST keeps the drawer's cap warning +
+    // preview honest (the apply path is fingerprint-guarded regardless, so this is display-only).
+    var _drawerRefresh = null;
+    function onCbChange(ev) {
+      var cb = ev.currentTarget;
+      var wo = parseInt(cb.getAttribute('data-wo'), 10);
+      if (!isFinite(wo)) return;
+      if (cb.checked) selected.add(wo); else selected.delete(wo);
+      refreshCount();
+      if (_drawerRefresh) { try { _drawerRefresh(); } catch (e) { /* drawer gone */ } }
+    }
+    // ponytail: the grid is React/DevExpress-managed and MAY transiently drop our injected checkbox
+    // on re-render; ensureBoxes (trailing 250ms after any mutation + a 1500ms floor) re-adds it and
+    // restores checked-state from `selected`, which is the source of truth - so selection is never
+    // lost even if a checkbox flickers. Rows are also recycled on scroll, so data-wo + checked are
+    // refreshed on EVERY pass, and onCbChange reads data-wo at event time (not a stale closure).
+    function ensureBoxes() {
+      if (!isListPage()) return;
+      var table = findListTable(); if (!table) return;
+      var rows = table.querySelectorAll('tr');
+      for (var i = 0; i < rows.length; i++) {
+        var tr = rows[i];
+        var wo = woOf(tr); if (wo == null) continue;
+        var cb = tr.querySelector('.bwn-src-cb');
+        if (!cb) {
+          var anchor = tr.querySelector(WO_ANCHOR);
+          var cell = (anchor.closest && anchor.closest('td')) || anchor.parentElement;
+          cb = document.createElement('input');
+          cb.type = 'checkbox';
+          cb.className = 'bwn-src-cb';
+          cb.style.cssText = 'margin-right:8px;vertical-align:middle;cursor:pointer;width:15px;height:15px;accent-color:var(--bwn-green)';
+          cb.addEventListener('click', function (ev) { ev.stopPropagation(); });   // don't trigger row nav/selection
+          cb.addEventListener('change', onCbChange);
+          cell.insertBefore(cb, anchor);
+        }
+        cb.setAttribute('data-wo', String(wo));
+        cb.setAttribute('aria-label', 'Select work order ' + wo + ' for bulk Source Job#');
+        cb.checked = selected.has(wo);
+      }
+      refreshCount();
+    }
+    function selectAllVisible() {
+      var table = findListTable(); if (!table) return;
+      var cbs = table.querySelectorAll('.bwn-src-cb');
+      for (var i = 0; i < cbs.length; i++) {
+        var wo = parseInt(cbs[i].getAttribute('data-wo'), 10);
+        if (isFinite(wo)) { selected.add(wo); cbs[i].checked = true; }
+      }
+      refreshCount();
+    }
+    function clearSelection() {
+      selected.clear();
+      var table = findListTable();
+      if (table) { var cbs = table.querySelectorAll('.bwn-src-cb'); for (var i = 0; i < cbs.length; i++) cbs[i].checked = false; }
+      refreshCount();
+    }
+    function refreshCount() {
+      var el = document.getElementById('bwn-src-selcount');
+      if (el) el.textContent = selCount() + ' work order' + (selCount() === 1 ? '' : 's') + ' selected';
+    }
+
+    // Keep checkboxes present on the virtualized grid. SET-ONCE trailing timer (fires 250ms after the
+    // FIRST mutation of a burst, so a continuously-churning grid can never starve a clear-and-reset
+    // debounce), plus a 1500ms interval floor as the hard guarantee.
+    var _pending = false;
+    function scheduleEnsure() {
+      if (_pending) return;
+      _pending = true;
+      setTimeout(BWN.guard(function () { _pending = false; ensureBoxes(); }, 'bulkSource:ensure'), 250);
+    }
+    function startObserving() {
+      ensureBoxes();
+      var obs = new MutationObserver(BWN.guard(scheduleEnsure, 'bulkSource:observe'));
+      obs.observe(document.body, { childList: true, subtree: true });
+      setInterval(BWN.guard(function () { if (isListPage()) ensureBoxes(); }, 'bulkSource:interval'), 1500);
+    }
+
+    // ---- shared launcher dock (bwn:dock:*) - mirrors the Bulk Ops console's register/open handshake --
+    var DOCK_KEY = 'bulk-source';
+    function dockRegister() {
+      try {
+        document.dispatchEvent(new CustomEvent('bwn:evt', { detail: {
+          id: 'bwn:dock:register', key: DOCK_KEY, label: 'Src Job#', icon: '🔖', weight: 23,
+          title: 'BWN Bulk Source Job# - check work orders on the list, then stamp Source Job# (Q/R or RF) in bulk (dry-run + typed confirm)'
+        } }));
+      } catch (e) { /* dock host not up yet - the heartbeat re-registers us */ }
+    }
+    function drawerDismiss(el) {
+      var reduce = false;
+      try { reduce = !!(window.matchMedia && window.matchMedia('(prefers-reduced-motion: reduce)').matches); } catch (e) { /* default to motion */ }
+      if (reduce) { el.remove(); return; }
+      el.removeAttribute('id'); el.setAttribute('aria-hidden', 'true');
+      el.classList.add('bwn-closing');
+      setTimeout(function () { el.remove(); }, 170);
+      _drawerRefresh = null;   // stop list-side checkbox changes poking a torn-down drawer
+    }
+    var _running = false, _cancelled = false;
+    try {
+      document.addEventListener('bwn:evt', function (e) {
+        var d = e && e.detail; if (!d) return;
+        if (d.id === 'bwn:dock:host' || d.id === 'bwn:dock:ping') dockRegister();
+        if (d.id === 'bwn:dock:open' && d.key === DOCK_KEY) buildDrawer();
+        if (d.id === 'bwn:drawer:open' && d.key !== DOCK_KEY && !_running) {
+          var o = document.getElementById('bwn-src-drawer'); if (o) drawerDismiss(o);
+        }
+      });
+    } catch (e) { /* bus unavailable */ }
+    dockRegister();
+
+    // ---- drawer (the only DOM this module builds besides the row checkboxes) --------------------
+    // Static skeleton carries no runtime values; every dynamic string is set via textContent below.
+    function buildDrawer() {
+      if (document.getElementById('bwn-src-drawer')) return;   // idempotent mount
+      try { document.dispatchEvent(new CustomEvent('bwn:evt', { detail: { id: 'bwn:drawer:open', key: DOCK_KEY } })); } catch (e) { /* others close their own */ }
+      ensureBoxes();
+      var el = document.createElement('aside');
+      el.className = 'bwn-drawer';
+      el.id = 'bwn-src-drawer';
+      el.setAttribute('role', 'dialog');
+      el.setAttribute('aria-label', 'Bulk Source Job#');
+      el.innerHTML =
+        '<div class="bwn-drawer-hd"><div><div class="t">Bulk Source Job#</div>' +
+        '<div class="s">check rows on the list · Q/R or RF · dry-run + typed confirm</div></div>' +
+        '<button class="bwn-drawer-x" id="bwn-src-x" aria-label="Close" type="button">×</button></div>' +
+        '<div class="bwn-drawer-body">' +
+          '<div class="bwn-ops-sec">1 · Select<span class="d">tick the checkbox on each work-order row</span></div>' +
+          '<div id="bwn-src-selcount" style="font:600 12px ui-monospace,monospace;color:var(--bwn-text);margin:2px 0 6px">0 work orders selected</div>' +
+          '<div style="display:flex;gap:8px;flex-wrap:wrap;margin-bottom:8px">' +
+            '<button class="bwn-ops-btn ghost" id="bwn-src-all" type="button">Select all visible</button>' +
+            '<button class="bwn-ops-btn ghost" id="bwn-src-clear" type="button">Clear</button>' +
+          '</div>' +
+          '<div class="bwn-ops-sec">2 · Shorthand<span class="d">what goes into Source Job#</span></div>' +
+          '<div style="margin:3px 0 6px;font-size:13px;color:var(--bwn-text)">' +
+            '<label style="margin-right:16px"><input type="radio" name="bwn-src-op" value="qr" checked> Q/R</label>' +
+            '<label><input type="radio" name="bwn-src-op" value="rf"> RF</label></div>' +
+          '<div class="bwn-ops-note" style="display:block">Q/R sets "Q/R (WO#)". RF sets "RF (client WO#)" when the work order has a client WO#, otherwise "RF (WO#)". Only blank Source Job# fields are written - a WO that already has one is skipped.</div>' +
+          '<div id="bwn-src-cap" class="bwn-ops-note" role="status" aria-live="polite" style="display:none"></div>' +
+
+          '<div class="bwn-ops-sec">3 · Dry run<span class="d">reads only, zero writes - resolves each row and its verdict</span></div>' +
+          '<div style="display:flex;gap:8px;align-items:center;flex-wrap:wrap;margin-bottom:6px">' +
+            '<button class="bwn-ops-btn ghost" id="bwn-src-dry" type="button" disabled>Dry run (reads only)</button>' +
+            '<input id="bwn-src-filter" placeholder="filter WO#" style="flex:1;min-width:90px;padding:5px 8px;border:1px solid var(--bwn-border);border-radius:7px;font-size:12px;background:var(--bwn-surface);color:var(--bwn-text)">' +
+          '</div>' +
+          '<div id="bwn-src-drycount" style="font:500 11px ui-monospace,monospace;color:var(--bwn-text-muted);margin:0 0 6px"></div>' +
+          '<div id="bwn-src-preview" style="max-height:190px;overflow:auto;border:1px solid var(--bwn-border-2);border-radius:8px"></div>' +
+
+          '<div id="bwn-src-confirmwrap" style="display:none">' +
+            '<div class="bwn-ops-sec">4 · Confirm<span class="d">type the phrase EXACTLY to arm the run</span></div>' +
+            '<div id="bwn-src-confirmtarget" style="font:600 13px ui-monospace,monospace;color:var(--bwn-text);margin-bottom:4px"></div>' +
+            '<div style="display:flex;gap:8px;align-items:center;flex-wrap:wrap">' +
+              '<input id="bwn-src-confirm" placeholder="APPLY n" style="flex:1;min-width:110px;padding:6px 9px;border:1px solid var(--bwn-border);border-radius:7px;font:600 13px ui-monospace,monospace;background:var(--bwn-surface);color:var(--bwn-text)">' +
+              '<button class="bwn-ops-btn primary" id="bwn-src-approve" type="button" disabled>Apply</button>' +
+            '</div>' +
+          '</div>' +
+
+          '<div id="bwn-src-runwrap" style="display:none">' +
+            '<div class="bwn-ops-sec">5 · Run<span class="d">live progress · cancel stops new rows</span></div>' +
+            '<div style="height:8px;border-radius:5px;background:var(--bwn-surface-3);overflow:hidden;margin-bottom:6px"><div id="bwn-src-progfill" style="height:100%;width:0%;background:var(--bwn-green);transition:width .15s linear"></div></div>' +
+            '<div style="display:flex;gap:8px;margin-bottom:6px"><button class="bwn-ops-btn ghost" id="bwn-src-cancel" type="button">Cancel</button></div>' +
+            '<div id="bwn-src-log" style="max-height:150px;overflow:auto;font:500 11px ui-monospace,monospace;color:var(--bwn-text-muted);white-space:pre-wrap;border:1px solid var(--bwn-border-2);border-radius:8px;padding:7px 9px"></div>' +
+          '</div>' +
+
+          '<div id="bwn-src-resultwrap" style="display:none">' +
+            '<div class="bwn-ops-sec">6 · Results<span class="d">done / skipped / failed</span></div>' +
+            '<div id="bwn-src-tally" style="font:600 12px ui-monospace,monospace;color:var(--bwn-text)"></div>' +
+          '</div>' +
+        '</div>' +
+        '<div class="bwn-drawer-ft"><button class="bwn-ops-btn ghost" id="bwn-src-close" type="button">Close</button></div>';
+      document.body.appendChild(el);
+      wireDrawer(el);
+    }
+
+    function wireDrawer(root) {
+      function $(id) { return root.querySelector('#' + id); }
+      var dryStamp = null, dryResults = null, confirmCount = 0;
+
+      function op() { var r = root.querySelector('input[name="bwn-src-op"]:checked'); return r ? r.value : 'qr'; }
+      function logln(s) { var l = $('bwn-src-log'); if (!l) return; l.appendChild(document.createTextNode(s + '\n')); l.scrollTop = l.scrollHeight; }
+      function close() {
+        if (_running) { logln('! A run is in progress - Cancel it before closing.'); return; }
+        drawerDismiss(root);
+      }
+      $('bwn-src-x').onclick = close;
+      $('bwn-src-close').onclick = close;
+      $('bwn-src-all').onclick = function () { selectAllVisible(); invalidateDry(); };
+      $('bwn-src-clear').onclick = function () { clearSelection(); invalidateDry(); };
+      Array.prototype.forEach.call(root.querySelectorAll('input[name="bwn-src-op"]'), function (rb) { rb.onchange = invalidateDry; });
+      $('bwn-src-filter').oninput = renderPreview;
+
+      // The dry-run is valid ONLY for this exact (op, selection); any change invalidates it.
+      function fingerprint() { return JSON.stringify({ op: op(), wos: selList().sort(function (a, b) { return a - b; }) }); }
+
+      function refreshCapUi() {
+        var n = selCount();
+        var cap = overCap(n);
+        var capEl = $('bwn-src-cap');
+        var canDry = false;
+        if (n === 0) { capEl.style.display = 'none'; }
+        else if (cap.refused) {
+          capEl.style.display = 'block';
+          capEl.textContent = 'REFUSED: ' + cap.count + ' selected exceeds the ' + cap.cap + '-record cap. ' + cap.over + ' over. Deselect down to ' + cap.cap + ' or fewer - the run will not truncate.';
+        } else {
+          capEl.style.display = 'block';
+          capEl.textContent = n + ' selected, within the ' + cap.cap + '-record cap.';
+          canDry = true;
+        }
+        $('bwn-src-dry').disabled = !canDry || _running;
+      }
+
+      function invalidateDry() {
+        dryStamp = null; dryResults = null;
+        $('bwn-src-confirmwrap').style.display = 'none';
+        $('bwn-src-approve').disabled = true;
+        $('bwn-src-confirm').value = '';
+        if (!_running) { $('bwn-src-runwrap').style.display = 'none'; $('bwn-src-resultwrap').style.display = 'none'; }
+        refreshCapUi();
+        renderPreview();
+      }
+
+      function verdictOf(dr) {
+        if (!dr) return { txt: '(dry run pending)', cls: '' };
+        if (dr.error) return { txt: 'read failed', cls: 'no' };
+        if (dr.outcome === 'noop') return { txt: 'skip: already set', cls: '' };
+        return { txt: 'would write', cls: 'ok' };
+      }
+      function renderPreview() {
+        var box = $('bwn-src-preview'); box.textContent = '';
+        var filter = String($('bwn-src-filter').value || '').trim().toLowerCase();
+        var wos = selList().sort(function (a, b) { return a - b; });
+        var shown = 0;
+        wos.forEach(function (wo) {
+          if (filter && String(wo).toLowerCase().indexOf(filter) === -1) return;
+          if (shown >= 300) return;   // ponytail: preview caps at 300 painted rows; the run is not capped by this (the 50-record cap is)
+          shown++;
+          var dr = dryResults ? dryResults[wo] : null;
+          var v = verdictOf(dr);
+          var line = document.createElement('div');
+          line.style.cssText = 'display:flex;gap:8px;align-items:center;padding:5px 9px;border-bottom:1px solid var(--bwn-surface-3);font:500 11px ui-monospace,monospace';
+          var w = document.createElement('span'); w.style.cssText = 'flex:none;width:78px;color:var(--bwn-text)'; w.textContent = 'W-' + wo;
+          var cur = document.createElement('span'); cur.style.cssText = 'flex:1;min-width:0;color:var(--bwn-text-faint);overflow:hidden;text-overflow:ellipsis;white-space:nowrap'; cur.textContent = dr && dr.before ? (dr.before.sourceJob || '(blank)') : '';
+          var intended = document.createElement('span'); intended.style.cssText = 'flex:1;min-width:0;color:var(--bwn-text-muted);overflow:hidden;text-overflow:ellipsis;white-space:nowrap'; intended.textContent = dr && dr.after ? dr.after.sourceJob : '';
+          var verd = document.createElement('span'); verd.style.cssText = 'flex:none;width:100px;text-align:right'; verd.textContent = v.txt;
+          verd.style.color = v.cls === 'ok' ? 'var(--bwn-green)' : (v.cls === 'no' ? 'var(--bwn-bad)' : 'var(--bwn-text-faint)');
+          line.appendChild(w); line.appendChild(cur); line.appendChild(intended); line.appendChild(verd);
+          box.appendChild(line);
+        });
+        if (!shown) { var em = document.createElement('div'); em.style.cssText = 'padding:9px;color:var(--bwn-text-faint);font-size:12px'; em.textContent = selCount() ? 'No selected WO# matches the filter.' : 'No work orders selected. Tick rows on the list.'; box.appendChild(em); }
+      }
+
+      // ---- dry run (READ leg only, zero writes) ----
+      $('bwn-src-dry').onclick = function () {
+        if (_running) return;
+        var wos = selList();
+        if (overCap(wos.length).refused || wos.length === 0) { refreshCapUi(); return; }
+        var stamp = fingerprint();
+        var thisOp = op();
+        $('bwn-src-dry').disabled = true;
+        $('bwn-src-drycount').textContent = 'Dry run: reading ' + wos.length + ' work orders...';
+        runPool(wos, function (wo) { return bulkExecSrc('dry', thisOp, wo); }, 3, null, function () { return false; }).then(function (out) {
+          var byWo = {};
+          wos.forEach(function (wo, j) { byWo[wo] = out[j]; });
+          dryResults = byWo; dryStamp = stamp;
+          var would = out.filter(function (o) { return o && !o.error && o.outcome === 'would-send'; }).length;
+          var noop = out.filter(function (o) { return o && !o.error && o.outcome === 'noop'; }).length;
+          var failed = out.filter(function (o) { return o && o.error; }).length;
+          $('bwn-src-drycount').textContent = 'Dry run complete: ' + would + ' would write, ' + noop + ' already set (skip), ' + failed + ' read failed. ZERO writes sent.';
+          renderPreview();
+          armConfirm(would);
+          $('bwn-src-dry').disabled = false;
+        }, function () {
+          $('bwn-src-drycount').textContent = 'Dry run failed to read - retry.';
+          $('bwn-src-dry').disabled = false;
+        });
+      };
+
+      // ---- typed confirm ----
+      function armConfirm(would) {
+        confirmCount = would;
+        var wrap = $('bwn-src-confirmwrap');
+        wrap.style.display = 'block';
+        if (would <= 0) {
+          $('bwn-src-confirmtarget').textContent = 'Nothing to apply - every selected WO already has a Source Job#.';
+          $('bwn-src-confirm').style.display = 'none';
+          $('bwn-src-approve').style.display = 'none';
+          return;
+        }
+        $('bwn-src-confirm').style.display = '';
+        $('bwn-src-approve').style.display = '';
+        $('bwn-src-confirmtarget').textContent = 'Type exactly:  APPLY ' + would;
+        $('bwn-src-confirm').placeholder = 'APPLY ' + would;
+        $('bwn-src-confirm').value = '';
+        $('bwn-src-approve').disabled = true;
+      }
+      $('bwn-src-confirm').oninput = function () {
+        var armed = dryStamp === fingerprint() && confirmCount > 0 && $('bwn-src-confirm').value === ('APPLY ' + confirmCount);
+        $('bwn-src-approve').disabled = !armed;
+      };
+
+      // ---- apply -> run ----
+      $('bwn-src-approve').onclick = function () {
+        if ($('bwn-src-approve').disabled) return;
+        if (dryStamp !== fingerprint()) { invalidateDry(); return; }   // last-line guard: inputs moved
+        var wos = selList();
+        if (overCap(wos.length).refused || wos.length === 0) { invalidateDry(); return; }
+        // Only the rows the dry-run judged writable (the blank ones); the already-set rows are skipped.
+        var targets = wos.filter(function (wo) { var dr = dryResults && dryResults[wo]; return dr && !dr.error && dr.outcome === 'would-send'; });
+        if (!targets.length) { armConfirm(0); return; }
+        var thisOp = op();
+        _running = true; _cancelled = false;
+        $('bwn-src-confirmwrap').style.display = 'none';
+        $('bwn-src-runwrap').style.display = 'block';
+        $('bwn-src-resultwrap').style.display = 'none';
+        $('bwn-src-dry').disabled = true;
+        $('bwn-src-log').textContent = '';
+        var total = targets.length;
+        setProg(0, total);
+        logln('Run - ' + total + ' Source Job# write' + (total === 1 ? '' : 's') + ' (' + (thisOp === 'qr' ? 'Q/R' : 'RF') + '), concurrency 3');
+        runPool(targets, function (wo) {
+          return bulkExecSrc('run', thisOp, wo).then(function (r) {
+            logln('W-' + wo + ': ' + (r.outcome === 'noop' ? 'skip (already set)' : ('set Source Job# = ' + (r.after && r.after.sourceJob))));
+            return r;
+          }, function (err) { logln('W-' + wo + ': FAILED - ' + ((err && err.message) || err)); throw err; });
+        }, 3, function (d, t) { setProg(d, t); }, function () { return _cancelled; }).then(function (out) {
+          _running = false;
+          var tal = bulkTally(out, total);
+          $('bwn-src-tally').textContent = tal.done + ' done · ' + tal.noop + ' skipped · ' + tal.failed + ' failed · ' + tal.notRun + ' not-run  (of ' + total + ')';
+          $('bwn-src-resultwrap').style.display = 'block';
+          $('bwn-src-dry').disabled = false;
+          BWN.beat('bulkSource', 'ok', 'run complete: ' + tal.done + ' written, ' + tal.failed + ' failed');
+        });
+      };
+      $('bwn-src-cancel').onclick = function () { if (_running) { _cancelled = true; logln('-- cancelling: no new rows will start --'); } };
+      function setProg(d, t) { $('bwn-src-progfill').style.width = (t ? Math.round(d / t * 100) : 0) + '%'; }
+
+      // A live selection change (a row ticked on the list) invalidates any standing dry-run and
+      // repaints the cap + preview - the fingerprint guard already blocks Apply, this keeps the UI true.
+      _drawerRefresh = function () { if (!_running) invalidateDry(); else { refreshCapUi(); renderPreview(); } };
+      refreshCapUi();
+      renderPreview();
+    }
+
+    startObserving();
+    BWN.beat('bulkSource', 'ok', 'ready (flag on)');
   });
 
   // ---- Flush the module queue -------------------------------------------------

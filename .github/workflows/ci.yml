@@ -488,6 +488,12 @@ jobs:
       - name: Bulk Operations Console engine harness (batch writes through the audit ring)
         run: node scripts/test-bulk-ops.js
 
+      # Bulk Source Job# engine: the Q/R / RF shorthand -> sourceJobNumber value, the single-scalar
+      # patchWorkOrder shape, blanks-only skip (re-checked at write time), the dry gate, the 50-record
+      # cap, and the feature:'bulkSource' kill switch - driven end to end through the real audit ring.
+      - name: Bulk Source Job# engine harness (Q/R/RF shorthand + blanks-only patchWorkOrder)
+        run: node scripts/test-bulk-source.js
+
       - name: Per-client profile resolver harness (T10 defaults + empty-table inert safety)
         run: node scripts/test-client-profile.js
 
