@@ -517,7 +517,13 @@ jobs:
       - name: WO Assist B2 status-write harness (patchWorkOrder confirm gate + statusId alone)
         run: node scripts/test-b2-statuswrite.js
 
-      - name: Bulk Operations Console engine harness (batch writes through the audit ring)
+      # THE single Safe Bulk Operations Console (Core bwn-suite-core, flag bulkOps default OFF). v2
+      # converge: status/assign (patchWorkOrder, HIGH, behind bulkOpsDestructive) + escalation-task
+      # (addTask) + request-missing-docs (addEditJobNote), the F4-DEEP armed per-batch confirm (no bare
+      # confirmed:true on the bulk path), the advisory fail-closed rank gate, mid-batch kill, PII-safe
+      # export, and negative controls that each redden. Slices the BULK-OPS-ENGINE + BWN-OPS blocks and
+      # drives the write path end to end through the real audit ring + confirm gate.
+      - name: Bulk Operations Console engine harness (converged ops + F4-deep armed confirm + kill/PII)
         run: node scripts/test-bulk-ops.js
 
       # Bulk Source Job# engine: the Q/R / RF shorthand -> sourceJobNumber value, the single-scalar
@@ -525,7 +531,11 @@ jobs:
       # cap, and the feature:'bulkSource' kill switch - driven end to end through the real audit ring.
       - name: Bulk Source Job# engine harness (Q/R/RF shorthand + blanks-only patchWorkOrder)
         run: node scripts/test-bulk-source.js
-      - name: "RM-C1 bulk console harness (bwn-write-queue: preview / dry-run / pause-cancel / threshold / CSV+JSON export; flag bulkConsole default OFF)"
+      # Converge ruling 2026-09-01: bwn-write-queue's operator MODAL is RETIRED (Core is the one console).
+      # This harness is now a RETIREMENT TRIPWIRE - it fails if the modal, its engine, or the bulkConsole
+      # flag menu creep back - and folds the one still-relevant executor guarantee that lived here: the
+      # kept BWN-WQ EXEC executeCommand dry-run path routes ZERO writes (with a control on each dry guard).
+      - name: "Bulk console retirement tripwire + BWN-WQ EXEC dry-run 0-write (write-queue)"
         run: node scripts/test-bulk-console.js
 
       - name: Per-client profile resolver harness (T10 defaults + empty-table inert safety)

@@ -62,7 +62,15 @@ A.ok('bulkOps flag ships default OFF', /bulkOps: false,/.test(coreFull));
 A.ok('bulkOpsDestructive flag ships default OFF', /bulkOpsDestructive: false/.test(coreFull));
 A.ok('the whole module mounts only behind BWN_MODULES.bulkOps', /bwnBoot\('bulkOps', BWN_MODULES\.bulkOps, function \(\) \{/.test(coreFull));
 A.ok('the add-note write passes feature:bulkOps to the wrapper', /feature: 'bulkOps', ids: \{ wo: wo \}/.test(S_ENG));
-A.ok('the set-ECD write passes confirmed:true + feature:bulkOps', /feature: 'bulkOps', confirmed: true/.test(S_ENG));
+// F4-DEEP: the converged bulk path must NEVER pass a bare confirmed:true - every high-risk write
+// routes through the ARMED per-batch confirm handler. A confirmed:true literal on the bulk path would
+// re-open the exact trust residual the WRAP flags, so its ABSENCE here is load-bearing.
+// Strip full-line comments so the check sees CODE only (the design is described with the phrase
+// "confirmed:true" in several comments; what must never appear is a confirmed:true in an opts object).
+var S_ENG_CODE = S_ENG.split('\n').filter(function (l) { return l.trim().indexOf('//') !== 0; }).join('\n');
+A.ok('NO bare confirmed:true anywhere in the bulk engine CODE (F4-deep)', S_ENG_CODE.indexOf('confirmed: true') === -1 && S_ENG_CODE.indexOf('confirmed:true') === -1);
+A.ok('the engine installs an injected _confirmFn via bwnGqlOp.setConfirm', /bwnGqlOp\.setConfirm\(bulkConfirmHandler\)/.test(S_ENG));
+A.ok('the destructive verbs (status/assign) are gated by a second flag bulkOpsDestructive', /bulkOpsDestructive/.test(coreFull) && /needsDestructiveFlag/.test(S_ENG));
 
 var DEFAULT_WO = {
   assignedTo: 'g', statusId: 41, serviceLevelAgreementId: 'sla-1',
@@ -77,6 +85,7 @@ function mkGql(opts) {
     gql.calls.push({ q: query, v: variables });
     if (/patchWorkOrder/.test(query)) return Promise.resolve({ patchWorkOrder: { success: opts.patchFail ? false : true, message: opts.patchFail ? 'refused' : '' } });
     if (/addEditJobNote/.test(query)) return Promise.resolve({ addEditJobNote: { success: opts.noteFail ? false : true, note: { id: 'note-1' }, message: '' } });
+    if (/addTask/.test(query)) return Promise.resolve({ addTask: { success: opts.taskFail ? false : true, message: '' } });
     if (/workOrderNotes/.test(query)) return Promise.resolve({ workOrderNotes: opts.notes || [] });
     if (/workOrder\s*\(/.test(query)) return Promise.resolve({ workOrder: (opts.wo === undefined ? DEFAULT_WO : opts.wo) });
     return Promise.resolve({});
@@ -84,9 +93,10 @@ function mkGql(opts) {
   gql.calls = [];
   return gql;
 }
-function writeCalls(g) { return g.calls.filter(function (c) { return /patchWorkOrder|addEditJobNote/.test(c.q); }); }
+function writeCalls(g) { return g.calls.filter(function (c) { return /patchWorkOrder|addEditJobNote|addTask/.test(c.q); }); }
 function patchCalls(g) { return g.calls.filter(function (c) { return /patchWorkOrder/.test(c.q); }); }
 function notePosts(g) { return g.calls.filter(function (c) { return /addEditJobNote/.test(c.q); }); }
+function taskPosts(g) { return g.calls.filter(function (c) { return /addTask/.test(c.q); }); }
 
 function makeEnv(opts, engSrc) {
   opts = opts || {};
@@ -111,10 +121,15 @@ function makeEnv(opts, engSrc) {
   var api = vm.runInContext(
     '(function () {\n' + S_OPS + '\n' + (engSrc || S_ENG) + '\n' +
     'return { run: bwnGqlOp, auditAll: bwnAuditAll,\n' +
-    '  bulkExecNote: bulkExecNote, bulkExecEcd: bulkExecEcd, bulkTally: bulkTally, auditTally: auditTally,\n' +
+    '  bulkExecNote: bulkExecNote, bulkExecEcd: bulkExecEcd, bulkExecStatus: bulkExecStatus, bulkExecAssign: bulkExecAssign,\n' +
+    '  bulkExecTask: bulkExecTask, bulkExecDocReq: bulkExecDocReq, bulkExecPatch: bulkExecPatch,\n' +
+    '  bulkTally: bulkTally, auditTally: auditTally,\n' +
     '  pendingRows: pendingRows, runPool: runPool, overCap: overCap, capForOp: capForOp, idemKeyFor: idemKeyFor,\n' +
     '  priorityWriteValue: priorityWriteValue, markerFor: markerFor, noteHasMarker: noteHasMarker, cond: cond,\n' +
-    '  BULK_MAX_RECORDS: BULK_MAX_RECORDS, ADD_NOTE_M: ADD_NOTE_M, PATCH_M: PATCH_M };\n})()',
+    '  armBatchConfirm: armBatchConfirm, disarmBatchConfirm: disarmBatchConfirm, bulkConfirmHandler: bulkConfirmHandler, batchArmed: batchArmed,\n' +
+    '  bulkModuleKilled: bulkModuleKilled, approvalDecision: approvalDecision, isHighRisk: isHighRisk, needsDestructiveFlag: needsDestructiveFlag,\n' +
+    '  clampReason: clampReason, clampRef: clampRef, undoLabelFor: undoLabelFor, bulkScalar: bulkScalar,\n' +
+    '  BULK_MAX_RECORDS: BULK_MAX_RECORDS, ADD_NOTE_M: ADD_NOTE_M, PATCH_M: PATCH_M, M_ADD_TASK: M_ADD_TASK };\n})()',
     sandbox, { filename: 'bulk-ops.js' });
   return { api: api, gql: gql };
 }
@@ -179,8 +194,10 @@ function tick(n) {
   A.eq('CONTROL: a DIFFERENT runId is not deduped (marker is per-run, so dedup is load-bearing)', notePosts(e.gql).length, 1);
 
   // ---- set-ECD happy: whole-object priority, every sibling, SLA bundled --------------------
+  //   Now ARM the per-batch confirm first (F4-deep): no bare confirmed:true carries this any more.
   e = makeEnv();   // DEFAULT_WO, oldEcd 2026-01-01
-  var rE = await e.api.bulkExecEcd('run', 'RUN1', '200', '2026-09-01');
+  e.api.armBatchConfirm('RUN1', [200], 'audit cleanup: reset stale ECDs');
+  var rE = await e.api.bulkExecEcd('run', 'RUN1', '200', '2026-09-01', 'audit cleanup: reset stale ECDs', 'TCK-1');
   await tick();
   A.eq('set-ECD: outcome done', rE.outcome, 'done');
   A.eq('set-ECD: exactly one patch', patchCalls(e.gql).length, 1);
@@ -193,7 +210,12 @@ function tick(n) {
   A.eq('set-ECD: new ECD set inside the whole priority', data.priority.value.expectedCompletionDate, '2026-09-01');
   A.eq('set-ECD: override forced', data.priority.value.hasOverridePriority, true);
   A.eq('set-ECD: serviceLevelAgreementId bundled as a cond', data.serviceLevelAgreementId, { shouldInclude: true, value: 'sla-1' });
-  A.eq('set-ECD: high-risk write audited ok (confirmed:true unblocked the gate)', (e.api.auditAll()[0] || {}).outcome, 'ok');
+  A.eq('set-ECD: high-risk write audited ok (the ARMED handler unblocked the gate)', (e.api.auditAll()[0] || {}).outcome, 'ok');
+  A.eq('set-ECD: audit after carries the clamped reason (PII-free scalar, not in ids)', (e.api.auditAll()[0] || {}).after.reason, 'audit cleanup: reset stale ECDs');
+  A.eq('set-ECD: audit after carries the ticket ref', (e.api.auditAll()[0] || {}).after.ref, 'TCK-1');
+  A.eq('set-ECD: audit after carries the runId', (e.api.auditAll()[0] || {}).after.runId, 'RUN1');
+  A.eq('set-ECD: audit ids carry ONLY the wo (reason/ref NEVER in ids)', Object.keys((e.api.auditAll()[0] || {}).ids || {}), ['wo']);
+  e.api.disarmBatchConfirm();
 
   // ---- set-ECD no-op: the date already matches -> skip, no patch ---------------------------
   e = makeEnv({ wo: { serviceLevelAgreementId: 's', priority: { expectedCompletionDate: '2026-09-01T12:00:00Z' } } });
@@ -204,9 +226,11 @@ function tick(n) {
 
   // ---- set-ECD without an SLA on the read -> no serviceLevelAgreementId key ----------------
   e = makeEnv({ wo: { priority: { label: 'P1', expectedCompletionDate: '2026-01-01' } } });
-  await e.api.bulkExecEcd('run', 'RUN1', '200', '2026-09-01');
+  e.api.armBatchConfirm('RUN1', [200], 'r');
+  await e.api.bulkExecEcd('run', 'RUN1', '200', '2026-09-01', 'r', 'T');
   await tick();
   A.ok('set-ECD: serviceLevelAgreementId omitted when the read had none', !('serviceLevelAgreementId' in patchCalls(e.gql)[0].v.data));
+  e.api.disarmBatchConfirm();
 
   // ---- DRY-RUN: builds the exact vars, sends ZERO writes ----------------------------------
   e = makeEnv({ notes: [] });
@@ -250,7 +274,7 @@ function tick(n) {
   A.eq('kill switch: nothing posted when the module is off', notePosts(e.gql).length, 0);
   A.eq('kill switch: audit outcome denied', (e.api.auditAll()[0] || {}).outcome, 'denied');
 
-  // ---- high-risk gate: patchWorkOrder WITHOUT confirmed:true is refused (Core wires no _confirmFn)
+  // ---- high-risk gate: a patchWorkOrder with NO confirmed:true and NO armed handler is refused ----
   e = makeEnv();
   var gateRefused = false;
   await e.api.run('patchWorkOrder', e.api.PATCH_M, { data: { workOrderNumber: 1, priority: e.api.cond({}) } }, { feature: 'bulkOps', ids: { wo: 1 } })
@@ -259,18 +283,60 @@ function tick(n) {
   A.ok('gate: an UNCONFIRMED patchWorkOrder is refused', gateRefused);
   A.eq('gate: nothing sent on the refusal', patchCalls(e.gql).length, 0);
   A.eq('gate: audit outcome denied', (e.api.auditAll()[0] || {}).outcome, 'denied');
-  // control: bulkExecEcd carries confirmed:true, so the SAME high-risk op DOES send through it.
+
+  // =========================================================================================
+  // F4-DEEP: the bulk high-risk path is authorized ONLY by the ARMED per-batch confirm handler.
+  // A bare confirmed:true is never used; without arming, a high-risk bulk write is REFUSED.
+  // =========================================================================================
+  // (a) NOT armed -> bulkExecEcd is refused (the confirm handler is the gate, not a literal).
   e = makeEnv();
-  await e.api.bulkExecEcd('run', 'RUN1', '200', '2026-09-01');
+  var ecdUnarmed = false;
+  await e.api.bulkExecEcd('run', 'RUN1', '200', '2026-09-01', 'r', 'T').then(function () {}, function () { ecdUnarmed = true; });
   await tick();
-  A.eq('gate control: bulkExecEcd (confirmed:true) DOES send - confirmed is the gate', patchCalls(e.gql).length, 1);
+  A.ok('F4-deep: an UNARMED bulkExecEcd is refused', ecdUnarmed);
+  A.eq('F4-deep: nothing sent when unarmed', patchCalls(e.gql).length, 0);
+  // (b) armed for THIS runId + WO + reason -> it sends.
+  e = makeEnv();
+  e.api.armBatchConfirm('RUN1', [200], 'r');
+  await e.api.bulkExecEcd('run', 'RUN1', '200', '2026-09-01', 'r', 'T');
+  await tick();
+  A.eq('F4-deep: an ARMED bulkExecEcd DOES send', patchCalls(e.gql).length, 1);
+  e.api.disarmBatchConfirm();
+  // (c) armed for a DIFFERENT WO -> the write for a WO outside the cohort is refused.
+  e = makeEnv();
+  e.api.armBatchConfirm('RUN1', [999], 'r');
+  var offCohort = false;
+  await e.api.bulkExecStatus('run', 'RUN1', '200', 7, 'r', 'T').then(function () {}, function () { offCohort = true; });
+  await tick();
+  A.ok('F4-deep: a WO OUTSIDE the armed cohort is refused', offCohort);
+  A.eq('F4-deep: nothing sent for the off-cohort WO', patchCalls(e.gql).length, 0);
+  e.api.disarmBatchConfirm();
+  // (d) armed but reason MISSING at the write -> refused (reason is mandatory in the handler).
+  e = makeEnv();
+  e.api.armBatchConfirm('RUN1', [200], 'r');
+  var noReason = false;
+  await e.api.bulkExecStatus('run', 'RUN1', '200', 7, '', '').then(function () {}, function () { noReason = true; });
+  await tick();
+  A.ok('F4-deep: a high-risk write with NO reason is refused even when armed', noReason);
+  e.api.disarmBatchConfirm();
+  // (e) disarm actually tears the handler down: setConfirm(null) -> a later high-risk write is refused.
+  e = makeEnv();
+  e.api.armBatchConfirm('RUN1', [200], 'r');
+  e.api.disarmBatchConfirm();
+  var afterDisarm = false;
+  await e.api.bulkExecStatus('run', 'RUN1', '200', 7, 'r', 'T').then(function () {}, function () { afterDisarm = true; });
+  await tick();
+  A.ok('F4-deep: after disarm, a high-risk write is refused (setConfirm(null) is load-bearing)', afterDisarm);
+  A.ok('F4-deep: bulkConfirmHandler denies when nothing is armed', e.api.bulkConfirmHandler({ risk: 'high', ids: { wo: 200 }, reason: 'r' }) === false);
 
   // ---- success:false envelope rejects (never a silent false) ------------------------------
   e = makeEnv({ patchFail: true });
+  e.api.armBatchConfirm('RUN1', [200], 'r');
   var envRejected = false;
-  await e.api.bulkExecEcd('run', 'RUN1', '200', '2026-09-01').then(function () {}, function () { envRejected = true; });
+  await e.api.bulkExecEcd('run', 'RUN1', '200', '2026-09-01', 'r', 'T').then(function () {}, function () { envRejected = true; });
   await tick();
   A.ok('a patchWorkOrder success:false rejects', envRejected);
+  e.api.disarmBatchConfirm();
 
   // ---- runPool cancel semantics carry over (holes, not errors) ----------------------------
   e = makeEnv();
@@ -287,7 +353,8 @@ function tick(n) {
   await (async function () {
     var mut = mutate(S_ENG, 'skipWeekends: !!p.skipWeekends\n      };', 'skipWeekendsDROPPED: !!p.skipWeekends\n      };');
     var m = makeEnv({}, mut);
-    await m.api.bulkExecEcd('run', 'RUN1', '200', '2026-09-01');
+    m.api.armBatchConfirm('RUN1', [200], 'r');
+    await m.api.bulkExecEcd('run', 'RUN1', '200', '2026-09-01', 'r', 'T');
     await tick();
     var d = patchCalls(m.gql)[0].v.data;
     A.ok('CONTROL: dropping a priority sibling blanks it (whole-object assertion is load-bearing)', !('skipWeekends' in d.priority.value));
@@ -318,6 +385,153 @@ function tick(n) {
     await m.api.bulkExecNote('run', 'RUN1', '100', 'x');
     await tick();
     A.eq('CONTROL: disabling the marker check DOES double-post (dedup is load-bearing)', notePosts(m.gql).length, 1);
+  })();
+
+  // =========================================================================================
+  // CONVERGED OPS v2: status / assign (HIGH, armed) · escalation task / doc-request (moderate)
+  // =========================================================================================
+
+  // ---- SET-STATUS (armed): statusId ALONE, coerced to Int; no-op when already at target -----
+  e = makeEnv();   // DEFAULT_WO statusId 41
+  e.api.armBatchConfirm('RS', [200], 'move to In Progress');
+  var rS = await e.api.bulkExecStatus('run', 'RS', '200', 7, 'move to In Progress', 'JIRA-9');
+  await tick();
+  A.eq('set-status: outcome done', rS.outcome, 'done');
+  A.eq('set-status: exactly one patch', patchCalls(e.gql).length, 1);
+  var sdata = patchCalls(e.gql)[0].v.data;
+  A.eq('set-status: data keys are workOrderNumber + statusId ONLY (siblings blank otherwise)', Object.keys(sdata).sort(), ['statusId', 'workOrderNumber']);
+  A.eq('set-status: statusId is a ConditionalInput with an INT value', sdata.statusId, { shouldInclude: true, value: 7 });
+  A.eq('set-status: audit after carries statusId + runId + reason + ref', [(e.api.auditAll()[0] || {}).after.statusId, (e.api.auditAll()[0] || {}).after.runId, (e.api.auditAll()[0] || {}).after.reason, (e.api.auditAll()[0] || {}).after.ref], [7, 'RS', 'move to In Progress', 'JIRA-9']);
+  e.api.disarmBatchConfirm();
+  // no-op: already at the target status -> no patch (even armed)
+  e = makeEnv();
+  e.api.armBatchConfirm('RS', [200], 'r');
+  var rSnoop = await e.api.bulkExecStatus('run', 'RS', '200', 41, 'r', 'T');   // 41 == DEFAULT_WO.statusId
+  await tick();
+  A.eq('set-status no-op: already at target -> no-op', rSnoop.outcome, 'noop');
+  A.eq('set-status no-op: NO patch sent', patchCalls(e.gql).length, 0);
+  e.api.disarmBatchConfirm();
+
+  // ---- REASSIGN (armed): assignedTo ALONE ---------------------------------------------------
+  e = makeEnv();   // DEFAULT_WO assignedTo 'g'
+  e.api.armBatchConfirm('RA', [200], 'load balance');
+  var rA = await e.api.bulkExecAssign('run', 'RA', '200', 'user-guid-2', 'load balance', 'REF-2');
+  await tick();
+  A.eq('reassign: outcome done', rA.outcome, 'done');
+  var adata = patchCalls(e.gql)[0].v.data;
+  A.eq('reassign: data keys are workOrderNumber + assignedTo ONLY', Object.keys(adata).sort(), ['assignedTo', 'workOrderNumber']);
+  A.eq('reassign: assignedTo is a ConditionalInput with the GUID (not coerced)', adata.assignedTo, { shouldInclude: true, value: 'user-guid-2' });
+  e.api.disarmBatchConfirm();
+  // no-op: already assigned to the same user
+  e = makeEnv();
+  e.api.armBatchConfirm('RA', [200], 'r');
+  var rAnoop = await e.api.bulkExecAssign('run', 'RA', '200', 'g', 'r', 'T');   // 'g' == DEFAULT_WO.assignedTo
+  await tick();
+  A.eq('reassign no-op: already assigned -> no-op, no patch', [rAnoop.outcome, patchCalls(e.gql).length], ['noop', 0]);
+  e.api.disarmBatchConfirm();
+
+  // ---- ESCALATION TASK (moderate, addTask - NO confirm gate) ---------------------------------
+  e = makeEnv();
+  var rT = await e.api.bulkExecTask('run', 'RT', '200', 'Escalate: vendor unresponsive 48h');
+  await tick();
+  A.eq('task: outcome done', rT.outcome, 'done');
+  A.eq('task: exactly one addTask, no confirm needed (moderate)', taskPosts(e.gql).length, 1);
+  var tvars = taskPosts(e.gql)[0].v.data;
+  A.eq('task: entityType 1 (work order)', tvars.entityType, 1);
+  A.eq('task: entityId is the WO number as a String', tvars.entityId, '200');
+  A.ok('task: description carries the [bwn:RT:200] run marker', tvars.description.indexOf('[bwn:RT:200]') !== -1);
+  A.eq('task: metadata carries the number', JSON.parse(tvars.metadata).number, '200');
+  A.eq('task: audit after.task is clamped, plus runId', [(e.api.auditAll()[0] || {}).after.runId, (e.api.auditAll()[0] || {}).outcome], ['RT', 'ok']);
+
+  // ---- REQUEST-MISSING-DOCS (moderate, addEditJobNote; op relabelled to docreq) --------------
+  e = makeEnv({ notes: [] });
+  var rD = await e.api.bulkExecDocReq('run', 'RD', '200', 'W-9 + COI');
+  await tick();
+  A.eq('docreq: op relabelled to docreq (for the run-log)', rD.op, 'docreq');
+  A.eq('docreq: one addEditJobNote (it IS a note write)', notePosts(e.gql).length, 1);
+  A.ok('docreq: the canned prefix is in the body', notePosts(e.gql)[0].v.addEditInput.content.indexOf('Document request:') !== -1);
+  A.ok('docreq: the operator context is appended', notePosts(e.gql)[0].v.addEditInput.content.indexOf('W-9 + COI') !== -1);
+  A.eq('docreq: audit after carries noteType only (body NEVER audited)', (e.api.auditAll()[0] || {}).after, { noteType: 13 });
+
+  // ---- caps for the new ops (risk-tiered) ---------------------------------------------------
+  A.eq('status cap is the tight 25 (high risk)', e.api.capForOp('status'), 25);
+  A.eq('assign cap is 25 (high risk)', e.api.capForOp('assign'), 25);
+  A.eq('task cap is 50 (moderate)', e.api.capForOp('task'), 50);
+  A.eq('docreq cap is 50 (moderate)', e.api.capForOp('docreq'), 50);
+  A.eq('status over cap REFUSED not truncated', e.api.overCap('status', 26), { refused: true, cap: 25, count: 26, over: 1 });
+
+  // =========================================================================================
+  // ADVISORY APPROVAL GATE (fail-closed, rank-based). PURE - driven with an injected rank.
+  // =========================================================================================
+  A.ok('approval: unknown rank denies EVERY op (deny-for-all, fail-closed)', e.api.approvalDecision('note', 5, null).allowed === false && e.api.approvalDecision('status', 5, null).allowed === false);
+  A.eq('approval: unknown-rank reason is explicit', e.api.approvalDecision('note', 5, null).reason, 'rank-unknown');
+  A.ok('approval: coordinator (1) may add a note', e.api.approvalDecision('note', 5, 1).allowed);
+  A.ok('approval: coordinator (1) may NOT set status (needs supervisor)', e.api.approvalDecision('status', 5, 1).allowed === false);
+  A.ok('approval: supervisor (3) may reassign + set status (small batch)', e.api.approvalDecision('assign', 5, 3).allowed && e.api.approvalDecision('status', 5, 3).allowed);
+  A.ok('approval: a LARGE high-risk batch needs a manager', e.api.approvalDecision('status', 15, 3).allowed === false && e.api.approvalDecision('status', 15, 5).allowed);
+  A.eq('approval: the large-batch denial names the manager bar', e.api.approvalDecision('status', 15, 3).needLabel, 'manager');
+
+  // ---- undo-eligibility labels: NEVER a bare "undo available" -------------------------------
+  A.ok('undo: status label names the non-reversible CLOCK', e.api.undoLabelFor('status').indexOf('NON-reversible CLOCK') !== -1);
+  A.ok('undo: ECD label names the non-reversible CLOCK', e.api.undoLabelFor('ecd').indexOf('NON-reversible CLOCK') !== -1);
+  A.ok('undo: no label is a bare "undo available"', e.api.undoLabelFor('status').toLowerCase().indexOf('undo available') === -1 && e.api.undoLabelFor('ecd').toLowerCase().indexOf('undo available') === -1);
+
+  // =========================================================================================
+  // KILL SWITCH MID-BATCH (item 9): a live BWN_MODULES flip halts the in-flight batch.
+  // =========================================================================================
+  A.ok('kill: bulkOps:false halts', e.api.bulkModuleKilled({ bulkOps: false }, false) === true);
+  A.ok('kill: bulkOps:true does not halt', e.api.bulkModuleKilled({ bulkOps: true }, false) === false);
+  A.ok('kill: a destructive op ALSO halts on bulkOpsDestructive:false', e.api.bulkModuleKilled({ bulkOps: true, bulkOpsDestructive: false }, true) === true);
+  A.ok('kill: a moderate op is unaffected by bulkOpsDestructive', e.api.bulkModuleKilled({ bulkOps: true, bulkOpsDestructive: false }, false) === false);
+  // Drive the real runPool with a kill flip mid-batch: rows after the flip are left as HOLES.
+  e = makeEnv();
+  var mods = { bulkOps: true };
+  var seen = 0;
+  var killPool = await e.api.runPool([1, 2, 3, 4, 5], function () { seen++; if (seen === 2) mods.bulkOps = false; return Promise.resolve({ outcome: 'done' }); }, 1, null, function () { return e.api.bulkModuleKilled(mods, false); });
+  A.ok('kill mid-batch: rows after the flip are not-run (holes), not written', killPool[3] === undefined && killPool[4] === undefined);
+  A.eq('kill mid-batch: tally counts the halted rows as not-run', e.api.bulkTally(killPool, 5).notRun >= 2, true);
+
+  // =========================================================================================
+  // PII: the note/task BODY never reaches the audit ring; the export projection drops annotations.
+  // =========================================================================================
+  e = makeEnv({ notes: [] });
+  await e.api.bulkExecNote('run', 'RP', '200', 'CLIENT PHONE 555-0000 do-not-leak');
+  await tick();
+  A.ok('PII: a note BODY never appears in the audit ring', JSON.stringify(e.api.auditAll()).indexOf('555-0000') === -1 && JSON.stringify(e.api.auditAll()).indexOf('do-not-leak') === -1);
+  e = makeEnv();
+  await e.api.bulkExecTask('run', 'RP', '200', 'x'.repeat(200) + ' SECRETTAIL');   // long body
+  await tick();
+  A.ok('PII: the task run-marker + overflow body never reach the audit (after.task clamped <= 40)', (e.api.auditAll()[0] || {}).after.task.length <= 40 && JSON.stringify(e.api.auditAll()).indexOf('SECRETTAIL') === -1 && JSON.stringify(e.api.auditAll()).indexOf('[bwn:RP:200]') === -1);
+  // export projection: bulkScalar returns the lone VALUE scalar, dropping runId/reason/ref annotations
+  var DROP = { runId: true, reason: true, ref: true, task: true, noteType: true, hasMarker: true };
+  A.eq('export: bulkScalar flattens {statusId} to its scalar', e.api.bulkScalar({ statusId: 7, runId: 'R', reason: 'secret reason', ref: 'T' }, DROP), 7);
+  A.eq('export: bulkScalar NEVER returns the reason/ref annotations', e.api.bulkScalar({ reason: 'secret reason', ref: 'T', runId: 'R' }, DROP), null);
+  A.eq('export: a note projection is null (body/type never a value scalar)', e.api.bulkScalar({ noteType: 13, runId: 'R' }, DROP), null);
+
+  // =========================================================================================
+  // NEGATIVE CONTROLS for the converged path - each guarantee observably load-bearing.
+  // =========================================================================================
+
+  // (5) F4-DEEP: re-introduce a bare confirmed:true into the patch path -> an UNARMED status write
+  //     now sends. Proves the ABSENCE of confirmed:true + the armed handler are load-bearing.
+  await (async function () {
+    var mut = mutate(S_ENG,
+      "feature: 'bulkOps', ids: { wo: wo }, reason: clampReason(reason),\n          validate: function (v) { var d = v && v.data || {}; if (!d.workOrderNumber) return 'no WO number';",
+      "feature: 'bulkOps', confirmed: true, ids: { wo: wo }, reason: clampReason(reason),\n          validate: function (v) { var d = v && v.data || {}; if (!d.workOrderNumber) return 'no WO number';");
+    var m = makeEnv({}, mut);   // NOTE: no armBatchConfirm here
+    await m.api.bulkExecStatus('run', 'RS', '200', 7, 'r', 'T');
+    await tick();
+    A.eq('CONTROL: a bare confirmed:true lets an UNARMED high-risk write through (its absence is load-bearing)', patchCalls(m.gql).length, 1);
+  })();
+
+  // (6) Neuter the status no-op precheck -> a same-value write is sent (the precheck is load-bearing).
+  await (async function () {
+    var mut = mutate(S_ENG, "var same = String(cur == null ? '' : cur) === String(newValue == null ? '' : newValue);", "var same = false;");
+    var m = makeEnv({}, mut);
+    m.api.armBatchConfirm('RS', [200], 'r');
+    await m.api.bulkExecStatus('run', 'RS', '200', 41, 'r', 'T');   // 41 == current; should have been a no-op
+    await tick();
+    A.eq('CONTROL: neutering the no-op precheck writes a same-value patch (precheck is load-bearing)', patchCalls(m.gql).length, 1);
   })();
 
   A.finish();
