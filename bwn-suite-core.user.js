@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         BWN Suite - Core (Broadway National)
 // @namespace    broadwaynational.bwn
-// @version      1.81.0
+// @version      1.82.0
 // @downloadURL  https://raw.githubusercontent.com/Intermu/userscripts/main/bwn-suite-core.user.js
 // @updateURL    https://raw.githubusercontent.com/Intermu/userscripts/main/bwn-suite-core.user.js
 // @description  Runs several Umbrava helpers for BWN coordinators, in the browser with no privileged grants. Includes: PO Approval + ETA Builder; WO Assist (GP/ETA, a stall watchdog, DNE calculator, and a next-action playbook); Email Leak Guard (checks recipients against vendor names, PO amounts, and client budget references before an outbound email sends); WO List Heat (a triage overlay + My Day strip on the work-order list, with an optional same-origin Umbrava API scan for deterministic full-board coverage); and the BWN Launcher (opens the Azure Static Web App tools with the current WO's context). Modules share state through sessionStorage/localStorage. The only network calls are same-origin Umbrava GraphQL requests (app.umbrava.com/api/graphql, the app's own session): List Heat's full-board scan and WO Assist's work-order / trip / clock-in / document reads, plus ONE write - BWN Views saves the column layout through Umbrava's own putUserPreference, the same preference the column chooser writes; everything else is offline. Toggle modules in BWN_MODULES below.
@@ -16136,6 +16136,10 @@
     // The two brand-new destructive verbs ride a SECOND flag on top of bulkOps. ECD keeps riding
     // bulkOps alone (it shipped in v1); status + assign are gated by bulkOpsDestructive as well.
     function needsDestructiveFlag(op) { return op === 'status' || op === 'assign'; }
+    // F3: PRE-ARM gate. A destructive verb cannot even be ARMED while bulkOpsDestructive is off -
+    // defense-in-depth over the runtime shouldStop/validate halt, so the gate is not a single point at
+    // row 0. Pure; the drawer's approveArmable() + refreshTargetUi() call it with the live BWN_MODULES.
+    function destructiveArmBlocked(op, modules) { return needsDestructiveFlag(op) && !!modules && modules.bulkOpsDestructive === false; }
 
     // ---- High-impact audit context (reason + reference), length-clamped scalars ----
     // REQUIRED for a patchWorkOrder-class action. They ride the audit `after` as clamped SCALARS
@@ -16185,6 +16189,18 @@
       if (typeof bwnGqlOp === 'function' && bwnGqlOp.setConfirm) bwnGqlOp.setConfirm(null);
     }
     function batchArmed() { return !!_armedBatch; }
+    // F2: arm the batch, run bodyFn (returns a promise), and ALWAYS disarm - a SYNC throw in bodyFn AND
+    // a rejected promise both restore setConfirm(null), so a failed or wedged run never leaks a live
+    // arm. The drawer's runBatch wraps its high-risk run in this so the disarm is a real finally, not a
+    // settlement handler that only fires because runPool happens never to reject (a throw in onProgress
+    // would leave that handler unreached). bodyFn's result/rejection propagates to the caller.
+    function withArmedBatch(runId, wos, reason, bodyFn) {
+      armBatchConfirm(runId, wos, reason);
+      var p;
+      try { p = Promise.resolve(bodyFn()); }
+      catch (e) { disarmBatchConfirm(); return Promise.reject(e); }
+      return p.then(function (v) { disarmBatchConfirm(); return v; }, function (e) { disarmBatchConfirm(); throw e; });
+    }
 
     // ---- Advisory action-class approval gate (rank-based, FAIL-CLOSED) ----------------------------
     // note / doc-request / escalation-task -> coordinator; reassign -> supervisor; status / ECD ->
@@ -16255,8 +16271,16 @@
         var vars = { data: data };
         if (mode === 'dry') return { op: opName, wo: wo, outcome: 'would-send', before: kv(field, cur), after: kv(field, newValue), vars: vars };
         return bwnGqlOp('patchWorkOrder', PATCH_M, vars, {
+          // F1: these destructive verbs pass feature:'bulkOps', so the WRAP's per-feature kill checks
+          // bulkOps - NOT bulkOpsDestructive. To make a mid-batch bulkOpsDestructive flip actually DENY
+          // a write (not just halt NEW rows), validate() re-reads bulkOpsDestructive at send time: every
+          // row not yet past validate is blocked here, before the network call. Rows already past
+          // validate (<= concurrency, default 2) are inherently unrecallable - accepted.
           feature: 'bulkOps', ids: { wo: wo }, reason: clampReason(reason),
-          validate: function (v) { var d = v && v.data || {}; if (!d.workOrderNumber) return 'no WO number'; if (!(d[field] && d[field].value != null && d[field].value !== '')) return 'no ' + field; return true; },
+          validate: function (v) {
+            if (typeof BWN_MODULES !== 'undefined' && BWN_MODULES && BWN_MODULES.bulkOpsDestructive === false) return 'bulkOpsDestructive off';
+            var d = v && v.data || {}; if (!d.workOrderNumber) return 'no WO number'; if (!(d[field] && d[field].value != null && d[field].value !== '')) return 'no ' + field; return true;
+          },
           current: kv(field, cur), proposed: kv(field, newValue), irreversible: true,
           before: kv(field, cur), after: mergeAudit(kv(field, newValue), runId, reason, ref)
         }).then(function () {
@@ -16628,10 +16652,11 @@
           : 'Internal note text, posted to every WO in the cohort';
         $('bwn-bulk-scalar').placeholder = o === 'status' ? 'Target status id (integer)' : 'Assignee User GUID';
 
-        // High-impact: reason + ticket required; show the block + the undo-eligibility label.
+        // High-impact: reason + ticket required; show the block + the undo-eligibility label. F3: when a
+        // destructive verb is selected while bulkOpsDestructive is off, say so - it cannot be armed.
         var hi = isHighRisk(o);
         $('bwn-bulk-hiwrap').style.display = hi ? 'block' : 'none';
-        $('bwn-bulk-undo').textContent = undoLabelFor(o);
+        $('bwn-bulk-undo').textContent = (destructiveArmBlocked(o, BWN_MODULES) ? 'BLOCKED: ' + (OP_LABEL[o] || o) + ' is a destructive verb and bulkOpsDestructive is OFF - it cannot be armed. ' : '') + undoLabelFor(o);
 
         var rr = session ? resolveRows() : [];
         var w = writable(rr);
@@ -16823,11 +16848,13 @@
       }
       function confirmTarget() { return 'APPLY ' + confirmCount; }
       // Approve enables only when: the dry-run still matches the inputs, the typed phrase is exact, the
-      // advisory approval gate allows the op for this cohort size, AND (for a high op) reason + ref are
-      // present. The armed per-batch confirm is installed at click time, not here.
+      // advisory approval gate allows the op for this cohort size, (for a high op) reason + ref are
+      // present, AND (F3) a destructive verb is NOT blocked by bulkOpsDestructive being off. The armed
+      // per-batch confirm is installed at click time, not here.
       function approveArmable() {
         return dryStamp === fingerprint() && confirmCount > 0 && $('bwn-bulk-confirm').value === confirmTarget() &&
-          approvalDecision(op(), confirmCount, bulkRank()).allowed && highInputsOk();
+          approvalDecision(op(), confirmCount, bulkRank()).allowed && highInputsOk() &&
+          !destructiveArmBlocked(op(), BWN_MODULES);
       }
       $('bwn-bulk-confirm').oninput = function () { $('bwn-bulk-approve').disabled = !approveArmable(); };
 
@@ -16870,40 +16897,46 @@
         $('bwn-bulk-file').disabled = true;
         var thisOp = op();
         var hi = isHighRisk(thisOp);
-        // F4-DEEP: (re-)ARM the per-batch confirm over exactly THIS batch's cohort + reason - covers a
-        // Retry (same runId) too, which the initial arm's disarm had torn down. Moderate ops never arm.
-        if (hi) armBatchConfirm(runId, targets.map(function (r) { return r.wo; }), reasonVal());
         var total = targets.length, doneN = 0;
         setProg(0, total);
         logln((retryOnly ? 'Retry' : 'Run') + ' ' + runId + ' - ' + total + ' ' + (OP_LABEL[thisOp] || thisOp) + ' write' + (total === 1 ? '' : 's') + ', concurrency ' + concurrency());
 
-        runPool(targets, function (rrow) {
-          // Pause gate at worker entry: a row already past this point (in flight) finishes; while
-          // paused, a runner parks HERE and pulls no new row. Cancel releases the gate and skips.
-          return waitWhilePaused().then(function () {
-            if (_cancelled) { var ce = new Error('cancelled before write'); ce.bwnCancelled = true; throw ce; }
-            return execFor('run', runId, rrow)
-              .then(function (r) {
-                logln('W-' + rrow.wo + ': ' + (r.outcome === 'noop' ? ('no-op (' + r.reason + ')') : 'done') + ' - ' + (OP_LABEL[thisOp] || thisOp));
-                return r;
-              }, function (err) {
-                logln('W-' + rrow.wo + ': FAILED - ' + ((err && err.message) || err));
-                throw err;
-              });
-          });
-          // Mid-batch KILL (item 9): shouldStop re-reads BWN_MODULES per record. A live bulkOps (or, for
-          // a destructive op, bulkOpsDestructive) flip to false halts the pool on the next row; bwnGqlOp's
-          // own per-feature check independently denies any row already in flight.
-        }, concurrency(), function (d, t) { doneN = d; setProg(d, t); }, function () { return _cancelled || bulkModuleKilled(BWN_MODULES, needsDestructiveFlag(thisOp)); })
-          .then(function (out) {
-            // Fold this batch's results back onto the full-row results array by rowIdx.
-            targets.forEach(function (r, j) { var i = session._targetIdx.indexOf(r.rowIdx); results[i] = out[j]; });
-            _running = false;
-            if (hi) disarmBatchConfirm();               // tear the confirm gate down the instant we settle
-            if (bulkModuleKilled(BWN_MODULES, needsDestructiveFlag(thisOp))) logln('-- HALTED by kill switch: remaining rows are not-run --');
-            $('bwn-bulk-file').disabled = false;
-            renderResults();
-          });
+        function runBody() {
+          return runPool(targets, function (rrow) {
+            // Pause gate at worker entry: a row already past this point (in flight) finishes; while
+            // paused, a runner parks HERE and pulls no new row. Cancel releases the gate and skips.
+            return waitWhilePaused().then(function () {
+              if (_cancelled) { var ce = new Error('cancelled before write'); ce.bwnCancelled = true; throw ce; }
+              return execFor('run', runId, rrow)
+                .then(function (r) {
+                  logln('W-' + rrow.wo + ': ' + (r.outcome === 'noop' ? ('no-op (' + r.reason + ')') : 'done') + ' - ' + (OP_LABEL[thisOp] || thisOp));
+                  return r;
+                }, function (err) {
+                  logln('W-' + rrow.wo + ': FAILED - ' + ((err && err.message) || err));
+                  throw err;
+                });
+            });
+            // Mid-batch KILL (item 9): shouldStop re-reads BWN_MODULES per record. A bulkOps flip to
+            // false halts the pool on the next row AND the WRAP's per-feature check denies any row
+            // already in flight (feature:'bulkOps'). A bulkOpsDestructive flip halts new rows here AND
+            // the destructive execs' validate() denies every row not yet past validate at send time
+            // (F1); up to `concurrency` rows (default 2) already past validate may still land.
+          }, concurrency(), function (d, t) { doneN = d; setProg(d, t); }, function () { return _cancelled || bulkModuleKilled(BWN_MODULES, needsDestructiveFlag(thisOp)); });
+        }
+
+        // F2: cleanup + result-fold runs on BOTH success AND failure so _running never wedges and the
+        // arm never leaks. For a high op the run is bracketed by withArmedBatch (arm -> run -> ALWAYS
+        // disarm, a real finally) - covering a Retry (same runId) whose initial disarm had torn the
+        // arm down. Moderate ops never arm.
+        function finishBatch(out) {
+          if (out) targets.forEach(function (r, j) { var i = session._targetIdx.indexOf(r.rowIdx); results[i] = out[j]; });
+          _running = false;
+          if (bulkModuleKilled(BWN_MODULES, needsDestructiveFlag(thisOp))) logln('-- HALTED by kill switch: remaining rows are not-run --');
+          $('bwn-bulk-file').disabled = false;
+          renderResults();
+        }
+        var p = hi ? withArmedBatch(runId, targets.map(function (r) { return r.wo; }), reasonVal(), runBody) : runBody();
+        p.then(function (out) { finishBatch(out); }, function (err) { logln('! Run aborted - ' + ((err && err.message) || err)); finishBatch(null); });
       }
       function concurrency() { var n = parseInt($('bwn-bulk-conc').value, 10); if (!isFinite(n)) n = 2; return Math.min(6, Math.max(1, n)); }
       function setProg(d, t) { $('bwn-bulk-progfill').style.width = (t ? Math.round(d / t * 100) : 0) + '%'; }

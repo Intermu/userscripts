@@ -126,8 +126,8 @@ function makeEnv(opts, engSrc) {
     '  bulkTally: bulkTally, auditTally: auditTally,\n' +
     '  pendingRows: pendingRows, runPool: runPool, overCap: overCap, capForOp: capForOp, idemKeyFor: idemKeyFor,\n' +
     '  priorityWriteValue: priorityWriteValue, markerFor: markerFor, noteHasMarker: noteHasMarker, cond: cond,\n' +
-    '  armBatchConfirm: armBatchConfirm, disarmBatchConfirm: disarmBatchConfirm, bulkConfirmHandler: bulkConfirmHandler, batchArmed: batchArmed,\n' +
-    '  bulkModuleKilled: bulkModuleKilled, approvalDecision: approvalDecision, isHighRisk: isHighRisk, needsDestructiveFlag: needsDestructiveFlag,\n' +
+    '  armBatchConfirm: armBatchConfirm, disarmBatchConfirm: disarmBatchConfirm, bulkConfirmHandler: bulkConfirmHandler, batchArmed: batchArmed, withArmedBatch: withArmedBatch,\n' +
+    '  bulkModuleKilled: bulkModuleKilled, approvalDecision: approvalDecision, isHighRisk: isHighRisk, needsDestructiveFlag: needsDestructiveFlag, destructiveArmBlocked: destructiveArmBlocked,\n' +
     '  clampReason: clampReason, clampRef: clampRef, undoLabelFor: undoLabelFor, bulkScalar: bulkScalar,\n' +
     '  BULK_MAX_RECORDS: BULK_MAX_RECORDS, ADD_NOTE_M: ADD_NOTE_M, PATCH_M: PATCH_M, M_ADD_TASK: M_ADD_TASK };\n})()',
     sandbox, { filename: 'bulk-ops.js' });
@@ -515,9 +515,11 @@ function tick(n) {
   // (5) F4-DEEP: re-introduce a bare confirmed:true into the patch path -> an UNARMED status write
   //     now sends. Proves the ABSENCE of confirmed:true + the armed handler are load-bearing.
   await (async function () {
+    // Target is unique to bulkExecPatch (its validate opens with the BWN_MODULES bulkOpsDestructive
+    // re-check); inserting confirmed:true into its opts lets an UNARMED destructive write through.
     var mut = mutate(S_ENG,
-      "feature: 'bulkOps', ids: { wo: wo }, reason: clampReason(reason),\n          validate: function (v) { var d = v && v.data || {}; if (!d.workOrderNumber) return 'no WO number';",
-      "feature: 'bulkOps', confirmed: true, ids: { wo: wo }, reason: clampReason(reason),\n          validate: function (v) { var d = v && v.data || {}; if (!d.workOrderNumber) return 'no WO number';");
+      "feature: 'bulkOps', ids: { wo: wo }, reason: clampReason(reason),\n          validate: function (v) {\n            if (typeof BWN_MODULES",
+      "feature: 'bulkOps', confirmed: true, ids: { wo: wo }, reason: clampReason(reason),\n          validate: function (v) {\n            if (typeof BWN_MODULES");
     var m = makeEnv({}, mut);   // NOTE: no armBatchConfirm here
     await m.api.bulkExecStatus('run', 'RS', '200', 7, 'r', 'T');
     await tick();
@@ -533,6 +535,67 @@ function tick(n) {
     await tick();
     A.eq('CONTROL: neutering the no-op precheck writes a same-value patch (precheck is load-bearing)', patchCalls(m.gql).length, 1);
   })();
+
+  // =========================================================================================
+  // F1: a mid-batch bulkOpsDestructive kill DENIES a not-yet-dispatched destructive write at send.
+  // The destructive execs pass feature:'bulkOps' (so the WRAP feature-check watches bulkOps, not
+  // bulkOpsDestructive); their validate() re-reads bulkOpsDestructive so a row not yet past validate
+  // is blocked before the network call.
+  // =========================================================================================
+  e = makeEnv({ modules: { bulkOps: true, bulkOpsDestructive: false } });
+  e.api.armBatchConfirm('RF1', [200], 'r');
+  var f1Denied = false;
+  await e.api.bulkExecStatus('run', 'RF1', '200', 7, 'r', 'T').then(function () {}, function () { f1Denied = true; });
+  await tick();
+  A.ok('F1: a destructive write is DENIED when bulkOpsDestructive is off (validate blocks at send)', f1Denied);
+  A.eq('F1: nothing sent on the destructive-kill denial', patchCalls(e.gql).length, 0);
+  A.eq('F1: audit records the validation denial', (e.api.auditAll()[0] || {}).outcome, 'denied');
+  e.api.disarmBatchConfirm();
+  // assign is denied the same way (both destructive execs share bulkExecPatch's validate)
+  var eA = makeEnv({ modules: { bulkOps: true, bulkOpsDestructive: false } });
+  eA.api.armBatchConfirm('RF1', [200], 'r');
+  var f1AssignDenied = false;
+  await eA.api.bulkExecAssign('run', 'RF1', '200', 'g2', 'r', 'T').then(function () {}, function () { f1AssignDenied = true; });
+  await tick();
+  A.ok('F1: reassign is denied the same way (shared validate)', f1AssignDenied && patchCalls(eA.gql).length === 0);
+  eA.api.disarmBatchConfirm();
+  // control: with bulkOpsDestructive ON (armed), the SAME status write DOES send - the validate gate is load-bearing.
+  e = makeEnv({ modules: { bulkOps: true, bulkOpsDestructive: true } });
+  e.api.armBatchConfirm('RF1', [200], 'r');
+  await e.api.bulkExecStatus('run', 'RF1', '200', 7, 'r', 'T');
+  await tick();
+  A.eq('F1 control: with bulkOpsDestructive ON, the destructive write sends (gate is load-bearing)', patchCalls(e.gql).length, 1);
+  e.api.disarmBatchConfirm();
+
+  // =========================================================================================
+  // F2: withArmedBatch ALWAYS disarms - a sync throw AND a rejected promise both restore
+  // setConfirm(null), so a failed/wedged run never leaks a live arm.
+  // =========================================================================================
+  e = makeEnv();
+  var f2Threw = false;
+  await e.api.withArmedBatch('RF2', [200], 'r', function () { throw new Error('boom in body'); }).then(function () {}, function () { f2Threw = true; });
+  A.ok('F2: a SYNC throw in the batch body still disarms', f2Threw && e.api.batchArmed() === false);
+  var f2Refused = false;
+  await e.api.bulkExecStatus('run', 'RF2', '200', 7, 'r', 'T').then(function () {}, function () { f2Refused = true; });
+  await tick();
+  A.ok('F2: after a thrown body, a high-risk write is refused again (setConfirm back to null)', f2Refused);
+  // a REJECTED promise body also disarms
+  e = makeEnv();
+  await e.api.withArmedBatch('RF2', [200], 'r', function () { return Promise.reject(new Error('rejected body')); }).then(function () {}, function () {});
+  A.ok('F2: a REJECTED batch body also disarms', e.api.batchArmed() === false);
+  // the happy path still disarms + propagates the body's value
+  e = makeEnv();
+  var f2Val = await e.api.withArmedBatch('RF2', [200], 'r', function () { return Promise.resolve('ok-value'); });
+  A.ok('F2: a resolved body disarms AND propagates its value', f2Val === 'ok-value' && e.api.batchArmed() === false);
+
+  // =========================================================================================
+  // F3: a destructive verb cannot be ARMED while bulkOpsDestructive is off (pre-Approve gate).
+  // =========================================================================================
+  A.ok('F3: status is arm-blocked when bulkOpsDestructive is off', e.api.destructiveArmBlocked('status', { bulkOpsDestructive: false }) === true);
+  A.ok('F3: assign is arm-blocked when bulkOpsDestructive is off', e.api.destructiveArmBlocked('assign', { bulkOpsDestructive: false }) === true);
+  A.ok('F3: status is NOT blocked when bulkOpsDestructive is on', e.api.destructiveArmBlocked('status', { bulkOpsDestructive: true }) === false);
+  A.ok('F3: ECD is NOT destructive-arm-blocked (it rides bulkOps alone, not the second flag)', e.api.destructiveArmBlocked('ecd', { bulkOpsDestructive: false }) === false);
+  A.ok('F3: a moderate op (note) is never destructive-arm-blocked', e.api.destructiveArmBlocked('note', { bulkOpsDestructive: false }) === false);
 
   A.finish();
 })().catch(function (e) { console.error('\nHARNESS ERROR:', e && e.stack || e); process.exit(2); });
