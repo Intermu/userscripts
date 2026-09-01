@@ -63,6 +63,17 @@ A.ok('bulkSource flag ships default OFF', /bulkSource: false,/.test(coreFull));
 A.ok('the whole module mounts only behind BWN_MODULES.bulkSource', /bwnBoot\('bulkSource', BWN_MODULES\.bulkSource, function \(\) \{/.test(coreFull));
 A.ok('the write passes feature:bulkSource + confirmed:true to the wrapper', /feature: 'bulkSource', confirmed: true/.test(S_ENG));
 
+// ---- UI-layer regression guards. The selection + checkbox-injection code is NOT in the sliced
+// (DOM-free) engine, so two live bugs escaped through it during the smoke: (1) Array.prototype.slice
+// .call() on a Set returns [] - a Set is not array-like - which made selList() always empty, so Dry
+// Run silently no-op'd even with rows checked; (2) inserting the checkbox before the WO <a> failed
+// with NotFoundError because the anchor is nested (td > div > a), not a direct child of the td. Lock
+// both fixes by source pattern so neither can regress. ----
+A.ok('selList converts the Set with Array.from (slice.call on a Set yields [])', /function selList\(\) \{ return Array\.from\(selected\)/.test(coreFull));
+A.ok('selList never uses Array.prototype.slice on the Set (that returns [])', !/slice\.call\(selected\)/.test(coreFull));
+A.ok('the row checkbox mounts at the cell edge (cell.firstChild), not before the nested anchor', /cell\.insertBefore\(cb, cell\.firstChild\)/.test(coreFull));
+A.ok('ensureBoxes never inserts before the WO anchor (nested, not a direct child of the td)', !/insertBefore\(cb, anchor\)/.test(coreFull));
+
 // Programmable bwnGql: records every call so a test can assert what was (or was NOT) issued.
 function mkGql(opts) {
   opts = opts || {};
