@@ -111,6 +111,14 @@ jobs:
       - name: Bid-out dock registration + ACT_TOOL harness
         run: node scripts/test-bidout-dock.js
 
+      # Phase 1 read-only Vendor Snapshot card (bwn-bid-out.user.js). Slices the BWN-VENDOR-SNAPSHOT
+      # block and drives the real functions: governance fail-closed, the count-gated rating (no
+      # zero-sample scores), never-impute metric guard, distance-ranked explainable recommendation,
+      # the render states, the two gate integrations (rank ladder + vendorIntel flag), and a SCHEMA
+      # PIN on VEND_Q + the slim vendorAssignmentJobMetrics read - with 5 negative-control mutations.
+      - name: Vendor snapshot (Phase 1) render/guard/schema-pin harness
+        run: node scripts/test-vendor-snapshot.js
+
       # Cross-script: Drop Upload has no egress, so the client-response item only exists if the
       # bwn:assist:track / :tracked handshake holds. Nothing else checks across those two files.
       - name: Client-response track handshake + convergence harness
