@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         BWN Suite - Core (Broadway National)
 // @namespace    broadwaynational.bwn
-// @version      1.79.0
+// @version      1.79.1
 // @downloadURL  https://raw.githubusercontent.com/Intermu/userscripts/main/bwn-suite-core.user.js
 // @updateURL    https://raw.githubusercontent.com/Intermu/userscripts/main/bwn-suite-core.user.js
 // @description  Runs several Umbrava helpers for BWN coordinators, in the browser with no privileged grants. Includes: PO Approval + ETA Builder; WO Assist (GP/ETA, a stall watchdog, DNE calculator, and a next-action playbook); Email Leak Guard (checks recipients against vendor names, PO amounts, and client budget references before an outbound email sends); WO List Heat (a triage overlay + My Day strip on the work-order list, with an optional same-origin Umbrava API scan for deterministic full-board coverage); and the BWN Launcher (opens the Azure Static Web App tools with the current WO's context). Modules share state through sessionStorage/localStorage. The only network calls are same-origin Umbrava GraphQL requests (app.umbrava.com/api/graphql, the app's own session): List Heat's full-board scan and WO Assist's work-order / trip / clock-in / document reads, plus ONE write - BWN Views saves the column layout through Umbrava's own putUserPreference, the same preference the column chooser writes; everything else is offline. Toggle modules in BWN_MODULES below.
@@ -16435,23 +16435,30 @@
       var table = findListTable(); if (!table) return;
       var rows = table.querySelectorAll('tr');
       for (var i = 0; i < rows.length; i++) {
-        var tr = rows[i];
-        var wo = woOf(tr); if (wo == null) continue;
-        var cb = tr.querySelector('.bwn-src-cb');
-        if (!cb) {
-          var anchor = tr.querySelector(WO_ANCHOR);
-          var cell = (anchor.closest && anchor.closest('td')) || anchor.parentElement;
-          cb = document.createElement('input');
-          cb.type = 'checkbox';
-          cb.className = 'bwn-src-cb';
-          cb.style.cssText = 'margin-right:8px;vertical-align:middle;cursor:pointer;width:15px;height:15px;accent-color:var(--bwn-green)';
-          cb.addEventListener('click', function (ev) { ev.stopPropagation(); });   // don't trigger row nav/selection
-          cb.addEventListener('change', onCbChange);
-          cell.insertBefore(cb, anchor);
-        }
-        cb.setAttribute('data-wo', String(wo));
-        cb.setAttribute('aria-label', 'Select work order ' + wo + ' for bulk Source Job#');
-        cb.checked = selected.has(wo);
+        // Per-row guard: the grid's rows vary (header, group, spacer rows), so one odd row must not
+        // abort the whole pass and leave the rest of the list without checkboxes.
+        try {
+          var tr = rows[i];
+          var wo = woOf(tr); if (wo == null) continue;
+          var cb = tr.querySelector('.bwn-src-cb');
+          if (!cb) {
+            var anchor = tr.querySelector(WO_ANCHOR);
+            // The WO <a> is nested inside its cell (td > div > ... > a), so it is NOT a direct child
+            // of the td - inserting BEFORE the anchor must use the anchor's own parent, and inserting
+            // at the cell's left edge must use cell.firstChild (always a direct child, or null).
+            var cell = (anchor.closest && anchor.closest('td')) || anchor.parentElement;
+            cb = document.createElement('input');
+            cb.type = 'checkbox';
+            cb.className = 'bwn-src-cb';
+            cb.style.cssText = 'margin-right:8px;vertical-align:middle;cursor:pointer;width:15px;height:15px;accent-color:var(--bwn-green)';
+            cb.addEventListener('click', function (ev) { ev.stopPropagation(); });   // don't trigger row nav/selection
+            cb.addEventListener('change', onCbChange);
+            cell.insertBefore(cb, cell.firstChild);
+          }
+          cb.setAttribute('data-wo', String(wo));
+          cb.setAttribute('aria-label', 'Select work order ' + wo + ' for bulk Source Job#');
+          cb.checked = selected.has(wo);
+        } catch (e) { /* skip this row; the next ensure pass retries */ }
       }
       refreshCount();
     }
