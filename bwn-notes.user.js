@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         BWN Suite - Note Templates (Broadway National)
 // @namespace    broadwaynational.bwn
-// @version      0.7.3
+// @version      0.7.4
 // @description  Canned dispatch-note templates in a "Templates" dropdown beside the "+ Add" note button in the Umbrava Dispatch Board's work-order detail panel (Notes tab). Picking a template opens Umbrava's own Add Note composer and DRAFTS the note into it (signed with your first name, ______ blanks left for you to fill) - it is NEVER auto-posted; you review, set the Type, and click Save. STANDALONE: carries its own tiptap/ProseMirror inserter, so in-house techs install this one script alone - no drop-upload dependency. Still prefers drop-upload's hook (window.__bwnFillNoteEditor) when that script is also installed, so coordinator machines keep a single live-tested fill path. Also, on the regular WO page, a "Spoke with" button stamps a [Spoke with: <Vendor>] tag at the TOP of a note (vendor picked from your recent vendors or typed) so you can record which of several WO vendors you spoke with - same human-gated draft, never auto-posted. @grant none, zero egress.
 // @match        https://app.umbrava.com/*
 // @run-at       document-idle
@@ -456,9 +456,22 @@
     trig.appendChild(lab); trig.appendChild(car);
     wrap.appendChild(trig);
 
-    var menu = null;
+    // Two-level flyout: the top menu lists the GROUPS (4 short rows, so it never runs off the
+    // viewport bottom the way the old flat list did on a low trigger); hovering/clicking a group
+    // pops its items in a submenu to the LEFT (fallback right if there's no room). Both levels clamp
+    // into the viewport so every template is reachable at 100% zoom. Hover-intent (armClose/cancelClose,
+    // same shape as the AI-Draft flyout, PR #38) keeps the submenu open on a diagonal move.
+    var menu = null, sub = null, subOwner = null, subCloseT = null;
+    function removeSub() {
+      if (subCloseT) { clearTimeout(subCloseT); subCloseT = null; }
+      if (sub) { sub.remove(); sub = null; }
+      if (subOwner) { subOwner.setAttribute('aria-expanded', 'false'); subOwner.style.background = 'transparent'; subOwner = null; }
+    }
+    function armClose() { if (subCloseT) clearTimeout(subCloseT); subCloseT = setTimeout(removeSub, 220); }
+    function cancelClose() { if (subCloseT) { clearTimeout(subCloseT); subCloseT = null; } }
     function close() {
       if (!menu) return;
+      removeSub();
       menu.remove(); menu = null;
       trig.setAttribute('aria-expanded', 'false');
       document.removeEventListener('mousedown', onDoc, true);
@@ -466,33 +479,68 @@
       window.removeEventListener('scroll', close, true);
       window.removeEventListener('resize', close, true);
     }
-    function onDoc(e) { if (menu && !menu.contains(e.target) && !trig.contains(e.target)) close(); }
+    function onDoc(e) { if (menu && !menu.contains(e.target) && (!sub || !sub.contains(e.target)) && !trig.contains(e.target)) close(); }
     function onKey(e) { if (e.key === 'Escape') { e.preventDefault(); close(); } }
+    // Open one group's items to the left of the parent menu, aligned to the group row, clamped in-view.
+    function openSub(grp, ownerRow) {
+      if (subOwner === ownerRow && sub) { cancelClose(); return; }   // already open for this group
+      removeSub();
+      subOwner = ownerRow;
+      ownerRow.setAttribute('aria-expanded', 'true');
+      ownerRow.style.background = '#f0fdf4';
+      sub = document.createElement('div');
+      sub.setAttribute('role', 'menu');
+      sub.setAttribute('aria-label', grp.group + ' templates');
+      sub.style.cssText = 'position:fixed;z-index:99999;min-width:300px;max-height:80vh;overflow:auto;background:#fff;border:1px solid #e2e8f0;border-radius:10px;box-shadow:0 10px 30px rgba(0,0,0,.18);padding:6px;font-family:-apple-system,BlinkMacSystemFont,"Segoe UI",Arial,sans-serif;';
+      grp.items.forEach(function (tpl) {
+        var row = document.createElement('button');
+        row.type = 'button'; row.setAttribute('role', 'menuitem'); row.tabIndex = -1;
+        row.textContent = tpl.label;
+        row.style.cssText = 'display:block;width:100%;box-sizing:border-box;text-align:left;padding:8px 10px;border:none;background:transparent;border-radius:7px;cursor:pointer;font:500 13px -apple-system,BlinkMacSystemFont,"Segoe UI",Arial,sans-serif;color:#1e293b;';
+        row.addEventListener('mouseenter', function () { row.style.background = '#f0fdf4'; });
+        row.addEventListener('mouseleave', function () { row.style.background = 'transparent'; });
+        row.addEventListener('click', function (e) { e.preventDefault(); close(); pickTemplate(tpl); });
+        sub.appendChild(row);
+      });
+      sub.addEventListener('mouseenter', cancelClose);
+      sub.addEventListener('mouseleave', armClose);
+      document.body.appendChild(sub);
+      var mr = menu.getBoundingClientRect(), rr = ownerRow.getBoundingClientRect();
+      var sw = sub.offsetWidth || 300, sh = sub.offsetHeight || 0;
+      var left = mr.left - sw - 4;                       // to the LEFT of the parent menu
+      if (left < 8) left = mr.right + 4;                 // no room on the left -> open to the right
+      left = Math.min(left, window.innerWidth - sw - 8);
+      var top = Math.min(rr.top, window.innerHeight - sh - 8);   // align to the row, clamp to viewport
+      if (top < 8) top = 8;
+      sub.style.left = Math.round(left) + 'px';
+      sub.style.top = Math.round(top) + 'px';
+    }
     function open() {
       menu = document.createElement('div');
       menu.setAttribute('role', 'menu');
-      menu.setAttribute('aria-label', 'Note templates');
-      menu.style.cssText = 'position:fixed;z-index:99998;min-width:300px;max-height:72vh;overflow:auto;background:#fff;border:1px solid #e2e8f0;border-radius:10px;box-shadow:0 10px 30px rgba(0,0,0,.18);padding:6px;font-family:-apple-system,BlinkMacSystemFont,"Segoe UI",Arial,sans-serif;';
+      menu.setAttribute('aria-label', 'Note template groups');
+      menu.style.cssText = 'position:fixed;z-index:99998;min-width:220px;max-height:80vh;overflow:auto;background:#fff;border:1px solid #e2e8f0;border-radius:10px;box-shadow:0 10px 30px rgba(0,0,0,.18);padding:6px;font-family:-apple-system,BlinkMacSystemFont,"Segoe UI",Arial,sans-serif;';
       TEMPLATES.forEach(function (grp) {
-        var h = document.createElement('div');
-        h.textContent = grp.group;
-        h.style.cssText = 'padding:8px 10px 4px;font:700 10px ui-monospace,"Segoe UI Mono",monospace;letter-spacing:.6px;text-transform:uppercase;color:#64748b;';
-        menu.appendChild(h);
-        grp.items.forEach(function (tpl) {
-          var row = document.createElement('button');
-          row.type = 'button'; row.setAttribute('role', 'menuitem'); row.tabIndex = -1;
-          row.textContent = tpl.label;
-          row.style.cssText = 'display:block;width:100%;box-sizing:border-box;text-align:left;padding:8px 10px;border:none;background:transparent;border-radius:7px;cursor:pointer;font:500 13px -apple-system,BlinkMacSystemFont,"Segoe UI",Arial,sans-serif;color:#1e293b;';
-          row.addEventListener('mouseenter', function () { row.style.background = '#f0fdf4'; });
-          row.addEventListener('mouseleave', function () { row.style.background = 'transparent'; });
-          row.addEventListener('click', function (e) { e.preventDefault(); close(); pickTemplate(tpl); });
-          menu.appendChild(row);
-        });
+        var row = document.createElement('button');
+        row.type = 'button'; row.setAttribute('role', 'menuitem'); row.tabIndex = -1;
+        row.setAttribute('aria-haspopup', 'menu'); row.setAttribute('aria-expanded', 'false');
+        row.style.cssText = 'display:flex;align-items:center;justify-content:space-between;gap:10px;width:100%;box-sizing:border-box;text-align:left;padding:9px 10px;border:none;background:transparent;border-radius:7px;cursor:pointer;font:600 13px -apple-system,BlinkMacSystemFont,"Segoe UI",Arial,sans-serif;color:#1e293b;';
+        var name = document.createElement('span'); name.textContent = grp.group;
+        var chev = document.createElement('span'); chev.textContent = '‹'; chev.setAttribute('aria-hidden', 'true'); chev.style.cssText = 'font-size:14px;color:#94a3b8;';
+        row.appendChild(name); row.appendChild(chev);
+        row.addEventListener('mouseenter', function () { cancelClose(); row.style.background = '#f0fdf4'; openSub(grp, row); });
+        row.addEventListener('mouseleave', function () { if (subOwner !== row) row.style.background = 'transparent'; });
+        row.addEventListener('click', function (e) { e.preventDefault(); openSub(grp, row); });   // click opens (touch, no hover)
+        menu.appendChild(row);
       });
+      menu.addEventListener('mouseenter', cancelClose);
+      menu.addEventListener('mouseleave', armClose);
       document.body.appendChild(menu);
       var r = trig.getBoundingClientRect();
-      var w = menu.offsetWidth || 300;
-      menu.style.top = Math.round(r.bottom + 4) + 'px';
+      var w = menu.offsetWidth || 220, h = menu.offsetHeight || 0;
+      var top = Math.min(r.bottom + 4, window.innerHeight - h - 8);   // clamp so the group menu itself never clips
+      if (top < 8) top = 8;
+      menu.style.top = Math.round(top) + 'px';
       menu.style.left = Math.round(Math.min(r.left, window.innerWidth - w - 8)) + 'px';
       trig.setAttribute('aria-expanded', 'true');
       document.addEventListener('mousedown', onDoc, true);
