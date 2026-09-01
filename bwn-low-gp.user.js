@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         BWN Suite - Low GP Note (Broadway National)
 // @namespace    broadwaynational.bwn
-// @version      0.2.4
+// @version      0.2.5
 // @description  A "Low GP" button beside the global "Search Work Orders" box. Enter a WO#, Tracking#, Source PO#, or Source Job#; it finds the work order, shows a one-click CONFIRM card (WO / client / location / assignee), then posts TWO notes via Umbrava's own API: a Billing-type note reading "Low GP", and a second note that @-mentions the WO's assignee ("@Name Low GP note added") so they are notified. The @-mention is the real TipTap mention span the SPA sends (captured live 2026-08-17); actionNoteEmails stays null - the span alone notifies. Same-origin /api/graphql with the app's Auth0 bearer, @grant none, zero egress. Nothing posts until you click Confirm.
 // @match        https://app.umbrava.com/*
 // @run-at       document-idle
@@ -175,8 +175,27 @@
     while (j < n) { var c = q.charAt(j); if ((c >= 'A' && c <= 'Z') || (c >= 'a' && c <= 'z') || (c >= '0' && c <= '9') || c === '_') j++; else break; }
     return lgGql(q.slice(i, j) || null, query, variables);
   };
-  var BWN_VER = '0.2.4';
+  var BWN_VER = '0.2.5';
   var BWN_MODULES = (function () { try { return JSON.parse(localStorage.getItem('bwn:modules') || '{}') || {}; } catch (e) { return {}; } })();
+  // Central governance (governance-sync): fold the org flags bwn-suite-ai caches to bwn:gov into
+  // BWN_MODULES as ONE-WAY disables, the SAME shape as bwn-suite-core's bwnApplyGov(). A remote
+  // flags['lowGp']===false or flags.globalKillSwitch DISABLES this script's writes - the bwnGqlOp
+  // per-feature gate below reads BWN_MODULES['lowGp'] live - and can NEVER enable one. Fail-closed:
+  // an absent or corrupt bundle keeps the local defaults (last-known-good), never relaxes. Re-applies
+  // on the bwn:gov ping so a remote kill blocks new writes with no reload.
+  if (!('lowGp' in BWN_MODULES)) BWN_MODULES.lowGp = true;
+  function bwnApplyGov() {
+    try {
+      var g = JSON.parse(localStorage.getItem('bwn:gov') || 'null');
+      if (!g || typeof g !== 'object' || !g.flags || typeof g.flags !== 'object') return;
+      var f = g.flags, kill = f.globalKillSwitch === true;
+      Object.keys(BWN_MODULES).forEach(function (k) {
+        if (kill || f[k] === false) BWN_MODULES[k] = false;   // one-way: only ever disable
+      });
+    } catch (e) { /* corrupt bundle -> keep local defaults (safe) */ }
+  }
+  bwnApplyGov();
+  try { document.addEventListener('bwn:gov', function () { bwnApplyGov(); }); } catch (e) { }
   var BWN_OPS = {
     addEditJobNote: { kind: 'write', target: 'note', risk: 'moderate', idempotent: false, retry: 'none',
       ok: 'Note posted.', fail: 'The note was not posted.' }
@@ -380,7 +399,7 @@
     // Routed through bwnGqlOp: correlation id + shared bwn:audit entry + centralized success:false
     // rejection. addEditJobNote is moderate (no confirm gate); ids carry the scalar WO number only
     // (the note text stays in variables, never the audit trail).
-    return bwnGqlOp('addEditJobNote', LG_ADD_NOTE, { addEditInput: input }, { ids: { wo: input.workOrderNumber } }).then(function (d) {
+    return bwnGqlOp('addEditJobNote', LG_ADD_NOTE, { addEditInput: input }, { feature: 'lowGp', ids: { wo: input.workOrderNumber } }).then(function (d) {
       var res = d && d.addEditJobNote;
       if (!res || res.success !== true) throw new Error((res && res.message) || 'addEditJobNote reported no success');
       return res.note;

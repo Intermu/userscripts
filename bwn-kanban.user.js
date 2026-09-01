@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         BWN WO Kanban (Broadway National)
 // @namespace    broadwaynational.bwn
-// @version      0.7.7
+// @version      0.7.8
 // @description  Turns Umbrava's Work Orders list into a kanban board without leaving the page. A Board/List toggle sits next to the list's own search box; switching to Board hides the table (the toolbar stays, so the app's own filtering still drives everything) and lays the same work orders out as cards in lanes. Lanes are WO Status by default and regroup to Priority, Assignee, Client or Age from a dropdown. The board never invents its own filter system, and as of 0.5.0 it does not query at all: it reads both rows and verdicts from the full-board scan bwn-suite-core's List Heat already runs on the same page, so whatever the list is filtered to (phase, statuses, search, assignee chips, sort) is exactly what the board shows, and one list page now costs one full-board query instead of two. It still captures the SPA's own PagedWorkOrders request off the wire, because that capture is where the auth headers for the status write come from. Cards carry the triage picture: the status clock against the limit that WO was actually judged against, the reasons it is flagged, whether its onsite date has already passed, DNE vs vendor NTE with GP, vendors and trades. Severity is never computed here - it is read from the verdicts List Heat publishes in bwn-suite-core, so the board and the list can never disagree. Dragging a card between status lanes DOES change the work order, through Umbrava's own captured PatchWorkOrder mutation - it asks first, states that the WO's time-in-status clock will reset, verifies the server reported success, re-scans rather than trusting the optimistic move, and leaves the card where it was if anything fails. Everything is same-origin using the page's own session: no @connect, no keys, nothing leaves the browser.
 // @downloadURL  https://raw.githubusercontent.com/Intermu/userscripts/main/bwn-kanban.user.js
 // @updateURL    https://raw.githubusercontent.com/Intermu/userscripts/main/bwn-kanban.user.js
@@ -26,7 +26,7 @@
   // update check another. There is no GM_info without a grant (and a grant would sandbox the
   // script away from the page's fetch - see the header note), so the fallback is a literal
   // that must be bumped WITH @version; the harness pins the two together.
-  var VER = '0.7.7';
+  var VER = '0.7.8';
   console.info('[BWN KANBAN] v' + VER + ' - board rows AND verdicts read from bwn-suite-core\'s List Heat scan (no second full-board query); drag between status lanes writes via captured PatchWorkOrder');
 
   // ---------------------------------------------------------------------------
@@ -792,6 +792,25 @@
   };
   var BWN_VER = VER;
   var BWN_MODULES = (function () { try { return JSON.parse(localStorage.getItem('bwn:modules') || '{}') || {}; } catch (e) { return {}; } })();
+  // Central governance (governance-sync): fold the org flags bwn-suite-ai caches to bwn:gov into
+  // BWN_MODULES as ONE-WAY disables, the SAME shape as bwn-suite-core's bwnApplyGov(). A remote
+  // flags['kanban']===false or flags.globalKillSwitch DISABLES this script's writes - the bwnGqlOp
+  // per-feature gate below reads BWN_MODULES['kanban'] live - and can NEVER enable one. Fail-closed:
+  // an absent or corrupt bundle keeps the local defaults (last-known-good), never relaxes. Re-applies
+  // on the bwn:gov ping so a remote kill blocks new writes with no reload.
+  if (!('kanban' in BWN_MODULES)) BWN_MODULES.kanban = true;
+  function bwnApplyGov() {
+    try {
+      var g = JSON.parse(localStorage.getItem('bwn:gov') || 'null');
+      if (!g || typeof g !== 'object' || !g.flags || typeof g.flags !== 'object') return;
+      var f = g.flags, kill = f.globalKillSwitch === true;
+      Object.keys(BWN_MODULES).forEach(function (k) {
+        if (kill || f[k] === false) BWN_MODULES[k] = false;   // one-way: only ever disable
+      });
+    } catch (e) { /* corrupt bundle -> keep local defaults (safe) */ }
+  }
+  bwnApplyGov();
+  try { document.addEventListener('bwn:gov', function () { bwnApplyGov(); }); } catch (e) { }
   var BWN_OPS = {
     patchWorkOrder: { kind: 'write', target: 'workOrder', risk: 'high', idempotent: false, retry: 'none',
       ok: 'Work order updated.', fail: 'The work order was not updated.' }
@@ -1013,7 +1032,7 @@
     // high-risk confirm gate + centralized success:false rejection. The confirm() above IS this
     // write's confirmation, so it passes confirmed:true; before/after carry the scalar status ids
     // for the audit trail (never PII). bwnGql POSTs over the captured session headers.
-    return bwnGqlOp('patchWorkOrder', PATCH_QUERY, { data: { workOrderNumber: row.number, statusId: { shouldInclude: true, value: targetId } } }, { confirmed: true, ids: { wo: row.number }, before: { statusId: row.statusId }, after: { statusId: targetId } }).then(function (data) {
+    return bwnGqlOp('patchWorkOrder', PATCH_QUERY, { data: { workOrderNumber: row.number, statusId: { shouldInclude: true, value: targetId } } }, { feature: 'kanban', confirmed: true, ids: { wo: row.number }, before: { statusId: row.statusId }, after: { statusId: targetId } }).then(function (data) {
       var p = data && data.patchWorkOrder;
       if (!p || !p.success) throw new Error((p && p.message) || 'patchWorkOrder reported no success');
       // Move it locally so the board is right immediately, then re-scan for the truth.

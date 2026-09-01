@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         BWN Suite - Temp-Activate Vendor for PO (Broadway National)
 // @namespace    broadwaynational.bwn
-// @version      0.3.1
+// @version      0.3.2
 // @description  Inside the "Create Purchase Order" modal, adds a "Temp-Activate Vendor" button. Type an inactive vendor's name or number; it finds them, temporarily activates them via Umbrava's own API (reason ALWAYS "Temporary Activation") so they become assignable in the PO. After you assign them and click Create, it watches the PO save and auto-prompts a one-click re-deactivation (reason ALWAYS "Pending Compliance"). A persistent reminder pill keeps the temporarily-active vendor visible until you deactivate, so nobody is left active by mistake. Same-origin /api/graphql with the app's Auth0 bearer, @grant none, zero egress. Every write is one click behind a confirm.
 // @match        https://app.umbrava.com/*
 // @run-at       document-idle
@@ -74,8 +74,27 @@
   // bwnGql(query,variables) it calls, recovering the op name from the query. temp-vendor confirms
   // each write in its own panel (vendor + reason spelled out), so it passes confirmed:true.
   function bwnGql(query, variables) { var m = /\b(?:query|mutation)\s+([A-Za-z0-9_]+)/.exec(query); return tvGql(m ? m[1] : null, query, variables); }
-  var BWN_VER = (typeof GM_info !== 'undefined' && GM_info.script && GM_info.script.version) || '0.3.1';
+  var BWN_VER = (typeof GM_info !== 'undefined' && GM_info.script && GM_info.script.version) || '0.3.2';
   var BWN_MODULES = (function () { try { return JSON.parse(localStorage.getItem('bwn:modules') || '{}') || {}; } catch (e) { return {}; } })();
+  // Central governance (governance-sync): fold the org flags bwn-suite-ai caches to bwn:gov into
+  // BWN_MODULES as ONE-WAY disables, the SAME shape as bwn-suite-core's bwnApplyGov(). A remote
+  // flags['tempVendor']===false or flags.globalKillSwitch DISABLES this script's writes - the bwnGqlOp
+  // per-feature gate below reads BWN_MODULES['tempVendor'] live - and can NEVER enable one. Fail-closed:
+  // an absent or corrupt bundle keeps the local defaults (last-known-good), never relaxes. Re-applies
+  // on the bwn:gov ping so a remote kill blocks new writes with no reload.
+  if (!('tempVendor' in BWN_MODULES)) BWN_MODULES.tempVendor = true;
+  function bwnApplyGov() {
+    try {
+      var g = JSON.parse(localStorage.getItem('bwn:gov') || 'null');
+      if (!g || typeof g !== 'object' || !g.flags || typeof g.flags !== 'object') return;
+      var f = g.flags, kill = f.globalKillSwitch === true;
+      Object.keys(BWN_MODULES).forEach(function (k) {
+        if (kill || f[k] === false) BWN_MODULES[k] = false;   // one-way: only ever disable
+      });
+    } catch (e) { /* corrupt bundle -> keep local defaults (safe) */ }
+  }
+  bwnApplyGov();
+  try { document.addEventListener('bwn:gov', function () { bwnApplyGov(); }); } catch (e) { }
   var BWN_OPS = {
     activateVendor: { kind: 'write', target: 'vendor', risk: 'high', idempotent: true, retry: 'none',
       ok: 'Vendor activated.', fail: 'The vendor was not activated.' },
@@ -312,6 +331,7 @@
       // confirmed via its panel (vendor + reason spelled out), so it passes confirmed:true; the
       // wrapper owns the success:false rejection.
       return bwnGqlOp('activateVendor', M_ACTIVATE, { data: { vendorId: vendor.id, activationReasonId: rid, notes: ACT_NOTE } }, {
+        feature: 'tempVendor',
         confirmed: true,
         ids: { vendorId: vendor.id },
         before: { status: 'Inactive' }, after: { status: 'Active' }, reason: ACT_REASON_NAME
@@ -324,6 +344,7 @@
     return tvReasonId('deact').then(function (rid) {
       // Moderate write - routed through bwnGqlOp for the audit trail + centralized success handling.
       return bwnGqlOp('deactivateVendor', M_DEACTIVATE, { data: { vendorId: vendor.id, deactivationReasonId: rid, notes: DEACT_NOTE } }, {
+        feature: 'tempVendor',
         ids: { vendorId: vendor.id },
         before: { status: 'Active' }, after: { status: 'Inactive' }, reason: DEACT_REASON_NAME
       });

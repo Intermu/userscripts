@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         BWN Proposal Actions (Broadway National)
 // @namespace    broadwaynational.bwn
-// @version      0.4.1
+// @version      0.4.2
 // @downloadURL  https://raw.githubusercontent.com/Intermu/userscripts/main/bwn-proposal-actions.user.js
 // @updateURL    https://raw.githubusercontent.com/Intermu/userscripts/main/bwn-proposal-actions.user.js
 // @description  On a Client Proposal DETAILS page, a "Proposal Actions" dropdown runs the internal review workflow in one confirmed action: Approval / TSP Review / Kickback. Each posts a note to the Proposal + the Work Order, sets the WO status, completes open tasks, and files a new task (assigned to the WO coordinator, or Ronny Sharp for TSP). Kickback drafts a rejection reason with the on-device browser AI for the operator to confirm. Every write is shown in a confirm dialog first; nothing fires until Confirm. @grant none.
@@ -15,7 +15,7 @@
 (function () {
   'use strict';
 
-  var VER = '0.4.1';   // keep in step with @version
+  var VER = '0.4.2';   // keep in step with @version
   var DRY_RUN = false; // when true, every WRITE is console.logged instead of sent
   console.info('[BWN PROPOSAL ACTIONS] v' + VER + ' - Approval / TSP Review / Kickback workflow on the Client Proposal details page');
 
@@ -255,6 +255,25 @@
   function bwnGql(query, variables) { var m = /\b(?:query|mutation)\s+([A-Za-z0-9_]+)/.exec(query); return paGql(m ? m[1] : null, query, variables); }
   var BWN_VER = VER;
   var BWN_MODULES = (function () { try { return JSON.parse(localStorage.getItem('bwn:modules') || '{}') || {}; } catch (e) { return {}; } })();
+  // Central governance (governance-sync): fold the org flags bwn-suite-ai caches to bwn:gov into
+  // BWN_MODULES as ONE-WAY disables, the SAME shape as bwn-suite-core's bwnApplyGov(). A remote
+  // flags['proposalActions']===false or flags.globalKillSwitch DISABLES this script's writes - the
+  // bwnGqlOp per-feature gate below reads BWN_MODULES['proposalActions'] live - and can NEVER enable
+  // one. Fail-closed: an absent or corrupt bundle keeps the local defaults (last-known-good), never
+  // relaxes. Re-applies on the bwn:gov ping so a remote kill blocks new writes with no reload.
+  if (!('proposalActions' in BWN_MODULES)) BWN_MODULES.proposalActions = true;
+  function bwnApplyGov() {
+    try {
+      var g = JSON.parse(localStorage.getItem('bwn:gov') || 'null');
+      if (!g || typeof g !== 'object' || !g.flags || typeof g.flags !== 'object') return;
+      var f = g.flags, kill = f.globalKillSwitch === true;
+      Object.keys(BWN_MODULES).forEach(function (k) {
+        if (kill || f[k] === false) BWN_MODULES[k] = false;   // one-way: only ever disable
+      });
+    } catch (e) { /* corrupt bundle -> keep local defaults (safe) */ }
+  }
+  bwnApplyGov();
+  try { document.addEventListener('bwn:gov', function () { bwnApplyGov(); }); } catch (e) { }
   var BWN_OPS = {
     patchWorkOrder: { kind: 'write', target: 'workOrder', risk: 'high', idempotent: false, retry: 'none',
       ok: 'Work order updated.', fail: 'The work order was not updated.' },
@@ -475,7 +494,7 @@
     // Routed through bwnGqlOp: audit + corrId + the high-risk confirm gate. proposal-actions
     // confirms every write in its own dialog, so this high-risk write passes confirmed:true.
     return bwnGqlOp('patchWorkOrder', M_PATCH, vars, {
-      confirmed: true, ids: { wo: n }, after: { statusId: statusId }
+      feature: 'proposalActions', confirmed: true, ids: { wo: n }, after: { statusId: statusId }
     }).then(function () { return true; });
   }
 
@@ -493,7 +512,7 @@
       targetPurchaseOrderNumbers: []
     };
     if (DRY_RUN) { console.log('[PA DRY_RUN] addWONote', input); return Promise.resolve(true); }
-    return bwnGqlOp('addEditJobNote', M_WONOTE, { addEditInput: input }, { ids: { wo: n } }).then(function () { return true; });
+    return bwnGqlOp('addEditJobNote', M_WONOTE, { addEditInput: input }, { feature: 'proposalActions', ids: { wo: n } }).then(function () { return true; });
   }
 
   // ===== writes: PINNED 2026-08-17 ==========================================
@@ -515,7 +534,7 @@
   function addProposalNote(proposalId, text) {
     if (DRY_RUN) { console.log('[PA DRY_RUN] addProposalNote', { proposalId: proposalId, text: text }); return Promise.resolve(true); }
     var input = { entityId: proposalId, plainTextContent: text, htmlContent: textToHtml(text) };
-    return bwnGqlOp('addClientProposalNote', M_ADD_PROP_NOTE, { data: input }, { ids: { proposalId: proposalId } }).then(function () { return true; });
+    return bwnGqlOp('addClientProposalNote', M_ADD_PROP_NOTE, { data: input }, { feature: 'proposalActions', ids: { proposalId: proposalId } }).then(function () { return true; });
   }
 
   // createTask - addTask(data: AddTaskInput!). entityType 1 = work order, entityId = the WO number
@@ -538,14 +557,14 @@
       notifyCreator: false,
       metadata: JSON.stringify({ number: String(woNumber) })
     };
-    return bwnGqlOp('addTask', M_ADD_TASK, { data: input }, { ids: { wo: woNumber } }).then(function () { return true; });
+    return bwnGqlOp('addTask', M_ADD_TASK, { data: input }, { feature: 'proposalActions', ids: { wo: woNumber } }).then(function () { return true; });
   }
 
   // completeTask - completeTask(data: CompleteTaskInput!). CompleteTaskInput is JUST { id: ID! }.
   var M_COMPLETE_TASK = 'mutation CompleteTask($data: CompleteTaskInput!){ completeTask(data: $data){ success message } }';
   function completeTask(taskId) {
     if (DRY_RUN) { console.log('[PA DRY_RUN] completeTask', { taskId: taskId }); return Promise.resolve(true); }
-    return bwnGqlOp('completeTask', M_COMPLETE_TASK, { data: { id: taskId } }, { ids: { taskId: taskId } }).then(function () { return true; });
+    return bwnGqlOp('completeTask', M_COMPLETE_TASK, { data: { id: taskId } }, { feature: 'proposalActions', ids: { taskId: taskId } }).then(function () { return true; });
   }
   function completeAllTasks(tasks) {
     // Promise.all([]) resolves immediately, so a WO with zero open tasks succeeds trivially.

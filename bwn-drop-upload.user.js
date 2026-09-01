@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         BWN Drop Upload (Broadway National)
 // @namespace    broadwaynational.bwn
-// @version      1.22.0
+// @version      1.22.1
 // @downloadURL  https://raw.githubusercontent.com/Intermu/userscripts/main/bwn-drop-upload.user.js
 // @updateURL    https://raw.githubusercontent.com/Intermu/userscripts/main/bwn-drop-upload.user.js
 // @description  Drop files anywhere on an Umbrava work order to upload them. Opens the Documents tab and upload dialog, hands over the files, and builds each file's description from its contents. Emails are parsed locally (.msg via an OLE/MAPI reader, .eml via RFC822) into an Outlook-style block - From/Sent/To/Cc/Subject and the body - that becomes the WO note, led by a one-line summary from Chrome's on-device built-in AI (zero cost, zero egress, nothing leaves the browser), falling back to local WO-field extraction (store, city/state, priority, PO, NTE, problem, requester) when the on-device model is unavailable. That same summary fills each file's Description. The WO note's Type is chosen from the email's parties: inbound is typed by the sender (client -> Client, else Vendor); outbound from Broadway is typed by the recipients (a client recipient -> Client, any vendor recipient -> Vendor, all-internal -> Internal). Umbrava's Description field is a TipTap/ProseMirror rich-text editor. It rejects synthetic paste, beforeinput, insertHTML and raw innerHTML, but honours execCommand('insertText') plus a synthetic Enter keydown - so the note is filled line by line (Enter between lines to keep paragraphs), paced ~12ms/line so ProseMirror's async commit doesn't drop lines (measured live 2026-08-10). The text is also placed on your clipboard as a backup, and if every fill method fails a "Copy the WO note" button appears (its click supplies the gesture for a reliable copy, then Ctrl+V). A console diagnostic reports which editor was found and which fill method stuck. When WO Intake hands off a just-created WO's request email, each uploaded file's Label (document type) is set to "Work Order Request" and the note Type is forced to Client (a WO Intake handoff is a client's request, even when the sender is a broker like Fairmarkit that reads as a Vendor domain). Fairmarkit / bulk-email footer boilerplate (the Fairmarkit company block: tagline + Boston address + FAQ/Privacy/Terms/Unsubscribe, and the -----!{...}!----- machine tail) plus ALL tracking URLs (safelinks/awstrack/logo) are stripped from the note body, keeping content through the suppliers@ email. A Fairmarkit RFQ body is also condensed to one line per entry - single-spaced, with each line-item rejoined to its QTY and each Details label (Buyer/Close date/RFQ ID/Shipping address) rejoined to its value. Files upload via Umbrava's own API (initializeJobDocument -> Azure blob PUT -> bulkAddWorkOrderDocuments, captured live 2026-08-12), Label set by id, so the brittle upload-dialog combobox is bypassed; the dialog remains the automatic fallback if the API is unavailable. A manual drop does NOT auto-upload: the review box shows a "Document type" picker plus an Upload button, so the coordinator CHOOSES the document type before it is committed (there is no update-label mutation, so the label must be right at upload time). The picker defaults to MATCH the note Type we assigned (Client -> Client Correspondence, Vendor -> Vendor Correspondence, Internal -> Internal) and stays in sync as the note Type is changed, until the coordinator overrides the doc type directly; for an unknown external party the on-device classifier upgrades Vendor -> Supplier Correspondence when it reads as a parts supplier. The file Description is still filled automatically from the file's contents / the email summary. Only the WO Intake handoff still uploads automatically and forces "Work Order Request". The email note is shown in a centered BWN review box (editable; the Type picker offers a curated set of the note types a drop is actually filed under, defaulted to the party-derived Client/Vendor/Internal) and posted via addEditJobNote ONLY when you click Post - it is never auto-posted, and posts under your own Umbrava session for correct attribution. Network calls are same-origin to app.umbrava.com's own /api/graphql (the app's Auth0 bearer, no @connect/GM) plus the SAS-authorized blob PUT the SPA itself makes - nothing goes to any third party. @grant none.
@@ -15,7 +15,7 @@
 (function () {
   'use strict';
 
-  var VER = '1.22.0';   // keep in step with @version (drift caught earlier: banner had lagged two releases)
+  var VER = '1.22.1';   // keep in step with @version (drift caught earlier: banner had lagged two releases)
   var BWN_VER = VER;   // stamped into BWN-OPS audit entries; the wrapper references BWN_VER
   console.info('[BWN DROP UPLOAD] v' + VER + ' · Uploads via Umbrava API (initializeJobDocument→blob PUT→bulkAddWorkOrderDocuments, Label by id), DOM dialog is the fallback · manual drop HOLDS the upload: the review box shows a Document type picker (defaulted to MATCH the note Type - Client->Client Correspondence, Vendor->Vendor Correspondence, Internal->Internal - and re-synced as the note Type changes, until overridden) + an Upload button, so the type is CHOSEN, not assumed · email→note in a human-gated BWN review box, posted via addEditJobNote on an explicit Post click (never auto-posted) · note Type by parties (inbound=sender, outbound=recipient) · note box shows instantly with a mechanical lead; the slow on-device AI brief (Gemini Nano / Edge Phi) fills in async · bwn:cmd dropupload:files bridge (handoff still forces Work Order Request)');
 
@@ -673,6 +673,25 @@
   // posted here lands in the SAME audit trail as Core writes.
   function bwnGql(query, variables) { var m = /\b(?:query|mutation)\s+([A-Za-z0-9_]+)/.exec(query); return duGql(m ? m[1] : null, query, variables); }
   var BWN_MODULES = (function () { try { return JSON.parse(localStorage.getItem('bwn:modules') || '{}') || {}; } catch (e) { return {}; } })();
+  // Central governance (governance-sync): fold the org flags bwn-suite-ai caches to bwn:gov into
+  // BWN_MODULES as ONE-WAY disables, the SAME shape as bwn-suite-core's bwnApplyGov(). A remote
+  // flags['dropUpload']===false or flags.globalKillSwitch DISABLES this script's writes - the bwnGqlOp
+  // per-feature gate below reads BWN_MODULES['dropUpload'] live - and can NEVER enable one. Fail-closed:
+  // an absent or corrupt bundle keeps the local defaults (last-known-good), never relaxes. Re-applies
+  // on the bwn:gov ping so a remote kill blocks new writes with no reload.
+  if (!('dropUpload' in BWN_MODULES)) BWN_MODULES.dropUpload = true;
+  function bwnApplyGov() {
+    try {
+      var g = JSON.parse(localStorage.getItem('bwn:gov') || 'null');
+      if (!g || typeof g !== 'object' || !g.flags || typeof g.flags !== 'object') return;
+      var f = g.flags, kill = f.globalKillSwitch === true;
+      Object.keys(BWN_MODULES).forEach(function (k) {
+        if (kill || f[k] === false) BWN_MODULES[k] = false;   // one-way: only ever disable
+      });
+    } catch (e) { /* corrupt bundle -> keep local defaults (safe) */ }
+  }
+  bwnApplyGov();
+  try { document.addEventListener('bwn:gov', function () { bwnApplyGov(); }); } catch (e) { }
   var BWN_OPS = {
     addEditJobNote: { kind: 'write', target: 'note', risk: 'moderate', idempotent: false, retry: 'none',
       ok: 'Note posted.', fail: 'The note was not posted.' },
@@ -965,6 +984,7 @@
     // Routed through bwnGqlOp (BWN-OPS): correlation id + shared audit entry + pre-send
     // validate; the wrapper rejects a success:false envelope, so no inline success check.
     return bwnGqlOp('addEditJobNote', MUT_ADD_NOTE, { addEditInput: input }, {
+      feature: 'dropUpload',
       ids: { wo: woNumber },
       validate: function (v) {
         var a = v && v.addEditInput;
@@ -985,7 +1005,7 @@
       // fileSize is a STRING in the live schema, NOT Int (the captured request body couldn't reveal the
       // type; a live drop errored "String cannot represent a non string value: <bytes>" at data.fileSize).
       data: { fileName: rawFile.name, fileSize: String(rawFile.size) }
-    }, { ids: { wo: woNumber } }).then(function (d) {
+    }, { feature: 'dropUpload', ids: { wo: woNumber } }).then(function (d) {
       var init = d && d.initializeJobDocument;
       if (!init || init.success !== true || !init.sasToken || !init.sasToken.uriWithSas) {
         throw new Error((init && init.message) || 'initializeJobDocument returned no SAS');
@@ -1014,7 +1034,7 @@
       jobs.push(uploadOneViaApi(rawFiles[i], desc, labelId, woNumber));
     }
     return Promise.all(jobs).then(function (entries) {
-      return bwnGqlOp('bulkAddWorkOrderDocuments', MUT_BULK_ADD, { data: { workOrderNumber: woNumber, documents: entries } }, { ids: { wo: woNumber } })
+      return bwnGqlOp('bulkAddWorkOrderDocuments', MUT_BULK_ADD, { data: { workOrderNumber: woNumber, documents: entries } }, { feature: 'dropUpload', ids: { wo: woNumber } })
         .then(function (d) {
           var res = d && d.bulkAddWorkOrderDocuments;
           if (!res || res.success !== true) throw new Error((res && res.message) || 'bulkAddWorkOrderDocuments reported no success');
