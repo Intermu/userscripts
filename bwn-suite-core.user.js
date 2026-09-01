@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         BWN Suite - Core (Broadway National)
 // @namespace    broadwaynational.bwn
-// @version      1.79.0
+// @version      1.80.0
 // @downloadURL  https://raw.githubusercontent.com/Intermu/userscripts/main/bwn-suite-core.user.js
 // @updateURL    https://raw.githubusercontent.com/Intermu/userscripts/main/bwn-suite-core.user.js
 // @description  Runs several Umbrava helpers for BWN coordinators, in the browser with no privileged grants. Includes: PO Approval + ETA Builder; WO Assist (GP/ETA, a stall watchdog, DNE calculator, and a next-action playbook); Email Leak Guard (checks recipients against vendor names, PO amounts, and client budget references before an outbound email sends); WO List Heat (a triage overlay + My Day strip on the work-order list, with an optional same-origin Umbrava API scan for deterministic full-board coverage); and the BWN Launcher (opens the Azure Static Web App tools with the current WO's context). Modules share state through sessionStorage/localStorage. The only network calls are same-origin Umbrava GraphQL requests (app.umbrava.com/api/graphql, the app's own session): List Heat's full-board scan and WO Assist's work-order / trip / clock-in / document reads, plus ONE write - BWN Views saves the column layout through Umbrava's own putUserPreference, the same preference the column chooser writes; everything else is offline. Toggle modules in BWN_MODULES below.
@@ -63,11 +63,22 @@
                          // keeps its own hooks (current behavior, byte-for-byte). The helper itself
                          // is always DEFINED; this flag only flips whether an adopter routes through
                          // it, so a stuck/unresolved flag never silently changes lifecycle.
-    errorReporter: false // RM-B2, SHIPPING DEFAULT OFF: when on, BWN.report writes a bounded,
+    errorReporter: false, // RM-B2, SHIPPING DEFAULT OFF: when on, BWN.report writes a bounded,
                          // PII-free breadcrumb to the bwn:errlog ring alongside its toast. Off = the
                          // toast still shows (unchanged at paths that already toasted) but NOTHING is
                          // logged, and a formerly-silent path stays silent. The bwn:audit write ring
                          // is a SEPARATE key and is never touched by the reporter.
+    recoveryPlaybooks: false, // Recovery Playbooks (read-only), SHIPPING DEFAULT OFF: when on, the SLA
+                         // countdown + early-breach flag surface on the WO Assist checklist / case
+                         // file / dashboard. PURE read-only signal (slaCountdown/breachPredict over the
+                         // existing status clock); it renders and stages nothing that mutates. Off = the
+                         // countdown chips never render, so the rollout is clean until this is flipped.
+    recoveryWrites: false // Recovery Writes, SHIPPING DEFAULT OFF: gates the recovery card's one-click
+                         // actions (enqueue a note/ECD intent to Track C, fire a single escalation). When
+                         // false the buttons never mount, so the card stays read-only for every user.
+                         // Even then each write routes through bwnGqlOp feature:'recoveryWrites' (its
+                         // per-feature kill switch + audit ring) and, for patchWorkOrder, the fail-closed
+                         // high-risk confirm gate - two gates: this flag hides the UI, bwnGqlOp governs.
   };
 
   var BWN_VER = (typeof GM_info !== 'undefined' && GM_info.script && GM_info.script.version) || '1.51.2';
@@ -1355,6 +1366,69 @@
     }
     return { warn: C.hrsWarn * mult, bad: C.hrsBad * mult, sla: sm !== null };
   }
+
+  // ---- SLA countdown + early-breach prediction (Recovery Playbooks; PURE) ------
+  // ===== BWN-SLA START v1 (paste-identical into the Dashboard BWN-ACT port; sliced by
+  //       scripts/test-recovery-sla.js) =====
+  // Turn the mature status clock (bwnThresholdsFor + bwnSlaMult) and the already-computed ECD
+  // (state.due, from dueStatus) into a reader-facing countdown and an EARLY breach flag - a WO
+  // whose current status will cross its priority/SLA-scaled limit BEFORE its complete-by date
+  // is flagged so a coordinator acts AHEAD of the breach, not after. Both are PURE: no DOM, no
+  // store, and no wall clock of their own - nowMs is INJECTED (determinism + the ECD hours-left
+  // derivation). They re-use the clock verbatim; nothing about a threshold is re-implemented.
+  // They take `state` (never read a global) so the on-page checklist, the dashboard port and the
+  // job-acts overlay all call the SAME function and cannot disagree - the single-source rule the
+  // next-actions engine already follows. state.sla (optional { responseMinutes, category }) lets
+  // the countdown scale off the client's real clock; absent, bwnThresholdsFor falls back to the
+  // priority-label parse, so a caller with no SLA facts is unaffected.
+  //   slaCountdown(state,C,nowMs) -> null when there is no hours-in-status reading, else
+  //     { hrsInStatus, warnHrs, badHrs, hrsToWarn, hrsToBad, level:'ok'|'warn'|'breach', breached, slaScaled }
+  //   breachPredict(state,C,nowMs) -> { willBreach, breached, level, dueDays, hrsToBad, reason }
+  function bwnDueDaysFromState(state) {
+    // Reuse dueStatus' OUTPUT (state.due) rather than re-reading the ECD picker: a '+n' label is
+    // days until complete-by, an "Overdue n" label is n days past it. null when the WO has no ECD.
+    // Same label convention scoreAct parses, so "days to due" has ONE reading across the suite.
+    if (!state || !state.due || !state.due.label) return null;
+    var m = String(state.due.label).match(/\d+/);
+    if (!m) return null;
+    var n = parseInt(m[0], 10);
+    return /overdue/i.test(state.due.label) ? -n : n;
+  }
+  function slaCountdown(state, C, nowMs) {
+    C = C || (state && state.cfg) || BWN.cfg();
+    if (!state) return null;
+    var hrs = Number(state.hrs);
+    if (state.hrs === null || state.hrs === undefined || !isFinite(hrs)) return null;   // no hours-in-status reading
+    var th = bwnThresholdsFor(state.status, state.priority, C, state.sla);
+    var level = hrs >= th.bad ? 'breach' : hrs >= th.warn ? 'warn' : 'ok';
+    return {
+      hrsInStatus: hrs, warnHrs: th.warn, badHrs: th.bad,
+      hrsToWarn: th.warn - hrs, hrsToBad: th.bad - hrs,
+      level: level, breached: hrs >= th.bad, slaScaled: !!th.sla
+    };
+  }
+  function breachPredict(state, C, nowMs) {
+    C = C || (state && state.cfg) || BWN.cfg();
+    var sc = slaCountdown(state, C, nowMs);
+    if (!sc) return { willBreach: false, breached: false, level: null, dueDays: null, hrsToBad: null, reason: null };
+    var dueDays = bwnDueDaysFromState(state);
+    if (sc.breached) {
+      return { willBreach: true, breached: true, level: 'breach', dueDays: dueDays, hrsToBad: sc.hrsToBad,
+        reason: 'Status past its ' + Math.round(sc.badHrs) + 'h limit' };
+    }
+    // Not yet breached. Predict a breach when the status clock runs out BEFORE the complete-by date
+    // (or the WO is already overdue against its ECD). No ECD -> no horizon -> predict off the clock
+    // alone (not-breached => not-predicted). hrsToBad is > 0 here.
+    var dueHrs = (dueDays === null) ? null : dueDays * 24;
+    var willBreach = (dueHrs !== null) && (dueHrs < 0 || sc.hrsToBad < dueHrs);
+    return {
+      willBreach: willBreach, breached: false, level: sc.level, dueDays: dueDays, hrsToBad: sc.hrsToBad,
+      reason: willBreach
+        ? ('SLA clock (' + Math.round(sc.hrsToBad) + 'h to limit) runs out before complete-by (' + dueDays + 'd)')
+        : null
+    };
+  }
+  // ===== BWN-SLA END v1 =====
 
   // ---- Next-actions engine, published across module closures -------------------
   // `computeNextActions` is a PURE fn but it lives inside the WO Assist module's IIFE
@@ -2919,6 +2993,11 @@
         eta: pos.length ? etaStatus(pos, notes, stall) : null,
         stall: stall, status: woStatus(), hrs: hrsInStatus(),
         priority: (woApi && woApi.priority && woApi.priority.label) || hd.priority || '',
+        // The row's OWN SLA facts for bwnSlaMult (Recovery Playbooks): WORKORDER_Q selects
+        // priority.category (responseMinutes is not in that query, so it stays null and the
+        // category drives the scale). Absent -> null -> slaCountdown falls back to the P#-label
+        // parse, so this is purely additive.
+        sla: (woApi && woApi.priority) ? { responseMinutes: null, category: woApi.priority.category } : null,
         due: dueStatus(C),
         staleDays: staleness(notes), noteCount: notes.length, lastNote: lastNoteTs ? new Date(lastNoteTs).toISOString() : null, deep: !!deepNotes, notesSrc: lastNotesSrc,
         lastClientNoteDays: lastClientTs ? Math.floor((Date.now() - lastClientTs) / 86400000) : null,   // null = no client-labeled note among the loaded notes
@@ -4439,7 +4518,13 @@
           noteCount: (typeof state.noteCount === 'number') ? state.noteCount : 0,
           lastClientNoteDays: (typeof state.lastClientNoteDays === 'number') ? state.lastClientNoteDays : null,
           staleDays: (typeof state.staleDays === 'number') ? state.staleDays : null,
-          eta: state.eta || null
+          eta: state.eta || null,
+          // Recovery Playbooks: the PRECOMPUTED SLA countdown + early-breach flag, so a surface
+          // WITHOUT the engine (the SWA case file) can render the same chip Core shows. Named
+          // distinctly from state.sla (the raw { responseMinutes, category } facts) so nothing
+          // collides when the dashboard merges this overlay onto stateFromRow. Best-effort/null-safe.
+          slaCountdown: (function () { try { return slaCountdown(state, state.cfg, Date.now()); } catch (e) { return null; } })(),
+          breachPredict: (function () { try { return breachPredict(state, state.cfg, Date.now()); } catch (e) { return null; } })()
         };
         // Only worth a push if it carries something the workbook row lacks - else the dashboard's
         // default (workbook-only) state is already equivalent, so pushing an empty overlay is noise.
