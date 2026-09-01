@@ -308,6 +308,18 @@ jobs:
       - name: Drawer + toast motion behavioural harness (Core 1.78.0 animation review)
         run: node scripts/test-drawer-motion.js
 
+      # RM-B1: the two SHA-ledger harnesses for the canonical toast() and drawerDismiss() blocks were
+      # committed to scripts/ but never wired here - the exact orphan-harness rot the audits keep closing
+      # (an unrun harness is a green check that proves nothing). Both are self-contained (they read the
+      # suite's own *.user.js, no network/fixtures) and pass a local sweep. Each enumerates every script,
+      # classifies it CANONICAL/VARIANT/NONE, pins ONE shared SHA across the adopters, and carries negative
+      # controls that flip red on drift. Step names carry NO colon-space (the parser bug that zeroed jobs).
+      - name: Toast canonical SHA-ledger harness (RM-B1 one bottom-centre toast across adopters)
+        run: node scripts/test-toast-ledger.js
+
+      - name: Drawer-dismiss canonical SHA-ledger harness (RM-B1 one drawerDismiss + exit contract)
+        run: node scripts/test-drawerdismiss-ledger.js
+
       # BWN Ask reaches the page tools and reports failure instead of eating it. Pins Ask's tool
       # definitions byte-identical to bwn-suite-ai (one model, one truth about the three verbs) and
       # drives the sliced tool loop: /api/ai not /api/ask, fresh token per round, round cap, status stamp.
@@ -493,6 +505,8 @@ jobs:
       # cap, and the feature:'bulkSource' kill switch - driven end to end through the real audit ring.
       - name: Bulk Source Job# engine harness (Q/R/RF shorthand + blanks-only patchWorkOrder)
         run: node scripts/test-bulk-source.js
+      - name: "RM-C1 bulk console harness (bwn-write-queue: preview / dry-run / pause-cancel / threshold / CSV+JSON export; flag bulkConsole default OFF)"
+        run: node scripts/test-bulk-console.js
 
       - name: Per-client profile resolver harness (T10 defaults + empty-table inert safety)
         run: node scripts/test-client-profile.js
@@ -543,6 +557,16 @@ jobs:
 
       - name: A11y focus-trap harness (bwnFocusTrap byte-identity + focus move/wrap/restore across dialog sandboxes)
         run: node scripts/test-a11y-focus.js
+
+      # #29 ship-items (bwn-inventory 0.4.0): the "Ship items" orchestration (multi-line issues A
+      # BEFORE one packing-slip POST B, per-line non-atomic, both halves separately idempotent). The
+      # harness was committed to scripts/ but never wired here, so CI said NOTHING about it - the same
+      # "committed but never executed" rot the audit steps above closed. It slices the SHIP-ITEMS
+      # ORCHESTRATION block from the shipped bytes and runs it in a vm with a stubbed transport (zero
+      # network), pinning A-before-B, partial-commit-no-rollback, slip-resend adds zero inventory
+      # calls, and SourceId/SlipNumber stability. Step name carries NO colon-space (the parser bug).
+      - name: Ship-items orchestration harness (A-before-B issues then one packing slip, partial-commit + idempotent resend)
+        run: node scripts/test-ship-items.js
 
       # RM-B4: Core's central route/lifecycle helper (BWN.onRoute / window.bwnOnRoute). Slices the
       # shipped helper + bwn-kanban's flag-gated kbRouteHooks adopter and drives both against a fake
