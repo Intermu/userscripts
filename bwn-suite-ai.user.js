@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         BWN Suite - AI (Broadway National)
 // @namespace    broadwaynational.bwn
-// @version      1.45.21
+// @version      1.45.22
 // @downloadURL  https://raw.githubusercontent.com/Intermu/userscripts/main/bwn-suite-ai.user.js
 // @updateURL    https://raw.githubusercontent.com/Intermu/userscripts/main/bwn-suite-ai.user.js
 // @description  The Umbrava tools that call outside APIs, kept separate from the zero-egress Core script. Client Update and WO Audit drafts (Anthropic Claude; draft-only, scrubbed before sending, you review before posting); Find Techs / Find Suppliers (Google Places; vendor leads near a WO); and Job View (opens the Ops-Dashboard job card on the WO page - WO details from Umbrava plus the authored case file and next actions, read-only). Network access is limited by the browser to the declared API hosts and the BWN Static Web App. API keys are stored in Tampermonkey's storage via the menu commands and never enter the page. Toggle modules in BWN_MODULES below.
@@ -202,7 +202,18 @@
       requiredStatuses: [],
       closeout: { docs: ['signed ticket', 'sign-in/out', 'before/after photos'], enforce: true },
       refFields: { sourceJob: false, sourcePo: false },
-      cadenceDays: null
+      cadenceDays: null,
+      // Integer, top-level, stamped on EVERY compliance score (result.rulesVersion) so a stored
+      // or pushed score is always traceable to the rule set that produced it. Bump when the check
+      // catalogue's meaning changes; a per-client override may raise it for that client only.
+      rulesVersion: 1,
+      // Documentation-compliance config (read by computeCompliance via bwnClientProfile). Only the
+      // keys a client actually differs on need overriding; deepMerge keeps the rest. `checks` is a
+      // sparse per-id override table over DOC_CHECK_CATALOGUE - each id may set required (bool),
+      // appliesToTrades (array of trade names; empty/absent = all), and weight (number). Absent id
+      // = catalogue default. ponytail: per-program required sets / photo-by-worktype / cadence
+      // values are DEFERRED - this is the flat per-client layer only.
+      compliance: { checks: {} }
     };
     // Seed profiles keyed by alpha-only-lowercased client name (bwnClientKey). clientId is
     // recorded for cross-checking against the live clientTenantProfileId; the resolver still
@@ -214,10 +225,10 @@
       'caleresinc': { clientId: null },
       'transformsrbrandsllc': { clientId: '23914', refFields: { sourceJob: true, sourcePo: true } }
     };
-    // Shallow merge with ONE level of depth over the two nested config objects (closeout,
-    // refFields) so a partial override (e.g. {refFields:{sourceJob:true}}) keeps its sibling
-    // defaults. Every other key is replaced wholesale. Nested objects are cloned so a merge
-    // never mutates CLIENT_DEFAULTS_SEED.
+    // Shallow merge with ONE level of depth over the nested config objects (closeout, refFields,
+    // compliance) so a partial override (e.g. {refFields:{sourceJob:true}} or {compliance:{checks:
+    // {receipt:{required:true}}}}) keeps its sibling defaults. Every other key is replaced
+    // wholesale. Nested objects are cloned so a merge never mutates CLIENT_DEFAULTS_SEED.
     function deepMerge() {
       var out = {};
       for (var i = 0; i < arguments.length; i++) {
@@ -225,7 +236,7 @@
         if (!src || typeof src !== 'object') continue;
         Object.keys(src).forEach(function (k) {
           var v = src[k];
-          if ((k === 'closeout' || k === 'refFields') && v && typeof v === 'object') {
+          if ((k === 'closeout' || k === 'refFields' || k === 'compliance') && v && typeof v === 'object') {
             out[k] = Object.assign({}, out[k] || {}, v);
           } else {
             out[k] = v;
@@ -5236,6 +5247,11 @@ if (BWN_MODULES.jobView) BWN.safeModule('jobView', function () {
     // stay stable. Absent => null => omitted.
     var openTasks = null;
     try { var _tk = BWN.lsGetJSON('bwn:tasks:' + (job.wo||job.woNumber||''), null); if(_tk && typeof _tk.open === 'number') openTasks = _tk.open; } catch(e){}
+    // Doc-compliance: Core (on the WO page, docCompliance flag ON) writes the confident score to
+    // bwn:compliance:<wo>; carry score + rulesVersion. Absent (flag off, or WO never opened) => null
+    // => omitted by wo-ingest + the overlay, never a guessed 0. Keyed by WO # like bwn:docs.
+    var complianceScore = null, complianceRulesVersion = null;
+    try { var _cp = BWN.lsGetJSON('bwn:compliance:' + (job.wo||job.woNumber||''), null); if(_cp && typeof _cp.score === 'number'){ complianceScore = _cp.score; if(typeof _cp.rulesVersion === 'number') complianceRulesVersion = _cp.rulesVersion; } } catch(e){}
     jvPost({ jobFacts:{ target:target, status:job.status, coordinator:job.coordinator, location:job.location,
       priority:job.priority, fm:job.fm, trades:job.trades, vendors:job.vendors, amount:job.amount, aged:job.aged,
       statusHrs:job.statusHrs, daysSinceUpdate:job.daysSinceUpdate, lastUpdated:iso(job.lastUpdated), woDate:iso(job.woDate),
@@ -5244,7 +5260,8 @@ if (BWN_MODULES.jobView) BWN.safeModule('jobView', function () {
       city:job.city, state:job.state, client:job.client, sourcePo:job.po, vendorNte:job.totalVendorNte, docCount:docCount,
       noShowDays:noShowDays, noShowVendor:noShowVendor, gpPct:gpPct, openProposals:openProposals,
       noteCount:noteCount, clientNoteDays:clientNoteDays, openTasks:openTasks,
-      laborHours:laborHours, travelHours:travelHours } });
+      laborHours:laborHours, travelHours:travelHours,
+      complianceScore:complianceScore, complianceRulesVersion:complianceRulesVersion } });
   }
   // Freshen the CURRENT WO on the dashboard when the connector records WO actions
   // (debounced per WO). Exposed on window so the top-level connector drain can call it.
