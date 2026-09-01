@@ -442,6 +442,18 @@ jobs:
       - name: "Proposal Actions live-resolve harness (RM-A3: status id + TSP assignee, fail-closed)"
         run: node scripts/test-pa-live-resolve.js
 
+      # Phase-1 ADVISORY margin guardrail (bwn-proposal-actions.user.js): the READ-ONLY "Margin check"
+      # panel (flag bwn:modules.marginGuardrail, default OFF). Slices the PA-GPLABEL + PA-MARGIN-LOGIC
+      # blocks and runs the pure math: GP-label boundaries, below-floor vs a governance target (fixture
+      # 0.28) with a stale/absent fallback to the 0.33 default, missing-category set difference
+      # (presence-by-category; the real category enum is uncaptured - REQUIRED_CATEGORIES ships empty),
+      # empty line items -> all-required-missing ADVISORY (not an error), and the dollar view (Money
+      # minor-units -> dollars + implied cost from GP%, no fabricated component split). Three negative
+      # controls (default floor / comparison direction / staleness TTL) each flip a probe. The enforced
+      # exception-approval WRITE path is DEFERRED (asserted TODO); this feature routes through no mutation.
+      - name: "Margin guardrail advisory harness (Phase-1 read-only: GP floor/target + missing-category)"
+        run: node scripts/test-margin-guardrail.js
+
       # Track C write-back DRAIN half (bwn-write-queue.user.js): the coordinator's-tab executor that
       # claims a queued command from /api/wo-write-queue, confirms it, and turns it into a real
       # patchWorkOrder / addEditJobNote write. Slices the exec block into a vm with an injected gql and
