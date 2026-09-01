@@ -107,7 +107,7 @@ var CONTRACTS = {
 // a script forces a row; the CI step then keeps that row honest.
 var LEDGER = {
   'bwn-ask.user.js':           { drawer: 'DIVERGENT', toast: 'NA',        rmotion: 'NA',  rail: 'NA'  },
-  'bwn-bid-out.user.js':       { drawer: 'NA',        toast: 'DIVERGENT', rmotion: 'NA',  rail: 'HAS' },
+  'bwn-bid-out.user.js':       { drawer: 'NA',        toast: 'DIVERGENT', rmotion: 'HAS', rail: 'HAS' },
   'bwn-cc-auth.user.js':       { drawer: 'HAS',       toast: 'HAS',       rmotion: 'NA',  rail: 'NA'  },
   'bwn-cc-purchase.user.js':   { drawer: 'HAS',       toast: 'HAS',       rmotion: 'NA',  rail: 'NA'  },
   'bwn-dispatch.user.js':      { drawer: 'HAS',       toast: 'HAS',       rmotion: 'NA',  rail: 'NA'  },
