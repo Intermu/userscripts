@@ -1,10 +1,10 @@
 // ==UserScript==
 // @name         BWN Proposal Actions (Broadway National)
 // @namespace    broadwaynational.bwn
-// @version      0.4.1
+// @version      0.5.0
 // @downloadURL  https://raw.githubusercontent.com/Intermu/userscripts/main/bwn-proposal-actions.user.js
 // @updateURL    https://raw.githubusercontent.com/Intermu/userscripts/main/bwn-proposal-actions.user.js
-// @description  On a Client Proposal DETAILS page, a "Proposal Actions" dropdown runs the internal review workflow in one confirmed action: Approval / TSP Review / Kickback. Each posts a note to the Proposal + the Work Order, sets the WO status, completes open tasks, and files a new task (assigned to the WO coordinator, or Ronny Sharp for TSP). Kickback drafts a rejection reason with the on-device browser AI for the operator to confirm. Every write is shown in a confirm dialog first; nothing fires until Confirm. @grant none.
+// @description  On a Client Proposal DETAILS page, a "Proposal Actions" dropdown runs the internal review workflow in one confirmed action: Approval / TSP Review / Kickback. Each posts a note to the Proposal + the Work Order, sets the WO status, completes open tasks, and files a new task (assigned to the WO coordinator, or Ronny Sharp for TSP). Kickback drafts a rejection reason with the on-device browser AI for the operator to confirm. Every write is shown in a confirm dialog first; nothing fires until Confirm. Adds a READ-ONLY "Margin check" advisory panel (flag bwn:modules.marginGuardrail, default OFF): GP% vs the governance floor/target, a below-floor banner with plain-text drivers, missing-priced-category detection, and optional on-device-AI scope-gap questions - advisory only, no writes. @grant none.
 // @match        https://app.umbrava.com/*
 // @match        https://*.umbrava.com/*
 // @run-at       document-idle
@@ -15,8 +15,12 @@
 (function () {
   'use strict';
 
-  var VER = '0.4.1';   // keep in step with @version
+  var VER = '0.5.0';   // keep in step with @version
   var DRY_RUN = false; // when true, every WRITE is console.logged instead of sent
+
+  // Governance biz-rules slot lives on the SWA. Read is best-effort + FAIL-SAFE (see readBizRules).
+  var SWA_BASE = 'https://green-stone-0717dab0f.7.azurestaticapps.net';
+  var GOVERNANCE_URL = SWA_BASE + '/api/governance';
   console.info('[BWN PROPOSAL ACTIONS] v' + VER + ' - Approval / TSP Review / Kickback workflow on the Client Proposal details page');
 
   // ===== constants ==========================================================
@@ -118,6 +122,114 @@
     return gpPct < GP_GOOD_THRESHOLD ? 'Low GP' : 'Good GP';
   }
   // ===== PA-GPLABEL END =====
+
+  // ===== PA-MARGIN-LOGIC START (Phase-1 ADVISORY margin guardrail; pure, DOM/fetch-free, sliced by
+  // scripts/test-margin-guardrail.js) =====
+  // Read-only guardrail math for the "Margin check" panel. NO writes live in this feature - the
+  // enforced exception-approval WRITE path (marginApproval, risk:high) is DEFERRED, see the TODO block
+  // below. Everything here is pure so the test can run it in a vm without a DOM or a network.
+  //
+  // The authoritative margin is the API's grossProfitPercent (a FRACTION: 0.41 = 41%), same convention
+  // as gpLabel above. We NEVER fabricate a labor/material/travel/markup component split - it is not in
+  // the proposal data - so the panel renders "component breakdown unavailable" instead of inventing one.
+  var MARGIN_FLOOR_DEFAULT = (typeof GP_GOOD_THRESHOLD === 'number' ? GP_GOOD_THRESHOLD : 0.33); // reuse the one 0.33 source
+  var BIZRULES_TTL_MS = 24 * 3600 * 1000;   // a biz-rules record older than this is treated as stale -> default floor
+  // TODO(enum): the proposalLineItems.category enum values are NOT yet captured (one live proposal read
+  // is needed). Until then REQUIRED_CATEGORIES stays EMPTY so the live panel never emits a FALSE
+  // "missing category" warning on real data. The presence/set-difference logic below is generic and is
+  // proven in the test against a fixture required set; only the real required set is pending capture.
+  var REQUIRED_CATEGORIES = [];
+
+  function marginNum(x) { var v = (typeof x === 'number') ? x : parseFloat(x); return isFinite(v) ? v : null; }
+  function marginFrac(x) { var n = marginNum(x); return (n != null && n > 0 && n <= 1) ? n : null; } // a valid margin is a fraction in (0,1]
+
+  // parseBizRules(raw, nowMs) -> { floor, target, source }. Tolerant + FAIL-SAFE: anything unusable,
+  // stale, or absent yields the built-in default floor (0.33). belowFloor compares gpPct < target.
+  // TODO(shape): the exact /api/governance biz-rules JSON shape is not yet pinned (needs one live
+  // capture). This digs a few plausible paths and validates each value is a fraction; a wrong shape
+  // simply falls back rather than misreading. Confirm the shape, then tighten.
+  function parseBizRules(raw, nowMs) {
+    var d = { floor: MARGIN_FLOOR_DEFAULT, target: MARGIN_FLOOR_DEFAULT, source: 'default' };
+    if (!raw || typeof raw !== 'object') return d;
+    var ts = marginNum(raw.ts != null ? raw.ts : raw.updatedTs);
+    var now = (typeof nowMs === 'number') ? nowMs : Date.now();
+    if (ts != null && (now - ts) > BIZRULES_TTL_MS) { d.source = 'stale'; return d; }   // stale record -> default floor
+    var slot = raw.bizRules || raw.margin || raw;
+    var target = marginFrac(slot.marginTarget != null ? slot.marginTarget : slot.target);
+    var floor = marginFrac(slot.marginFloor != null ? slot.marginFloor : slot.floor);
+    if (target == null && floor == null) return d;                                       // nothing usable -> default floor
+    d.target = (target != null) ? target : floor;
+    d.floor = (floor != null) ? floor : d.target;
+    d.source = 'governance';
+    return d;
+  }
+
+  // marginVerdict: below-floor is gpPct < target. A null/NaN GP is "unknown" (never a confident verdict),
+  // matching gpLabel's rule that a failed read stays visible rather than silently labeled.
+  function marginVerdict(gpPct, target) {
+    if (typeof gpPct !== 'number' || isNaN(gpPct)) return { known: false, below: false };
+    return { known: true, below: gpPct < target };
+  }
+
+  function normCat(c) { return String(c == null ? '' : c).trim().toLowerCase(); }
+  // presence-by-category: the DISTINCT non-empty categories present across the line items.
+  function presentCategories(lineItems) {
+    var seen = {}, out = [];
+    (lineItems || []).forEach(function (li) {
+      var c = normCat(li && li.category);
+      if (c && !seen[c]) { seen[c] = true; out.push(c); }
+    });
+    return out;
+  }
+  // missing = required \ present (set difference, case-insensitive). Empty line items -> ALL required
+  // missing (an advisory, not an error). Returns the required labels verbatim (for display).
+  function missingCategories(present, required) {
+    var have = {};
+    (present || []).forEach(function (c) { have[normCat(c)] = true; });
+    return (required || []).filter(function (r) { return !have[normCat(r)]; });
+  }
+
+  // Dollar view. revenue = total.amount / 10^precision (Money minor-units -> dollars, ONCE); implied
+  // cost = revenue * (1 - gpPct). Kept in dollars end to end; never mixed with raw minor-units.
+  function moneyToDollars(m) {
+    if (!m || m.amount == null) return null;
+    var p = (m.precision != null) ? m.precision : 2;
+    var v = Number(m.amount) / Math.pow(10, p);
+    return isFinite(v) ? v : null;
+  }
+  function impliedCostDollars(revenueDollars, gpPct) {
+    if (typeof revenueDollars !== 'number' || !isFinite(revenueDollars)) return null;
+    if (typeof gpPct !== 'number' || isNaN(gpPct)) return null;
+    return revenueDollars * (1 - gpPct);
+  }
+
+  // Plain-TEXT drivers for the below-floor banner (never color-only - each is a full sentence).
+  function marginDrivers(gpPct, target, missing) {
+    var out = [];
+    if (typeof gpPct === 'number' && !isNaN(gpPct) && gpPct < target) {
+      out.push('GP ' + (gpPct * 100).toFixed(1) + '% is below the ' + (target * 100).toFixed(1) + '% target.');
+    }
+    if (typeof gpPct === 'number' && !isNaN(gpPct) && gpPct < 0) {
+      out.push('Gross profit is negative - the proposal loses money as priced.');
+    }
+    if (missing && missing.length) {
+      out.push('Missing priced categories: ' + missing.join(', ') + '.');
+    }
+    return out;
+  }
+  // ===== PA-MARGIN-LOGIC END =====
+
+  // ponytail: Phase-1 is ADVISORY ONLY. The following are DEFERRED to a later branch, NOT built here:
+  //   TODO(write-path): the enforced exception-approval WRITE (flag marginApproval, risk:HIGH). Needs a
+  //     server route + ops_* roles + CI financial-coverage gate before any write ships. This branch has
+  //     NO write flag and routes through NO mutation - the panel only reads and displays.
+  //   TODO(rate-cards): no rate cards exist in the data (grep = 0). A cost-vs-rate check is a separate build.
+  //   TODO(gp-split): grossProfitInfo is a PERCENT only; a per-component (labor/material/travel/markup)
+  //     GP split is not derivable and is NOT invented - the panel shows "component breakdown unavailable".
+  //   TODO(comparables): historical comparables + a recommended NTE need a separate aggregation build.
+  //   TODO(line-price+enum): proposalLineItems exposes no per-line PRICE here, and the category ENUM
+  //     values are uncaptured - one live proposal read is needed to pin both (see REQUIRED_CATEGORIES).
+
   function textToHtml(t) {
     return String(t == null ? '' : t).split('\n').map(function (ln) {
       return '<p>' + (ln === '' ? '<br>' : escapeHtml(ln)) + '</p>';
@@ -602,11 +714,188 @@
     return paGql('PA_PropCtx', Q_PROP_CTX, { p: proposalId }).then(function (d) {
       var pr = d && d.proposal;
       var scope = (pr && pr.scopeOfWork) || '';
-      var items = ((pr && pr.proposalLineItems) || []).map(function (li) {
+      var lis = (pr && pr.proposalLineItems) || [];
+      var items = lis.map(function (li) {
         return '- ' + (li.item || 'item') + ' x' + (li.quantity == null ? '?' : li.quantity);
       }).join('\n');
-      return { scope: scope, items: items };
-    }).catch(function () { return { scope: '', items: '' }; });
+      // categories/lineItems added for the Margin check advisory; scope/items keep the kickback caller working.
+      return { scope: scope, items: items, lineItems: lis, categories: presentCategories(lis) };
+    }).catch(function () { return { scope: '', items: '', lineItems: [], categories: [] }; });
+  }
+
+  // ===== margin guardrail: governance read + AI scope-gap (advisory, read-only) ============
+  var _bizRulesCache = null;
+  // Best-effort, FAIL-SAFE read of the governance biz-rules slot. @grant none means a native
+  // cross-origin GET to the SWA; if the route is dark / 503 / CORS-blocked, or carries no usable
+  // margin target, parseBizRules falls back to the built-in floor (0.33). This is ADVISORY only - a
+  // failed read must never block, error, or mislabel. Cached per page load.
+  function readBizRules() {
+    if (_bizRulesCache) return Promise.resolve(_bizRulesCache);
+    return fetch(GOVERNANCE_URL, { method: 'GET', credentials: 'omit' })
+      .then(function (r) { return r && r.ok ? r.json() : null; })
+      .then(function (raw) { _bizRulesCache = parseBizRules(raw, Date.now()); return _bizRulesCache; })
+      .catch(function () { _bizRulesCache = parseBizRules(null, Date.now()); return _bizRulesCache; });
+  }
+
+  // Optional on-device-AI scope-gap questions (reuses onDevice / the proposal context). Best-effort:
+  // returns '' when the browser has no on-device model, and the panel says so rather than erroring.
+  function draftScopeGaps(ctx, pc) {
+    var sys = 'You are an internal operations reviewer at a facilities-management company reviewing a client proposal for completeness before it is sent. In 2 to 5 short lines, list the most important scope or pricing GAPS or clarifying questions a coordinator should resolve (e.g. missing labor / material / travel lines, unclear quantities, permit or access assumptions). Be specific to the scope given. No greeting, no sign-off, no markdown.';
+    var content = 'Scope of work:\n' + (pc.scope || '(none)') +
+      '\n\nClient total: ' + ctx.total +
+      '\nGross profit: ' + ctx.gpText +
+      '\nLine items:\n' + (pc.items || '(none)') +
+      '\nCategories present: ' + (pc.categories && pc.categories.length ? pc.categories.join(', ') : '(none)');
+    return onDevice(sys, content).then(function (t) { return (t || '').trim(); });
+  }
+
+  // Local focus trap for the advisory panel. Deliberately NOT the shared bwnFocusTrap (that helper is
+  // byte-identical across the drawer-modal family and tied to the .bwn-closing drawer exit contract,
+  // which this file's plain-overlay modals do not use - see test-ui-contract-ledger / test-a11y-focus).
+  function paFocusTrap(card) {
+    var prev = document.activeElement;
+    var SEL = 'a[href],button:not([disabled]),textarea,input,select,[tabindex]:not([tabindex="-1"])';
+    function focusables() {
+      return [].slice.call(card.querySelectorAll(SEL)).filter(function (el) {
+        return el.offsetWidth > 0 || el.offsetHeight > 0 || el === document.activeElement;
+      });
+    }
+    var f = focusables();
+    if (f.length) { f[0].focus(); } else { card.setAttribute('tabindex', '-1'); card.focus(); }
+    function onKey(e) {
+      if (e.key !== 'Tab') return;
+      var list = focusables();
+      if (!list.length) { e.preventDefault(); return; }
+      var first = list[0], last = list[list.length - 1];
+      if (e.shiftKey && document.activeElement === first) { e.preventDefault(); last.focus(); }
+      else if (!e.shiftKey && document.activeElement === last) { e.preventDefault(); first.focus(); }
+    }
+    card.addEventListener('keydown', onKey);
+    return function release() {
+      card.removeEventListener('keydown', onKey);
+      try { if (prev && prev.focus) prev.focus(); } catch (e) { }
+    };
+  }
+
+  function fmtDollars(n) {
+    if (typeof n !== 'number' || !isFinite(n)) return 'n/a';
+    return '$' + n.toLocaleString('en-US', { minimumFractionDigits: 2, maximumFractionDigits: 2 });
+  }
+
+  // ===== margin guardrail: advisory panel (READ-ONLY; no writes) ============================
+  function openMarginPanel(ctx, biz, pc) {
+    ensureStyle();
+    var prior = document.getElementById('bwn-pa-overlay');
+    if (prior) prior.remove();
+
+    var gpPct = ctx.gpPct;
+    var verdict = marginVerdict(gpPct, biz.target);
+    var missing = missingCategories(pc.categories, REQUIRED_CATEGORIES);
+    var drivers = marginDrivers(gpPct, biz.target, missing);
+    var revenue = moneyToDollars(ctx.totalMoney);
+    var cost = impliedCostDollars(revenue, gpPct);
+    var gpText = (gpPct == null || isNaN(gpPct)) ? 'unknown' : (gpPct * 100).toFixed(1) + '%';
+    var targetText = (biz.target * 100).toFixed(1) + '%';
+    var floorText = (biz.floor * 100).toFixed(1) + '%';
+    var srcNote = biz.source === 'governance' ? 'from governance biz-rules'
+      : (biz.source === 'stale' ? 'governance record stale - using default floor' : 'governance unavailable - using default floor');
+
+    // Verdict line: icon + TEXT (never color-only).
+    var vIcon = verdict.known ? (verdict.below ? '⚠' : '✓') : '?';   // warn / check / question
+    var vText = !verdict.known
+      ? 'GP could not be read - margin cannot be assessed.'
+      : (verdict.below
+        ? 'Margin exception - GP ' + gpText + ' below ' + targetText + ' target.'
+        : 'GP ' + gpText + ' meets the ' + targetText + ' target.');
+
+    var overlay = document.createElement('div');
+    overlay.id = 'bwn-pa-overlay';
+    var card = document.createElement('div');
+    card.id = 'bwn-pa-card';
+    card.setAttribute('role', 'dialog');
+    card.setAttribute('aria-modal', 'true');
+    card.setAttribute('aria-label', 'Margin check for proposal ' + ctx.pid);
+
+    // Below-floor banner (only when below): bordered box, leading icon + label, plain-text drivers.
+    var banner = '';
+    if (verdict.known && verdict.below) {
+      banner = '<div role="alert" style="border:1px solid #f0c2bd;background:#fdf1f0;border-radius:8px;padding:10px 12px;margin:0 0 12px;">' +
+        '<div style="font-weight:600;color:#b42318;">⚠ Margin exception - GP ' + escapeHtml(gpText) + ' below ' + escapeHtml(targetText) + ' target</div>' +
+        (drivers.length ? '<ul style="margin:6px 0 0;padding-left:18px;font-size:12px;color:#7a271a;">' +
+          drivers.map(function (d) { return '<li>' + escapeHtml(d) + '</li>'; }).join('') + '</ul>' : '') +
+        '</div>';
+    }
+
+    // Required-category section: pending until the enum is captured; otherwise present/missing lists.
+    var catHtml;
+    if (!REQUIRED_CATEGORIES.length) {
+      catHtml = '<div style="font-size:12px;color:#5b6b62;">Required-category check: pending category-enum capture (one live proposal read needed). Categories present: ' +
+        escapeHtml(pc.categories && pc.categories.length ? pc.categories.join(', ') : '(none)') + '.</div>';
+    } else if (!missing.length) {
+      catHtml = '<div style="font-size:12px;color:#166534;">✓ All required categories are priced.</div>';
+    } else {
+      catHtml = '<div style="font-size:12px;color:#7a271a;">⚠ Missing priced categories: ' + escapeHtml(missing.join(', ')) + '.</div>';
+    }
+
+    card.innerHTML =
+      '<div class="hd"><div class="t">Margin check</div>' +
+      '<div class="s">W-' + escapeHtml(String(ctx.n)) + '  ·  Proposal #' + escapeHtml(String(ctx.pid)) + '  ·  ' + escapeHtml(ctx.total) + '  ·  ' + escapeHtml(ctx.gp) + '</div></div>' +
+      '<div class="bd">' +
+      '<div style="display:flex;gap:8px;align-items:flex-start;margin:0 0 12px;font-size:13px;font-weight:600;">' +
+        '<span aria-hidden="true">' + vIcon + '</span><span>' + escapeHtml(vText) + '</span></div>' +
+      banner +
+      '<div style="font-size:12px;color:#5b6b62;margin:0 0 4px;">Margin</div>' +
+      '<div class="notebox">GP: ' + escapeHtml(gpText) + '\nTarget: ' + escapeHtml(targetText) + '   Floor: ' + escapeHtml(floorText) + '\n(' + escapeHtml(srcNote) + ')</div>' +
+      '<div style="font-size:12px;color:#5b6b62;margin:0 0 4px;">Dollar view (derived from GP%)</div>' +
+      '<div class="notebox">Revenue: ' + escapeHtml(fmtDollars(revenue)) + '\nImplied cost: ' + escapeHtml(fmtDollars(cost)) + '\nComponent breakdown unavailable - the labor / material / travel / markup split is not in the proposal data.</div>' +
+      '<div style="font-size:12px;color:#5b6b62;margin:0 0 4px;">Priced categories</div>' +
+      '<div style="margin:0 0 12px;">' + catHtml + '</div>' +
+      '<div style="font-size:12px;color:#5b6b62;margin:0 0 4px;">Scope-gap questions (on-device AI)</div>' +
+      '<div id="bwn-pa-scopegaps" class="notebox">Not run yet.</div>' +
+      '</div>' +
+      '<div class="ft">' +
+      '<button class="btn cancel" id="bwn-pa-ai" type="button">Ask AI for scope gaps</button>' +
+      '<button class="btn go" id="bwn-pa-close" type="button">Close</button></div>';
+
+    overlay.appendChild(card);
+    document.body.appendChild(overlay);
+    var releaseTrap = paFocusTrap(card);
+
+    var closeBtn = card.querySelector('#bwn-pa-close');
+    var aiBtn = card.querySelector('#bwn-pa-ai');
+    var gapsBox = card.querySelector('#bwn-pa-scopegaps');
+
+    function close() {
+      try { releaseTrap(); } catch (e) { }
+      try { overlay.remove(); } catch (e) { }
+      document.removeEventListener('keydown', onKey);
+    }
+    function onKey(e) { if (e.key === 'Escape') close(); }
+    document.addEventListener('keydown', onKey);
+    overlay.addEventListener('click', function (e) { if (e.target === overlay) close(); });
+    closeBtn.addEventListener('click', close);
+
+    aiBtn.addEventListener('click', function () {
+      aiBtn.disabled = true;
+      gapsBox.textContent = 'Asking the on-device AI…';
+      draftScopeGaps(ctx, pc).then(function (text) {
+        gapsBox.textContent = text || 'On-device AI unavailable in this browser (advisory feature; no gaps generated).';
+        aiBtn.disabled = false;
+      }, function () {
+        gapsBox.textContent = 'On-device AI unavailable in this browser (advisory feature; no gaps generated).';
+        aiBtn.disabled = false;
+      });
+    });
+  }
+
+  function startMarginCheck() {
+    paToast('Reading proposal for margin check…');
+    Promise.all([gatherContext(), readBizRules()]).then(function (arr) {
+      var ctx = arr[0], biz = arr[1];
+      return readProposalContext(ctx.pid).then(function (pc) { openMarginPanel(ctx, biz, pc); });
+    }).catch(function (err) {
+      paToast('Could not read proposal: ' + ((err && err.message) || err));
+    });
   }
 
   // ===== styles =============================================================
@@ -793,7 +1082,7 @@
         return readOpenTasks(n).then(function (openTasks) {
           return {
             n: n, pid: pid, wo: wo,
-            total: money(tot.total), gpPct: tot.gpPct, gp: gpLabel(tot.gpPct),
+            total: money(tot.total), totalMoney: tot.total, gpPct: tot.gpPct, gp: gpLabel(tot.gpPct),
             gpText: (tot.gpPct == null ? 'unknown' : (tot.gpPct * 100).toFixed(2) + '%'),
             openTasks: openTasks
           };
@@ -941,6 +1230,10 @@
       { label: 'TSP Review', sub: 'Send to Ronny → Pending Trade Specialist', fn: startTsp },
       { label: 'Kickback', sub: 'AI reason → Internal Proposal Rejected', fn: startKickback }
     ];
+    // Margin check: READ-ONLY advisory, flag-gated (bwn:modules.marginGuardrail, default OFF). No writes.
+    if (BWN_MODULES.marginGuardrail === true) {
+      items.push({ label: 'Margin check', sub: 'Advisory - GP vs floor/target (read-only)', fn: startMarginCheck });
+    }
     items.forEach(function (it) {
       var b = document.createElement('button');
       b.type = 'button'; b.setAttribute('role', 'menuitem');

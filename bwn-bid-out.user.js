@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         BWN Bid-Out (Broadway National)
 // @namespace    broadwaynational.bwn
-// @version      0.27.2
+// @version      0.28.0
 // @downloadURL  https://raw.githubusercontent.com/Intermu/userscripts/main/bwn-bid-out.user.js
 // @updateURL    https://raw.githubusercontent.com/Intermu/userscripts/main/bwn-bid-out.user.js
 // @description  Email RFP to outside / net-new vendors, launched from a caret on Umbrava's own "See Who Is Available" button (network-vendor bidding stays native - no separate Bid-Out button). The caret menu opens the tracked email RFP wizard: finds net-new vendors nearby through Google Places, looks up their emails via the BWN scrape-contacts function, takes pasted outside addresses, and can still include assignable Umbrava vendors in the same email. You pick who's included, then review the exact recipient list and the rendered email before anything sends. Send from your own mailbox via the SWA send-bid function (Microsoft Graph), or open a plain Outlook draft. Vendors are BCC'd; nothing sends until you click Send. Network access is limited to Umbrava (same-origin), Google Places, and your SWA host.
@@ -20,7 +20,7 @@
 (function () {
   'use strict';
 
-  var VER = '0.27.2';
+  var VER = '0.28.0';
   console.info('[BWN BID-OUT] v' + VER + ' - Build Requests wizard (WO details -> select vendors -> review -> sent) · Umbrava vendors + Places net-new discovery + email scrape · one-click Graph send via SWA (Outlook-draft fallback) · sent-state flip persists bid-sent + GM baseline per WO');
 
   var COMPANY_ADDR = 'Broadway National Group, 100 Davids Dr, Hauppauge, NY 11788';
@@ -939,7 +939,32 @@
       '.bwn-bo-sumfld:first-of-type{border-top:none;}' +
       '.bwn-bo-sumfld .k{flex:0 0 128px;font:500 12px ' + FONT + ';color:#5a6b62;}' +
       '.bwn-bo-sumfld .v{flex:1;font:400 14px ' + FONT + ';color:#1f2a24;white-space:pre-wrap;min-width:0;}' +
-      '.bwn-bo-sumnote{font:500 12px ' + FONT + ';color:#1a5f3e;margin:8px 0 2px;}';
+      '.bwn-bo-sumnote{font:500 12px ' + FONT + ';color:#1a5f3e;margin:8px 0 2px;}' +
+      // ---- Vendor snapshot card (Phase 1, read-only) ----
+      '.bwn-bo-vs{border:1px solid #dde6e1;border-radius:10px;background:#f7faf8;padding:12px 14px;margin:2px 0 12px;}' +
+      '.bwn-bo-vshd{font:600 14px ' + FONT + ';color:#0d3d26;margin-bottom:8px;display:flex;align-items:center;gap:8px;}' +
+      '.bwn-bo-vstag{font:500 11px ' + FONT + ';color:#5a6b62;background:#e8f3ed;border:1px solid #cfe6da;border-radius:999px;padding:2px 8px;}' +
+      '.bwn-bo-vsskel{height:12px;border-radius:6px;background:linear-gradient(90deg,#eef3f0,#e2ece7,#eef3f0);background-size:200% 100%;animation:bwn-bo-vssh 1.1s ease-in-out infinite;margin:8px 0;}' +
+      '.bwn-bo-vsskel.short{width:60%;}' +
+      '@keyframes bwn-bo-vssh{0%{background-position:200% 0;}100%{background-position:-200% 0;}}' +
+      '@media (prefers-reduced-motion:reduce){.bwn-bo-vsskel{animation:none;}}' +
+      '.bwn-bo-vsempty{font:400 13px ' + FONT + ';color:#5a6b62;padding:6px 0;}' +
+      '.bwn-bo-vsrec{background:#e8f3ed;border:1px solid #cfe6da;border-radius:8px;padding:9px 11px;margin-bottom:10px;}' +
+      '.bwn-bo-vsrec-hd{font:500 14px ' + FONT + ';color:#0d3d26;}' +
+      '.bwn-bo-vsrec-note{font:400 12px ' + FONT + ';color:#5a6b62;}' +
+      '.bwn-bo-vswhy{margin:6px 0 0;padding-left:18px;}' +
+      '.bwn-bo-vswhy li{font:400 13px ' + FONT + ';color:#1f2a24;line-height:1.5;}' +
+      '.bwn-bo-vstbl{width:100%;border-collapse:collapse;font:400 13px ' + FONT + ';}' +
+      '.bwn-bo-vstbl th{text-align:left;font:500 11px ' + FONT + ';color:#5a6b62;padding:4px 6px;border-bottom:1px solid #dde6e1;white-space:nowrap;}' +
+      '.bwn-bo-vstbl td{padding:5px 6px;border-bottom:1px solid #eef2f4;color:#1f2a24;vertical-align:top;}' +
+      '.bwn-bo-vstbl td.nm{font-weight:500;}' +
+      '.bwn-bo-vstbl tr:last-child td{border-bottom:none;}' +
+      '.bwn-bo-vsrate{color:#0d3d26;white-space:nowrap;}' +
+      '.bwn-bo-vsmuted{color:#5a6b62;}' +
+      '.bwn-bo-vsnote{font:400 12px ' + FONT + ';color:#5a6b62;margin:6px 0;}' +
+      '.bwn-bo-vserr{font:500 12px ' + FONT + ';color:#8a4b12;margin:6px 0;display:flex;align-items:center;gap:8px;flex-wrap:wrap;}' +
+      '.bwn-bo-vsretry{border:1px solid #dde6e1;background:#fff;border-radius:6px;padding:3px 10px;font:500 12px ' + FONT + ';color:#1a5f3e;cursor:pointer;}' +
+      '.bwn-bo-vslegend{font:400 11px ' + FONT + ';color:#93a29a;margin-top:8px;line-height:1.5;}';
     document.head.appendChild(st);
   }
 
@@ -949,6 +974,236 @@
     t.textContent = 'Bid-Out: ' + msg; document.body.appendChild(t);
     setTimeout(function () { t.remove(); }, 5500);
   }
+
+  // ===== BWN-VENDOR-SNAPSHOT START v1 (Phase 1 read-only; sliced by scripts/test-vendor-snapshot.js) =====
+  // A read-only "vendor snapshot" card shown at Select-Vendors (proposal/dispatch) time, above the
+  // existing assignable-vendor list. Phase 1 shows ONLY signals that exist now, each labelled with the
+  // op it came from, and highlights ONE suggested vendor with a plain-text "why". It NEVER awards,
+  // NEVER classifies (preferred/probation/avoid/tier = Phase 3, held), and NEVER imputes a missing
+  // value (a missing metric renders "-", never 0, never blank).
+  //
+  // Gating - TWO independent, fail-closed gates, both must pass before anything renders:
+  //   1. rank  - the WORKING Umbrava rank ladder that resolveUmbravaUser publishes on the bwn:role
+  //              bus event + the bwn:role:last localStorage slot (the same source every other suite
+  //              script reads). Min view rank = supervisor (VS_MIN_RANK = 3; Mike-confirmable). A
+  //              null/unknown rank is NOT a pass. This is the Umbrava ladder - deliberately NOT the
+  //              ops_* AAD app-roles, which are unassigned (memory: swa-rank-roles-never-assigned).
+  //   2. flag  - governance flag `vendorIntel`, default OFF, read from /api/governance. Any non-2xx,
+  //              timeout, parse error, or absent/false flag = OFF = the card never mounts (no flash).
+  //              So the card stays dark until BOTH the endpoint returns vendorIntel:true AND the
+  //              viewer is supervisor+. (The /api/governance route ships with the governance-completion
+  //              work; until it is deployed the fetch 404s -> OFF, which is the intended default.)
+  //
+  // ponytail: reuses bid-out's own gql()/gmGet()/esc()/FONT and the getAssignableVendors result the
+  // panel ALREADY loaded (`res`) for rating/distance/name. The ONLY new network read is a slim
+  // id+metrics query, issued once per panel and only when the card actually mounts, so the existing
+  // email-RFP load path (VEND_Q, module top) is byte-for-byte unchanged and carries NONE of the new
+  // field's schema risk - a bad field degrades one metric to "-", it cannot dark the vendor list.
+  var GOV_URL = 'https://green-stone-0717dab0f.7.azurestaticapps.net/api/governance';
+  var VS_MIN_RANK = 3;                 // supervisor on the Umbrava ladder. RANK.SUPERVISOR (api/shared/umbrava-auth.js).
+  var VS_ROLE_TTL_MS = 6 * 3600 * 1000;
+  var VS_GOV_TTL_MS = 5 * 60 * 1000;
+  var VS_TOP_N = 6;                     // comparable rows shown in the card
+
+  // --- rank read (read-only; same shape as bwn-proposal-actions / bwn-cc-auth) ---
+  var _vsLiveRank = null;
+  try {
+    document.addEventListener('bwn:evt', function (e) {
+      var d = e && e.detail;
+      if (d && d.id === 'bwn:role' && typeof d.rank === 'number') _vsLiveRank = d.rank;
+    });
+  } catch (e) { /* no bus: rank stays null -> gate fails closed */ }
+  function vsRank() {
+    if (typeof _vsLiveRank === 'number') return _vsLiveRank;
+    try {
+      var r = JSON.parse(localStorage.getItem('bwn:role:last') || 'null');
+      if (r && r.ok && typeof r.rank === 'number' && r.ts && (Date.now() - r.ts) < VS_ROLE_TTL_MS) return r.rank;
+    } catch (e2) { /* unreadable slot -> null */ }
+    return null;
+  }
+  function vsRankAllows() { var r = vsRank(); return typeof r === 'number' && r >= VS_MIN_RANK; }
+
+  // --- governance flag (fail-closed OFF) ---
+  // ONLY the literal boolean true enables the feature; a missing key, non-boolean, non-2xx, or any
+  // network/parse failure resolves OFF. Cached briefly so re-draws (Back/Next) don't refetch.
+  function vsParseGovernance(json) { return !!(json && json.vendorIntel === true); }
+  var _vsGov = null; // { ts, on }
+  function vsGovernance() {
+    if (_vsGov && (Date.now() - _vsGov.ts) < VS_GOV_TTL_MS) return Promise.resolve(_vsGov.on);
+    return gmGet(GOV_URL, { 'Accept': 'application/json' }, 5000).then(function (r) {
+      var on = (r && r.status >= 200 && r.status < 300) ? vsParseGovernance(r.json) : false;
+      _vsGov = { ts: Date.now(), on: on };
+      return on;
+    }).catch(function () { _vsGov = { ts: Date.now(), on: false }; return false; });
+  }
+
+  // --- pure label / guard helpers (no DOM, no network) ---
+  // Rating is COUNT-GATED: an average with zero ratings behind it is NOT a score. Returns hasScore
+  // false so the card shows "no ratings yet" rather than a hollow "0.0". (input-count >= 1 guard.)
+  function vsRatingLabel(rating, count) {
+    var c = (typeof count === 'number' && count > 0) ? count : 0;
+    if (c >= 1 && typeof rating === 'number' && isFinite(rating)) {
+      return { hasScore: true, star: '★', text: rating.toFixed(1), count: c };
+    }
+    return { hasScore: false, star: '', text: 'no ratings yet', count: 0 };
+  }
+  // Never impute: a non-finite / missing value renders as a literal dash - never 0, never blank.
+  function vsMetricText(v) { return (typeof v === 'number' && isFinite(v)) ? String(v) : '-'; }
+  function vsMiText(mi) { return (typeof mi === 'number' && isFinite(mi)) ? (mi.toFixed(1) + ' mi') : '-'; }
+
+  // Comparable vendors: the assignable list within the chosen radius (the same filter the vendor rows
+  // use at :vendorRows). Nulls (no distance) are kept - they are assignable, just unmeasured.
+  function vsComparable(res, miles) {
+    var items = (res && res.items) || [];
+    return items.filter(function (v) { return v.distanceFromLocation == null || v.distanceFromLocation <= miles; });
+  }
+
+  // Suggested vendor - EXPLAINABLE and NON-AUTOMATIC. Ranks by DISTANCE ONLY (a value that is present
+  // and needs no sample). Rating is REPORTED as supporting context but never used to rank, so a
+  // 0-sample rating can never inflate a suggestion. Returns null when there is nothing to suggest.
+  // This is a starting point for a human, never an award and never a classification.
+  function vsPickRecommendation(vendors, serviceById) {
+    var pool = (vendors || []).filter(function (v) { return typeof v.distanceFromLocation === 'number' && isFinite(v.distanceFromLocation); });
+    var chosen;
+    if (pool.length) {
+      chosen = pool.slice().sort(function (a, b) { return a.distanceFromLocation - b.distanceFromLocation; })[0];
+    } else if ((vendors || []).length) {
+      chosen = vendors[0]; // no distances on file at all - fall back to first and SAY distance is unknown
+    } else {
+      return null;
+    }
+    var rl = vsRatingLabel(chosen.averageRating, chosen.ratingCount);
+    var svc = serviceById ? serviceById[chosen.id] : undefined;
+    var why = [];
+    why.push((typeof chosen.distanceFromLocation === 'number' && isFinite(chosen.distanceFromLocation))
+      ? ('Closest assignable vendor for this trade - ' + vsMiText(chosen.distanceFromLocation))
+      : 'First assignable vendor for this trade (no distance on file)');
+    why.push(rl.hasScore
+      ? ('Umbrava rating ' + rl.text + ' from ' + rl.count + ' review' + (rl.count === 1 ? '' : 's') + ' (Umbrava reviews, not a Broadway job-outcome score)')
+      : 'No Umbrava ratings on file yet');
+    if (typeof svc === 'number' && isFinite(svc)) {
+      why.push(svc + ' prior service' + (svc === 1 ? '' : 's') + ' at this location');
+    }
+    return { id: chosen.id, name: chosen.name, why: why };
+  }
+
+  // Slim metrics read: the SAME getAssignableVendors call/args as VEND_Q, selecting ONLY id + the new
+  // nested metric, so the new (schema-unverified) field cannot break anything but this one call. Pinned
+  // by scripts/test-vendor-snapshot.js. locationServiceCount is per the discovery anchor
+  // vendorAssignmentJobMetrics(locationId){locationServiceCount} - UNVERIFIED against live schema; live
+  // smoke owed before the flag is flipped (see the deliverable).
+  var VS_METRICS_Q =
+    'query($t:[ID!]!,$loc:ID!,$type:Int!,$lat:Float,$lng:Float,$take:Int!){ ' +
+    'getAssignableVendors(tradeIds:$t, tradeFilterOption:Any, locationId:$loc, workOrderTypeId:$type, ' +
+    'locationLatitude:$lat, locationLongitude:$lng, page:{skip:0,take:$take}, ' +
+    'sortBy:[{columnName:"distanceFromLocation",direction:ASC}], filter:[]){ value{ items{ ' +
+    'id vendorAssignmentJobMetrics(locationId:$loc){ locationServiceCount } } } } }';
+  function vsFetchMetrics(wo, take) {
+    var trades = (wo.trades || []).map(function (t) { return t.id; }).filter(Boolean);
+    var lat = wo.address ? wo.address.latitude : null;
+    var lng = wo.address ? wo.address.longitude : null;
+    return gql(VS_METRICS_Q, { t: trades, loc: wo.locationId, type: wo.workOrderTypeId || 8, lat: lat, lng: lng, take: take || 60 })
+      .then(function (d) {
+        var items = (d && d.getAssignableVendors && d.getAssignableVendors.value && d.getAssignableVendors.value.items) || [];
+        var by = {};
+        items.forEach(function (it) {
+          var c = it && it.vendorAssignmentJobMetrics && it.vendorAssignmentJobMetrics.locationServiceCount;
+          if (it && it.id != null) by[it.id] = (typeof c === 'number') ? c : null;
+        });
+        return by;
+      });
+  }
+
+  // Build the view model from res + the (optional) per-vendor service-count map. Pure.
+  function vsModel(res, miles, serviceById, metricsState) {
+    var cmp = vsComparable(res, miles);
+    if (!cmp.length) return { state: 'empty' };
+    var rows = cmp.slice(0, VS_TOP_N).map(function (v) {
+      return {
+        name: v.name, mi: v.distanceFromLocation, rating: v.averageRating, ratingCount: v.ratingCount,
+        service: serviceById ? (v.id in serviceById ? serviceById[v.id] : null) : null
+      };
+    });
+    return {
+      state: 'ok',
+      metricsState: metricsState || 'pending',
+      recommendation: vsPickRecommendation(cmp, serviceById),
+      rows: rows
+    };
+  }
+
+  // Pure render - returns the card HTML for a given model/state. Tested directly for labels + states.
+  //   model.state         'loading' | 'empty' | 'ok'
+  //   model.metricsState  'pending' | 'ok' | 'error'   (only meaningful when state === 'ok')
+  function vsRenderCard(model) {
+    var head = '<div class="bwn-bo-vshd">Vendor snapshot <span class="bwn-bo-vstag">read-only</span></div>';
+    if (model.state === 'loading') {
+      return '<section class="bwn-bo-vs" role="region" aria-label="Vendor snapshot" aria-busy="true">' + head +
+        '<div class="bwn-bo-vsskel"></div><div class="bwn-bo-vsskel"></div><div class="bwn-bo-vsskel short"></div></section>';
+    }
+    if (model.state === 'empty') {
+      return '<section class="bwn-bo-vs" role="region" aria-label="Vendor snapshot">' + head +
+        '<div class="bwn-bo-vsempty">No vendors on file for this trade near this location.</div></section>';
+    }
+    var rec = model.recommendation;
+    var recHtml = rec
+      ? '<div class="bwn-bo-vsrec"><div class="bwn-bo-vsrec-hd">Suggested: <strong>' + esc(rec.name) + '</strong>' +
+          ' <span class="bwn-bo-vsrec-note">(a starting point - not an award)</span></div>' +
+          '<ul class="bwn-bo-vswhy">' + rec.why.map(function (w) { return '<li>' + esc(w) + '</li>'; }).join('') + '</ul></div>'
+      : '<div class="bwn-bo-vsrec"><div class="bwn-bo-vsrec-hd">No single vendor stands out on the visible signals.</div></div>';
+    var metricNote = model.metricsState === 'error'
+      ? '<div class="bwn-bo-vserr">Service history unavailable. <button type="button" class="bwn-bo-vsretry">Retry</button></div>'
+      : (model.metricsState === 'pending' ? '<div class="bwn-bo-vsnote">Loading service history…</div>' : '');
+    var rows = (model.rows || []).map(function (r) {
+      var rl = vsRatingLabel(r.rating, r.ratingCount);
+      var ratingCell = rl.hasScore
+        ? '<span class="bwn-bo-vsrate"><span aria-hidden="true">' + rl.star + '</span> ' + esc(rl.text) + ' <span class="bwn-bo-vsmuted">(' + rl.count + ')</span></span>'
+        : '<span class="bwn-bo-vsmuted">' + esc(rl.text) + '</span>';
+      return '<tr><td class="nm">' + esc(r.name) + '</td>' +
+        '<td>' + esc(vsMiText(r.mi)) + '</td>' +
+        '<td>' + ratingCell + '</td>' +
+        '<td>' + esc(vsMetricText(r.service)) + '</td>' +
+        '<td class="bwn-bo-vsmuted">Assignable</td></tr>';
+    }).join('');
+    var table = '<table class="bwn-bo-vstbl"><thead><tr>' +
+      '<th>Vendor</th><th>Distance</th><th>Umbrava rating</th><th>Services here</th><th>Status</th>' +
+      '</tr></thead><tbody>' + rows + '</tbody></table>';
+    var legend = '<div class="bwn-bo-vslegend">Sources: rating, distance, services here = getAssignableVendors' +
+      ' · Umbrava rating reflects Umbrava reviews, not Broadway job outcomes' +
+      ' · authoritative Active/Inactive = lookupVendors.status (not wired in Phase 1; rows show assignability)' +
+      ' · compliance / W-9 = pending a captured op.</div>';
+    return '<section class="bwn-bo-vs" role="region" aria-label="Vendor snapshot">' + head + recHtml + metricNote + table + legend + '</section>';
+  }
+
+  // Mount the card into `container` (a placeholder div inside Select-Vendors). Fail-closed on BOTH
+  // gates BEFORE anything renders, so a denied viewer or an off flag sees nothing at all (no flash).
+  function vsMountSnapshot(container, wo, res, miles) {
+    if (!container) return;
+    if (!vsRankAllows()) return;                          // denied -> hidden
+    vsGovernance().then(function (on) {
+      if (!on) return;                                    // disabled -> not mounted
+      if (!document.body.contains(container)) return;     // panel re-drew or closed while we waited
+      function paint(serviceById, metricsState) {
+        container.innerHTML = vsRenderCard(vsModel(res, miles, serviceById, metricsState));
+        var rb = container.querySelector('.bwn-bo-vsretry');
+        if (rb) rb.addEventListener('click', function () { if (openState) openState.vsMetrics = null; run(); });
+      }
+      function run() {
+        if (!vsComparable(res, miles).length) { container.innerHTML = vsRenderCard({ state: 'empty' }); return; }
+        if (openState && openState.vsMetrics && openState.vsMetrics.state === 'ok') { paint(openState.vsMetrics.by, 'ok'); return; }
+        container.innerHTML = vsRenderCard({ state: 'loading' });
+        vsFetchMetrics(wo, 60).then(function (by) {
+          if (openState) openState.vsMetrics = { state: 'ok', by: by };
+          paint(by, 'ok');
+        }).catch(function () {
+          if (openState) openState.vsMetrics = null;      // never cache a failure as fact
+          paint(null, 'error');                           // card still shows rating/distance; service = "-"
+        });
+      }
+      run();
+    });
+  }
+  // ===== BWN-VENDOR-SNAPSHOT END v1 =====
 
   var openState = null;
 
@@ -1329,6 +1584,7 @@
       body.innerHTML =
         stepperHtml() +
         woLineHtml() +
+        '<div id="bwn-bo-snap"></div>' +
         '<div class="bwn-bo-row"><label>Distance</label>' +
         '<label>Within</label><input id="bo-miles" type="number" min="1" step="5" value="' + openState.miles + '" style="width:70px;"> mi ' +
         '<button id="bo-reload" class="bwn-bo-mini">Apply</button></div>' +
@@ -1417,6 +1673,10 @@
       }
       inviteEl.addEventListener('input', refreshInvite);
       renderNetNew(); refreshInvite();
+      // Read-only vendor snapshot (Phase 1) - self-gates on rank + the vendorIntel governance flag,
+      // so it renders nothing unless a supervisor+ views it AND the flag is on. Uses the vendors the
+      // panel already loaded; never blocks or alters the email-RFP flow.
+      vsMountSnapshot(document.getElementById('bwn-bo-snap'), wo, res, openState.miles);
       if (openState.focusInvite) { openState.focusInvite = false; try { inviteEl.scrollIntoView({ block: 'center' }); inviteEl.focus(); } catch (e) { } }
 
       document.getElementById('bo-all').addEventListener('click', function () {

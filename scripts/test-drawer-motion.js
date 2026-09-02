@@ -317,6 +317,9 @@ console.log('\n-- every animating selector honours reduced motion --');
 //   slowed: covered by animation-duration rather than animation:none - correct for a spinner,
 //   which reports that work is in flight and is the comprehension aid the rule says to keep.
 var ANIMATED_BY_FILE = {
+  'bwn-bid-out.user.js': [
+    { sel: '.bwn-bo-vsskel', keyframe: 'bwn-bo-vssh' }   // vendor-snapshot skeleton shimmer; off under reduced motion
+  ],
   'bwn-suite-core.user.js': [
     { sel: '#bwn-heat-panel', keyframe: 'bwnPanelIn' },
     { sel: '#bwn-heat-set', keyframe: 'bwnPanelIn' },

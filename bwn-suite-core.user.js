@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         BWN Suite - Core (Broadway National)
 // @namespace    broadwaynational.bwn
-// @version      1.80.1
+// @version      1.80.2
 // @downloadURL  https://raw.githubusercontent.com/Intermu/userscripts/main/bwn-suite-core.user.js
 // @updateURL    https://raw.githubusercontent.com/Intermu/userscripts/main/bwn-suite-core.user.js
 // @description  Runs several Umbrava helpers for BWN coordinators, in the browser with no privileged grants. Includes: PO Approval + ETA Builder; WO Assist (GP/ETA, a stall watchdog, DNE calculator, and a next-action playbook); Email Leak Guard (checks recipients against vendor names, PO amounts, and client budget references before an outbound email sends); WO List Heat (a triage overlay + My Day strip on the work-order list, with an optional same-origin Umbrava API scan for deterministic full-board coverage); and the BWN Launcher (opens the Azure Static Web App tools with the current WO's context). Modules share state through sessionStorage/localStorage. The only network calls are same-origin Umbrava GraphQL requests (app.umbrava.com/api/graphql, the app's own session): List Heat's full-board scan and WO Assist's work-order / trip / clock-in / document reads, plus ONE write - BWN Views saves the column layout through Umbrava's own putUserPreference, the same preference the column chooser writes; everything else is offline. Toggle modules in BWN_MODULES below.
@@ -63,11 +63,30 @@
                          // keeps its own hooks (current behavior, byte-for-byte). The helper itself
                          // is always DEFINED; this flag only flips whether an adopter routes through
                          // it, so a stuck/unresolved flag never silently changes lifecycle.
-    errorReporter: false // RM-B2, SHIPPING DEFAULT OFF: when on, BWN.report writes a bounded,
+    errorReporter: false, // RM-B2, SHIPPING DEFAULT OFF: when on, BWN.report writes a bounded,
                          // PII-free breadcrumb to the bwn:errlog ring alongside its toast. Off = the
                          // toast still shows (unchanged at paths that already toasted) but NOTHING is
                          // logged, and a formerly-silent path stays silent. The bwn:audit write ring
                          // is a SEPARATE key and is never touched by the reporter.
+    docCompliance: false, // SHIPPING DEFAULT OFF: read-only Documentation-compliance scoring. When on,
+                         // computeCompliance runs in compute() (WO page), caches bwn:compliance:<wo>,
+                         // and lights up three surfaces - the NEXT ACTIONS card pill, a per-row "Docs
+                         // N/M" badge on the WO list, and extra rows on the closeout preflight banner
+                         // (WARN-only, never blocks). Off = none of that mounts, nothing is computed or
+                         // cached, and the AI script's jobFacts push omits the compliance fields. The
+                         // score is READ-ONLY (no writes to Umbrava): a failed/pending read scores a
+                         // check 'unknown', never a miss, so an unread WO is deferred, not penalised.
+    recoveryPlaybooks: false, // Recovery Playbooks (read-only), SHIPPING DEFAULT OFF: when on, the SLA
+                         // countdown + early-breach flag surface on the WO Assist checklist / case
+                         // file / dashboard. PURE read-only signal (slaCountdown/breachPredict over the
+                         // existing status clock); it renders and stages nothing that mutates. Off = the
+                         // countdown chips never render, so the rollout is clean until this is flipped.
+    recoveryWrites: false // Recovery Writes, SHIPPING DEFAULT OFF: gates the recovery card's one-click
+                         // actions (enqueue a note/ECD intent to Track C, fire a single escalation). When
+                         // false the buttons never mount, so the card stays read-only for every user.
+                         // Even then each write routes through bwnGqlOp feature:'recoveryWrites' (its
+                         // per-feature kill switch + audit ring) and, for patchWorkOrder, the fail-closed
+                         // high-risk confirm gate - two gates: this flag hides the UI, bwnGqlOp governs.
   };
 
   var BWN_VER = (typeof GM_info !== 'undefined' && GM_info.script && GM_info.script.version) || '1.51.2';
@@ -85,7 +104,7 @@
   try { localStorage.setItem('bwn:status:core', JSON.stringify({ ver: BWN_VER, ts: Date.now() })); } catch (e) { /* best-effort */ }
 
   console.info('[BWN SUITE CORE] v' + BWN_VER + ' |',
-    'Shared Core 7 \u00b7 DOM Handles 1.0 \u00b7 PO Approval 1.13 \u00b7 WO Assist 2.71 \u00b7 Leak Guard 2.0 \u00b7 List Heat 3.28 \u00b7 Launcher 2.0 \u00b7 Views 3.1 \u00b7 Palette 1.1 \u00b7 Visit 1.2 \u00b7 Reminders 1.1 \u00b7 Timeline 1.1 \u00b7 TripCal 1.4 \u00b7 Bulk Ops 1.0 \u00b7 Connector 1.2 |',
+    'Shared Core 7 \u00b7 DOM Handles 1.0 \u00b7 PO Approval 1.13 \u00b7 WO Assist 2.71 \u00b7 Leak Guard 2.0 \u00b7 List Heat 3.28 \u00b7 Launcher 2.0 \u00b7 Views 3.1 \u00b7 Palette 1.1 \u00b7 Visit 1.2 \u00b7 Reminders 1.1 \u00b7 Timeline 1.1 \u00b7 TripCal 1.4 \u00b7 Bulk Ops 1.0 \u00b7 Doc Compliance 1.0 \u00b7 Connector 1.2 |',
     'enabled:', Object.keys(BWN_MODULES).filter(function (k) { return BWN_MODULES[k]; }).join(', '));
 
   // ===== BWN SHARED CORE v7 - KEEP IN SYNC across both suite scripts =====
@@ -198,7 +217,18 @@
       requiredStatuses: [],
       closeout: { docs: ['signed ticket', 'sign-in/out', 'before/after photos'], enforce: true },
       refFields: { sourceJob: false, sourcePo: false },
-      cadenceDays: null
+      cadenceDays: null,
+      // Integer, top-level, stamped on EVERY compliance score (result.rulesVersion) so a stored
+      // or pushed score is always traceable to the rule set that produced it. Bump when the check
+      // catalogue's meaning changes; a per-client override may raise it for that client only.
+      rulesVersion: 1,
+      // Documentation-compliance config (read by computeCompliance via bwnClientProfile). Only the
+      // keys a client actually differs on need overriding; deepMerge keeps the rest. `checks` is a
+      // sparse per-id override table over DOC_CHECK_CATALOGUE - each id may set required (bool),
+      // appliesToTrades (array of trade names; empty/absent = all), and weight (number). Absent id
+      // = catalogue default. ponytail: per-program required sets / photo-by-worktype / cadence
+      // values are DEFERRED - this is the flat per-client layer only.
+      compliance: { checks: {} }
     };
     // Seed profiles keyed by alpha-only-lowercased client name (bwnClientKey). clientId is
     // recorded for cross-checking against the live clientTenantProfileId; the resolver still
@@ -210,10 +240,10 @@
       'caleresinc': { clientId: null },
       'transformsrbrandsllc': { clientId: '23914', refFields: { sourceJob: true, sourcePo: true } }
     };
-    // Shallow merge with ONE level of depth over the two nested config objects (closeout,
-    // refFields) so a partial override (e.g. {refFields:{sourceJob:true}}) keeps its sibling
-    // defaults. Every other key is replaced wholesale. Nested objects are cloned so a merge
-    // never mutates CLIENT_DEFAULTS_SEED.
+    // Shallow merge with ONE level of depth over the nested config objects (closeout, refFields,
+    // compliance) so a partial override (e.g. {refFields:{sourceJob:true}} or {compliance:{checks:
+    // {receipt:{required:true}}}}) keeps its sibling defaults. Every other key is replaced
+    // wholesale. Nested objects are cloned so a merge never mutates CLIENT_DEFAULTS_SEED.
     function deepMerge() {
       var out = {};
       for (var i = 0; i < arguments.length; i++) {
@@ -221,7 +251,7 @@
         if (!src || typeof src !== 'object') continue;
         Object.keys(src).forEach(function (k) {
           var v = src[k];
-          if ((k === 'closeout' || k === 'refFields') && v && typeof v === 'object') {
+          if ((k === 'closeout' || k === 'refFields' || k === 'compliance') && v && typeof v === 'object') {
             out[k] = Object.assign({}, out[k] || {}, v);
           } else {
             out[k] = v;
@@ -1356,6 +1386,69 @@
     return { warn: C.hrsWarn * mult, bad: C.hrsBad * mult, sla: sm !== null };
   }
 
+  // ---- SLA countdown + early-breach prediction (Recovery Playbooks; PURE) ------
+  // ===== BWN-SLA START v1 (paste-identical into the Dashboard BWN-ACT port; sliced by
+  //       scripts/test-recovery-sla.js) =====
+  // Turn the mature status clock (bwnThresholdsFor + bwnSlaMult) and the already-computed ECD
+  // (state.due, from dueStatus) into a reader-facing countdown and an EARLY breach flag - a WO
+  // whose current status will cross its priority/SLA-scaled limit BEFORE its complete-by date
+  // is flagged so a coordinator acts AHEAD of the breach, not after. Both are PURE: no DOM, no
+  // store, and no wall clock of their own - nowMs is INJECTED (determinism + the ECD hours-left
+  // derivation). They re-use the clock verbatim; nothing about a threshold is re-implemented.
+  // They take `state` (never read a global) so the on-page checklist, the dashboard port and the
+  // job-acts overlay all call the SAME function and cannot disagree - the single-source rule the
+  // next-actions engine already follows. state.sla (optional { responseMinutes, category }) lets
+  // the countdown scale off the client's real clock; absent, bwnThresholdsFor falls back to the
+  // priority-label parse, so a caller with no SLA facts is unaffected.
+  //   slaCountdown(state,C,nowMs) -> null when there is no hours-in-status reading, else
+  //     { hrsInStatus, warnHrs, badHrs, hrsToWarn, hrsToBad, level:'ok'|'warn'|'breach', breached, slaScaled }
+  //   breachPredict(state,C,nowMs) -> { willBreach, breached, level, dueDays, hrsToBad, reason }
+  function bwnDueDaysFromState(state) {
+    // Reuse dueStatus' OUTPUT (state.due) rather than re-reading the ECD picker: a '+n' label is
+    // days until complete-by, an "Overdue n" label is n days past it. null when the WO has no ECD.
+    // Same label convention scoreAct parses, so "days to due" has ONE reading across the suite.
+    if (!state || !state.due || !state.due.label) return null;
+    var m = String(state.due.label).match(/\d+/);
+    if (!m) return null;
+    var n = parseInt(m[0], 10);
+    return /overdue/i.test(state.due.label) ? -n : n;
+  }
+  function slaCountdown(state, C, nowMs) {
+    C = C || (state && state.cfg) || BWN.cfg();
+    if (!state) return null;
+    var hrs = Number(state.hrs);
+    if (state.hrs === null || state.hrs === undefined || !isFinite(hrs)) return null;   // no hours-in-status reading
+    var th = bwnThresholdsFor(state.status, state.priority, C, state.sla);
+    var level = hrs >= th.bad ? 'breach' : hrs >= th.warn ? 'warn' : 'ok';
+    return {
+      hrsInStatus: hrs, warnHrs: th.warn, badHrs: th.bad,
+      hrsToWarn: th.warn - hrs, hrsToBad: th.bad - hrs,
+      level: level, breached: hrs >= th.bad, slaScaled: !!th.sla
+    };
+  }
+  function breachPredict(state, C, nowMs) {
+    C = C || (state && state.cfg) || BWN.cfg();
+    var sc = slaCountdown(state, C, nowMs);
+    if (!sc) return { willBreach: false, breached: false, level: null, dueDays: null, hrsToBad: null, reason: null };
+    var dueDays = bwnDueDaysFromState(state);
+    if (sc.breached) {
+      return { willBreach: true, breached: true, level: 'breach', dueDays: dueDays, hrsToBad: sc.hrsToBad,
+        reason: 'Status past its ' + Math.round(sc.badHrs) + 'h limit' };
+    }
+    // Not yet breached. Predict a breach when the status clock runs out BEFORE the complete-by date
+    // (or the WO is already overdue against its ECD). No ECD -> no horizon -> predict off the clock
+    // alone (not-breached => not-predicted). hrsToBad is > 0 here.
+    var dueHrs = (dueDays === null) ? null : dueDays * 24;
+    var willBreach = (dueHrs !== null) && (dueHrs < 0 || sc.hrsToBad < dueHrs);
+    return {
+      willBreach: willBreach, breached: false, level: sc.level, dueDays: dueDays, hrsToBad: sc.hrsToBad,
+      reason: willBreach
+        ? ('SLA clock (' + Math.round(sc.hrsToBad) + 'h to limit) runs out before complete-by (' + dueDays + 'd)')
+        : null
+    };
+  }
+  // ===== BWN-SLA END v1 =====
+
   // ---- Next-actions engine, published across module closures -------------------
   // `computeNextActions` is a PURE fn but it lives inside the WO Assist module's IIFE
   // together with its taxonomy (WO_PHASE, scoreAct, ACT_*), and List Heat is a separate
@@ -2465,7 +2558,7 @@
     // re-renders when it lands. Gives the exact priority label (the DOM read can
     // silently fall back to neutral) and the internal job id (the DOM can't).
     var WO_CACHE = Object.create(null);   // woNum -> wo | 'pending' | 'error'
-    var WORKORDER_Q = 'query WorkOrderHeader($n: Int!) { workOrder(workOrderNumber: $n) { id number statusName systemStatusName phase priority { label category } doNotExceed { amount currency precision } totalNTE { amount currency precision } grossProfitInfo { estimatedGrossProfitPercent trueGrossProfitPercent grossProfitPercentType } trades { id name } locationNumber locationName } }';
+    var WORKORDER_Q = 'query WorkOrderHeader($n: Int!) { workOrder(workOrderNumber: $n) { id number statusName systemStatusName phase priority { label category } doNotExceed { amount currency precision } totalNTE { amount currency precision } grossProfitInfo { estimatedGrossProfitPercent trueGrossProfitPercent grossProfitPercentType } trades { id name } locationNumber locationName scopeOfWork } }';
     function fetchWO(woNum) {
       if (!woNum) return;
       var c = WO_CACHE[woNum];
@@ -2633,7 +2726,14 @@
         // includeArchived:false is both ASKED FOR and enforced here - the live
         // count must not depend on the server honouring the argument.
         var live = rows.filter(function (r) { return r && !r.isArchived; });
-        DOCS_CACHE[woNum] = { count: live.length, docs: live };
+        // Bucket by NUMERIC label id for the compliance reader (docsByLabel). GUARD: a `label`
+        // that is not a finite number is dropped - Umbrava returns numeric label ids (see
+        // bwn-drop-upload DOC_LABELS: Photo=4, Invoice=12, ...), and bucketing a text/null label
+        // by a string key would let a doc-TYPE check match on stray text, the exact numeric-vs-text
+        // confusion that made the old closeout advisory (below) unable to match its labels at all.
+        var byLabel = Object.create(null);
+        live.forEach(function (r) { var L = Number(r && r.label); if (isFinite(L)) byLabel[L] = (byLabel[L] || 0) + 1; });
+        DOCS_CACHE[woNum] = { count: live.length, docs: live, byLabel: byLabel };
         // Track A docs-closure: publish the confident count for the live-jobs push - AI's
         // pushJobFacts reads bwn:docs:<wo> and sends it as docCount to the Ops Dashboard.
         // CONFIDENT reads ONLY: the 'error'/'pending' branches never write here, so an
@@ -2651,6 +2751,173 @@
       fetchDocs(woNum);
       return null;   // pending / errored / just-fired - unknown, never a guessed zero
     }
+
+    // ===== BWN DOC-COMPLIANCE START (pure; sliced by scripts/test-doc-compliance.js) =============
+    // Read-only Documentation-compliance score for a WO, computed IN-PAGE (the SWA server holds no
+    // Umbrava session - api/wo-audit 400s without one - so scoring has to live here). PURE: facts
+    // in, verdict out; no DOM reads, no store writes, deterministic. `nowMs` is INJECTED, never
+    // Date.now(), so the harness asserts on a fixed clock ([[headless-harness-cannot-time]]).
+    //
+    // THE UNKNOWN-vs-MISS CONTRACT IS THE WHOLE POINT (mirrors readDocs' null-vs-{count:0} split
+    // and computeFlags' "null header returns []"): a failed or still-pending READ makes a check
+    // 'unknown' - NEVER a 'miss'. A miss is a CONFIDENT absence (the read landed and the thing is
+    // not there); unknown is "could not tell". Both 'unknown' and 'na' are EXCLUDED from score AND
+    // total, so an unread WO is deferred, not penalised:
+    //     total = checks with state ok|miss        score = checks with state ok
+    // The pill fraction is therefore ok / (ok+miss); unknowns surface as a separate "N pending".
+    //
+    // ponytail: DEFERRED, do NOT build here - per-program required-check sets, photo-by-worktype
+    // rules, supplier-quote applicability, a "structured" completion-note rule, cadence values, a
+    // central rule store, and the Salesforce check (no data source anywhere - forced to 'na' below).
+
+    // Doc-label NAME -> numeric id: the subset of bwn-drop-upload's DOC_LABELS the checks reference.
+    // Core cannot @require that script's map across the @grant boundary, so the ids are pinned here.
+    // Kept inside the slice so the pure functions have no external dependency.
+    var DOC_LABEL_IDS = {
+      'Work Order Request': 17, 'Signoff': 3, 'Photo': 4, 'Invoice': 12,
+      'Vendor Proposal': 20, 'Supplier Proposal': 21, 'Receipt': 29
+    };
+    var DOC_LABEL_NAMES = (function () { var o = {}; for (var k in DOC_LABEL_IDS) o[DOC_LABEL_IDS[k]] = k; return o; })();
+    // Numeric label id -> its display name ('' when unknown). Used by the closeout advisory so it
+    // matches on the label's NAME, not its raw numeric id (which no text label could ever contain).
+    function docLabelName(id) { var n = Number(id); return isFinite(n) && DOC_LABEL_NAMES[n] ? DOC_LABEL_NAMES[n] : ''; }
+
+    // The default check catalogue. Evidence source per check:
+    //   docLabels: OK when ANY listed label has a CONFIDENT count > 0 in docsByLabel (else miss);
+    //              docsByLabel == null (read pending/failed) -> unknown.
+    //   field:'scopeOfWork': OK when header.scopeOfWork is non-blank; header == null -> unknown.
+    //   notes:'completion':  OK when notesMeta.hasCompletion; notesMeta == null -> unknown.
+    //   pos:true:            OK when a vendor PO is attached; pos == null && header == null -> unknown.
+    //   source:'salesforce': DROPPED - no data source in either repo -> forced 'na', never scored.
+    // Photos are PRESENCE-only (before/after is not distinguishable - there is no such label).
+    var DOC_CHECK_CATALOGUE = [
+      { id: 'workOrderRequest', label: 'Work Order Request',        docLabels: ['Work Order Request'],                    required: true,  weight: 1 },
+      { id: 'scopeOfWork',      label: 'Scope of work',             field: 'scopeOfWork',                                 required: true,  weight: 1 },
+      { id: 'signoff',          label: 'Signed ticket',             docLabels: ['Signoff'],                               required: true,  weight: 1 },
+      { id: 'photos',           label: 'Photos',                    docLabels: ['Photo'],                                 required: true,  weight: 1 },
+      { id: 'invoice',          label: 'Invoice',                   docLabels: ['Invoice'],                               required: true,  weight: 1 },
+      { id: 'vendorProposal',   label: 'Vendor/supplier proposal',  docLabels: ['Vendor Proposal', 'Supplier Proposal'], required: true,  weight: 1 },
+      { id: 'receipt',          label: 'Receipt',                   docLabels: ['Receipt'],                               required: false, weight: 1 },
+      { id: 'completionNote',   label: 'Completion note',           notes: 'completion',                                  required: true,  weight: 1 },
+      { id: 'poAttached',       label: 'Vendor PO attached',        pos: true,                                            required: true,  weight: 1 },
+      // ponytail TODO: 'salesforceUpdate' has NO data source in either repo (no SF read anywhere).
+      // Kept in the catalogue so it is VISIBLE as deferred, but forced to 'na' and never scored.
+      // Wire a real Salesforce read before making this evaluable.
+      { id: 'salesforceUpdate', label: 'Salesforce update',         source: 'salesforce',                                 required: true,  weight: 1 }
+    ];
+
+    // Resolve the catalogue against a client profile's sparse compliance.checks override table.
+    function complianceChecks(profile) {
+      var over = (profile && profile.compliance && profile.compliance.checks) || {};
+      return DOC_CHECK_CATALOGUE.map(function (c) {
+        var o = over[c.id] || {}, m = {};
+        for (var k in c) m[k] = c[k];
+        if (o.required !== undefined) m.required = o.required;
+        if (o.appliesToTrades !== undefined) m.appliesToTrades = o.appliesToTrades;
+        if (o.weight !== undefined) m.weight = o.weight;
+        return m;
+      });
+    }
+
+    // Does the WO's trade list satisfy a check's appliesToTrades gate? tradeNames is an array of
+    // the WO's trade names, or null when the header did not read. 'yes' | 'no' | 'unknown'.
+    function tradeApplies(check, tradeNames) {
+      var want = check.appliesToTrades;
+      if (!want || !want.length) return 'yes';                 // applies to every trade
+      if (!tradeNames) return 'unknown';                       // header unread - cannot tell
+      var lc = tradeNames.map(function (t) { return String(t || '').toLowerCase(); });
+      return want.some(function (w) { return lc.indexOf(String(w).toLowerCase()) !== -1; }) ? 'yes' : 'no';
+    }
+
+    // (header, notesMeta, docsByLabel, proposals, pos, profile, rulesVersion, nowMs) -> result.
+    //   header      : { trades:[{name}|str], scopeOfWork, hasNonTerminatedPurchaseOrders? } | null
+    //   notesMeta   : { hasCompletion:bool, count } | null
+    //   docsByLabel : { <labelId>: count } | null   (readDocs().byLabel; null = unread/failed)
+    //   pos         : [{ amount, vendor }] | null
+    //   profile     : bwnClientProfile(state) (carries compliance.checks overrides)
+    //   rulesVersion: integer stamped onto result.rulesVersion (source: profile.rulesVersion)
+    // ponytail: `proposals` and `nowMs` are RESERVED (fixed signature) - no proposal-applicability
+    //   or time-based check ships yet; both are accepted so the harness/callers stay stable and the
+    //   deferred rules can use them without a signature change.
+    function computeCompliance(header, notesMeta, docsByLabel, proposals, pos, profile, rulesVersion, nowMs) {
+      var tradeNames = header && Array.isArray(header.trades)
+        ? header.trades.map(function (t) { return (t && t.name) || t; }) : null;
+      var checks = complianceChecks(profile).map(function (c) {
+        // Dropped source: no data anywhere -> na (never scored).
+        if (c.source === 'salesforce') return { id: c.id, label: c.label, state: 'na', why: 'No Salesforce data source - deferred', weight: c.weight };
+        // Not required for this client -> na (excluded). A per-client override flipping required
+        // true<->false is what moves total (and score) between clients.
+        if (c.required === false) return { id: c.id, label: c.label, state: 'na', why: 'Not required for this client', weight: c.weight };
+        var appl = tradeApplies(c, tradeNames);
+        if (appl === 'no') return { id: c.id, label: c.label, state: 'na', why: 'Does not apply to this WO’s trades', weight: c.weight };
+        if (appl === 'unknown') return { id: c.id, label: c.label, state: 'unknown', why: 'WO trades not read yet', weight: c.weight };
+
+        var state, why;
+        if (c.docLabels) {
+          if (docsByLabel == null) { state = 'unknown'; why = 'Documents not read yet'; }
+          else {
+            var ids = c.docLabels.map(function (n) { return DOC_LABEL_IDS[n]; }).filter(function (v) { return typeof v === 'number'; });
+            var present = ids.some(function (id) { return (docsByLabel[id] || 0) > 0; });
+            state = present ? 'ok' : 'miss';
+            why = present ? (c.label + ' on file') : ('No ' + c.label + ' document on file');
+          }
+        } else if (c.field === 'scopeOfWork') {
+          if (header == null) { state = 'unknown'; why = 'WO header not read yet'; }
+          else { var sow = String(header.scopeOfWork || '').trim(); state = sow ? 'ok' : 'miss'; why = sow ? 'Scope of work present' : 'Scope of work is blank'; }
+        } else if (c.notes === 'completion') {
+          if (notesMeta == null) { state = 'unknown'; why = 'Notes not read yet'; }
+          else { var hc = !!notesMeta.hasCompletion; state = hc ? 'ok' : 'miss'; why = hc ? 'Completion note present' : 'No completion note on file'; }
+        } else if (c.pos) {
+          if (pos == null && header == null) { state = 'unknown'; why = 'Purchase orders not read yet'; }
+          else {
+            var hasPo = (Array.isArray(pos) && pos.some(function (p) { return p && ((p.amount > 0) || p.vendor); }))
+              || !!(header && header.hasNonTerminatedPurchaseOrders);
+            state = hasPo ? 'ok' : 'miss';
+            why = hasPo ? 'Vendor PO attached' : 'No vendor PO attached';
+          }
+        } else { state = 'unknown'; why = 'No evaluator for this check'; }
+        return { id: c.id, label: c.label, state: state, why: why, weight: c.weight };
+      });
+
+      var total = 0, score = 0;
+      checks.forEach(function (c) {
+        var w = (typeof c.weight === 'number') ? c.weight : 1;
+        if (c.state === 'ok' || c.state === 'miss') total += w;   // unknown + na excluded from BOTH
+        if (c.state === 'ok') score += w;
+        delete c.weight;                                          // weight is internal - keep the reported check shape {id,label,state,why}
+      });
+      return { score: score, total: total, checks: checks, rulesVersion: (typeof rulesVersion === 'number') ? rulesVersion : 0 };
+    }
+
+    // Supervisor rollup: the compact per-WO record the dashboard aggregates by coordinator.
+    // ageBucket buckets WO age in DAYS (null/NaN -> 'unknown'). PURE - the impure caller passes the
+    // WO number, the computeCompliance result, the coordinator, and the WO age in days.
+    function complianceAgeBucket(ageDays) {
+      if (ageDays == null || isNaN(ageDays)) return 'unknown';
+      if (ageDays <= 7) return '0-7d';
+      if (ageDays <= 30) return '8-30d';
+      return '30d+';
+    }
+    function complianceRollup(woNumber, result, coordinator, ageDays) {
+      return {
+        woNumber: String(woNumber || ''),
+        score: (result && result.score) || 0,
+        total: (result && result.total) || 0,
+        rulesVersion: (result && result.rulesVersion) || 0,   // stamped from the score it summarises
+        coordinator: coordinator || '',
+        ageBucket: complianceAgeBucket(ageDays)
+      };
+    }
+
+    // Missing (miss-state) check labels, worst-first as the catalogue orders them. Used by the UI to
+    // enumerate exactly what is absent (pill aria-label, expandable list, preflight rows).
+    function complianceMisses(result) {
+      return (result && result.checks || []).filter(function (c) { return c.state === 'miss'; }).map(function (c) { return c.label; });
+    }
+    function complianceUnknowns(result) {
+      return (result && result.checks || []).filter(function (c) { return c.state === 'unknown'; }).length;
+    }
+    // ===== BWN DOC-COMPLIANCE END ================================================================
 
     // ---- Signals --------------------------------------------------------------
     // Tolerant (shared, v5): absolute, relative ("2 hours ago"), or Date.parse-able -
@@ -2914,11 +3181,37 @@
         if (t && n && /\b(client|customer)\b/i.test(n.label || '') && t > lastClientTs) lastClientTs = t;
       });
       var stall = stalled(pos, C);
+      // ---- Documentation-compliance score (flag-gated, read-only) ----------------
+      // Assembled from the reads already done above (docs/notes/POs/header), scored by the pure
+      // computeCompliance, and cached to bwn:compliance:<wo> - the SAME confident-reads-only,
+      // never-a-guessed-0 discipline as bwn:docs (unknown WOs stay ABSENT from the cache). The
+      // cache feeds the WO-list per-row "Docs N/M" badge and the AI script's jobFacts push.
+      var _compliance = null;
+      if (BWN_MODULES.docCompliance) {
+        try {
+          var _prof = BWN.bwnClientProfile({ hd: hd });
+          var _docsC = readDocs();                                  // {count,docs,byLabel} | null (unknown)
+          var _dbl = _docsC ? _docsC.byLabel : null;                // null => every doc check 'unknown'
+          var _nm = notes ? { hasCompletion: (notes || []).some(function (n) { return n && (n.isCompletion || /\bcompletion\b/i.test(n.label || '')); }), count: notes.length } : null;
+          var _hdr = woApi ? { trades: woApi.trades, scopeOfWork: woApi.scopeOfWork } : null;
+          _compliance = computeCompliance(_hdr, _nm, _dbl, null, pos, _prof, (_prof.rulesVersion | 0), Date.now());
+          try {
+            var _woId = currentWOId();
+            if (_woId) BWN.lsSetJSON('bwn:compliance:' + _woId, { score: _compliance.score, total: _compliance.total, rulesVersion: _compliance.rulesVersion, ts: Date.now() });
+          } catch (e) { /* cache best-effort */ }
+        } catch (e) { _compliance = null; }
+      }
       return {
+        compliance: _compliance,   // null when the flag is off or the compute threw - every reader guards it
         pos: pos, vendorTotal: vendorTotal, nte: nte, gp: gp, gpPct: gpPct,
         eta: pos.length ? etaStatus(pos, notes, stall) : null,
         stall: stall, status: woStatus(), hrs: hrsInStatus(),
         priority: (woApi && woApi.priority && woApi.priority.label) || hd.priority || '',
+        // The row's OWN SLA facts for bwnSlaMult (Recovery Playbooks): WORKORDER_Q selects
+        // priority.category (responseMinutes is not in that query, so it stays null and the
+        // category drives the scale). Absent -> null -> slaCountdown falls back to the P#-label
+        // parse, so this is purely additive.
+        sla: (woApi && woApi.priority) ? { responseMinutes: null, category: woApi.priority.category } : null,
         due: dueStatus(C),
         staleDays: staleness(notes), noteCount: notes.length, lastNote: lastNoteTs ? new Date(lastNoteTs).toISOString() : null, deep: !!deepNotes, notesSrc: lastNotesSrc,
         lastClientNoteDays: lastClientTs ? Math.floor((Date.now() - lastClientTs) / 86400000) : null,   // null = no client-labeled note among the loaded notes
@@ -3769,7 +4062,14 @@
         // blocking signal; the `docs === null` unknown guard is preserved by the `docs &&` tests.
         var coDocs = (profile.closeout && profile.closeout.docs) || [];
         if (docs && docs.count > 0 && coDocs.length && profile.closeout.enforce) {
-          var coLabels = (docs.docs || []).map(function (d) { return ((d.label || '') + ' ' + (d.displayFileName || '')).toLowerCase(); });
+          // Search the label's NAME (resolved from its numeric id via docLabelName), the RAW label
+          // (a legacy text label, or a filename-shaped one), the filename, and the description. The
+          // old code concatenated ONLY the raw label, which in production is a NUMERIC id (e.g. "4")
+          // - a required-type name can never contain a bare number, so the label side matched
+          // nothing and only the filename ever hit ([[getfield-alias-orphan]]-style silent miss).
+          // Resolving the id to its name is the fix; the raw label is kept so text-label docs and
+          // filename-in-label rows still match exactly as before.
+          var coLabels = (docs.docs || []).map(function (d) { return (String(d.label == null ? '' : d.label) + ' ' + docLabelName(d.label) + ' ' + (d.displayFileName || '') + ' ' + (d.description || '')).toLowerCase(); });
           var coMiss = coDocs.filter(function (t) { var tl = String(t).toLowerCase(); return !coLabels.some(function (L) { return L.indexOf(tl) !== -1; }); });
           if (coMiss.length) {
             acts.push({
@@ -4439,7 +4739,13 @@
           noteCount: (typeof state.noteCount === 'number') ? state.noteCount : 0,
           lastClientNoteDays: (typeof state.lastClientNoteDays === 'number') ? state.lastClientNoteDays : null,
           staleDays: (typeof state.staleDays === 'number') ? state.staleDays : null,
-          eta: state.eta || null
+          eta: state.eta || null,
+          // Recovery Playbooks: the PRECOMPUTED SLA countdown + early-breach flag, so a surface
+          // WITHOUT the engine (the SWA case file) can render the same chip Core shows. Named
+          // distinctly from state.sla (the raw { responseMinutes, category } facts) so nothing
+          // collides when the dashboard merges this overlay onto stateFromRow. Best-effort/null-safe.
+          slaCountdown: (function () { try { return slaCountdown(state, state.cfg, Date.now()); } catch (e) { return null; } })(),
+          breachPredict: (function () { try { return breachPredict(state, state.cfg, Date.now()); } catch (e) { return null; } })()
         };
         // Only worth a push if it carries something the workbook row lacks - else the dashboard's
         // default (workbook-only) state is already equivalent, so pushing an empty overlay is noise.
@@ -4909,13 +5215,17 @@
       var realOpen = acts.filter(function (a) { return !a.anchor && !(store[a.key] && store[a.key].done); }).length;
       var collapsed = false;
       try { collapsed = localStorage.getItem('bwn:acts:collapsed') === '1'; } catch (e) { }
+      // Documentation-compliance summary (flag-gated; null otherwise). Part of the signature below
+      // so the card rebuilds when the score changes (a docs read landing flips checks miss->ok).
+      var dc = (BWN_MODULES.docCompliance && state.compliance) ? state.compliance : null;
+      var dcSig = dc ? (dc.score + '/' + dc.total + '/' + dc.rulesVersion + '/' + complianceMisses(dc).join(',')) : '';
       // Live escalation state (render-layer only; see waEscState). Part of the signature
       // so the strip appears, flips and clears the moment the assist script publishes.
       var escSt = null;
       try { escSt = waEscState(); } catch (e) { }
       // Signature gate: rebuild only when content or placement actually changed, so
       // the steady-state refresh loop never re-renders the card under the cursor.
-      var sig = JSON.stringify([collapsed, escSt ? escSt.status + '|' + escSt.id + '|' + (escSt.ackAt || '') : '', acts.map(function (a) {
+      var sig = JSON.stringify([collapsed, dcSig, escSt ? escSt.status + '|' + escSt.id + '|' + (escSt.ackAt || '') : '', acts.map(function (a) {
         var r = store[a.key];
         // Phase 2 additions to the signature: a tool button appearing when its registrant
         // comes online (or vanishing when it drops) and a help block toggling are both
@@ -4953,7 +5263,25 @@
       hs.textContent = !nAuth ? 'chase → do it → log it as a WO note'
         : (nGen ? nAuth + ' from ' + planSrcLbl + ' · ' + nGen + ' from the playbook' : 'from ' + planSrcLbl);
       var hx = document.createElement('span'); hx.className = 'bwn-actc-x'; hx.textContent = collapsed ? '▸' : '▾';
-      hd.appendChild(ht); hd.appendChild(hc); hd.appendChild(hs); hd.appendChild(hx);
+      hd.appendChild(ht); hd.appendChild(hc); hd.appendChild(hs);
+      // Documentation-compliance pill: fraction TEXT + a status ICON, colour as reinforcement only
+      // (never the sole signal). aria-label enumerates exactly what is missing; role=status so a
+      // screen reader announces a change when a docs read flips the fraction.
+      if (dc) {
+        var dcMiss = complianceMisses(dc), dcUnk = complianceUnknowns(dc);
+        var dcPill = document.createElement('span'); dcPill.className = 'bwn-actc-doc';
+        var dcIcon = dcMiss.length ? '⚠' : (dc.total > 0 ? '✓' : '·');   // ⚠ / ✓ / ·
+        dcPill.textContent = dcIcon + ' Docs ' + dc.score + '/' + dc.total;
+        var dcAria = 'Documentation ' + dc.score + ' of ' + dc.total + ' complete'
+          + (dcMiss.length ? '. Missing: ' + dcMiss.join(', ') : '')
+          + (dcUnk ? '. ' + dcUnk + ' not yet read' : '');
+        dcPill.setAttribute('role', 'status'); dcPill.setAttribute('aria-label', dcAria); dcPill.title = dcAria;
+        var dcCol = dcMiss.length ? 'var(--bwn-warn)' : 'var(--bwn-green)';
+        dcPill.style.cssText = 'margin-left:8px;padding:2px 7px;border-radius:8px;white-space:nowrap;'
+          + 'font:600 10px ui-monospace,"Segoe UI Mono","SF Mono",monospace;border:1px solid ' + dcCol + ';color:' + dcCol + ';';
+        hd.appendChild(dcPill);
+      }
+      hd.appendChild(hx);
       function toggleCollapse() {
         try { localStorage.setItem('bwn:acts:collapsed', collapsed ? '' : '1'); } catch (e) { }
         renderActsInline(state);
@@ -4975,6 +5303,31 @@
 
       if (!collapsed) {
         var body = document.createElement('div'); body.className = 'bwn-actc-body';
+        // Documentation-compliance detail: the exact missing/unread checks, expanded with the card.
+        // ponytail: DEFERRED - per-row drop-upload / note-template deep-link shortcuts. The card's
+        // existing steps (docs:none, completion-note) already carry the actionable "Copy chase" and
+        // tool buttons for these; duplicating a fragile cross-script open here would be churn. This
+        // block ENUMERATES what is missing so the coordinator knows precisely what to attach.
+        if (dc && (complianceMisses(dc).length || complianceUnknowns(dc))) {
+          var dcRow = document.createElement('div'); dcRow.className = 'bwn-act-row'; dcRow.style.cssText = 'display:block;';
+          var dcHd = document.createElement('div'); dcHd.className = 'bwn-act-lbl';
+          dcHd.textContent = 'Documentation ' + dc.score + '/' + dc.total + (complianceMisses(dc).length ? ' - missing:' : ' - all present');
+          dcRow.appendChild(dcHd);
+          var dcMissL = complianceMisses(dc);
+          if (dcMissL.length) {
+            var chips = document.createElement('div'); chips.style.cssText = 'display:flex;flex-wrap:wrap;gap:4px;margin-top:4px;';
+            dcMissL.forEach(function (lbl) {
+              var ch = document.createElement('span');
+              ch.textContent = lbl;
+              ch.style.cssText = 'padding:2px 7px;border-radius:7px;font:600 10px ui-monospace,"Segoe UI Mono","SF Mono",monospace;background:var(--bwn-warn);color:#fff;';
+              chips.appendChild(ch);
+            });
+            dcRow.appendChild(chips);
+          }
+          var dcU = complianceUnknowns(dc);
+          if (dcU) { var dcUw = document.createElement('div'); dcUw.className = 'bwn-act-why'; dcUw.textContent = dcU + ' check' + (dcU === 1 ? '' : 's') + ' not read yet (open the Documents / Notes tab) - not counted for or against the score.'; dcRow.appendChild(dcUw); }
+          body.appendChild(dcRow);
+        }
         acts.forEach(function (a) {
           if (a.anchor) {
             // Uncheckable completion gate - a flag + label, no checkbox/buttons. It sits
@@ -5803,6 +6156,17 @@
       else items.push({ ok: null, t: 'Documents not checked this session - open the Documents tab' });
       if (inv) items.push({ ok: inv.invoices > 0, t: inv.invoices > 0 ? inv.invoices + ' invoice' + (inv.invoices === 1 ? '' : 's') + ' on file' : 'No invoice on file' });
       else items.push({ ok: null, t: 'Invoices not checked this session - open the Invoices tab' });
+      // Documentation-compliance rows (flag-gated). WARN-ONLY: the preflight banner never blocks the
+      // status change (it is dismissible), so these surface what is missing without stopping a close.
+      // ok:false = a CONFIDENT miss; ok:null = unknown (unread) - shown muted, never as a failure.
+      if (BWN_MODULES.docCompliance && state.compliance) {
+        var dcP = state.compliance;
+        items.push({ ok: complianceMisses(dcP).length === 0, t: 'Documentation ' + dcP.score + '/' + dcP.total + ' complete' });
+        (dcP.checks || []).forEach(function (c) {
+          if (c.state === 'miss') items.push({ ok: false, t: 'Missing: ' + c.label });
+          else if (c.state === 'unknown') items.push({ ok: null, t: c.label + ' not read yet' });
+        });
+      }
       return items;
     }
     function ensurePfStyle() {
@@ -7551,6 +7915,11 @@
         '#bwn-heat-panel .orow .sz:hover{background:var(--bwn-tint);color:var(--bwn-green);}' +
         'td.bwn-note-age::after{content:" \u00b7 " attr(data-bwn-age) "d";font:500 10px ui-monospace,"Segoe UI Mono","SF Mono",monospace;color:var(--bwn-text-faint);margin-left:2px;white-space:nowrap;}' +
         'td.bwn-note-age.bwn-note-stale::after{color:var(--bwn-bad-fg);font-weight:500;}' +
+        // Documentation-compliance per-row badge (::after via a data attr - same virtualizer-safe,
+        // observer-safe decoration as the note-age badge). Content = "Docs N/M" (or "Docs -" when
+        // the WO has no cached score yet). Colour reinforces the miss/ok state the text already says.
+        'td.bwn-doc-badge::after{content:" \u00b7 " attr(data-bwn-doc);font:500 10px ui-monospace,"Segoe UI Mono","SF Mono",monospace;color:var(--bwn-text-faint);margin-left:2px;white-space:nowrap;}' +
+        'td.bwn-doc-badge.bwn-doc-miss::after{color:var(--bwn-warn);font-weight:600;}' +
         '#bwn-heat-sum{display:flex;gap:8px;align-items:center;margin:6px 0;padding:8px 12px;border-radius:10px;background:linear-gradient(135deg,var(--bwn-green),var(--bwn-green-dk));font-family:-apple-system,BlinkMacSystemFont,"Segoe UI","Helvetica Neue",Arial,sans-serif;flex-wrap:wrap;}' +
         '#bwn-heat-sum .t{font:500 11px -apple-system,BlinkMacSystemFont,"Segoe UI","Helvetica Neue",Arial,sans-serif;color:#fff;letter-spacing:.5px;}' +
         '#bwn-heat-sum .c{padding:3px 10px;border-radius:10px;font:500 10px ui-monospace,"Segoe UI Mono","SF Mono",monospace;cursor:pointer;border:1px solid transparent;}' +
@@ -8528,6 +8897,23 @@
           } else if (lnCell.classList.contains('bwn-note-age')) {
             lnCell.classList.remove('bwn-note-age', 'bwn-note-stale');
             lnCell.removeAttribute('data-bwn-age');
+          }
+        }
+
+        // Documentation-compliance per-row badge (flag-gated). Sourced from the bwn:compliance:<wo>
+        // cache Core wrote when the WO page last ran compute() - a list row cannot read documents
+        // itself, so an UNVISITED WO shows "Docs -" (unread), never a fabricated 0. Same data-attr +
+        // ::after decoration as the note-age badge (virtualizer- and observer-safe).
+        if (BWN_MODULES.docCompliance) {
+          var woCell = tr.cells ? tr.cells[H.wo] : null;
+          if (woCell) {
+            var dcc = null;
+            try { if (rowId) dcc = BWN.lsGetJSON('bwn:compliance:' + rowId, null); } catch (eDc) { }
+            var dccText = (dcc && typeof dcc.score === 'number' && typeof dcc.total === 'number') ? (dcc.score + '/' + dcc.total) : '-';
+            var dccMiss = (dcc && typeof dcc.score === 'number' && typeof dcc.total === 'number' && dcc.score < dcc.total);
+            if (woCell.getAttribute('data-bwn-doc') !== 'Docs ' + dccText) woCell.setAttribute('data-bwn-doc', 'Docs ' + dccText);
+            if (!woCell.classList.contains('bwn-doc-badge')) woCell.classList.add('bwn-doc-badge');
+            woCell.classList.toggle('bwn-doc-miss', !!dccMiss);
           }
         }
 
