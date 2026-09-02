@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         BWN Ask (Coordinator Copilot)
 // @namespace    https://broadwaynational.com/bwn
-// @version      0.7.5
+// @version      0.7.6
 // @description  Ask questions about the work order you're viewing. Reads the WO live from Umbrava via same-origin GraphQL (details + full note / site-visit history) AND a summary roster of the other work orders at the same location, plus the team knowledge doc, and answers through the Broadway AI proxy with dates and references. Phase 1.5 = page-scoped + location roster (Path A); no data leaves the trusted Broadway path.
 // @match        https://app.umbrava.com/*
 // @run-at       document-idle
@@ -500,7 +500,12 @@
     if (r.status === 403) return 'The SWA ingest key is missing or wrong. Re-set it from the Tampermonkey menu.';
     if (r.status === 429) return 'Slow down - too many questions in a row. Try again in a moment.';
     if (r.status === 503) return 'The copilot is not fully configured on the server yet (' + (j.error || 'unavailable') + ').';
-    return (j && (j.error || j.detail)) ? ('Server error: ' + (j.error || j.detail)) : ('Server error (' + r.status + ').');
+    // A wrapped upstream failure comes back as a 502 whose body carries the REAL provider status
+    // and a category in `code`. Both were being dropped, so "Anthropic API error (400)" was the
+    // whole message a coordinator got - and an out-of-credits account looks exactly like a
+    // malformed request, even though only the first is anyone here's to fix.
+    if (j.code === 'INSUFFICIENT_CREDITS') return 'The Anthropic account is out of credits, so Ask BWN cannot answer until it is topped up. Ask is the one part of the suite still on Anthropic; the rest runs on Azure OpenAI and is unaffected.';
+    return (j && (j.error || j.detail)) ? ('Server error: ' + (j.error || j.detail) + (j.code ? ' [' + j.code + ']' : '')) : ('Server error (' + r.status + ').');
   }
 
   // ---- Panel UI -------------------------------------------------------------
