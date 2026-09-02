@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         BWN Suite - Core (Broadway National)
 // @namespace    broadwaynational.bwn
-// @version      1.80.0
+// @version      1.80.1
 // @downloadURL  https://raw.githubusercontent.com/Intermu/userscripts/main/bwn-suite-core.user.js
 // @updateURL    https://raw.githubusercontent.com/Intermu/userscripts/main/bwn-suite-core.user.js
 // @description  Runs several Umbrava helpers for BWN coordinators, in the browser with no privileged grants. Includes: PO Approval + ETA Builder; WO Assist (GP/ETA, a stall watchdog, DNE calculator, and a next-action playbook); Email Leak Guard (checks recipients against vendor names, PO amounts, and client budget references before an outbound email sends); WO List Heat (a triage overlay + My Day strip on the work-order list, with an optional same-origin Umbrava API scan for deterministic full-board coverage); and the BWN Launcher (opens the Azure Static Web App tools with the current WO's context). Modules share state through sessionStorage/localStorage. The only network calls are same-origin Umbrava GraphQL requests (app.umbrava.com/api/graphql, the app's own session): List Heat's full-board scan and WO Assist's work-order / trip / clock-in / document reads, plus ONE write - BWN Views saves the column layout through Umbrava's own putUserPreference, the same preference the column chooser writes; everything else is offline. Toggle modules in BWN_MODULES below.
@@ -50,13 +50,13 @@
                          // the destructive bulk ops (status change / reassign). v1 exposes only
                          // add-note + set-ECD; this flag gates nothing yet - it exists so the
                          // destructive ops land behind a SECOND, separately-flipped gate later.
-    bulkSource: false,   // SHIPPING DEFAULT OFF: Bulk Source Job# - per-row checkboxes on the Work
-                         // Orders list + a dock drawer that stamps Source Job# in bulk from a Q/R or
-                         // RF shorthand (blanks only). The WHOLE module - checkboxes, dock, drawer,
-                         // reads and writes - mounts only when this is on, so nothing writes until it
-                         // is flipped after a live smoke test. Even then each batch passes a dry-run +
-                         // a typed confirm, and every write routes through bwnGqlOp feature:'bulkSource'
-                         // (its per-feature kill switch + audit ring) via the proven patchWorkOrder.
+    bulkSource: true,    // ON for coordinators (2026-09-02, after a live write round-trip smoke:
+                         // one Apply stamped Source Job# across 22 WOs at once). Bulk Source Job# -
+                         // per-row checkboxes on the Work Orders list + a dock drawer that stamps
+                         // Source Job# in bulk from a Q/R or RF shorthand (blanks only). Each batch
+                         // still passes a dry-run + a typed confirm, and every write routes through
+                         // bwnGqlOp feature:'bulkSource' (its per-feature kill switch + audit ring)
+                         // via the proven patchWorkOrder. Flip back to false to kill the module.
     routeHelper: false,  // RM-B4, SHIPPING DEFAULT OFF: when on, consumers that have adopted the
                          // central BWN.onRoute (window.bwnOnRoute) route helper use it INSTEAD of
                          // pasting their own history.pushState/popstate trio. Off = each adopter
