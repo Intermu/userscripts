@@ -208,4 +208,20 @@ function loadSync(seed, opts) {
   A.eq('govFetch: 403 keeps last-known-good flags', JSON.parse(r.store['bwn:gov']).flags.woAssist, false);
 })();
 
+// ---- Writer-side kill reach (H1 regression) --------------------------------
+// The 6 standalone writers are killed only if EVERY side effect sits behind the kill. Dispatch's
+// card POST is a raw gmPost (not a bwnGqlOp), so the record-write gate alone left the card-only
+// path (hasWrites=false) firing Teams cards + xlsx rows after a kill. Lock the submit-handler
+// guard AND that it precedes the card POST, so the kill can never regress to the write leg only.
+(function () {
+  var DISP = fs.readFileSync(path.join(__dirname, '..', 'bwn-dispatch.user.js'), 'utf8').replace(/\r\n/g, '\n');
+  A.ok('dispatch: gov block seeds BWN_MODULES.dispatch + applies bwn:gov one-way',
+    /if \(!\('dispatch' in BWN_MODULES\)\) BWN_MODULES\.dispatch = true;/.test(DISP) && /function bwnApplyGov\(\)/.test(DISP));
+  var guard = DISP.indexOf('if (BWN_MODULES.dispatch === false)');
+  A.ok('dispatch: submit handler carries the central-governance kill guard (H1)', guard !== -1);
+  var cardPost = DISP.indexOf('gmPost(PROXY_URL');
+  A.ok('dispatch: the kill guard precedes the card POST so the card-only path is killed too (H1)',
+    guard !== -1 && cardPost !== -1 && guard < cardPost);
+})();
+
 A.finish();

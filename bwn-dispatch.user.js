@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         BWN Dispatch (Broadway National)
 // @namespace    broadwaynational.bwn
-// @version      0.11.2
+// @version      0.11.3
 // @downloadURL  https://raw.githubusercontent.com/Intermu/userscripts/main/bwn-dispatch.user.js
 // @updateURL    https://raw.githubusercontent.com/Intermu/userscripts/main/bwn-dispatch.user.js
 // @description  One-click Dispatch for a work order - replaces manually typing a row into Dispatch_Notifications.xlsx. The Dispatch launcher shows only on a WO that is in "Pending Dispatch". It opens a confirm modal prefilled from the BWN Ops Suite bus (Tracking) and a same-origin Umbrava GraphQL read (Location as the site NUMBER, Priority, and the coordinator to ping): it uses the person this WO is assigned to (whoever a supervisor/manager assigned it to, read live when you open it), and when that is a team or blank it falls back to the coordinator from the most recent work order(s) at the same location. The coordinator name + email are editable before you send. On submit it POSTs the 5 typed fields plus the WO number (read from the URL, never typed - the flow needs it to deep-link the card, because Tracking is the CLIENT's tracking number and points at the wrong record) to the broadway-internal-ops SWA proxy (x-bwn-key gated) which forwards to the HTTP-triggered "Dispatch HTTP" Power Automate flow - the flow adds the row to Dispatch_Notifications.xlsx AND dispatches it (posts a Teams adaptive card to the coordinator and waits for their accept). Dispatching is a coordinator action, so there is no role gate (the x-bwn-key is the boundary). The assignee's email is not on the WO record (Umbrava exposes the coordinator NAME only), so it is resolved from a per-user name->email roster you maintain (seeded with you, and it remembers each coordinator you dispatch to); for a coordinator the roster has never met it falls back to a GUESS derived from the house name pattern and the signed-in user's own domain, shown with a "check it before you send" warning and always editable - never a silent send to an address nobody confirmed. The flow's secret URL stays server-side; nothing sensitive lives in this script. As of 0.10.0 the modal also writes the WO RECORD directly via the same-origin Umbrava GraphQL patchWorkOrder mutation (the write kanban proved live) - an operator-picked target status, an operator-picked assignee (a real Umbrava user, so the assign carries a proper GUID and the card name/email come from the record), and an auto priority-scaled Expected Completion Date - behind a confirm that spells out each write and warns that a status change resets the time-in-status clock. Writes run first and atomically; the Teams card is posted only if the record change succeeds. Registers a single "Dispatch" launcher into the shared dock (bwn:dock:*) - the dock tab is the only launcher; no floating fallback button.
@@ -991,6 +991,13 @@
     form.addEventListener('submit', function (e) {
       e.preventDefault();
       msg.textContent = '';
+
+      // Central governance kill (H1): block the WHOLE submit when dispatch is remotely disabled -
+      // both the patchWorkOrder write AND the SWA card POST. postCard() is a raw gmPost that the
+      // bwnGqlOp feature gate never sees, so the record-write gate alone left the card-only path
+      // (hasWrites=false) firing Teams cards + xlsx rows after a kill. bwnApplyGov keeps
+      // BWN_MODULES.dispatch live (default true; set false on a bwn:gov kill, re-applied on the ping).
+      if (BWN_MODULES.dispatch === false) { msg.textContent = 'Dispatch is disabled by central governance.'; return; }
 
       var key = GM_getValue('ingest_key', '');
       if (!key) { msg.textContent = 'Set the SWA ingest key first: Tampermonkey menu -> "Set SWA ingest key".'; return; }
