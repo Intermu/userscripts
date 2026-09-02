@@ -1,0 +1,33 @@
+{
+  "_comment": "US-0 canonical roster for the installed-vs-repository self-check. This file declares ONLY what the repo bytes cannot tell us: whether a script is expected to be installed on a coordinator machine, and which conformance checks are deliberately waived and why. Everything derivable from disk - @version, @match, @updateURL, @downloadURL, content hash - is read from the shipped file on every run and is NOT duplicated here, so this file cannot drift on those. scripts/test-manifest-ledger.js enforces that this roster and the *.user.js files on disk agree in BOTH directions: a new script with no row here, or a row here with no file, is a red build. Waivers are per-check and must carry a reason.",
+  "_schemaVersion": 1,
+  "expectedRawBase": "https://raw.githubusercontent.com/Intermu/userscripts/main/",
+  "scripts": {
+    "bwn-ask.user.js": {
+      "expectedInstalled": true,
+      "waived": {
+        "namespace": "Uses https://broadwaynational.com/bwn where the other 20 use broadwaynational.bwn. NOT normalized on purpose: Tampermonkey's identity key is (@namespace, @name), so changing it mints a new script and orphans every installed copy into a manual reinstall. Recorded as a deliberate exception, not drift."
+      }
+    },
+    "bwn-bid-out.user.js": { "expectedInstalled": true },
+    "bwn-cc-auth.user.js": { "expectedInstalled": true },
+    "bwn-cc-purchase.user.js": { "expectedInstalled": true },
+    "bwn-dispatch.user.js": { "expectedInstalled": true },
+    "bwn-drop-upload.user.js": { "expectedInstalled": true },
+    "bwn-inventory.user.js": { "expectedInstalled": true },
+    "bwn-kanban.user.js": { "expectedInstalled": true },
+    "bwn-low-gp.user.js": { "expectedInstalled": true },
+    "bwn-notes.user.js": { "expectedInstalled": true },
+    "bwn-proposal-actions.user.js": { "expectedInstalled": true },
+    "bwn-proposal-copy.user.js": { "expectedInstalled": true },
+    "bwn-suite-ai.user.js": { "expectedInstalled": true },
+    "bwn-suite-core.user.js": { "expectedInstalled": true },
+    "bwn-temp-vendor.user.js": { "expectedInstalled": true },
+    "bwn-vendor-intake.user.js": { "expectedInstalled": true },
+    "bwn-wide-list.user.js": { "expectedInstalled": true },
+    "bwn-wo-assist.user.js": { "expectedInstalled": true },
+    "bwn-wo-audit.user.js": { "expectedInstalled": true },
+    "bwn-wo-intake.user.js": { "expectedInstalled": true },
+    "bwn-write-queue.user.js": { "expectedInstalled": true }
+  }
+}

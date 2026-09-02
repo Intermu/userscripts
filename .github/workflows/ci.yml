@@ -592,6 +592,24 @@ jobs:
       - name: Permission gate harness (BWN-PERM paste ledger + real-mask decode + negative controls)
         run: node scripts/test-perm-block-ledger.js
 
+      # US-0: the canonical roster vs the shipped bytes. Enumerates every bwn-*.user.js, forces each
+      # into a scripts/userscript-manifest.json row (both directions), and checks the auto-update
+      # chain end to end: @updateURL == @downloadURL == the raw main URL for that filename, @version
+      # in step with the in-body VER const, the canonical @namespace (Tampermonkey's identity key),
+      # a #sha384= pin on every @require/@resource, and a unique identity per script. Ten negative
+      # controls mutate real shipped bytes to prove each guard fires.
+      - name: US-0 manifest ledger (roster vs shipped metadata + negative controls)
+        run: node scripts/test-manifest-ledger.js
+
+      # US-0: the installed half. Drives the real scripts/selfcheck-installed.js against synthesised
+      # Tampermonkey-export fixtures (em-dash shadow duplicate, ungoverned copy with no @updateURL,
+      # source-less script, third-party script, hostile __proto__ / markup / ANSI names, an
+      # over-cap file, a secret-bearing storage.json) and asserts the guarantees that justify the
+      # tool: the GM storage sidecar is never opened, no secret reaches either output mode, and the
+      # source contains no egress primitive, no write and no bwn:audit path.
+      - name: US-0 installed self-check (export fixtures + no-egress/no-write guarantee)
+        run: node scripts/test-selfcheck-installed.js
+
   lint:
     name: Lint
     runs-on: ubuntu-latest
