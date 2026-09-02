@@ -18,7 +18,7 @@
 (function () {
   'use strict';
 
-  var VER = '0.4.1';
+  var VER = '0.4.6';   // keep in step with @version
   var FONT = "-apple-system,BlinkMacSystemFont,'Segoe UI','Helvetica Neue',Arial,sans-serif";
   var SWA_BASE = 'https://green-stone-0717dab0f.7.azurestaticapps.net';
   var PROXY_URL = SWA_BASE + '/api/cc-auth';
