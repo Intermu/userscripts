@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         BWN Drop Upload (Broadway National)
 // @namespace    broadwaynational.bwn
-// @version      1.22.0
+// @version      1.23.0
 // @downloadURL  https://raw.githubusercontent.com/Intermu/userscripts/main/bwn-drop-upload.user.js
 // @updateURL    https://raw.githubusercontent.com/Intermu/userscripts/main/bwn-drop-upload.user.js
 // @description  Drop files anywhere on an Umbrava work order to upload them. Opens the Documents tab and upload dialog, hands over the files, and builds each file's description from its contents. Emails are parsed locally (.msg via an OLE/MAPI reader, .eml via RFC822) into an Outlook-style block - From/Sent/To/Cc/Subject and the body - that becomes the WO note, led by a one-line summary from Chrome's on-device built-in AI (zero cost, zero egress, nothing leaves the browser), falling back to local WO-field extraction (store, city/state, priority, PO, NTE, problem, requester) when the on-device model is unavailable. That same summary fills each file's Description. The WO note's Type is chosen from the email's parties: inbound is typed by the sender (client -> Client, else Vendor); outbound from Broadway is typed by the recipients (a client recipient -> Client, any vendor recipient -> Vendor, all-internal -> Internal). Umbrava's Description field is a TipTap/ProseMirror rich-text editor. It rejects synthetic paste, beforeinput, insertHTML and raw innerHTML, but honours execCommand('insertText') plus a synthetic Enter keydown - so the note is filled line by line (Enter between lines to keep paragraphs), paced ~12ms/line so ProseMirror's async commit doesn't drop lines (measured live 2026-08-10). The text is also placed on your clipboard as a backup, and if every fill method fails a "Copy the WO note" button appears (its click supplies the gesture for a reliable copy, then Ctrl+V). A console diagnostic reports which editor was found and which fill method stuck. When WO Intake hands off a just-created WO's request email, each uploaded file's Label (document type) is set to "Work Order Request" and the note Type is forced to Client (a WO Intake handoff is a client's request, even when the sender is a broker like Fairmarkit that reads as a Vendor domain). Fairmarkit / bulk-email footer boilerplate (the Fairmarkit company block: tagline + Boston address + FAQ/Privacy/Terms/Unsubscribe, and the -----!{...}!----- machine tail) plus ALL tracking URLs (safelinks/awstrack/logo) are stripped from the note body, keeping content through the suppliers@ email. A Fairmarkit RFQ body is also condensed to one line per entry - single-spaced, with each line-item rejoined to its QTY and each Details label (Buyer/Close date/RFQ ID/Shipping address) rejoined to its value. Files upload via Umbrava's own API (initializeJobDocument -> Azure blob PUT -> bulkAddWorkOrderDocuments, captured live 2026-08-12), Label set by id, so the brittle upload-dialog combobox is bypassed; the dialog remains the automatic fallback if the API is unavailable. A manual drop does NOT auto-upload: the review box shows a "Document type" picker plus an Upload button, so the coordinator CHOOSES the document type before it is committed (there is no update-label mutation, so the label must be right at upload time). The picker defaults to MATCH the note Type we assigned (Client -> Client Correspondence, Vendor -> Vendor Correspondence, Internal -> Internal) and stays in sync as the note Type is changed, until the coordinator overrides the doc type directly; for an unknown external party the on-device classifier upgrades Vendor -> Supplier Correspondence when it reads as a parts supplier. The file Description is still filled automatically from the file's contents / the email summary. Only the WO Intake handoff still uploads automatically and forces "Work Order Request". The email note is shown in a centered BWN review box (editable; the Type picker offers a curated set of the note types a drop is actually filed under, defaulted to the party-derived Client/Vendor/Internal) and posted via addEditJobNote ONLY when you click Post - it is never auto-posted, and posts under your own Umbrava session for correct attribution. Network calls are same-origin to app.umbrava.com's own /api/graphql (the app's Auth0 bearer, no @connect/GM) plus the SAS-authorized blob PUT the SPA itself makes - nothing goes to any third party. @grant none.
@@ -15,7 +15,7 @@
 (function () {
   'use strict';
 
-  var VER = '1.22.0';   // keep in step with @version (drift caught earlier: banner had lagged two releases)
+  var VER = '1.23.0';   // keep in step with @version (drift caught earlier: banner had lagged two releases)
   var BWN_VER = VER;   // stamped into BWN-OPS audit entries; the wrapper references BWN_VER
   console.info('[BWN DROP UPLOAD] v' + VER + ' · Uploads via Umbrava API (initializeJobDocument→blob PUT→bulkAddWorkOrderDocuments, Label by id), DOM dialog is the fallback · manual drop HOLDS the upload: the review box shows a Document type picker (defaulted to MATCH the note Type - Client->Client Correspondence, Vendor->Vendor Correspondence, Internal->Internal - and re-synced as the note Type changes, until overridden) + an Upload button, so the type is CHOSEN, not assumed · email→note in a human-gated BWN review box, posted via addEditJobNote on an explicit Post click (never auto-posted) · note Type by parties (inbound=sender, outbound=recipient) · note box shows instantly with a mechanical lead; the slow on-device AI brief (Gemini Nano / Edge Phi) fills in async · bwn:cmd dropupload:files bridge (handoff still forces Work Order Request)');
 
@@ -650,6 +650,78 @@
     } catch (e) { return ''; }
   }
   // ===== BWN-SHARED END v1 =====
+
+  // ===== BWN-PERM START v1 (paste-identical; pinned by scripts/test-perm-block-ledger.js) =====
+  // Umbrava's own per-user permission checkboxes, as the one question a control has:
+  //   bwnCan('WorkOrderNote.AddNew') -> true | false
+  // Umbrava returns me.permissions as a JSON STRING of {"<Type>Permissions": "<bitmask>"} - one
+  // bit per checkbox on /company/users/<id>/permissions. bwn-suite-core decodes it once a session
+  // and publishes the DECODED grant list to `bwn:perm:last` + the `bwn:perm` bus event, the same
+  // one-way producer/consumer shape as bwn:role. This block only READS that slot, so every
+  // sandbox that pastes it needs neither the query, the token, nor the flag numbers.
+  //
+  // FAIL-OPEN on anything unknown - no slot yet, a stale slot, or a group the producer does not
+  // map. Umbrava's server is the real boundary (it refuses the mutation either way), so an
+  // unreadable cache must never strand a coordinator mid-shift. Fail-CLOSED only on a
+  // positively-known missing bit. localStorage is per-origin, so this answers "unknown" (and
+  // therefore allows) anywhere but app.umbrava.com - by design.
+  var BWN_PERM_KEY = 'bwn:perm:last';
+  var BWN_PERM_TTL_MS = 24 * 3600 * 1000;
+  var _bwnPermSlot = null;      // memoized parse; invalidated by the bwn:perm listener below
+  function bwnPermSlot() {
+    if (_bwnPermSlot) return _bwnPermSlot;
+    try {
+      var p = JSON.parse(localStorage.getItem(BWN_PERM_KEY) || 'null');
+      if (p && p.ts && (Date.now() - p.ts) < BWN_PERM_TTL_MS &&
+        Array.isArray(p.groups) && Array.isArray(p.granted)) _bwnPermSlot = p;
+    } catch (e) { /* an unreadable cache reads as unknown, which fails open */ }
+    return _bwnPermSlot;
+  }
+  function bwnCan(key) {
+    var p = bwnPermSlot();
+    if (!p) return true;                                          // nothing decoded yet -> allow
+    var grp = String(key).split('.')[0];
+    if (p.groups.indexOf(grp) === -1) return true;                // group unmapped/absent -> allow
+    return p.granted.indexOf(key) !== -1;
+  }
+  // keys: a 'Group.Flag' string, or an array of them (ALL must be granted).
+  function bwnCanAll(keys) {
+    if (!keys) return true;
+    if (typeof keys === 'string') return bwnCan(keys);
+    for (var i = 0; i < keys.length; i++) { if (!bwnCan(keys[i])) return false; }
+    return true;
+  }
+  // patchWorkOrder is ONE mutation over MANY fields and Umbrava gates each field separately, so
+  // its permission depends on the variables rather than the operation. This maps the data keys the
+  // suite actually sends, all of them wire-proven; a key this map does not know contributes NO
+  // requirement, which is the block's unknown -> allow rule and keeps a future field from being
+  // blocked by a map nobody updated. `workOrderNumber` is the identifier, not a field write.
+  var BWN_PATCH_FIELD_PERM = {
+    statusId: 'WorkOrderField.Status',
+    assignedTo: 'WorkOrderField.AssignedTo',
+    // ECD rides inside the whole-object `priority` replace, and the SPA bundles the SLA id with it.
+    priority: 'WorkOrderField.CompletionSLA',
+    serviceLevelAgreementId: 'WorkOrderField.CompletionSLA',
+    sourceJobNumber: 'WorkOrderField.SourceJobNumber',
+    sourcePurchaseOrderNumber: 'WorkOrderField.SourcePurchaseOrderNumber'
+  };
+  // -> [] | ['WorkOrderField.Status', ...]; deduped, so a bundled priority+SLA asks once.
+  function bwnPermsForPatch(variables) {
+    var data = (variables && variables.data) || {};
+    var out = [];
+    Object.keys(data).forEach(function (k) {
+      var p = BWN_PATCH_FIELD_PERM[k];
+      if (p && out.indexOf(p) === -1) out.push(p);
+    });
+    return out;
+  }
+  try {
+    document.addEventListener('bwn:evt', function (e) {
+      var d = e && e.detail;
+      if (d && d.id === 'bwn:perm') _bwnPermSlot = null;          // a fresh decode landed
+    });
+  } catch (e) { }
+  // ===== BWN-PERM END v1 =====
   function duGql(op, query, variables) {
     var tok = authToken();
     if (!tok) return Promise.reject(new Error('no-umbrava-token'));
@@ -674,14 +746,17 @@
   function bwnGql(query, variables) { var m = /\b(?:query|mutation)\s+([A-Za-z0-9_]+)/.exec(query); return duGql(m ? m[1] : null, query, variables); }
   var BWN_MODULES = (function () { try { return JSON.parse(localStorage.getItem('bwn:modules') || '{}') || {}; } catch (e) { return {}; } })();
   var BWN_OPS = {
-    addEditJobNote: { kind: 'write', target: 'note', risk: 'moderate', idempotent: false, retry: 'none',
+    addEditJobNote: { kind: 'write', perm: 'WorkOrderNote.AddNew', target: 'note', risk: 'moderate', idempotent: false, retry: 'none',
       ok: 'Note posted.', fail: 'The note was not posted.' },
-    initializeJobDocument: { kind: 'write', target: 'document', risk: 'moderate', idempotent: false, retry: 'none',
+    initializeJobDocument: { kind: 'write', perm: 'WorkOrderDocument.AddNew', target: 'document', risk: 'moderate', idempotent: false, retry: 'none',
       ok: 'Document upload started.', fail: 'The upload could not start.' },
-    bulkAddWorkOrderDocuments: { kind: 'write', target: 'document', risk: 'moderate', idempotent: false, retry: 'none',
+    bulkAddWorkOrderDocuments: { kind: 'write', perm: 'WorkOrderDocument.AddNew', target: 'document', risk: 'moderate', idempotent: false, retry: 'none',
       ok: 'Documents attached.', fail: 'The documents were not attached.' }
   };
-  // ===== BWN-OPS-WRAP START v2 (paste-identical across adopters; SHA-gated by scripts/test-bwn-ops.js) =====
+  // ===== BWN-OPS-WRAP START v3 (paste-identical across adopters; SHA-gated by scripts/test-bwn-ops.js) =====
+  // v3 (2026-09-02) adds the Umbrava permission gate (G7 below). It closes over bwnCan/bwnCanAll
+  // from the BWN-PERM block, so an adopter of this wrapper must carry that block too - the ledger
+  // in scripts/test-perm-block-ledger.js is what keeps the two lists in step.
   // Generic machinery only - NO registry, NO window hook - so it is byte-identical in every
   // sandbox that adopts it (Core, drop-upload, ...). It closes over four things each sandbox
   // supplies on its own: BWN_OPS (that file's registry), BWN_MODULES (kill switches), BWN_VER,
@@ -789,6 +864,29 @@
       writeAudit('denied', { reason: 'feature-off:' + opts.feature });
       return Promise.reject(new Error('bwnGqlOp: feature "' + opts.feature + '" is disabled'));
     }
+    // Umbrava permission gate (G7). The UI hides a control the operator's checkboxes do not cover,
+    // but hiding is not enforcement: a palette entry, a stale drawer, a queued command, or a future
+    // caller can all reach a write whose button was never rendered. This is the enforcement point -
+    // every registered write passes through here, so ONE guard covers every caller.
+    //   meta.perm  'Group.Flag' | ['Group.Flag', ...] | fn(variables) -> either of those
+    // A function is how a multi-field mutation (patchWorkOrder) asks per FIELD instead of per op.
+    // bwnCanAll fails OPEN on anything undecided - no slot, a stale slot, an unmapped group - so
+    // this refuses ONLY a positively-known missing checkbox. Refusals are non-transient (retrying
+    // cannot grant a permission) and audited `denied`, so a refusal is visible in the ring rather
+    // than silent. The reason carries the permission NAME, which is a static key, never user data.
+    if (isWrite && meta.perm) {
+      var need = (typeof meta.perm === 'function') ? meta.perm(variables) : meta.perm;
+      if (typeof need === 'string') need = [need];
+      if (!Array.isArray(need)) need = [];
+      if (need.length && !bwnCanAll(need)) {
+        var missing = need.filter(function (k) { return !bwnCan(k); });
+        writeAudit('denied', { reason: 'permission:' + missing.join('+') });
+        var noPerm = new Error('bwnGqlOp: "' + op + '" needs Umbrava permission ' + missing.join(' + ') + ' - the write was NOT sent.');
+        noPerm.bwnNonTransient = true;
+        noPerm.bwnPermissionDenied = missing;
+        return Promise.reject(noPerm);
+      }
+    }
     // Validate a write BEFORE it leaves the browser.
     if (isWrite && typeof opts.validate === 'function') {
       var vr = opts.validate(variables);
@@ -873,7 +971,7 @@
     return attempt(1);
   }
   bwnGqlOp.setConfirm = function (fn) { _confirmFn = (typeof fn === 'function') ? fn : null; };
-  // ===== BWN-OPS-WRAP END v2 =====
+  // ===== BWN-OPS-WRAP END v3 =====
 
   // Doc-label id map, read live off the MUI Autocomplete options (the SPA loads it once at boot,
   // never on the wire). The names are stable tenant reference data; drop-upload only ever needs
@@ -2018,6 +2116,9 @@
     clearNoteBox();
     clearRespChip();
     if (!pending || !woNumberFromUrl()) return null;
+    // The review box's only outcome is a work-order note. An operator who may upload documents but
+    // not post notes gets the upload without the note step, rather than a box that cannot land.
+    if (!bwnCan('WorkOrderNote.AddNew')) return null;
     var woNum = woNumberFromUrl();
     var canRespond = !!inboundClientEmail(pending.files);
     var box = document.createElement('div');
@@ -2348,6 +2449,10 @@
 
   window.addEventListener('dragenter', function (e) {
     if (!onWorkOrder() || !hasFiles(e)) return;
+    // Umbrava permission gate: the overlay exists to attach documents to the work order. Without
+    // the Document > Add New checkbox the upload would 403 at the end of the flow, so the overlay
+    // never appears and the browser's own drop behaviour is left alone. Fails OPEN when unknown.
+    if (!bwnCan('WorkOrderDocument.AddNew')) return;
     // Yield to the Create Work Order modal: when BWN WO Intake's drop zone is present (or the
     // Create WO modal is open), a file drag is meant for THAT modal's prefill, not this page's
     // document upload - so don't throw the full-screen overlay over it and steal the drop.

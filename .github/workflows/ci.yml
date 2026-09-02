@@ -583,6 +583,15 @@ jobs:
       - name: Error reporter harness (BWN.report toast + PII-free capped ring + negative controls)
         run: node scripts/test-error-reporter.js
 
+      # Umbrava permission gate. Two jobs in one harness: the paste LEDGER over the BWN-PERM reader
+      # block (every bwn-*.user.js classified ADOPTED or NA, one SHA across all adopters, no rival
+      # bwnCan anywhere else) and the DECODE itself, driven with real masks captured from a live
+      # user - so a decode that quietly grants everything, or nothing, cannot pass. Four negative
+      # controls, including the 32-bit `&` regression the division bit-test exists to prevent.
+      # Step name carries NO colon-space (the parser bug that killed this workflow once already).
+      - name: Permission gate harness (BWN-PERM paste ledger + real-mask decode + negative controls)
+        run: node scripts/test-perm-block-ledger.js
+
   lint:
     name: Lint
     runs-on: ubuntu-latest

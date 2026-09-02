@@ -37,6 +37,14 @@ function mutate(src, from, to) {
   return src.slice(0, i) + to + src.slice(i + from.length);
 }
 
+// The distinct bwnGqlOp('<op>' ops the sliced exec block routes, sorted - used to prove no verb
+// reaches the transport through an op the registry (and therefore the permission gate) misses.
+function uniqOps(src) {
+  var out = [], re = /bwnGqlOp\('([A-Za-z_$][\w$]*)'/g, m;
+  while ((m = re.exec(src)) !== null) { if (out.indexOf(m[1]) === -1) out.push(m[1]); }
+  return out.sort();
+}
+
 function load(engineSrc) {
   var sandbox = { console: console, gql: null };
   // executeCommand's WRITES now route through bwnGqlOp (Core's BWN-OPS-WRAP, proven byte-for-byte
@@ -216,6 +224,24 @@ function notePostsOf(g) { return g.calls.filter(function (c) { return /addEditJo
   // patchNoSuccess; assert the classifier directly too so the contract is explicit).
   var wrapRefusal = new Error("refused"); wrapRefusal.bwnNonTransient = true;
   A.ok("a wrapper success:false refusal (.bwnNonTransient) is NON-retryable", S.classifyError(wrapRefusal) === false);
+
+  // ---- Umbrava permission gate: enforced in the WRAPPER, not duplicated here -----------------
+  // The queue drains commands the SWA handed us, so the OPERATOR's own checkboxes decide what may
+  // land - but the gate lives in bwnGqlOp (BWN-OPS-WRAP v3) off this file's registry, so there is
+  // exactly one verb->permission mapping in the suite. What this harness owns is that the mapping
+  // EXISTS and covers every verb the drain can execute; the gate's behaviour is proven against the
+  // real wrapper in scripts/test-bwn-ops.js.
+  console.log("\n--- permission gate is declared for every drained verb (enforced in bwnGqlOp) ---");
+  var reg = full.slice(full.indexOf("var BWN_OPS = {"));
+  reg = reg.slice(0, reg.indexOf("};") + 2);
+  A.ok("the note write declares its permission", /addEditJobNote:[^}]*perm: 'WorkOrderNote\.AddNew'/.test(reg), reg.slice(0, 200));
+  A.ok("the patch write declares the per-FIELD resolver (status / assign / ECD each ask their own bit)",
+    /patchWorkOrder:[^}]*perm: bwnPermsForPatch/.test(reg), reg.slice(0, 200));
+  A.ok("no second verb->permission table lives in this file (one source of truth)",
+    full.indexOf("VERB_PERM") === -1, "a local mapping reappeared beside the registry");
+  // Every verb executeCommand can run reaches one of those two registry entries - so a new verb
+  // cannot quietly arrive ungated without also arriving unregistered (test-registry-authoritative).
+  A.eq("the exec block routes exactly two ops", uniqOps(S_ENGINE), ["addEditJobNote", "patchWorkOrder"]);
 
   A.finish();
 })().catch(function (e) { console.error(e); process.exit(1); });

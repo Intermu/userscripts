@@ -53,6 +53,11 @@ function slice(start, end, what) {
 }
 
 var S_OPS = slice('  // ===== BWN-OPS START v1', '  // ===== BWN-OPS END v1 =====', 'BWN-OPS block');
+// WRAP v3's permission gate closes over bwnCan/bwnCanAll (and the registry over bwnPermsForPatch),
+// so the REAL reader block goes into every sandbox rather than a stub - the gate is then driven by
+// the same localStorage slot the shipped code reads. Ledgered separately by
+// scripts/test-perm-block-ledger.js; here it is just the dependency the wrapper needs.
+var S_PERM = slice('  // ===== BWN-PERM START v1', '  // ===== BWN-PERM END v1 =====', 'BWN-PERM block');
 
 function mutate(src, from, to) {
   var i = src.indexOf(from);
@@ -65,8 +70,12 @@ function mutate(src, from, to) {
 // A fresh instance per build: fake localStorage, an injectable transport whose per-call
 // result comes off env.plan, and setTimeout collapsed to a microtask so retry backoff does
 // not slow the run.
-function makeOps(opsSrc, modules) {
+// perms (optional): { groups: [...], granted: [...] } planted in the slot BEFORE the block loads,
+// so the reader memoizes a decoded user. Omitted = no slot at all = every permission unknown =
+// fail-open, which is what every pre-gate case below expects.
+function makeOps(opsSrc, modules, perms) {
   var store = Object.create(null);
+  if (perms) store['bwn:perm:last'] = JSON.stringify({ v: 1, ts: Date.now(), ver: 'test', groups: perms.groups, granted: perms.granted });
   var localStorage = {
     getItem: function (k) { return (k in store) ? store[k] : null; },
     setItem: function (k, v) { store[k] = String(v); },
@@ -77,6 +86,9 @@ function makeOps(opsSrc, modules) {
     Object: Object, Array: Array, Number: Number, String: String, JSON: JSON,
     Promise: Promise, Error: Error, RegExp: RegExp, Math: Math, Date: Date, console: console,
     window: {},                              // no crypto -> corrId uses the timestamp form
+    // The reader block subscribes to the bwn:perm bus event to drop its memo; nothing here
+    // dispatches one, so an inert listener sink is enough.
+    document: { addEventListener: function () { } },
     localStorage: localStorage,
     setTimeout: function (fn) { return setTimeout(fn, 0); },
     BWN_VER: '1.78.28',
@@ -91,7 +103,7 @@ function makeOps(opsSrc, modules) {
   };
   vm.createContext(sandbox);
   var api = vm.runInContext(
-    '(function () {\n' + opsSrc + '\n' +
+    '(function () {\n' + S_PERM + '\n' + opsSrc + '\n' +
     'return { OPS: BWN_OPS, run: bwnGqlOp, corrId: bwnCorrId, MAX: BWN_AUDIT_MAX,\n' +
     '  auditAll: bwnAuditAll, auditExport: bwnAuditExport, auditRecord: bwnAuditRecord,\n' +
     '  isTransient: bwnIsTransient, backoff: bwnBackoff, hook: window.__bwnOps };\n})()',
@@ -395,7 +407,7 @@ var MUTATIONS = [
 function runProposalGateCases() {
   console.log('\n-- newly high-risk proposal writes are gated (bwn-proposal-copy registry) --');
   var PC = fs.readFileSync(path.join(__dirname, '..', 'bwn-proposal-copy.user.js'), 'utf8').replace(/\r\n/g, '\n');
-  var a = PC.indexOf('  var BWN_OPS = {'), b = PC.indexOf('  // ===== BWN-OPS-WRAP END v2 =====');
+  var a = PC.indexOf('  var BWN_OPS = {'), b = PC.indexOf('  // ===== BWN-OPS-WRAP END v3 =====');
   if (a === -1 || b === -1 || b < a) { A.ok('proposal-copy BWN-OPS block is sliceable', false, 'markers not found'); return Promise.resolve(); }
   var pc = makeOps(PC.slice(a, b));
   function settle(p) { return p.then(function (v) { return { ok: true, v: v }; }, function (e) { return { ok: false, e: e }; }); }
@@ -476,6 +488,104 @@ function runUnclassifiedGateCases() {
   });
 }
 
+// G7: the Umbrava permission gate. Hiding a control is UX; THIS is the enforcement point, so it
+// has to hold for a caller that never saw the hidden button - a palette entry, a stale drawer, a
+// queued command. Driven through the real reader block against a planted slot.
+function runPermGateCases() {
+  console.log('\n-- G7: the Umbrava permission gate (fail-closed on a known-missing checkbox) --');
+  function settle(p) { return p.then(function (v) { return { ok: true, v: v }; }, function (e) { return { ok: false, e: e }; }); }
+
+  // A decoded user who may add a note but NOT complete a task, and who may edit Status but not
+  // AssignedTo - so one op, one field of a multi-field op, and one allowed path are all covered.
+  var PERMS = {
+    groups: ['WorkOrderNote', 'Task', 'WorkOrderField'],
+    granted: ['WorkOrderNote.AddNew', 'Task.AddNew', 'WorkOrderField.Status']
+  };
+  var Q_NOTE = 'mutation{addEditJobNote{success}}';
+  var Q_TASK = 'mutation{completeTask{success}}';
+  var Q_PATCH = 'mutation{patchWorkOrder{success}}';
+
+  var e = makeOps(S_OPS, null, PERMS);
+  A.ok('the registry carries perm on the note write', e.api.OPS.addEditJobNote.perm === 'WorkOrderNote.AddNew', String(e.api.OPS.addEditJobNote.perm));
+  A.ok('...and a FUNCTION on patchWorkOrder (per-field, not per-op)', typeof e.api.OPS.patchWorkOrder.perm === 'function');
+  A.ok('...and none on putUserPreference (personal UI state is not gated)', e.api.OPS.putUserPreference.perm === undefined);
+
+  e.plan = [{ data: { completeTask: { success: true } } }]; e.calls = [];
+  return settle(e.api.run('completeTask', Q_TASK, { data: { id: 't1' } }, {})).then(function (r) {
+    A.ok('a write the user lacks the checkbox for is REFUSED', !r.ok && /needs Umbrava permission Task\.Complete/.test(String(r.e && r.e.message)), r.ok ? 'resolved' : String(r.e && r.e.message));
+    A.eq('...and NOTHING reached the transport', e.calls.length, 0);
+    A.ok('...refused non-transiently (retrying cannot grant a permission)', !!(r.e && r.e.bwnNonTransient));
+    A.eq('...naming the missing key on the error', r.e && r.e.bwnPermissionDenied, ['Task.Complete']);
+    var last = e.api.auditAll().pop();
+    A.ok('...audited denied with the permission NAME as the reason', last && last.outcome === 'denied' && last.reason === 'permission:Task.Complete', JSON.stringify(last));
+
+    // The allowed sibling in the same registry still goes through.
+    e.plan = [{ data: { addEditJobNote: { success: true } } }]; e.calls = [];
+    return settle(e.api.run('addEditJobNote', Q_NOTE, {}, {}));
+  }).then(function (r) {
+    A.ok('a write the user DOES hold proceeds (the gate is scoped)', r.ok, r.ok ? '' : String(r.e && r.e.message));
+    A.eq('...and sent exactly once', e.calls.length, 1);
+
+    // patchWorkOrder: the permission depends on WHICH fields the variables carry.
+    e.plan = [{ data: { patchWorkOrder: { success: true } } }]; e.calls = [];
+    return settle(e.api.run('patchWorkOrder', Q_PATCH, { data: { workOrderNumber: 1, statusId: { shouldInclude: true, value: 5 } } }, { confirmed: true }));
+  }).then(function (r) {
+    A.ok('patch of an ALLOWED field (statusId) proceeds', r.ok, r.ok ? '' : String(r.e && r.e.message));
+    e.plan = [{ data: { patchWorkOrder: { success: true } } }]; e.calls = [];
+    return settle(e.api.run('patchWorkOrder', Q_PATCH, { data: { workOrderNumber: 1, assignedTo: { shouldInclude: true, value: 'g' } } }, { confirmed: true }));
+  }).then(function (r) {
+    A.ok('patch of a DENIED field (assignedTo) is refused', !r.ok && /WorkOrderField\.AssignedTo/.test(String(r.e && r.e.message)), r.ok ? 'resolved' : String(r.e && r.e.message));
+    A.eq('...with nothing sent', e.calls.length, 0);
+
+    // A bundle where ONE field is denied must not send the allowed half either - the mutation is
+    // atomic, so a partial write is not an option.
+    e.plan = [{ data: { patchWorkOrder: { success: true } } }]; e.calls = [];
+    return settle(e.api.run('patchWorkOrder', Q_PATCH, { data: { workOrderNumber: 1, statusId: { shouldInclude: true, value: 5 }, assignedTo: { shouldInclude: true, value: 'g' } } }, { confirmed: true }));
+  }).then(function (r) {
+    A.ok('a bundle with one denied field is refused whole', !r.ok, r.ok ? 'resolved' : '');
+    A.eq('...and the atomic mutation was not sent', e.calls.length, 0);
+
+    // A patch of fields the map does not know carries no requirement (unknown -> allow), so a
+    // future field cannot be blocked by a map nobody updated.
+    e.plan = [{ data: { patchWorkOrder: { success: true } } }]; e.calls = [];
+    return settle(e.api.run('patchWorkOrder', Q_PATCH, { data: { workOrderNumber: 1, someFutureField: { shouldInclude: true, value: 1 } } }, { confirmed: true }));
+  }).then(function (r) {
+    A.ok('a patch of unmapped fields is allowed (unknown -> allow)', r.ok, r.ok ? '' : String(r.e && r.e.message));
+
+    // No slot at all = undecoded user = every gated write proceeds exactly as before the gate.
+    var u = makeOps(S_OPS);         // no perms argument
+    u.plan = [{ data: { completeTask: { success: true } } }]; u.calls = [];
+    return settle(u.api.run('completeTask', Q_TASK, { data: { id: 't1' } }, {})).then(function (rr) { return { rr: rr, u: u }; });
+  }).then(function (o) {
+    A.ok('an UNDECODED user is not blocked (fail-open)', o.rr.ok, o.rr.ok ? '' : String(o.rr.e && o.rr.e.message));
+    A.eq('...and the write really went out', o.u.calls.length, 1);
+
+    // A read is never permission-gated here (Umbrava gates reads by hiding the pages).
+    var e2 = makeOps(S_OPS, null, { groups: ['WorkOrderNote'], granted: [] });
+    e2.plan = [{ data: { workOrder: { id: 7 } } }]; e2.calls = [];
+    return settle(e2.api.run('workOrder', 'query{workOrder{id}}', {}, {}));
+  }).then(function (r) {
+    A.ok('a read is unaffected by the gate', r.ok && r.v && r.v.workOrder && r.v.workOrder.id === 7, r.ok ? '' : String(r.e && r.e.message));
+
+    // Negative control: remove ONLY the gate; the denied write then lands.
+    var NOGATE = mutate(S_OPS, 'if (need.length && !bwnCanAll(need)) {', 'if (false) {');
+    var c = makeOps(NOGATE, null, PERMS);
+    c.plan = [{ data: { completeTask: { success: true } } }]; c.calls = [];
+    return settle(c.api.run('completeTask', Q_TASK, { data: { id: 't1' } }, {})).then(function (rr) { return { rr: rr, c: c }; });
+  }).then(function (o) {
+    A.ok('CONTROL: without the gate the forbidden write SENDS (so the gate is load-bearing)', o.rr.ok && o.c.calls.length === 1, o.rr.ok ? ('calls=' + o.c.calls.length) : String(o.rr.e && o.rr.e.message));
+
+    // Second control: a gate that read the wrong way round (deny on GRANTED) would pass the
+    // "refused" assertions above while breaking every allowed write. Prove the suite catches it.
+    var INVERTED = mutate(S_OPS, 'if (need.length && !bwnCanAll(need)) {', 'if (need.length && bwnCanAll(need)) {');
+    var c2 = makeOps(INVERTED, null, PERMS);
+    c2.plan = [{ data: { addEditJobNote: { success: true } } }]; c2.calls = [];
+    return settle(c2.api.run('addEditJobNote', Q_NOTE, {}, {})).then(function (rr) { return { rr: rr, c2: c2 }; });
+  }).then(function (o) {
+    A.ok('CONTROL: an inverted gate blocks a write the user IS allowed', !o.rr.ok && o.c2.calls.length === 0, o.rr.ok ? 'resolved' : '');
+  });
+}
+
 function main() {
   console.log('\n-- the shipped BWN-OPS block --');
   return runCases(S_OPS).then(function (results) {
@@ -503,8 +613,8 @@ function main() {
     var ADOPTERS = ['bwn-suite-core.user.js', 'bwn-drop-upload.user.js', 'bwn-dispatch.user.js', 'bwn-temp-vendor.user.js', 'bwn-proposal-actions.user.js', 'bwn-kanban.user.js', 'bwn-proposal-copy.user.js', 'bwn-low-gp.user.js', 'bwn-write-queue.user.js'];
     var wraps = ADOPTERS.map(function (f) {
       var s = fs.readFileSync(path.join(__dirname, '..', f), 'utf8').replace(/\r\n/g, '\n');
-      var a = s.indexOf('// ===== BWN-OPS-WRAP START v2');
-      var b = s.indexOf('// ===== BWN-OPS-WRAP END v2 =====');
+      var a = s.indexOf('// ===== BWN-OPS-WRAP START v3');
+      var b = s.indexOf('// ===== BWN-OPS-WRAP END v3 =====');
       return { f: f, w: (a !== -1 && b !== -1 && b > a) ? s.slice(a, b) : null };
     });
     var haveAll = wraps.every(function (x) { return x.w !== null; });
@@ -518,6 +628,8 @@ function main() {
     return runProposalGateCases();
   }).then(function () {
     return runUnclassifiedGateCases();
+  }).then(function () {
+    return runPermGateCases();
   }).then(function () {
     A.finish();
   }).catch(function (err) {

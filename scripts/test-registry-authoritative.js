@@ -52,7 +52,13 @@ function parseRegistry(body) {
     var name = m[1], inner = m[2];
     var km = /kind:\s*'(read|write)'/.exec(inner);
     var rm = /risk:\s*'([a-z]+)'/.exec(inner);
-    out[name] = { kind: km ? km[1] : null, risk: rm ? rm[1] : null };
+    var pm = /perm:\s*(?:'([^']+)'|\[([^\]]*)\]|([A-Za-z_$][\w$]*))/.exec(inner);
+    out[name] = {
+      kind: km ? km[1] : null, risk: rm ? rm[1] : null,
+      // The Umbrava permission this write needs: a quoted key, an array of them, or the name of a
+      // function (patchWorkOrder's per-field resolver). null = the entry declares none.
+      perm: pm ? (pm[1] || pm[2] || pm[3]) : null
+    };
   }
   return out;
 }
@@ -107,6 +113,49 @@ Object.keys(registries).forEach(function (f) {
   });
 });
 
+// CHECK C (G7): the permission gate can only enforce what the registry declares. An entry with no
+// `perm` is a write that bypasses the gate for every user - which is correct for exactly one thing
+// (a personal UI preference, which Umbrava does not gate) and a hole for anything else. The exempt
+// list is deliberately tiny and lives here, so adding a write without a permission is an EDIT to
+// this file rather than an omission nobody notices.
+console.log('\n-- CHECK C: every registry WRITE declares the Umbrava permission it needs --');
+var PERM_EXEMPT = {
+  // Umbrava's own column chooser writes this same preference for any user; there is no checkbox
+  // for it, and gating it would break saved layouts for people who may not edit work orders.
+  putUserPreference: 'personal UI state - Umbrava has no permission for it'
+};
+Object.keys(registries).forEach(function (f) {
+  var reg = registries[f];
+  Object.keys(reg).forEach(function (op) {
+    if (reg[op].kind !== 'write') return;
+    if (PERM_EXEMPT[op]) {
+      A.ok('[' + f + '] ' + op + ' is EXEMPT by design (' + PERM_EXEMPT[op] + ')', reg[op].perm === null,
+        'an exempt op declared a perm - drop it from PERM_EXEMPT or from the entry');
+      return;
+    }
+    A.ok('[' + f + '] write ' + op + ' declares perm (' + (reg[op].perm || 'MISSING') + ')', !!reg[op].perm,
+      'ungated write: add perm:, or add it to PERM_EXEMPT with a reason');
+  });
+});
+// The same op must ask for the SAME permission in every sandbox that registers it - a per-file
+// registry is exactly where a mapping can drift.
+console.log('\n-- CHECK C2: an op asks for the same permission in every registry --');
+(function () {
+  var byOp = {};
+  Object.keys(registries).forEach(function (f) {
+    var reg = registries[f];
+    Object.keys(reg).forEach(function (op) {
+      if (reg[op].kind !== 'write') return;
+      (byOp[op] = byOp[op] || []).push({ f: f, perm: reg[op].perm });
+    });
+  });
+  Object.keys(byOp).filter(function (op) { return byOp[op].length > 1; }).forEach(function (op) {
+    var perms = uniq(byOp[op].map(function (x) { return String(x.perm); }));
+    A.ok('write ' + op + ' asks for one permission across ' + byOp[op].length + ' registries (' + perms.join(' | ') + ')',
+      perms.length === 1, JSON.stringify(byOp[op]));
+  });
+})();
+
 console.log('\n-- regression guards (RM-D4 specifics) --');
 var DEAD = ['addWorkOrder', 'addDependentVendor', 'addVendorProposalNote'];
 DEAD.forEach(function (op) {
@@ -144,6 +193,22 @@ console.log('\n-- synthetic controls: the checker catches a dead entry and an un
   A.eq('CONTROL B: a dead registry write is caught', bViol, ['ghostWrite']);
   // reads are never flagged as dead even with no call-site.
   A.ok('CONTROL: a read with no call-site is NOT flagged', bViol.indexOf('workOrder') === -1);
+
+  // CHECK C over a fixture: ghostWrite declares no perm and is not exempt -> caught. The two
+  // declared forms (quoted key, function name) must both parse, or "declares perm" would be
+  // satisfied by nothing at all.
+  var FIX_C = "  var BWN_OPS = {\n" +
+    "    patchWorkOrder: { kind: 'write', perm: bwnPermsForPatch, risk: 'high' },\n" +
+    "    addEditJobNote: { kind: 'write', perm: 'WorkOrderNote.AddNew', risk: 'moderate' },\n" +
+    "    listPerms: { kind: 'write', perm: ['A.b', 'C.d'], risk: 'moderate' },\n" +
+    "    ghostWrite: { kind: 'write', target: 'x', risk: 'moderate' }\n" +
+    "  };";
+  var regC = parseRegistry(registryBody(FIX_C));
+  A.eq('CONTROL C: a function-valued perm parses', regC.patchWorkOrder.perm, 'bwnPermsForPatch');
+  A.eq('CONTROL C: a quoted perm parses', regC.addEditJobNote.perm, 'WorkOrderNote.AddNew');
+  A.ok('CONTROL C: an array perm parses', /A\.b/.test(String(regC.listPerms.perm)), String(regC.listPerms.perm));
+  var cViol = Object.keys(regC).filter(function (op) { return regC[op].kind === 'write' && !regC[op].perm && !PERM_EXEMPT[op]; });
+  A.eq('CONTROL C: an ungated write is caught', cViol, ['ghostWrite']);
 })();
 
 A.finish();

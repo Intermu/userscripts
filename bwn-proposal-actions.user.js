@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         BWN Proposal Actions (Broadway National)
 // @namespace    broadwaynational.bwn
-// @version      0.4.1
+// @version      0.5.0
 // @downloadURL  https://raw.githubusercontent.com/Intermu/userscripts/main/bwn-proposal-actions.user.js
 // @updateURL    https://raw.githubusercontent.com/Intermu/userscripts/main/bwn-proposal-actions.user.js
 // @description  On a Client Proposal DETAILS page, a "Proposal Actions" dropdown runs the internal review workflow in one confirmed action: Approval / TSP Review / Kickback. Each posts a note to the Proposal + the Work Order, sets the WO status, completes open tasks, and files a new task (assigned to the WO coordinator, or Ronny Sharp for TSP). Kickback drafts a rejection reason with the on-device browser AI for the operator to confirm. Every write is shown in a confirm dialog first; nothing fires until Confirm. @grant none.
@@ -15,7 +15,7 @@
 (function () {
   'use strict';
 
-  var VER = '0.4.1';   // keep in step with @version
+  var VER = '0.5.0';   // keep in step with @version
   var DRY_RUN = false; // when true, every WRITE is console.logged instead of sent
   console.info('[BWN PROPOSAL ACTIONS] v' + VER + ' - Approval / TSP Review / Kickback workflow on the Client Proposal details page');
 
@@ -53,6 +53,78 @@
     } catch (e) { return ''; }
   }
   // ===== BWN-SHARED END v1 =====
+
+  // ===== BWN-PERM START v1 (paste-identical; pinned by scripts/test-perm-block-ledger.js) =====
+  // Umbrava's own per-user permission checkboxes, as the one question a control has:
+  //   bwnCan('WorkOrderNote.AddNew') -> true | false
+  // Umbrava returns me.permissions as a JSON STRING of {"<Type>Permissions": "<bitmask>"} - one
+  // bit per checkbox on /company/users/<id>/permissions. bwn-suite-core decodes it once a session
+  // and publishes the DECODED grant list to `bwn:perm:last` + the `bwn:perm` bus event, the same
+  // one-way producer/consumer shape as bwn:role. This block only READS that slot, so every
+  // sandbox that pastes it needs neither the query, the token, nor the flag numbers.
+  //
+  // FAIL-OPEN on anything unknown - no slot yet, a stale slot, or a group the producer does not
+  // map. Umbrava's server is the real boundary (it refuses the mutation either way), so an
+  // unreadable cache must never strand a coordinator mid-shift. Fail-CLOSED only on a
+  // positively-known missing bit. localStorage is per-origin, so this answers "unknown" (and
+  // therefore allows) anywhere but app.umbrava.com - by design.
+  var BWN_PERM_KEY = 'bwn:perm:last';
+  var BWN_PERM_TTL_MS = 24 * 3600 * 1000;
+  var _bwnPermSlot = null;      // memoized parse; invalidated by the bwn:perm listener below
+  function bwnPermSlot() {
+    if (_bwnPermSlot) return _bwnPermSlot;
+    try {
+      var p = JSON.parse(localStorage.getItem(BWN_PERM_KEY) || 'null');
+      if (p && p.ts && (Date.now() - p.ts) < BWN_PERM_TTL_MS &&
+        Array.isArray(p.groups) && Array.isArray(p.granted)) _bwnPermSlot = p;
+    } catch (e) { /* an unreadable cache reads as unknown, which fails open */ }
+    return _bwnPermSlot;
+  }
+  function bwnCan(key) {
+    var p = bwnPermSlot();
+    if (!p) return true;                                          // nothing decoded yet -> allow
+    var grp = String(key).split('.')[0];
+    if (p.groups.indexOf(grp) === -1) return true;                // group unmapped/absent -> allow
+    return p.granted.indexOf(key) !== -1;
+  }
+  // keys: a 'Group.Flag' string, or an array of them (ALL must be granted).
+  function bwnCanAll(keys) {
+    if (!keys) return true;
+    if (typeof keys === 'string') return bwnCan(keys);
+    for (var i = 0; i < keys.length; i++) { if (!bwnCan(keys[i])) return false; }
+    return true;
+  }
+  // patchWorkOrder is ONE mutation over MANY fields and Umbrava gates each field separately, so
+  // its permission depends on the variables rather than the operation. This maps the data keys the
+  // suite actually sends, all of them wire-proven; a key this map does not know contributes NO
+  // requirement, which is the block's unknown -> allow rule and keeps a future field from being
+  // blocked by a map nobody updated. `workOrderNumber` is the identifier, not a field write.
+  var BWN_PATCH_FIELD_PERM = {
+    statusId: 'WorkOrderField.Status',
+    assignedTo: 'WorkOrderField.AssignedTo',
+    // ECD rides inside the whole-object `priority` replace, and the SPA bundles the SLA id with it.
+    priority: 'WorkOrderField.CompletionSLA',
+    serviceLevelAgreementId: 'WorkOrderField.CompletionSLA',
+    sourceJobNumber: 'WorkOrderField.SourceJobNumber',
+    sourcePurchaseOrderNumber: 'WorkOrderField.SourcePurchaseOrderNumber'
+  };
+  // -> [] | ['WorkOrderField.Status', ...]; deduped, so a bundled priority+SLA asks once.
+  function bwnPermsForPatch(variables) {
+    var data = (variables && variables.data) || {};
+    var out = [];
+    Object.keys(data).forEach(function (k) {
+      var p = BWN_PATCH_FIELD_PERM[k];
+      if (p && out.indexOf(p) === -1) out.push(p);
+    });
+    return out;
+  }
+  try {
+    document.addEventListener('bwn:evt', function (e) {
+      var d = e && e.detail;
+      if (d && d.id === 'bwn:perm') _bwnPermSlot = null;          // a fresh decode landed
+    });
+  } catch (e) { }
+  // ===== BWN-PERM END v1 =====
   function paGql(op, query, variables) {
     var tok = authToken();
     if (!tok) return Promise.reject(new Error('no-umbrava-token'));
@@ -256,18 +328,21 @@
   var BWN_VER = VER;
   var BWN_MODULES = (function () { try { return JSON.parse(localStorage.getItem('bwn:modules') || '{}') || {}; } catch (e) { return {}; } })();
   var BWN_OPS = {
-    patchWorkOrder: { kind: 'write', target: 'workOrder', risk: 'high', idempotent: false, retry: 'none',
+    patchWorkOrder: { kind: 'write', perm: bwnPermsForPatch, target: 'workOrder', risk: 'high', idempotent: false, retry: 'none',
       ok: 'Work order updated.', fail: 'The work order was not updated.' },
-    addEditJobNote: { kind: 'write', target: 'note', risk: 'moderate', idempotent: false, retry: 'none',
+    addEditJobNote: { kind: 'write', perm: 'WorkOrderNote.AddNew', target: 'note', risk: 'moderate', idempotent: false, retry: 'none',
       ok: 'Note posted.', fail: 'The note was not posted.' },
-    addClientProposalNote: { kind: 'write', target: 'proposal', risk: 'moderate', idempotent: false, retry: 'none',
+    addClientProposalNote: { kind: 'write', perm: 'WorkOrderProposal.AddNote', target: 'proposal', risk: 'moderate', idempotent: false, retry: 'none',
       ok: 'Proposal note posted.', fail: 'The proposal note was not posted.' },
-    addTask: { kind: 'write', target: 'task', risk: 'moderate', idempotent: false, retry: 'none',
+    addTask: { kind: 'write', perm: 'Task.AddNew', target: 'task', risk: 'moderate', idempotent: false, retry: 'none',
       ok: 'Task created.', fail: 'The task was not created.' },
-    completeTask: { kind: 'write', target: 'task', risk: 'moderate', idempotent: true, retry: 'none',
+    completeTask: { kind: 'write', perm: 'Task.Complete', target: 'task', risk: 'moderate', idempotent: true, retry: 'none',
       ok: 'Task completed.', fail: 'The task was not completed.' }
   };
-  // ===== BWN-OPS-WRAP START v2 (paste-identical across adopters; SHA-gated by scripts/test-bwn-ops.js) =====
+  // ===== BWN-OPS-WRAP START v3 (paste-identical across adopters; SHA-gated by scripts/test-bwn-ops.js) =====
+  // v3 (2026-09-02) adds the Umbrava permission gate (G7 below). It closes over bwnCan/bwnCanAll
+  // from the BWN-PERM block, so an adopter of this wrapper must carry that block too - the ledger
+  // in scripts/test-perm-block-ledger.js is what keeps the two lists in step.
   // Generic machinery only - NO registry, NO window hook - so it is byte-identical in every
   // sandbox that adopts it (Core, drop-upload, ...). It closes over four things each sandbox
   // supplies on its own: BWN_OPS (that file's registry), BWN_MODULES (kill switches), BWN_VER,
@@ -375,6 +450,29 @@
       writeAudit('denied', { reason: 'feature-off:' + opts.feature });
       return Promise.reject(new Error('bwnGqlOp: feature "' + opts.feature + '" is disabled'));
     }
+    // Umbrava permission gate (G7). The UI hides a control the operator's checkboxes do not cover,
+    // but hiding is not enforcement: a palette entry, a stale drawer, a queued command, or a future
+    // caller can all reach a write whose button was never rendered. This is the enforcement point -
+    // every registered write passes through here, so ONE guard covers every caller.
+    //   meta.perm  'Group.Flag' | ['Group.Flag', ...] | fn(variables) -> either of those
+    // A function is how a multi-field mutation (patchWorkOrder) asks per FIELD instead of per op.
+    // bwnCanAll fails OPEN on anything undecided - no slot, a stale slot, an unmapped group - so
+    // this refuses ONLY a positively-known missing checkbox. Refusals are non-transient (retrying
+    // cannot grant a permission) and audited `denied`, so a refusal is visible in the ring rather
+    // than silent. The reason carries the permission NAME, which is a static key, never user data.
+    if (isWrite && meta.perm) {
+      var need = (typeof meta.perm === 'function') ? meta.perm(variables) : meta.perm;
+      if (typeof need === 'string') need = [need];
+      if (!Array.isArray(need)) need = [];
+      if (need.length && !bwnCanAll(need)) {
+        var missing = need.filter(function (k) { return !bwnCan(k); });
+        writeAudit('denied', { reason: 'permission:' + missing.join('+') });
+        var noPerm = new Error('bwnGqlOp: "' + op + '" needs Umbrava permission ' + missing.join(' + ') + ' - the write was NOT sent.');
+        noPerm.bwnNonTransient = true;
+        noPerm.bwnPermissionDenied = missing;
+        return Promise.reject(noPerm);
+      }
+    }
     // Validate a write BEFORE it leaves the browser.
     if (isWrite && typeof opts.validate === 'function') {
       var vr = opts.validate(variables);
@@ -459,7 +557,7 @@
     return attempt(1);
   }
   bwnGqlOp.setConfirm = function (fn) { _confirmFn = (typeof fn === 'function') ? fn : null; };
-  // ===== BWN-OPS-WRAP END v2 =====
+  // ===== BWN-OPS-WRAP END v3 =====
 
   var M_PATCH = 'mutation PatchWorkOrder($data: PatchWorkOrderInput!){ patchWorkOrder(data: $data){ success message } }';
   function setStatus(n, statusId) {
@@ -665,6 +763,10 @@
   // Each step.run() returns a Promise. A step whose run rejects with NOT_PINNED is SKIPPED
   // (shown "pending capture"); any other rejection STOPS the run and is reported.
   function openConfirm(plan) {
+    // A step builder returns null when this operator's Umbrava permissions do not cover that write
+    // (see the build*Step functions). Dropping them HERE keeps the three workflow definitions
+    // readable and means the plan the operator confirms is exactly the plan that will run.
+    if (plan && Array.isArray(plan.steps)) plan.steps = plan.steps.filter(Boolean);
     ensureStyle();
     var prior = document.getElementById('bwn-pa-overlay');
     if (prior) prior.remove();
@@ -821,10 +923,12 @@
     // and inventing one is the fabricated-`workOrderNotes` bug class (vault umbrava-graphql-operations).
     // The resume-from-first-incomplete-step fix above stops a re-post in the normal case; a true
     // read-then-skip dedup (like the WO note below) needs a billing-notes read query pinned first.
+    if (!bwnCan('WorkOrderProposal.AddNote')) return null;   // dropped from the plan by openConfirm
     return { label: 'Add note to Proposal #' + ctx.pid + ' Notes tab', pending: false,
       run: function (reason) { return addProposalNote(ctx.pid, noteFn(reason)); } };
   }
   function buildWONoteStep(ctx, noteFn) {
+    if (!bwnCan('WorkOrderNote.AddNew')) return null;
     return { label: 'Add note to Work Order W-' + ctx.n + ' notes', pending: false,
       run: function (reason) {
         var text = noteFn(reason);
@@ -839,6 +943,7 @@
       } };
   }
   function buildCompleteStep(ctx) {
+    if (!bwnCan('Task.Complete')) return null;
     var c = ctx.openTasks.length;
     return { label: c ? ('Complete ' + c + ' open task(s)') : 'No open tasks to complete', pending: false,
       run: function () {
@@ -850,6 +955,7 @@
       } };
   }
   function buildCreateTaskStep(ctx, assigneeGuid, assigneeName, noteFn) {
+    if (!bwnCan('Task.AddNew')) return null;
     // ponytail: this append is NOT deduped - the created task carries no idempotency key we can read
     // back (the frozen addTask payload has no marker, and Task has no confirmed read field to match
     // on). It is the LAST step, so the resume fix means it only re-runs if it ITSELF failed; grounding
@@ -991,6 +1097,10 @@
     try {
       if (!onProposalDetailsPage()) { removeDropdown(); return; }
       if (!gated()) { removeDropdown(); return; }
+      // Every one of the three workflows starts by writing the work order's status, so that
+      // checkbox is what makes this menu meaningful at all. The later steps gate themselves.
+      // Fails OPEN while the decode is unknown.
+      if (!bwnCan('WorkOrderField.Status')) { removeDropdown(); return; }
       ensureStyle();
       if (document.getElementById(DROPDOWN_ID)) return;   // presence-based guard (React wipes; we re-add)
       var dd = buildDropdown();

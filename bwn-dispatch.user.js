@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         BWN Dispatch (Broadway National)
 // @namespace    broadwaynational.bwn
-// @version      0.11.1
+// @version      0.12.0
 // @downloadURL  https://raw.githubusercontent.com/Intermu/userscripts/main/bwn-dispatch.user.js
 // @updateURL    https://raw.githubusercontent.com/Intermu/userscripts/main/bwn-dispatch.user.js
 // @description  One-click Dispatch for a work order - replaces manually typing a row into Dispatch_Notifications.xlsx. The Dispatch launcher shows only on a WO that is in "Pending Dispatch". It opens a confirm modal prefilled from the BWN Ops Suite bus (Tracking) and a same-origin Umbrava GraphQL read (Location as the site NUMBER, Priority, and the coordinator to ping): it uses the person this WO is assigned to (whoever a supervisor/manager assigned it to, read live when you open it), and when that is a team or blank it falls back to the coordinator from the most recent work order(s) at the same location. The coordinator name + email are editable before you send. On submit it POSTs the 5 typed fields plus the WO number (read from the URL, never typed - the flow needs it to deep-link the card, because Tracking is the CLIENT's tracking number and points at the wrong record) to the broadway-internal-ops SWA proxy (x-bwn-key gated) which forwards to the HTTP-triggered "Dispatch HTTP" Power Automate flow - the flow adds the row to Dispatch_Notifications.xlsx AND dispatches it (posts a Teams adaptive card to the coordinator and waits for their accept). Dispatching is a coordinator action, so there is no role gate (the x-bwn-key is the boundary). The assignee's email is not on the WO record (Umbrava exposes the coordinator NAME only), so it is resolved from a per-user name->email roster you maintain (seeded with you, and it remembers each coordinator you dispatch to); for a coordinator the roster has never met it falls back to a GUESS derived from the house name pattern and the signed-in user's own domain, shown with a "check it before you send" warning and always editable - never a silent send to an address nobody confirmed. The flow's secret URL stays server-side; nothing sensitive lives in this script. As of 0.10.0 the modal also writes the WO RECORD directly via the same-origin Umbrava GraphQL patchWorkOrder mutation (the write kanban proved live) - an operator-picked target status, an operator-picked assignee (a real Umbrava user, so the assign carries a proper GUID and the card name/email come from the record), and an auto priority-scaled Expected Completion Date - behind a confirm that spells out each write and warns that a status change resets the time-in-status clock. Writes run first and atomically; the Teams card is posted only if the record change succeeds. Registers a single "Dispatch" launcher into the shared dock (bwn:dock:*) - the dock tab is the only launcher; no floating fallback button.
@@ -18,7 +18,7 @@
 (function () {
   'use strict';
 
-  var VER = '0.11.1';   // keep in step with @version - this is what the console banner reports
+  var VER = '0.12.0';   // keep in step with @version - this is what the console banner reports
   var FONT = "-apple-system,BlinkMacSystemFont,'Segoe UI','Helvetica Neue',Arial,sans-serif";
   var GREEN = '#0d3d26';          // BWN Ops Suite brand green - matches CC Request / WO Audit
   var SWA_BASE = 'https://green-stone-0717dab0f.7.azurestaticapps.net';
@@ -92,6 +92,78 @@
   }
   // ===== BWN-SHARED END v1 =====
 
+  // ===== BWN-PERM START v1 (paste-identical; pinned by scripts/test-perm-block-ledger.js) =====
+  // Umbrava's own per-user permission checkboxes, as the one question a control has:
+  //   bwnCan('WorkOrderNote.AddNew') -> true | false
+  // Umbrava returns me.permissions as a JSON STRING of {"<Type>Permissions": "<bitmask>"} - one
+  // bit per checkbox on /company/users/<id>/permissions. bwn-suite-core decodes it once a session
+  // and publishes the DECODED grant list to `bwn:perm:last` + the `bwn:perm` bus event, the same
+  // one-way producer/consumer shape as bwn:role. This block only READS that slot, so every
+  // sandbox that pastes it needs neither the query, the token, nor the flag numbers.
+  //
+  // FAIL-OPEN on anything unknown - no slot yet, a stale slot, or a group the producer does not
+  // map. Umbrava's server is the real boundary (it refuses the mutation either way), so an
+  // unreadable cache must never strand a coordinator mid-shift. Fail-CLOSED only on a
+  // positively-known missing bit. localStorage is per-origin, so this answers "unknown" (and
+  // therefore allows) anywhere but app.umbrava.com - by design.
+  var BWN_PERM_KEY = 'bwn:perm:last';
+  var BWN_PERM_TTL_MS = 24 * 3600 * 1000;
+  var _bwnPermSlot = null;      // memoized parse; invalidated by the bwn:perm listener below
+  function bwnPermSlot() {
+    if (_bwnPermSlot) return _bwnPermSlot;
+    try {
+      var p = JSON.parse(localStorage.getItem(BWN_PERM_KEY) || 'null');
+      if (p && p.ts && (Date.now() - p.ts) < BWN_PERM_TTL_MS &&
+        Array.isArray(p.groups) && Array.isArray(p.granted)) _bwnPermSlot = p;
+    } catch (e) { /* an unreadable cache reads as unknown, which fails open */ }
+    return _bwnPermSlot;
+  }
+  function bwnCan(key) {
+    var p = bwnPermSlot();
+    if (!p) return true;                                          // nothing decoded yet -> allow
+    var grp = String(key).split('.')[0];
+    if (p.groups.indexOf(grp) === -1) return true;                // group unmapped/absent -> allow
+    return p.granted.indexOf(key) !== -1;
+  }
+  // keys: a 'Group.Flag' string, or an array of them (ALL must be granted).
+  function bwnCanAll(keys) {
+    if (!keys) return true;
+    if (typeof keys === 'string') return bwnCan(keys);
+    for (var i = 0; i < keys.length; i++) { if (!bwnCan(keys[i])) return false; }
+    return true;
+  }
+  // patchWorkOrder is ONE mutation over MANY fields and Umbrava gates each field separately, so
+  // its permission depends on the variables rather than the operation. This maps the data keys the
+  // suite actually sends, all of them wire-proven; a key this map does not know contributes NO
+  // requirement, which is the block's unknown -> allow rule and keeps a future field from being
+  // blocked by a map nobody updated. `workOrderNumber` is the identifier, not a field write.
+  var BWN_PATCH_FIELD_PERM = {
+    statusId: 'WorkOrderField.Status',
+    assignedTo: 'WorkOrderField.AssignedTo',
+    // ECD rides inside the whole-object `priority` replace, and the SPA bundles the SLA id with it.
+    priority: 'WorkOrderField.CompletionSLA',
+    serviceLevelAgreementId: 'WorkOrderField.CompletionSLA',
+    sourceJobNumber: 'WorkOrderField.SourceJobNumber',
+    sourcePurchaseOrderNumber: 'WorkOrderField.SourcePurchaseOrderNumber'
+  };
+  // -> [] | ['WorkOrderField.Status', ...]; deduped, so a bundled priority+SLA asks once.
+  function bwnPermsForPatch(variables) {
+    var data = (variables && variables.data) || {};
+    var out = [];
+    Object.keys(data).forEach(function (k) {
+      var p = BWN_PATCH_FIELD_PERM[k];
+      if (p && out.indexOf(p) === -1) out.push(p);
+    });
+    return out;
+  }
+  try {
+    document.addEventListener('bwn:evt', function (e) {
+      var d = e && e.detail;
+      if (d && d.id === 'bwn:perm') _bwnPermSlot = null;          // a fresh decode landed
+    });
+  } catch (e) { }
+  // ===== BWN-PERM END v1 =====
+
   // ---- Same-origin GraphQL (mirrors bwn-ask / bwn-wo-audit gql) ------------
   // app.umbrava.com is same-origin, so a plain fetch needs no @connect; the page's own
   // bearer is passed explicitly so it works from the GM_* sandbox. Best-effort only: any
@@ -145,10 +217,13 @@
   var BWN_VER = VER;
   var BWN_MODULES = (function () { try { return JSON.parse(localStorage.getItem('bwn:modules') || '{}') || {}; } catch (e) { return {}; } })();
   var BWN_OPS = {
-    patchWorkOrder: { kind: 'write', target: 'workOrder', risk: 'high', idempotent: false, retry: 'none',
+    patchWorkOrder: { kind: 'write', perm: bwnPermsForPatch, target: 'workOrder', risk: 'high', idempotent: false, retry: 'none',
       ok: 'Work order updated.', fail: 'The work order was not updated.' }
   };
-  // ===== BWN-OPS-WRAP START v2 (paste-identical across adopters; SHA-gated by scripts/test-bwn-ops.js) =====
+  // ===== BWN-OPS-WRAP START v3 (paste-identical across adopters; SHA-gated by scripts/test-bwn-ops.js) =====
+  // v3 (2026-09-02) adds the Umbrava permission gate (G7 below). It closes over bwnCan/bwnCanAll
+  // from the BWN-PERM block, so an adopter of this wrapper must carry that block too - the ledger
+  // in scripts/test-perm-block-ledger.js is what keeps the two lists in step.
   // Generic machinery only - NO registry, NO window hook - so it is byte-identical in every
   // sandbox that adopts it (Core, drop-upload, ...). It closes over four things each sandbox
   // supplies on its own: BWN_OPS (that file's registry), BWN_MODULES (kill switches), BWN_VER,
@@ -256,6 +331,29 @@
       writeAudit('denied', { reason: 'feature-off:' + opts.feature });
       return Promise.reject(new Error('bwnGqlOp: feature "' + opts.feature + '" is disabled'));
     }
+    // Umbrava permission gate (G7). The UI hides a control the operator's checkboxes do not cover,
+    // but hiding is not enforcement: a palette entry, a stale drawer, a queued command, or a future
+    // caller can all reach a write whose button was never rendered. This is the enforcement point -
+    // every registered write passes through here, so ONE guard covers every caller.
+    //   meta.perm  'Group.Flag' | ['Group.Flag', ...] | fn(variables) -> either of those
+    // A function is how a multi-field mutation (patchWorkOrder) asks per FIELD instead of per op.
+    // bwnCanAll fails OPEN on anything undecided - no slot, a stale slot, an unmapped group - so
+    // this refuses ONLY a positively-known missing checkbox. Refusals are non-transient (retrying
+    // cannot grant a permission) and audited `denied`, so a refusal is visible in the ring rather
+    // than silent. The reason carries the permission NAME, which is a static key, never user data.
+    if (isWrite && meta.perm) {
+      var need = (typeof meta.perm === 'function') ? meta.perm(variables) : meta.perm;
+      if (typeof need === 'string') need = [need];
+      if (!Array.isArray(need)) need = [];
+      if (need.length && !bwnCanAll(need)) {
+        var missing = need.filter(function (k) { return !bwnCan(k); });
+        writeAudit('denied', { reason: 'permission:' + missing.join('+') });
+        var noPerm = new Error('bwnGqlOp: "' + op + '" needs Umbrava permission ' + missing.join(' + ') + ' - the write was NOT sent.');
+        noPerm.bwnNonTransient = true;
+        noPerm.bwnPermissionDenied = missing;
+        return Promise.reject(noPerm);
+      }
+    }
     // Validate a write BEFORE it leaves the browser.
     if (isWrite && typeof opts.validate === 'function') {
       var vr = opts.validate(variables);
@@ -340,7 +438,7 @@
     return attempt(1);
   }
   bwnGqlOp.setConfirm = function (fn) { _confirmFn = (typeof fn === 'function') ? fn : null; };
-  // ===== BWN-OPS-WRAP END v2 =====
+  // ===== BWN-OPS-WRAP END v3 =====
 
   // ---- Direct WO record writes: the "gold key" patchWorkOrder engine ---------
   // Reuses the mutation kanban proved writes status LIVE. PATCH semantics: send ONLY the fields being
@@ -914,28 +1012,41 @@
     wh.textContent = 'Update the work order';
     wsec.appendChild(wh);
 
-    var awrap = document.createElement('div'); awrap.style.cssText = 'margin-bottom:13px;';
-    var albl = document.createElement('label'); albl.style.cssText = lblCss; albl.textContent = 'Assign to (Umbrava user)';
-    assigneeSel = document.createElement('select'); assigneeSel.style.cssText = inCss;
-    albl.setAttribute('for', 'disp_assignee'); assigneeSel.id = 'disp_assignee';
-    assigneeSel.innerHTML = '<option value="">(loading users…)</option>';
-    assigneeSel.addEventListener('change', onAssigneePick);
-    awrap.appendChild(albl); awrap.appendChild(assigneeSel); wsec.appendChild(awrap);
+    // Each of the three record writes is mounted only if the operator's own Umbrava permission
+    // allows that FIELD. The control that is not built stays null, and every consumer below
+    // (submit, the confirm summary, the two hydrate fills, the ECD line) already null-guards - so
+    // a missing permission simply means that field is never written. bwnCan fails OPEN on an
+    // undecoded user, which is the pre-gate behaviour. The Teams card half of dispatch is
+    // unaffected: it notifies, it does not touch the record.
+    if (bwnCan('WorkOrderField.AssignedTo')) {
+      var awrap = document.createElement('div'); awrap.style.cssText = 'margin-bottom:13px;';
+      var albl = document.createElement('label'); albl.style.cssText = lblCss; albl.textContent = 'Assign to (Umbrava user)';
+      assigneeSel = document.createElement('select'); assigneeSel.style.cssText = inCss;
+      albl.setAttribute('for', 'disp_assignee'); assigneeSel.id = 'disp_assignee';
+      assigneeSel.innerHTML = '<option value="">(loading users…)</option>';
+      assigneeSel.addEventListener('change', onAssigneePick);
+      awrap.appendChild(albl); awrap.appendChild(assigneeSel); wsec.appendChild(awrap);
+    }
 
-    var swrap = document.createElement('div'); swrap.style.cssText = 'margin-bottom:5px;';
-    var slbl = document.createElement('label'); slbl.style.cssText = lblCss; slbl.textContent = 'Set status';
-    statusSel = document.createElement('select'); statusSel.style.cssText = inCss;
-    slbl.setAttribute('for', 'disp_status'); statusSel.id = 'disp_status';
-    statusSel.innerHTML = '<option value="">(loading statuses…)</option>';
-    swrap.appendChild(slbl); swrap.appendChild(statusSel); wsec.appendChild(swrap);
-    var sHint = document.createElement('div'); sHint.style.cssText = 'font-size:11.5px;color:#8a5a00;margin:4px 0 12px;';
-    sHint.textContent = 'Changing status resets the WO’s time-in-status clock (not reversible).';
-    wsec.appendChild(sHint);
+    if (bwnCan('WorkOrderField.Status')) {
+      var swrap = document.createElement('div'); swrap.style.cssText = 'margin-bottom:5px;';
+      var slbl = document.createElement('label'); slbl.style.cssText = lblCss; slbl.textContent = 'Set status';
+      statusSel = document.createElement('select'); statusSel.style.cssText = inCss;
+      slbl.setAttribute('for', 'disp_status'); statusSel.id = 'disp_status';
+      statusSel.innerHTML = '<option value="">(loading statuses…)</option>';
+      swrap.appendChild(slbl); swrap.appendChild(statusSel); wsec.appendChild(swrap);
+      var sHint = document.createElement('div'); sHint.style.cssText = 'font-size:11.5px;color:#8a5a00;margin:4px 0 12px;';
+      sHint.textContent = 'Changing status resets the WO’s time-in-status clock (not reversible).';
+      wsec.appendChild(sHint);
+    }
 
-    ecdEl = document.createElement('div');
-    ecdEl.style.cssText = 'font-size:12.5px;color:#33473d;background:#eef4f0;border:1px solid #cfe0d7;border-radius:8px;padding:8px 11px;margin-bottom:4px;line-height:1.45;';
-    ecdEl.textContent = 'Expected completion date: (reading…)';
-    wsec.appendChild(ecdEl);
+    // ECD rides inside `priority`, so it is the CompletionSLA checkbox.
+    if (bwnCan('WorkOrderField.CompletionSLA')) {
+      ecdEl = document.createElement('div');
+      ecdEl.style.cssText = 'font-size:12.5px;color:#33473d;background:#eef4f0;border:1px solid #cfe0d7;border-radius:8px;padding:8px 11px;margin-bottom:4px;line-height:1.45;';
+      ecdEl.textContent = 'Expected completion date: (reading…)';
+      wsec.appendChild(ecdEl);
+    }
 
     form.appendChild(wsec);
 

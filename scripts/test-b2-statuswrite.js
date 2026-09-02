@@ -43,7 +43,13 @@ function mutate(src, from, to) {
   return src.slice(0, i) + to + src.slice(i + from.length);
 }
 
-var S_OPS = slice('  // ===== BWN-OPS START v1', '  // ===== BWN-OPS END v1 =====', 'BWN-OPS block');
+// WRAP v3's permission gate closes over bwnCan/bwnCanAll and the registry over bwnPermsForPatch,
+// so the REAL BWN-PERM reader block is prepended to the slice rather than stubbed. With no
+// localStorage slot planted in these sandboxes every permission reads as unknown, which fails
+// OPEN - so every case below runs against the same behaviour it had before the gate existed.
+// (The gate itself is proven in scripts/test-bwn-ops.js and scripts/test-perm-block-ledger.js.)
+var S_PERM = slice('  // ===== BWN-PERM START v1', '  // ===== BWN-PERM END v1 =====', 'BWN-PERM block');
+var S_OPS = S_PERM + "\n" + slice('  // ===== BWN-OPS START v1', '  // ===== BWN-OPS END v1 =====', 'BWN-OPS block');
 var S_WA = slice('    // ===== WA-WRITES START v1', '    // ===== WA-WRITES END v1 =====', 'WA-WRITES block');
 
 A.ok('WA-WRITES slice is DOM-free (only bwnGqlOp + consts)', !/\bdocument\b|\bwindow\b/.test(S_WA), 'WA-WRITES must not touch the DOM');

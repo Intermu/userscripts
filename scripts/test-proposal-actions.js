@@ -37,6 +37,11 @@ function sliceBetween(a0, b0) {
   return full.slice(a, b);
 }
 var GPLABEL = sliceBetween("// ===== PA-GPLABEL START", "// ===== PA-GPLABEL END");
+// WRAP v3 gates writes on the operator's Umbrava permissions, so the sandbox needs the REAL
+// BWN-PERM reader block (bwnCan / bwnCanAll / bwnPermsForPatch) rather than a stub. No slot is
+// planted, so every permission reads as unknown and fails OPEN - the pre-gate behaviour these
+// cases were written against. The gate itself is proven in scripts/test-bwn-ops.js.
+var PERMBLK = sliceBetween("// ===== BWN-PERM START v1", "// ===== BWN-PERM END v1 =====");
 function loadGpLabel(src) { var box = { console: console }; vm.createContext(box); vm.runInContext(src, box); return box; }
 
 function mutate(src, from, to) {
@@ -81,14 +86,14 @@ function load(engineSrc, gql) {
       setItem: function (k, v) { store[k] = String(v); },
       removeItem: function (k) { delete store[k]; }
     },
-    VER: "0.4.1",
+    VER: "0.5.0",
     paGql: gql,
     DRY_RUN: false,
     NOTE_TYPE_INTERNAL: 13,
     textToHtml: function (t) { return "<p>" + String(t == null ? "" : t).replace(/\n/g, "</p><p>") + "</p>"; }
   };
   vm.createContext(sandbox);
-  vm.runInContext(engineSrc, sandbox);
+  vm.runInContext(PERMBLK + "\n" + engineSrc, sandbox);
   return sandbox;
 }
 function callsOf(g, op) { return g.calls.filter(function (c) { return c.op === op; }); }
@@ -219,7 +224,7 @@ function callsOf(g, op) { return g.calls.filter(function (c) { return c.op === o
   A.ok("every write still honors DRY_RUN", (full.match(/\[PA DRY_RUN\]/g) || []).length >= 5);
   var mV = full.match(/@version\s+([0-9.]+)/), mR = full.match(/VER\s*=\s*'([0-9.]+)'/);
   A.ok("@version and runtime VER agree", !!(mV && mR && mV[1] === mR[1]));
-  A.eq("shipped at 0.4.1", mV && mV[1], "0.4.1");
+  A.eq("shipped at 0.5.0", mV && mV[1], "0.5.0");
 
   A.finish();
 })().catch(function (e) { console.error(e); process.exit(1); });
