@@ -37,6 +37,11 @@ function sliceBetween(a0, b0) {
   return full.slice(a, b);
 }
 var GPLABEL = sliceBetween("// ===== PA-GPLABEL START", "// ===== PA-GPLABEL END");
+// WRAP v3 gates writes on the operator's Umbrava permissions, so the sandbox needs the REAL
+// BWN-PERM reader block (bwnCan / bwnCanAll / bwnPermsForPatch) rather than a stub. No slot is
+// planted, so every permission reads as unknown and fails OPEN - the pre-gate behaviour these
+// cases were written against. The gate itself is proven in scripts/test-bwn-ops.js.
+var PERMBLK = sliceBetween("// ===== BWN-PERM START v1", "// ===== BWN-PERM END v1 =====");
 function loadGpLabel(src) { var box = { console: console }; vm.createContext(box); vm.runInContext(src, box); return box; }
 
 function mutate(src, from, to) {
@@ -88,7 +93,7 @@ function load(engineSrc, gql) {
     textToHtml: function (t) { return "<p>" + String(t == null ? "" : t).replace(/\n/g, "</p><p>") + "</p>"; }
   };
   vm.createContext(sandbox);
-  vm.runInContext(engineSrc, sandbox);
+  vm.runInContext(PERMBLK + "\n" + engineSrc, sandbox);
   return sandbox;
 }
 function callsOf(g, op) { return g.calls.filter(function (c) { return c.op === op; }); }

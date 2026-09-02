@@ -115,6 +115,30 @@
     for (var i = 0; i < keys.length; i++) { if (!bwnCan(keys[i])) return false; }
     return true;
   }
+  // patchWorkOrder is ONE mutation over MANY fields and Umbrava gates each field separately, so
+  // its permission depends on the variables rather than the operation. This maps the data keys the
+  // suite actually sends, all of them wire-proven; a key this map does not know contributes NO
+  // requirement, which is the block's unknown -> allow rule and keeps a future field from being
+  // blocked by a map nobody updated. `workOrderNumber` is the identifier, not a field write.
+  var BWN_PATCH_FIELD_PERM = {
+    statusId: 'WorkOrderField.Status',
+    assignedTo: 'WorkOrderField.AssignedTo',
+    // ECD rides inside the whole-object `priority` replace, and the SPA bundles the SLA id with it.
+    priority: 'WorkOrderField.CompletionSLA',
+    serviceLevelAgreementId: 'WorkOrderField.CompletionSLA',
+    sourceJobNumber: 'WorkOrderField.SourceJobNumber',
+    sourcePurchaseOrderNumber: 'WorkOrderField.SourcePurchaseOrderNumber'
+  };
+  // -> [] | ['WorkOrderField.Status', ...]; deduped, so a bundled priority+SLA asks once.
+  function bwnPermsForPatch(variables) {
+    var data = (variables && variables.data) || {};
+    var out = [];
+    Object.keys(data).forEach(function (k) {
+      var p = BWN_PATCH_FIELD_PERM[k];
+      if (p && out.indexOf(p) === -1) out.push(p);
+    });
+    return out;
+  }
   try {
     document.addEventListener('bwn:evt', function (e) {
       var d = e && e.detail;
@@ -153,12 +177,15 @@
   var BWN_VER = VER;
   var BWN_MODULES = (function () { try { return JSON.parse(localStorage.getItem('bwn:modules') || '{}') || {}; } catch (e) { return {}; } })();
   var BWN_OPS = {
-    patchWorkOrder: { kind: 'write', target: 'workOrder', risk: 'high', idempotent: false, retry: 'none',
+    patchWorkOrder: { kind: 'write', perm: bwnPermsForPatch, target: 'workOrder', risk: 'high', idempotent: false, retry: 'none',
       ok: 'Work order updated.', fail: 'The work order was not updated.' },
-    addEditJobNote: { kind: 'write', target: 'note', risk: 'moderate', idempotent: false, retry: 'none',
+    addEditJobNote: { kind: 'write', perm: 'WorkOrderNote.AddNew', target: 'note', risk: 'moderate', idempotent: false, retry: 'none',
       ok: 'Note posted.', fail: 'The note was not posted.' }
   };
-  // ===== BWN-OPS-WRAP START v2 (paste-identical across adopters; SHA-gated by scripts/test-bwn-ops.js) =====
+  // ===== BWN-OPS-WRAP START v3 (paste-identical across adopters; SHA-gated by scripts/test-bwn-ops.js) =====
+  // v3 (2026-09-02) adds the Umbrava permission gate (G7 below). It closes over bwnCan/bwnCanAll
+  // from the BWN-PERM block, so an adopter of this wrapper must carry that block too - the ledger
+  // in scripts/test-perm-block-ledger.js is what keeps the two lists in step.
   // Generic machinery only - NO registry, NO window hook - so it is byte-identical in every
   // sandbox that adopts it (Core, drop-upload, ...). It closes over four things each sandbox
   // supplies on its own: BWN_OPS (that file's registry), BWN_MODULES (kill switches), BWN_VER,
@@ -266,6 +293,29 @@
       writeAudit('denied', { reason: 'feature-off:' + opts.feature });
       return Promise.reject(new Error('bwnGqlOp: feature "' + opts.feature + '" is disabled'));
     }
+    // Umbrava permission gate (G7). The UI hides a control the operator's checkboxes do not cover,
+    // but hiding is not enforcement: a palette entry, a stale drawer, a queued command, or a future
+    // caller can all reach a write whose button was never rendered. This is the enforcement point -
+    // every registered write passes through here, so ONE guard covers every caller.
+    //   meta.perm  'Group.Flag' | ['Group.Flag', ...] | fn(variables) -> either of those
+    // A function is how a multi-field mutation (patchWorkOrder) asks per FIELD instead of per op.
+    // bwnCanAll fails OPEN on anything undecided - no slot, a stale slot, an unmapped group - so
+    // this refuses ONLY a positively-known missing checkbox. Refusals are non-transient (retrying
+    // cannot grant a permission) and audited `denied`, so a refusal is visible in the ring rather
+    // than silent. The reason carries the permission NAME, which is a static key, never user data.
+    if (isWrite && meta.perm) {
+      var need = (typeof meta.perm === 'function') ? meta.perm(variables) : meta.perm;
+      if (typeof need === 'string') need = [need];
+      if (!Array.isArray(need)) need = [];
+      if (need.length && !bwnCanAll(need)) {
+        var missing = need.filter(function (k) { return !bwnCan(k); });
+        writeAudit('denied', { reason: 'permission:' + missing.join('+') });
+        var noPerm = new Error('bwnGqlOp: "' + op + '" needs Umbrava permission ' + missing.join(' + ') + ' - the write was NOT sent.');
+        noPerm.bwnNonTransient = true;
+        noPerm.bwnPermissionDenied = missing;
+        return Promise.reject(noPerm);
+      }
+    }
     // Validate a write BEFORE it leaves the browser.
     if (isWrite && typeof opts.validate === 'function') {
       var vr = opts.validate(variables);
@@ -350,7 +400,7 @@
     return attempt(1);
   }
   bwnGqlOp.setConfirm = function (fn) { _confirmFn = (typeof fn === 'function') ? fn : null; };
-  // ===== BWN-OPS-WRAP END v2 =====
+  // ===== BWN-OPS-WRAP END v3 =====
 
   // ==== BWN-WQ EXEC START (sliced by test-write-queue-drain.js; references injected `gql` (reads) + `bwnGqlOp` (writes)) ====
   var INTERNAL_NOTE_TYPE = 13;   // Internal (drop-upload's fallback map). v1 posts every note as Internal.
@@ -414,28 +464,19 @@
   // opts.dryRun (bulk console): do every READ + skip-if-equal decision but return BEFORE the single
   // bwnGqlOp write. Default (no opts / opts.dryRun falsy) is the unchanged LIVE path - so every existing
   // one-arg caller (pollTick, the drain harness) is byte-for-byte unaffected.
-  // The Umbrava checkbox each verb needs. A verb absent from this map is not permission-gated.
-  var VERB_PERM = {
-    'wo.note': 'WorkOrderNote.AddNew',
-    'wo.status': 'WorkOrderField.Status',
-    'wo.assign': 'WorkOrderField.AssignedTo',
-    'wo.ecd': 'WorkOrderField.CompletionSLA'
-  };
-
   function executeCommand(cmd, opts) {
     opts = opts || {};
     var wo = parseInt(cmd.woNumber, 10);
     var args = cmd.args || {};
 
-    // Permission gate, at the ONE point every queued write passes through - the queue drains
-    // commands the SWA handed us, so this is where the operator's own Umbrava permissions apply.
-    // A refusal is a BUSINESS error (never retried: retrying cannot grant a checkbox), and it is
-    // raised before any read so a forbidden command costs nothing. bwnCan fails OPEN on an
-    // undecoded user, leaving the drain exactly as it was.
-    var need = VERB_PERM[cmd.verb];
-    if (need && !bwnCan(need)) {
-      return Promise.reject(gqlError('Your Umbrava permissions do not allow ' + cmd.verb + ' (' + need + ') - the command was not sent.'));
-    }
+    // NOTE on permissions: the queue drains commands the SWA handed us, so the OPERATOR's own
+    // Umbrava checkboxes decide what may land - but that gate is NOT duplicated here. It lives in
+    // bwnGqlOp (BWN-OPS-WRAP v3), keyed off this file's BWN_OPS registry, so patchWorkOrder is
+    // gated per FIELD from the payload the code below builds (status / assign / ECD each ask for
+    // their own bit) and the note write asks for WorkOrderNote.AddNew. One source of truth: a
+    // verb->permission table here would be a second one, free to drift from the registry.
+    // The refusal is non-transient, so classifyError() treats it as a permanent failure and the
+    // command is reported failed rather than re-queued.
 
     if (cmd.verb === "wo.note") {
       // Append idempotency: a re-run must find its own marker and NOT post a second note.

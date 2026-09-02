@@ -103,7 +103,7 @@ function makeSandbox(slotValue) {
     console: console
   };
   vm.createContext(ctx);
-  vm.runInContext(READER + '\nthis.bwnCan = bwnCan; this.bwnCanAll = bwnCanAll;', ctx);
+  vm.runInContext(READER + '\nthis.bwnCan = bwnCan; this.bwnCanAll = bwnCanAll; this.bwnPermsForPatch = bwnPermsForPatch;', ctx);
   return ctx;
 }
 function slot(groups, granted, ageMs) {
@@ -135,6 +135,26 @@ reval.__store['bwn:perm:last'] = slot(['Task'], []);
 A.eq('slot swapped, memo still warm -> stale answer', reval.bwnCan('Task.AddNew'), true);
 reval.document.dispatchEvent({ detail: { id: 'bwn:perm' } });
 A.eq('bwn:perm invalidates the memo -> re-read denies', reval.bwnCan('Task.AddNew'), false);
+
+// ---- 2b. bwnPermsForPatch: one mutation, one permission per FIELD ----------------------------
+// patchWorkOrder is the only write whose permission depends on its variables, and it is the write
+// with the widest blast radius, so the field map is asserted directly rather than only through the
+// wrapper. Keys are the wire-proven data fields ([[dispatch-patchworkorder-pin]]).
+console.log('\n--- 2b. bwnPermsForPatch: the permission set follows the fields in the payload ---');
+var pf = makeSandbox(undefined);
+A.eq('status -> the Status field', pf.bwnPermsForPatch({ data: { workOrderNumber: 1, statusId: {} } }), ['WorkOrderField.Status']);
+A.eq('assign -> the AssignedTo field', pf.bwnPermsForPatch({ data: { assignedTo: {} } }), ['WorkOrderField.AssignedTo']);
+A.eq('ECD rides in priority -> CompletionSLA', pf.bwnPermsForPatch({ data: { priority: {} } }), ['WorkOrderField.CompletionSLA']);
+A.eq('priority + the SLA id the SPA bundles with it asks ONCE',
+  pf.bwnPermsForPatch({ data: { priority: {}, serviceLevelAgreementId: {} } }), ['WorkOrderField.CompletionSLA']);
+A.eq('the bulk Source Job#/PO# columns', pf.bwnPermsForPatch({ data: { sourceJobNumber: {}, sourcePurchaseOrderNumber: {} } }),
+  ['WorkOrderField.SourceJobNumber', 'WorkOrderField.SourcePurchaseOrderNumber']);
+A.eq('a bundle asks for every field it touches',
+  pf.bwnPermsForPatch({ data: { statusId: {}, assignedTo: {}, priority: {} } }).sort(),
+  ['WorkOrderField.AssignedTo', 'WorkOrderField.CompletionSLA', 'WorkOrderField.Status']);
+A.eq('workOrderNumber is the identifier, not a field write', pf.bwnPermsForPatch({ data: { workOrderNumber: 283834 } }), []);
+A.eq('an unmapped field asks for nothing (unknown -> allow)', pf.bwnPermsForPatch({ data: { someFutureField: {} } }), []);
+A.eq('no variables at all', pf.bwnPermsForPatch(undefined), []);
 
 // ---- 3. producer decode -----------------------------------------------------------------------
 console.log('\n--- 3. producer: real masks decode to the boxes the permissions page renders ---');

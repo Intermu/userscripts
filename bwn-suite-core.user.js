@@ -1433,6 +1433,10 @@
   //              kind==='read' OR idempotent===true. A non-idempotent write is NEVER auto-retried
   //              (there is no idempotency key for these Umbrava mutations).
   //   metered    a paid / server-side-LLM call - never retried, never looped over a board
+  //   perm       (writes) the Umbrava permission checkbox(es) this write needs: a 'Group.Flag'
+  //              string, an array of them, or fn(variables) returning either - the function form
+  //              is how patchWorkOrder asks per FIELD. Enforced in bwnGqlOp (G7); missing = the
+  //              write is not permission-gated. Fails OPEN on an undecoded user ([[BWN-PERM]]).
   //   ok / fail  user-facing toast text a caller may surface
   var BWN_OPS = {
     // ---- reads (idempotent; a transient failure may be retried) ----
@@ -1463,19 +1467,19 @@
       ok: 'View saved.', fail: 'Could not save the view.' },
 
     // ---- moderate-risk writes ----
-    addEditJobNote: { kind: 'write', target: 'note', risk: 'moderate', idempotent: false, retry: 'none',
+    addEditJobNote: { kind: 'write', perm: 'WorkOrderNote.AddNew', target: 'note', risk: 'moderate', idempotent: false, retry: 'none',
       ok: 'Note posted.', fail: 'The note was not posted.' },
-    addClientProposalNote: { kind: 'write', target: 'proposal', risk: 'moderate', idempotent: false, retry: 'none',
+    addClientProposalNote: { kind: 'write', perm: 'WorkOrderProposal.AddNote', target: 'proposal', risk: 'moderate', idempotent: false, retry: 'none',
       ok: 'Proposal note posted.', fail: 'The proposal note was not posted.' },
-    initializeJobDocument: { kind: 'write', target: 'document', risk: 'moderate', idempotent: false, retry: 'none',
+    initializeJobDocument: { kind: 'write', perm: 'WorkOrderDocument.AddNew', target: 'document', risk: 'moderate', idempotent: false, retry: 'none',
       ok: 'Document upload started.', fail: 'The upload could not start.' },
-    bulkAddWorkOrderDocuments: { kind: 'write', target: 'document', risk: 'moderate', idempotent: false, retry: 'none',
+    bulkAddWorkOrderDocuments: { kind: 'write', perm: 'WorkOrderDocument.AddNew', target: 'document', risk: 'moderate', idempotent: false, retry: 'none',
       ok: 'Documents attached.', fail: 'The documents were not attached.' },
-    addTask: { kind: 'write', target: 'task', risk: 'moderate', idempotent: false, retry: 'none',
+    addTask: { kind: 'write', perm: 'Task.AddNew', target: 'task', risk: 'moderate', idempotent: false, retry: 'none',
       ok: 'Task created.', fail: 'The task was not created.' },
-    completeTask: { kind: 'write', target: 'task', risk: 'moderate', idempotent: true, retry: 'none',
+    completeTask: { kind: 'write', perm: 'Task.Complete', target: 'task', risk: 'moderate', idempotent: true, retry: 'none',
       ok: 'Task completed.', fail: 'The task was not completed.' },
-    deactivateVendor: { kind: 'write', target: 'vendor', risk: 'moderate', idempotent: true, retry: 'none',
+    deactivateVendor: { kind: 'write', perm: 'Vendor.ManageProfile', target: 'vendor', risk: 'moderate', idempotent: true, retry: 'none',
       ok: 'Vendor deactivated.', fail: 'The vendor was not deactivated.' },
 
     // ---- high-risk writes (dispatch, status/ECD, activation) ----
@@ -1485,13 +1489,16 @@
     // registry write entry has no bwnGqlOp call-site (or a call-site has no entry). Their captured
     // mutation shapes live in wiki/umbrava-graphql-operations.md - re-add an entry here only when a
     // real caller is wired.
-    patchWorkOrder: { kind: 'write', target: 'workOrder', risk: 'high', idempotent: false, retry: 'none',
+    patchWorkOrder: { kind: 'write', perm: bwnPermsForPatch, target: 'workOrder', risk: 'high', idempotent: false, retry: 'none',
       ok: 'Work order updated.', fail: 'The work order was not updated.' },
-    activateVendor: { kind: 'write', target: 'vendor', risk: 'high', idempotent: true, retry: 'none',
+    activateVendor: { kind: 'write', perm: 'Vendor.ManageProfile', target: 'vendor', risk: 'high', idempotent: true, retry: 'none',
       ok: 'Vendor activated.', fail: 'The vendor was not activated.' }
   };
 
-  // ===== BWN-OPS-WRAP START v2 (paste-identical across adopters; SHA-gated by scripts/test-bwn-ops.js) =====
+  // ===== BWN-OPS-WRAP START v3 (paste-identical across adopters; SHA-gated by scripts/test-bwn-ops.js) =====
+  // v3 (2026-09-02) adds the Umbrava permission gate (G7 below). It closes over bwnCan/bwnCanAll
+  // from the BWN-PERM block, so an adopter of this wrapper must carry that block too - the ledger
+  // in scripts/test-perm-block-ledger.js is what keeps the two lists in step.
   // Generic machinery only - NO registry, NO window hook - so it is byte-identical in every
   // sandbox that adopts it (Core, drop-upload, ...). It closes over four things each sandbox
   // supplies on its own: BWN_OPS (that file's registry), BWN_MODULES (kill switches), BWN_VER,
@@ -1599,6 +1606,29 @@
       writeAudit('denied', { reason: 'feature-off:' + opts.feature });
       return Promise.reject(new Error('bwnGqlOp: feature "' + opts.feature + '" is disabled'));
     }
+    // Umbrava permission gate (G7). The UI hides a control the operator's checkboxes do not cover,
+    // but hiding is not enforcement: a palette entry, a stale drawer, a queued command, or a future
+    // caller can all reach a write whose button was never rendered. This is the enforcement point -
+    // every registered write passes through here, so ONE guard covers every caller.
+    //   meta.perm  'Group.Flag' | ['Group.Flag', ...] | fn(variables) -> either of those
+    // A function is how a multi-field mutation (patchWorkOrder) asks per FIELD instead of per op.
+    // bwnCanAll fails OPEN on anything undecided - no slot, a stale slot, an unmapped group - so
+    // this refuses ONLY a positively-known missing checkbox. Refusals are non-transient (retrying
+    // cannot grant a permission) and audited `denied`, so a refusal is visible in the ring rather
+    // than silent. The reason carries the permission NAME, which is a static key, never user data.
+    if (isWrite && meta.perm) {
+      var need = (typeof meta.perm === 'function') ? meta.perm(variables) : meta.perm;
+      if (typeof need === 'string') need = [need];
+      if (!Array.isArray(need)) need = [];
+      if (need.length && !bwnCanAll(need)) {
+        var missing = need.filter(function (k) { return !bwnCan(k); });
+        writeAudit('denied', { reason: 'permission:' + missing.join('+') });
+        var noPerm = new Error('bwnGqlOp: "' + op + '" needs Umbrava permission ' + missing.join(' + ') + ' - the write was NOT sent.');
+        noPerm.bwnNonTransient = true;
+        noPerm.bwnPermissionDenied = missing;
+        return Promise.reject(noPerm);
+      }
+    }
     // Validate a write BEFORE it leaves the browser.
     if (isWrite && typeof opts.validate === 'function') {
       var vr = opts.validate(variables);
@@ -1683,7 +1713,7 @@
     return attempt(1);
   }
   bwnGqlOp.setConfirm = function (fn) { _confirmFn = (typeof fn === 'function') ? fn : null; };
-  // ===== BWN-OPS-WRAP END v2 =====
+  // ===== BWN-OPS-WRAP END v3 =====
 
   // Console diagnostics/export hook - lets a coordinator or admin read and export the local
   // audit trail today, before any writer adopts the wrapper. Read-only; carries no PII beyond
@@ -1736,6 +1766,30 @@
     if (typeof keys === 'string') return bwnCan(keys);
     for (var i = 0; i < keys.length; i++) { if (!bwnCan(keys[i])) return false; }
     return true;
+  }
+  // patchWorkOrder is ONE mutation over MANY fields and Umbrava gates each field separately, so
+  // its permission depends on the variables rather than the operation. This maps the data keys the
+  // suite actually sends, all of them wire-proven; a key this map does not know contributes NO
+  // requirement, which is the block's unknown -> allow rule and keeps a future field from being
+  // blocked by a map nobody updated. `workOrderNumber` is the identifier, not a field write.
+  var BWN_PATCH_FIELD_PERM = {
+    statusId: 'WorkOrderField.Status',
+    assignedTo: 'WorkOrderField.AssignedTo',
+    // ECD rides inside the whole-object `priority` replace, and the SPA bundles the SLA id with it.
+    priority: 'WorkOrderField.CompletionSLA',
+    serviceLevelAgreementId: 'WorkOrderField.CompletionSLA',
+    sourceJobNumber: 'WorkOrderField.SourceJobNumber',
+    sourcePurchaseOrderNumber: 'WorkOrderField.SourcePurchaseOrderNumber'
+  };
+  // -> [] | ['WorkOrderField.Status', ...]; deduped, so a bundled priority+SLA asks once.
+  function bwnPermsForPatch(variables) {
+    var data = (variables && variables.data) || {};
+    var out = [];
+    Object.keys(data).forEach(function (k) {
+      var p = BWN_PATCH_FIELD_PERM[k];
+      if (p && out.indexOf(p) === -1) out.push(p);
+    });
+    return out;
   }
   try {
     document.addEventListener('bwn:evt', function (e) {

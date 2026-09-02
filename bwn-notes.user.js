@@ -52,6 +52,30 @@
     for (var i = 0; i < keys.length; i++) { if (!bwnCan(keys[i])) return false; }
     return true;
   }
+  // patchWorkOrder is ONE mutation over MANY fields and Umbrava gates each field separately, so
+  // its permission depends on the variables rather than the operation. This maps the data keys the
+  // suite actually sends, all of them wire-proven; a key this map does not know contributes NO
+  // requirement, which is the block's unknown -> allow rule and keeps a future field from being
+  // blocked by a map nobody updated. `workOrderNumber` is the identifier, not a field write.
+  var BWN_PATCH_FIELD_PERM = {
+    statusId: 'WorkOrderField.Status',
+    assignedTo: 'WorkOrderField.AssignedTo',
+    // ECD rides inside the whole-object `priority` replace, and the SPA bundles the SLA id with it.
+    priority: 'WorkOrderField.CompletionSLA',
+    serviceLevelAgreementId: 'WorkOrderField.CompletionSLA',
+    sourceJobNumber: 'WorkOrderField.SourceJobNumber',
+    sourcePurchaseOrderNumber: 'WorkOrderField.SourcePurchaseOrderNumber'
+  };
+  // -> [] | ['WorkOrderField.Status', ...]; deduped, so a bundled priority+SLA asks once.
+  function bwnPermsForPatch(variables) {
+    var data = (variables && variables.data) || {};
+    var out = [];
+    Object.keys(data).forEach(function (k) {
+      var p = BWN_PATCH_FIELD_PERM[k];
+      if (p && out.indexOf(p) === -1) out.push(p);
+    });
+    return out;
+  }
   try {
     document.addEventListener('bwn:evt', function (e) {
       var d = e && e.detail;
