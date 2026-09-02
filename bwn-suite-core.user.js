@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         BWN Suite - Core (Broadway National)
 // @namespace    broadwaynational.bwn
-// @version      1.80.1
+// @version      1.80.2
 // @downloadURL  https://raw.githubusercontent.com/Intermu/userscripts/main/bwn-suite-core.user.js
 // @updateURL    https://raw.githubusercontent.com/Intermu/userscripts/main/bwn-suite-core.user.js
 // @description  Runs several Umbrava helpers for BWN coordinators, in the browser with no privileged grants. Includes: PO Approval + ETA Builder; WO Assist (GP/ETA, a stall watchdog, DNE calculator, and a next-action playbook); Email Leak Guard (checks recipients against vendor names, PO amounts, and client budget references before an outbound email sends); WO List Heat (a triage overlay + My Day strip on the work-order list, with an optional same-origin Umbrava API scan for deterministic full-board coverage); and the BWN Launcher (opens the Azure Static Web App tools with the current WO's context). Modules share state through sessionStorage/localStorage. The only network calls are same-origin Umbrava GraphQL requests (app.umbrava.com/api/graphql, the app's own session): List Heat's full-board scan and WO Assist's work-order / trip / clock-in / document reads, plus ONE write - BWN Views saves the column layout through Umbrava's own putUserPreference, the same preference the column chooser writes; everything else is offline. Toggle modules in BWN_MODULES below.
@@ -10964,6 +10964,10 @@
       // an UNKNOWN tool; these two are not unknown.
       assist: ['M6 3v18', 'M6 4h13l-3 4 3 4H6z'],
       bidout: ['M4 6h16v12H4z', 'M4 7l8 6 8-6'],
+      // Edit PO#/WO# (bulk-source) registers from Core, so the dock-icon completeness test (which
+      // scans SIBLING .user.js files) never covered it - it fell back to its 🔖 emoji beside the
+      // line-icon rows. A pencil, matching the "Edit" name.
+      'bulk-source': ['M12 20h9', 'M16.5 3.5a2.121 2.121 0 0 1 3 3L7 19l-4 1 1-4z'],
       dispatch: ['M7 17a2 2 0 1 0 4 0 2 2 0 0 0-4 0z', 'M15 17a2 2 0 1 0 4 0 2 2 0 0 0-4 0z',
         'M5 17H3V6a1 1 0 0 1 1-1h9v12m-2 0h4m4 0h2v-6h-8m0-5h5l3 5'],
       // A 3D box (📦): the front silhouette, the top edges meeting at centre, and the seam down.
@@ -16518,7 +16522,7 @@
     function dockRegister() {
       try {
         document.dispatchEvent(new CustomEvent('bwn:evt', { detail: {
-          id: 'bwn:dock:register', key: DOCK_KEY, label: 'Src Job#', icon: '🔖', weight: 23,
+          id: 'bwn:dock:register', key: DOCK_KEY, label: 'Edit PO#/WO#', icon: '🔖', weight: 23,
           title: 'BWN Bulk Source Job# - check work orders on the list, then stamp Source Job# (Q/R or RF) in bulk (dry-run + typed confirm)'
         } }));
       } catch (e) { /* dock host not up yet - the heartbeat re-registers us */ }
