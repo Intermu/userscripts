@@ -3189,7 +3189,7 @@
       var _compliance = null;
       if (BWN_MODULES.docCompliance) {
         try {
-          var _prof = bwnClientProfile({ hd: hd });
+          var _prof = BWN.bwnClientProfile({ hd: hd });
           var _docsC = readDocs();                                  // {count,docs,byLabel} | null (unknown)
           var _dbl = _docsC ? _docsC.byLabel : null;                // null => every doc check 'unknown'
           var _nm = notes ? { hasCompletion: (notes || []).some(function (n) { return n && (n.isCompletion || /\bcompletion\b/i.test(n.label || '')); }), count: notes.length } : null;
