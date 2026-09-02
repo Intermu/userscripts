@@ -39,6 +39,12 @@ function mutate(src, from, to) {
 
 function load(engineSrc) {
   var sandbox = { console: console, gql: null };
+  // The engine now asks bwnCan(...) whether this operator's Umbrava permissions cover the verb
+  // before it reads or writes anything (the BWN-PERM reader block, ledgered by
+  // test-perm-block-ledger.js). Default: allow everything, so every pre-existing case below runs
+  // against unchanged behaviour. A test that wants the denial path overrides sandbox.can.
+  sandbox.can = function () { return true; };
+  sandbox.bwnCan = function (k) { return sandbox.can(k); };
   // executeCommand's WRITES now route through bwnGqlOp (Core's BWN-OPS-WRAP, proven byte-for-byte
   // across every adopter by test-bwn-ops.js's SHA gate). Here a faithful stub reproduces the
   // caller-visible contract for the two ops write-queue routes and delegates transport to the
@@ -216,6 +222,36 @@ function notePostsOf(g) { return g.calls.filter(function (c) { return /addEditJo
   // patchNoSuccess; assert the classifier directly too so the contract is explicit).
   var wrapRefusal = new Error("refused"); wrapRefusal.bwnNonTransient = true;
   A.ok("a wrapper success:false refusal (.bwnNonTransient) is NON-retryable", S.classifyError(wrapRefusal) === false);
+
+  // ---- Umbrava permission gate on the drain -------------------------------------------------
+  // The queue drains commands the SWA handed us, so the OPERATOR's own permissions decide what may
+  // land. A verb the user's checkboxes do not cover is refused before any read, and refused as a
+  // BUSINESS error - retrying cannot grant a permission, so it must never re-queue.
+  console.log("\n--- permission gate (bwnCan) on executeCommand ---");
+  var P = load(S_ENGINE);
+  P.gql = mkGql({ wo: { statusId: 10, assignedTo: "g", serviceLevelAgreementId: "s", priority: {} }, notes: [] });
+  P.can = function (k) { return k !== "WorkOrderField.Status"; };
+  var denied = null;
+  await P.executeCommand({ verb: "wo.status", woNumber: "200", idemKey: "k", args: { statusId: 55 } })
+    .then(function () { denied = "RESOLVED"; }, function (e) { denied = e; });
+  A.ok("a verb the operator may not perform is REFUSED", denied && denied !== "RESOLVED" && /permissions do not allow/.test(denied.message), String(denied && denied.message));
+  A.ok("...and refused as a business error (never retried)", !!(denied && denied.business));
+  A.eq("...with zero writes attempted", P.bwnGqlOp.calls.length, 0);
+  A.eq("...and zero reads attempted (a forbidden command costs nothing)", P.gql.calls.length, 0);
+
+  P.bwnGqlOp.calls = [];
+  P.gql = mkGql({ notes: [] });
+  await P.executeCommand({ verb: "wo.note", woNumber: "200", idemKey: "KN", args: { noteText: "hi" } });
+  A.eq("a verb the operator MAY perform is unaffected", P.bwnGqlOp.calls.length, 1);
+
+  // Negative control: with the gate removed, the denied command would have gone through - so the
+  // assertions above are testing a guard that is actually load-bearing.
+  var noGate = mutate(S_ENGINE, "if (need && !bwnCan(need)) {", "if (false) {");
+  var C = load(noGate);
+  C.gql = mkGql({ wo: { statusId: 10, assignedTo: "g", serviceLevelAgreementId: "s", priority: {} } });
+  C.can = function () { return false; };
+  await C.executeCommand({ verb: "wo.status", woNumber: "200", idemKey: "k", args: { statusId: 55 } });
+  A.eq("CONTROL: without the gate, a forbidden status write LANDS", C.bwnGqlOp.calls.length, 1);
 
   A.finish();
 })().catch(function (e) { console.error(e); process.exit(1); });

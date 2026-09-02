@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         BWN Write Queue (Broadway National)
 // @namespace    broadwaynational.bwn
-// @version      0.4.0
+// @version      0.5.0
 // @downloadURL  https://raw.githubusercontent.com/Intermu/userscripts/main/bwn-write-queue.user.js
 // @updateURL    https://raw.githubusercontent.com/Intermu/userscripts/main/bwn-write-queue.user.js
 // @description  Drains the Track C write-back queue: claims THIS coordinator's own queued Umbrava write commands from the SWA, confirms each irreversible write, executes it via patchWorkOrder/addEditJobNote, and reports the result. Self-drain; every write is human-confirmed; disabled until you turn it on. v0.4 adds a gated Bulk Operations Console (whole-batch preview + zero-write dry-run + throttled cancellable execute with per-record results + CSV/JSON export).
@@ -38,7 +38,7 @@
 
 (function () {
   "use strict";
-  var VER = "0.4.0";   // keep in lockstep with @version (TM compares versions, not contents)
+  var VER = "0.5.0";   // keep in lockstep with @version (TM compares versions, not contents)
 
   var SWA_BASE = "https://green-stone-0717dab0f.7.azurestaticapps.net";
   var PROXY_URL = SWA_BASE + "/api/wo-write-queue";
@@ -74,6 +74,54 @@
     } catch (e) { return ''; }
   }
   // ===== BWN-SHARED END v1 =====
+
+  // ===== BWN-PERM START v1 (paste-identical; pinned by scripts/test-perm-block-ledger.js) =====
+  // Umbrava's own per-user permission checkboxes, as the one question a control has:
+  //   bwnCan('WorkOrderNote.AddNew') -> true | false
+  // Umbrava returns me.permissions as a JSON STRING of {"<Type>Permissions": "<bitmask>"} - one
+  // bit per checkbox on /company/users/<id>/permissions. bwn-suite-core decodes it once a session
+  // and publishes the DECODED grant list to `bwn:perm:last` + the `bwn:perm` bus event, the same
+  // one-way producer/consumer shape as bwn:role. This block only READS that slot, so every
+  // sandbox that pastes it needs neither the query, the token, nor the flag numbers.
+  //
+  // FAIL-OPEN on anything unknown - no slot yet, a stale slot, or a group the producer does not
+  // map. Umbrava's server is the real boundary (it refuses the mutation either way), so an
+  // unreadable cache must never strand a coordinator mid-shift. Fail-CLOSED only on a
+  // positively-known missing bit. localStorage is per-origin, so this answers "unknown" (and
+  // therefore allows) anywhere but app.umbrava.com - by design.
+  var BWN_PERM_KEY = 'bwn:perm:last';
+  var BWN_PERM_TTL_MS = 24 * 3600 * 1000;
+  var _bwnPermSlot = null;      // memoized parse; invalidated by the bwn:perm listener below
+  function bwnPermSlot() {
+    if (_bwnPermSlot) return _bwnPermSlot;
+    try {
+      var p = JSON.parse(localStorage.getItem(BWN_PERM_KEY) || 'null');
+      if (p && p.ts && (Date.now() - p.ts) < BWN_PERM_TTL_MS &&
+        Array.isArray(p.groups) && Array.isArray(p.granted)) _bwnPermSlot = p;
+    } catch (e) { /* an unreadable cache reads as unknown, which fails open */ }
+    return _bwnPermSlot;
+  }
+  function bwnCan(key) {
+    var p = bwnPermSlot();
+    if (!p) return true;                                          // nothing decoded yet -> allow
+    var grp = String(key).split('.')[0];
+    if (p.groups.indexOf(grp) === -1) return true;                // group unmapped/absent -> allow
+    return p.granted.indexOf(key) !== -1;
+  }
+  // keys: a 'Group.Flag' string, or an array of them (ALL must be granted).
+  function bwnCanAll(keys) {
+    if (!keys) return true;
+    if (typeof keys === 'string') return bwnCan(keys);
+    for (var i = 0; i < keys.length; i++) { if (!bwnCan(keys[i])) return false; }
+    return true;
+  }
+  try {
+    document.addEventListener('bwn:evt', function (e) {
+      var d = e && e.detail;
+      if (d && d.id === 'bwn:perm') _bwnPermSlot = null;          // a fresh decode landed
+    });
+  } catch (e) { }
+  // ===== BWN-PERM END v1 =====
 
   // ---- Same-origin Umbrava GraphQL with an explicit bearer (works from the GM sandbox). A GraphQL
   // error is tagged .graphql so the report leg can classify it non-retryable; a network reject stays
@@ -366,10 +414,28 @@
   // opts.dryRun (bulk console): do every READ + skip-if-equal decision but return BEFORE the single
   // bwnGqlOp write. Default (no opts / opts.dryRun falsy) is the unchanged LIVE path - so every existing
   // one-arg caller (pollTick, the drain harness) is byte-for-byte unaffected.
+  // The Umbrava checkbox each verb needs. A verb absent from this map is not permission-gated.
+  var VERB_PERM = {
+    'wo.note': 'WorkOrderNote.AddNew',
+    'wo.status': 'WorkOrderField.Status',
+    'wo.assign': 'WorkOrderField.AssignedTo',
+    'wo.ecd': 'WorkOrderField.CompletionSLA'
+  };
+
   function executeCommand(cmd, opts) {
     opts = opts || {};
     var wo = parseInt(cmd.woNumber, 10);
     var args = cmd.args || {};
+
+    // Permission gate, at the ONE point every queued write passes through - the queue drains
+    // commands the SWA handed us, so this is where the operator's own Umbrava permissions apply.
+    // A refusal is a BUSINESS error (never retried: retrying cannot grant a checkbox), and it is
+    // raised before any read so a forbidden command costs nothing. bwnCan fails OPEN on an
+    // undecoded user, leaving the drain exactly as it was.
+    var need = VERB_PERM[cmd.verb];
+    if (need && !bwnCan(need)) {
+      return Promise.reject(gqlError('Your Umbrava permissions do not allow ' + cmd.verb + ' (' + need + ') - the command was not sent.'));
+    }
 
     if (cmd.verb === "wo.note") {
       // Append idempotency: a re-run must find its own marker and NOT post a second note.

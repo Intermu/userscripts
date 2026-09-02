@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         BWN Proposal Copy (Broadway National)
 // @namespace    broadwaynational.bwn
-// @version      0.1.14
+// @version      0.2.0
 // @downloadURL  https://raw.githubusercontent.com/Intermu/userscripts/main/bwn-proposal-copy.user.js
 // @updateURL    https://raw.githubusercontent.com/Intermu/userscripts/main/bwn-proposal-copy.user.js
 // @description  Copy a client proposal from an aged-out work order onto a chosen replacement WO as an un-submitted Draft, in one confirmed action. Replays Umbrava's own createDraftProposal + editProposal mutations (line items copied verbatim); never submits, deletes, or retries. Manager-gated visibility. @grant none.
@@ -15,7 +15,7 @@
 (function () {
   'use strict';
 
-  var VER = '0.1.14';   // keep in step with @version
+  var VER = '0.2.0';   // keep in step with @version
   var DRY_RUN = false; // when true, the two WRITE mutations are logged, not sent
   console.info('[BWN PROPOSAL COPY] v' + VER + ' - copy client proposal to another WO as a Draft (createDraftProposal + editProposal replay)');
 
@@ -58,6 +58,54 @@
     } catch (e) { return ''; }
   }
   // ===== BWN-SHARED END v1 =====
+
+  // ===== BWN-PERM START v1 (paste-identical; pinned by scripts/test-perm-block-ledger.js) =====
+  // Umbrava's own per-user permission checkboxes, as the one question a control has:
+  //   bwnCan('WorkOrderNote.AddNew') -> true | false
+  // Umbrava returns me.permissions as a JSON STRING of {"<Type>Permissions": "<bitmask>"} - one
+  // bit per checkbox on /company/users/<id>/permissions. bwn-suite-core decodes it once a session
+  // and publishes the DECODED grant list to `bwn:perm:last` + the `bwn:perm` bus event, the same
+  // one-way producer/consumer shape as bwn:role. This block only READS that slot, so every
+  // sandbox that pastes it needs neither the query, the token, nor the flag numbers.
+  //
+  // FAIL-OPEN on anything unknown - no slot yet, a stale slot, or a group the producer does not
+  // map. Umbrava's server is the real boundary (it refuses the mutation either way), so an
+  // unreadable cache must never strand a coordinator mid-shift. Fail-CLOSED only on a
+  // positively-known missing bit. localStorage is per-origin, so this answers "unknown" (and
+  // therefore allows) anywhere but app.umbrava.com - by design.
+  var BWN_PERM_KEY = 'bwn:perm:last';
+  var BWN_PERM_TTL_MS = 24 * 3600 * 1000;
+  var _bwnPermSlot = null;      // memoized parse; invalidated by the bwn:perm listener below
+  function bwnPermSlot() {
+    if (_bwnPermSlot) return _bwnPermSlot;
+    try {
+      var p = JSON.parse(localStorage.getItem(BWN_PERM_KEY) || 'null');
+      if (p && p.ts && (Date.now() - p.ts) < BWN_PERM_TTL_MS &&
+        Array.isArray(p.groups) && Array.isArray(p.granted)) _bwnPermSlot = p;
+    } catch (e) { /* an unreadable cache reads as unknown, which fails open */ }
+    return _bwnPermSlot;
+  }
+  function bwnCan(key) {
+    var p = bwnPermSlot();
+    if (!p) return true;                                          // nothing decoded yet -> allow
+    var grp = String(key).split('.')[0];
+    if (p.groups.indexOf(grp) === -1) return true;                // group unmapped/absent -> allow
+    return p.granted.indexOf(key) !== -1;
+  }
+  // keys: a 'Group.Flag' string, or an array of them (ALL must be granted).
+  function bwnCanAll(keys) {
+    if (!keys) return true;
+    if (typeof keys === 'string') return bwnCan(keys);
+    for (var i = 0; i < keys.length; i++) { if (!bwnCan(keys[i])) return false; }
+    return true;
+  }
+  try {
+    document.addEventListener('bwn:evt', function (e) {
+      var d = e && e.detail;
+      if (d && d.id === 'bwn:perm') _bwnPermSlot = null;          // a fresh decode landed
+    });
+  } catch (e) { }
+  // ===== BWN-PERM END v1 =====
   function pcGql(op, query, variables) {
     var tok = authToken();
     if (!tok) return Promise.reject(new Error('no-umbrava-token'));
@@ -619,6 +667,9 @@
   // (2) Add our "Copy to another WO..." item to a freshly opened actions menu. Idempotent.
   function injectMenuItem(menu) {
     if (!menu || !gated() || !onClientProposalsList()) return;
+    // The item creates a DRAFT proposal on the target work order and then fills its line items, so
+    // it needs both proposal checkboxes. Fails OPEN while the permission decode is unknown.
+    if (!bwnCanAll(['WorkOrderProposal.AddNew', 'WorkOrderProposal.EditFields'])) return;
     if (_pcPendingPid == null || (Date.now() - _pcPendingAt) > PC_PENDING_TTL_MS) return;  // no fresh row context
     if (!isProposalActionsMenu(menu)) return;   // menu may still be rendering its items - a retry catches it
     var pid = _pcPendingPid;

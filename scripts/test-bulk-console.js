@@ -45,7 +45,7 @@ function mutate(src, from, to) {
 }
 
 function load(engineSrc) {
-  var sandbox = { console: console, gql: null, BWN_VER: "0.4.0", setTimeout: setTimeout };
+  var sandbox = { console: console, gql: null, BWN_VER: "0.5.0", setTimeout: setTimeout, bwnCan: function () { return true; } };
   // Faithful bwnGqlOp stub (identical contract to test-write-queue-drain.js): records every routed
   // write, refuses a high-risk patch without confirmed:true, and rejects a success:false envelope
   // with .bwnNonTransient so classifyError sees a non-retryable refusal.
@@ -165,7 +165,7 @@ function recordingDelay() { var f = function (ms) { f.calls.push(ms); return Pro
 
   var jsonStr = S.bulkToJSON(demoRows, { mode: "dry" });
   var parsed = JSON.parse(jsonStr);
-  A.eq("json: schema + ver + count", [parsed.schema, parsed.ver, parsed.count], [1, "0.4.0", 5]);
+  A.eq("json: schema + ver + count", [parsed.schema, parsed.ver, parsed.count], [1, "0.5.0", 5]);
   A.eq("json: carries the tally", parsed.tally, { done: 1, noop: 1, failed: 1, notRun: 1, would: 1, total: 5 });
   A.ok("json: parses and round-trips the rows", Array.isArray(parsed.rows) && parsed.rows.length === 5);
 

@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         BWN WO Kanban (Broadway National)
 // @namespace    broadwaynational.bwn
-// @version      0.7.7
+// @version      0.8.0
 // @description  Turns Umbrava's Work Orders list into a kanban board without leaving the page. A Board/List toggle sits next to the list's own search box; switching to Board hides the table (the toolbar stays, so the app's own filtering still drives everything) and lays the same work orders out as cards in lanes. Lanes are WO Status by default and regroup to Priority, Assignee, Client or Age from a dropdown. The board never invents its own filter system, and as of 0.5.0 it does not query at all: it reads both rows and verdicts from the full-board scan bwn-suite-core's List Heat already runs on the same page, so whatever the list is filtered to (phase, statuses, search, assignee chips, sort) is exactly what the board shows, and one list page now costs one full-board query instead of two. It still captures the SPA's own PagedWorkOrders request off the wire, because that capture is where the auth headers for the status write come from. Cards carry the triage picture: the status clock against the limit that WO was actually judged against, the reasons it is flagged, whether its onsite date has already passed, DNE vs vendor NTE with GP, vendors and trades. Severity is never computed here - it is read from the verdicts List Heat publishes in bwn-suite-core, so the board and the list can never disagree. Dragging a card between status lanes DOES change the work order, through Umbrava's own captured PatchWorkOrder mutation - it asks first, states that the WO's time-in-status clock will reset, verifies the server reported success, re-scans rather than trusting the optimistic move, and leaves the card where it was if anything fails. Everything is same-origin using the page's own session: no @connect, no keys, nothing leaves the browser.
 // @downloadURL  https://raw.githubusercontent.com/Intermu/userscripts/main/bwn-kanban.user.js
 // @updateURL    https://raw.githubusercontent.com/Intermu/userscripts/main/bwn-kanban.user.js
@@ -21,12 +21,60 @@
 (function () {
   'use strict';
 
+  // ===== BWN-PERM START v1 (paste-identical; pinned by scripts/test-perm-block-ledger.js) =====
+  // Umbrava's own per-user permission checkboxes, as the one question a control has:
+  //   bwnCan('WorkOrderNote.AddNew') -> true | false
+  // Umbrava returns me.permissions as a JSON STRING of {"<Type>Permissions": "<bitmask>"} - one
+  // bit per checkbox on /company/users/<id>/permissions. bwn-suite-core decodes it once a session
+  // and publishes the DECODED grant list to `bwn:perm:last` + the `bwn:perm` bus event, the same
+  // one-way producer/consumer shape as bwn:role. This block only READS that slot, so every
+  // sandbox that pastes it needs neither the query, the token, nor the flag numbers.
+  //
+  // FAIL-OPEN on anything unknown - no slot yet, a stale slot, or a group the producer does not
+  // map. Umbrava's server is the real boundary (it refuses the mutation either way), so an
+  // unreadable cache must never strand a coordinator mid-shift. Fail-CLOSED only on a
+  // positively-known missing bit. localStorage is per-origin, so this answers "unknown" (and
+  // therefore allows) anywhere but app.umbrava.com - by design.
+  var BWN_PERM_KEY = 'bwn:perm:last';
+  var BWN_PERM_TTL_MS = 24 * 3600 * 1000;
+  var _bwnPermSlot = null;      // memoized parse; invalidated by the bwn:perm listener below
+  function bwnPermSlot() {
+    if (_bwnPermSlot) return _bwnPermSlot;
+    try {
+      var p = JSON.parse(localStorage.getItem(BWN_PERM_KEY) || 'null');
+      if (p && p.ts && (Date.now() - p.ts) < BWN_PERM_TTL_MS &&
+        Array.isArray(p.groups) && Array.isArray(p.granted)) _bwnPermSlot = p;
+    } catch (e) { /* an unreadable cache reads as unknown, which fails open */ }
+    return _bwnPermSlot;
+  }
+  function bwnCan(key) {
+    var p = bwnPermSlot();
+    if (!p) return true;                                          // nothing decoded yet -> allow
+    var grp = String(key).split('.')[0];
+    if (p.groups.indexOf(grp) === -1) return true;                // group unmapped/absent -> allow
+    return p.granted.indexOf(key) !== -1;
+  }
+  // keys: a 'Group.Flag' string, or an array of them (ALL must be granted).
+  function bwnCanAll(keys) {
+    if (!keys) return true;
+    if (typeof keys === 'string') return bwnCan(keys);
+    for (var i = 0; i < keys.length; i++) { if (!bwnCan(keys[i])) return false; }
+    return true;
+  }
+  try {
+    document.addEventListener('bwn:evt', function (e) {
+      var d = e && e.detail;
+      if (d && d.id === 'bwn:perm') _bwnPermSlot = null;          // a fresh decode landed
+    });
+  } catch (e) { }
+  // ===== BWN-PERM END v1 =====
+
   // Read from the metadata block rather than hand-kept: 0.3.0 shipped with @version 0.3.0 and
   // this constant still reading '0.2.0', so the console said one thing and Tampermonkey's
   // update check another. There is no GM_info without a grant (and a grant would sandbox the
   // script away from the page's fetch - see the header note), so the fallback is a literal
   // that must be bumped WITH @version; the harness pins the two together.
-  var VER = '0.7.7';
+  var VER = '0.8.0';
   console.info('[BWN KANBAN] v' + VER + ' - board rows AND verdicts read from bwn-suite-core\'s List Heat scan (no second full-board query); drag between status lanes writes via captured PatchWorkOrder');
 
   // ---------------------------------------------------------------------------
@@ -597,7 +645,10 @@
 
   function buildCard(r) {
     var card = el('div', 'kb-card');
-    card.draggable = true;
+    // Dragging a card IS the status write, so it is offered only to an operator Umbrava lets edit
+    // the Status field. bwnCan fails OPEN while the decode is unknown; writeStatus re-checks below
+    // so a card that was made draggable before the decode landed still cannot write.
+    card.draggable = bwnCan('WorkOrderField.Status');
     card.dataset.wo = r.number;
     card.dataset.statusId = r.statusId;
     card.dataset.statusName = r.statusName || '';
@@ -992,6 +1043,10 @@
 
   function writeStatus(row, targetLaneKey) {
     if (!WRITE_ENABLED) { alert('Status writes are off in this build.'); return Promise.resolve(false); }
+    if (!bwnCan('WorkOrderField.Status')) {
+      alert('Your Umbrava permissions do not include editing a work order\'s Status, so the card cannot be moved.');
+      return Promise.resolve(false);
+    }
     if (group !== 'status') {
       alert('Lanes are grouped by ' + groupDef().label + ', so dropping a card here has no status meaning.\n\nSwitch lanes to WO Status to move work orders.');
       return Promise.resolve(false);

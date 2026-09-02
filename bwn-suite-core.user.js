@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         BWN Suite - Core (Broadway National)
 // @namespace    broadwaynational.bwn
-// @version      1.80.2
+// @version      1.81.0
 // @downloadURL  https://raw.githubusercontent.com/Intermu/userscripts/main/bwn-suite-core.user.js
 // @updateURL    https://raw.githubusercontent.com/Intermu/userscripts/main/bwn-suite-core.user.js
 // @description  Runs several Umbrava helpers for BWN coordinators, in the browser with no privileged grants. Includes: PO Approval + ETA Builder; WO Assist (GP/ETA, a stall watchdog, DNE calculator, and a next-action playbook); Email Leak Guard (checks recipients against vendor names, PO amounts, and client budget references before an outbound email sends); WO List Heat (a triage overlay + My Day strip on the work-order list, with an optional same-origin Umbrava API scan for deterministic full-board coverage); and the BWN Launcher (opens the Azure Static Web App tools with the current WO's context). Modules share state through sessionStorage/localStorage. The only network calls are same-origin Umbrava GraphQL requests (app.umbrava.com/api/graphql, the app's own session): List Heat's full-board scan and WO Assist's work-order / trip / clock-in / document reads, plus ONE write - BWN Views saves the column layout through Umbrava's own putUserPreference, the same preference the column chooser writes; everything else is offline. Toggle modules in BWN_MODULES below.
@@ -57,6 +57,12 @@
                          // still passes a dry-run + a typed confirm, and every write routes through
                          // bwnGqlOp feature:'bulkSource' (its per-feature kill switch + audit ring)
                          // via the proven patchWorkOrder. Flip back to false to kill the module.
+    permGate: true,      // decode this user's Umbrava permission checkboxes (me.permissions) once a
+                         // session and hide the suite controls they are not allowed to use - the
+                         // dock rail rows, the WO-Assist write buttons, the bulk consoles. Core is
+                         // the only PRODUCER; sibling scripts read the published slot. Off = nothing
+                         // is decoded, everything reads as unknown, and every control shows (the
+                         // pre-2026-09-02 behaviour). Umbrava's server enforces regardless.
     routeHelper: false,  // RM-B4, SHIPPING DEFAULT OFF: when on, consumers that have adopted the
                          // central BWN.onRoute (window.bwnOnRoute) route helper use it INSTEAD of
                          // pasting their own history.pushState/popstate trio. Off = each adopter
@@ -1445,6 +1451,7 @@
     tasks:                   { kind: 'read', target: 'task',       retry: 'safe' },
     tasksByEntityTypeAndId:  { kind: 'read', target: 'task',       retry: 'safe' },
     user:                    { kind: 'read', target: 'user',       retry: 'safe' },
+    me:                      { kind: 'read', target: 'user',       retry: 'safe' },
     userPreference:          { kind: 'read', target: 'preference', retry: 'safe' },
     listVendorProposals:     { kind: 'read', target: 'proposal',   retry: 'safe' },
     listClientProposals:     { kind: 'read', target: 'proposal',   retry: 'safe' },
@@ -1689,6 +1696,120 @@
     };
   } catch (e) { /* non-fatal */ }
   // ===== BWN-OPS END v1 =====
+
+  // ===== BWN-PERM START v1 (paste-identical; pinned by scripts/test-perm-block-ledger.js) =====
+  // Umbrava's own per-user permission checkboxes, as the one question a control has:
+  //   bwnCan('WorkOrderNote.AddNew') -> true | false
+  // Umbrava returns me.permissions as a JSON STRING of {"<Type>Permissions": "<bitmask>"} - one
+  // bit per checkbox on /company/users/<id>/permissions. bwn-suite-core decodes it once a session
+  // and publishes the DECODED grant list to `bwn:perm:last` + the `bwn:perm` bus event, the same
+  // one-way producer/consumer shape as bwn:role. This block only READS that slot, so every
+  // sandbox that pastes it needs neither the query, the token, nor the flag numbers.
+  //
+  // FAIL-OPEN on anything unknown - no slot yet, a stale slot, or a group the producer does not
+  // map. Umbrava's server is the real boundary (it refuses the mutation either way), so an
+  // unreadable cache must never strand a coordinator mid-shift. Fail-CLOSED only on a
+  // positively-known missing bit. localStorage is per-origin, so this answers "unknown" (and
+  // therefore allows) anywhere but app.umbrava.com - by design.
+  var BWN_PERM_KEY = 'bwn:perm:last';
+  var BWN_PERM_TTL_MS = 24 * 3600 * 1000;
+  var _bwnPermSlot = null;      // memoized parse; invalidated by the bwn:perm listener below
+  function bwnPermSlot() {
+    if (_bwnPermSlot) return _bwnPermSlot;
+    try {
+      var p = JSON.parse(localStorage.getItem(BWN_PERM_KEY) || 'null');
+      if (p && p.ts && (Date.now() - p.ts) < BWN_PERM_TTL_MS &&
+        Array.isArray(p.groups) && Array.isArray(p.granted)) _bwnPermSlot = p;
+    } catch (e) { /* an unreadable cache reads as unknown, which fails open */ }
+    return _bwnPermSlot;
+  }
+  function bwnCan(key) {
+    var p = bwnPermSlot();
+    if (!p) return true;                                          // nothing decoded yet -> allow
+    var grp = String(key).split('.')[0];
+    if (p.groups.indexOf(grp) === -1) return true;                // group unmapped/absent -> allow
+    return p.granted.indexOf(key) !== -1;
+  }
+  // keys: a 'Group.Flag' string, or an array of them (ALL must be granted).
+  function bwnCanAll(keys) {
+    if (!keys) return true;
+    if (typeof keys === 'string') return bwnCan(keys);
+    for (var i = 0; i < keys.length; i++) { if (!bwnCan(keys[i])) return false; }
+    return true;
+  }
+  try {
+    document.addEventListener('bwn:evt', function (e) {
+      var d = e && e.detail;
+      if (d && d.id === 'bwn:perm') _bwnPermSlot = null;          // a fresh decode landed
+    });
+  } catch (e) { }
+  // ===== BWN-PERM END v1 =====
+
+  // ---- Permission PRODUCER (bwn-suite-core only) ------------------------------
+  // The flag numbers are Umbrava's own, read live from the SPA bundle that renders the
+  // permissions page (2026-09-02) and spot-checked against a real user's page counts (Note 5/9
+  // decoded to exactly the 5 boxes shown ticked). They are per TYPE, so the alias on the left is
+  // just the short name call sites use. A group missing from this map is reported as unknown and
+  // fails OPEN - add a group here only when something actually gates on it.
+  var BWN_PERM_MAP = {
+    WorkOrder: { type: 'WorkOrderActionPermissions', flags: { View: 1, Export: 2, ViewAudit: 16, EditAnyPhase: 64, Flag: 128, BulkUpdate: 512, Complete: 1024, Cancel: 2048, ReOpen: 4096, BulkAdd: 8192, Reject: 16384, Accept: 32768, Recall: 65536, Hold: 262144, Close: 524288, CreateWorkOrder: 1048576, ManageTrips: 2097152, LinkWorkOrder: 4194304, ViewDispatchBoard: 8388608, ManageInventory: 16777216, ManageExpense: 33554432 } },
+    WorkOrderField: { type: 'WorkOrderFieldPermissions', flags: { ClientDNE: 1, AssignedTo: 2, Status: 4, Priority: 8, SourceJobNumber: 16, SourcePurchaseOrderNumber: 32, Location: 64, Trades: 128, FirstTripSLA: 256, CompletionSLA: 512, Asset: 1024, Type: 2048 } },
+    WorkOrderNote: { type: 'WorkOrderNoteActionPermissions', flags: { AddNew: 2, EditOwnNote: 4, EditOtherUsersNote: 8, ExportAllNotes: 16, ExportSelectionOfNotes: 32, ViewAudit: 64, Share: 128, DeleteOwnNote: 256, DeleteOtherUsersNote: 512 } },
+    WorkOrderDocument: { type: 'WorkOrderDocumentActionPermissions', flags: { View: 1, AddNew: 2, Download: 4, Share: 8, Archive: 16 } },
+    WorkOrderPO: { type: 'WorkOrderPurchaseOrderActionPermissions', flags: { AddNew: 2, ViewAudit: 4, Export: 16, GetIVRLink: 32, AssignVendor: 64, EditAnyPhase: 128, Complete: 256, Cancel: 512, ReOpen: 1024, Recall: 2048, Revoke: 4096, Hold: 8192, Close: 16384, AssignInactiveVendor: 32768, ManageTrips: 65536, AcceptOnVendorsBehalf: 131072 } },
+    WorkOrderPOField: { type: 'WorkOrderPurchaseOrderFieldPermissions', flags: { Status: 1, Trades: 2, VendorNTE: 4, Priority: 8, FirstTripSLA: 16, CompletionSLA: 32 } },
+    WorkOrderProposal: { type: 'WorkOrderProposalActionPermissions', flags: { View: 1, AddNew: 2, ChangeState: 4, ViewAudit: 8, EditFields: 16, Export: 32, ConvertToInvoice: 64, AddNote: 128, EditNote: 256, DeleteNote: 512, EditAnyState: 1024 } },
+    WorkOrderInvoice: { type: 'WorkOrderInvoiceActionPermissions', flags: { View: 1, AddNew: 2, ChangeState: 4, Export: 8, ViewAudit: 16, EditFields: 32, SubmitOverDNE: 64, EditAnyState: 128, AddNote: 512, EditNote: 1024, DeleteNote: 2048 } },
+    WorkOrderBill: { type: 'WorkOrderBillActionPermissions', flags: { View: 1, AddNew: 2, ChangeState: 4, ViewAudit: 8, EditFields: 16, ApproveOverNTE: 32, EditAnyState: 64, AddNote: 128, EditNote: 256, DeleteNote: 512, Download: 1024 } },
+    Task: { type: 'TaskActionPermissions', flags: { AddNew: 2, Complete: 4, CompleteAddNew: 8, EditTask: 16, Flag: 32 } },
+    Vendor: { type: 'VendorV2ActionPermissions', flags: { CreateVendor: 2, ManageProfile: 4, ManageBilling: 8, ManageNotes: 16, ManageDocuments: 32, ManageRelationship: 64, ManageCompliance: 128, ManageRehireEligibility: 256 } },
+    Inventory: { type: 'InventoryPermissions', flags: { ViewInventory: 1, ViewMasterInventory: 2, ManageItems: 4, ManageGlobalInventory: 8, ViewInventoryAudit: 16, ManageStorageAreas: 32, ManageStock: 64 } },
+    Analytics: { type: 'AnalyticsPermissions', flags: { ViewCompanyAnalytics: 2, ViewLocationsAnalytics: 4, ViewFinancialAnalytics: 8, ViewWorkOrdersAnalytics: 16, ViewProjectsAnalytics: 32, ViewVendorsAnalytics: 64, ViewDataDiscoveryAnalytics: 128, EditDataDiscoveryAnalytics: 256 } }
+  };
+  // Verified live 2026-09-02 against the real schema: `me` is the ONLY no-arg current-user root
+  // ([[umbrava-role-auth]]) and `permissions` is an `Any!` scalar carrying the JSON string.
+  var BWN_PERM_Q = '{ me { id permissions } }';
+  var BWN_PERM_REFRESH_MS = 6 * 3600 * 1000;   // re-decode at most this often; TTL above is 24h
+
+  // Bit test by division, NOT `&`: JavaScript's bitwise operators truncate to 32 bits signed and
+  // these masks are already at 2^25 with room to grow. Math.floor stays exact to 2^53.
+  function bwnPermHasBit(mask, flag) { return Math.floor(mask / flag) % 2 === 1; }
+
+  function bwnPermPublish(raw) {
+    var obj = null;
+    try { obj = (typeof raw === 'string') ? JSON.parse(raw) : raw; } catch (e) { obj = null; }
+    if (!obj || typeof obj !== 'object') return null;
+    var groups = [], granted = [];
+    Object.keys(BWN_PERM_MAP).forEach(function (alias) {
+      var def = BWN_PERM_MAP[alias];
+      if (!Object.prototype.hasOwnProperty.call(obj, def.type)) return;   // Umbrava did not send it
+      var mask = Number(obj[def.type]);
+      if (!isFinite(mask)) return;
+      groups.push(alias);
+      Object.keys(def.flags).forEach(function (f) {
+        if (bwnPermHasBit(mask, def.flags[f])) granted.push(alias + '.' + f);
+      });
+    });
+    if (!groups.length) return null;             // an empty decode is drift, not "no permissions"
+    var rec = { v: 1, ts: Date.now(), ver: BWN_VER, groups: groups, granted: granted };
+    try { localStorage.setItem(BWN_PERM_KEY, JSON.stringify(rec)); } catch (e) { }
+    _bwnPermSlot = null;
+    try { document.dispatchEvent(new CustomEvent('bwn:evt', { detail: { id: 'bwn:perm', groups: groups.length, granted: granted.length, ts: rec.ts } })); } catch (e) { }
+    return rec;
+  }
+  // Resolves to the record, or null when nothing could be decoded - callers never see a rejection,
+  // because a failed refresh is not an error condition: it just leaves everything unknown, and
+  // unknown fails open.
+  function bwnPermRefresh(force) {
+    if (BWN_MODULES.permGate === false) return Promise.resolve(null);
+    var p = bwnPermSlot();
+    if (!force && p && (Date.now() - p.ts) < BWN_PERM_REFRESH_MS) return Promise.resolve(p);
+    return bwnGqlOp('me', BWN_PERM_Q, {}, {}).then(function (d) {
+      return bwnPermPublish(d && d.me && d.me.permissions);
+    }, function () { return null; });
+  }
+  bwnBoot('permGate', BWN_MODULES.permGate !== false, function () { bwnPermRefresh(); });
+  try { window.__bwnPerm = { can: bwnCan, canAll: bwnCanAll, slot: bwnPermSlot, refresh: bwnPermRefresh, map: BWN_PERM_MAP }; } catch (e) { }
 
   // ---- Core-local shared helpers (PO Approval + Leak Guard) --------------------
   // Distinctive-token vendor matching: "does this recipient text belong to this
@@ -5145,14 +5266,18 @@
           if (BWN_MODULES.woAssistWrites) {
             // "Create task…" - on every non-anchor act row (spin a follow-up off any next action).
             (function (act) {
-              var tkb = document.createElement('button');
-              tkb.type = 'button'; tkb.className = 'bwn-wa-btn ghost'; tkb.textContent = 'Create task…';
-              tkb.style.cssText = 'padding:3px 9px;font-size:10px;';
-              tkb.title = 'Create a follow-up task on this work order (assigned to the coordinator)';
-              tkb.addEventListener('click', function () { taskHelperOpen(state, act); });
-              btns.appendChild(tkb);
+              // Third gate, and the per-USER one: Umbrava's own checkboxes. bwnCan fails OPEN on
+              // anything it cannot decide, so these render exactly as before for an undecoded user.
+              if (bwnCan('Task.AddNew')) {
+                var tkb = document.createElement('button');
+                tkb.type = 'button'; tkb.className = 'bwn-wa-btn ghost'; tkb.textContent = 'Create task…';
+                tkb.style.cssText = 'padding:3px 9px;font-size:10px;';
+                tkb.title = 'Create a follow-up task on this work order (assigned to the coordinator)';
+                tkb.addEventListener('click', function () { taskHelperOpen(state, act); });
+                btns.appendChild(tkb);
+              }
               // "Change status…" - only on the advance-to-complete gate + the phase-chase rows.
-              if (act.key === 'advance:workcomplete' || act.key.indexOf('phase:') === 0) {
+              if (bwnCan('WorkOrderField.Status') && (act.key === 'advance:workcomplete' || act.key.indexOf('phase:') === 0)) {
                 var csb = document.createElement('button');
                 csb.type = 'button'; csb.className = 'bwn-wa-btn ghost'; csb.textContent = 'Change status…';
                 csb.style.cssText = 'padding:3px 9px;font-size:10px;';
@@ -10939,10 +11064,21 @@
       var p = document.getElementById(DOCK_ID); if (p) p.style.display = '';
       dockSig = '';   // next render must rebuild, not match a signature whose DOM is gone
     }
+    // Normalize whatever a registrant sent into null | [ 'Group.Flag', ... ]. Anything that is not
+    // a non-empty string (or an array of them) becomes null = "no permission needed", because a
+    // malformed spec must not silently hide a working tool.
+    function dockPermSpec(v) {
+      var a = (typeof v === 'string') ? [v] : (Array.isArray(v) ? v : []);
+      a = a.filter(function (k) { return typeof k === 'string' && k.indexOf('.') > 0; });
+      return a.length ? a : null;
+    }
     function dockVisible() {
       var arr = Object.keys(dockRoster).map(function (k) { return dockRoster[k]; });
       // Fail-OPEN when rank is unknown (show the entry; the server rejects if truly unauthorized).
       arr = arr.filter(function (en) { return en.minRank == null || dockRank == null || dockRank >= en.minRank; });
+      // Same fail-open rule for Umbrava's own permissions: bwnCanAll answers true for anything it
+      // cannot decide, so a row disappears ONLY when the checkbox is known to be off.
+      arr = arr.filter(function (en) { return bwnCanAll(en.needPerm); });
       arr.sort(function (a, b) { return (a.weight - b.weight) || (a.order - b.order); });
       return arr;
     }
@@ -11175,6 +11311,9 @@
     document.addEventListener('bwn:evt', BWN.guard(function (e) {
       var d = e && e.detail; if (!d || !d.id) return;
       if (d.id === 'bwn:role' && typeof d.rank === 'number') { dockRank = d.rank; scheduleDockRender(); return; }
+      // A permission decode landed after the rail already rendered: re-render so a row the user
+      // may not use drops out (and one that was hidden on a stale slot comes back).
+      if (d.id === 'bwn:perm') { scheduleDockRender(); return; }
       if (d.id === 'bwn:dock:host') { if (dockOtherWins(d)) { dockAmHost = false; dockOtherSeen = Date.now(); removeDockStack(); } return; }
       // A host that is still alive re-announces AND pings every DOCK_PING_MS; that traffic is what
       // holds off the reclaim in the heartbeat. Guarded on hostId so our own ping - same document,
@@ -11190,6 +11329,8 @@
           weight: typeof d.weight === 'number' ? d.weight : 50,
           badge: (d.badge != null && d.badge !== '') ? String(d.badge) : '',
           minRank: typeof d.minRank === 'number' ? d.minRank : null,
+          // 'Group.Flag' or an array of them: the Umbrava permission(s) the row's tool needs.
+          needPerm: dockPermSpec(d.needPerm),
           title: d.title ? String(d.title) : '',
           order: ex ? ex.order : (++dockOrderSeq),
           seen: Date.now()
@@ -11201,6 +11342,7 @@
         if (d.icon != null) en.icon = String(d.icon);
         if (d.badge != null) en.badge = d.badge === '' ? '' : String(d.badge);
         if (typeof d.minRank === 'number') en.minRank = d.minRank;
+        if (d.needPerm != null) en.needPerm = dockPermSpec(d.needPerm);
         en.seen = Date.now();
         scheduleDockRender();
       } else if (d.id === 'bwn:dock:unregister' && d.key) {
@@ -15777,6 +15919,10 @@
       try {
         document.dispatchEvent(new CustomEvent('bwn:evt', { detail: {
           id: 'bwn:dock:register', key: DOCK_KEY, label: 'Bulk Ops', icon: '📦', weight: 22,
+          // ponytail: ONE permission for the whole console, not one per op. v1 writes notes + ECD,
+          // and a user who may not bulk-update work orders has no business in a bulk console at
+          // all. Upgrade path if that ever splits: gate each op row on its own bwnCan.
+          needPerm: 'WorkOrder.BulkUpdate',
           title: 'BWN Bulk Operations Console - batch note / ECD writes from an .xlsx (dry-run + typed confirm)'
         } }));
       } catch (e) { /* dock host not up yet - the heartbeat will re-register us */ }
@@ -16523,6 +16669,10 @@
       try {
         document.dispatchEvent(new CustomEvent('bwn:evt', { detail: {
           id: 'bwn:dock:register', key: DOCK_KEY, label: 'Edit PO#/WO#', icon: '🔖', weight: 23,
+          // The drawer's primary write. Source PO# is the optional second column, deliberately NOT
+          // required here: a user allowed one field and not the other should still get the drawer
+          // rather than lose the tool over the column they were not going to fill.
+          needPerm: 'WorkOrderField.SourceJobNumber',
           title: 'BWN Bulk Source Job# - check work orders on the list, then stamp Source Job# (Q/R or RF) in bulk (dry-run + typed confirm)'
         } }));
       } catch (e) { /* dock host not up yet - the heartbeat re-registers us */ }
