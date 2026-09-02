@@ -1,4 +1,4 @@
-// test-bulk-source.js - the Bulk Source Job# engine (Core module, flag bulkSource default OFF).
+// test-bulk-source.js - the Bulk Source Job# engine (Core module, flag bulkSource ON since 2026-09-02).
 //
 // WHAT THIS PROVES, against the REAL shipped bytes of bwn-suite-core.user.js: the
 // BULK-SOURCE-ENGINE region (the pure, DOM-free write engine) is sliced out and CONCATENATED with
@@ -6,12 +6,14 @@
 // localStorage and an injectable bwnGql transport - so the batch write path is exercised end to end
 // through the real audit ring + fail-closed high-risk confirm gate, not a stub.
 //
-//   Q/R value      srcValueFor('qr',...) is always "Q/R (WO#)".
-//   RF value       "RF (clientWorkOrderNumber)" when the WO carries one (trimmed), else "RF (WO#)".
-//   write shape    patchWorkOrder data is EXACTLY { workOrderNumber, sourceJobNumber:{shouldInclude,value} }
-//                  - a single scalar PATCH, no whole-object hazard.
-//   blanks only    a WO whose sourceJobNumber already has a value -> no-op, NO patch (re-checked at
-//                  write time, not just in the dry-run).
+//   ref number     the parens carry the TRACKING number, falling back to the WO number when blank.
+//   Q/R value      "Q/R (tracking# else WO#)".
+//   RF value       "RF (clientWorkOrderNumber)" when present, else "RF (tracking# else WO#)".
+//   Source PO#     with setPO, a BLANK Source PO# is also set to "N/A" in the SAME atomic patch.
+//   blanks only    per field: an already-set Source Job# / Source PO# is skipped (re-checked at
+//                  write time). A row with nothing writable no-ops with zero writes.
+//   write shape    patchWorkOrder data = { workOrderNumber, sourceJobNumber?, sourcePurchaseOrderNumber? }
+//                  - only the fields being written, each a ConditionalStringInput (no whole-object hazard).
 //   dry-run        mode:'dry' builds the exact variables but sends ZERO writes.
 //   high-risk gate confirmed:true unblocks patchWorkOrder (risk:'high'); the write is audited ok.
 //   cap            over the 50-record cap -> REFUSED, count reported, never truncated.
@@ -53,15 +55,29 @@ var S_ENG = slice('    // ===== BULK-SOURCE-ENGINE START v1', '    // ===== BULK
 A.ok('BULK-SOURCE-ENGINE slice is DOM-free', !/\bdocument\b|\bwindow\b|\bXLSX\b|querySelector/.test(S_ENG), 'engine must not reach the DOM');
 
 // Pinned docs must be the exact captured strings (a re-shaped selector is a silent bug).
-A.ok('WOSRC_READ_Q reads sourceJobNumber + clientWorkOrderNumber',
-  S_ENG.indexOf("var WOSRC_READ_Q = 'query($n:Int!){ workOrder(workOrderNumber:$n){ sourceJobNumber clientWorkOrderNumber } }';") !== -1);
+A.ok('WOSRC_READ_Q reads sourceJobNumber + sourcePurchaseOrderNumber + clientWorkOrderNumber + trackingNumber',
+  S_ENG.indexOf("var WOSRC_READ_Q = 'query($n:Int!){ workOrder(workOrderNumber:$n){ sourceJobNumber sourcePurchaseOrderNumber clientWorkOrderNumber trackingNumber } }';") !== -1);
 A.ok('WOSRC_PATCH_M is the patchWorkOrder success/message mutation',
   S_ENG.indexOf("var WOSRC_PATCH_M = 'mutation PatchWorkOrder($data: PatchWorkOrderInput!) { patchWorkOrder(data: $data) { success message } }';") !== -1);
 
-// ---- source-level ship-safety: the module is gated OFF and nothing mounts when the flag is off ----
-A.ok('bulkSource flag ships default OFF', /bulkSource: false,/.test(coreFull));
+// ---- source-level ship-safety: the module mounts only behind the flag; kill switch flips it off ----
+A.ok('bulkSource flag ships ON (enabled for coordinators 2026-09-02)', /bulkSource: true,/.test(coreFull));
 A.ok('the whole module mounts only behind BWN_MODULES.bulkSource', /bwnBoot\('bulkSource', BWN_MODULES\.bulkSource, function \(\) \{/.test(coreFull));
 A.ok('the write passes feature:bulkSource + confirmed:true to the wrapper', /feature: 'bulkSource', confirmed: true/.test(S_ENG));
+
+// ---- UI-layer regression guards. The selection + checkbox-injection code is NOT in the sliced
+// (DOM-free) engine, so two live bugs escaped through it during the smoke: (1) Array.prototype.slice
+// .call() on a Set returns [] - a Set is not array-like - which made selList() always empty, so Dry
+// Run silently no-op'd even with rows checked; (2) inserting the checkbox before the WO <a> failed
+// with NotFoundError because the anchor is nested (td > div > a), not a direct child of the td. Lock
+// both fixes by source pattern so neither can regress. ----
+A.ok('selList converts the Set with Array.from (slice.call on a Set yields [])', /function selList\(\) \{ return Array\.from\(selected\)/.test(coreFull));
+A.ok('selList never uses Array.prototype.slice on the Set (that returns [])', !/slice\.call\(selected\)/.test(coreFull));
+A.ok('the row checkbox mounts at the cell edge (cell.firstChild), not before the nested anchor', /cell\.insertBefore\(cb, cell\.firstChild\)/.test(coreFull));
+A.ok('ensureBoxes never inserts before the WO anchor (nested, not a direct child of the td)', !/insertBefore\(cb, anchor\)/.test(coreFull));
+
+// A full WorkOrder read record with the four fields the engine reads; override per test.
+function WO(o) { return Object.assign({ sourceJobNumber: null, sourcePurchaseOrderNumber: null, clientWorkOrderNumber: null, trackingNumber: null }, o || {}); }
 
 // Programmable bwnGql: records every call so a test can assert what was (or was NOT) issued.
 function mkGql(opts) {
@@ -69,7 +85,7 @@ function mkGql(opts) {
   function gql(query, variables) {
     gql.calls.push({ q: query, v: variables });
     if (/patchWorkOrder/.test(query)) return Promise.resolve({ patchWorkOrder: { success: opts.patchFail ? false : true, message: opts.patchFail ? 'refused' : '' } });
-    if (/workOrder\s*\(/.test(query)) return Promise.resolve({ workOrder: (opts.wo === undefined ? { sourceJobNumber: null, clientWorkOrderNumber: null } : opts.wo) });
+    if (/workOrder\s*\(/.test(query)) return Promise.resolve({ workOrder: (opts.wo === undefined ? WO() : opts.wo) });
     return Promise.resolve({});
   }
   gql.calls = [];
@@ -110,20 +126,23 @@ function tick(n) {
   for (var i = 0; i < (n || 6); i++) p = p.then(function () { return new Promise(function (r) { setTimeout(r, 0); }); });
   return p;
 }
+function keys(o) { return Object.keys(o).sort(); }
 
 (async function () {
   // ---- pure helpers -------------------------------------------------------------------------
   var e = makeEnv();
   A.eq('cond wraps {shouldInclude:true, value}', e.api.cond('x'), { shouldInclude: true, value: 'x' });
 
-  // ---- srcValueFor: the whole shorthand contract, pure ---------------------------------------
-  A.eq('Q/R is always "Q/R (WO#)" (client# ignored)', e.api.srcValueFor('qr', 386473, 'CLI-9'), 'Q/R (386473)');
-  A.eq('Q/R coerces a string WO#', e.api.srcValueFor('qr', '386473', null), 'Q/R (386473)');
-  A.eq('RF uses the client WO# when present', e.api.srcValueFor('rf', 386473, 'CLI-9'), 'RF (CLI-9)');
-  A.eq('RF falls back to WO# when client# is null', e.api.srcValueFor('rf', 386473, null), 'RF (386473)');
-  A.eq('RF falls back to WO# when client# is empty', e.api.srcValueFor('rf', 386473, ''), 'RF (386473)');
-  A.eq('RF trims whitespace-only client# to the WO# fallback', e.api.srcValueFor('rf', 386473, '   '), 'RF (386473)');
-  A.eq('RF trims a padded client#', e.api.srcValueFor('rf', 386473, '  CLI-9  '), 'RF (CLI-9)');
+  // ---- srcValueFor: the whole shorthand contract, pure. Args (op, wo, client, tracking). ----
+  A.eq('Q/R uses the tracking number', e.api.srcValueFor('qr', 386473, 'CLI-9', 'TRK-1'), 'Q/R (TRK-1)');
+  A.eq('Q/R falls back to the WO# when no tracking number', e.api.srcValueFor('qr', 386473, 'CLI-9', null), 'Q/R (386473)');
+  A.eq('Q/R WO# fallback also on empty/whitespace tracking', e.api.srcValueFor('qr', 386473, null, '   '), 'Q/R (386473)');
+  A.eq('Q/R coerces a string WO#', e.api.srcValueFor('qr', '386473', null, null), 'Q/R (386473)');
+  A.eq('RF prefers the client WO# over the tracking number', e.api.srcValueFor('rf', 386473, 'CLI-9', 'TRK-1'), 'RF (CLI-9)');
+  A.eq('RF uses the tracking number when there is no client WO#', e.api.srcValueFor('rf', 386473, null, 'TRK-1'), 'RF (TRK-1)');
+  A.eq('RF falls back to WO# when neither client nor tracking', e.api.srcValueFor('rf', 386473, '', ''), 'RF (386473)');
+  A.eq('RF trims a padded client#', e.api.srcValueFor('rf', 386473, '  CLI-9  ', 'TRK-1'), 'RF (CLI-9)');
+  A.eq('RF trims a padded tracking#', e.api.srcValueFor('rf', 386473, null, '  TRK-1  '), 'RF (TRK-1)');
 
   // ---- caps -----------------------------------------------------------------------------------
   A.eq('cap is 50', e.api.BULK_SRC_MAX, 50);
@@ -131,33 +150,75 @@ function tick(n) {
   A.ok('overCap(51) is refused', e.api.overCap(51).refused);
   A.eq('overCap reports the overage', e.api.overCap(53).over, 3);
 
-  // ---- Q/R run happy: one patch, exact single-scalar shape, audited ok -----------------------
-  e = makeEnv({ wo: { sourceJobNumber: null, clientWorkOrderNumber: null } });
+  // ---- Q/R run happy (no tracking#): one patch, single field, WO# fallback, audited ok --------
+  e = makeEnv({ wo: WO() });
   var rQ = await e.api.bulkExecSrc('run', 'qr', '386473');
   await tick();
   A.eq('Q/R run: outcome done', rQ.outcome, 'done');
   A.eq('Q/R run: exactly one patch', patchCalls(e.gql).length, 1);
   var data = patchCalls(e.gql)[0].v.data;
-  A.eq('Q/R run: data keys are ONLY workOrderNumber + sourceJobNumber', Object.keys(data).sort(), ['sourceJobNumber', 'workOrderNumber']);
+  A.eq('Q/R run: data keys are ONLY workOrderNumber + sourceJobNumber (setPO off)', keys(data), ['sourceJobNumber', 'workOrderNumber']);
   A.eq('Q/R run: workOrderNumber is numeric', data.workOrderNumber, 386473);
-  A.eq('Q/R run: sourceJobNumber is a cond-wrapped value', data.sourceJobNumber, { shouldInclude: true, value: 'Q/R (386473)' });
+  A.eq('Q/R run: sourceJobNumber is the WO# fallback value', data.sourceJobNumber, { shouldInclude: true, value: 'Q/R (386473)' });
   A.eq('Q/R run: high-risk write audited ok (confirmed:true unblocked the gate)', (e.api.auditAll()[0] || {}).outcome, 'ok');
 
-  // ---- RF run: uses the client WO# from the read ---------------------------------------------
-  e = makeEnv({ wo: { sourceJobNumber: '', clientWorkOrderNumber: 'AMZ-55' } });
+  // ---- Q/R run uses the tracking number when present -----------------------------------------
+  e = makeEnv({ wo: WO({ trackingNumber: 'TRK-7' }) });
+  await e.api.bulkExecSrc('run', 'qr', '386473');
+  await tick();
+  A.eq('Q/R run: value is the tracking number, not W-######', patchCalls(e.gql)[0].v.data.sourceJobNumber.value, 'Q/R (TRK-7)');
+
+  // ---- RF run: client WO# beats tracking ----------------------------------------------------
+  e = makeEnv({ wo: WO({ clientWorkOrderNumber: 'AMZ-55', trackingNumber: 'TRK-9' }) });
   var rR = await e.api.bulkExecSrc('run', 'rf', '400001');
   await tick();
-  A.eq('RF run: value uses the client WO#', patchCalls(e.gql)[0].v.data.sourceJobNumber.value, 'RF (AMZ-55)');
+  A.eq('RF run: value uses the client WO# over tracking', patchCalls(e.gql)[0].v.data.sourceJobNumber.value, 'RF (AMZ-55)');
   A.eq('RF run: outcome done', rR.outcome, 'done');
 
-  // ---- RF run with no client WO#: WO# fallback ----------------------------------------------
-  e = makeEnv({ wo: { sourceJobNumber: null, clientWorkOrderNumber: null } });
+  // ---- RF run: no client -> tracking; no tracking -> WO# ------------------------------------
+  e = makeEnv({ wo: WO({ trackingNumber: 'TRK-2' }) });
   await e.api.bulkExecSrc('run', 'rf', '400002');
   await tick();
-  A.eq('RF run: WO# fallback when the WO has no client WO#', patchCalls(e.gql)[0].v.data.sourceJobNumber.value, 'RF (400002)');
+  A.eq('RF run: tracking used when no client WO#', patchCalls(e.gql)[0].v.data.sourceJobNumber.value, 'RF (TRK-2)');
+  e = makeEnv({ wo: WO() });
+  await e.api.bulkExecSrc('run', 'rf', '400003');
+  await tick();
+  A.eq('RF run: WO# fallback when no client and no tracking', patchCalls(e.gql)[0].v.data.sourceJobNumber.value, 'RF (400003)');
 
-  // ---- blanks-only: a WO that already has a Source Job# is a no-op, NO patch ------------------
-  e = makeEnv({ wo: { sourceJobNumber: 'RF (99999)', clientWorkOrderNumber: null } });
+  // ---- Source PO# = N/A (setPO true): both blank -> one atomic patch with BOTH fields --------
+  e = makeEnv({ wo: WO({ trackingNumber: 'TRK-1' }) });
+  var rBoth = await e.api.bulkExecSrc('run', 'qr', '386473', true);
+  await tick();
+  A.eq('PO both-blank: exactly one patch', patchCalls(e.gql).length, 1);
+  var d2 = patchCalls(e.gql)[0].v.data;
+  A.eq('PO both-blank: BOTH fields in one write', keys(d2), ['sourceJobNumber', 'sourcePurchaseOrderNumber', 'workOrderNumber']);
+  A.eq('PO both-blank: Source Job# value', d2.sourceJobNumber.value, 'Q/R (TRK-1)');
+  A.eq('PO both-blank: Source PO# is N/A', d2.sourcePurchaseOrderNumber, { shouldInclude: true, value: 'N/A' });
+  A.eq('PO both-blank: outcome done', rBoth.outcome, 'done');
+
+  // ---- setPO true, Source Job# already set -> ONLY the PO is written -------------------------
+  e = makeEnv({ wo: WO({ sourceJobNumber: 'RF (old)', trackingNumber: 'TRK-1' }) });
+  var rPOonly = await e.api.bulkExecSrc('run', 'qr', '386473', true);
+  await tick();
+  A.eq('PO-only: one patch', patchCalls(e.gql).length, 1);
+  A.eq('PO-only: writes ONLY sourcePurchaseOrderNumber (job already set is skipped)', keys(patchCalls(e.gql)[0].v.data), ['sourcePurchaseOrderNumber', 'workOrderNumber']);
+  A.eq('PO-only: outcome done, after has PO only', [rPOonly.outcome, rPOonly.after.sourcePO, rPOonly.after.sourceJob], ['done', 'N/A', undefined]);
+
+  // ---- setPO true, Source PO# already set -> ONLY the Job# is written ------------------------
+  e = makeEnv({ wo: WO({ sourcePurchaseOrderNumber: 'PO-123', trackingNumber: 'TRK-1' }) });
+  await e.api.bulkExecSrc('run', 'qr', '386473', true);
+  await tick();
+  A.eq('Job-only: writes ONLY sourceJobNumber (PO already set is skipped)', keys(patchCalls(e.gql)[0].v.data), ['sourceJobNumber', 'workOrderNumber']);
+
+  // ---- setPO true, BOTH already set -> no-op, no patch --------------------------------------
+  e = makeEnv({ wo: WO({ sourceJobNumber: 'RF (x)', sourcePurchaseOrderNumber: 'PO-9' }) });
+  var rBothSet = await e.api.bulkExecSrc('run', 'qr', '386473', true);
+  await tick();
+  A.eq('both-set: outcome no-op', rBothSet.outcome, 'noop');
+  A.eq('both-set: NO patch issued', patchCalls(e.gql).length, 0);
+
+  // ---- blanks-only (setPO off): a WO that already has a Source Job# is a no-op, NO patch ------
+  e = makeEnv({ wo: WO({ sourceJobNumber: 'RF (99999)' }) });
   var rNoop = await e.api.bulkExecSrc('run', 'qr', '386473');
   await tick();
   A.eq('blanks-only: outcome no-op', rNoop.outcome, 'noop');
@@ -166,29 +227,30 @@ function tick(n) {
   A.eq('blanks-only: no audit entry (no write)', e.api.auditAll().length, 0);
 
   // whitespace-only source counts as blank -> writes
-  e = makeEnv({ wo: { sourceJobNumber: '   ', clientWorkOrderNumber: null } });
+  e = makeEnv({ wo: WO({ sourceJobNumber: '   ' }) });
   await e.api.bulkExecSrc('run', 'qr', '386473');
   await tick();
   A.eq('blanks-only: a whitespace-only Source Job# is treated as blank and DOES write', patchCalls(e.gql).length, 1);
 
   // ---- dry run: builds the exact vars, sends ZERO writes -------------------------------------
-  e = makeEnv({ wo: { sourceJobNumber: null, clientWorkOrderNumber: 'C1' } });
-  var rDry = await e.api.bulkExecSrc('dry', 'rf', '386473');
+  e = makeEnv({ wo: WO({ clientWorkOrderNumber: 'C1' }) });
+  var rDry = await e.api.bulkExecSrc('dry', 'rf', '386473', true);
   await tick();
   A.eq('dry: outcome would-send', rDry.outcome, 'would-send');
-  A.eq('dry: the vars it WOULD send', rDry.vars.data.sourceJobNumber.value, 'RF (C1)');
+  A.eq('dry: the Source Job# it WOULD send', rDry.vars.data.sourceJobNumber.value, 'RF (C1)');
+  A.eq('dry: the Source PO# it WOULD send (setPO)', rDry.vars.data.sourcePurchaseOrderNumber.value, 'N/A');
   A.eq('dry: ZERO patches sent', patchCalls(e.gql).length, 0);
   A.eq('dry: no audit entry (no write)', e.api.auditAll().length, 0);
 
   // ---- dry run over an already-set WO: no-op verdict, still zero writes ----------------------
-  e = makeEnv({ wo: { sourceJobNumber: 'x', clientWorkOrderNumber: null } });
+  e = makeEnv({ wo: WO({ sourceJobNumber: 'x' }) });
   var rDryNoop = await e.api.bulkExecSrc('dry', 'qr', '386473');
   await tick();
   A.eq('dry no-op: outcome no-op for an already-set WO', rDryNoop.outcome, 'noop');
   A.eq('dry no-op: still zero patches', patchCalls(e.gql).length, 0);
 
   // ---- kill switch: feature OFF refuses the write (audited denied) ---------------------------
-  e = makeEnv({ wo: { sourceJobNumber: null, clientWorkOrderNumber: null }, modules: { bulkSource: false } });
+  e = makeEnv({ wo: WO(), modules: { bulkSource: false } });
   var refused = false;
   await e.api.bulkExecSrc('run', 'qr', '386473').then(function () { }, function () { refused = true; });
   await tick();
@@ -212,10 +274,10 @@ function tick(n) {
     { done: 1, noop: 1, failed: 1, notRun: 1 });
 
   // ---- NEGATIVE CONTROLS (each proves a guard is load-bearing) -------------------------------
-  // (1) Neuter the blanks-only pre-check -> an already-set WO gets OVERWRITTEN (a patch is issued).
+  // (1) Neuter the Source Job# blanks-only pre-check -> an already-set job gets OVERWRITTEN.
   await (async function () {
-    var mut = mutate(S_ENG, "if (cur) return { op: 'src', wo: wo, outcome: 'noop'", "if (false) return { op: 'src', wo: wo, outcome: 'noop'");
-    var m = makeEnv({ wo: { sourceJobNumber: 'ALREADY', clientWorkOrderNumber: null } }, mut);
+    var mut = mutate(S_ENG, 'if (!curJob) { var jv', 'if (true) { var jv');
+    var m = makeEnv({ wo: WO({ sourceJobNumber: 'ALREADY' }) }, mut);
     await m.api.bulkExecSrc('run', 'qr', '386473');
     await tick();
     A.eq('CONTROL: disabling the blanks-only check DOES overwrite (the check is load-bearing)', patchCalls(m.gql).length, 1);
@@ -224,19 +286,28 @@ function tick(n) {
   // (2) Neuter the dry gate -> a dry-run accidentally WRITES.
   await (async function () {
     var mut = mutate(S_ENG, "if (mode === 'dry') return { op: 'src', wo: wo, outcome: 'would-send'", "if (false) return { op: 'src', wo: wo, outcome: 'would-send'");
-    var m = makeEnv({ wo: { sourceJobNumber: null, clientWorkOrderNumber: null } }, mut);
+    var m = makeEnv({ wo: WO() }, mut);
     await m.api.bulkExecSrc('dry', 'qr', '386473');
     await tick();
     A.eq('CONTROL: neutering the dry gate DOES write (the dry gate is load-bearing)', patchCalls(m.gql).length, 1);
   })();
 
-  // (3) Flip the RF fallback to Q/R's unconditional WO# -> RF stops honouring the client WO#.
+  // (3) Flip the RF fallback to drop the client WO# -> RF stops honouring it.
   await (async function () {
-    var mut = mutate(S_ENG, "return 'RF (' + (client || wo) + ')';", "return 'RF (' + wo + ')';");
-    var m = makeEnv({ wo: { sourceJobNumber: null, clientWorkOrderNumber: 'C1' } }, mut);
+    var mut = mutate(S_ENG, "return 'RF (' + (client || ref) + ')';", "return 'RF (' + ref + ')';");
+    var m = makeEnv({ wo: WO({ clientWorkOrderNumber: 'C1' }) }, mut);
     await m.api.bulkExecSrc('run', 'rf', '386473');
     await tick();
     A.eq('CONTROL: dropping the client-WO# branch makes RF ignore it (the branch is load-bearing)', patchCalls(m.gql)[0].v.data.sourceJobNumber.value, 'RF (386473)');
+  })();
+
+  // (4) Neuter the Source PO# blanks-only pre-check -> an already-set PO gets OVERWRITTEN.
+  await (async function () {
+    var mut = mutate(S_ENG, 'if (setPO && !curPO) {', 'if (setPO) {');
+    var m = makeEnv({ wo: WO({ sourceJobNumber: 'keep', sourcePurchaseOrderNumber: 'PO-EXISTING' }) }, mut);
+    await m.api.bulkExecSrc('run', 'qr', '386473', true);
+    await tick();
+    A.eq('CONTROL: disabling the PO blanks-only check DOES overwrite the PO (load-bearing)', (patchCalls(m.gql)[0] || { v: { data: {} } }).v.data.sourcePurchaseOrderNumber && patchCalls(m.gql)[0].v.data.sourcePurchaseOrderNumber.value, 'N/A');
   })();
 
   A.finish();

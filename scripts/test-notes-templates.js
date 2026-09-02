@@ -48,21 +48,24 @@ var spokeTag = env.spokeTag, prependSpokeTag = env.prependSpokeTag, mruAdd = env
 function allItems(t) { return t.reduce(function (a, g) { return a.concat(g.items); }, []); }
 
 // ---- groups + templates intact -----------------------------------------------------------
-A.eq('3 groups', TEMPLATES.length, 3);
-A.eq('group titles', TEMPLATES.map(function (g) { return g.group; }).join(' | '), 'Call outs | Completed work | New work to schedule');
+A.eq('4 groups', TEMPLATES.length, 4);
+A.eq('group titles', TEMPLATES.map(function (g) { return g.group; }).join(' | '), 'Call outs | Completed work | New work to schedule | Approvals');
 A.eq('Call outs = 2', TEMPLATES[0].items.length, 2);
 A.eq('Completed work = 3', TEMPLATES[1].items.length, 3);
 A.eq('New work to schedule = 4', TEMPLATES[2].items.length, 4);
-A.eq('9 templates total', allItems(TEMPLATES).length, 9);
+A.eq('Approvals = 2', TEMPLATES[3].items.length, 2);
+A.eq('11 templates total', allItems(TEMPLATES).length, 11);
 A.ok('every template has a label and a body', allItems(TEMPLATES).every(function (t) { return t.label && t.body && typeof t.signed === 'boolean'; }));
 A.ok('call-outs are unsigned', TEMPLATES[0].items.every(function (t) { return t.signed === false; }));
-A.ok('completed + new-work are signed', TEMPLATES[1].items.concat(TEMPLATES[2].items).every(function (t) { return t.signed === true; }));
+A.ok('completed + new-work + approvals are signed', TEMPLATES[1].items.concat(TEMPLATES[2].items).concat(TEMPLATES[3].items).every(function (t) { return t.signed === true; }));
 
 // ---- verbatim spot-checks ----------------------------------------------------------------
 function byLabel(re) { return allItems(TEMPLATES).find(function (t) { return re.test(t.label); }); }
 A.ok('reschedule template keeps the blank', /rescheduled for ______ ./.test(byLabel(/reschedule/).body));
 A.ok('completed template mentions adjusting the NTE', /adjust the NTE accordingly/.test(byLabel(/Completed/).body));
 A.ok('too-far template mentions round-trip travel', /round-trip travel/.test(byLabel(/cost-effective/).body));
+A.ok('approval back-on-schedule template thanks for the approval + keeps the date blank', /Thank you for the approval, this is back on schedule for ______\./.test(byLabel(/back on schedule/).body));
+A.ok('approval order-material template thanks for the approval + follows up with a lead time', /Thank you for the approval, we will order material and follow up with a lead time/.test(byLabel(/ordering material/).body));
 
 // ---- firstNameFromUser -------------------------------------------------------------------
 A.eq('given_name wins', firstNameFromUser({ given_name: 'Alyssa', name: 'X Y' }), 'Alyssa');
@@ -71,6 +74,12 @@ A.eq('falls back to display-name first token', firstNameFromUser({ name: 'Alyssa
 A.eq('single-word name', firstNameFromUser({ name: 'Alyssa' }), 'Alyssa');
 A.eq('no claims -> empty', firstNameFromUser({}), '');
 A.eq('null user -> empty', firstNameFromUser(null), '');
+
+// ---- sign-off nicknames: Nicholas signs as Nick (from given_name or display name, any case) -----
+A.eq('nickname maps given_name Nicholas -> Nick', firstNameFromUser({ given_name: 'Nicholas' }), 'Nick');
+A.eq('nickname maps display-name Nicholas -> Nick', firstNameFromUser({ name: 'Nicholas Smith' }), 'Nick');
+A.eq('nickname is case-insensitive', firstNameFromUser({ given_name: 'nicholas' }), 'Nick');
+A.eq('a non-nicknamed name is untouched', firstNameFromUser({ given_name: 'Nick' }), 'Nick');
 
 // ---- buildNote: signature is dynamic + gated ---------------------------------------------
 var signed = byLabel(/Scheduled for/), callout = byLabel(/redirect \(week full\)/);
@@ -82,11 +91,13 @@ A.ok('no template body bakes in a literal name (signature is always dynamic)',
 
 // ---- date-fill: the picker turns y/m/d into the blank's text -----------------------------
 // The four date templates declare a `date` kind; the rest declare none (money/hours stay manual).
-A.eq('exactly 4 templates carry a date blank', allItems(TEMPLATES).filter(function (t) { return t.date; }).length, 4);
+A.eq('exactly 5 templates carry a date blank', allItems(TEMPLATES).filter(function (t) { return t.date; }).length, 5);
 A.eq('reschedule is a day', byLabel(/reschedule/).date, 'day');
 A.eq('scheduled-for is a day', byLabel(/^Scheduled for/).date, 'day');
 A.eq('soonest-on-site is a day', byLabel(/Soonest on-site/).date, 'day');
 A.eq('week-of is weekOf', byLabel(/week of/).date, 'weekOf');
+A.eq('approval back-on-schedule is a day', byLabel(/back on schedule/).date, 'day');
+A.ok('applyDate fills the approval back-on-schedule blank', /back on schedule for Friday 8\/21\./.test(applyDate(byLabel(/back on schedule/).body, 'day', 2026, 8, 21)));
 A.ok('completed FC ($, not a date) has no date kind', !byLabel(/Completed/).date);
 // Aug 21 2026 is a Friday; Monday of its week is Aug 17. Built LOCALLY so weekday is TZ-stable.
 A.eq('fmtDay -> weekday + M/D', fmtDay(2026, 8, 21), 'Friday 8/21');
