@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         BWN Suite - Core (Broadway National)
 // @namespace    broadwaynational.bwn
-// @version      1.81.1
+// @version      1.81.2
 // @downloadURL  https://raw.githubusercontent.com/Intermu/userscripts/main/bwn-suite-core.user.js
 // @updateURL    https://raw.githubusercontent.com/Intermu/userscripts/main/bwn-suite-core.user.js
 // @description  Runs several Umbrava helpers for BWN coordinators, in the browser with no privileged grants. Includes: PO Approval + ETA Builder; WO Assist (GP/ETA, a stall watchdog, DNE calculator, and a next-action playbook); Email Leak Guard (checks recipients against vendor names, PO amounts, and client budget references before an outbound email sends); WO List Heat (a triage overlay + My Day strip on the work-order list, with an optional same-origin Umbrava API scan for deterministic full-board coverage); and the BWN Launcher (opens the Azure Static Web App tools with the current WO's context). Modules share state through sessionStorage/localStorage. The only network calls are same-origin Umbrava GraphQL requests (app.umbrava.com/api/graphql, the app's own session): List Heat's full-board scan and WO Assist's work-order / trip / clock-in / document reads, plus ONE write - BWN Views saves the column layout through Umbrava's own putUserPreference, the same preference the column chooser writes; everything else is offline. Toggle modules in BWN_MODULES below.
@@ -91,7 +91,7 @@
   try { localStorage.setItem('bwn:status:core', JSON.stringify({ ver: BWN_VER, ts: Date.now() })); } catch (e) { /* best-effort */ }
 
   console.info('[BWN SUITE CORE] v' + BWN_VER + ' |',
-    'Shared Core 7 \u00b7 DOM Handles 1.0 \u00b7 PO Approval 1.13 \u00b7 WO Assist 2.72 \u00b7 Leak Guard 2.0 \u00b7 List Heat 3.28 \u00b7 Launcher 2.0 \u00b7 Views 3.1 \u00b7 Palette 1.1 \u00b7 Visit 1.2 \u00b7 Reminders 1.1 \u00b7 Timeline 1.1 \u00b7 TripCal 1.4 \u00b7 Bulk Ops 1.0 \u00b7 Connector 1.2 |',
+    'Shared Core 7 \u00b7 DOM Handles 1.0 \u00b7 PO Approval 1.13 \u00b7 WO Assist 2.73 \u00b7 Leak Guard 2.0 \u00b7 List Heat 3.28 \u00b7 Launcher 2.0 \u00b7 Views 3.1 \u00b7 Palette 1.1 \u00b7 Visit 1.2 \u00b7 Reminders 1.1 \u00b7 Timeline 1.1 \u00b7 TripCal 1.4 \u00b7 Bulk Ops 1.0 \u00b7 Connector 1.2 |',
     'enabled:', Object.keys(BWN_MODULES).filter(function (k) { return BWN_MODULES[k]; }).join(', '));
 
   // ===== BWN SHARED CORE v7 - KEEP IN SYNC across both suite scripts =====
@@ -283,6 +283,20 @@
     }
 
     // ---- Field readers / React-safe setter ------------------------------------
+    // Umbrava rebuilt the WO detail form (measured live 2026-09-03, W-371126): the header
+    // wrapper now holds NO inputs at all, and the fields that used to carry a data-testid
+    // carry a `name` equal to their API field path instead - `priority.expectedCompletionDate`,
+    // `priority.firstTripDate`, `sourceJobNumber`, `doNotExceed`, `scopeOfWork`. Key on that
+    // `name`: it is the same string the GraphQL patch uses, so DOM and API stay in step, and
+    // unlike the label's `for` (`mui-32`) it is not MUI's per-render counter.
+    // A PO edit form can carry the same field names, so anything inside a PO accordion is
+    // skipped - the WO's own field is the one that is not in a POAccordion.
+    function woFieldInput(name) {
+      var els = document.querySelectorAll('input[name="' + name + '"], textarea[name="' + name + '"]');
+      for (var i = 0; i < els.length; i++) { if (!els[i].closest('[data-testid^="POAccordion-"]')) return els[i]; }
+      return null;
+    }
+    function woFieldVal(name) { var el = woFieldInput(name); return el ? (el.value || '') : ''; }
     function inputVal(testid) {
       var el = document.querySelector('[data-testid="' + testid + '"]');
       if (!el) return '';
@@ -2197,7 +2211,7 @@
   });
 
   // ==========================================================================
-  // MODULE: WO Assist: GP + ETA Watchdog + Playbook v2.72 (Connector 1.2)
+  // MODULE: WO Assist: GP + ETA Watchdog + Playbook v2.73 (Connector 1.2)
   // ==========================================================================
   bwnBoot('woAssist', BWN_MODULES.woAssist, function () {
     'use strict';
@@ -2227,7 +2241,7 @@
     var PANEL_ID = 'bwn-gp-panel';
     var GREEN = BWN.GREEN;
 
-    console.info('[BWN GP] WO Assist v2.72 loaded on', location.href);
+    console.info('[BWN GP] WO Assist v2.73 loaded on', location.href);
 
     // ---- Parsing helpers (shared via BWN core) -----------------------------
     var parseMoney = BWN.parseMoney;
@@ -2970,8 +2984,7 @@
         var dates = labeled.map(function (p) { return p.schedDate; }).join(', ');
         return { ok: true, label: 'POs sched: ' + dates, detail: 'Every active PO shows a scheduled date.' };
       }
-      var ftEl = document.querySelector('[data-testid="work-order-first-trip-date-picker"]');
-      var ft = ftEl ? (ftEl.tagName === 'INPUT' ? ftEl.value : (ftEl.querySelector('input') ? ftEl.querySelector('input').value : '')) : '';
+      var ft = woFieldVal('priority.firstTripDate');
       if (ft && ft.trim()) return { ok: true, label: 'Trip: ' + ft.trim(), detail: 'First-trip date set on the WO (no per-PO dates found).' };
       var hit = null;
       notes.forEach(function (n) {
@@ -2996,7 +3009,7 @@
     }
 
     function dueStatus(C) {
-      var v = inputVal('work-order-expected-completion-date-picker');
+      var v = woFieldVal('priority.expectedCompletionDate');
       var ts = parseUSDate(v);
       if (!ts) return null;
       var d = daysUntil(ts);
@@ -4325,7 +4338,7 @@
       // the flow when the clipboard write rejects, e.g. the tab isn't focused). Copy
       // best-effort and surface a dismissible toast instead.
       try { navigator.clipboard.writeText(text).catch(function () { }); } catch (e) { }
-      ecdToast('Add Note composer not found - the note text was copied to your clipboard. Open a new note and paste it.', null);
+      ecdToast('Add Note composer not found - the note text was copied to your clipboard. Open a new note and paste it.', 'error');
     }
 
     // The FULL-WIDTH block to insert the card before, derived STRUCTURALLY (never
@@ -5361,12 +5374,12 @@
     // TYPES the date into the WO's own field (never clicks a separate Save - Umbrava
     // persists per its normal flow) and prefills a client-facing note for manual
     // posting. (Scheduled-trip reading is a future add, pending a Trips-tab recon.)
-    var ECD_FIELD = 'work-order-expected-completion-date-picker';
+    var ECD_FIELD = 'priority.expectedCompletionDate';   // a form field NAME now, not a testid - see woFieldInput
     function ecdToday() { var d = new Date(); return new Date(d.getFullYear(), d.getMonth(), d.getDate()).getTime(); }
     function ecdSecondFriday() { var d = new Date(); d.setHours(0, 0, 0, 0); var add = (5 - d.getDay() + 7) % 7; if (add === 0) add = 7; d.setDate(d.getDate() + add + 7); return d; }   // upcoming Friday + 1 week
     function ecdFmtUS(dt) { var p = function (n) { return (n < 10 ? '0' : '') + n; }; return p(dt.getMonth() + 1) + '/' + p(dt.getDate()) + '/' + dt.getFullYear(); }   // MM/DD/YYYY - mask-safe for the picker
     function ecdFmtISO(dt) { var p = function (n) { return (n < 10 ? '0' : '') + n; }; return dt.getFullYear() + '-' + p(dt.getMonth() + 1) + '-' + p(dt.getDate()); }
-    function ecdFieldInput() { var el = document.querySelector('[data-testid="' + ECD_FIELD + '"]'); if (!el) return null; return el.tagName === 'INPUT' ? el : el.querySelector('input'); }
+    function ecdFieldInput() { return woFieldInput(ECD_FIELD); }
     // CFG.ETA_WORDS is the watchdog's vocabulary and it is about a vendor ARRIVING. A
     // completion promise is written in different words - "ECD 8/20", "complete by 8/20",
     // "done by Friday" - and those notes are precisely what a coordinator means when they
@@ -5454,68 +5467,23 @@
         // VENDOR button and can move anything absolutely positioned inside it. Two 420ms passes
         // repainting one small button is the cheaper risk. Do not extend this pattern to
         // anything larger or more frequent.
-        '@keyframes bwnEcdPulse{from{box-shadow:0 0 0 0 rgba(46,160,90,.75);}to{box-shadow:0 0 0 9px rgba(46,160,90,0);}}' +
-        '.bwn-ecd-savepulse{animation:bwnEcdPulse .42s cubic-bezier(.23,1,.32,1) 2;outline:2px solid var(--bwn-green)!important;outline-offset:2px;border-radius:6px;}' +
-        '@media (prefers-reduced-motion:reduce){.bwn-ecd-savepulse{animation:none;}}';
       document.head.appendChild(st);
     }
 
-    // The WO header's Save (submit) button - persisting an edited Complete-By date
-    // requires clicking it (Umbrava does NOT autosave the field on blur, verified
-    // 2026-07-13). Scoped to the header wrapper; prefer the submit button, fall back
-    // to text so a markup tweak can't blind it.
-    function ecdSaveButton() {
-      var scope = document.querySelector('[data-testid="work-order-header-wrapper"]') || document;
-      var subs = scope.querySelectorAll('button[type="submit"]');
-      for (var i = 0; i < subs.length; i++) { if (/^\s*save\s*$/i.test(subs[i].textContent || '')) return subs[i]; }
-      var all = scope.querySelectorAll('button');
-      for (var j = 0; j < all.length; j++) { if (/^\s*save\s*$/i.test(all[j].textContent || '')) return all[j]; }
-      return null;
-    }
-    function ecdPulse(el) {
-      try { el.classList.add('bwn-ecd-savepulse'); setTimeout(function () { try { el.classList.remove('bwn-ecd-savepulse'); } catch (e) { } }, 5500); } catch (e2) { }
-    }
     // Dismissible, non-blocking toast (the module has no shared toast - the reminders
-    // module's is out of scope). Optional Save button gets a "Show Save" jump.
-    function ecdToast(msg, saveBtn) {
-      // Routed through the unified BWN.toast (Task 2). Extra preserved: the "Show Save"
-      // button that scrolls to + pulses the WO-header Save. id keeps it single-instance
-      // (a follow-up toast replaces the prior one, as the old getElementById did).
-      var opts = { id: 'ecd', timeout: 16000 };
-      if (saveBtn) opts.action = { label: 'Show Save', onClick: function () { try { saveBtn.scrollIntoView({ block: 'center', behavior: 'smooth' }); } catch (e) { } ecdPulse(saveBtn); } };
-      BWN.toast('success', msg, opts);
+    // module's is out of scope). The old "Show Save" action went with the Save button:
+    // Umbrava's rebuilt WO form has none, and the write no longer touches the page.
+    // id keeps it single-instance, so a follow-up toast replaces the prior one.
+    function ecdToast(msg, sev) {
+      BWN.toast(sev || 'success', msg, { id: 'ecd', timeout: 16000 });
     }
-    // Auto-persist (coordinator opted in 2026-07-13): Umbrava doesn't autosave the
-    // Complete-By field on blur, so click the WO header Save ourselves. React marks the
-    // header form dirty a tick after the write, so give it a moment then poll for the
-    // Save button to enable. If it never does, fall back to pointing them at Save
-    // (with pulse) so the filled date is never silently lost.
-    function ecdFlagSave(usDT) {
-      var tries = 0;
-      function poll() {
-        var save = ecdSaveButton();
-        if (save && !save.disabled && save.offsetWidth > 0) {
-          try { save.click(); ecdToast('Completion date saved: ' + usDT + '.', null); }
-          catch (e) { ecdToast('Completion date filled: ' + usDT + ' - click “Save” in the WO header to persist it.', save); if (save) ecdPulse(save); }
-          return;
-        }
-        if (++tries > 16) {   // ~4s: Save never enabled - hand it back to the coordinator
-          ecdToast('Completion date filled: ' + usDT + ' - click “Save” in the WO header to persist it.' + (save ? '' : ' (Save button not found on this view.)'), save);
-          if (save) ecdPulse(save);
-          return;
-        }
-        setTimeout(poll, 250);
-      }
-      setTimeout(poll, 200);   // let React commit the write before reading Save's state
-    }
-
     function ecdHelperOpen(state) {
       if (!onWO() || !currentWOId()) { alert('Open a work order to set its expected completion date.'); return; }
       fetchNotesApi(currentWOId());   // no-op if the engine already warmed it; arms the re-propose below otherwise
       ensureEcdStyle();
       var old = document.getElementById('bwn-ecd-overlay'); if (old) old.remove();
       var prop = proposeECD(state);
-      var curRaw = inputVal(ECD_FIELD);
+      var curRaw = woFieldVal(ECD_FIELD);
       var ov = document.createElement('div'); ov.id = 'bwn-ecd-overlay';
       var card = document.createElement('div'); card.className = 'bwn-ecd';
       var releaseA11y = null;
@@ -5563,30 +5531,46 @@
       card.appendChild(body);
 
       var ft = document.createElement('div'); ft.className = 'bwn-ecd-ft';
-      var note = document.createElement('span'); note.className = 'sp'; note.textContent = 'Fills the date and saves it to the WO for you.'; ft.appendChild(note);
+      var note = document.createElement('span'); note.className = 'sp'; note.textContent = 'Writes the date to the WO record, then drafts the note.'; ft.appendChild(note);
       var apply = document.createElement('button'); apply.type = 'button'; apply.className = 'pri'; apply.textContent = 'Apply + draft note';
       apply.addEventListener('click', function () {
         var iso = di.value; if (!iso) { alert('Pick a date.'); return; }
-        var pp = iso.split('-'); var dt = new Date(parseInt(pp[0], 10), parseInt(pp[1], 10) - 1, parseInt(pp[2], 10));
+        var pp = iso.split('-');
+        // 11:59 PM LOCAL on the chosen day, which is what the SPA stores: the field showing
+        // "08/07/2026, 11:59 PM" reads back as 2026-08-08T03:59:00Z. Building the instant the
+        // same way keeps the no-op comparison in waSetEcd honest.
+        var dt = new Date(parseInt(pp[0], 10), parseInt(pp[1], 10) - 1, parseInt(pp[2], 10), 23, 59, 0);
         if (isNaN(dt.getTime())) { alert('That date is not valid.'); return; }
-        // The Complete-By field is a DATETIME (e.g. "07/01/2026, 11:59 PM") - a bare
-        // date is rejected. Always stamp 11:59 PM (end of the target day).
-        var us = ecdFmtUS(dt), usDT = us + ', 11:59 PM';
-        var f = ecdFieldInput();
-        var wrote = false;
-        if (f) { try { BWN.setNativeValue(f, usDT); f.dispatchEvent(new Event('blur', { bubbles: true })); wrote = true; } catch (e) { } }
-        try { navigator.clipboard.writeText(usDT).catch(function () { }); } catch (e) { }   // backup if the picker rejects the typed value
-        ingestPush('ecd-set', usDT);   // connector: log the ECD set (drained + POSTed by the AI script)
+        var usDT = ecdFmtUS(dt) + ', 11:59 PM';       // display + note wording only
+        var woNum = currentWOId();
+        if (!woNum) { ecdToast('Could not tell which work order this is - the date was NOT written.', 'error'); return; }
         var reason = ri.value.trim();
         var noteText = 'Expected completion date set to ' + usDT + '.' + (reason ? ' ' + reason : '') + (state.status ? ' Current status: ' + state.status + '.' : '');
-        close();
-        // Umbrava no longer persists the Complete-By field on blur - it needs the WO
-        // header Save. Per the coordinator's choice we DON'T auto-submit; instead point
-        // them straight at Save so the filled date can't silently revert (verified: a
-        // write+blur without Save reverts on reload).
-        if (wrote) ecdFlagSave(usDT); else ecdToast('Couldn’t find the Complete-By field to fill - set it manually in the WO header.', null);
-        // ECD notes are internal audit records - label the composer's note type accordingly.
-        insertWONote(noteText, function () { /* posted manually by the coordinator */ }, 'Internal');
+        // The write goes through the API now, not the page. Umbrava's rebuilt form has no Save
+        // button to click and its header holds no input to fill, so patchWorkOrder is the only
+        // path that still persists this - and it cannot half-apply the way fill-without-Save did.
+        waEcdSubmit(apply, woNum, dt.toISOString(), {
+          ok: function () {
+            close();
+            ingestPush('ecd-set', usDT);   // connector: log the ECD set (drained + POSTed by the AI script)
+            ecdToast('Expected completion date set to ' + usDT + '.');
+            // ECD notes are internal audit records - label the composer's note type accordingly.
+            insertWONote(noteText, function () { /* posted manually by the coordinator */ }, 'Internal');
+            refresh();   // the header's "days left" is derived from the ECD - recompute it
+          },
+          noop: function () {
+            close();
+            ecdToast('That is already the expected completion date - nothing was written.');
+          },
+          fail: function (e) {
+            // Stay OPEN on failure so the typed reason is not lost, and say what actually
+            // happened: a missing Umbrava permission is not a transient error to retry.
+            var msg = (e && e.bwnPermissionDenied)
+              ? 'Umbrava does not allow you to change the completion date on this work order, so nothing was written.'
+              : 'The expected completion date was NOT written: ' + ((e && e.message) || 'the request failed') + '.';
+            ecdToast(msg, 'error');
+          }
+        });
       });
       var cancel = document.createElement('button'); cancel.type = 'button'; cancel.textContent = 'Cancel'; cancel.addEventListener('click', close);
       ft.appendChild(apply); ft.appendChild(cancel); card.appendChild(ft);
@@ -5683,6 +5667,84 @@
         return r;
       }, function (e) {
         btn.disabled = false;
+        if (hooks.fail) hooks.fail(e);
+        throw e;
+      });
+    }
+    // B3 - SET ECD via patchWorkOrder, replacing the old type-into-the-picker + click-Save path.
+    // Umbrava rebuilt the WO form (2026-09-03): the header carries no inputs and there is no
+    // button reading "Save" anywhere on the details route, so the DOM writer's two halves - fill
+    // the field, then point the coordinator at Save - both lost their target. The API does not
+    // depend on either, and it is the same field the DOM now names `priority.expectedCompletionDate`.
+    //
+    // patchWorkOrder REPLACES the whole `priority` object, so every sibling field must be copied
+    // back or Umbrava blanks it. priorityWriteValue + WA_ECD_WO_Q are copied VERBATIM from
+    // bwn-dispatch.user.js (wire-proven 2026-08-12) - the read's `hasPriorityOverride` maps onto
+    // the input's `hasOverridePriority`, forced true because a hand-set ECD IS an override.
+    // ponytail: this is the third verbatim copy of the same 20 lines (bwn-write-queue, Core's
+    // bulk console, here). Fold all three into one shared-scope helper when a fourth caller
+    // appears - not sooner: the bulk console sits in a different bwnBoot closure that ships
+    // flag-OFF, so hoisting today would mean editing a sentinel region two harnesses slice.
+    var WA_ECD_WO_Q = 'query($n:Int!){ workOrder(workOrderNumber:$n){ serviceLevelAgreementId priority{ label responseMinutes firstTripDate serviceLevelAgreementMinutes expirationMinutes expectedCompletionDate hasPriorityOverride category skipWeekends } } }';
+    function waNum(v) { var n = Number(v); return isFinite(n) ? n : null; }
+    function waPriorityWriteValue(readPriority, newEcd) {
+      var p = readPriority || {};
+      return {
+        label: (p.label == null ? null : String(p.label)),
+        responseMinutes: waNum(p.responseMinutes),
+        firstTripDate: (p.firstTripDate == null ? null : String(p.firstTripDate)),
+        serviceLevelAgreementMinutes: waNum(p.serviceLevelAgreementMinutes),
+        expirationMinutes: waNum(p.expirationMinutes),
+        expectedCompletionDate: newEcd,
+        hasOverridePriority: true,
+        category: (p.category == null ? null : String(p.category)),
+        skipWeekends: !!p.skipWeekends
+      };
+    }
+    // newEcd is an ISO instant. Reads the WO first (the sibling priority fields are not on the
+    // page any more, and guessing them would blank real SLA data), no-ops when the stored ECD is
+    // already that calendar day, then sends ONE atomic patch.
+    function waSetEcd(woNumber, newEcd) {
+      var wo = Number(woNumber);
+      return bwnGqlOp('workOrder', WA_ECD_WO_Q, { n: wo }, { feature: 'woAssist' }).then(function (rd) {
+        var rec = rd && rd.workOrder;
+        if (!rec) { var e = new Error('W-' + wo + ' could not be read, so the ECD was NOT written'); e.bwnNonTransient = true; throw e; }
+        var oldEcd = rec.priority && rec.priority.expectedCompletionDate;
+        // Same-day = nothing to change. A high-risk write that alters nothing is pure downside.
+        if (oldEcd && String(oldEcd).slice(0, 10) === String(newEcd).slice(0, 10)) {
+          return { noop: true, before: oldEcd, after: newEcd };
+        }
+        var data = { workOrderNumber: wo, priority: { shouldInclude: true, value: waPriorityWriteValue(rec.priority, newEcd) } };
+        // Bundled by the SPA on a real ECD edit, but ONLY when the WO carries one.
+        if (rec.serviceLevelAgreementId) data.serviceLevelAgreementId = { shouldInclude: true, value: rec.serviceLevelAgreementId };
+        return bwnGqlOp('patchWorkOrder', PATCH_M, { data: data }, {
+          confirmed: true,
+          feature: 'woAssist',
+          validate: function (v) {
+            var d = v && v.data || {};
+            if (!d.workOrderNumber) return 'no WO number';
+            if (!(d.priority && d.priority.value && d.priority.value.expectedCompletionDate)) return 'no expected completion date';
+            return true;
+          },
+          ids: { wo: wo },
+          current: { ecd: oldEcd || null }, proposed: { ecd: newEcd }, irreversible: true,
+          before: { ecd: oldEcd || null }, after: { ecd: newEcd }
+        }).then(function () { return { noop: false, before: oldEcd || null, after: newEcd }; });
+      });
+    }
+    // Re-entry-guarded ECD set, same shape as waTaskSubmit / waStatusSubmit: the first click
+    // disables the button before the write lands, a failure re-enables it so the coordinator can
+    // retry, and the hooks let the dialog observe the outcome without this function touching DOM.
+    function waEcdSubmit(btn, woNumber, newEcd, hooks) {
+      hooks = hooks || {};
+      if (btn && btn.disabled) return null;
+      if (btn) btn.disabled = true;
+      return waSetEcd(woNumber, newEcd).then(function (r) {
+        if (r && r.noop) { if (hooks.noop) hooks.noop(r); return r; }
+        if (hooks.ok) hooks.ok(r);
+        return r;
+      }, function (e) {
+        if (btn) btn.disabled = false;
         if (hooks.fail) hooks.fail(e);
         throw e;
       });

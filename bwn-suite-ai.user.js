@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         BWN Suite - AI (Broadway National)
 // @namespace    broadwaynational.bwn
-// @version      1.45.21
+// @version      1.45.22
 // @downloadURL  https://raw.githubusercontent.com/Intermu/userscripts/main/bwn-suite-ai.user.js
 // @updateURL    https://raw.githubusercontent.com/Intermu/userscripts/main/bwn-suite-ai.user.js
 // @description  The Umbrava tools that call outside APIs, kept separate from the zero-egress Core script. Client Update and WO Audit drafts (Anthropic Claude; draft-only, scrubbed before sending, you review before posting); Find Techs / Find Suppliers (Google Places; vendor leads near a WO); and Job View (opens the Ops-Dashboard job card on the WO page - WO details from Umbrava plus the authored case file and next actions, read-only). Network access is limited by the browser to the declared API hosts and the BWN Static Web App. API keys are stored in Tampermonkey's storage via the menu commands and never enter the page. Toggle modules in BWN_MODULES below.
@@ -281,6 +281,20 @@
     }
 
     // ---- Field readers / React-safe setter ------------------------------------
+    // Umbrava rebuilt the WO detail form (measured live 2026-09-03, W-371126): the header
+    // wrapper now holds NO inputs at all, and the fields that used to carry a data-testid
+    // carry a `name` equal to their API field path instead - `priority.expectedCompletionDate`,
+    // `priority.firstTripDate`, `sourceJobNumber`, `doNotExceed`, `scopeOfWork`. Key on that
+    // `name`: it is the same string the GraphQL patch uses, so DOM and API stay in step, and
+    // unlike the label's `for` (`mui-32`) it is not MUI's per-render counter.
+    // A PO edit form can carry the same field names, so anything inside a PO accordion is
+    // skipped - the WO's own field is the one that is not in a POAccordion.
+    function woFieldInput(name) {
+      var els = document.querySelectorAll('input[name="' + name + '"], textarea[name="' + name + '"]');
+      for (var i = 0; i < els.length; i++) { if (!els[i].closest('[data-testid^="POAccordion-"]')) return els[i]; }
+      return null;
+    }
+    function woFieldVal(name) { var el = woFieldInput(name); return el ? (el.value || '') : ''; }
     function inputVal(testid) {
       var el = document.querySelector('[data-testid="' + testid + '"]');
       if (!el) return '';
@@ -2077,8 +2091,8 @@
         tracking: txt('work-order-header-tracking-number'),
         wo: txt('work-order-header-number-formatted'),
         status: inputVal('statusId-autocomplete-input'),
-        firstTrip: inputVal('work-order-first-trip-date-picker'),
-        completeBy: inputVal('work-order-expected-completion-date-picker'),
+        firstTrip: woFieldVal('priority.firstTripDate'),
+        completeBy: woFieldVal('priority.expectedCompletionDate'),
         location: txt('wo-location-dropdown-input-label'),
         assignedTo: inputVal('assignedTo-autocomplete-input')
       };
