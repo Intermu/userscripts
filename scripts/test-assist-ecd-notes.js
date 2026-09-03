@@ -89,6 +89,10 @@ var PRELUDE = [
   'function parseNoteDate(s) { var d = s ? new Date(s) : null; return (d && !isNaN(+d)) ? +d : null; }',
   'function parseUSDate(s) { var m = /^(\\d{1,2})\\/(\\d{1,2})\\/(\\d{4})/.exec(s || ""); return m ? +new Date(+m[3], +m[1] - 1, +m[2]) : null; }',
   'function inputVal() { return ""; }',
+  // Umbrava moved the WO form fields onto name="<api.field.path>" (2026-09-03); ecdFieldInput
+  // now goes through these, so the picker presence flag drives woFieldInput, not querySelector.
+  'function woFieldInput(n) { return H.ecdField ? { tagName: "INPUT", value: H.ecdValue } : null; }',
+  'function woFieldVal(n) { var e = woFieldInput(n); return e ? (e.value || "") : ""; }',
   'function onWO() { return true; }',
   'function getNotes() { lastNotesSrc = H.notesSrc; return H.notes; }',
   'function busNotesGet() { return H.busNotes; }',
@@ -130,6 +134,8 @@ function build(opts) {
     notesSrc: o.notesSrc || 'view',
     busNotes: o.busNotes || null,
     trips: o.trips || null,
+    ecdField: o.ecdField !== false,
+    ecdValue: o.ecdValue || '',
     published: [], opened: [], refreshes: 0, apiCalls: [],
     apiCall: function (n) {
       H.apiCalls.push(n);
@@ -146,10 +152,7 @@ function build(opts) {
     document: {
       // maybeAutoECD bails unless the Complete-By picker is mounted (hydration guard), so
       // the auto-pop probes need it present.
-      querySelector: function (sel) {
-        if (o.ecdField !== false && /expected-completion-date-picker/.test(sel || '')) return { tagName: 'INPUT' };
-        return null;
-      },
+      querySelector: function () { return null; },   // the ECD field is reached via woFieldInput now
       querySelectorAll: function () { return []; },
       getElementById: function () { return null; }
     }
@@ -389,46 +392,50 @@ var t8 = t7.then(function () {
   A.ok('...but never over an edit the coordinator made', coreFull.indexOf('if (touched || document.getElementById(\'bwn-ecd-overlay\') !== ov') !== -1, 'touched guard missing');
   A.ok('the shared bwnNotesApi block is still the one Deep Scan uses', coreFull.indexOf('  // ===== BEGIN bwnNotesApi =====') !== -1, 'transport block missing');
 
-  // ---- The Save-button attention ring (animation review 2026-08-10) ---------------------
-  // It points at Umbrava's own Save button because the Complete-By date does not autosave, so
-  // this is a data-loss guard: the probes are about what it COSTS and whether it respects a
-  // reduced-motion user, never about removing it. It ran 1.2s x 4 = 4.8s of continuous repaint
-  // and was not covered by any reduced-motion query.
-  console.log('\nECD save-button attention ring (cost + accessibility)');
-  function pulseRuleOf(src) {
-    var i = src.indexOf("'.bwn-ecd-savepulse{animation:");
-    if (i === -1) throw new Error('the .bwn-ecd-savepulse rule is gone');
-    return src.slice(i, src.indexOf('\n', i));
-  }
-  // Total motion = one pass x iteration count, read out of the shipped rule rather than assumed.
-  function pulseMs(rule) {
-    var m = rule.match(/animation:bwnEcdPulse\s+([\d.]+)s\s+[^;]*?\s(\d+);/);
-    return m ? Math.round(parseFloat(m[1]) * 1000) * parseInt(m[2], 10) : null;
-  }
-  var pulseRule = pulseRuleOf(coreFull);
-  A.ok('one pass is 420ms', /animation:bwnEcdPulse \.42s /.test(pulseRule), pulseRule);
-  A.ok('it pulses twice - enough to catch an eye that was elsewhere, not a loop',
-    / 2;/.test(pulseRule), pulseRule);
-  A.ok('total motion is under a second (it was 4800ms)', pulseMs(pulseRule) === 840, 'got ' + pulseMs(pulseRule));
-  A.ok('the static outline stays, because that is the actual affordance',
-    pulseRule.indexOf('outline:2px solid var(--bwn-green)!important') !== -1, pulseRule);
-  A.ok('reduced motion drops the pulse',
-    coreFull.indexOf("'@media (prefers-reduced-motion:reduce){.bwn-ecd-savepulse{animation:none;}}'") !== -1,
-    'the ring animates for a user who asked for no motion');
-  A.ok('...and drops ONLY the animation, so the outline still guards the unsaved date',
-    coreFull.indexOf('{.bwn-ecd-savepulse{animation:none;}}') !== -1 &&
-    coreFull.indexOf('{.bwn-ecd-savepulse{display:none') === -1);
-  A.ok('the keyframe no longer holds a dead tail at 0 opacity',
-    coreFull.indexOf('@keyframes bwnEcdPulse{from{box-shadow:0 0 0 0 rgba(46,160,90,.75);}to{box-shadow:0 0 0 9px rgba(46,160,90,0);}}') !== -1,
-    'the 70%-to-100% hold is back');
-  A.ok('the class is still removed on a timer, so nothing outlives the edit',
-    coreFull.indexOf("el.classList.remove('bwn-ecd-savepulse');") !== -1);
+  // ---- The field moved off data-testid, and the write moved off the DOM (2026-09-03) --------
+  // Umbrava rebuilt the WO form: the header holds no inputs, the pickers lost their testids for
+  // a `name` equal to their API field path, and no button on the page reads "Save". Reading by
+  // the old testid returned nothing, which is why maybeAutoECD's `if (!ecdFieldInput()) return;`
+  // kept the popup silent no matter what the suppressor did.
+  A.ok('the ECD field is addressed by its form NAME, not the retired testid',
+    coreFull.indexOf("var ECD_FIELD = 'priority.expectedCompletionDate';") !== -1, 'ECD_FIELD is not the name');
+  A.ok('no reader anywhere still queries the retired date-picker testids',
+    coreFull.indexOf('work-order-expected-completion-date-picker') === -1 &&
+    coreFull.indexOf('work-order-first-trip-date-picker') === -1, 'a retired testid is still queried');
+  A.ok('the first-trip read moved with it', coreFull.indexOf("woFieldVal('priority.firstTripDate')") !== -1, 'first-trip read not remapped');
+  A.ok('a PO accordion cannot shadow the WO field (a PO form carries the same names)',
+    coreFull.indexOf('[data-testid^="POAccordion-"]') !== -1 &&
+    /woFieldInput[\s\S]{0,400}POAccordion/.test(coreFull), 'woFieldInput does not exclude PO rows');
+  A.ok('Apply writes through the audited API, not by typing into the page',
+    coreFull.indexOf('waEcdSubmit(apply, woNum, dt.toISOString()') !== -1, 'the Apply handler is not on waEcdSubmit');
+  A.ok('...and the DOM writer is gone with the Save button it depended on',
+    coreFull.indexOf('ecdFlagSave') === -1 && coreFull.indexOf('ecdSaveButton') === -1, 'the dead Save machinery survives');
+  A.ok('the ECD write is a whole-object priority replace (siblings blank if dropped)',
+    coreFull.indexOf('function waPriorityWriteValue(readPriority, newEcd)') !== -1, 'waPriorityWriteValue missing');
 
-  // Control: put the 4.8s version back and require the cost probe to go red. Mutating the real
-  // rule is the point - a control against a hand-written string would pass on deleted source.
-  var oldForm = pulseRule.replace('animation:bwnEcdPulse .42s cubic-bezier(.23,1,.32,1) 2;', 'animation:bwnEcdPulse 1.2s ease-out 4;');
-  if (oldForm === pulseRule) throw new Error('MUTATION TARGET ABSENT: the pulse rule did not change');
-  A.ok('control: the pre-fix 4.8s form is caught by the cost probe', pulseMs(oldForm) === 4800, 'got ' + pulseMs(oldForm));
+  // ---- BWN-SHARED export/import contract ----------------------------------------------
+  // The shared block is an IIFE that hangs its helpers off BWN; every module then re-imports
+  // them (`var inputVal = BWN.inputVal;`). Defining a helper there is NOT enough to make it
+  // reachable, and neither `node --check` nor a harness that stubs the helper can tell -
+  // both were green while woFieldVal was undefined at all six of its call sites. CI's eslint
+  // caught it as no-undef. This probe is the local version of that catch.
+  ['bwn-suite-core.user.js', 'bwn-suite-ai.user.js'].forEach(function (f) {
+    var src = readLF(path.join(__dirname, '..', f));
+    // Everything before the export line is the shared block's own scope, where the helpers
+    // see each other directly (woFieldVal calls woFieldInput there). Only a call in MODULE
+    // code - after that line - needs an import.
+    var exportAt = src.indexOf('inputVal: inputVal');
+    A.ok(f + ': the BWN-SHARED export list is where it was', exportAt !== -1, 'export block moved');
+    var moduleCode = src.slice(exportAt);
+    ['woFieldInput', 'woFieldVal'].forEach(function (name) {
+      var usedBare = new RegExp('[^.\\w]' + name + '\\s*\\(').test(moduleCode);
+      if (!usedBare) return;
+      A.ok(f + ': ' + name + ' is exported on BWN',
+        src.indexOf(name + ': ' + name) !== -1, 'defined but never exported - unreachable from any module');
+      A.ok(f + ': ' + name + ' is imported into the module scope that calls it',
+        new RegExp('=\\s*BWN\\.' + name + '\\b').test(src), 'exported but never imported - no-undef at every call site');
+    });
+  });
 
   console.log('\n(auto-warm x auto-pop gate x proposal, real source, 5 mutations. Nothing here proves');
   console.log(' the popup renders, that Umbrava answers in a real tab, or that the proposed date is');

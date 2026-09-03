@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         BWN Suite - AI (Broadway National)
 // @namespace    broadwaynational.bwn
-// @version      1.45.21
+// @version      1.45.23
 // @downloadURL  https://raw.githubusercontent.com/Intermu/userscripts/main/bwn-suite-ai.user.js
 // @updateURL    https://raw.githubusercontent.com/Intermu/userscripts/main/bwn-suite-ai.user.js
 // @description  The Umbrava tools that call outside APIs, kept separate from the zero-egress Core script. Client Update and WO Audit drafts (Anthropic Claude; draft-only, scrubbed before sending, you review before posting); Find Techs / Find Suppliers (Google Places; vendor leads near a WO); and Job View (opens the Ops-Dashboard job card on the WO page - WO details from Umbrava plus the authored case file and next actions, read-only). Network access is limited by the browser to the declared API hosts and the BWN Static Web App. API keys are stored in Tampermonkey's storage via the menu commands and never enter the page. Toggle modules in BWN_MODULES below.
@@ -281,6 +281,20 @@
     }
 
     // ---- Field readers / React-safe setter ------------------------------------
+    // Umbrava rebuilt the WO detail form (measured live 2026-09-03, W-371126): the header
+    // wrapper now holds NO inputs at all, and the fields that used to carry a data-testid
+    // carry a `name` equal to their API field path instead - `priority.expectedCompletionDate`,
+    // `priority.firstTripDate`, `sourceJobNumber`, `doNotExceed`, `scopeOfWork`. Key on that
+    // `name`: it is the same string the GraphQL patch uses, so DOM and API stay in step, and
+    // unlike the label's `for` (`mui-32`) it is not MUI's per-render counter.
+    // A PO edit form can carry the same field names, so anything inside a PO accordion is
+    // skipped - the WO's own field is the one that is not in a POAccordion.
+    function woFieldInput(name) {
+      var els = document.querySelectorAll('input[name="' + name + '"], textarea[name="' + name + '"]');
+      for (var i = 0; i < els.length; i++) { if (!els[i].closest('[data-testid^="POAccordion-"]')) return els[i]; }
+      return null;
+    }
+    function woFieldVal(name) { var el = woFieldInput(name); return el ? (el.value || '') : ''; }
     function inputVal(testid) {
       var el = document.querySelector('[data-testid="' + testid + '"]');
       if (!el) return '';
@@ -852,7 +866,7 @@
       CLIENT_DEFAULTS_SEED: CLIENT_DEFAULTS_SEED, CLIENT_PROFILE_SEED: CLIENT_PROFILE_SEED, bwnClientProfile: bwnClientProfile,
       money: money, parseMoney: parseMoney, parseBare: parseBare, parseUSDate: parseUSDate,
       alphaOnly: alphaOnly, lcsLen: lcsLen,
-      inputVal: inputVal, setNativeValue: setNativeValue,
+      inputVal: inputVal, woFieldInput: woFieldInput, woFieldVal: woFieldVal, setNativeValue: setNativeValue,
       GREEN: GREEN, injectTokens: injectTokens,
       getTheme: getTheme, setTheme: setTheme, applyTheme: applyTheme,
       makeDropdown: makeDropdown, a11yDialog: a11yDialog,
@@ -2072,13 +2086,14 @@
       return el ? (el.textContent || '').trim() : '';
     }
     var inputVal = BWN.inputVal;
+    var woFieldVal = BWN.woFieldVal;
     function getHeader() {
       return {
         tracking: txt('work-order-header-tracking-number'),
         wo: txt('work-order-header-number-formatted'),
         status: inputVal('statusId-autocomplete-input'),
-        firstTrip: inputVal('work-order-first-trip-date-picker'),
-        completeBy: inputVal('work-order-expected-completion-date-picker'),
+        firstTrip: woFieldVal('priority.firstTripDate'),
+        completeBy: woFieldVal('priority.expectedCompletionDate'),
         location: txt('wo-location-dropdown-input-label'),
         assignedTo: inputVal('assignedTo-autocomplete-input')
       };
@@ -2093,7 +2108,12 @@
 
     function vendorNames() {
       var out = [];
-      document.querySelectorAll('[data-testid="purchase-order-vendor-name"]').forEach(function (el) {
+      // `-link` as well as `-name`: Umbrava renders the vendor as a LINK on every PO row now
+      // (measured 2026-09-03), so the name-only query returned nothing and this fell through to
+      // Core's bus every time. That matters more here than elsewhere - this list is what scrub()
+      // redacts before text leaves the browser, so an empty list means vendor names go UNSCRUBBED
+      // whenever Core is absent or its bus has not published yet. Matches the pair used below.
+      document.querySelectorAll('[data-testid="purchase-order-vendor-name"], [data-testid="purchase-order-vendor-link"]').forEach(function (el) {
         var v = (el.textContent || '').trim();
         if (v && out.indexOf(v) === -1) out.push(v);
       });
@@ -5125,7 +5145,12 @@ if (BWN_MODULES.jobView) BWN.safeModule('jobView', function () {
     // query by. Prefer it; the header testids below are guesses that may not exist.
     var u = location.pathname.match(/\/work-orders\/(\d+)/);
     if (u) return u[1];
-    var el = document.querySelector('[data-testid="work-order-header-work-order-number"]') ||
+    // Both of the old header testids are GONE (measured 2026-09-03); the header renders
+    // `work-order-header-number-formatted` ("W-371126"). The URL above still answers first on
+    // every WO route, so this branch was already dead weight - it is corrected rather than
+    // dropped because it is the fallback for a route where the path carries no number.
+    var el = document.querySelector('[data-testid="work-order-header-number-formatted"]') ||
+      document.querySelector('[data-testid="work-order-header-work-order-number"]') ||
       document.querySelector('[data-testid="work-order-header-number"]');
     var d = el ? String(el.textContent || '').replace(/\D+/g, '') : '';
     if (d) return d;

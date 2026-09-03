@@ -57,10 +57,26 @@ A.ok('WA-WRITES slice is DOM-free (only bwnGqlOp + consts)', !/\bdocument\b|\bwi
 // The PATCH_M doc must be the VERBATIM dispatch string, and the payload must send statusId alone.
 A.ok('PATCH_M is the verbatim dispatch mutation doc', S_WA.indexOf("var PATCH_M = 'mutation PatchWorkOrder($data: PatchWorkOrderInput!) { patchWorkOrder(data: $data) { success message } }';") !== -1);
 
+// Shaped like the live record read off W-371126 on 2026-09-03: an ECD stored as the UTC instant
+// of 11:59 PM local, a real SLA id, and siblings that patchWorkOrder blanks if they are not copied.
+var DEFAULT_WO_READ = {
+  serviceLevelAgreementId: 'dcc21347-28a7-46b0-9b97-a31345405df0',
+  priority: {
+    label: 'P4 PM', responseMinutes: 7200, firstTripDate: '2026-06-27T16:09:50Z',
+    serviceLevelAgreementMinutes: 66949, expirationMinutes: null,
+    expectedCompletionDate: '2026-08-08T03:59:00+00:00',
+    hasPriorityOverride: true, category: 'Standard', skipWeekends: false
+  }
+};
 function makeEnv(opts, waSrc) {
   opts = opts || {};
   var store = Object.create(null);
   var env = { calls: [] };
+  // The BWN-PERM block reads the decoded grant list out of localStorage. Seeding it here is how
+  // a probe models 'this user does not hold that checkbox'; absent = unknown = fails OPEN.
+  env.setPerm = function (groups, granted) {
+    store['bwn:perm:last'] = JSON.stringify({ v: 1, ts: Date.now(), ver: 'test', groups: groups, granted: granted });
+  };
   var sandbox = {
     Object: Object, Array: Array, Number: Number, String: String, JSON: JSON,
     Promise: Promise, Error: Error, RegExp: RegExp, Math: Math, Date: Date, console: console,
@@ -76,6 +92,11 @@ function makeEnv(opts, waSrc) {
     bwnGql: function (query, variables) {
       env.calls.push({ query: query, variables: variables });
       if (opts.fail) return Promise.reject(new Error('refused'));
+      // waSetEcd reads the WO before patching (the sibling priority fields are not on the page
+      // any more). Answer that read here; opts.woRead === null models a WO that cannot be read.
+      if (/workOrder\(workOrderNumber/.test(query)) {
+        return Promise.resolve({ workOrder: ('woRead' in opts) ? opts.woRead : DEFAULT_WO_READ });
+      }
       var field = /patchWorkOrder/.test(query) ? 'patchWorkOrder' : null;
       var o = {}; if (field) o[field] = { success: opts.envFalse ? false : true, message: '' };
       return Promise.resolve(o);
@@ -85,7 +106,8 @@ function makeEnv(opts, waSrc) {
   env.api = vm.runInContext(
     '(function () {\n' + S_OPS + '\n' + (waSrc || S_WA) + '\n' +
     'return { run: bwnGqlOp, PATCH_M: PATCH_M, waChangeStatus: waChangeStatus,\n' +
-    '  waStatusSubmit: waStatusSubmit, auditAll: bwnAuditAll };\n})()',
+    '  waStatusSubmit: waStatusSubmit, waSetEcd: waSetEcd, waEcdSubmit: waEcdSubmit,\n' +
+    '  auditAll: bwnAuditAll };\n})()',
     sandbox, { filename: 'wa-b2.js' });
   return env;
 }
@@ -224,6 +246,93 @@ function patchCalls(env) { return env.calls.filter(function (c) { return /patchW
     A.ok('render: "Change status…" is inside the woAssistWrites guard', /Change status/.test(region) && /statusHelperOpen\(state, act\)/.test(region));
     A.ok('render: it is scoped to advance:workcomplete + phase-chase rows', /act\.key === 'advance:workcomplete' \|\| act\.key\.indexOf\('phase:'\) === 0/.test(region));
   })();
+
+  // ---- B3: SET ECD via patchWorkOrder ------------------------------------------------------
+  // Replaces the old DOM writer (type into the picker, then click the WO header Save). Umbrava
+  // rebuilt the WO form on 2026-09-03: the header holds no inputs and no button reads "Save",
+  // so both halves of that writer lost their target. These drive the real WA-WRITES bytes.
+  console.log('\n-- B3: set the expected completion date through the API --');
+
+  var e10 = makeEnv();
+  var ecdBtn = { disabled: false };
+  var ecdOk = null, ecdNoop = false;
+  await e10.api.waEcdSubmit(ecdBtn, 371126, '2026-09-18T03:59:00.000Z', {
+    ok: function (r) { ecdOk = r; }, noop: function () { ecdNoop = true; }
+  });
+  await tick();
+  var c10 = patchCalls(e10);
+  A.eq('B3-happy: exactly one patchWorkOrder sent', c10.length, 1);
+  var d10 = c10.length ? c10[0].variables.data : {};
+  A.eq('B3-happy: data carries the WO, the whole priority, and the SLA id',
+    Object.keys(d10).sort(), ['priority', 'serviceLevelAgreementId', 'workOrderNumber']);
+  A.eq('B3-happy: workOrderNumber is numeric', d10.workOrderNumber, 371126);
+  A.eq('B3-happy: only the ECD is changed', d10.priority.value.expectedCompletionDate, '2026-09-18T03:59:00.000Z');
+  // THE hazard this shape exists for: patchWorkOrder replaces the entire priority object, so a
+  // sibling that is not copied back is BLANKED on a live record.
+  A.eq('B3-happy: the label sibling is carried, not blanked', d10.priority.value.label, 'P4 PM');
+  A.eq('B3-happy: the SLA minutes sibling is carried', d10.priority.value.serviceLevelAgreementMinutes, 66949);
+  A.eq('B3-happy: the first-trip sibling is carried', d10.priority.value.firstTripDate, '2026-06-27T16:09:50Z');
+  A.eq('B3-happy: the read hasPriorityOverride maps onto hasOverridePriority, forced true',
+    d10.priority.value.hasOverridePriority, true);
+  A.ok('B3-happy: the input carries no hasPriorityOverride key (that is the READ spelling)',
+    !('hasPriorityOverride' in d10.priority.value), Object.keys(d10.priority.value).join(','));
+  A.eq('B3-happy: ok fired with the before/after pair, noop did not', [!!ecdOk, ecdNoop], [true, false]);
+  A.eq('B3-happy: the audit entry records the outcome', (e10.api.auditAll()[0] || {}).outcome, 'ok');
+
+  // Same calendar day as the stored value -> no write at all. The stored ECD is a UTC instant, so
+  // this also pins that the comparison is made on the date part of the SAME representation.
+  var e11 = makeEnv();
+  var noopFired11 = false;
+  await e11.api.waEcdSubmit({ disabled: false }, 371126, '2026-08-08T03:59:00.000Z', { noop: function () { noopFired11 = true; } });
+  await tick();
+  A.eq('B3-noop: an unchanged date sends NO patch', patchCalls(e11).length, 0);
+  A.ok('B3-noop: and reports the no-op instead of claiming a write', noopFired11);
+
+  // A WO with no SLA id must not have the key invented.
+  var e12 = makeEnv({ woRead: { serviceLevelAgreementId: null, priority: { label: 'X', responseMinutes: 60, firstTripDate: null, serviceLevelAgreementMinutes: 60, expirationMinutes: null, expectedCompletionDate: '2026-01-01T00:00:00Z', hasPriorityOverride: false, category: 'Standard', skipWeekends: false } } });
+  await e12.api.waEcdSubmit({ disabled: false }, 371126, '2026-09-18T03:59:00.000Z', {});
+  await tick();
+  var d12 = patchCalls(e12)[0].variables.data;
+  A.ok('B3-nosla: serviceLevelAgreementId is omitted when the WO has none', !('serviceLevelAgreementId' in d12), Object.keys(d12).join(','));
+
+  // An unreadable WO must NOT fall through into a patch built on an empty priority - that would
+  // blank every sibling on the live record.
+  var e13 = makeEnv({ woRead: null });
+  var failed13 = null, btn13 = { disabled: false };
+  await e13.api.waEcdSubmit(btn13, 371126, '2026-09-18T03:59:00.000Z', { fail: function (e) { failed13 = e; } }).catch(function () { });
+  await tick();
+  A.eq('B3-unreadable: no patch is sent when the WO could not be read', patchCalls(e13).length, 0);
+  A.ok('B3-unreadable: it fails loudly rather than writing a guess', failed13 && /NOT written/.test(failed13.message), failed13 && failed13.message);
+  A.eq('B3-unreadable: the button is re-enabled so the coordinator can retry', btn13.disabled, false);
+
+  // The Umbrava permission gate owns the ECD field via WorkOrderField.CompletionSLA.
+  var e14 = makeEnv();
+  var permDenied = null;
+  e14.setPerm(['WorkOrderField'], ['WorkOrderField.Status']);   // has Status, NOT CompletionSLA
+  await e14.api.waEcdSubmit({ disabled: false }, 371126, '2026-09-18T03:59:00.000Z', { fail: function (e) { permDenied = e; } }).catch(function () { });
+  await tick();
+  A.eq('B3-perm: a user without WorkOrderField.CompletionSLA sends NO patch', patchCalls(e14).length, 0);
+  A.ok('B3-perm: and the refusal names the permission', permDenied && /CompletionSLA/.test(permDenied.message), permDenied && permDenied.message);
+
+  // ---- B3 mutations: each must redden a probe above -----------------------------------------
+  console.log('\n-- B3 mutations --');
+
+  // M-B3a: stop copying a sibling. This is the exact bug the whole-object contract exists to
+  // prevent, and on a live WO it silently wipes the SLA window.
+  var mA = makeEnv({}, mutate(S_WA, '        serviceLevelAgreementMinutes: waNum(p.serviceLevelAgreementMinutes),\n', ''));
+  await mA.api.waEcdSubmit({ disabled: false }, 371126, '2026-09-18T03:59:00.000Z', {});
+  await tick();
+  A.ok('M-B3a dropping a sibling from the copy blanks it in the payload',
+    patchCalls(mA)[0].variables.data.priority.value.serviceLevelAgreementMinutes === undefined,
+    'the sibling survived a mutation that should have removed it');
+
+  // M-B3b: drop the no-op pre-check -> an unchanged date becomes a real high-risk write.
+  var mB = makeEnv({}, mutate(S_WA,
+    "          return { noop: true, before: oldEcd, after: newEcd };",
+    "          void 0;"));
+  await mB.api.waEcdSubmit({ disabled: false }, 371126, '2026-08-08T03:59:00.000Z', {});
+  await tick();
+  A.eq('M-B3b without the no-op pre-check an unchanged date still patches', patchCalls(mB).length, 1);
 
   A.finish();
 })().catch(function (e) { console.error('\nHARNESS ERROR:', e && e.stack || e); process.exit(2); });
