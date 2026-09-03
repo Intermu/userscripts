@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         BWN Suite - AI (Broadway National)
 // @namespace    broadwaynational.bwn
-// @version      1.45.22
+// @version      1.45.23
 // @downloadURL  https://raw.githubusercontent.com/Intermu/userscripts/main/bwn-suite-ai.user.js
 // @updateURL    https://raw.githubusercontent.com/Intermu/userscripts/main/bwn-suite-ai.user.js
 // @description  The Umbrava tools that call outside APIs, kept separate from the zero-egress Core script. Client Update and WO Audit drafts (Anthropic Claude; draft-only, scrubbed before sending, you review before posting); Find Techs / Find Suppliers (Google Places; vendor leads near a WO); and Job View (opens the Ops-Dashboard job card on the WO page - WO details from Umbrava plus the authored case file and next actions, read-only). Network access is limited by the browser to the declared API hosts and the BWN Static Web App. API keys are stored in Tampermonkey's storage via the menu commands and never enter the page. Toggle modules in BWN_MODULES below.
@@ -2107,7 +2107,12 @@
 
     function vendorNames() {
       var out = [];
-      document.querySelectorAll('[data-testid="purchase-order-vendor-name"]').forEach(function (el) {
+      // `-link` as well as `-name`: Umbrava renders the vendor as a LINK on every PO row now
+      // (measured 2026-09-03), so the name-only query returned nothing and this fell through to
+      // Core's bus every time. That matters more here than elsewhere - this list is what scrub()
+      // redacts before text leaves the browser, so an empty list means vendor names go UNSCRUBBED
+      // whenever Core is absent or its bus has not published yet. Matches the pair used below.
+      document.querySelectorAll('[data-testid="purchase-order-vendor-name"], [data-testid="purchase-order-vendor-link"]').forEach(function (el) {
         var v = (el.textContent || '').trim();
         if (v && out.indexOf(v) === -1) out.push(v);
       });
@@ -5139,7 +5144,12 @@ if (BWN_MODULES.jobView) BWN.safeModule('jobView', function () {
     // query by. Prefer it; the header testids below are guesses that may not exist.
     var u = location.pathname.match(/\/work-orders\/(\d+)/);
     if (u) return u[1];
-    var el = document.querySelector('[data-testid="work-order-header-work-order-number"]') ||
+    // Both of the old header testids are GONE (measured 2026-09-03); the header renders
+    // `work-order-header-number-formatted` ("W-371126"). The URL above still answers first on
+    // every WO route, so this branch was already dead weight - it is corrected rather than
+    // dropped because it is the fallback for a route where the path carries no number.
+    var el = document.querySelector('[data-testid="work-order-header-number-formatted"]') ||
+      document.querySelector('[data-testid="work-order-header-work-order-number"]') ||
       document.querySelector('[data-testid="work-order-header-number"]');
     var d = el ? String(el.textContent || '').replace(/\D+/g, '') : '';
     if (d) return d;

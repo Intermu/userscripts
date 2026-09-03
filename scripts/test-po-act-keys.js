@@ -292,6 +292,20 @@ var m4 = probeSidLadder(mutate(S_READPOS,
   '        if (false) sid = sid + \'-\' + num;'));
 A.ok('M4 dropping the collision suffix breaks key distinctness', m4.collisionSuffixed === false, JSON.stringify(m4));
 
+// ---- The vendor element is a LINK now, everywhere (measured 2026-09-03) --------------------
+// Umbrava renders every PO row's vendor as `purchase-order-vendor-link`; `purchase-order-vendor-name`
+// did not appear on a single row of a real 3-PO work order. Any reader that queries only `-name`
+// silently degrades - vendorOf() always had the link fallback, two other call sites did not.
+console.log('\nPO vendor element: every reader tolerates the link form');
+
+// Probe the CODE, not the prose: a comment that merely names the link form would otherwise
+// satisfy a naive window search (it did, on the first draft of this probe).
+var coreCode = coreFull.replace(/^\s*\/\/.*$/gm, '');
+var vendorNameHits = (coreCode.match(/purchase-order-vendor-name/g) || []).length;
+var pairedHits = (coreCode.match(/purchase-order-vendor-name[\s\S]{0,140}?purchase-order-vendor-link/g) || []).length;
+A.ok('Core still reads the vendor element at all', vendorNameHits > 0, 'the vendor readers vanished');
+A.eq('every vendor-name query in Core has the link form beside it', pairedHits, vendorNameHits);
+
 console.log('\n(ladder/stability/converge/migration/nav x real source, 4 mutations. Nothing here');
 console.log(' proves the checklist renders - the live Phase 2 dock test on the board covers that.)');
 A.finish();
