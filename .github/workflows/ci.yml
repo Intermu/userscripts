@@ -592,6 +592,15 @@ jobs:
       - name: Permission gate harness (BWN-PERM paste ledger + real-mask decode + negative controls)
         run: node scripts/test-perm-block-ledger.js
 
+      # WO Intake cross-client guards. The five per-client harnesses each prove their own field
+      # mapping; this one pins the guarantees that span them: sanitizeWo() strips inline contact
+      # details out of Scope/_note/_warn AND is actually wired into fillWo (with a control proving
+      # that check can fail), the script still carries no write path, no egress primitive and no
+      # synthesized click on a Create control, the .msg directory maps stay null-prototype, and every
+      # extractor degrades to blank fields on an anchor-missing, truncated or entity-laden document.
+      - name: WO Intake guards (PII containment + no-auto-create + malformed input)
+        run: node scripts/test-intake-guards.js
+
       # US-0: the canonical roster vs the shipped bytes. Enumerates every bwn-*.user.js, forces each
       # into a scripts/userscript-manifest.json row (both directions), and checks the auto-update
       # chain end to end: @updateURL == @downloadURL == the raw main URL for that filename, @version

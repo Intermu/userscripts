@@ -109,7 +109,9 @@
       (function walk(d) { if (d === NIL || d == null) return; var n = entries[d]; if (!n) return; walk(n.left); out.push(n); walk(n.right); })(e.child);
       return out;
     }
-    var topByName = {}; if (root) childrenOf(root.did).forEach(function (e) { topByName[e.name] = e; });
+    // Null-prototype: the key is a directory-entry name read straight out of an attacker-supplied
+    // .msg, so a stream named __proto__ must not reach Object.prototype or shadow a real lookup.
+    var topByName = Object.create(null); if (root) childrenOf(root.did).forEach(function (e) { topByName[e.name] = e; });
     return {
       // message-level property streams live directly under the root storage
       get: function (tag) { var e = topByName['__substg1.0_' + tag]; return e ? readStream(e) : null; },
@@ -120,7 +122,7 @@
         var out = [];
         childrenOf(root.did).forEach(function (e) {
           if (e.type !== 1 || !/^__attach_version1\.0_/i.test(e.name)) return;
-          var byName = {}; childrenOf(e.did).forEach(function (k) { byName[k.name] = k; });
+          var byName = Object.create(null); childrenOf(e.did).forEach(function (k) { byName[k.name] = k; });
           function s(tag) { var x = byName['__substg1.0_' + tag]; return x ? readStream(x) : null; }
           var nm = utf16(s('3707001F')) || latin1(s('3707001E')) || utf16(s('3704001F')) || latin1(s('3704001E')) || '';
           var mime = utf16(s('370E001F')) || latin1(s('370E001E')) || '';
@@ -1186,8 +1188,45 @@
       })();
     });
   }
+  // ---- PII guard at the fill boundary ----------------------------------------------------------
+  // Client emails carry contact details INLINE, mid-sentence: "call Jane at 555-0100 for access",
+  // "contact the property engineer, Sam Roe, at 555-0101". genericBodyScope only breaks on a
+  // signature-shaped LINE (leading phone label, a line containing an email, a sign-off), so an
+  // inline number or address survives into the Scope of Work field. Scope matters beyond this
+  // script: bwn-bid-out reads scopeOfWork back out of Umbrava and pastes it into the BCC'd vendor
+  // RFP, where Hard Rule 5 permits city/state only - no client name, street or contact.
+  //
+  // One guard here, at the single point where every client path hands its fields to the modal,
+  // rather than seven per-extractor patches. Scoped honestly: this narrows what INTAKE contributes
+  // to Scope. It does NOT close the vendor-facing path, because a coordinator can type a name and
+  // number into Scope by hand; that check belongs at bid-out's render and send boundary.
+  var PII_EMAIL = /[A-Za-z0-9._%+\-]+@[A-Za-z0-9.\-]+\.[A-Za-z]{2,}/g;
+  var PII_PHONE = /(?:\+?1[ .\-]?)?\(?\d{3}\)?[ .\-]\d{3}[ .\-]\d{4}\b/g;
+  var TEXT_CAP = 600;   // same ceiling the extractors already apply to scope
+
+  function stripInlinePii(s) {
+    // Deliberately does NOT collapse whitespace: the CorrigoPro Problem block and the Pilot
+    // asset block carry meaningful newlines, and flattening them would damage the scope a human
+    // is about to review.
+    return String(s === null || s === undefined ? '' : s)
+      .replace(PII_EMAIL, '[contact removed]')
+      .replace(PII_PHONE, '[phone removed]')
+      .trim();
+  }
+
+  // Applied to the three fields built from document text. Everything else on `wo` is a parsed
+  // identifier (WO number, site code, priority tier) or a field label, none of which is free text.
+  function sanitizeWo(wo) {
+    if (!wo) return wo;
+    if (wo.scope) wo.scope = stripInlinePii(wo.scope).slice(0, TEXT_CAP);
+    if (wo._note) wo._note = stripInlinePii(wo._note).slice(0, TEXT_CAP);
+    if (wo._warn) wo._warn = stripInlinePii(wo._warn).slice(0, TEXT_CAP);
+    return wo;
+  }
+
   function fillWo(root, wo) {
     var done = [], picked = [], hint = [];
+    sanitizeWo(wo);                                                     // before ANY of it is rendered, stored or filled
     if (wo._warn) toast('⚠ Heads up: ' + wo._warn, 18000, '#8b1a1a');   // cancel/flag on the WO PDF - warn before Create
     function setV(sel, v, label) { var el = root.querySelector(sel); if (el && v) { setNativeValue(el, v); done.push(label); } }
     setV('textarea#scopeOfWork', wo.scope, 'Scope');
@@ -1261,7 +1300,9 @@
             .filter(function (x) { return /^reactive$/i.test(normText(x.value || x.getAttribute('value') || '')); })[0] || null;
         }
         // Ground-truth diagnostic (read the console if the auto-select ever misses live).
-        try { console.info('[BWN WO INTAKE] WO Type target:', typeEl ? (typeEl.id || typeEl.name || typeEl.className || typeEl.tagName) : 'NOT FOUND - "Type" label not matched', '| value:', typeEl ? (typeEl.value || '') : ''); } catch (e) { }
+        // Element identity only. The value is document-derived and the label match below is loose
+        // (it can land on any input), so echoing it risked printing client text to the console.
+        try { console.info('[BWN WO INTAKE] WO Type target:', typeEl ? (typeEl.id || typeEl.name || typeEl.className || typeEl.tagName) : 'NOT FOUND - "Type" label not matched'); } catch (e) { }
         var rwt = await selectAC(typeEl, wo._woType, wo._woType);
         // If the option-click did not commit: type the value, click a matching option (role=option /
         // menuitem / li), then Enter, and verify the field actually shows the value.
@@ -1522,7 +1563,7 @@
     var dz = document.createElement('div');
     dz.id = 'bwn-wo-drop';
     dz.style.cssText = 'display:block;width:100%;box-sizing:border-box;margin:16px 0 4px;padding:18px 20px;border:1.5px dashed #c2d8cd;border-radius:12px;background:#f4f9f6;color:#0d3d26;font:600 13.5px ' + FONT + ';text-align:center;cursor:pointer;line-height:1.45;transition:border-color .15s,background-color .15s;';
-    dz.innerHTML = '<div style="display:flex;align-items:center;justify-content:center;gap:8px;"><span style="font-size:18px;line-height:1;">📧</span><span>Drop the PO email to prefill</span></div><div style="font:400 12px ' + FONT + ';color:#6a7d73;margin-top:5px;">.msg or .eml, read locally &mdash; nothing leaves your browser</div>';
+    dz.innerHTML = '<div style="display:flex;align-items:center;justify-content:center;gap:8px;"><span style="font-size:18px;line-height:1;">📧</span><span>Drop the PO email to prefill</span></div><div style="font:400 12px ' + FONT + ';color:#6a7d73;margin-top:5px;">.msg or .eml, read locally - nothing leaves your browser</div>';
     var file = document.createElement('input'); file.type = 'file'; file.accept = '.msg,.eml,message/rfc822,application/vnd.ms-outlook'; file.style.display = 'none';
     dz.appendChild(file);
     dz.addEventListener('click', function (e) { if (e.target !== file) { file.value = ''; file.click(); } });
