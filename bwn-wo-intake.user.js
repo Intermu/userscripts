@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         BWN WO Intake (Broadway National)
 // @namespace    broadwaynational.bwn
-// @version      0.9.25
+// @version      0.9.26
 // @downloadURL  https://raw.githubusercontent.com/Intermu/userscripts/main/bwn-wo-intake.user.js
 // @updateURL    https://raw.githubusercontent.com/Intermu/userscripts/main/bwn-wo-intake.user.js
 // @description  Drop a client PO/WO email (.msg or .eml) onto the Create Work Order modal and it prefills the fields. Pilot Travel Centers: from the email body. Caleres (Famous Footwear / Corrigo): reads the attached WO PDF on-device for Trade, Scope, Priority, Due-By, Store, NTE. If a Caleres request has no WO PDF (image-only), it reads Store, City/State and Trade from the subject and the scope from the body (NTE + Priority stay manual - they live only in the images). Amazon (Fairmarkit RFQ): the buyer is Amazon.com, Inc. but the sender is the Fairmarkit e-bidding platform - reads the RFQ body (no PDF) for Site (matched by the Amazon site code e.g. PIT2/STL3, else the shipping address), RFQ #, Trade, Scope + line items; NTE and Priority stay manual because an RFQ carries no ceiling yet (we are the quoting supplier). The email carries no attachment - the full scope / any 'see attached file' lives on the Fairmarkit bid page - so it surfaces that RFQ link and warns you when the body defers to it. Per Amazon: Source PO # is set to the literal "Quote Request", Source Job # is set to the RFQ ID suffixed " (FM-AMZ)" (e.g. 2956102 (FM-AMZ)), Client DNE is set to 0.00, and WO Type is selected as Proposal in the create modal - all filled in the one pass (no post-Create tracking-number step). Selects Client, Location (address-verified), Trade and Priority by clicking the real dropdown option; fills Client DNE, Source Job # and Source PO #; warns you if the WO PDF shows a cancel/flag note. CW-Amazon (Cushman & Wakefield / FAMIS 360, from amazon@ilrs.360facility.net - a separate feed from Fairmarkit, so the client is "CW-Amazon"): reads the plain-text Case Summary for Site (matched by the exact site code = Umbrava locationNumber), Request ID (-> Source Job #; Source PO # is left blank per the client convention), Trade, Scope, Client DNE (from the PO/NTE amount in the Statement of Work, else 0.00) and Priority (the FAMIS P-code -> the client's "P<n> - ..." priority, or Scheduled PPM); it sets WO Type from the Type|Sub-Type line - a Request for Proposal -> Proposal, a preventive/PPM job -> Preventative, everything else -> Reactive. Then, after you Create the WO, it hands the email to BWN Drop Upload to attach it to the new WO's Documents. JLL-Amazon (Jones Lang LaSalle / CorrigoPro, from alerts@am.corrigopro.com - a separate feed again, so the client is "JLL-Amazon"): reads the "WORK ORDER #..." body for Site (matched by the exact property/site code = Umbrava locationNumber, e.g. BNA12/ATL11/DEN17), the CorrigoPro WO number (set as BOTH Source Job # and Source PO # per the client convention), Scope, Client DNE (the NTE, else 0.00) and Priority (the email's priority IS the Umbrava label - a PM job is "PM (Scheduled)"); it sets WO Type from the job kind - a PM (Scheduled) job -> Preventative, everything else -> Reactive. CW-Amazon via CorrigoPro (C&W Services on the CorrigoPro network, from alerts@am.corrigopro.com with subject "...received from C&W Services" - the SAME CorrigoPro format as JLL-Amazon but a different brand, so the client is still "CW-Amazon"): reads the "WORK ORDER #..." body for Site (the code in "Requested By: AMAZON <code>", e.g. IFM-JFK8 = Umbrava locationNumber), the CorrigoPro WO number (BOTH Source Job # and Source PO #), Scope (the Problem block), Trade (from the Problem "<Area> > <Issue>" head), Client DNE (the NTE, else 0.00), WO Type (a PM/preventive job -> Preventative, a proposal -> Proposal, else Reactive - the CorrigoPro Details "Type:" line is a ridealong and is ignored) and Priority (the Details "Priority:" value - "PM" -> "Scheduled PPM"). Transform SR Brands LLC (TransformCo / Sears / Kmart, sender @transformco.com): reads the free-text dispatch/quote email body for Location (the store number in the subject = the Umbrava locationNumber), the TransformCo WO/PO reference number (set as BOTH Source Job # and Source PO #), Client DNE (the NTE, with $1K/$2K shorthand expanded), Scope (the request body) and a best-effort Trade; WO Type is set to Reactive and Priority is left blank (the client's SLA tier is a manual coordinator pick). Reads everything in the browser; nothing is uploaded to any server. Best-effort: review every field before you click Create.
@@ -13,7 +13,7 @@
 
 (function () {
   'use strict';
-  var VER = '0.9.25';
+  var VER = '0.9.26';
   var FONT = "-apple-system,BlinkMacSystemFont,'Segoe UI','Helvetica Neue',Arial,sans-serif";
   console.info('[BWN WO INTAKE] v' + VER + ' - drop a PO / Amazon RFQ email (.msg/.eml) on Create Work Order to prefill + auto-attach to the new WO Documents (via Drop Upload); reads locally, nothing leaves the browser');
 
@@ -109,7 +109,9 @@
       (function walk(d) { if (d === NIL || d == null) return; var n = entries[d]; if (!n) return; walk(n.left); out.push(n); walk(n.right); })(e.child);
       return out;
     }
-    var topByName = {}; if (root) childrenOf(root.did).forEach(function (e) { topByName[e.name] = e; });
+    // Null-prototype: the key is a directory-entry name read straight out of an attacker-supplied
+    // .msg, so a stream named __proto__ must not reach Object.prototype or shadow a real lookup.
+    var topByName = Object.create(null); if (root) childrenOf(root.did).forEach(function (e) { topByName[e.name] = e; });
     return {
       // message-level property streams live directly under the root storage
       get: function (tag) { var e = topByName['__substg1.0_' + tag]; return e ? readStream(e) : null; },
@@ -120,7 +122,7 @@
         var out = [];
         childrenOf(root.did).forEach(function (e) {
           if (e.type !== 1 || !/^__attach_version1\.0_/i.test(e.name)) return;
-          var byName = {}; childrenOf(e.did).forEach(function (k) { byName[k.name] = k; });
+          var byName = Object.create(null); childrenOf(e.did).forEach(function (k) { byName[k.name] = k; });
           function s(tag) { var x = byName['__substg1.0_' + tag]; return x ? readStream(x) : null; }
           var nm = utf16(s('3707001F')) || latin1(s('3707001E')) || utf16(s('3704001F')) || latin1(s('3704001E')) || '';
           var mime = utf16(s('370E001F')) || latin1(s('370E001E')) || '';
@@ -1186,8 +1188,45 @@
       })();
     });
   }
+  // ---- PII guard at the fill boundary ----------------------------------------------------------
+  // Client emails carry contact details INLINE, mid-sentence: "call Jane at 555-0100 for access",
+  // "contact the property engineer, Sam Roe, at 555-0101". genericBodyScope only breaks on a
+  // signature-shaped LINE (leading phone label, a line containing an email, a sign-off), so an
+  // inline number or address survives into the Scope of Work field. Scope matters beyond this
+  // script: bwn-bid-out reads scopeOfWork back out of Umbrava and pastes it into the BCC'd vendor
+  // RFP, where Hard Rule 5 permits city/state only - no client name, street or contact.
+  //
+  // One guard here, at the single point where every client path hands its fields to the modal,
+  // rather than seven per-extractor patches. Scoped honestly: this narrows what INTAKE contributes
+  // to Scope. It does NOT close the vendor-facing path, because a coordinator can type a name and
+  // number into Scope by hand; that check belongs at bid-out's render and send boundary.
+  var PII_EMAIL = /[A-Za-z0-9._%+\-]+@[A-Za-z0-9.\-]+\.[A-Za-z]{2,}/g;
+  var PII_PHONE = /(?:\+?1[ .\-]?)?\(?\d{3}\)?[ .\-]\d{3}[ .\-]\d{4}\b/g;
+  var TEXT_CAP = 600;   // same ceiling the extractors already apply to scope
+
+  function stripInlinePii(s) {
+    // Deliberately does NOT collapse whitespace: the CorrigoPro Problem block and the Pilot
+    // asset block carry meaningful newlines, and flattening them would damage the scope a human
+    // is about to review.
+    return String(s === null || s === undefined ? '' : s)
+      .replace(PII_EMAIL, '[contact removed]')
+      .replace(PII_PHONE, '[phone removed]')
+      .trim();
+  }
+
+  // Applied to the three fields built from document text. Everything else on `wo` is a parsed
+  // identifier (WO number, site code, priority tier) or a field label, none of which is free text.
+  function sanitizeWo(wo) {
+    if (!wo) return wo;
+    if (wo.scope) wo.scope = stripInlinePii(wo.scope).slice(0, TEXT_CAP);
+    if (wo._note) wo._note = stripInlinePii(wo._note).slice(0, TEXT_CAP);
+    if (wo._warn) wo._warn = stripInlinePii(wo._warn).slice(0, TEXT_CAP);
+    return wo;
+  }
+
   function fillWo(root, wo) {
     var done = [], picked = [], hint = [];
+    sanitizeWo(wo);                                                     // before ANY of it is rendered, stored or filled
     if (wo._warn) toast('⚠ Heads up: ' + wo._warn, 18000, '#8b1a1a');   // cancel/flag on the WO PDF - warn before Create
     function setV(sel, v, label) { var el = root.querySelector(sel); if (el && v) { setNativeValue(el, v); done.push(label); } }
     setV('textarea#scopeOfWork', wo.scope, 'Scope');
@@ -1261,7 +1300,9 @@
             .filter(function (x) { return /^reactive$/i.test(normText(x.value || x.getAttribute('value') || '')); })[0] || null;
         }
         // Ground-truth diagnostic (read the console if the auto-select ever misses live).
-        try { console.info('[BWN WO INTAKE] WO Type target:', typeEl ? (typeEl.id || typeEl.name || typeEl.className || typeEl.tagName) : 'NOT FOUND - "Type" label not matched', '| value:', typeEl ? (typeEl.value || '') : ''); } catch (e) { }
+        // Element identity only. The value is document-derived and the label match below is loose
+        // (it can land on any input), so echoing it risked printing client text to the console.
+        try { console.info('[BWN WO INTAKE] WO Type target:', typeEl ? (typeEl.id || typeEl.name || typeEl.className || typeEl.tagName) : 'NOT FOUND - "Type" label not matched'); } catch (e) { }
         var rwt = await selectAC(typeEl, wo._woType, wo._woType);
         // If the option-click did not commit: type the value, click a matching option (role=option /
         // menuitem / li), then Enter, and verify the field actually shows the value.
@@ -1315,8 +1356,27 @@
     });
   }
   function idbPut(k, v) { return idbReq('readwrite', function (st) { st.put(v, k); }); }
-  function idbGet(k) { return idbReq('readonly', function (st) { return st.get(k); }); }
-  function idbDel(k) { return idbReq('readwrite', function (st) { st.delete(k); }).catch(function () { }); }
+
+  // Consume-once, ATOMICALLY: read and delete inside ONE readwrite transaction, so two
+  // overlapping checks can never both claim the same pending files. A readonly get followed
+  // by a separate delete is NOT enough - readonly transactions run concurrently, so a second
+  // checker (the other tab Umbrava leaves on the same new WO, or a load + path-change tick in
+  // this one) reads the record before the delete commits and hands the same files to Drop
+  // Upload a second time. That is what duplicated every document on W-392732 (2026-09-03:
+  // two bulkAdd batches 10ms apart). Resolves the record only when this caller deleted it.
+  function idbClaim(k, pathNow, maxAgeMs) {
+    var claimed = null;
+    return idbReq('readwrite', function (st) {
+      var g = st.get(k);
+      g.onsuccess = function () {
+        var v = g.result;
+        if (!v || !v.files || !v.files.length) return;
+        if (Date.now() - v.ts > maxAgeMs) { st.delete(k); return; }   // stale - drop it, claim nothing
+        if (v.fromPath === pathNow) return;                           // create failed / not navigated yet - leave it for later
+        st.delete(k); claimed = v;
+      };
+    }).then(function () { return claimed; });
+  }
 
   // On the modal's Create click (with a dropped email pending), persist for the new WO page.
   // fromPath lets the new page tell a real create-navigation from a validation failure (modal
@@ -1343,12 +1403,9 @@
   var _consuming = false;
   function maybeConsumePending() {
     if (_consuming || !/\/work-orders\/\d+/.test(location.pathname)) return;
-    idbGet('current').then(function (p) {
-      if (!p || !p.files || !p.files.length) return;
-      if (Date.now() - p.ts > 3 * 60 * 1000) { idbDel('current'); return; }   // stale
-      if (p.fromPath === location.pathname) return;                            // create failed / not navigated yet - wait
-      _consuming = true;
-      idbDel('current');   // consume-once: delete before dispatch so a re-check can't double-fire
+    _consuming = true;   // claim this TAB synchronously - two overlapping calls both cleared the old check before either's read resolved
+    idbClaim('current', location.pathname, 3 * 60 * 1000).then(function (p) {
+      if (!p) { _consuming = false; return; }
       waitWoReady(9000).then(function () {
         var acked = false;
         function onAck(ev) { if (ev && ev.detail && ev.detail.id === 'dropupload:accepted') acked = true; }
@@ -1361,7 +1418,7 @@
           _consuming = false;
         }, 1800);
       });
-    }).catch(function () { });
+    }).catch(function () { _consuming = false; });   // an IDB error must not wedge the tab's consumer
   }
 
   async function handleDrop(file, root) {
@@ -1522,7 +1579,7 @@
     var dz = document.createElement('div');
     dz.id = 'bwn-wo-drop';
     dz.style.cssText = 'display:block;width:100%;box-sizing:border-box;margin:16px 0 4px;padding:18px 20px;border:1.5px dashed #c2d8cd;border-radius:12px;background:#f4f9f6;color:#0d3d26;font:600 13.5px ' + FONT + ';text-align:center;cursor:pointer;line-height:1.45;transition:border-color .15s,background-color .15s;';
-    dz.innerHTML = '<div style="display:flex;align-items:center;justify-content:center;gap:8px;"><span style="font-size:18px;line-height:1;">📧</span><span>Drop the PO email to prefill</span></div><div style="font:400 12px ' + FONT + ';color:#6a7d73;margin-top:5px;">.msg or .eml, read locally &mdash; nothing leaves your browser</div>';
+    dz.innerHTML = '<div style="display:flex;align-items:center;justify-content:center;gap:8px;"><span style="font-size:18px;line-height:1;">📧</span><span>Drop the PO email to prefill</span></div><div style="font:400 12px ' + FONT + ';color:#6a7d73;margin-top:5px;">.msg or .eml, read locally - nothing leaves your browser</div>';
     var file = document.createElement('input'); file.type = 'file'; file.accept = '.msg,.eml,message/rfc822,application/vnd.ms-outlook'; file.style.display = 'none';
     dz.appendChild(file);
     dz.addEventListener('click', function (e) { if (e.target !== file) { file.value = ''; file.click(); } });

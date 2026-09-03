@@ -46,16 +46,20 @@ var SENDER = 'alerts@am.corrigopro.com';
 // Build a realistic CorrigoPro body from the parts that vary per WO. The extractor flattens all
 // whitespace, so exact spacing does not matter - the label ANCHORS (WORK ORDER #, Problem/Details,
 // Priority/Type, Property:, Expanded Work Description:) are what is exercised. These five mirror the
-// real emails (verified end-to-end against the actual .msg bytes).
+// SANITIZED fixtures: the label anchors and layout are reproduced from the real CorrigoPro emails
+// this path was verified against, with every identifier replaced by a synthetic one (WO numbers,
+// site codes, asset tags, IVR codes, street addresses, zips, phone numbers, support addresses).
+// City and state survive because the Location matcher scores on them. Do NOT paste a real client
+// email here: this repo is anonymously readable, and assert.js prints got/want into public CI logs.
 function body(o) {
   return [
     '  <https://login.corrigo.com/Content/Images/connection_center_email_logo.png?v=2> ',
     '  <https://am-desktop.corrigopro.com//ServiceChat/Chat/Barcode?code=' + o.barcode + '> \t',
     'Broadway National - JLL Amazon',
     '100 Davids Drive, Hauppauge, NY 11788, US',
-    '+1 631-737-3140',
+    '+1 555-0100',
     'For JLL Amazon',
-    'Fax this back to (800) 476-8004',
+    'Fax this back to (800) 555-0101',
     'Click here to accept/reject this work order in CorrigoPro.',
     'WORK ORDER #' + o.wo + ' ',
     'Date Created: \tNTE: $' + o.nte + ' USD \t',
@@ -66,7 +70,7 @@ function body(o) {
     'Requested By:\t ' + o.code + ' ',
     o.floor + ' ',
     'Site Address:\t ' + o.addr + '\t ',
-    'WO check in/out phone #:\t 877-620-7137\t ',
+    'WO check in/out phone #:\t 555-0122\t ',
     'IVR code:\t ' + o.ivr + '\t ',
     'Problem ',
     '  _____  ',
@@ -106,82 +110,82 @@ function body(o) {
     'Work Completion Due By: ' + o.completeBy + ' ',
     'Expanded Work Description: ' + o.expanded,
     'Check-in/check-out via IVR or smartphone (http://checkin.worktrack.com) is required when on-site.',
-    'For help with your Work Order Network account, please contact Corrigo Work Order Network Support at https://support.jllt.com, support.jllt@jll.com or 800-701-8326, option 1.',
+    'For help with your Work Order Network account, please contact Corrigo Work Order Network Support at https://support.example.com, support@example.com or 555-0123, option 1.',
     'Your CorrigoPro Support Team ',
-    'support.jllt@jll.com <mailto:support.jllt@jll.com>  '
+    'support@example.com <mailto:support@example.com>  '
   ].join('\n');
 }
 
 var CASES = [
   {
-    name: 'BNA1233423 Nashville PM (Preventative, PM (Scheduled), procedures attached)',
-    subject: 'The new PM (Scheduled) work order #BNA1233423 received from JLL Amazon',
+    name: 'BNX9900001 Nashville PM (Preventative, PM (Scheduled), procedures attached)',
+    subject: 'The new PM (Scheduled) work order #BNX9900001 received from JLL Amazon',
     body: body({
-      barcode: '43477756_e063639a', wo: 'BNA1233423', nte: '0.00', created: '7/17/2026 1:02 AM',
-      code: 'BNA12', floor: '4th Floor', addr: '101 Platform Way N, Nashville, TN 37203, US',
-      ivr: '923432741', asset: 'PRE-BNA12-04-001', task: 'Quarterly:Please complete the attached procedure(s)\t ',
+      barcode: '90000001_aa000001', wo: 'BNX9900001', nte: '0.00', created: '7/17/2026 1:02 AM',
+      code: 'BNX12', floor: '4th Floor', addr: '101 Example Way N, Nashville, TN 37299, US',
+      ivr: '900000001', asset: 'PRE-BNX12-04-001', task: 'Quarterly:Please complete the attached procedure(s)\t ',
       priority: 'PM (Scheduled)', acceptBy: '8/17/2026 5:00 PM', completeBy: '9/1/2026 5:00 PM',
-      scheduled: '8/3/2026 8:00 AM', proc: '211319_PMI_EN', fmCall: '615-473-9059',
-      expanded: 'PRE-BNA12-04-001:Preventive:Quarterly:Please complete the attached procedure(s)'
+      scheduled: '8/3/2026 8:00 AM', proc: '900001_PMI_EN', fmCall: '555-0120',
+      expanded: 'PRE-BNX12-04-001:Preventive:Quarterly:Please complete the attached procedure(s)'
     }),
-    expect: { wo: 'BNA1233423', code: 'BNA12', woType: 'Preventative', priority: 'PM (Scheduled)',
-      dne: '0.00', completeBy: '9/1/2026 5:00 PM', asset: 'PRE-BNA12-04-001', city: 'Nashville', state: 'TN', warn: true }
+    expect: { wo: 'BNX9900001', code: 'BNX12', woType: 'Preventative', priority: 'PM (Scheduled)',
+      dne: '0.00', completeBy: '9/1/2026 5:00 PM', asset: 'PRE-BNX12-04-001', city: 'Nashville', state: 'TN', warn: true }
   },
   {
-    name: 'ATL1105398 Atlanta PM (Preventative, procedures attached)',
-    subject: 'The new PM (Scheduled) work order #ATL1105398 received from JLL Amazon',
+    name: 'ATX9900002 Atlanta PM (Preventative, procedures attached)',
+    subject: 'The new PM (Scheduled) work order #ATX9900002 received from JLL Amazon',
     body: body({
-      barcode: '41903922_199d4b00', wo: 'ATL1105398', nte: '0.00', created: '6/1/2026 2:01 AM',
-      code: 'ATL11', floor: '3rd Floor', addr: '3333 Piedmont Rd NW, Ste 400, Atlanta, GA 30305, US',
-      ivr: '911878687', asset: 'CWP-ATL11-03-001', task: 'Q1: Please complete the attached procedure(s)\t ',
+      barcode: '90000002_aa000002', wo: 'ATX9900002', nte: '0.00', created: '6/1/2026 2:01 AM',
+      code: 'ATX11', floor: '3rd Floor', addr: '3333 Example Rd NW, Ste 400, Atlanta, GA 30399, US',
+      ivr: '900000002', asset: 'CWP-ATX11-03-001', task: 'Q1: Please complete the attached procedure(s)\t ',
       priority: 'PM (Scheduled)', acceptBy: '6/30/2026 5:00 PM', completeBy: '6/30/2026 11:59 PM',
-      scheduled: '6/1/2026 8:00 AM', proc: '232123_PMI_EN', fmCall: '770-639-4429',
-      expanded: 'CWP-ATL11-03-001:Preventive:Q1: Please complete the attached procedure(s)'
+      scheduled: '6/1/2026 8:00 AM', proc: '900002_PMI_EN', fmCall: '555-0121',
+      expanded: 'CWP-ATX11-03-001:Preventive:Q1: Please complete the attached procedure(s)'
     }),
-    expect: { wo: 'ATL1105398', code: 'ATL11', woType: 'Preventative', priority: 'PM (Scheduled)',
-      dne: '0.00', completeBy: '6/30/2026 11:59 PM', asset: 'CWP-ATL11-03-001', city: 'Atlanta', state: 'GA', warn: true }
+    expect: { wo: 'ATX9900002', code: 'ATX11', woType: 'Preventative', priority: 'PM (Scheduled)',
+      dne: '0.00', completeBy: '6/30/2026 11:59 PM', asset: 'CWP-ATX11-03-001', city: 'Atlanta', state: 'GA', warn: true }
   },
   {
-    name: 'ATL1105399 Atlanta PM (Preventative, procedures attached)',
-    subject: 'The new PM (Scheduled) work order #ATL1105399 received from JLL Amazon',
+    name: 'ATX9900003 Atlanta PM (Preventative, procedures attached)',
+    subject: 'The new PM (Scheduled) work order #ATX9900003 received from JLL Amazon',
     body: body({
-      barcode: '41903931_c38c4d89', wo: 'ATL1105399', nte: '0.00', created: '6/1/2026 2:01 AM',
-      code: 'ATL11', floor: '4th Floor', addr: '3333 Piedmont Rd NW, Ste 400, Atlanta, GA 30305, US',
-      ivr: '955329567', asset: 'CWP-ATL11-04-001', task: 'Q1: Please complete the attached procedure(s)\t ',
+      barcode: '90000003_aa000003', wo: 'ATX9900003', nte: '0.00', created: '6/1/2026 2:01 AM',
+      code: 'ATX11', floor: '4th Floor', addr: '3333 Example Rd NW, Ste 400, Atlanta, GA 30399, US',
+      ivr: '900000003', asset: 'CWP-ATX11-04-001', task: 'Q1: Please complete the attached procedure(s)\t ',
       priority: 'PM (Scheduled)', acceptBy: '6/30/2026 5:00 PM', completeBy: '6/30/2026 11:59 PM',
-      scheduled: '6/1/2026 8:00 AM', proc: '232123_PMI_EN', fmCall: '770-639-4429',
-      expanded: 'CWP-ATL11-04-001:Preventive:Q1: Please complete the attached procedure(s)'
+      scheduled: '6/1/2026 8:00 AM', proc: '900002_PMI_EN', fmCall: '555-0121',
+      expanded: 'CWP-ATX11-04-001:Preventive:Q1: Please complete the attached procedure(s)'
     }),
-    expect: { wo: 'ATL1105399', code: 'ATL11', woType: 'Preventative', priority: 'PM (Scheduled)',
-      dne: '0.00', completeBy: '6/30/2026 11:59 PM', asset: 'CWP-ATL11-04-001', city: 'Atlanta', state: 'GA', warn: true }
+    expect: { wo: 'ATX9900003', code: 'ATX11', woType: 'Preventative', priority: 'PM (Scheduled)',
+      dne: '0.00', completeBy: '6/30/2026 11:59 PM', asset: 'CWP-ATX11-04-001', city: 'Atlanta', state: 'GA', warn: true }
   },
   {
-    name: 'DEN1707236 Denver PM (Preventative, no attached-procedure text -> no warn)',
-    subject: 'The new PM (Scheduled) work order #DEN1707236 received from JLL Amazon',
+    name: 'DEX9900004 Denver PM (Preventative, no attached-procedure text -> no warn)',
+    subject: 'The new PM (Scheduled) work order #DEX9900004 received from JLL Amazon',
     body: body({
-      barcode: '41663284_34769622', wo: 'DEN1707236', nte: '0.00', created: '5/17/2026 2:00 AM',
-      code: 'DEN17', floor: '3rd Floor', addr: '1515 Wynkoop St, 5th Floor, Denver, CO 80202, US',
-      ivr: '946171515', asset: 'ET-DEN17-03-001', task: '\t',
+      barcode: '90000004_aa000004', wo: 'DEX9900004', nte: '0.00', created: '5/17/2026 2:00 AM',
+      code: 'DEX17', floor: '3rd Floor', addr: '1515 Example St, 5th Floor, Denver, CO 80299, US',
+      ivr: '900000004', asset: 'ET-DEX17-03-001', task: '\t',
       priority: 'PM (Scheduled)', acceptBy: '6/17/2026 5:00 PM', completeBy: '6/30/2026 5:00 PM',
-      scheduled: '6/1/2026 8:00 AM', proc: '221223_PMI_EN', fmCall: '',
-      expanded: 'ET-DEN17-03-001:Preventive'
+      scheduled: '6/1/2026 8:00 AM', proc: '900003_PMI_EN', fmCall: '',
+      expanded: 'ET-DEX17-03-001:Preventive'
     }),
-    expect: { wo: 'DEN1707236', code: 'DEN17', woType: 'Preventative', priority: 'PM (Scheduled)',
-      dne: '0.00', completeBy: '6/30/2026 5:00 PM', asset: 'ET-DEN17-03-001', city: 'Denver', state: 'CO', warn: false }
+    expect: { wo: 'DEX9900004', code: 'DEX17', woType: 'Preventative', priority: 'PM (Scheduled)',
+      dne: '0.00', completeBy: '6/30/2026 5:00 PM', asset: 'ET-DEX17-03-001', city: 'Denver', state: 'CO', warn: false }
   },
   {
-    name: 'DEN1707237 Denver PM (Preventative, no attached-procedure text -> no warn)',
-    subject: 'The new PM (Scheduled) work order #DEN1707237 received from JLL Amazon',
+    name: 'DEX9900005 Denver PM (Preventative, no attached-procedure text -> no warn)',
+    subject: 'The new PM (Scheduled) work order #DEX9900005 received from JLL Amazon',
     body: body({
-      barcode: '41663596_ec9eabea', wo: 'DEN1707237', nte: '0.00', created: '5/17/2026 2:00 AM',
-      code: 'DEN17', floor: '3rd Floor', addr: '1515 Wynkoop St, 5th Floor, Denver, CO 80202, US',
-      ivr: '955001517', asset: 'ET-DEN17-03-002', task: '\t',
+      barcode: '90000005_aa000005', wo: 'DEX9900005', nte: '0.00', created: '5/17/2026 2:00 AM',
+      code: 'DEX17', floor: '3rd Floor', addr: '1515 Example St, 5th Floor, Denver, CO 80299, US',
+      ivr: '900000005', asset: 'ET-DEX17-03-002', task: '\t',
       priority: 'PM (Scheduled)', acceptBy: '6/17/2026 5:00 PM', completeBy: '6/30/2026 5:00 PM',
-      scheduled: '6/1/2026 8:00 AM', proc: '221223_PMI_EN', fmCall: '',
-      expanded: 'ET-DEN17-03-002:Preventive'
+      scheduled: '6/1/2026 8:00 AM', proc: '900003_PMI_EN', fmCall: '',
+      expanded: 'ET-DEX17-03-002:Preventive'
     }),
-    expect: { wo: 'DEN1707237', code: 'DEN17', woType: 'Preventative', priority: 'PM (Scheduled)',
-      dne: '0.00', completeBy: '6/30/2026 5:00 PM', asset: 'ET-DEN17-03-002', city: 'Denver', state: 'CO', warn: false }
+    expect: { wo: 'DEX9900005', code: 'DEX17', woType: 'Preventative', priority: 'PM (Scheduled)',
+      dne: '0.00', completeBy: '6/30/2026 5:00 PM', asset: 'ET-DEX17-03-002', city: 'Denver', state: 'CO', warn: false }
   }
 ];
 
@@ -223,8 +227,8 @@ A.ok('a JLL-Ryder CorrigoPro email is NOT JLL-Amazon (sibling client, same platf
   api.isJllAmazon('alerts@am.corrigopro.com', 'The new work order #RYD100 received from JLL Ryder',
     'For JLL Ryder ... WORK ORDER #RYD100 ...') === false);
 A.ok('JLL-Amazon detected by subject even without the corrigopro sender',
-  api.isJllAmazon('someone@example.com', 'The new PM (Scheduled) work order #ATL1105398 received from JLL Amazon',
-    'WORK ORDER #ATL1105398 Property: ATL11') === true);
+  api.isJllAmazon('someone@example.com', 'The new PM (Scheduled) work order #ATX9900002 received from JLL Amazon',
+    'WORK ORDER #ATX9900002 Property: ATX11') === true);
 
 // WO-type mapping unit checks (the rule the user asked for: mostly PM, some regular WOs).
 console.log('\n# WO Type rule');
@@ -238,6 +242,6 @@ A.ok('a reactive job (time-window priority, no PM/Preventive) -> Reactive',
 console.log('\n# Client DNE parsing');
 A.ok('NTE: $0.00 USD -> 0.00', api.jllDne('... Date Created: NTE: $0.00 USD ...') === '0.00');
 A.ok('NTE: $1,250.00 -> 1250.00', api.jllDne('... NTE: $1,250.00 USD ...') === '1250.00');
-A.ok('no NTE -> 0.00', api.jllDne('WORK ORDER #X Property: ATL11') === '0.00');
+A.ok('no NTE -> 0.00', api.jllDne('WORK ORDER #X Property: ATX11') === '0.00');
 
 A.finish();
