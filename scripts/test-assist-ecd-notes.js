@@ -308,6 +308,33 @@ var t6 = Promise.resolve().then(function () {
   // A promise that has already blown is not a completion date.
   var n6 = build({ notes: [note('eta 7/01', '2026-06-25T09:00:00Z', 1)], notesSrc: 'api' });
   A.eq('a blown ETA is ignored', ymd(+n6.api.proposeECD(state()).date), '2026-8-14');
+
+  // ---- A hyphenated pair is a RANGE, not a date ----------------------------------------
+  // Measured on W-386564 (2026-09-03): a note reading "1-5" produced a proposal of 2027-01-05,
+  // because CFG.DATE_RE accepts `-` as a date separator and parseBodyDate then resolved that
+  // yearless date FORWARD into the next year. Four months out, off a note that never named a
+  // completion date. Stripped in latestNotedEta ONLY - CFG.DATE_RE and parseBodyDate are shared
+  // with the ETA watchdog and are untouched.
+  var h1 = build({ notes: [note('vendor says eta 1-5 business days', '2026-08-04T09:00:00Z', 5)], notesSrc: 'api' });
+  A.eq('"1-5 business days" is a range, not January 5 of next year',
+    ymd(+h1.api.proposeECD(state()).date), '2026-8-14');
+
+  // The surrounding forms that must still work.
+  var h2 = build({ notes: [note('complete by 8/20', '2026-08-04T09:00:00Z', 5)], notesSrc: 'api' });
+  A.eq('a slash date is untouched by the strip', ymd(+h2.api.proposeECD(state()).date), '2026-8-20');
+  var h3 = build({ notes: [note('completion date August 20', '2026-08-04T09:00:00Z', 5)], notesSrc: 'api' });
+  A.eq('a month-name date is untouched', ymd(+h3.api.proposeECD(state()).date), '2026-8-20');
+  // A hyphen inside a longer digit/dash run is a real date fragment, not a range.
+  var h4 = build({ notes: [note('completion date 2026-08-20 per vendor', '2026-08-04T09:00:00Z', 5)], notesSrc: 'api' });
+  A.eq('an ISO date survives the strip', ymd(+h4.api.proposeECD(state()).date), '2026-8-20');
+  // A phone number must not be mistaken for a date either way.
+  var h5 = build({ notes: [note('eta unknown, call 631-737-3140', '2026-08-04T09:00:00Z', 5)], notesSrc: 'api' });
+  A.eq('a phone number proposes nothing', ymd(+h5.api.proposeECD(state()).date), '2026-8-14');
+
+  // The word test still reads the ORIGINAL body: stripping must not delete ETA vocabulary.
+  var h6 = build({ notes: [note('eta 1-5 days, but complete by 8/20', '2026-08-04T09:00:00Z', 5)], notesSrc: 'api' });
+  A.eq('a real date still wins when a range sits beside it',
+    ymd(+h6.api.proposeECD(state()).date), '2026-8-20');
 });
 
 // ---- Mutations: revert one piece each, assert the harness reddens ----------------------
@@ -342,8 +369,8 @@ var t7 = Promise.all([t2, t3, t4, t5, t6]).then(function () {
   var m3 = build({
     notes: [note('ECD 8/20', '2026-08-04T09:00:00Z', 5)], notesSrc: 'api',
     src: mutate(SOURCE,
-      '        if (!((CFG.ETA_WORDS.test(b) || ECD_NOTE_WORDS.test(b)) && CFG.DATE_RE.test(b))) continue;',
-      '        if (!(CFG.ETA_WORDS.test(b) && CFG.DATE_RE.test(b))) continue;')
+      '        if (!((CFG.ETA_WORDS.test(raw) || ECD_NOTE_WORDS.test(raw)) && CFG.DATE_RE.test(b))) continue;',
+      '        if (!(CFG.ETA_WORDS.test(raw) && CFG.DATE_RE.test(b))) continue;')
   });
   A.ok('M3 without ECD_NOTE_WORDS an "ECD 8/20" note is invisible', ymd(+m3.api.proposeECD(state()).date) === '2026-8-14', ymd(+m3.api.proposeECD(state()).date));
 
@@ -368,6 +395,16 @@ var t7 = Promise.all([t2, t3, t4, t5, t6]).then(function () {
   var m5t = build({ notes: [], notesSrc: 'api', trips: { latestScheduled: +new RealDate(2026, 7, 20) }, src: m5src });
   m5t.api.maybeAutoECD(state({ pos: [{ done: false, amount: 500, schedDate: '' }] }));
   A.ok('M5 ...and on a cached scheduled trip', m5t.H.opened.length === 0, 'opened=' + m5t.H.opened.length);
+
+  // M6: neuter the hyphen strip -> the live 2027 proposal comes straight back. This is the
+  // control for the W-386564 defect: without it the probe above would pass on any source that
+  // merely happens to produce a Friday.
+  var m6 = build({
+    notes: [note('vendor says eta 1-5 business days', '2026-08-04T09:00:00Z', 5)], notesSrc: 'api',
+    src: mutate(SOURCE, '        return \' \';\n      });', '        return m;\n      });')
+  });
+  A.ok('M6 without the hyphen strip "1-5" becomes January 5 of the NEXT year',
+    ymd(+m6.api.proposeECD(state()).date) === '2027-1-5', ymd(+m6.api.proposeECD(state()).date));
 
   // M4: drop the nav guard - WO A's history gets hung off WO B.
   var m4 = build({
@@ -437,7 +474,7 @@ var t8 = t7.then(function () {
     });
   });
 
-  console.log('\n(auto-warm x auto-pop gate x proposal, real source, 5 mutations. Nothing here proves');
+  console.log('\n(auto-warm x auto-pop gate x proposal, real source, 6 mutations. Nothing here proves');
   console.log(' the popup renders, that Umbrava answers in a real tab, or that the proposed date is');
   console.log(' the one the coordinator wanted - the live test on a WO with a noted ETA covers that.)');
   A.finish();
