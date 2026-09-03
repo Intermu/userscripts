@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         BWN Suite - Note Templates (Broadway National)
 // @namespace    broadwaynational.bwn
-// @version      0.8.0
+// @version      0.8.1
 // @description  Canned dispatch-note templates in a "Templates" dropdown beside the "+ Add" note button in the Umbrava Dispatch Board's work-order detail panel (Notes tab). Picking a template opens Umbrava's own Add Note composer and DRAFTS the note into it (signed with your first name, ______ blanks left for you to fill) - it is NEVER auto-posted; you review, set the Type, and click Save. STANDALONE: carries its own tiptap/ProseMirror inserter, so in-house techs install this one script alone - no drop-upload dependency. Still prefers drop-upload's hook (window.__bwnFillNoteEditor) when that script is also installed, so coordinator machines keep a single live-tested fill path. Also, on the regular WO page, a "Spoke with" button stamps a [Spoke with: <Vendor>] tag at the TOP of a note (vendor picked from your recent vendors or typed) so you can record which of several WO vendors you spoke with - same human-gated draft, never auto-posted. @grant none, zero egress.
 // @match        https://app.umbrava.com/*
 // @run-at       document-idle
@@ -117,33 +117,33 @@
   var TEMPLATES = [
     { group: 'Call outs', items: [
       { label: 'Tech called out - redirect (week full)', signed: false,
-        body: 'Good morning,\nUnfortunately, our technician called out today and his schedule for the rest of the week is full.\nThis work order will need to be redirected. Sorry for any inconvenience.' },
+        body: 'Good morning,\n\nUnfortunately, our technician called out today and his schedule for the rest of the week is full. This work order will need to be redirected. Sorry for any inconvenience.' },
       { label: 'Tech called out - reschedule for ___', signed: false, date: 'day',
-        body: 'Good morning,\nUnfortunately, our technician called out today and this work order will need to be rescheduled for ______ . Apologies for the inconvenience.' }
+        body: 'Good morning,\n\nUnfortunately, our technician called out today and this work order will need to be rescheduled for ______. Apologies for the inconvenience.' }
     ] },
     { group: 'Completed work', items: [
       { label: 'Completed - FC $___, adjust NTE', signed: true,
-        body: 'Hi team this has been completed, and our FC is $______ please adjust the NTE accordingly when you have a chance\nThank you' },
+        body: 'Hi team,\n\nThis has been completed and our FC is $______. Please adjust the NTE accordingly when you have a chance. Thank you\n' },
       { label: 'Invoice + closing docs to follow', signed: true,
-        body: 'Hi team, we will get invoice and closing documents over to your shortly.\nThank you for your patience' },
+        body: 'Hi team,\n\nWe will get the invoice and closing documents over to you shortly. Thank you for your patience\n' },
       { label: 'Quote to follow', signed: true,
-        body: 'Hi team, we will get this quote over to your shortly.\nThank you for your patience' }
+        body: 'Hi team,\n\nWe will get this quote over to you shortly. Thank you for your patience\n' }
     ] },
     { group: 'New work to schedule', items: [
       { label: 'Scheduled for ___', signed: true, date: 'day',
-        body: 'Hi Team, this has been scheduled for ______\nThank you' },
+        body: 'Hi team,\n\nThis has been scheduled for ______. Thank you\n' },
       { label: 'No availability until week of ___ - redirect', signed: true, date: 'weekOf',
-        body: "Hi team, at this time we don't have availability in this area until the week of _______ , apologies please redirect" },
+        body: "Hi team,\n\nAt this time we don't have availability in this area until the week of _______, apologies please redirect\n" },
       { label: 'Soonest on-site ___ - schedule or redirect', signed: true, date: 'day',
-        body: 'Good afternoon,\nUnfortunately, the soonest we could have someone on site for this work order would be ________\nIf the store can wait until then we can get this schedule, otherwise this will need to be redirected.\nPlease advise' },
+        body: 'Good afternoon,\n\nUnfortunately, the soonest we could have someone on site for this work order would be ________. If the store can wait until then we can get this scheduled, otherwise this will need to be redirected. Please advise\n' },
       { label: 'Too far / not cost-effective - redirect', signed: true,
-        body: "Hi team,\nThis location is _____ hours from our nearest technician, which would round-trip travel of __________ in addition to the assessment fee. Given the scope of work, I don't believe this is cost-effective for either your team or ours.\nPlease redirect\nThank you." }
+        body: "Hi team,\n\nThis location is _____ hours from our nearest technician, which would be round-trip travel of __________ in addition to the assessment fee. Given the scope of work, I don't believe this is cost-effective for either your team or ours. Please redirect. Thank you\n" }
     ] },
     { group: 'Approvals', items: [
       { label: 'Approved - back on schedule for ___', signed: true, date: 'day',
-        body: 'Hi team,\n\nThank you for the approval, this is back on schedule for ______.' },
+        body: 'Hi team,\n\nThank you for the approval, this is back on schedule for ______.\n' },
       { label: 'Approved - ordering material, lead time to follow', signed: true,
-        body: 'Hi team,\n\nThank you for the approval, we will order material and follow up with a lead time' }
+        body: 'Hi team,\n\nThank you for the approval, we will order material and follow up with a lead time\n' }
     ] }
   ];
 
