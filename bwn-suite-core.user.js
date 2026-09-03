@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         BWN Suite - Core (Broadway National)
 // @namespace    broadwaynational.bwn
-// @version      1.81.0
+// @version      1.81.1
 // @downloadURL  https://raw.githubusercontent.com/Intermu/userscripts/main/bwn-suite-core.user.js
 // @updateURL    https://raw.githubusercontent.com/Intermu/userscripts/main/bwn-suite-core.user.js
 // @description  Runs several Umbrava helpers for BWN coordinators, in the browser with no privileged grants. Includes: PO Approval + ETA Builder; WO Assist (GP/ETA, a stall watchdog, DNE calculator, and a next-action playbook); Email Leak Guard (checks recipients against vendor names, PO amounts, and client budget references before an outbound email sends); WO List Heat (a triage overlay + My Day strip on the work-order list, with an optional same-origin Umbrava API scan for deterministic full-board coverage); and the BWN Launcher (opens the Azure Static Web App tools with the current WO's context). Modules share state through sessionStorage/localStorage. The only network calls are same-origin Umbrava GraphQL requests (app.umbrava.com/api/graphql, the app's own session): List Heat's full-board scan and WO Assist's work-order / trip / clock-in / document reads, plus ONE write - BWN Views saves the column layout through Umbrava's own putUserPreference, the same preference the column chooser writes; everything else is offline. Toggle modules in BWN_MODULES below.
@@ -91,7 +91,7 @@
   try { localStorage.setItem('bwn:status:core', JSON.stringify({ ver: BWN_VER, ts: Date.now() })); } catch (e) { /* best-effort */ }
 
   console.info('[BWN SUITE CORE] v' + BWN_VER + ' |',
-    'Shared Core 7 \u00b7 DOM Handles 1.0 \u00b7 PO Approval 1.13 \u00b7 WO Assist 2.71 \u00b7 Leak Guard 2.0 \u00b7 List Heat 3.28 \u00b7 Launcher 2.0 \u00b7 Views 3.1 \u00b7 Palette 1.1 \u00b7 Visit 1.2 \u00b7 Reminders 1.1 \u00b7 Timeline 1.1 \u00b7 TripCal 1.4 \u00b7 Bulk Ops 1.0 \u00b7 Connector 1.2 |',
+    'Shared Core 7 \u00b7 DOM Handles 1.0 \u00b7 PO Approval 1.13 \u00b7 WO Assist 2.72 \u00b7 Leak Guard 2.0 \u00b7 List Heat 3.28 \u00b7 Launcher 2.0 \u00b7 Views 3.1 \u00b7 Palette 1.1 \u00b7 Visit 1.2 \u00b7 Reminders 1.1 \u00b7 Timeline 1.1 \u00b7 TripCal 1.4 \u00b7 Bulk Ops 1.0 \u00b7 Connector 1.2 |',
     'enabled:', Object.keys(BWN_MODULES).filter(function (k) { return BWN_MODULES[k]; }).join(', '));
 
   // ===== BWN SHARED CORE v7 - KEEP IN SYNC across both suite scripts =====
@@ -2197,7 +2197,7 @@
   });
 
   // ==========================================================================
-  // MODULE: WO Assist: GP + ETA Watchdog + Playbook v2.71 (Connector 1.2)
+  // MODULE: WO Assist: GP + ETA Watchdog + Playbook v2.72 (Connector 1.2)
   // ==========================================================================
   bwnBoot('woAssist', BWN_MODULES.woAssist, function () {
     'use strict';
@@ -2227,7 +2227,7 @@
     var PANEL_ID = 'bwn-gp-panel';
     var GREEN = BWN.GREEN;
 
-    console.info('[BWN GP] WO Assist v2.71 loaded on', location.href);
+    console.info('[BWN GP] WO Assist v2.72 loaded on', location.href);
 
     // ---- Parsing helpers (shared via BWN core) -----------------------------
     var parseMoney = BWN.parseMoney;
@@ -5418,15 +5418,6 @@
       if (cands.length) { cands.sort(function (a, b) { return b.ms - a.ms; }); return { date: new Date(cands[0].ms), from: 'signal', why: cands[0].why, noteCount: meta.noteCount, noteSrc: meta.noteSrc, noteSrcLabel: meta.noteSrcLabel }; }   // latest of trip/PO/ETA = complete-by ≥ last scheduled work
       return { date: ecdSecondFriday(), from: 'default', why: 'no scheduled trip, PO date, or noted completion date - defaulted to the 2nd upcoming Friday', noteCount: meta.noteCount, noteSrc: meta.noteSrc, noteSrcLabel: meta.noteSrcLabel };
     }
-    // True when the WO already carries the ETA info the helper would ask for - used
-    // to SUPPRESS the auto-pop (don't nag when a PO date or a noted ETA is on file).
-    function ecdHasEtaSignal(state) {
-      if (state.pos.some(function (p) { return !p.done && p.amount > 0 && p.schedDate; })) return true;
-      if (latestNotedEta(state)) return true;
-      try { var tb = BWN.ssGetJSON('bwn:trips:' + currentWOId(), null); if (tb && tb.latestScheduled && tb.latestScheduled >= ecdToday()) return true; } catch (e) { }
-      return false;
-    }
-
     function ensureEcdStyle() {
       if (document.getElementById('bwn-ecd-style')) return;
       var st = document.createElement('style'); st.id = 'bwn-ecd-style';
@@ -5914,7 +5905,16 @@
       if (!missingOrPast) return;
       var hasActivePO = state.pos.some(function (p) { return !p.done && p.amount > 0; });
       if (!state.due && !hasActivePO) return;   // no ECD and no active work → nothing to target yet
-      if (ecdHasEtaSignal(state)) return;        // ETA is on file → the ecd action + "Set ECD…" button cover it without a popup
+      // NO signal suppressor. Until 1.81.1 this returned early whenever the WO carried a PO
+      // scheduled date, a noted ETA, or a cached scheduled trip - "an ETA is on file, don't
+      // nag". That was backwards: those three signals are exactly what proposeECD ranks a
+      // real date from, so suppressing on them left the auto-pop able to fire ONLY when it
+      // had nothing to propose but the fallback 2nd-upcoming-Friday, and silent on every WO
+      // where it had something useful to say. The signal sources accumulated over time (the
+      // trips cache, then PO schedDate capture), so the popup went quiet by degrees rather
+      // than in one commit. An overdue or empty ECD is a wrong record whether or not a date
+      // is promised somewhere - the promise is the proposal, not a reason to stay silent.
+      // Volume is held by the once-per-WO `ecdAutoShownFor` guard, not by this.
       // Defer while an Umbrava modal is open (Create WO / Vendor / Build Requests, etc.): the
       // ECD overlay would sit on top and block it. Do NOT burn the once-per-WO guard - the
       // refresh loop re-checks, so the popup opens once the modal closes.
