@@ -29,6 +29,10 @@
 //               nothing, forever, silently - the same defect class as an orphaned field alias.
 //   VMPORT    - every @grant is implemented by Violentmonkey too, so the suite stays runnable on a
 //               second, non-proprietary manager. Waivable per script with a reason.
+//   CONNECT   - @connect and GM_xmlhttpRequest imply each other, every declared host is a literal
+//               (no `*` anywhere), and any host hard-coded in a `url:` is declared. Measured
+//               2026-09-03: the suite reaches exactly two hosts and wildcards nothing, so this
+//               pins a posture that is currently discipline only. Waivable with a reason.
 //
 // Run: "/c/Program Files/Adobe/Adobe Creative Cloud Experience/libs/node.exe" scripts/test-manifest-ledger.js
 // No network, no writes: reads the shipped bytes and the roster JSON only.
@@ -90,6 +94,33 @@ var TM_OK = grantSet(VM_GRANTS.concat(TM_ONLY_GRANTS));
 var UNION_LC = Object.create(null);
 var UNION_ALL = VM_GRANTS.concat(TM_ONLY_GRANTS);
 for (var u = 0; u < UNION_ALL.length; u++) UNION_LC[UNION_ALL[u].toLowerCase()] = UNION_ALL[u];
+
+// ---- @connect ----------------------------------------------------------------------------------
+// GM_xmlhttpRequest bypasses same-origin, so @connect is the only thing bounding where a script may
+// send Umbrava data. Measured across origin/main on 2026-09-03: 10 scripts grant the API, the same
+// 10 declare hosts, there is not one wildcard, and the whole suite reaches exactly two hosts (the
+// SWA and places.googleapis.com). That is posture, not enforcement - nothing stopped a later
+// `@connect *`. These rules make it enforcement.
+//
+// Tampermonkey also accepts the non-host keywords below. They are bounded (own origin / loopback),
+// so they stay legal here; only `*` and wildcard patterns are refused. Listing them rather than
+// refusing everything non-hostname avoids the subset-vocabulary trap the GRANT rule exists to catch.
+var CONNECT_KEYWORDS = grantSet(['self', 'localhost']);
+
+var XHR_GRANT_RE = /^(GM_xmlhttpRequest|GM\.xmlHttpRequest)$/;
+
+// A host hard-coded straight into a request, e.g. `url: 'https://places.googleapis.com/v1/...'`.
+// ponytail: literals only. A URL assembled from a constant (`SWA_BASE + '/api/x'`) is invisible
+// here, which is most of the suite - widen to constant tracing only if a real miss shows up.
+var LITERAL_URL_RE = /\burl\s*:\s*['"]https?:\/\/([A-Za-z0-9._-]+)/g;
+
+function literalRequestHosts(src) {
+  var hosts = Object.create(null);
+  var m;
+  LITERAL_URL_RE.lastIndex = 0;
+  while ((m = LITERAL_URL_RE.exec(src))) hosts[m[1].toLowerCase()] = true;
+  return Object.keys(hosts);
+}
 
 // -> 'none' | 'both' | 'tm-only' | 'unknown'
 function classifyGrant(name) {
@@ -168,6 +199,44 @@ function auditScript(file, src, row) {
   // no GM APIs at all, with no error anywhere.
   if (sawNone && sawReal && !waived(row, 'grant')) {
     problems.push('GRANT: @grant none is mixed with real grants, which grants NOTHING');
+  }
+
+  if (!waived(row, 'connect')) {
+    var grantsXhr = false;
+    for (var x = 0; x < meta.grant.length; x++) {
+      if (XHR_GRANT_RE.test(String(meta.grant[x]).trim())) { grantsXhr = true; break; }
+    }
+    var declared = Object.create(null);
+    for (var c = 0; c < meta.connect.length; c++) {
+      var host = String(meta.connect[c]).trim();
+      if (!host) continue;
+      declared[host.toLowerCase()] = true;
+      // `*` is the whole point of the rule: it turns a bounded egress list back into "anywhere",
+      // and `*.example.com` quietly widens to every subdomain someone can register.
+      if (host.indexOf('*') !== -1) {
+        problems.push('CONNECT: @connect ' + host + ' is a wildcard, which un-bounds egress');
+      } else if (!CONNECT_KEYWORDS[host] && !/^[A-Za-z0-9]([A-Za-z0-9-]*[A-Za-z0-9])?(\.[A-Za-z0-9]([A-Za-z0-9-]*[A-Za-z0-9])?)+$/.test(host)) {
+        problems.push('CONNECT: @connect ' + host + ' is not a literal hostname');
+      }
+    }
+    var declaredCount = Object.keys(declared).length;
+
+    // The two directions imply each other. XHR with no @connect prompts the user on first use and
+    // is a deploy-time surprise; @connect with no XHR is a dead directive that usually means the
+    // grant was dropped and the egress list was left behind.
+    if (grantsXhr && !declaredCount) {
+      problems.push('CONNECT: @grant GM_xmlhttpRequest with no @connect host declared');
+    }
+    if (!grantsXhr && declaredCount) {
+      problems.push('CONNECT: @connect declared but GM_xmlhttpRequest is not granted');
+    }
+
+    var reached = literalRequestHosts(src);
+    for (var h = 0; h < reached.length; h++) {
+      if (!declared[reached[h]]) {
+        problems.push('CONNECT: request to ' + reached[h] + ' is hard-coded but not in @connect');
+      }
+    }
   }
 
   if (meta.malformed.length) problems.push('META: malformed directive line ' + JSON.stringify(meta.malformed[0]));
@@ -331,5 +400,54 @@ A.ok('C14 a vmport waiver does not silence GRANT',
 A.eq('C15 GM4 spellings are accepted, not red-flagged',
   ['GM.getResourceUrl', 'GM.xmlHttpRequest', 'GM.setValue'].map(classifyGrant),
   ['both', 'both', 'both']);
+
+// CONNECT controls. The probe ships `@grant none` and no @connect, so the mutations build the
+// header state each case needs rather than editing an existing directive.
+var XHR_HEADER = '// @grant        GM_xmlhttpRequest\n// @connect      green-stone-0717dab0f.7.azurestaticapps.net';
+
+A.ok('C16 a wildcard @connect goes red',
+  fired(auditScript(probe, probeSrc.replace(GRANT_NONE,
+    '// @grant        GM_xmlhttpRequest\n// @connect      *'), probeRow), 'CONNECT'),
+  'CONNECT guard did not fire on @connect *');
+
+A.ok('C17 a subdomain-wildcard @connect goes red',
+  fired(auditScript(probe, probeSrc.replace(GRANT_NONE,
+    '// @grant        GM_xmlhttpRequest\n// @connect      *.azurestaticapps.net'), probeRow), 'CONNECT'),
+  'CONNECT guard did not fire on a *.domain pattern');
+
+A.ok('C18 GM_xmlhttpRequest with no @connect goes red',
+  fired(auditScript(probe, probeSrc.replace(GRANT_NONE, '// @grant        GM_xmlhttpRequest'), probeRow), 'CONNECT'),
+  'CONNECT guard did not fire on an XHR grant with no declared host');
+
+A.ok('C19 @connect with no GM_xmlhttpRequest goes red',
+  fired(auditScript(probe, probeSrc.replace(GRANT_NONE,
+    GRANT_NONE + '\n// @connect      green-stone-0717dab0f.7.azurestaticapps.net'), probeRow), 'CONNECT'),
+  'CONNECT guard did not fire on an orphaned @connect');
+
+A.ok('C20 a hard-coded request host outside @connect goes red',
+  fired(auditScript(probe, probeSrc.replace(GRANT_NONE, XHR_HEADER)
+    .replace(M.BLOCK_END, M.BLOCK_END + "\n  var leak = { url: 'https://evil.example.com/collect' };"), probeRow), 'CONNECT'),
+  'CONNECT guard did not fire on a request to an undeclared host');
+
+A.ok('C21 a declared host is accepted, so C20 is not just "any url: literal goes red"',
+  !fired(auditScript(probe, probeSrc.replace(GRANT_NONE, XHR_HEADER)
+    .replace(M.BLOCK_END, M.BLOCK_END + "\n  var ok = { url: 'https://green-stone-0717dab0f.7.azurestaticapps.net/api/x' };"), probeRow), 'CONNECT'),
+  'CONNECT guard fired on a host that IS declared - the check is matching nothing');
+
+// C20/C21 drive the literal-host check with a synthetic line. This one drives it with real shipped
+// bytes: bwn-suite-ai hard-codes places.googleapis.com in a GM_xmlhttpRequest and declares it, so
+// deleting the declaration must go red. Without this the check could be matching nothing on any
+// file that actually ships.
+var aiFile = 'bwn-suite-ai.user.js';
+var aiSrc = sources[aiFile];
+A.ok('C23 dropping a real declared host from @connect goes red on real shipped bytes',
+  aiSrc && fired(auditScript(aiFile, aiSrc.replace(/^\/\/ @connect\s+places\.googleapis\.com$/m, '// @noframes'),
+    manifest.scripts[aiFile]), 'CONNECT'),
+  'CONNECT guard did not fire when a hard-coded host lost its declaration');
+
+A.ok('C22 a connect waiver does not silence GRANT',
+  fired(auditScript(probe, probeSrc.replace(GRANT_NONE, '// @grant        GM_nonesuch'),
+    { expectedInstalled: true, waived: { connect: 'unrelated waiver, long enough to pass the reason check' } }), 'GRANT'),
+  'a connect waiver wrongly suppressed the GRANT guard');
 
 A.finish();
