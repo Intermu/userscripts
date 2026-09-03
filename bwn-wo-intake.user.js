@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         BWN WO Intake (Broadway National)
 // @namespace    broadwaynational.bwn
-// @version      0.9.25
+// @version      0.9.26
 // @downloadURL  https://raw.githubusercontent.com/Intermu/userscripts/main/bwn-wo-intake.user.js
 // @updateURL    https://raw.githubusercontent.com/Intermu/userscripts/main/bwn-wo-intake.user.js
 // @description  Drop a client PO/WO email (.msg or .eml) onto the Create Work Order modal and it prefills the fields. Pilot Travel Centers: from the email body. Caleres (Famous Footwear / Corrigo): reads the attached WO PDF on-device for Trade, Scope, Priority, Due-By, Store, NTE. If a Caleres request has no WO PDF (image-only), it reads Store, City/State and Trade from the subject and the scope from the body (NTE + Priority stay manual - they live only in the images). Amazon (Fairmarkit RFQ): the buyer is Amazon.com, Inc. but the sender is the Fairmarkit e-bidding platform - reads the RFQ body (no PDF) for Site (matched by the Amazon site code e.g. PIT2/STL3, else the shipping address), RFQ #, Trade, Scope + line items; NTE and Priority stay manual because an RFQ carries no ceiling yet (we are the quoting supplier). The email carries no attachment - the full scope / any 'see attached file' lives on the Fairmarkit bid page - so it surfaces that RFQ link and warns you when the body defers to it. Per Amazon: Source PO # is set to the literal "Quote Request", Source Job # is set to the RFQ ID suffixed " (FM-AMZ)" (e.g. 2956102 (FM-AMZ)), Client DNE is set to 0.00, and WO Type is selected as Proposal in the create modal - all filled in the one pass (no post-Create tracking-number step). Selects Client, Location (address-verified), Trade and Priority by clicking the real dropdown option; fills Client DNE, Source Job # and Source PO #; warns you if the WO PDF shows a cancel/flag note. CW-Amazon (Cushman & Wakefield / FAMIS 360, from amazon@ilrs.360facility.net - a separate feed from Fairmarkit, so the client is "CW-Amazon"): reads the plain-text Case Summary for Site (matched by the exact site code = Umbrava locationNumber), Request ID (-> Source Job #; Source PO # is left blank per the client convention), Trade, Scope, Client DNE (from the PO/NTE amount in the Statement of Work, else 0.00) and Priority (the FAMIS P-code -> the client's "P<n> - ..." priority, or Scheduled PPM); it sets WO Type from the Type|Sub-Type line - a Request for Proposal -> Proposal, a preventive/PPM job -> Preventative, everything else -> Reactive. Then, after you Create the WO, it hands the email to BWN Drop Upload to attach it to the new WO's Documents. JLL-Amazon (Jones Lang LaSalle / CorrigoPro, from alerts@am.corrigopro.com - a separate feed again, so the client is "JLL-Amazon"): reads the "WORK ORDER #..." body for Site (matched by the exact property/site code = Umbrava locationNumber, e.g. BNA12/ATL11/DEN17), the CorrigoPro WO number (set as BOTH Source Job # and Source PO # per the client convention), Scope, Client DNE (the NTE, else 0.00) and Priority (the email's priority IS the Umbrava label - a PM job is "PM (Scheduled)"); it sets WO Type from the job kind - a PM (Scheduled) job -> Preventative, everything else -> Reactive. CW-Amazon via CorrigoPro (C&W Services on the CorrigoPro network, from alerts@am.corrigopro.com with subject "...received from C&W Services" - the SAME CorrigoPro format as JLL-Amazon but a different brand, so the client is still "CW-Amazon"): reads the "WORK ORDER #..." body for Site (the code in "Requested By: AMAZON <code>", e.g. IFM-JFK8 = Umbrava locationNumber), the CorrigoPro WO number (BOTH Source Job # and Source PO #), Scope (the Problem block), Trade (from the Problem "<Area> > <Issue>" head), Client DNE (the NTE, else 0.00), WO Type (a PM/preventive job -> Preventative, a proposal -> Proposal, else Reactive - the CorrigoPro Details "Type:" line is a ridealong and is ignored) and Priority (the Details "Priority:" value - "PM" -> "Scheduled PPM"). Transform SR Brands LLC (TransformCo / Sears / Kmart, sender @transformco.com): reads the free-text dispatch/quote email body for Location (the store number in the subject = the Umbrava locationNumber), the TransformCo WO/PO reference number (set as BOTH Source Job # and Source PO #), Client DNE (the NTE, with $1K/$2K shorthand expanded), Scope (the request body) and a best-effort Trade; WO Type is set to Reactive and Priority is left blank (the client's SLA tier is a manual coordinator pick). Reads everything in the browser; nothing is uploaded to any server. Best-effort: review every field before you click Create.
@@ -13,7 +13,7 @@
 
 (function () {
   'use strict';
-  var VER = '0.9.25';
+  var VER = '0.9.26';
   var FONT = "-apple-system,BlinkMacSystemFont,'Segoe UI','Helvetica Neue',Arial,sans-serif";
   console.info('[BWN WO INTAKE] v' + VER + ' - drop a PO / Amazon RFQ email (.msg/.eml) on Create Work Order to prefill + auto-attach to the new WO Documents (via Drop Upload); reads locally, nothing leaves the browser');
 
@@ -1356,8 +1356,27 @@
     });
   }
   function idbPut(k, v) { return idbReq('readwrite', function (st) { st.put(v, k); }); }
-  function idbGet(k) { return idbReq('readonly', function (st) { return st.get(k); }); }
-  function idbDel(k) { return idbReq('readwrite', function (st) { st.delete(k); }).catch(function () { }); }
+
+  // Consume-once, ATOMICALLY: read and delete inside ONE readwrite transaction, so two
+  // overlapping checks can never both claim the same pending files. A readonly get followed
+  // by a separate delete is NOT enough - readonly transactions run concurrently, so a second
+  // checker (the other tab Umbrava leaves on the same new WO, or a load + path-change tick in
+  // this one) reads the record before the delete commits and hands the same files to Drop
+  // Upload a second time. That is what duplicated every document on W-392732 (2026-09-03:
+  // two bulkAdd batches 10ms apart). Resolves the record only when this caller deleted it.
+  function idbClaim(k, pathNow, maxAgeMs) {
+    var claimed = null;
+    return idbReq('readwrite', function (st) {
+      var g = st.get(k);
+      g.onsuccess = function () {
+        var v = g.result;
+        if (!v || !v.files || !v.files.length) return;
+        if (Date.now() - v.ts > maxAgeMs) { st.delete(k); return; }   // stale - drop it, claim nothing
+        if (v.fromPath === pathNow) return;                           // create failed / not navigated yet - leave it for later
+        st.delete(k); claimed = v;
+      };
+    }).then(function () { return claimed; });
+  }
 
   // On the modal's Create click (with a dropped email pending), persist for the new WO page.
   // fromPath lets the new page tell a real create-navigation from a validation failure (modal
@@ -1384,12 +1403,9 @@
   var _consuming = false;
   function maybeConsumePending() {
     if (_consuming || !/\/work-orders\/\d+/.test(location.pathname)) return;
-    idbGet('current').then(function (p) {
-      if (!p || !p.files || !p.files.length) return;
-      if (Date.now() - p.ts > 3 * 60 * 1000) { idbDel('current'); return; }   // stale
-      if (p.fromPath === location.pathname) return;                            // create failed / not navigated yet - wait
-      _consuming = true;
-      idbDel('current');   // consume-once: delete before dispatch so a re-check can't double-fire
+    _consuming = true;   // claim this TAB synchronously - two overlapping calls both cleared the old check before either's read resolved
+    idbClaim('current', location.pathname, 3 * 60 * 1000).then(function (p) {
+      if (!p) { _consuming = false; return; }
       waitWoReady(9000).then(function () {
         var acked = false;
         function onAck(ev) { if (ev && ev.detail && ev.detail.id === 'dropupload:accepted') acked = true; }
@@ -1402,7 +1418,7 @@
           _consuming = false;
         }, 1800);
       });
-    }).catch(function () { });
+    }).catch(function () { _consuming = false; });   // an IDB error must not wedge the tab's consumer
   }
 
   async function handleDrop(file, root) {

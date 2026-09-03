@@ -601,6 +601,15 @@ jobs:
       - name: WO Intake guards (PII containment + no-auto-create + malformed input)
         run: node scripts/test-intake-guards.js
 
+      # The stage-2 handoff's consume-once claim. Live on 2026-09-03 (W-392732) every handed-off
+      # document uploaded TWICE: the pending files were read with a readonly transaction and deleted
+      # with a separate one, so two overlapping checkers both claimed the same record. Pins that the
+      # read + delete happen in ONE readwrite transaction (exactly one of two racing claims wins),
+      # that a failed create still leaves the record for the real one, and that a stale record is
+      # dropped. Carries a negative control: the old readonly-get pattern double-claims.
+      - name: WO Intake stage-2 claim (consume-once, no duplicate uploads)
+        run: node scripts/test-intake-claim.js
+
       # US-0: the canonical roster vs the shipped bytes. Enumerates every bwn-*.user.js, forces each
       # into a scripts/userscript-manifest.json row (both directions), and checks the auto-update
       # chain end to end: @updateURL == @downloadURL == the raw main URL for that filename, @version
