@@ -413,6 +413,30 @@ var t8 = t7.then(function () {
   A.ok('the ECD write is a whole-object priority replace (siblings blank if dropped)',
     coreFull.indexOf('function waPriorityWriteValue(readPriority, newEcd)') !== -1, 'waPriorityWriteValue missing');
 
+  // ---- BWN-SHARED export/import contract ----------------------------------------------
+  // The shared block is an IIFE that hangs its helpers off BWN; every module then re-imports
+  // them (`var inputVal = BWN.inputVal;`). Defining a helper there is NOT enough to make it
+  // reachable, and neither `node --check` nor a harness that stubs the helper can tell -
+  // both were green while woFieldVal was undefined at all six of its call sites. CI's eslint
+  // caught it as no-undef. This probe is the local version of that catch.
+  ['bwn-suite-core.user.js', 'bwn-suite-ai.user.js'].forEach(function (f) {
+    var src = readLF(path.join(__dirname, '..', f));
+    // Everything before the export line is the shared block's own scope, where the helpers
+    // see each other directly (woFieldVal calls woFieldInput there). Only a call in MODULE
+    // code - after that line - needs an import.
+    var exportAt = src.indexOf('inputVal: inputVal');
+    A.ok(f + ': the BWN-SHARED export list is where it was', exportAt !== -1, 'export block moved');
+    var moduleCode = src.slice(exportAt);
+    ['woFieldInput', 'woFieldVal'].forEach(function (name) {
+      var usedBare = new RegExp('[^.\\w]' + name + '\\s*\\(').test(moduleCode);
+      if (!usedBare) return;
+      A.ok(f + ': ' + name + ' is exported on BWN',
+        src.indexOf(name + ': ' + name) !== -1, 'defined but never exported - unreachable from any module');
+      A.ok(f + ': ' + name + ' is imported into the module scope that calls it',
+        new RegExp('=\\s*BWN\\.' + name + '\\b').test(src), 'exported but never imported - no-undef at every call site');
+    });
+  });
+
   console.log('\n(auto-warm x auto-pop gate x proposal, real source, 5 mutations. Nothing here proves');
   console.log(' the popup renders, that Umbrava answers in a real tab, or that the proposed date is');
   console.log(' the one the coordinator wanted - the live test on a WO with a noted ETA covers that.)');

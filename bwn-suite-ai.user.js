@@ -866,7 +866,7 @@
       CLIENT_DEFAULTS_SEED: CLIENT_DEFAULTS_SEED, CLIENT_PROFILE_SEED: CLIENT_PROFILE_SEED, bwnClientProfile: bwnClientProfile,
       money: money, parseMoney: parseMoney, parseBare: parseBare, parseUSDate: parseUSDate,
       alphaOnly: alphaOnly, lcsLen: lcsLen,
-      inputVal: inputVal, setNativeValue: setNativeValue,
+      inputVal: inputVal, woFieldInput: woFieldInput, woFieldVal: woFieldVal, setNativeValue: setNativeValue,
       GREEN: GREEN, injectTokens: injectTokens,
       getTheme: getTheme, setTheme: setTheme, applyTheme: applyTheme,
       makeDropdown: makeDropdown, a11yDialog: a11yDialog,
@@ -2086,6 +2086,7 @@
       return el ? (el.textContent || '').trim() : '';
     }
     var inputVal = BWN.inputVal;
+    var woFieldVal = BWN.woFieldVal;
     function getHeader() {
       return {
         tracking: txt('work-order-header-tracking-number'),

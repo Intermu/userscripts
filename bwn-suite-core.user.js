@@ -868,7 +868,7 @@
       CLIENT_DEFAULTS_SEED: CLIENT_DEFAULTS_SEED, CLIENT_PROFILE_SEED: CLIENT_PROFILE_SEED, bwnClientProfile: bwnClientProfile,
       money: money, parseMoney: parseMoney, parseBare: parseBare, parseUSDate: parseUSDate,
       alphaOnly: alphaOnly, lcsLen: lcsLen,
-      inputVal: inputVal, setNativeValue: setNativeValue,
+      inputVal: inputVal, woFieldInput: woFieldInput, woFieldVal: woFieldVal, setNativeValue: setNativeValue,
       GREEN: GREEN, injectTokens: injectTokens,
       getTheme: getTheme, setTheme: setTheme, applyTheme: applyTheme,
       makeDropdown: makeDropdown, a11yDialog: a11yDialog,
@@ -2257,6 +2257,7 @@
     function daysUntil(ts) { return Math.ceil((ts - Date.now()) / 86400000); }
     function daysSince(ts) { return Math.floor((Date.now() - ts) / 86400000); }
     var inputVal = BWN.inputVal;
+    var woFieldInput = BWN.woFieldInput, woFieldVal = BWN.woFieldVal;
 
     // ---- BWN bus (suite data contract v1; shared via BWN core) -------------
     // WO Assist is the PRODUCER of bwn:wo:{id}; others consume DOM-first, bus-fallback.
