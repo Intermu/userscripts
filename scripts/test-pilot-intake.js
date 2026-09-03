@@ -33,11 +33,15 @@ function slice(startNeedle, endNeedle, what) {
 // CLIENT_BY_DOMAIN + clientFromDomain + calTrade + extractCaleres + assetToTrade + genericBodyScope
 // + extractWo, verbatim. Only function declarations and the CLIENT_BY_DOMAIN literal execute at load.
 var BLOCK = slice('var CLIENT_BY_DOMAIN = {', '// Image-based Caleres/Corrigo request', 'Pilot/generic extractor cluster');
+// extractWo also calls amazonTrade - the WORD-BOUNDARIED keyword map - for the subject-derived
+// Trade on free-text requests with no Asset Name, so the generic path needs it in scope too.
+// (It lives further down the file with the Amazon extractor; it is shared, not Amazon-only.)
+var TRADE = slice('function amazonTrade(', '  function extractAmazon(', 'shared keyword trade map');
 var exportLine = '\n;this.extractWo=extractWo;this.genericBodyScope=genericBodyScope;' +
   'this.assetToTrade=assetToTrade;this.clientFromDomain=clientFromDomain;' +
-  'this.extractCaleres=extractCaleres;';
+  'this.extractCaleres=extractCaleres;this.amazonTrade=amazonTrade;';
 var api = {};
-vm.runInNewContext(BLOCK + exportLine, api);
+vm.runInNewContext(BLOCK + '\n' + TRADE + exportLine, api);
 
 // SANITIZED fixture, reconstructed with the same line structure the .msg carries (description, then a
 // blank line, then the NTE amount, then the signature block).
@@ -149,6 +153,72 @@ A.ok('  Water Heater is NOT stolen by Appliances (pre-existing "heat" -> HVAC wi
 A.eq('  Walk-in Freezer stays HVAC (not Appliances)', api.assetToTrade('Walk-in Freezer'), 'HVAC');
 A.eq('  Reach-in Cooler stays HVAC (not Appliances)', api.assetToTrade('Reach-in Cooler'), 'HVAC');
 A.eq('  Medium Range LSI fixture stays Lighting (bare "range" not an appliance)', api.assetToTrade('Medium Range LSI V-locity fixture'), 'Lighting');
+
+// --- Third real format: the free-text BID REQUEST (0.9.27) --------------------------------------
+// Grounded on Mike's dropped .msg "<store#> store Painting" from a Pilot capital-projects manager -
+// no PO, no NTE, no priority, no Description: label, no Asset Name. Three things broke on it:
+//   1. Location was BLANK. The store number LEADS the word ("258 store Painting"); the label-first
+//      pattern only matched "Store 399, ...". The correct value is the Umbrava locationNumber
+//      "PFJ 0258" (live-verified: store 258 = 2966 Lee Highway South, Troutville VA).
+//   2. Trade was BLANK. With no Asset Name nothing fed assetToTrade, though the subject says
+//      "Painting" - a real Umbrava system trade, and the one the coordinator picked on W-392889.
+//   3. Scope led with the bare-name salutation "Ronny/Mike," and trailed into the Outlook
+//      signature table (name + job title), because neither is a greeting word or an email address.
+// Sanitized: store 299, a fictional requester and address; the LINE STRUCTURE is the real one -
+// blank lines between every content line, then a tab-only row, then TAB-separated signature cells.
+var SENDER3 = 'alex.roe@pilottravelcenters.com';
+var SUBJECT3 = '299 store Painting';
+var BODY3 = [
+  'Ronny/Mike,',
+  '',
+  'See attached store.  I need to get a quote to paint this location.  Would you like to submit a bid?',
+  '',
+  ' ',
+  '',
+  '2999 Example Highway South',
+  '',
+  'Exampleville, Virginia 24199',
+  '',
+  'United States',
+  '',
+  ' ',
+  '',
+  '\t',
+  'Alex Roe\t\t',
+  'Manager, Maintenance Capital Projects\t',
+  'Alex.Roe@pilottravelcenters.com <mailto:Alex.Roe@pilottravelcenters.com> \t',
+  'office: (555) 555-0173 <tel:0173> \t'
+].join('\r\n');
+
+console.log('\n# the free-text BID REQUEST format (no PO / NTE / priority / label / asset)');
+var wo3 = api.extractWo(SUBJECT3, BODY3, SENDER3);
+A.eq('  Location = PFJ 0299 (store number LEADS the word "store")', wo3.location, 'PFJ 0299');
+A.eq('  Trade = Painting (from the subject, no Asset Name in the email)', wo3.trade, 'Painting');
+A.eq('  Scope = the request + the site address, no salutation, no signature',
+  wo3.scope,
+  'See attached store. I need to get a quote to paint this location. Would you like to submit a bid? ' +
+  '2999 Example Highway South Exampleville, Virginia 24199 United States');
+A.ok('  Scope drops the bare-name salutation', wo3.scope.indexOf('Ronny') === -1, 'got ' + JSON.stringify(wo3.scope));
+A.ok('  Scope stops at the Outlook signature table', wo3.scope.indexOf('Alex Roe') === -1 && wo3.scope.indexOf('Capital Projects') === -1, 'got ' + JSON.stringify(wo3.scope));
+A.eq('  Client = Pilot Travel Centers (by sender domain)', wo3.client, 'Pilot Travel Centers');
+A.eq('  Source PO # stays blank (none in the email)', wo3.po, '');
+A.eq('  Client DNE stays blank (no NTE - the coordinator sets it)', wo3.clientDne, '');
+A.eq('  Priority stays blank (none in the email)', wo3.priorityLevel, '');
+
+console.log('\n# the new scope/store/trade rules do not fire where they should not');
+A.eq('  a real one-line request is NOT mistaken for a name salutation',
+  api.genericBodyScope('Replace the broken sign,'),
+  'Replace the broken sign,');
+// The name-salutation skip sits BELOW the sign-off break on purpose: "Thanks," fits the same
+// name-comma shape, and skipping it would let the signature under it become the scope.
+A.eq('  a sign-off-only body still yields nothing, not the signature under it',
+  api.genericBodyScope('Thanks,\nJane Doe\noffice: 555-0100\njane@example.com'), '');
+A.eq('  a tab BEFORE any content does not truncate the scope',
+  api.genericBodyScope('\t\r\nThe canopy light is out.\r\njdoe@example.com'),
+  'The canopy light is out.');
+A.eq('  "Pilot Store: 199-Travel Center" still reads 199, not a number in front of it', wo2.location, 'PFJ 0199');
+A.eq('  subject Trade never overrides an Asset Name trade', wo2.trade, 'Appliances');
+A.eq('  subject Trade stays BLANK when the subject names no trade', wo.trade, '');
 
 console.log('\n# regression guard: the subject stays the LAST resort in extractWo source');
 A.ok('  genericBodyScope is tried before the subject fallback',
