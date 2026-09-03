@@ -24,6 +24,11 @@
 //   PIN       - every @require / @resource URL carries a #sha384= (or sha256/sha512) integrity pin.
 //   IDENT     - (@namespace, @name) is unique across the suite: two scripts sharing an identity
 //               would collide in Tampermonkey and in the self-check's matching.
+//   GRANT     - every @grant names a real API, and `none` is never mixed with real grants. A
+//               misspelled grant (`GM.getValuez`) is accepted by the manager and then resolves to
+//               nothing, forever, silently - the same defect class as an orphaned field alias.
+//   VMPORT    - every @grant is implemented by Violentmonkey too, so the suite stays runnable on a
+//               second, non-proprietary manager. Waivable per script with a reason.
 //
 // Run: "/c/Program Files/Adobe/Adobe Creative Cloud Experience/libs/node.exe" scripts/test-manifest-ledger.js
 // No network, no writes: reads the shipped bytes and the roster JSON only.
@@ -41,6 +46,63 @@ var MANIFEST_PATH = path.join(__dirname, 'userscript-manifest.json');
 var CANON_NS = 'broadwaynational.bwn';
 
 var SCRIPT_RE = /^bwn-.*\.user\.js$/;
+
+// ---- the @grant vocabulary ---------------------------------------------------------------------
+// Two managers, two vocabularies, and the union is the only safe validator. Sourced 2026-09-03:
+//
+//   VM_GRANTS      = Violentmonkey's GM_API_NAMES, src/common/consts.js (MIT, current shipping
+//                    source). Machine-readable, so this half can be re-derived from a raw URL.
+//   TM_ONLY_GRANTS = what tampermonkey.net/documentation.php lists and Violentmonkey does not
+//                    implement. TM >= 3.0 is closed, so this half is transcribed from the docs
+//                    page and is the half to re-check when TM ships new APIs.
+//
+// Checking against EITHER list alone reproduces the bug this rule exists to catch: VM's array
+// misses 11 valid Tampermonkey names, so it would red-flag working scripts, and TM's list misses
+// the bare `GM` object. See wiki/violentmonkey-assessment.md in the vault.
+var VM_GRANTS = [
+  'GM', 'GM_addElement', 'GM_addStyle', 'GM_addValueChangeListener', 'GM_cookie',
+  'GM_deleteValue', 'GM_deleteValues', 'GM_download', 'GM_getResourceText', 'GM_getResourceURL',
+  'GM_getValue', 'GM_getValues', 'GM_info', 'GM_listValues', 'GM_log', 'GM_notification',
+  'GM_openInTab', 'GM_registerMenuCommand', 'GM_removeValueChangeListener', 'GM_setClipboard',
+  'GM_setValue', 'GM_setValues', 'GM_unregisterMenuCommand', 'GM_xmlhttpRequest', 'unsafeWindow'
+];
+var TM_ONLY_GRANTS = [
+  'GM_getTab', 'GM_saveTab', 'GM_getTabs', 'GM_webRequest',
+  'GM_audio.setMute', 'GM_audio.getState',
+  'GM_audio.addStateChangeListener', 'GM_audio.removeStateChangeListener',
+  // TM grants the cookie API per-operation; Violentmonkey grants the bare `GM_cookie` object.
+  'GM_cookie.list', 'GM_cookie.set', 'GM_cookie.delete',
+  'window.onurlchange', 'window.close', 'window.focus'
+];
+
+function grantSet(list) {
+  var s = Object.create(null);
+  for (var i = 0; i < list.length; i++) s[list[i]] = true;
+  return s;
+}
+var VM_OK = grantSet(VM_GRANTS);
+var TM_OK = grantSet(VM_GRANTS.concat(TM_ONLY_GRANTS));
+
+// Lowercased index of the union, used ONLY to resolve the GM4 promise-style spellings, which are
+// not a straight case-preserving rewrite of the GM_ names: `GM.getResourceUrl` is `GM_getResourceURL`
+// and `GM.xmlHttpRequest` is `GM_xmlhttpRequest`. Everything else stays case-sensitive, because
+// `gm_setvalue` is not a real grant and must go red.
+var UNION_LC = Object.create(null);
+var UNION_ALL = VM_GRANTS.concat(TM_ONLY_GRANTS);
+for (var u = 0; u < UNION_ALL.length; u++) UNION_LC[UNION_ALL[u].toLowerCase()] = UNION_ALL[u];
+
+// -> 'none' | 'both' | 'tm-only' | 'unknown'
+function classifyGrant(name) {
+  if (name === 'none') return 'none';
+  var key = name;
+  if (name.indexOf('GM.') === 0) {
+    key = UNION_LC[('GM_' + name.slice(3)).toLowerCase()];
+    if (!key) return 'unknown';
+  }
+  if (VM_OK[key]) return 'both';
+  if (TM_OK[key]) return 'tm-only';
+  return 'unknown';
+}
 
 function read(file) {
   return fs.readFileSync(path.join(ROOT, file), 'utf8').replace(/\r\n/g, '\n');
@@ -84,6 +146,28 @@ function auditScript(file, src, row) {
     var url = parts[parts.length - 1];
     if (!/^https:\/\//.test(url)) { problems.push('PIN: non-https remote artifact ' + url); continue; }
     if (!M.integrityPin(url) && !waived(row, 'pin')) problems.push('PIN: unpinned remote artifact ' + url);
+  }
+
+  var sawNone = false;
+  var sawReal = false;
+  for (var g = 0; g < meta.grant.length; g++) {
+    var name = String(meta.grant[g]).trim();
+    if (!name) continue;
+    var kind = classifyGrant(name);
+    if (kind === 'none') { sawNone = true; continue; }
+    sawReal = true;
+    if (kind === 'unknown') {
+      if (!waived(row, 'grant')) {
+        problems.push('GRANT: @grant ' + name + ' is not an API in either Tampermonkey or Violentmonkey');
+      }
+    } else if (kind === 'tm-only' && !waived(row, 'vmport')) {
+      problems.push('VMPORT: @grant ' + name + ' is Tampermonkey-only, so this script cannot run under Violentmonkey');
+    }
+  }
+  // `none` alongside a real grant is not additive: the manager honours `none` and the script gets
+  // no GM APIs at all, with no error anywhere.
+  if (sawNone && sawReal && !waived(row, 'grant')) {
+    problems.push('GRANT: @grant none is mixed with real grants, which grants NOTHING');
   }
 
   if (meta.malformed.length) problems.push('META: malformed directive line ' + JSON.stringify(meta.malformed[0]));
@@ -220,5 +304,32 @@ A.ok('C9 @__proto__ directive cannot reach Object.prototype and is not swallowed
 A.ok('C10 a malformed directive line goes red',
   fired(auditScript(probe, probeSrc.replace(M.BLOCK_END, '// @__proto__    x\n' + M.BLOCK_END), probeRow), 'META'),
   'META guard did not fire on a rejected directive name');
+
+// GRANT / VMPORT controls. The probe ships `@grant none`, so each mutation swaps that one line.
+var GRANT_NONE = '// @grant        none';
+
+A.ok('C11 a misspelled grant goes red',
+  fired(auditScript(probe, probeSrc.replace(GRANT_NONE, '// @grant        GM.getValuez'), probeRow), 'GRANT'),
+  'GRANT guard did not fire on a grant that names no real API');
+
+A.ok('C12 a Tampermonkey-only grant goes red on portability',
+  fired(auditScript(probe, probeSrc.replace(GRANT_NONE, '// @grant        GM_getTab'), probeRow), 'VMPORT'),
+  'VMPORT guard did not fire on an API Violentmonkey does not implement');
+
+A.ok('C13 `none` mixed with a real grant goes red',
+  fired(auditScript(probe, probeSrc.replace(GRANT_NONE, GRANT_NONE + '\n// @grant        GM_setValue'), probeRow), 'GRANT'),
+  'GRANT guard did not fire on `none` alongside a real grant');
+
+A.ok('C14 a vmport waiver does not silence GRANT',
+  fired(auditScript(probe, probeSrc.replace(GRANT_NONE, '// @grant        GM_nonesuch'),
+    { expectedInstalled: true, waived: { vmport: 'unrelated waiver, long enough to pass the reason check' } }), 'GRANT'),
+  'a vmport waiver wrongly suppressed the GRANT guard');
+
+// Positive control: the GM4 promise-style spellings must NOT be flagged. These two are the only
+// names whose GM. form is not a case-preserving rewrite of the GM_ form, so they are exactly where
+// a naive validator would red-flag a working script.
+A.eq('C15 GM4 spellings are accepted, not red-flagged',
+  ['GM.getResourceUrl', 'GM.xmlHttpRequest', 'GM.setValue'].map(classifyGrant),
+  ['both', 'both', 'both']);
 
 A.finish();
