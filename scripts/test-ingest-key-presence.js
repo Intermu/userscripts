@@ -163,7 +163,9 @@ function runRollup(rollupSrc, store, coreTs) {
   }
   function kv(k, v, cls) { rows.push({ k: k, v: v, cls: cls }); }
   var status = { core: { ts: coreTs } };
-  // eslint-disable-next-line no-new-func
+  // new Function, not eval: it runs the sliced bytes with ONLY these four names in scope, so the
+  // block cannot accidentally satisfy itself from the harness's own variables. (No eslint-disable
+  // here - no-new-func is not in eslint.config.mjs, and a dead directive fails --max-warnings 0.)
   var run = new Function('localStorage', 'lsGet', 'kv', 'status', rollupSrc);
   run(localStorage, lsGet, kv, status);
   return rows;
