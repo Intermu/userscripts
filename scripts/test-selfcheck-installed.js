@@ -277,7 +277,11 @@ A.ok('enabled:false is DISABLED', has(modRow, 'DISABLED'), JSON.stringify((modRo
 var foreign = S.compare(repo, {
   entries: [{
     name: 'foreign.user.js',
-    meta: M.parseMeta(probeSrc.replace(new RegExp(RAW + PROBE, 'g'),
+    // Literal global replace via split/join - RAW is a URL, and feeding it to `new RegExp` left its
+    // dots unescaped, so the pattern matched more hosts than the fixture means (CodeQL
+    // js/incomplete-hostname-regexp). This fixture is the host-strictness control; it must not be
+    // built with a loose host pattern itself.
+    meta: M.parseMeta(probeSrc.split(RAW + PROBE).join(
       'https://raw.githubusercontent.com/someone-else/userscripts/main/' + PROBE)),
     sha: S.loadRepo().byFile[PROBE].sha,
     options: { enabled: true, check_for_updates: true, user_modified: false }

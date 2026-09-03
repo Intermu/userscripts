@@ -113,14 +113,37 @@ function loadRepo() {
 // a renderer or the JSON.
 var OPTION_KEYS = ['enabled', 'check_for_updates', 'user_modified', 'uuid', 'position', 'modified'];
 
+// Read a file under the size cap WITHOUT a check-then-read gap. statSync + readFileSync names the
+// path twice, so between the check and the read the name can point at something else - a different
+// file, a symlink swapped in, a file grown past the cap (CodeQL js/file-system-race). Opening once
+// and fstat-ing THAT descriptor binds the checks to the bytes actually read. The input here is a
+// user-supplied Tampermonkey export directory, which is exactly the case the cap exists for.
+// Returns { text } on success, or { why } naming the refusal - callers decide what to report.
+function readCapped(file) {
+  var fd;
+  try { fd = fs.openSync(file, 'r'); } catch (e) { return { why: 'unreadable' }; }
+  try {
+    var st = fs.fstatSync(fd);
+    if (!st.isFile()) return { why: 'not a regular file' };
+    if (st.size > MAX_FILE) return { why: 'over the ' + MAX_FILE + ' byte cap' };
+    var buf = Buffer.allocUnsafe(st.size);
+    var off = 0, n;
+    while (off < st.size && (n = fs.readSync(fd, buf, off, st.size - off, off)) > 0) off += n;
+    return { text: buf.toString('utf8', 0, off) };
+  } catch (e) {
+    return { why: 'unreadable' };
+  } finally {
+    try { fs.closeSync(fd); } catch (e2) { }
+  }
+}
+
 function readOptions(dir, base) {
   var file = path.join(dir, base + '.options.json');
   var out = Object.create(null);
-  var stat;
-  try { stat = fs.statSync(file); } catch (e) { return null; }
-  if (!stat.isFile() || stat.size > MAX_FILE) return null;
+  var read = readCapped(file);
+  if (read.text === undefined) return null;   // unreadable, not a file, or over the cap
   var parsed;
-  try { parsed = JSON.parse(fs.readFileSync(file, 'utf8')); } catch (e) { return { _unparseable: true }; }
+  try { parsed = JSON.parse(read.text); } catch (e) { return { _unparseable: true }; }
   if (!parsed || typeof parsed !== 'object') return { _unparseable: true };
   for (var i = 0; i < OPTION_KEYS.length; i++) {
     var k = OPTION_KEYS[i];
@@ -143,12 +166,14 @@ function loadInstalled(dir) {
     if (!/\.user\.js$/.test(name)) continue;
 
     var full = path.join(dir, name);
-    var stat;
-    try { stat = fs.statSync(full); } catch (e) { skipped.push({ name: name, why: 'unreadable' }); continue; }
-    if (!stat.isFile()) continue;
-    if (stat.size > MAX_FILE) { skipped.push({ name: name, why: 'over the ' + MAX_FILE + ' byte cap' }); continue; }
+    var read = readCapped(full);
+    if (read.text === undefined) {
+      // A non-file entry is skipped silently, as before; a real refusal is reported.
+      if (read.why !== 'not a regular file') skipped.push({ name: name, why: read.why });
+      continue;
+    }
 
-    var src = fs.readFileSync(full, 'utf8');
+    var src = read.text;
     var meta = M.parseMeta(src);
     if (!meta) { skipped.push({ name: name, why: 'no parseable ==UserScript== block' }); continue; }
 
