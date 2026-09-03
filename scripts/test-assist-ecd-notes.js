@@ -8,7 +8,7 @@
 //   the note read returned an empty array unless the coordinator had already opened the
 //   Notes tab and run a Deep Scan by hand. Both questions the popup answers are answered
 //   from the notes:
-//     - ecdHasEtaSignal() - "is a completion date already promised?" -> always false,
+//     - the signal suppressor (removed in 1.81.1) - "is a completion date already promised?" -> always false,
 //       so the popup nagged past a real ETA;
 //     - proposeECD()      - "what date should we propose?"           -> no noted date,
 //       so it defaulted to "the 2nd upcoming Friday" and burned the once-per-WO guard.
@@ -101,7 +101,7 @@ var PRELUDE = [
 ].join('\n');
 
 var EPILOGUE = 'H.api = { fetchNotesApi: fetchNotesApi, notesReadState: notesReadState, notesOnRead: notesOnRead,' +
-  ' latestNotedEta: latestNotedEta, proposeECD: proposeECD, ecdHasEtaSignal: ecdHasEtaSignal,' +
+  ' latestNotedEta: latestNotedEta, proposeECD: proposeECD,' +
   ' maybeAutoECD: maybeAutoECD, getShownFor: function () { return ecdAutoShownFor; },' +
   ' getDeepNotes: function () { return deepNotes; } };';
 
@@ -232,10 +232,30 @@ var t5 = Promise.resolve().then(function () {
   A.eq('with the read settled and no date on file, it pops', p2.H.opened.length, 1);
   A.eq('and burns the guard so it asks once', p2.api.getShownFor(), '283834');
 
-  // The read landed and the notes DO carry a completion date: suppressed, no nag.
+  // ---- The signals are the REASON to pop, not a reason to stay silent (1.81.1) --------
+  // Until 1.81.1 each of the three below returned early out of maybeAutoECD. That left the
+  // auto-pop able to fire ONLY on a WO it had nothing to propose from, which is the exact
+  // shape of "the ECD popup stopped appearing": the WOs a coordinator actually meets - a
+  // scheduled tech, a PO date, a noted ETA - were the silent ones.
   var p3 = build({ notes: [note('ECD 8/20 per vendor', '2026-08-04T09:00:00Z', 5)], notesSrc: 'api' });
   p3.api.maybeAutoECD(state({ pos: [{ done: false, amount: 500, schedDate: '' }] }));
-  A.eq('a completion date in the notes suppresses the popup', p3.H.opened.length, 0);
+  A.eq('a completion date in the notes POPS (it is the proposal, not a silencer)', p3.H.opened.length, 1);
+  A.eq('and the date proposed is the noted one, not the Friday fallback',
+    ymd(+p3.api.proposeECD(state()).date), '2026-8-20');
+
+  var p4 = build({ notes: [], notesSrc: 'api' });
+  p4.api.maybeAutoECD(state({ pos: [{ done: false, amount: 500, schedDate: '08/20/2026' }] }));
+  A.eq('a PO line with a scheduled date pops', p4.H.opened.length, 1);
+
+  var p5 = build({ notes: [], notesSrc: 'api', trips: { latestScheduled: +new RealDate(2026, 7, 20) } });
+  p5.api.maybeAutoECD(state({ pos: [{ done: false, amount: 500, schedDate: '' }] }));
+  A.eq('a cached scheduled trip pops', p5.H.opened.length, 1);
+
+  // The guards that are NOT about signals must still hold - this fix removed one early
+  // return, not the gate. A WO whose ECD is set and in the future is simply correct.
+  var p6 = build({ notes: [note('ECD 8/20', '2026-08-04T09:00:00Z', 5)], notesSrc: 'api' });
+  p6.api.maybeAutoECD(state({ due: { kind: 'ok', raw: '12/31/2026' }, pos: [{ done: false, amount: 500, schedDate: '08/20/2026' }] }));
+  A.eq('a healthy future ECD still never pops, signal or not', p6.H.opened.length, 0);
 });
 
 // ---- 3. What the notes are read FOR ---------------------------------------------------
@@ -324,6 +344,28 @@ var t7 = Promise.all([t2, t3, t4, t5, t6]).then(function () {
   });
   A.ok('M3 without ECD_NOTE_WORDS an "ECD 8/20" note is invisible', ymd(+m3.api.proposeECD(state()).date) === '2026-8-14', ymd(+m3.api.proposeECD(state()).date));
 
+  // M5: put the pre-1.81.1 signal suppressor back, inline and verbatim in behaviour. This is
+  // the control for the fix itself: with it restored, every one of p3/p4/p5 goes silent again,
+  // which is the reported symptom. Anchored on the line the suppressor used to sit under, so
+  // a future edit that moves that gate reddens here rather than passing on a stale anchor.
+  var OLD_SUPPRESSOR =
+    '      if (state.pos.some(function (p) { return !p.done && p.amount > 0 && p.schedDate; })) return;\n' +
+    '      if (latestNotedEta(state)) return;\n' +
+    '      try { var _tb = BWN.ssGetJSON(\'bwn:trips:\' + currentWOId(), null); if (_tb && _tb.latestScheduled && _tb.latestScheduled >= ecdToday()) return; } catch (e) { }\n';
+  var ANCHOR = '      if (!state.due && !hasActivePO) return;';
+  var m5src = mutate(SOURCE, ANCHOR, ANCHOR + '\n' + OLD_SUPPRESSOR);
+  [
+    ['a noted completion date', { notes: [note('ECD 8/20 per vendor', '2026-08-04T09:00:00Z', 5)], notesSrc: 'api' }, { done: false, amount: 500, schedDate: '' }],
+    ['a PO scheduled date', { notes: [], notesSrc: 'api' }, { done: false, amount: 500, schedDate: '08/20/2026' }]
+  ].forEach(function (c) {
+    var m = build({ notes: c[1].notes, notesSrc: c[1].notesSrc, src: m5src });
+    m.api.maybeAutoECD(state({ pos: [c[2]] }));
+    A.ok('M5 the old suppressor silences the popup on ' + c[0], m.H.opened.length === 0, 'opened=' + m.H.opened.length);
+  });
+  var m5t = build({ notes: [], notesSrc: 'api', trips: { latestScheduled: +new RealDate(2026, 7, 20) }, src: m5src });
+  m5t.api.maybeAutoECD(state({ pos: [{ done: false, amount: 500, schedDate: '' }] }));
+  A.ok('M5 ...and on a cached scheduled trip', m5t.H.opened.length === 0, 'opened=' + m5t.H.opened.length);
+
   // M4: drop the nav guard - WO A's history gets hung off WO B.
   var m4 = build({
     apiNotes: [note('eta 8/20', '2026-08-01T09:00:00Z', 7)],
@@ -388,7 +430,7 @@ var t8 = t7.then(function () {
   if (oldForm === pulseRule) throw new Error('MUTATION TARGET ABSENT: the pulse rule did not change');
   A.ok('control: the pre-fix 4.8s form is caught by the cost probe', pulseMs(oldForm) === 4800, 'got ' + pulseMs(oldForm));
 
-  console.log('\n(auto-warm x auto-pop gate x proposal, real source, 4 mutations. Nothing here proves');
+  console.log('\n(auto-warm x auto-pop gate x proposal, real source, 5 mutations. Nothing here proves');
   console.log(' the popup renders, that Umbrava answers in a real tab, or that the proposed date is');
   console.log(' the one the coordinator wanted - the live test on a WO with a noted ETA covers that.)');
   A.finish();
