@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         BWN Ask (Coordinator Copilot)
 // @namespace    https://broadwaynational.com/bwn
-// @version      0.7.5
+// @version      0.7.6
 // @description  Ask questions about the work order you're viewing. Reads the WO live from Umbrava via same-origin GraphQL (details + full note / site-visit history) AND a summary roster of the other work orders at the same location, plus the team knowledge doc, and answers through the Broadway AI proxy with dates and references. Phase 1.5 = page-scoped + location roster (Path A); no data leaves the trusted Broadway path.
 // @match        https://app.umbrava.com/*
 // @run-at       document-idle
@@ -737,12 +737,25 @@
     });
   } catch (e) { }
 
-  // ---- Menu: set the shared ingest key (same key as the rest of the suite) ---
+  // ---- SWA ingest key presence beacon ---------------------------------------
+  // Boolean only, never the key. GM storage is PER SCRIPT (measured 2026-09-03), so a blank key
+  // here is invisible to every sibling; Core's Ops panel reads these beacons to name the blank
+  // ones. ts is the LOAD time, never refreshed on save - Core's freshness handshake needs that.
+  var INGEST_BEACON_TS = Date.now();
+  function publishIngestPresence() {
+    try {
+      localStorage.setItem('bwn:ingest:ask', JSON.stringify({ k: GM_getValue('ingest_key', '') ? 1 : 0, ts: INGEST_BEACON_TS }));
+    } catch (e) { /* best-effort */ }
+  }
+  publishIngestPresence();
+
+  // ---- Menu: set THIS script's ingest key -----------------------------------
+  // Not shared: Tampermonkey scopes GM storage per script, so this sets Ask's own copy only.
   try {
     GM_registerMenuCommand('BWN Ask: set ingest key', function () {
       var cur = GM_getValue('ingest_key', '');
-      var v = window.prompt('Shared SWA ingest key (same key the rest of the BWN suite uses):', cur);
-      if (v != null) { GM_setValue('ingest_key', v.trim()); }
+      var v = window.prompt('SWA ingest key (same value as the connector WO_INGEST_KEY). Tampermonkey scopes this PER SCRIPT, so setting it here sets it for Ask only - every other suite script needs its own copy:', cur);
+      if (v != null) { GM_setValue('ingest_key', v.trim()); publishIngestPresence(); }
     });
   } catch (e) { }
 
