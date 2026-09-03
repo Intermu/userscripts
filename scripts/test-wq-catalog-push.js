@@ -62,6 +62,6 @@ A.ok("posts to /api/catalog-ingest", /CATALOG_URL = SWA_BASE \+ "\/api\/catalog-
 A.ok("catalog push runs on load INDEPENDENT of draining (not gated on enabled())", /setTimeout\(function \(\) \{ wqPushCatalogs\(false\); \}, 5000\)/.test(full));
 A.ok("throttled via a wq_catalog_ts stamp", /GM_getValue\("wq_catalog_ts", 0\)/.test(full) && /GM_setValue\("wq_catalog_ts", Date\.now\(\)\)/.test(full));
 A.ok("a menu command force-refreshes the catalogs", /refresh Umbrava catalogs now/.test(full));
-A.ok("@version and runtime VER are both 0.5.0", /@version\s+0\.5\.0/.test(full) && /VER = "0\.5\.0"/.test(full));
+A.ok("@version and runtime VER are both 0.5.1", /@version\s+0\.5\.1/.test(full) && /VER = "0\.5\.1"/.test(full));
 
 A.finish();

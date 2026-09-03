@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         BWN Suite - AI (Broadway National)
 // @namespace    broadwaynational.bwn
-// @version      1.45.23
+// @version      1.45.24
 // @downloadURL  https://raw.githubusercontent.com/Intermu/userscripts/main/bwn-suite-ai.user.js
 // @updateURL    https://raw.githubusercontent.com/Intermu/userscripts/main/bwn-suite-ai.user.js
 // @description  The Umbrava tools that call outside APIs, kept separate from the zero-egress Core script. Client Update and WO Audit drafts (Anthropic Claude; draft-only, scrubbed before sending, you review before posting); Find Techs / Find Suppliers (Google Places; vendor leads near a WO); and Job View (opens the Ops-Dashboard job card on the WO page - WO details from Umbrava plus the authored case file and next actions, read-only). Network access is limited by the browser to the declared API hosts and the BWN Static Web App. API keys are stored in Tampermonkey's storage via the menu commands and never enter the page. Toggle modules in BWN_MODULES below.
@@ -50,10 +50,13 @@
   (function migrateGmKeys() {
     try {
       var SENT = ' bwn-absent';
-      // SCOPE: only this script's PRIVATE keys. ingest_key (SWA connector, shared by 9
-      // scripts) and places_key (shared by suite-ai + bid-out) are CROSS-SCRIPT - renaming
-      // them here alone would split the shared value, so they stay bare and are flagged for
-      // a coordinated cross-script rename. Do NOT add them here without every sibling.
+      // SCOPE: this script's keys. ingest_key and places_key stay OUT of this map, but the
+      // reason recorded here until 2026-09-03 was wrong: they were called "cross-script" and
+      // held back for "a coordinated rename". They are not cross-script. GM storage is scoped
+      // PER SCRIPT, not per @namespace (measured on TM 5.x - [[gm-storage-is-per-script]]), so
+      // this script's ingest_key was never shared with anything and there is no shared value a
+      // rename here could split. They stay bare only because renaming them is churn with no
+      // payoff: each script would still hold its own copy either way.
       var pairs = { 'sr_nte_pct': 'bwn:sr_nte_pct', 'sr_contact_email': 'bwn:sr_contact_email' };
       for (var oldK in pairs) {
         if (!Object.prototype.hasOwnProperty.call(pairs, oldK)) continue;
@@ -87,6 +90,19 @@
     } catch (e) { /* best-effort */ }
   }
   publishAiStatus();
+
+  // ---- SWA ingest key presence beacon ---------------------------------------
+  // Same boolean as `ingest` above, in the suite-wide shape Core's Ops panel rolls up. Every
+  // script that uses the key publishes one, because GM storage is PER SCRIPT (measured
+  // 2026-09-03): this script having the key says nothing about any sibling, and the panel row
+  // that read `status.ai.ingest` as "the suite's key" was reporting exactly that false fact.
+  // ts is AI_LOAD_TS, never refreshed on save, for the reason documented on publishAiStatus.
+  function publishIngestPresence() {
+    try {
+      localStorage.setItem('bwn:ingest:suite-ai', JSON.stringify({ k: GM_getValue('ingest_key', '') ? 1 : 0, ts: AI_LOAD_TS }));
+    } catch (e) { /* best-effort */ }
+  }
+  publishIngestPresence();
 
   console.info('[BWN SUITE AI] v' + BWN_VER + ' |',
     'Shared Core 7 \u00b7 Client Update 1.47 \u00b7 Find Techs 2.15 \u00b7 Connector 1.5 |',
@@ -1344,8 +1360,8 @@
   });
   GM_registerMenuCommand('Set SWA ingest key', function () {
     var cur = GM_getValue('ingest_key', '');
-    var v = prompt('Paste the WO_INGEST_KEY (the SWA ingest function key; stored locally in Tampermonkey, never in the page):', cur || '');
-    if (v !== null) { GM_setValue('ingest_key', v.trim()); publishAiStatus(); alert(v.trim() ? 'Saved.' : 'Cleared.'); }
+    var v = prompt('Paste the WO_INGEST_KEY (the SWA ingest function key; stored locally in Tampermonkey, never in the page). Tampermonkey scopes this PER SCRIPT, so setting it here sets it for Suite AI only - every other suite script needs its own copy:', cur || '');
+    if (v !== null) { GM_setValue('ingest_key', v.trim()); publishAiStatus(); publishIngestPresence(); alert(v.trim() ? 'Saved.' : 'Cleared.'); }
   });
 
   // In-House Dispatch Report push: Core's dispatch scan (window.__bwnDispatchSyncNow) writes the
@@ -6635,7 +6651,7 @@ if (BWN_MODULES.jobView) BWN.safeModule('jobView', function () {
       return new Promise(function (resolve) {
         var key = GM_getValue('ingest_key', '');
         if (!connectorEnabled()) return resolve({ clientError: 'The AI connector is switched off in the Ops Suite panel.' });
-        if (!key) return resolve({ clientError: 'Set the shared SWA ingest key first (Tampermonkey menu).' });
+        if (!key) return resolve({ clientError: 'Set this script\'s SWA ingest key first (Tampermonkey menu - the key is per script, so setting it elsewhere does not set it here).' });
         try {
           GM_xmlhttpRequest({
             method: 'POST', url: AI_URL, timeout: AI_REQ_TIMEOUT_MS,

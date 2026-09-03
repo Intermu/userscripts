@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         BWN Suite - Core (Broadway National)
 // @namespace    broadwaynational.bwn
-// @version      1.81.3
+// @version      1.81.5
 // @downloadURL  https://raw.githubusercontent.com/Intermu/userscripts/main/bwn-suite-core.user.js
 // @updateURL    https://raw.githubusercontent.com/Intermu/userscripts/main/bwn-suite-core.user.js
 // @description  Runs several Umbrava helpers for BWN coordinators, in the browser with no privileged grants. Includes: PO Approval + ETA Builder; WO Assist (GP/ETA, a stall watchdog, DNE calculator, and a next-action playbook); Email Leak Guard (checks recipients against vendor names, PO amounts, and client budget references before an outbound email sends); WO List Heat (a triage overlay + My Day strip on the work-order list, with an optional same-origin Umbrava API scan for deterministic full-board coverage); and the BWN Launcher (opens the Azure Static Web App tools with the current WO's context). Modules share state through sessionStorage/localStorage. The only network calls are same-origin Umbrava GraphQL requests (app.umbrava.com/api/graphql, the app's own session): List Heat's full-board scan and WO Assist's work-order / trip / clock-in / document reads, plus ONE write - BWN Views saves the column layout through Umbrava's own putUserPreference, the same preference the column chooser writes; everything else is offline. Toggle modules in BWN_MODULES below.
@@ -10573,8 +10573,36 @@
       if (aiFresh) {
         kv('Anthropic key', status.ai.anthropic ? 'set' : 'not set', status.ai.anthropic ? 'ok' : 'no');
         kv('Google Places key', status.ai.places ? 'set' : 'not set', status.ai.places ? 'ok' : 'no');
-        kv('SWA ingest key', status.ai.ingest ? 'set' : 'not set', status.ai.ingest ? 'ok' : 'no');
       }
+
+      // SWA ingest key, PER SCRIPT. This row used to read status.ai.ingest and call it "the"
+      // ingest key, which was a false suite-wide fact: GM storage is scoped per script, not per
+      // @namespace (measured 2026-09-03 on TM 5.x - [[gm-storage-is-per-script]]), so each script
+      // holds its own private copy and a newly installed one starts blank while its siblings keep
+      // working. That is the silent failure this row exists to make loud. Every script using the
+      // key publishes a BOOLEAN beacon at bwn:ingest:<slug> (never the key itself) stamped with
+      // its own load time; a script that did not load this session leaves a stale beacon and is
+      // skipped, so an uninstalled script cannot raise a permanent red row - same rule as the
+      // AI/Ask freshness rows above.
+      (function ingestKeyRollup() {
+        var PFX = 'bwn:ingest:', set = [], blank = [];
+        try {
+          for (var i = 0; i < localStorage.length; i++) {
+            var lk = localStorage.key(i);
+            if (!lk || lk.indexOf(PFX) !== 0) continue;
+            var b = lsGet(lk, null);
+            if (!b || !status.core.ts || Math.abs(status.core.ts - (b.ts || 0)) >= 60000) continue;
+            (b.k ? set : blank).push(lk.slice(PFX.length));
+          }
+        } catch (e) { /* storage refusal - fall through to the "no script reported" row */ }
+        set.sort(); blank.sort();
+        var total = set.length + blank.length;
+        if (!total) { kv('SWA ingest key', 'no script reported this session', ''); return; }
+        kv('SWA ingest key', blank.length
+          ? (set.length + ' of ' + total + ' set · BLANK: ' + blank.join(', '))
+          : ('set in all ' + total + ' loaded script' + (total === 1 ? '' : 's')),
+          blank.length ? 'no' : 'ok');
+      })();
       // Ask is its own script and can be disabled on its own, so it gets the same freshness
       // treatment as AI rather than being assumed present.
       var askFresh = !!status.ask.ver && !!status.core.ts && Math.abs((status.core.ts || 0) - (status.ask.ts || 0)) < 60000;

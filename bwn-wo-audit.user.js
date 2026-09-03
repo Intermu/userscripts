@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         BWN WO Audit (Broadway National)
 // @namespace    broadwaynational.bwn
-// @version      0.8.2
+// @version      0.8.3
 // @downloadURL  https://raw.githubusercontent.com/Intermu/userscripts/main/bwn-wo-audit.user.js
 // @updateURL    https://raw.githubusercontent.com/Intermu/userscripts/main/bwn-wo-audit.user.js
 // @description  Batch WO-audit tool. Upload a WO audit .xlsx; for each work order this reads its two most recent notes DIRECTLY from Umbrava's GraphQL API in-page (using your live Umbrava session - the same read the BWN Ops Suite AI drafts use), then asks the broadway-internal-ops SWA summarize route (x-bwn-key gated, Anthropic key server-side) to write a 1-3 sentence client-ready status note. Fills the audit's notes column and downloads the workbook, preserving every other cell and formula. It also reads each WO's live header (status, phase, priority, GP, DNE/NTE, PO/vendor, schedule) in the same call and writes a deterministic Audit Flags column (OVERDUE, NEG/LOW GP, NTE>DNE, NO VENDOR, UNSCHEDULED, STALE) computed with no AI - so the exception audit survives an AI outage. Runs entirely in the app.umbrava.com page so it inherits your Umbrava auth - no MCP, no pasted keys, nothing sensitive in this script. This replaces the old standalone WO_Audit_Automation.html SWA tool, whose server-side MCP path could not authenticate to Umbrava.
@@ -19,7 +19,7 @@
 (function () {
   'use strict';
 
-  var VER = '0.8.2';
+  var VER = '0.8.3';
   var FONT = "-apple-system,BlinkMacSystemFont,'Segoe UI','Helvetica Neue',Arial,sans-serif";
 
   // Suite drawer exit, per the contract in Core's ensureStyle. Core's stylesheet owns the fade;
@@ -1221,12 +1221,27 @@
     }
   }
 
+  // ---- SWA ingest key presence beacon ---------------------------------------
+  // GM storage is scoped PER SCRIPT, not per @namespace (measured 2026-09-03 on TM 5.x): this
+  // script's ingest_key is its own private copy, invisible to every sibling, which is exactly
+  // why a blank one fails silently. Publish a BOOLEAN - never the key - so Core's Ops panel can
+  // name the scripts that are still blank. ts is the LOAD time and is deliberately NOT refreshed
+  // on save: Core's "loaded this session" handshake compares it to Core's own load stamp, so a
+  // fresh Date.now() on save would make this script read as stale the moment the key was set.
+  var INGEST_BEACON_TS = Date.now();
+  function publishIngestPresence() {
+    try {
+      localStorage.setItem('bwn:ingest:wo-audit', JSON.stringify({ k: getKey() ? 1 : 0, ts: INGEST_BEACON_TS }));
+    } catch (e) { /* best-effort */ }
+  }
+  publishIngestPresence();
+
   // ---- Launchers ----
   try {
     GM_registerMenuCommand('BWN WO Audit: open', buildModal);
     GM_registerMenuCommand('BWN WO Audit: Set SWA ingest key', function () {
-      var v = prompt('SWA ingest key (same value as the connector WO_INGEST_KEY - used across the BWN Ops Suite):', getKey() || '');
-      if (v !== null) { GM_setValue('ingest_key', v.trim()); toast(v.trim() ? 'Ingest key saved.' : 'Ingest key cleared.'); }
+      var v = prompt('SWA ingest key (same value as the connector WO_INGEST_KEY). Tampermonkey scopes this PER SCRIPT, so setting it here sets it for WO Audit only - every other suite script needs its own copy:', getKey() || '');
+      if (v !== null) { GM_setValue('ingest_key', v.trim()); publishIngestPresence(); toast(v.trim() ? 'Ingest key saved.' : 'Ingest key cleared.'); }
     });
   } catch (e) { /* menu API absent - floating button still works */ }
 
