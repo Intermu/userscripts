@@ -59,6 +59,19 @@ var SCRIPT_RE = /^bwn-.*\.user\.js$/;
 // Checking against EITHER list alone reproduces the bug this rule exists to catch: VM's array
 // misses 11 valid Tampermonkey names, so it would red-flag working scripts, and TM's list misses
 // the bare `GM` object. See wiki/violentmonkey-assessment.md in the vault.
+//
+// CROSS-CHECKED 2026-09-03 against a third source: vite-plugin-monkey's `grantNames`
+// (src/node/utils/gmApi.ts, MIT, maintained), which is a cross-manager union built for the same
+// purpose. 60 entries there against 39 here. The diff was computed, not eyeballed, and it is small
+// in both directions - see wiki/vite-plugin-monkey-assessment.md:
+//
+//   it names, we did not  -> bare `GM_audio` (and so `GM.audio` through the GM4 resolver). Added.
+//   we name, it does not  -> bare `GM`, the four `GM_audio.*` and three `GM_cookie.*` sub-grants.
+//                            NOT a gap to close: that source models grants at object granularity
+//                            while Tampermonkey grants the cookie and audio APIs per operation.
+//                            Both are right for their own manager, and the union has to accept
+//                            BOTH spellings. Do not "simplify" the dotted entries away on the
+//                            strength of their absence there.
 var VM_GRANTS = [
   'GM', 'GM_addElement', 'GM_addStyle', 'GM_addValueChangeListener', 'GM_cookie',
   'GM_deleteValue', 'GM_deleteValues', 'GM_download', 'GM_getResourceText', 'GM_getResourceURL',
@@ -68,6 +81,12 @@ var VM_GRANTS = [
 ];
 var TM_ONLY_GRANTS = [
   'GM_getTab', 'GM_saveTab', 'GM_getTabs', 'GM_webRequest',
+  // Bare `GM_audio` on vite-plugin-monkey's authority alone: the TM docs page enumerates only the
+  // four per-operation forms below, and the bare name was not confirmed there. Accepted anyway,
+  // because the failure directions are not symmetric - a wrongly ACCEPTED grant costs nothing here
+  // (no suite script grants any audio API), while a wrongly REJECTED one reds the build on working
+  // code, which is the defect this whole rule exists to prevent. Re-check if a script ever wants it.
+  'GM_audio',
   'GM_audio.setMute', 'GM_audio.getState',
   'GM_audio.addStateChangeListener', 'GM_audio.removeStateChangeListener',
   // TM grants the cookie API per-operation; Violentmonkey grants the bare `GM_cookie` object.
@@ -331,5 +350,13 @@ A.ok('C14 a vmport waiver does not silence GRANT',
 A.eq('C15 GM4 spellings are accepted, not red-flagged',
   ['GM.getResourceUrl', 'GM.xmlHttpRequest', 'GM.setValue'].map(classifyGrant),
   ['both', 'both', 'both']);
+
+// Positive control for the vite-plugin-monkey cross-check: both audio spellings must resolve, and
+// must resolve as tm-only rather than as portable, since Violentmonkey implements no audio API.
+// Pins the granularity point made in the vocabulary comment - the bare name AND the per-operation
+// names are all valid, so removing either row breaks this.
+A.eq('C16 both @grant spellings of the audio API resolve, and stay Tampermonkey-only',
+  ['GM_audio', 'GM.audio', 'GM_audio.setMute'].map(classifyGrant),
+  ['tm-only', 'tm-only', 'tm-only']);
 
 A.finish();
