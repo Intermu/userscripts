@@ -105,7 +105,10 @@ var EXPECT = {
   'bwn-ask.user.js':              ['esc'],
   'bwn-bid-out.user.js':          ['esc'],
   'bwn-dispatch.user.js':         ['esc'],
-  'bwn-drop-upload.user.js':      ['esc', 'esc'],       // two: textToHtml (line ~875) + a second builder
+  'bwn-drop-upload.user.js':      ['duEsc', 'esc', 'esc'],   // textToHtml + a second builder, plus duEsc:
+  //   the module-level copy the @-mention span builder uses. That span puts a display name inside
+  //   FIVE quoted attributes, so it is the one place here where an unescaped quote does not merely
+  //   render wrong - it breaks out of data-label and the mention resolves to nobody.
   'bwn-low-gp.user.js':           ['lgEsc'],
   'bwn-notes.user.js':            ['esc'],
   'bwn-proposal-actions.user.js': ['escapeHtml'],

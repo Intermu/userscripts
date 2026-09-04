@@ -143,7 +143,7 @@ function loadDrop(world, srcOverride) {
   var fn = new Function('document', 'location', 'CustomEvent', 'setTimeout', 'clearTimeout', 'Math', '__toasts',
     prelude + classify + '\n' + chip +
     '\n; return { inboundClientEmail: inboundClientEmail, woIdFromUrl: woIdFromUrl, requestTrack: requestTrack,' +
-    ' classifyDomain: classifyDomain, noteTypeForEmail: noteTypeForEmail, showRespChip: showRespChip,' +
+    ' classifyDomain: classifyDomain, noteTypeForEmail: noteTypeForEmail,' +
     ' setPending: function(p){ pending = p; }, getPending: function(){ return pending; } };');
   world.dropToasts = [];
   return fn(world.document, world.location, world.CustomEvent, world.setTimeout, world.clearTimeout, Math, world.dropToasts);

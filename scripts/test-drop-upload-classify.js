@@ -32,7 +32,7 @@ function slice(startNeedle, endNeedle, what) {
 // Deterministic layer: CLIENT_DOMAINS + classifyDomain + partyByDomain + noteTypeForEmail/ForFiles.
 var DET = slice('var CLIENT_DOMAINS = {', 'function inboundClientEmail(', 'domain classifier');
 // Label layer: DEFAULT_DOC_LABEL + PARTY_LABEL + vendorOrSupplier + classifyEmail + docLabelForFiles.
-var LBL = slice('var DEFAULT_DOC_LABEL =', 'var noteBox = null', 'label classifier');
+var LBL = slice('var DEFAULT_DOC_LABEL =', '// ---- Action note: @-mention', 'label classifier');
 
 // Prelude: the module-level helpers the label slice leans on, plus a stub bwnAI whose reply we flip.
 var prelude = [
@@ -108,7 +108,7 @@ function handoffLabels() {
   A.eq('fileKind: a photo attachment (octet-stream mime, .jpeg name) -> Photo',
     kctx.fileKind({ name: 'original-C2383B61.jpeg', type: 'application/octet-stream' }), 'Photo');
 
-  var handoff = slice('runApiUpload(raw, described, dt, ctx,', '}, false);', 'WO-intake handoff upload call');
+  var handoff = slice('runApiUpload(raw, Promise.resolve(files), udt, ctx,', '}, false);', 'WO-intake handoff upload call');
   var m = /return (fileKind\(f\)[\s\S]*?);/.exec(handoff);
   A.ok('the handoff passes a per-file label resolver, not one fixed name', !!m, handoff.slice(0, 200));
   var resolve = new Function('fileKind', 'f', 'return ' + m[1] + ';');

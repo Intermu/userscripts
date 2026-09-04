@@ -44,6 +44,8 @@ vm.runInNewContext(BLOCK + '\n;this.parseEml=parseEml;', api);
 var CRLF = '\r\n';
 var PDF_BYTES = Buffer.from('%PDF-1.4\n1 0 obj<<>>endobj\ntrailer<<>>\n%%EOF\n', 'latin1');
 var PDF_B64 = PDF_BYTES.toString('base64').replace(/(.{76})/g, '$1' + CRLF);  // wrapped like Outlook
+var LOGO_BYTES = Buffer.from('\x89PNG\r\n\x1a\nFAKE-SIGNATURE-LOGO', 'latin1');
+var LOGO_B64 = LOGO_BYTES.toString('base64');
 var OUT = '_004_SYNTHmixed_';
 var INN = '_000_SYNTHalt_';
 var eml = [
@@ -82,6 +84,16 @@ var eml = [
   'Content-Transfer-Encoding: base64',
   '',
   PDF_B64,
+  '--' + OUT,
+  // The sender's signature logo: disposed INLINE and cited by a Content-ID the HTML part
+  // references. Both marks together are what make it a signature graphic rather than a file
+  // they attached - a part disposed `attachment` is never dropped, whatever else it carries.
+  'Content-Type: image/png; name="logo.png"',
+  'Content-Disposition: inline; filename="logo.png"',
+  'Content-ID: <image001.png@01D9>',
+  'Content-Transfer-Encoding: base64',
+  '',
+  LOGO_B64,
   '--' + OUT + '--',
   ''
 ].join(CRLF);
@@ -97,6 +109,20 @@ A.ok('body keeps the second line', /Second line stays intact\./.test(p.body), JS
 A.ok('body does NOT leak MIME boundaries/headers', !/Content-Type|Content-Transfer|boundary=|--_00/.test(p.body), JSON.stringify(p.body));
 A.ok('body does NOT leak the base64 attachment (JVBER = "%PDF" b64)', !/JVBER/.test(p.body), JSON.stringify(p.body.slice(0, 200)));
 A.ok('=96 quoted-printable was decoded (no literal =96 in body)', !/=96/.test(p.body), JSON.stringify(p.body));
+
+// The attachments must not only stay OUT of the note - they must come back OUT of the email, or the
+// drop uploads one file and buries the PDF and the photos inside it (the reported bug: "only being
+// read as one file with no attachments").
+console.log('# parseEml - attachments come back as bytes, signature graphics do not');
+A.eq('two attachment parts were seen (the PDF + the signature logo)', p.attachments.length, 2);
+var pdf = p.attachments.filter(function (a) { return a.name === '1135344-00000006.pdf'; })[0];
+A.ok('the attached PDF is extracted by name', !!pdf, JSON.stringify(p.attachments.map(function (a) { return a.name; })));
+A.eq('its mime is carried', pdf.mime, 'application/pdf');
+A.eq('its bytes round-trip byte-for-byte through base64', Buffer.from(pdf.bytes).toString('latin1'), PDF_BYTES.toString('latin1'));
+A.eq('a real attachment is NOT marked inline', pdf.inline, false);
+var logo = p.attachments.filter(function (a) { return a.name === 'logo.png'; })[0];
+A.ok('the signature logo is still parsed', !!logo, 'logo part missing');
+A.eq('...but MARKED inline (disposed inline + a cited Content-ID), so describeFile drops it', logo.inline, true);
 
 console.log('# parseEml - plain single-part text/plain (the rewrite must not break the simple path)');
 var simple = [
