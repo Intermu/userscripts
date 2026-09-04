@@ -498,10 +498,22 @@ var t8 = t7b.then(function () {
   // Nulling it on a path change re-armed it on a TAB HOP inside one WO (/details -> /notes),
   // which is exactly how the prompt came back on a WO whose ECD had just been set. The only
   // `= null` left must be the declaration.
-  A.eq('the auto-pop guard is never cleared on a route change (a tab hop is not a new WO)',
-    (coreFull.match(/ecdAutoShownFor = null/g) || []).length, 1);
-  A.ok('...and the one that remains is its declaration',
-    coreFull.indexOf('var ecdAutoShownFor = null;') !== -1, 'the guard declaration moved');
+  // The guard is cleared in exactly two places: its declaration, and on LEAVING the WO.
+  // A tab hop inside one WO must not re-arm it - that was the 1.81.8 re-pop, when any path
+  // change cleared it. But a route with no WO at all (the board, a client, a vendor) ends the
+  // visit, and coming back must ask again if the date is still missing or overdue: without
+  // that, the popup fired on a first visit and never on a return, because on a warm revisit
+  // the note read short-circuits on the cached history and its refresh - the one that carried
+  // the cold path - never happens.
+  A.eq('the auto-pop guard is cleared in exactly one place besides its declaration',
+    (coreFull.match(/ecdAutoShownFor = null/g) || []).length, 2);
+  A.ok('...its declaration', coreFull.indexOf('var ecdAutoShownFor = null;') !== -1, 'the guard declaration moved');
+  A.ok('...and the other is gated on having left the WO, not on the path changing',
+    coreFull.indexOf('if (!currentWOId()) ecdAutoShownFor = null;') !== -1,
+    'the re-arm is not gated on leaving the WO');
+  A.ok('the route handler still does that reset (it is inside the path-change block)',
+    /location\.pathname !== lastPath[\s\S]{0,1600}if \(!currentWOId\(\)\) ecdAutoShownFor = null;/.test(coreFull),
+    'the reset is not in the route-change block');
 
   // ---- BWN-SHARED export/import contract ----------------------------------------------
   // The shared block is an IIFE that hangs its helpers off BWN; every module then re-imports
