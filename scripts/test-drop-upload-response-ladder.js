@@ -192,7 +192,7 @@ function run() {
     var L = build({ storage: { 'bwn:escTeams': teams }, users: users, notes: [] });
     var T0 = L.state.now;
     L.api.ladderPut({
-      id: 'L1', woNum: 371126, url: 'https://app.umbrava.com/work-orders/371126',
+      id: 'L1', woNum: 371126,
       assigneeId: 'a-guid', assigneeName: 'Dana Coordinator', subject: 'Store 305',
       startedAt: T0, nextAt: T0 + L.api.LADDER_EVERY, count: 0
     });

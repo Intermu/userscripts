@@ -2323,7 +2323,7 @@
     var now = Date.now();
     ladderPut({
       id: 'L' + woNum + '-' + now,
-      woNum: woNum, url: location.href,
+      woNum: woNum,
       assigneeId: (assignee && assignee.id) || '', assigneeName: (assignee && assignee.name) || '',
       subject: String(subject || '').slice(0, 200),
       startedAt: now, nextAt: now + LADDER_EVERY, count: 0
@@ -2331,11 +2331,16 @@
     try { if (window.Notification && Notification.permission === 'default') Notification.requestPermission(); } catch (e) { }
   }
 
-  function notifyPerson(title, body, url) {
+  // The click target is REBUILT from the work-order number, never stored and replayed. A full href
+  // kept in localStorage is a navigation sink fed by a value anything same-origin can rewrite (a
+  // javascript: URL in that slot would run on the click - CodeQL flags exactly this); woNum comes
+  // off the path as digits, and is re-checked here, so the rebuilt path carries nothing to hijack.
+  function notifyPerson(title, body, woNum) {
+    var path = /^[0-9]+$/.test(String(woNum)) ? '/work-orders/' + woNum : '';
     try {
       if (window.Notification && Notification.permission === 'granted') {
         var n = new Notification(title, { body: body, tag: 'bwn-du-' + title });
-        n.onclick = function () { try { window.focus(); } catch (e) { } if (url) location.href = url; try { n.close(); } catch (e2) { } };
+        n.onclick = function () { try { window.focus(); } catch (e) { } if (path) location.href = path; try { n.close(); } catch (e2) { } };
         return;
       }
     } catch (e) { }
@@ -2431,7 +2436,7 @@
       answeredSince(entry).then(function (answered) {
         if (answered) {
           ladderDrop(entry.id);
-          notifyPerson('W-' + entry.woNum + ' answered', 'A client note was logged - the response chase is closed.', entry.url);
+          notifyPerson('W-' + entry.woNum + ' answered', 'A client note was logged - the response chase is closed.', entry.woNum);
           return;
         }
         var cur = ladderLoad().filter(function (r) { return r.id === entry.id; })[0];
@@ -2443,7 +2448,7 @@
         notifyPerson('W-' + cur.woNum + ' still needs a client response',
           'Prompt ' + cur.count + ' of ' + LADDER_MAX + (cur.subject ? ' · ' + cur.subject : '') +
           (last ? '. Escalating to your supervisor and manager now.' : '. Log a Client note when you have replied.'),
-          cur.url);
+          cur.woNum);
         if (last) {
           ladderDrop(cur.id);
           ladderEscalate(cur).catch(function (err) {
