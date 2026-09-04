@@ -103,6 +103,7 @@ function makeWorld(o) {
 // build the location-roster query, so a regression to the arg-less query that went dark in prod
 // ("unavailable: site-roster") fails here instead of only on Mike's tenant.
 var ROSTER_BLOCK = slice(ASK, '/* ===== BWN-ASK-ROSTER:START ===== */', '/* ===== BWN-ASK-ROSTER:END ===== */', 'ask roster block');
+var ERRFOR_BLOCK = slice(ASK, '  function errorFor(r) {', '\n  // ---- Panel UI', 'ask errorFor');
 function makeRosterWorld(gqlImpl) {
   var calls = [];
   var sandbox = {
@@ -324,6 +325,26 @@ console.log('\nbus client');
   });
 })
 
+/* ---- a wrapped upstream failure keeps its category ---- */
+// 2026-09-02: a coordinator's first question came back as the bare line "Server error: Anthropic
+// API error (400)". The server had already sent the category (`code`) alongside it; errorFor threw
+// it away, so an out-of-credits account and a malformed request read identically on screen.
+.then(function () {
+  console.log('\nupstream failure categories');
+  var box = { console: console, JSON: JSON };
+  vm.createContext(box);
+  vm.runInContext(ERRFOR_BLOCK + '\n;this.errorFor = errorFor;', box);
+
+  A.ok('an out-of-credits 400 says so in plain language, not "Anthropic API error"',
+    /out of credits/.test(box.errorFor({ status: 502, json: { ok: false, error: 'Anthropic API error (400)', upstreamStatus: 400, code: 'INSUFFICIENT_CREDITS' } })));
+  A.ok('any other wrapped failure still carries its code for diagnosis',
+    /\[BAD_REQUEST\]/.test(box.errorFor({ status: 502, json: { ok: false, error: 'Anthropic API error (400)', upstreamStatus: 400, code: 'BAD_REQUEST' } })));
+  A.ok('a codeless failure reads exactly as before, with no empty brackets',
+    box.errorFor({ status: 502, json: { ok: false, error: 'boom' } }) === 'Server error: boom');
+  A.ok('the already-handled statuses are untouched',
+    /below the level required/.test(box.errorFor({ status: 403, json: { code: 'ROLE_REQUIRED', tier: 'viewer' } })));
+})
+
 /* ============================ 5. controls ============================ */
 
 .then(function () {
@@ -341,6 +362,8 @@ console.log('\nbus client');
   // The roster slice must be non-trivial, and the dead introspection path must be GONE from the
   // shipped file - a re-introduced discoverLocField would guess the arg-less query again and go dark.
   A.ok('the roster block slice is non-trivial', ROSTER_BLOCK.length > 400, String(ROSTER_BLOCK.length));
+  A.ok('the errorFor slice is non-trivial and really holds the status ladder',
+    ERRFOR_BLOCK.length > 600 && /r\.status === 429/.test(ERRFOR_BLOCK), String(ERRFOR_BLOCK.length));
   A.ok('the old introspection roster is gone (no discoverLocField / __schema in the file)',
     ASK.indexOf('discoverLocField') === -1 && ASK.indexOf('__schema') === -1);
 
