@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         BWN Suite - Core (Broadway National)
 // @namespace    broadwaynational.bwn
-// @version      1.81.6
+// @version      1.81.7
 // @downloadURL  https://raw.githubusercontent.com/Intermu/userscripts/main/bwn-suite-core.user.js
 // @updateURL    https://raw.githubusercontent.com/Intermu/userscripts/main/bwn-suite-core.user.js
 // @description  Runs several Umbrava helpers for BWN coordinators, in the browser with no privileged grants. Includes: PO Approval + ETA Builder; WO Assist (GP/ETA, a stall watchdog, DNE calculator, and a next-action playbook); Email Leak Guard (checks recipients against vendor names, PO amounts, and client budget references before an outbound email sends); WO List Heat (a triage overlay + My Day strip on the work-order list, with an optional same-origin Umbrava API scan for deterministic full-board coverage); and the BWN Launcher (opens the Azure Static Web App tools with the current WO's context). Modules share state through sessionStorage/localStorage. The only network calls are same-origin Umbrava GraphQL requests (app.umbrava.com/api/graphql, the app's own session): List Heat's full-board scan and WO Assist's work-order / trip / clock-in / document reads, plus ONE write - BWN Views saves the column layout through Umbrava's own putUserPreference, the same preference the column chooser writes; everything else is offline. Toggle modules in BWN_MODULES below.
@@ -4221,6 +4221,18 @@
       }
       return null;
     }
+    // The WO tab that hosts the notes list (and therefore the Add Note button). Matched by
+    // EXACT label so a "Notes" tab is never confused with "Note Templates" or a card heading;
+    // the href form is the belt for a router link that carries no tab role. Visible only -
+    // an unmounted tab panel's link is not something a click can reach.
+    function noteTabControl() {
+      var els = document.querySelectorAll('[role="tab"], a[href*="/notes"]');
+      for (var i = 0; i < els.length; i++) {
+        if (!els[i].offsetParent) continue;
+        if (/^notes?$/i.test((els[i].textContent || '').trim())) return els[i];
+      }
+      return null;
+    }
     // Best-effort: set the Add Note composer's note-type control to `label` (e.g. "Internal").
     // Scoped to the just-opened composer. No-ops safely (the note still posts) when the control
     // isn't found. Umbrava's CURRENT note-type control is a custom autocomplete (an
@@ -4319,9 +4331,28 @@
         try { document.execCommand('insertHTML', false, html); } catch (e3) { try { ed.textContent = String(text); ed.dispatchEvent(new Event('input', { bubbles: true })); } catch (e4) { } }
       }
     }
-    function insertWONote(text, cb, noteType) {
+    // `_hopped` is internal: set on the one retry after a tab hop, so a view that still
+    // has no Add Note button falls back instead of hopping forever.
+    function insertWONote(text, cb, noteType, _hopped) {
       var btn = findAddNoteBtn();
-      if (!btn) { noteFallback(text); if (cb) cb(false); return; }
+      if (!btn) {
+        // The Add Note button only exists on the WO views that host the notes list. The ECD
+        // helper - and every other drafted note - runs on the DETAILS route, and the note
+        // steps fire from the AI Job View too, so on those views the draft used to die
+        // straight into the clipboard fallback with nothing opened. Hop to the Notes tab and
+        // retry once. Same ladder as bwn-drop-upload's triggerNoteComposer (live-proven),
+        // minus its Documents-only split-button branch, which has no target here.
+        var tab = _hopped ? null : noteTabControl();
+        if (!tab) { noteFallback(text); if (cb) cb(false); return; }
+        tab.click();
+        var hops = 0;
+        (function waitTab() {
+          if (findAddNoteBtn()) { insertWONote(text, cb, noteType, true); return; }
+          if (++hops > 20) { noteFallback(text); if (cb) cb(false); return; }   // 5s
+          setTimeout(waitTab, 250);
+        })();
+        return;
+      }
       var beforeEls = Array.prototype.slice.call(document.querySelectorAll('textarea, [contenteditable="true"], [contenteditable=""]'));
       btn.click();
       var tries = 0;
