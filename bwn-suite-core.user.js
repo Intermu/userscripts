@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         BWN Suite - Core (Broadway National)
 // @namespace    broadwaynational.bwn
-// @version      1.81.7
+// @version      1.81.8
 // @downloadURL  https://raw.githubusercontent.com/Intermu/userscripts/main/bwn-suite-core.user.js
 // @updateURL    https://raw.githubusercontent.com/Intermu/userscripts/main/bwn-suite-core.user.js
 // @description  Runs several Umbrava helpers for BWN coordinators, in the browser with no privileged grants. Includes: PO Approval + ETA Builder; WO Assist (GP/ETA, a stall watchdog, DNE calculator, and a next-action playbook); Email Leak Guard (checks recipients against vendor names, PO amounts, and client budget references before an outbound email sends); WO List Heat (a triage overlay + My Day strip on the work-order list, with an optional same-origin Umbrava API scan for deterministic full-board coverage); and the BWN Launcher (opens the Azure Static Web App tools with the current WO's context). Modules share state through sessionStorage/localStorage. The only network calls are same-origin Umbrava GraphQL requests (app.umbrava.com/api/graphql, the app's own session): List Heat's full-board scan and WO Assist's work-order / trip / clock-in / document reads, plus ONE write - BWN Views saves the column layout through Umbrava's own putUserPreference, the same preference the column chooser writes; everything else is offline. Toggle modules in BWN_MODULES below.
@@ -3015,8 +3015,31 @@
       return { ok: false, label: 'No ETA found', detail: 'No per-PO scheduled dates, no first-trip date, and no note pairs an ETA word with a date. Use Deep Scan to cover the full note history.' };
     }
 
+    // ---- ECD write echo (the DOM does not re-render after our patch) ----------
+    // Setting the ECD is an API patch (patchWorkOrder) since Umbrava rebuilt the WO form -
+    // and the form does NOT re-render from it, so until a reload the field still reads the
+    // PRE-write date. Every consumer of state.due then reads the WO as overdue/undated: the
+    // header pill, the checklist, and the once-per-WO auto-pop, which re-fires on the very WO
+    // that was just fixed the moment its guard re-arms (a tab hop). So the write leaves an
+    // echo here and dueStatus substitutes it - trusted ONLY while the field still shows
+    // `before`. Any other value means the DOM has caught up (reload) or moved on (edited in
+    // Umbrava's own UI), and the echo is dropped rather than believed over the page.
+    // sessionStorage, so it cannot outlive the tab.
+    function ecdEcho(domRaw) {
+      var w = currentWOId(); if (!w) return null;
+      var k = 'bwn:ecdset:' + w;
+      var rec = BWN.ssGetJSON(k, null);
+      if (!rec || !rec.after) return null;
+      var domTs = parseUSDate(domRaw), beforeTs = rec.before ? parseUSDate(ecdFmtUS(new Date(rec.before))) : null;
+      if (domTs !== beforeTs) { try { sessionStorage.removeItem(k); } catch (e) { } return null; }
+      return rec.after;
+    }
     function dueStatus(C) {
       var v = woFieldVal('priority.expectedCompletionDate');
+      var echo = ecdEcho(v);
+      // Same convention either way: the day at LOCAL midnight, so an echoed date reads
+      // exactly as the field's own "MM/DD/YYYY, 11:59 PM" would once it catches up.
+      if (echo) v = ecdFmtUS(new Date(echo));
       var ts = parseUSDate(v);
       if (!ts) return null;
       var d = daysUntil(ts);
@@ -5409,9 +5432,11 @@
     // the best available signal - the latest FUTURE PO scheduled date, else a noted
     // ETA (same ETA-word+date heuristic etaStatus uses), else the 2nd upcoming
     // Friday - and let the coordinator confirm + capture the reason. On Apply it
-    // TYPES the date into the WO's own field (never clicks a separate Save - Umbrava
-    // persists per its normal flow) and prefills a client-facing note for manual
-    // posting. (Scheduled-trip reading is a future add, pending a Trips-tab recon.)
+    // PATCHES the date through the audited API (waEcdSubmit; Umbrava's rebuilt form has no
+    // Save button and no header input to type into) and prefills a client-facing note for
+    // manual posting. The page does not re-render from that patch, so the write leaves the
+    // ecdEcho record dueStatus reads. (Scheduled-trip reading is a future add, pending a
+    // Trips-tab recon.)
     var ECD_FIELD = 'priority.expectedCompletionDate';   // a form field NAME now, not a testid - see woFieldInput
     function ecdToday() { var d = new Date(); return new Date(d.getFullYear(), d.getMonth(), d.getDate()).getTime(); }
     function ecdSecondFriday() { var d = new Date(); d.setHours(0, 0, 0, 0); var add = (5 - d.getDay() + 7) % 7; if (add === 0) add = 7; d.setDate(d.getDate() + add + 7); return d; }   // upcoming Friday + 1 week
@@ -5767,7 +5792,12 @@
           ids: { wo: wo },
           current: { ecd: oldEcd || null }, proposed: { ecd: newEcd }, irreversible: true,
           before: { ecd: oldEcd || null }, after: { ecd: newEcd }
-        }).then(function () { return { noop: false, before: oldEcd || null, after: newEcd }; });
+        }).then(function () {
+          // Leave the echo dueStatus reads (see ecdEcho): the page keeps showing oldEcd until a
+          // reload, and without this the WO stays "overdue" and re-pops its own auto-prompt.
+          try { BWN.ssSetJSON('bwn:ecdset:' + wo, { v: 1, ts: Date.now(), before: oldEcd || null, after: newEcd }); } catch (e) { }
+          return { noop: false, before: oldEcd || null, after: newEcd };
+        });
       });
     }
     // Re-entry-guarded ECD set, same shape as waTaskSubmit / waStatusSubmit: the first click
@@ -6555,7 +6585,11 @@
         var acn = document.getElementById(ACT_CARD_ID); if (acn) acn.remove();   // checklist is per-WO; never carry it across
         var eo = document.getElementById('bwn-ecd-overlay'); if (eo) eo.remove();
         var pfb = document.getElementById('bwn-pf-banner'); if (pfb) pfb.remove();
-        ecdAutoShownFor = null;   // re-arm the once-per-WO ECD auto-pop for the new WO
+        // NO ecdAutoShownFor reset here. It holds the WO NUMBER it fired for, so it re-arms by
+        // itself the moment the WO changes - while nulling it re-armed on ANY path change,
+        // including a tab hop within the SAME WO (/details -> /notes). That is what re-popped
+        // the prompt on a WO whose ECD had just been set: the guard was cleared and the DOM
+        // still read the pre-write date (see ecdEcho).
         prevStatus = null;        // don't treat an already-terminal WO opened fresh as a "change"
       }
       clearTimeout(debounce);
