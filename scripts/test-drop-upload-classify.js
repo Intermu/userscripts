@@ -88,6 +88,35 @@ function run() {
     .then(function () { ctx.setAI('supplier'); return ctx.docLabelForFiles([emailFile(outbound('boss@broadwaynational.com'))]); })
     .then(function (l) { A.eq('label: internal email -> Internal (no AI; not a client Work Order Request)', l, 'Internal'); })
     .then(function () { return ctx.docLabelForFiles([{ isEmail: false }]); })
-    .then(function (l) { A.eq('label: no email (photo/PDF) -> Work Order Request', l, 'Work Order Request'); });
+    .then(function (l) { A.eq('label: no email (photo/PDF) -> Work Order Request', l, 'Work Order Request'); })
+    .then(handoffLabels);
+}
+
+// ---- WO-intake handoff: the request email and its photos get DIFFERENT doc labels -------------
+// The handoff forced "Work Order Request" on EVERY file it uploaded, so the site photos a client
+// attaches to a request were filed as Work Order Requests too (reported 2026-09-03 on the Pilot
+// store 258 painting request - six photos, all mislabeled). It now resolves the label PER FILE.
+// Both halves below are the REAL shipped bytes: fileKind is sliced out, and the resolver's own
+// expression is lifted from the handoff call and run against it - not a restatement.
+function handoffLabels() {
+  var KIND = slice('function fileKind(', 'function humanSize(', 'file kind sniffer');
+  var kctx = {};
+  vm.runInNewContext(KIND + ';this.fileKind=fileKind;', kctx);
+  A.eq('fileKind: the dropped request email -> Email', kctx.fileKind({ name: 'store Painting.msg', type: '' }), 'Email');
+  // Outlook hands embedded photos over with mime application/octet-stream, so the NAME is what
+  // classifies them - a mime-only sniffer would have missed every one of them.
+  A.eq('fileKind: a photo attachment (octet-stream mime, .jpeg name) -> Photo',
+    kctx.fileKind({ name: 'original-C2383B61.jpeg', type: 'application/octet-stream' }), 'Photo');
+
+  var handoff = slice('runApiUpload(raw, described, dt, ctx,', '}, false);', 'WO-intake handoff upload call');
+  var m = /return (fileKind\(f\)[\s\S]*?);/.exec(handoff);
+  A.ok('the handoff passes a per-file label resolver, not one fixed name', !!m, handoff.slice(0, 200));
+  var resolve = new Function('fileKind', 'f', 'return ' + m[1] + ';');
+  A.eq('handoff: the request email itself -> Work Order Request',
+    resolve(kctx.fileKind, { name: 'store Painting.msg', type: '' }), 'Work Order Request');
+  A.eq('handoff: an image attachment -> Photo (THE FIX)',
+    resolve(kctx.fileKind, { name: 'original-C2383B61.jpeg', type: 'application/octet-stream' }), 'Photo');
+  A.eq('handoff: an attached PDF is still a Work Order Request',
+    resolve(kctx.fileKind, { name: 'scope.pdf', type: 'application/pdf' }), 'Work Order Request');
 }
 run().then(function () { A.finish(); }, function (e) { console.error('THREW:', e && e.stack || e); process.exit(2); });
