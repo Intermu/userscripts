@@ -523,6 +523,9 @@ jobs:
       - name: Drop Upload party/label classifier harness (broker is not a vendor)
         run: node scripts/test-drop-upload-classify.js
 
+      - name: Drop Upload response-ladder harness (@-mention wire format, answered, escalation)
+        run: node scripts/test-drop-upload-response-ladder.js
+
       - name: WO Intake .eml MIME-parse harness (parseEml multipart walk)
         run: node scripts/test-eml-parse.js
 
