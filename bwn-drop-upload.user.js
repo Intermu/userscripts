@@ -4,7 +4,7 @@
 // @version      1.24.0
 // @downloadURL  https://raw.githubusercontent.com/Intermu/userscripts/main/bwn-drop-upload.user.js
 // @updateURL    https://raw.githubusercontent.com/Intermu/userscripts/main/bwn-drop-upload.user.js
-// @description  Drop files anywhere on an Umbrava work order to upload them. Opens the Documents tab and upload dialog, hands over the files, and builds each file's description from its contents. Emails are parsed locally (.msg via an OLE/MAPI reader, .eml via RFC822) into an Outlook-style block - From/Sent/To/Cc/Subject and the body - that becomes the WO note, led by a one-line summary from Chrome's on-device built-in AI (zero cost, zero egress, nothing leaves the browser), falling back to local WO-field extraction (store, city/state, priority, PO, NTE, problem, requester) when the on-device model is unavailable. That same summary fills each file's Description. The WO note's Type is chosen from the email's parties: inbound is typed by the sender (client -> Client, else Vendor); outbound from Broadway is typed by the recipients (a client recipient -> Client, any vendor recipient -> Vendor, all-internal -> Internal). Umbrava's Description field is a TipTap/ProseMirror rich-text editor. It rejects synthetic paste, beforeinput, insertHTML and raw innerHTML, but honours execCommand('insertText') plus a synthetic Enter keydown - so the note is filled line by line (Enter between lines to keep paragraphs), paced ~12ms/line so ProseMirror's async commit doesn't drop lines (measured live 2026-08-10). The text is also placed on your clipboard as a backup, and if every fill method fails a "Copy the WO note" button appears (its click supplies the gesture for a reliable copy, then Ctrl+V). A console diagnostic reports which editor was found and which fill method stuck. When WO Intake hands off a just-created WO's request email, each uploaded file's Label (document type) is set to "Work Order Request" and the note Type is forced to Client (a WO Intake handoff is a client's request, even when the sender is a broker like Fairmarkit that reads as a Vendor domain). Fairmarkit / bulk-email footer boilerplate (the Fairmarkit company block: tagline + Boston address + FAQ/Privacy/Terms/Unsubscribe, and the -----!{...}!----- machine tail) plus ALL tracking URLs (safelinks/awstrack/logo) are stripped from the note body, keeping content through the suppliers@ email. A Fairmarkit RFQ body is also condensed to one line per entry - single-spaced, with each line-item rejoined to its QTY and each Details label (Buyer/Close date/RFQ ID/Shipping address) rejoined to its value. Files upload via Umbrava's own API (initializeJobDocument -> Azure blob PUT -> bulkAddWorkOrderDocuments, captured live 2026-08-12), Label set by id, so the brittle upload-dialog combobox is bypassed; the dialog remains the automatic fallback if the API is unavailable. A manual drop does NOT auto-upload: the review box shows a "Document type" picker plus an Upload button, so the coordinator CHOOSES the document type before it is committed (there is no update-label mutation, so the label must be right at upload time). The picker defaults to MATCH the note Type we assigned (Client -> Client Correspondence, Vendor -> Vendor Correspondence, Internal -> Internal) and stays in sync as the note Type is changed, until the coordinator overrides the doc type directly; for an unknown external party the on-device classifier upgrades Vendor -> Supplier Correspondence when it reads as a parts supplier. The file Description is still filled automatically from the file's contents / the email summary. Only the WO Intake handoff still uploads automatically, and it labels per file: the request email itself is the "Work Order Request", while any image attachment is filed as a "Photo". The email note is shown in a centered BWN review box (editable; the Type picker offers a curated set of the note types a drop is actually filed under, defaulted to the party-derived Client/Vendor/Internal) and posted via addEditJobNote ONLY when you click Post - it is never auto-posted, and posts under your own Umbrava session for correct attribution. A dropped email is a CONTAINER, so its real attachments (the PDF, the site photos) are extracted and uploaded as documents of their own, listed under the note - the sender's signature graphics are left behind, identified by their MAPI hidden / MHTML-reference marks (.msg) or by being disposed inline with a cited Content-ID (.eml) rather than by size or filename; an attached image is filed as a "Photo" while the email keeps the document type you picked. Ticking "This client email needs a response" now also posts an Action note that @-mentions the work order's assignee (the notify rides the TipTap mention span the SPA itself sends), then prompts them every 15 minutes until they log a Client note on that WO; after 5 unanswered prompts it posts an Escalation note @-mentioning their supervisor and manager. Who that is comes from localStorage["bwn:escTeams"], shaped {"Assignee Name":{"supervisor":"Sam Sup","manager":"Mo Manager"},"*":{...}} - both keys optional, "*" is the fallback team - resolved to user ids against the live roster; nobody's name is baked into this file. The prompt ladder is local (localStorage + a ticker + a browser notification, falling back to an in-page toast), so it runs while an Umbrava tab is open; the Action note and the escalation are work-order notes, so the record of the chase survives a closed browser. Network calls are same-origin to app.umbrava.com's own /api/graphql (the app's Auth0 bearer, no @connect/GM) plus the SAS-authorized blob PUT the SPA itself makes - nothing goes to any third party. @grant none.
+// @description  Drop files anywhere on an Umbrava work order to upload them. Opens the Documents tab and upload dialog, hands over the files, and builds each file's description from its contents. Emails are parsed locally (.msg via an OLE/MAPI reader, .eml via RFC822) into an Outlook-style block - From/Sent/To/Cc/Subject and the body - that becomes the WO note, led by a one-line summary from Chrome's on-device built-in AI (zero cost, zero egress, nothing leaves the browser), falling back to local WO-field extraction (store, city/state, priority, PO, NTE, problem, requester) when the on-device model is unavailable. That same summary fills each file's Description. The WO note's Type is chosen from the email's parties: inbound is typed by the sender (client -> Client, else Vendor); outbound from Broadway is typed by the recipients (a client recipient -> Client, any vendor recipient -> Vendor, all-internal -> Internal). Umbrava's Description field is a TipTap/ProseMirror rich-text editor. It rejects synthetic paste, beforeinput, insertHTML and raw innerHTML, but honours execCommand('insertText') plus a synthetic Enter keydown - so the note is filled line by line (Enter between lines to keep paragraphs), paced ~12ms/line so ProseMirror's async commit doesn't drop lines (measured live 2026-08-10). The text is also placed on your clipboard as a backup, and if every fill method fails a "Copy the WO note" button appears (its click supplies the gesture for a reliable copy, then Ctrl+V). A console diagnostic reports which editor was found and which fill method stuck. When WO Intake hands off a just-created WO's request email, each uploaded file's Label (document type) is set to "Work Order Request" and the note Type is forced to Client (a WO Intake handoff is a client's request, even when the sender is a broker like Fairmarkit that reads as a Vendor domain). Fairmarkit / bulk-email footer boilerplate (the Fairmarkit company block: tagline + Boston address + FAQ/Privacy/Terms/Unsubscribe, and the -----!{...}!----- machine tail) plus ALL tracking URLs (safelinks/awstrack/logo) are stripped from the note body, keeping content through the suppliers@ email. A Fairmarkit RFQ body is also condensed to one line per entry - single-spaced, with each line-item rejoined to its QTY and each Details label (Buyer/Close date/RFQ ID/Shipping address) rejoined to its value. Files upload via Umbrava's own API (initializeJobDocument -> Azure blob PUT -> bulkAddWorkOrderDocuments, captured live 2026-08-12), Label set by id, so the brittle upload-dialog combobox is bypassed; the dialog remains the automatic fallback if the API is unavailable. A manual drop does NOT auto-upload: the review box shows a "Document type" picker plus an Upload button, so the coordinator CHOOSES the document type before it is committed (there is no update-label mutation, so the label must be right at upload time). The picker defaults to MATCH the note Type we assigned (Client -> Client Correspondence, Vendor -> Vendor Correspondence, Internal -> Internal) and stays in sync as the note Type is changed, until the coordinator overrides the doc type directly; for an unknown external party the on-device classifier upgrades Vendor -> Supplier Correspondence when it reads as a parts supplier. The file Description is still filled automatically from the file's contents / the email summary. Only the WO Intake handoff still uploads automatically, and it labels per file: the request email itself is the "Work Order Request", while any image attachment is filed as a "Photo". The email note is shown in a centered BWN review box (editable; the Type picker offers a curated set of the note types a drop is actually filed under, defaulted to the party-derived Client/Vendor/Internal) and posted via addEditJobNote ONLY when you click Post - it is never auto-posted, and posts under your own Umbrava session for correct attribution. A dropped email is a CONTAINER, so its real attachments (the PDF, the site photos) are extracted and uploaded as documents of their own, listed under the note - the sender's signature graphics are left behind, identified by their MAPI hidden / MHTML-reference marks (.msg) or by being disposed inline with a cited Content-ID (.eml) rather than by size or filename; an attached image is filed as a "Photo" while the email keeps the document type you picked. Ticking "This client email needs a response" now also posts an Action note that @-mentions the work order's assignee (the notify rides the TipTap mention span the SPA itself sends), then prompts them every 15 minutes until they log a Client note on that WO; after 5 unanswered prompts it posts an Escalation note @-mentioning their supervisor and manager. Who that is is READ FROM UMBRAVA, not configured anywhere: Company > Users shows each person's Teams, and the ops behind that page (user(id){parentTeams{parentTeam}} then users(teamId:){role{name}}) give the assignee's team and its members, from which whoever ranks supervisor or manager is told. A team may carry both or only one; the assignee is excluded, so a manager's own unanswered work does not escalate to themselves. Role-to-rank mirrors the SWA's own ladder so the two cannot disagree. Nothing to set up and no name is written down - fix the team in Umbrava and the escalation follows. The prompt ladder is local (localStorage + a ticker + a browser notification, falling back to an in-page toast), so it runs while an Umbrava tab is open; the Action note and the escalation are work-order notes, so the record of the chase survives a closed browser. Network calls are same-origin to app.umbrava.com's own /api/graphql (the app's Auth0 bearer, no @connect/GM) plus the SAS-authorized blob PUT the SPA itself makes - nothing goes to any third party. @grant none.
 // @match        https://app.umbrava.com/*
 // @match        https://*.umbrava.com/*
 // @run-at       document-idle
@@ -17,7 +17,7 @@
 
   var VER = '1.24.0';   // keep in step with @version (drift caught earlier: banner had lagged two releases)
   var BWN_VER = VER;   // stamped into BWN-OPS audit entries; the wrapper references BWN_VER
-  console.info('[BWN DROP UPLOAD] v' + VER + ' · Uploads via Umbrava API (initializeJobDocument→blob PUT→bulkAddWorkOrderDocuments, Label by id), DOM dialog is the fallback · manual drop HOLDS the upload: the review box shows a Document type picker (defaulted to MATCH the note Type - Client->Client Correspondence, Vendor->Vendor Correspondence, Internal->Internal - and re-synced as the note Type changes, until overridden) + an Upload button, so the type is CHOSEN, not assumed · email→note in a human-gated BWN review box, posted via addEditJobNote on an explicit Post click (never auto-posted) · note Type by parties (inbound=sender, outbound=recipient) · note box shows instantly with a mechanical lead; the slow on-device AI brief (Gemini Nano / Edge Phi) fills in async · a dropped email is a CONTAINER: its real attachments upload as their own documents (signature graphics dropped by their MAPI/Content-ID marks; an attached image files as Photo) · "needs a response" also posts an Action note @-mentioning the WO assignee, then prompts every 15 min until they log a Client note, escalating to their supervisor + manager (localStorage bwn:escTeams) after 5 · bwn:cmd dropupload:files bridge (handoff labels per file: the email = Work Order Request, image attachments = Photo)');
+  console.info('[BWN DROP UPLOAD] v' + VER + ' · Uploads via Umbrava API (initializeJobDocument→blob PUT→bulkAddWorkOrderDocuments, Label by id), DOM dialog is the fallback · manual drop HOLDS the upload: the review box shows a Document type picker (defaulted to MATCH the note Type - Client->Client Correspondence, Vendor->Vendor Correspondence, Internal->Internal - and re-synced as the note Type changes, until overridden) + an Upload button, so the type is CHOSEN, not assumed · email→note in a human-gated BWN review box, posted via addEditJobNote on an explicit Post click (never auto-posted) · note Type by parties (inbound=sender, outbound=recipient) · note box shows instantly with a mechanical lead; the slow on-device AI brief (Gemini Nano / Edge Phi) fills in async · a dropped email is a CONTAINER: its real attachments upload as their own documents (signature graphics dropped by their MAPI/Content-ID marks; an attached image files as Photo) · "needs a response" also posts an Action note @-mentioning the WO assignee, then prompts every 15 min until they log a Client note, escalating after 5 to the supervisor + manager READ from their Umbrava team (Company > Users/Teams), nothing configured · bwn:cmd dropupload:files bridge (handoff labels per file: the email = Work Order Request, image attachments = Photo)');
 
   // Active only on WO pages; checked at drag time so SPA navigation needs no watcher.
   // Excluded: the WO's billing invoice sub-pages (/billing/vendor-invoices, /billing/client-invoices),
@@ -2245,58 +2245,77 @@
     });
   }
 
-  // The tenant's user roster, for turning the escalation team's NAMES into the GUIDs a mention
-  // needs. Cached for the session - the roster does not move during a shift, and the ladder would
-  // otherwise re-read it on every escalation.
-  var Q_USERS = 'query BwnDuUsers{ users(includeInactiveUsers:false, includeSystemUsers:false){ id firstName lastName emailAddress } }';
-  var _roster = null;
-  function roster() {
-    if (_roster) return _roster;
-    _roster = duGql('BwnDuUsers', Q_USERS, {}).then(function (d) { return (d && d.users) || []; })
-      .catch(function () { _roster = null; return []; });
-    return _roster;
-  }
-  function fullName(u) { return String((u.firstName || '') + ' ' + (u.lastName || '')).replace(/\s+/g, ' ').trim(); }
-  // Resolve a display name (or an email address) to {name, id}. An unmatched name still comes back
-  // so the escalation note NAMES the person even when it cannot ping them - a silent drop would
-  // read as "nobody needed telling".
-  function resolvePerson(who) {
-    var want = String(who || '').trim();
-    if (!want) return Promise.resolve(null);
-    return roster().then(function (users) {
-      var lc = want.toLowerCase();
-      for (var i = 0; i < users.length; i++) {
-        if (fullName(users[i]).toLowerCase() === lc || String(users[i].emailAddress || '').toLowerCase() === lc) {
-          return { name: fullName(users[i]) || want, id: String(users[i].id || '') };
-        }
-      }
-      return { name: want, id: '' };
-    });
-  }
 
-  // WHO a coordinator escalates to. Deliberately NOT hardcoded here: colleagues' names in a source
-  // file that pushes to GitHub is the leak the suite's rules forbid (the SWA assist route refuses
-  // the same thing for the same reason), and a baked list goes stale silently. It lives in
-  // localStorage, per browser, shaped:
-  //   bwn:escTeams = { "Assignee Name": {"supervisor":"Sam Sup","manager":"Mo Manager"}, "*": {...} }
-  // A team may have both, or only one - both keys are optional, and "*" is the fallback team for
-  // anyone not listed. Names must match Umbrava's own display names (or be email addresses); they
-  // are resolved to user GUIDs against the live roster, so a typo shows up as an un-pinged name in
-  // the escalation note rather than as silence.
-  var ESC_TEAMS_KEY = 'bwn:escTeams';
-  function escTeamFor(assigneeName) {
-    var map = null;
-    try { map = JSON.parse(localStorage.getItem(ESC_TEAMS_KEY) || 'null'); } catch (e) { return null; }
-    if (!map || typeof map !== 'object') return null;
-    var direct = map[String(assigneeName || '')] || map['*'] || null;
-    return (direct && typeof direct === 'object') ? direct : null;
+  // WHO a coordinator escalates to. NOTHING is configured and no name is written down: Umbrava
+  // already owns the org chart. /company/users shows every person's Teams, and each team holds its
+  // coordinators alongside its supervisor and manager - so the escalation is a read, not a list
+  // somebody has to remember to update. Two ops behind that page, captured live read-only
+  // 2026-09-04 and proven end to end on a real team:
+  //   user(id:ID!){ parentTeams { parentTeam { id name } } }   - the assignee's team(s)
+  //   users(teamId:ID, includeInactiveUsers, includeSystemUsers){ ... role { name } }  - its members
+  // `users` already takes a `teamId` filter, so a team's roster is one call.
+  var Q_USER_TEAMS = 'query BwnDuUserTeams($id:ID!){ user(id:$id){ id parentTeams { parentTeam { id name } } } }';
+  var Q_TEAM_MEMBERS = 'query BwnDuTeamMembers($t:ID){ users(teamId:$t, includeInactiveUsers:false, includeSystemUsers:false){ id firstName lastName title isInactive role { name } } }';
+
+  // Role -> rank, MIRRORED from broadway-internal-ops api/shared/umbrava-auth.js so this script and
+  // the SWA cannot disagree about who outranks whom. Exact names first, then the same keyword
+  // inference for a role nobody has mapped yet. Live examples: "National Account Supervisor" = 3,
+  // "National Account Manager" = 4, "Lead Operations Coordinator" = 2, "Operations Coordinator" = 1.
+  var RANK_SUPERVISOR = 3, RANK_MANAGER = 4;
+  var ROLE_RANKS = {
+    'operations coordinator': 1, 'on call coordinator': 1, 'vendor management coordinator': 1,
+    'account executive': 1, 'construction pm': 1, 'construction + service': 1, 'projects signage': 1,
+    'new account team': 1, 'sales': 1, 'billing': 1, 'analytics': 1, 'reception': 1, 'marketing': 1,
+    'vendor compliance': 1, 'vendor management mgmt': 1, 'admin': 1, 'trade specialist': 1,
+    'lead operations coordinator': 2,
+    'national account supervisor': 3, 'on call supervisor': 3,
+    'billing manager': 4, 'national account manager': 4,
+    'director': 5
+  };
+  function rankOfRole(name) {
+    var n = String(name || '').trim().replace(/\s+/g, ' ').toLowerCase();
+    if (!n) return 1;
+    if (ROLE_RANKS[n] != null) return ROLE_RANKS[n];
+    if (/\b(director|vp|vice president|president|owner)\b/.test(n)) return 5;
+    if (/\bmanager\b/.test(n)) return 4;
+    if (/\bsupervisor\b/.test(n)) return 3;
+    if (/\blead\b/.test(n)) return 2;
+    return 1;
   }
-  // -> Promise<[{name,id}]>, in escalation order (supervisor first, then manager), skipping blanks.
-  function escalationPeople(assigneeName) {
-    var team = escTeamFor(assigneeName);
-    if (!team) return Promise.resolve([]);
-    return Promise.all([team.supervisor, team.manager].map(resolvePerson))
-      .then(function (ps) { return ps.filter(Boolean); });
+  // -> Promise<[{name,id}]>: the assignee's team's supervisor(s) and manager(s), supervisor first.
+  // A team may carry both, or only one (Mike's rule, and the live data agrees) - whoever is there is
+  // who gets told. The assignee is excluded: escalating a manager's own unanswered work to that same
+  // manager is a no-op that would read as "handled". Their teams are UNIONED - somebody on two teams
+  // should not have half their chain skipped - and deduped by user id.
+  function escalationPeople(assigneeId) {
+    if (!assigneeId) return Promise.resolve([]);
+    return duGql('BwnDuUserTeams', Q_USER_TEAMS, { id: assigneeId }).then(function (d) {
+      var links = (d && d.user && d.user.parentTeams) || [];
+      var ids = [];
+      links.forEach(function (l) {
+        var t = l && l.parentTeam;
+        if (t && t.id && ids.indexOf(t.id) === -1) ids.push(t.id);
+      });
+      if (!ids.length) return [];
+      return Promise.all(ids.map(function (tid) {
+        return duGql('BwnDuTeamMembers', Q_TEAM_MEMBERS, { t: tid })
+          .then(function (r) { return (r && r.users) || []; })
+          .catch(function () { return []; });     // one unreadable team must not lose the others
+      })).then(function (lists) {
+        var seen = {}, sups = [], mgrs = [];
+        lists.forEach(function (us) {
+          us.forEach(function (u) {
+            if (!u || !u.id || u.isInactive || u.id === assigneeId || seen[u.id]) return;
+            var rank = rankOfRole(u.role && u.role.name);
+            if (rank !== RANK_SUPERVISOR && rank !== RANK_MANAGER) return;
+            seen[u.id] = 1;
+            var person = { name: String((u.firstName || '') + ' ' + (u.lastName || '')).replace(/\s+/g, ' ').trim(), id: String(u.id) };
+            if (rank === RANK_SUPERVISOR) sups.push(person); else mgrs.push(person);
+          });
+        });
+        return sups.concat(mgrs);
+      });
+    }).catch(function () { return []; });   // no read -> the escalation still posts, unaddressed
   }
 
   // ---- The 15-minute prompt ladder --------------------------------------------------------------
@@ -2369,16 +2388,18 @@
   }
 
   function ladderEscalate(entry) {
-    return escalationPeople(entry.assigneeName).then(function (people) {
+    return escalationPeople(entry.assigneeId).then(function (people) {
       var who = entry.assigneeName || 'the assignee';
       var msg = 'No client response logged on this work order after ' + LADDER_MAX + ' prompts to ' +
         who + ' over ' + Math.round((LADDER_MAX * LADDER_EVERY) / 60000) + ' minutes' +
         (entry.subject ? ' (client email: ' + entry.subject + ')' : '') + '. Please step in.';
       if (!people.length) {
         // Fail LOUD, not silent: the note still lands so the escalation is on the record, and the
-        // coordinator is told exactly why nobody was pinged.
-        toast('W-' + entry.woNum + ': 5 prompts unanswered, but no escalation team is set for ' + who +
-          ' - set localStorage["' + ESC_TEAMS_KEY + '"]. Posting the escalation note unaddressed.');
+        // coordinator is told exactly what to fix. Either the assignee is on no team, or their
+        // team carries nobody at supervisor or manager rank - both are answered in Umbrava under
+        // Company > Teams, which is the point of reading it from there instead of a config file.
+        toast('W-' + entry.woNum + ': 5 prompts unanswered, but ' + who +
+          ' has no supervisor or manager on their Umbrava team. Posting the escalation note unaddressed.');
         return postNoteViaApi(msg, 'Escalation', entry.woNum);
       }
       return postNoteHtmlViaApi(mentionNoteText(people, msg), mentionNoteHtml(people, msg), 'Escalation', entry.woNum)
@@ -2400,6 +2421,13 @@
         // No assignee (or a name with no user id): nobody to ping, so nobody to chase. Say so -
         // an unassigned WO silently skipping the whole feature is the failure worth naming.
         toast('W-' + woNum + ' has no assignee to @-mention, so no action note and no prompts. Assign it first.');
+        return null;
+      }
+      // `assignedTo` can resolve to a TEAM rather than a person (recorded in the vault's Umbrava
+      // operations notes, and Company > Teams is where those live). A team has nobody to prompt and
+      // no supervisor of its own, so the chase has no subject - name that instead of pinging a group.
+      if (/^\s*team\b/i.test(assignee.name)) {
+        toast('W-' + woNum + ' is assigned to ' + assignee.name + ', not a person - no action note and no prompts. Assign an individual first.');
         return null;
       }
       var people = [assignee];
@@ -2597,7 +2625,7 @@
       lt.innerHTML = '<strong style="font-weight:600;">This client email needs a response</strong>' +
         '<div style="color:#5b6b8c;margin-top:2px;">Opens a tracked item on the priority clock and posts an <strong>Action</strong> note ' +
         '@-mentioning this WO’s assignee, then prompts them every 15 minutes until they log a Client note - ' +
-        'after 5 unanswered prompts their supervisor and manager are @-mentioned. The upload note posts as ' +
+        'after 5 unanswered prompts the supervisor and manager on their Umbrava team are @-mentioned. The upload note posts as ' +
         '<strong>Internal</strong> so it does not read as “we updated the client”.</div>';
       lab.appendChild(respCb); lab.appendChild(lt);
       box.appendChild(lab);

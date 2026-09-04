@@ -45,7 +45,8 @@ function build(opts, blockSrc) {
   var state = {
     now: opts.now || 1000000000000,
     notes: opts.notes || [],
-    users: opts.users || [],
+    teamsOf: opts.teamsOf || {},
+    members: opts.members || {},
     assignee: ('assignee' in opts) ? opts.assignee : { assignedTo: 'aaaaaaaa-bbbb-cccc-dddd-eeeeeeeeeeee', assignedToMemberName: 'Dana Coordinator' },
     posted: [], toasts: [], notified: [], ticker: null, gqlFail: opts.gqlFail || false
   };
@@ -66,8 +67,18 @@ function build(opts, blockSrc) {
     duGql: function (op) {
       if (state.gqlFail) return Promise.reject(new Error('boom'));
       if (op === 'BwnDuAssignee') return Promise.resolve({ listWorkOrdersPaginated: { items: state.assignee ? [state.assignee] : [] } });
-      if (op === 'BwnDuUsers') return Promise.resolve({ users: state.users });
       if (op === 'BwnDuNotes') return Promise.resolve({ jobNotes: state.notes });
+      // The org chart, as Umbrava actually serves it: a user's parentTeams, then that team's users.
+      // Field names and shapes are the ones captured live read-only 2026-09-04 off /company/users.
+      if (op === 'BwnDuUserTeams') {
+        var uid = arguments[2] && arguments[2].id;
+        var mine = (state.teamsOf && state.teamsOf[uid]) || [];
+        return Promise.resolve({ user: { id: uid, parentTeams: mine.map(function (tid) { return { parentTeam: { id: tid, name: tid } }; }) } });
+      }
+      if (op === 'BwnDuTeamMembers') {
+        var tid2 = arguments[2] && arguments[2].t;
+        return Promise.resolve({ users: (state.members && state.members[tid2]) || [] });
+      }
       return Promise.reject(new Error('unexpected op ' + op));
     },
     postNoteViaApi: function (text, type, wo) { state.posted.push({ text: text, html: null, type: type, wo: wo }); return Promise.resolve({ id: 1 }); },
@@ -77,7 +88,7 @@ function build(opts, blockSrc) {
   ctx.Date = function () { }; ctx.Date.now = function () { return state.now; }; ctx.Date.parse = Date.parse;
   vm.runInNewContext((blockSrc || BLOCK) + '\n;' + [
     'this.mentionNoteHtml=mentionNoteHtml', 'this.mentionNoteText=mentionNoteText', 'this.duTenant=duTenant',
-    'this.escTeamFor=escTeamFor', 'this.escalationPeople=escalationPeople', 'this.answeredSince=answeredSince',
+    'this.rankOfRole=rankOfRole', 'this.escalationPeople=escalationPeople', 'this.answeredSince=answeredSince',
     'this.assigneeOf=assigneeOf', 'this.postActionNote=postActionNote', 'this.ladderTick=ladderTick',
     'this.ladderLoad=ladderLoad', 'this.ladderPut=ladderPut', 'this.LADDER_MAX=LADDER_MAX',
     'this.LADDER_EVERY=LADDER_EVERY', 'this.ACTION_MSG=ACTION_MSG'
@@ -113,33 +124,74 @@ function run() {
     b.api.mentionNoteHtml([{ name: '<img src=x onerror=1>', id: 'i' }], 'x').indexOf('<img') === -1,
     b.api.mentionNoteHtml([{ name: '<img src=x onerror=1>', id: 'i' }], 'x'));
 
-  // ---- 2. The escalation team ---------------------------------------------
-  console.log('# the escalation team - localStorage, never a name baked into a pushed repo');
-  var teams = JSON.stringify({
-    'Dana Coordinator': { supervisor: 'Sam Sup', manager: 'Mo Mgr' },
-    'Solo Coordinator': { manager: 'Mo Mgr' },
-    '*': { supervisor: 'Default Sup' }
-  });
-  var users = [
-    { id: 's-guid', firstName: 'Sam', lastName: 'Sup', emailAddress: 'sam@example.com' },
-    { id: 'm-guid', firstName: 'Mo', lastName: 'Mgr', emailAddress: 'mo@example.com' }
-  ];
-  var t = build({ storage: { 'bwn:escTeams': teams }, users: users });
-  A.eq('a listed coordinator resolves their own team', t.api.escTeamFor('Dana Coordinator'), { supervisor: 'Sam Sup', manager: 'Mo Mgr' });
-  A.eq('an unlisted coordinator falls back to the "*" team', t.api.escTeamFor('Nobody At All'), { supervisor: 'Default Sup' });
-  A.eq('no roster at all -> null (and the caller posts unaddressed, loudly)', build().api.escTeamFor('Dana Coordinator'), null);
+  // ---- 2. The escalation team, READ from Umbrava ---------------------------
+  // Roles are the live vocabulary, verbatim off a real team: "National Account Supervisor" is the
+  // supervisor, "National Account Manager" the manager, "Lead Operations Coordinator" is NOT either
+  // one. The rank map mirrors the SWA's api/shared/umbrava-auth.js so the two cannot drift apart.
+  console.log('# role -> rank, mirrored from the SWA ladder');
+  var r = build().api;
+  A.eq('National Account Supervisor is a supervisor (3)', r.rankOfRole('National Account Supervisor'), 3);
+  A.eq('National Account Manager is a manager (4)', r.rankOfRole('National Account Manager'), 4);
+  A.eq('Lead Operations Coordinator is a LEAD (2), not a supervisor', r.rankOfRole('Lead Operations Coordinator'), 2);
+  A.eq('Operations Coordinator is staff (1)', r.rankOfRole('Operations Coordinator'), 1);
+  A.eq('Trade Specialist is staff (1), not escalation material', r.rankOfRole('Trade Specialist'), 1);
+  A.eq('an unmapped role infers from its keyword', r.rankOfRole('Regional Service Manager'), 4);
+  A.eq('...and an unmapped one with no keyword is staff, never an accidental escalation target', r.rankOfRole('Fleet Whisperer'), 1);
+  A.eq('no role at all is staff', r.rankOfRole(''), 1);
 
-  return t.api.escalationPeople('Dana Coordinator').then(function (ps) {
-    A.eq('supervisor FIRST, then manager', ps.map(function (p) { return p.name; }), ['Sam Sup', 'Mo Mgr']);
-    A.eq('both resolve to real user GUIDs', ps.map(function (p) { return p.id; }), ['s-guid', 'm-guid']);
-    return t.api.escalationPeople('Solo Coordinator');
+  // The stub answers by OPERATION NAME, so it would happily agree with a misspelled field. Pin the
+  // SHIPPED query text against what was captured live, or a schema drift passes here and returns
+  // null in production - the "a catch that returns [] becomes a believable fact" trap.
+  console.log('# the shipped org-chart queries, pinned against the live capture');
+  [
+    ['user(id:$id) is the assignee lookup', /user\(id:\s*\$id\)/],
+    ['it reads parentTeams { parentTeam { id name } }', /parentTeams\s*\{\s*parentTeam\s*\{\s*id\s+name\s*\}\s*\}/],
+    ['users takes the teamId filter', /users\(teamId:\s*\$t/],
+    ['...excluding inactive and system users', /includeInactiveUsers:\s*false[\s\S]{0,40}includeSystemUsers:\s*false/],
+    ['...and selects role { name }, which is what decides rank', /role\s*\{\s*name\s*\}/],
+    ['...plus isInactive, the deactivated-account flag', /\bisInactive\b/]
+  ].forEach(function (p) { A.ok(p[0], p[1].test(BLOCK), 'shipped query no longer matches the capture'); });
+
+  console.log('# the escalation team - the assignee\'s Umbrava team, nothing configured');
+  // Shaped exactly like the live Team T read: a supervisor, a manager, leads, a coordinator.
+  var TEAM_T = [
+    { id: 'sup-guid', firstName: 'Lee', lastName: 'Sup', title: 'Lead Operations Coordinator', isInactive: false, role: { name: 'National Account Supervisor' } },
+    { id: 'mgr-guid', firstName: 'Morgan', lastName: 'Mgr', title: 'Operations Manager', isInactive: false, role: { name: 'National Account Manager' } },
+    { id: 'dana-guid', firstName: 'Dana', lastName: 'Coordinator', title: 'Operations Coordinator', isInactive: false, role: { name: 'Operations Coordinator' } },
+    { id: 'lead-guid', firstName: 'Lou', lastName: 'Lead', title: 'Operations Coordinator', isInactive: false, role: { name: 'Lead Operations Coordinator' } },
+    { id: 'trade-guid', firstName: 'Ronny', lastName: 'Trade', title: '', isInactive: false, role: { name: 'Trade Specialist' } }
+  ];
+  var t = build({ teamsOf: { 'dana-guid': ['T'], 'mgr-guid': ['T'], 'solo-guid': ['S'], 'multi-guid': ['T', 'S'] },
+    members: { T: TEAM_T, S: [{ id: 'mgr2-guid', firstName: 'Sol', lastName: 'Mgr', isInactive: false, role: { name: 'Billing Manager' } }] } });
+
+  return t.api.escalationPeople('dana-guid').then(function (ps) {
+    A.eq('supervisor FIRST, then manager', ps.map(function (p) { return p.name; }), ['Lee Sup', 'Morgan Mgr']);
+    A.eq('both carry the real user GUIDs the mention needs', ps.map(function (p) { return p.id; }), ['sup-guid', 'mgr-guid']);
+    return t.api.escalationPeople('solo-guid');
   }).then(function (ps) {
-    A.eq('a team with ONLY a manager escalates to one person', ps.map(function (p) { return p.name; }), ['Mo Mgr']);
-    var u = build({ storage: { 'bwn:escTeams': JSON.stringify({ '*': { manager: 'Typo Name' } }) }, users: users });
-    return u.api.escalationPeople('anyone');
+    A.eq('a team with ONLY a manager escalates to one person', ps.map(function (p) { return p.name; }), ['Sol Mgr']);
+    return t.api.escalationPeople('mgr-guid');
   }).then(function (ps) {
-    A.eq('a name the roster does not know is still NAMED', ps.map(function (p) { return p.name; }), ['Typo Name']);
-    A.eq('...with no id, so the note names them without a fake ping', ps[0].id, '');
+    A.eq('the assignee is EXCLUDED - a manager does not escalate to themselves', ps.map(function (p) { return p.id; }), ['sup-guid']);
+    return t.api.escalationPeople('multi-guid');
+  }).then(function (ps) {
+    A.eq('somebody on two teams gets BOTH chains, supervisors before managers',
+      ps.map(function (p) { return p.id; }), ['sup-guid', 'mgr-guid', 'mgr2-guid']);
+    return t.api.escalationPeople('');
+  }).then(function (ps) {
+    A.eq('no assignee id -> nobody (the note still posts, unaddressed)', ps, []);
+    return t.api.escalationPeople('teamless-guid');
+  }).then(function (ps) {
+    A.eq('an assignee on no team -> nobody', ps, []);
+    var inact = build({ teamsOf: { x: ['T'] }, members: { T: [
+      { id: 'gone-guid', firstName: 'Gone', lastName: 'Sup', isInactive: true, role: { name: 'National Account Supervisor' } }
+    ] } });
+    return inact.api.escalationPeople('x');
+  }).then(function (ps) {
+    A.eq('a DEACTIVATED supervisor is not escalated to', ps, []);
+    return build({ gqlFail: true }).api.escalationPeople('dana-guid');
+  }).then(function (ps) {
+    A.eq('an unreadable roster -> nobody, never a throw that loses the escalation', ps, []);
 
     // ---- 3. "Answered" -----------------------------------------------------
     console.log('# answered = the next CLIENT note by the ASSIGNEE, after the ladder opened');
@@ -189,7 +241,7 @@ function run() {
   }).then(function () {
     // ---- 5. The ladder, driven end to end -----------------------------------
     console.log('# the ladder - 5 prompts, then the supervisor and manager');
-    var L = build({ storage: { 'bwn:escTeams': teams }, users: users, notes: [] });
+    var L = build({ teamsOf: { 'a-guid': ['T'] }, members: { T: TEAM_T }, notes: [] });
     var T0 = L.state.now;
     L.api.ladderPut({
       id: 'L1', woNum: 371126,
@@ -228,8 +280,8 @@ function run() {
         A.ok('...and warns them it is escalating now', /Escalating to your supervisor and manager/.test(L.state.toasts[4]), L.state.toasts[4]);
         A.eq('the 5th unanswered prompt escalates', L.state.posted.length, 1);
         A.eq('...as an Escalation note', L.state.posted[0].type, 'Escalation');
-        A.ok('...@-mentioning the supervisor', /data-id="s-guid"/.test(L.state.posted[0].html), L.state.posted[0].html);
-        A.ok('...and the manager', /data-id="m-guid"/.test(L.state.posted[0].html), L.state.posted[0].html);
+        A.ok('...@-mentioning the supervisor', /data-id="sup-guid"/.test(L.state.posted[0].html), L.state.posted[0].html);
+        A.ok('...and the manager', /data-id="mgr-guid"/.test(L.state.posted[0].html), L.state.posted[0].html);
         A.ok('...naming the assignee who did not answer', /Dana Coordinator/.test(L.state.posted[0].text), L.state.posted[0].text);
         A.eq('the ladder is closed after escalating (it does not nag forever)', L.api.ladderLoad().length, 0);
       });
