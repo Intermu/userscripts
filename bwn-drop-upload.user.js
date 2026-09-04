@@ -1,10 +1,10 @@
 // ==UserScript==
 // @name         BWN Drop Upload (Broadway National)
 // @namespace    broadwaynational.bwn
-// @version      1.23.0
+// @version      1.23.1
 // @downloadURL  https://raw.githubusercontent.com/Intermu/userscripts/main/bwn-drop-upload.user.js
 // @updateURL    https://raw.githubusercontent.com/Intermu/userscripts/main/bwn-drop-upload.user.js
-// @description  Drop files anywhere on an Umbrava work order to upload them. Opens the Documents tab and upload dialog, hands over the files, and builds each file's description from its contents. Emails are parsed locally (.msg via an OLE/MAPI reader, .eml via RFC822) into an Outlook-style block - From/Sent/To/Cc/Subject and the body - that becomes the WO note, led by a one-line summary from Chrome's on-device built-in AI (zero cost, zero egress, nothing leaves the browser), falling back to local WO-field extraction (store, city/state, priority, PO, NTE, problem, requester) when the on-device model is unavailable. That same summary fills each file's Description. The WO note's Type is chosen from the email's parties: inbound is typed by the sender (client -> Client, else Vendor); outbound from Broadway is typed by the recipients (a client recipient -> Client, any vendor recipient -> Vendor, all-internal -> Internal). Umbrava's Description field is a TipTap/ProseMirror rich-text editor. It rejects synthetic paste, beforeinput, insertHTML and raw innerHTML, but honours execCommand('insertText') plus a synthetic Enter keydown - so the note is filled line by line (Enter between lines to keep paragraphs), paced ~12ms/line so ProseMirror's async commit doesn't drop lines (measured live 2026-08-10). The text is also placed on your clipboard as a backup, and if every fill method fails a "Copy the WO note" button appears (its click supplies the gesture for a reliable copy, then Ctrl+V). A console diagnostic reports which editor was found and which fill method stuck. When WO Intake hands off a just-created WO's request email, each uploaded file's Label (document type) is set to "Work Order Request" and the note Type is forced to Client (a WO Intake handoff is a client's request, even when the sender is a broker like Fairmarkit that reads as a Vendor domain). Fairmarkit / bulk-email footer boilerplate (the Fairmarkit company block: tagline + Boston address + FAQ/Privacy/Terms/Unsubscribe, and the -----!{...}!----- machine tail) plus ALL tracking URLs (safelinks/awstrack/logo) are stripped from the note body, keeping content through the suppliers@ email. A Fairmarkit RFQ body is also condensed to one line per entry - single-spaced, with each line-item rejoined to its QTY and each Details label (Buyer/Close date/RFQ ID/Shipping address) rejoined to its value. Files upload via Umbrava's own API (initializeJobDocument -> Azure blob PUT -> bulkAddWorkOrderDocuments, captured live 2026-08-12), Label set by id, so the brittle upload-dialog combobox is bypassed; the dialog remains the automatic fallback if the API is unavailable. A manual drop does NOT auto-upload: the review box shows a "Document type" picker plus an Upload button, so the coordinator CHOOSES the document type before it is committed (there is no update-label mutation, so the label must be right at upload time). The picker defaults to MATCH the note Type we assigned (Client -> Client Correspondence, Vendor -> Vendor Correspondence, Internal -> Internal) and stays in sync as the note Type is changed, until the coordinator overrides the doc type directly; for an unknown external party the on-device classifier upgrades Vendor -> Supplier Correspondence when it reads as a parts supplier. The file Description is still filled automatically from the file's contents / the email summary. Only the WO Intake handoff still uploads automatically and forces "Work Order Request". The email note is shown in a centered BWN review box (editable; the Type picker offers a curated set of the note types a drop is actually filed under, defaulted to the party-derived Client/Vendor/Internal) and posted via addEditJobNote ONLY when you click Post - it is never auto-posted, and posts under your own Umbrava session for correct attribution. Network calls are same-origin to app.umbrava.com's own /api/graphql (the app's Auth0 bearer, no @connect/GM) plus the SAS-authorized blob PUT the SPA itself makes - nothing goes to any third party. @grant none.
+// @description  Drop files anywhere on an Umbrava work order to upload them. Opens the Documents tab and upload dialog, hands over the files, and builds each file's description from its contents. Emails are parsed locally (.msg via an OLE/MAPI reader, .eml via RFC822) into an Outlook-style block - From/Sent/To/Cc/Subject and the body - that becomes the WO note, led by a one-line summary from Chrome's on-device built-in AI (zero cost, zero egress, nothing leaves the browser), falling back to local WO-field extraction (store, city/state, priority, PO, NTE, problem, requester) when the on-device model is unavailable. That same summary fills each file's Description. The WO note's Type is chosen from the email's parties: inbound is typed by the sender (client -> Client, else Vendor); outbound from Broadway is typed by the recipients (a client recipient -> Client, any vendor recipient -> Vendor, all-internal -> Internal). Umbrava's Description field is a TipTap/ProseMirror rich-text editor. It rejects synthetic paste, beforeinput, insertHTML and raw innerHTML, but honours execCommand('insertText') plus a synthetic Enter keydown - so the note is filled line by line (Enter between lines to keep paragraphs), paced ~12ms/line so ProseMirror's async commit doesn't drop lines (measured live 2026-08-10). The text is also placed on your clipboard as a backup, and if every fill method fails a "Copy the WO note" button appears (its click supplies the gesture for a reliable copy, then Ctrl+V). A console diagnostic reports which editor was found and which fill method stuck. When WO Intake hands off a just-created WO's request email, each uploaded file's Label (document type) is set to "Work Order Request" and the note Type is forced to Client (a WO Intake handoff is a client's request, even when the sender is a broker like Fairmarkit that reads as a Vendor domain). Fairmarkit / bulk-email footer boilerplate (the Fairmarkit company block: tagline + Boston address + FAQ/Privacy/Terms/Unsubscribe, and the -----!{...}!----- machine tail) plus ALL tracking URLs (safelinks/awstrack/logo) are stripped from the note body, keeping content through the suppliers@ email. A Fairmarkit RFQ body is also condensed to one line per entry - single-spaced, with each line-item rejoined to its QTY and each Details label (Buyer/Close date/RFQ ID/Shipping address) rejoined to its value. Files upload via Umbrava's own API (initializeJobDocument -> Azure blob PUT -> bulkAddWorkOrderDocuments, captured live 2026-08-12), Label set by id, so the brittle upload-dialog combobox is bypassed; the dialog remains the automatic fallback if the API is unavailable. A manual drop does NOT auto-upload: the review box shows a "Document type" picker plus an Upload button, so the coordinator CHOOSES the document type before it is committed (there is no update-label mutation, so the label must be right at upload time). The picker defaults to MATCH the note Type we assigned (Client -> Client Correspondence, Vendor -> Vendor Correspondence, Internal -> Internal) and stays in sync as the note Type is changed, until the coordinator overrides the doc type directly; for an unknown external party the on-device classifier upgrades Vendor -> Supplier Correspondence when it reads as a parts supplier. The file Description is still filled automatically from the file's contents / the email summary. Only the WO Intake handoff still uploads automatically, and it labels per file: the request email itself is the "Work Order Request", while any image attachment is filed as a "Photo". The email note is shown in a centered BWN review box (editable; the Type picker offers a curated set of the note types a drop is actually filed under, defaulted to the party-derived Client/Vendor/Internal) and posted via addEditJobNote ONLY when you click Post - it is never auto-posted, and posts under your own Umbrava session for correct attribution. Network calls are same-origin to app.umbrava.com's own /api/graphql (the app's Auth0 bearer, no @connect/GM) plus the SAS-authorized blob PUT the SPA itself makes - nothing goes to any third party. @grant none.
 // @match        https://app.umbrava.com/*
 // @match        https://*.umbrava.com/*
 // @run-at       document-idle
@@ -15,9 +15,9 @@
 (function () {
   'use strict';
 
-  var VER = '1.23.0';   // keep in step with @version (drift caught earlier: banner had lagged two releases)
+  var VER = '1.23.1';   // keep in step with @version (drift caught earlier: banner had lagged two releases)
   var BWN_VER = VER;   // stamped into BWN-OPS audit entries; the wrapper references BWN_VER
-  console.info('[BWN DROP UPLOAD] v' + VER + ' · Uploads via Umbrava API (initializeJobDocument→blob PUT→bulkAddWorkOrderDocuments, Label by id), DOM dialog is the fallback · manual drop HOLDS the upload: the review box shows a Document type picker (defaulted to MATCH the note Type - Client->Client Correspondence, Vendor->Vendor Correspondence, Internal->Internal - and re-synced as the note Type changes, until overridden) + an Upload button, so the type is CHOSEN, not assumed · email→note in a human-gated BWN review box, posted via addEditJobNote on an explicit Post click (never auto-posted) · note Type by parties (inbound=sender, outbound=recipient) · note box shows instantly with a mechanical lead; the slow on-device AI brief (Gemini Nano / Edge Phi) fills in async · bwn:cmd dropupload:files bridge (handoff still forces Work Order Request)');
+  console.info('[BWN DROP UPLOAD] v' + VER + ' · Uploads via Umbrava API (initializeJobDocument→blob PUT→bulkAddWorkOrderDocuments, Label by id), DOM dialog is the fallback · manual drop HOLDS the upload: the review box shows a Document type picker (defaulted to MATCH the note Type - Client->Client Correspondence, Vendor->Vendor Correspondence, Internal->Internal - and re-synced as the note Type changes, until overridden) + an Upload button, so the type is CHOSEN, not assumed · email→note in a human-gated BWN review box, posted via addEditJobNote on an explicit Post click (never auto-posted) · note Type by parties (inbound=sender, outbound=recipient) · note box shows instantly with a mechanical lead; the slow on-device AI brief (Gemini Nano / Edge Phi) fills in async · bwn:cmd dropupload:files bridge (handoff labels per file: the email = Work Order Request, image attachments = Photo)');
 
   // Active only on WO pages; checked at drag time so SPA navigation needs no watcher.
   // Excluded: the WO's billing invoice sub-pages (/billing/vendor-invoices, /billing/client-invoices),
@@ -1105,11 +1105,14 @@
   function uploadViaApi(rawFiles, describedFiles, labelName, woNumber) {
     if (!woNumber) return Promise.reject(new Error('no-wo-number'));
     if (!rawFiles || !rawFiles.length) return Promise.reject(new Error('no-files'));
-    var labelId = labelName ? docLabelId(labelName) : null;
     var jobs = [];
     for (var i = 0; i < rawFiles.length; i++) {
       var desc = (describedFiles && describedFiles[i] && describedFiles[i].desc) || '';
-      jobs.push(uploadOneViaApi(rawFiles[i], desc, labelId, woNumber));
+      // labelName may be a FUNCTION of the file, not one name for the batch: the WO-intake handoff
+      // labels the request email "Work Order Request" but its photo attachments "Photo". One drop,
+      // two document types - and there is no update-label mutation, so each has to be right here.
+      var nm = (typeof labelName === 'function') ? labelName(rawFiles[i]) : labelName;
+      jobs.push(uploadOneViaApi(rawFiles[i], desc, nm ? docLabelId(nm) : null, woNumber));
     }
     return Promise.all(jobs).then(function (entries) {
       return bwnGqlOp('bulkAddWorkOrderDocuments', MUT_BULK_ADD, { data: { workOrderNumber: woNumber, documents: entries } }, { ids: { wo: woNumber } })
@@ -2262,16 +2265,17 @@
     // A caller may FORCE a label (the WO-intake handoff passes 'Work Order Request'); otherwise the
     // label is auto-picked from the resolved files (email -> correspondence by party). Held in a closure
     // so the dialog fallback labels the same way if the API leg fails.
-    var resolvedLabel = labelName || DEFAULT_DOC_LABEL;
+    // A per-file resolver has no single name, so the dialog fallback keeps the default.
+    var resolvedLabel = (typeof labelName === 'string' && labelName) || DEFAULT_DOC_LABEL;
     return described.then(function (files) {
       if (ctx.aborted) throw new Error('aborted');
       // docLabelForFiles is async (an unrecognized external email asks the on-device AI vendor-vs-
       // supplier); await it here so the RIGHT label lands in bulkAdd - there is no update-label
       // mutation, so the label must be correct at upload time. A forced label skips the resolve.
       return (labelName ? Promise.resolve(labelName) : docLabelForFiles(files)).then(function (lbl) {
-        resolvedLabel = lbl;
+        if (typeof lbl === 'string') resolvedLabel = lbl;
         noteBoxStatus('Uploading ' + rawFiles.length + ' file' + (rawFiles.length > 1 ? 's' : '') + '…');
-        return uploadViaApi(rawFiles, files, resolvedLabel, woNum);
+        return uploadViaApi(rawFiles, files, lbl, woNum);
       });
     }).then(function (ids) {
       var n = (ids && ids.length) || rawFiles.length;
@@ -2497,9 +2501,13 @@
       showNoteReview();
       enrichNoteWithAI(pending);   // upgrade the mechanical lead to the AI brief in the background
     });
-    // WO Intake handoff = a just-created WO's client request email, so label the uploaded
-    // document(s) "Work Order Request". Uploads via the API; DOM dialog is the fallback.
-    runApiUpload(raw, described, dt, ctx, 'Work Order Request');
+    // WO Intake handoff = a just-created WO's client request email. The EMAIL is the "Work Order
+    // Request"; its image attachments are the site photos the requester sent, and filing those as
+    // Work Order Requests too is what buried them (reported on the Pilot 258 painting request).
+    // Label per file - Umbrava has no update-label mutation, so it has to be right at upload time.
+    runApiUpload(raw, described, dt, ctx, function (f) {
+      return fileKind(f) === 'Photo' ? 'Photo' : 'Work Order Request';
+    });
   }, false);
 
   // ---- Toast -----------------------------------------------------------------
