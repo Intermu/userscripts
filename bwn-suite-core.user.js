@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         BWN Suite - Core (Broadway National)
 // @namespace    broadwaynational.bwn
-// @version      1.81.8
+// @version      1.81.9
 // @downloadURL  https://raw.githubusercontent.com/Intermu/userscripts/main/bwn-suite-core.user.js
 // @updateURL    https://raw.githubusercontent.com/Intermu/userscripts/main/bwn-suite-core.user.js
 // @description  Runs several Umbrava helpers for BWN coordinators, in the browser with no privileged grants. Includes: PO Approval + ETA Builder; WO Assist (GP/ETA, a stall watchdog, DNE calculator, and a next-action playbook); Email Leak Guard (checks recipients against vendor names, PO amounts, and client budget references before an outbound email sends); WO List Heat (a triage overlay + My Day strip on the work-order list, with an optional same-origin Umbrava API scan for deterministic full-board coverage); and the BWN Launcher (opens the Azure Static Web App tools with the current WO's context). Modules share state through sessionStorage/localStorage. The only network calls are same-origin Umbrava GraphQL requests (app.umbrava.com/api/graphql, the app's own session): List Heat's full-board scan and WO Assist's work-order / trip / clock-in / document reads, plus ONE write - BWN Views saves the column layout through Umbrava's own putUserPreference, the same preference the column chooser writes; everything else is offline. Toggle modules in BWN_MODULES below.
@@ -6585,11 +6585,16 @@
         var acn = document.getElementById(ACT_CARD_ID); if (acn) acn.remove();   // checklist is per-WO; never carry it across
         var eo = document.getElementById('bwn-ecd-overlay'); if (eo) eo.remove();
         var pfb = document.getElementById('bwn-pf-banner'); if (pfb) pfb.remove();
-        // NO ecdAutoShownFor reset here. It holds the WO NUMBER it fired for, so it re-arms by
-        // itself the moment the WO changes - while nulling it re-armed on ANY path change,
-        // including a tab hop within the SAME WO (/details -> /notes). That is what re-popped
-        // the prompt on a WO whose ECD had just been set: the guard was cleared and the DOM
-        // still read the pre-write date (see ecdEcho).
+        // The ECD auto-pop guard holds the WO NUMBER it fired for, so a different WO re-arms it
+        // by itself and a tab hop inside ONE WO does not (nulling it on any path change is what
+        // re-popped the prompt on a WO whose ECD had just been set - 1.81.8). But LEAVING the WO
+        // ends the visit: a route with no WO at all (the board, a client, a vendor) is a real
+        // departure, and coming back should ask again if the date is still missing or overdue.
+        // Why that was the whole "never fires on a warm revisit" report: on a first visit the
+        // note read's own refresh re-runs the gate a beat later, but on a revisit that read
+        // short-circuits on the cached history, so the ONLY thing that could have re-opened the
+        // prompt was a re-armed guard - and nothing re-armed it.
+        if (!currentWOId()) ecdAutoShownFor = null;
         prevStatus = null;        // don't treat an already-terminal WO opened fresh as a "change"
       }
       clearTimeout(debounce);
