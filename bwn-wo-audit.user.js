@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         BWN WO Audit (Broadway National)
 // @namespace    broadwaynational.bwn
-// @version      0.8.3
+// @version      0.9.0
 // @downloadURL  https://raw.githubusercontent.com/Intermu/userscripts/main/bwn-wo-audit.user.js
 // @updateURL    https://raw.githubusercontent.com/Intermu/userscripts/main/bwn-wo-audit.user.js
 // @description  Batch WO-audit tool. Upload a WO audit .xlsx; for each work order this reads its two most recent notes DIRECTLY from Umbrava's GraphQL API in-page (using your live Umbrava session - the same read the BWN Ops Suite AI drafts use), then asks the broadway-internal-ops SWA summarize route (x-bwn-key gated, Anthropic key server-side) to write a 1-3 sentence client-ready status note. Fills the audit's notes column and downloads the workbook, preserving every other cell and formula. It also reads each WO's live header (status, phase, priority, GP, DNE/NTE, PO/vendor, schedule) in the same call and writes a deterministic Audit Flags column (OVERDUE, NEG/LOW GP, NTE>DNE, NO VENDOR, UNSCHEDULED, STALE) computed with no AI - so the exception audit survives an AI outage. Runs entirely in the app.umbrava.com page so it inherits your Umbrava auth - no MCP, no pasted keys, nothing sensitive in this script. This replaces the old standalone WO_Audit_Automation.html SWA tool, whose server-side MCP path could not authenticate to Umbrava.
@@ -19,7 +19,7 @@
 (function () {
   'use strict';
 
-  var VER = '0.8.3';
+  var VER = '0.9.0';
   var FONT = "-apple-system,BlinkMacSystemFont,'Segoe UI','Helvetica Neue',Arial,sans-serif";
 
   // Suite drawer exit, per the contract in Core's ensureStyle. Core's stylesheet owns the fade;
@@ -205,14 +205,24 @@
   // `nowMs` is INJECTED, never Date.now(), so the harness asserts ages on a fixed clock
   // ([[fixture-clock-time-day-age]] / [[headless-harness-cannot-time]]). A null header returns []
   // (say nothing rather than fabricate a clean bill of health - unread is not empty).
-  var GP_LOW_PCT = 15;   // ponytail: business threshold - flag GP below this %. tune here.
-  var STALE_DAYS = 7;    // ponytail: business threshold - flag if the newest note is older. tune here.
+  var GP_LOW_PCT = 15;   // default - per-user override: Core Ops Suite panel > Preferences (bwn:config.audit.gpLow)
+  var STALE_DAYS = 7;    // default - per-user override: bwn:config.audit.staleDays
+  // Reads the override off the shared bwn:config blob Core's panel writes. Page localStorage is
+  // readable from this GM sandbox (same channel as bwn:role:last). Absent, malformed, non-finite,
+  // or no localStorage at all (the node harness) -> the default.
+  function auditCfg(key, def) {
+    try {
+      var c = JSON.parse(localStorage.getItem('bwn:config') || 'null');
+      var v = c && c.audit && c.audit[key];
+      return (typeof v === 'number' && isFinite(v)) ? v : def;
+    } catch (e) { return def; }
+  }
   function computeFlags(h, notes, nowMs) {
     var f = [];
     if (!h) return f;
     if (typeof h.remainingDays === 'number' && h.remainingDays < 0) f.push('OVERDUE ' + Math.abs(h.remainingDays) + 'd');
     var gp = gpPercent(h);
-    if (gp != null) { if (gp < 0) f.push('NEG GP'); else if (gp < GP_LOW_PCT) f.push('LOW GP ' + Math.round(gp) + '%'); }
+    if (gp != null) { if (gp < 0) f.push('NEG GP'); else if (gp < auditCfg('gpLow', GP_LOW_PCT)) f.push('LOW GP ' + Math.round(gp) + '%'); }
     var dne = moneyDollars(h.doNotExceed), nte = moneyDollars(h.totalNTE);
     if (dne != null && nte != null && dne > 0 && nte > dne) f.push('NTE>DNE');
     var hasVendor = (typeof h.hasNonTerminatedPurchaseOrders === 'boolean')
@@ -222,7 +232,7 @@
     if (String(h.phase || '') === 'Open' && !h.nextOnsiteDate) f.push('UNSCHEDULED');
     if (notes && notes.length) {
       var newest = _date(notes[0] && notes[0].createdDate);
-      if (newest) { var age = Math.floor((nowMs - (+newest)) / MS_DAY); if (age > STALE_DAYS) f.push('STALE ' + age + 'd'); }
+      if (newest) { var age = Math.floor((nowMs - (+newest)) / MS_DAY); if (age > auditCfg('staleDays', STALE_DAYS)) f.push('STALE ' + age + 'd'); }
     } else if (notes) {
       f.push('NO NOTES');
     }
