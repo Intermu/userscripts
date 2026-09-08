@@ -10475,13 +10475,14 @@
     ];
     // Per-user preferences (Core 1.82.0). Group names must not collide with the blob's existing
     // top-level objects (ai, keys, clients, clientDefaults, v).
-    // ponytail: consumers owed - bwn-wo-audit 0.9.0 reads audit.*; notify.channel, view.defaultWO
-    // and filters.accounts have NO reader yet (stored so the knob exists when one lands).
+    // Readers: bwn-wo-audit 0.9.0 reads audit.*; bwn-kanban 0.9.0 reads view.defaultWO at load.
+    // ponytail: notify.channel and filters.accounts have NO reader yet (stored so the knob exists
+    // when one lands).
     var OPS_PREF_FIELDS = [
       { k: 'audit.gpLow', label: 'Audit: low GP %', type: 'number', def: 15, min: 0, max: 100 },
       { k: 'audit.staleDays', label: 'Audit: stale note (d)', type: 'number', def: 7, min: 0, max: 365 },
       { k: 'notify.channel', label: 'Notifications', type: 'select', def: 'toast', options: [['toast', 'Toast (in-page)'], ['quiet', 'Quiet']] },
-      { k: 'view.defaultWO', label: 'Default WO view', type: 'select', def: 'list', options: [['list', 'List'], ['board', 'Kanban board']] },
+      { k: 'view.defaultWO', label: 'Default WO view', type: 'select', def: 'list', options: [['list', 'List (remember last toggle)'], ['board', 'Kanban board on every load']] },
       { k: 'filters.accounts', label: 'Account filter (comma-sep)', type: 'text', def: '' }
     ];
     // Current value of a spec key from a cfg object (dotted = one level).
