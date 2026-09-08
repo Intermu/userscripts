@@ -108,6 +108,13 @@ jobs:
       - name: WO Audit deterministic flags harness
         run: node scripts/test-wo-audit-flags.js
 
+      # Core 1.82.0: the Ops Suite panel's typed field specs (BWN-SETTINGS block) - number/select/
+      # text, min/max, one-level nesting into bwn:config, sibling-preserving group writes, and the
+      # unchanged-group drop that keeps an untouched Save from firing bwn:config churn. Two mutation
+      # controls (drop the max check, drop the sibling preserve) must each turn it red.
+      - name: Ops Suite typed settings fields harness (Core 1.82.0)
+        run: node scripts/test-ops-settings.js
+
       - name: Bid-out dock registration + ACT_TOOL harness
         run: node scripts/test-bidout-dock.js
 

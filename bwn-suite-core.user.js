@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         BWN Suite - Core (Broadway National)
 // @namespace    broadwaynational.bwn
-// @version      1.81.9
+// @version      1.82.0
 // @downloadURL  https://raw.githubusercontent.com/Intermu/userscripts/main/bwn-suite-core.user.js
 // @updateURL    https://raw.githubusercontent.com/Intermu/userscripts/main/bwn-suite-core.user.js
 // @description  Runs several Umbrava helpers for BWN coordinators, in the browser with no privileged grants. Includes: PO Approval + ETA Builder; WO Assist (GP/ETA, a stall watchdog, DNE calculator, and a next-action playbook); Email Leak Guard (checks recipients against vendor names, PO amounts, and client budget references before an outbound email sends); WO List Heat (a triage overlay + My Day strip on the work-order list, with an optional same-origin Umbrava API scan for deterministic full-board coverage); and the BWN Launcher (opens the Azure Static Web App tools with the current WO's context). Modules share state through sessionStorage/localStorage. The only network calls are same-origin Umbrava GraphQL requests (app.umbrava.com/api/graphql, the app's own session): List Heat's full-board scan and WO Assist's work-order / trip / clock-in / document reads, plus ONE write - BWN Views saves the column layout through Umbrava's own putUserPreference, the same preference the column chooser writes; everything else is offline. Toggle modules in BWN_MODULES below.
@@ -10455,7 +10455,74 @@
       { k: 'notesTimeline', script: 'Core', label: 'Notes timeline (chronological read)' },
       { k: 'tripCal', script: 'Core', label: 'Trips → calendar (.ics export)' }
     ];
-    var OPS_CFG_FIELDS = [['targetGP', 'Target GP %'], ['gpWarn', 'GP warn %'], ['gpBad', 'GP red %'], ['hrsWarn', 'Hours warn'], ['hrsBad', 'Hours red'], ['activeMult', 'Active ×'], ['dueWarnDays', 'Due warn (d)'], ['schedGraceDays', 'Sched grace (d)'], ['noteStaleDays', 'Note stale (d)']];
+    // ===== BWN-SETTINGS START v1 (pure; sliced by scripts/test-ops-settings.js) ==================
+    // Typed field specs for the Ops Suite panel. Spec: k (dotted = ONE level of nesting in the
+    // bwn:config blob, 'audit.gpLow' -> cfg.audit.gpLow), label, type (number|select|text), def,
+    // number min/max, select options [[value, label]]. Top-level number keys are the CFG_DEFAULTS
+    // thresholds and are always stored; nested keys are per-user OVERRIDES - blank or equal to def
+    // clears the key so the consumer's own default applies. The declarative field map is the
+    // pattern borrowed from GM_config (see wiki gm-config-assessment); its iframe renderer was not.
+    var OPS_CFG_FIELDS = [
+      { k: 'targetGP', label: 'Target GP %', type: 'number', min: 0, max: 100 },
+      { k: 'gpWarn', label: 'GP warn %', type: 'number', min: 0, max: 100 },
+      { k: 'gpBad', label: 'GP red %', type: 'number', min: 0, max: 100 },
+      { k: 'hrsWarn', label: 'Hours warn', type: 'number', min: 0, max: 8760 },
+      { k: 'hrsBad', label: 'Hours red', type: 'number', min: 0, max: 8760 },
+      { k: 'activeMult', label: 'Active ×', type: 'number', min: 0, max: 10 },
+      { k: 'dueWarnDays', label: 'Due warn (d)', type: 'number', min: 0, max: 365 },
+      { k: 'schedGraceDays', label: 'Sched grace (d)', type: 'number', min: 0, max: 365 },
+      { k: 'noteStaleDays', label: 'Note stale (d)', type: 'number', min: 0, max: 365 }
+    ];
+    // Per-user preferences (Core 1.82.0). Group names must not collide with the blob's existing
+    // top-level objects (ai, keys, clients, clientDefaults, v).
+    // ponytail: consumers owed - bwn-wo-audit 0.9.0 reads audit.*; notify.channel, view.defaultWO
+    // and filters.accounts have NO reader yet (stored so the knob exists when one lands).
+    var OPS_PREF_FIELDS = [
+      { k: 'audit.gpLow', label: 'Audit: low GP %', type: 'number', def: 15, min: 0, max: 100 },
+      { k: 'audit.staleDays', label: 'Audit: stale note (d)', type: 'number', def: 7, min: 0, max: 365 },
+      { k: 'notify.channel', label: 'Notifications', type: 'select', def: 'toast', options: [['toast', 'Toast (in-page)'], ['quiet', 'Quiet']] },
+      { k: 'view.defaultWO', label: 'Default WO view', type: 'select', def: 'list', options: [['list', 'List'], ['board', 'Kanban board']] },
+      { k: 'filters.accounts', label: 'Account filter (comma-sep)', type: 'text', def: '' }
+    ];
+    // Current value of a spec key from a cfg object (dotted = one level).
+    function bwnCfgGet(c, k) {
+      var p = k.split('.');
+      if (p.length === 1) return c ? c[k] : undefined;
+      return (c && c[p[0]] && typeof c[p[0]] === 'object') ? c[p[0]][p[1]] : undefined;
+    }
+    // Validate raw input strings against specs and build the cfgSave partial:
+    // { ok, bad: [k...], partial }. Nested groups start from the STORED object so sibling keys the
+    // panel does not own survive (same rule as the AI block), and an unchanged group is dropped
+    // from the partial so an untouched save fires no scan-invalidating churn. Never touches the DOM.
+    function bwnCfgPartial(fields, raw, stored) {
+      var partial = {}, bad = [];
+      fields.forEach(function (f) {
+        var s = String(raw[f.k] == null ? '' : raw[f.k]).trim();
+        var p = f.k.split('.'), nested = p.length === 2, val, clear = false;
+        if (f.type === 'number') {
+          if (s === '' && nested) clear = true;
+          else {
+            var n = parseFloat(s);
+            if (isNaN(n) || (typeof f.min === 'number' && n < f.min) || (typeof f.max === 'number' && n > f.max)) { bad.push(f.k); return; }
+            val = n; if (nested && n === f.def) clear = true;
+          }
+        } else if (f.type === 'select') {
+          if (!(f.options || []).some(function (o) { return o[0] === s; })) { bad.push(f.k); return; }
+          val = s; if (nested && s === f.def) clear = true;
+        } else {
+          val = s; if (s === '' || (nested && s === f.def)) clear = true;
+        }
+        if (!nested) { if (!clear) partial[f.k] = val; return; }
+        var g = p[0];
+        if (!partial[g]) partial[g] = Object.assign({}, (stored && stored[g] && typeof stored[g] === 'object') ? stored[g] : {});
+        if (clear) delete partial[g][p[1]]; else partial[g][p[1]] = val;
+      });
+      Object.keys(partial).forEach(function (g) {
+        if (partial[g] && typeof partial[g] === 'object' && JSON.stringify(partial[g]) === JSON.stringify((stored && stored[g]) || {})) delete partial[g];
+      });
+      return { ok: !bad.length, bad: bad, partial: partial };
+    }
+    // ===== BWN-SETTINGS END v1 =====
     var opsConfig = BWN.cfg;        // defaults + read/save now in the BWN core (single source of truth)
     var opsConfigSave = BWN.cfgSave;
 
@@ -10594,15 +10661,36 @@
 
       // Thresholds
       section('Thresholds', 'shared by WO Assist + List Heat');
-      var grid = document.createElement('div'); grid.className = 'bwn-ops-grid';
       var cfg = opsConfig(); var inputs = {};
-      OPS_CFG_FIELDS.forEach(function (f) {
-        var w = document.createElement('div');
-        var l = document.createElement('label'); l.textContent = f[1];
-        var inp = document.createElement('input'); inp.type = 'number'; inp.step = 'any'; inp.value = String(cfg[f[0]]);
-        inputs[f[0]] = inp; w.appendChild(l); w.appendChild(inp); grid.appendChild(w);
-      });
-      body.appendChild(grid);
+      var storedCfg = lsGet('bwn:config', {}) || {};
+      // One renderer for every typed spec (number / select / text); inputs[k] is read by Save.
+      function fieldGrid(fields, cur) {
+        var grid = document.createElement('div'); grid.className = 'bwn-ops-grid';
+        fields.forEach(function (f) {
+          var w = document.createElement('div');
+          var l = document.createElement('label'); l.textContent = f.label;
+          var v = bwnCfgGet(cur, f.k), el;
+          if (f.type === 'select') {
+            el = document.createElement('select');
+            (f.options || []).forEach(function (o) { var op = document.createElement('option'); op.value = o[0]; op.textContent = o[1]; el.appendChild(op); });
+            el.value = (f.options || []).some(function (o) { return o[0] === v; }) ? v : f.def;
+          } else {
+            el = document.createElement('input');
+            el.type = f.type === 'number' ? 'number' : 'text';
+            if (f.type === 'number') { el.step = 'any'; if (typeof f.min === 'number') el.min = String(f.min); if (typeof f.max === 'number') el.max = String(f.max); }
+            else el.style.textAlign = 'left';
+            el.value = (v === undefined || v === null) ? (f.def === undefined ? '' : String(f.def)) : String(v);
+          }
+          el.setAttribute('aria-label', f.label);
+          inputs[f.k] = el; w.appendChild(l); w.appendChild(el); grid.appendChild(w);
+        });
+        return grid;
+      }
+      body.appendChild(fieldGrid(OPS_CFG_FIELDS, cfg));
+
+      // Per-user preferences: nested overrides in bwn:config (audit.*, notify.*, view.*, filters.*).
+      section('Preferences', 'per user · audit thresholds · notifications · default view · account filter');
+      body.appendChild(fieldGrid(OPS_PREF_FIELDS, storedCfg));
 
       // AI drafting knobs (consumed by the AI script via bwn:config.ai; blank = default).
       section('AI drafting', 'model · recent window · preflight');
@@ -10891,12 +10979,10 @@
       var ft = document.createElement('div'); ft.className = 'bwn-ops-ft';
       var saveBtn = document.createElement('button'); saveBtn.type = 'button'; saveBtn.className = 'bwn-ops-btn primary'; saveBtn.textContent = 'Save settings';
       saveBtn.addEventListener('click', function () {
-        var partial = {}, ok = true;
-        OPS_CFG_FIELDS.forEach(function (f) {
-          var n = parseFloat(inputs[f[0]].value);
-          if (isNaN(n) || n < 0) { inputs[f[0]].style.borderColor = 'var(--bwn-bad)'; ok = false; }
-          else { inputs[f[0]].style.borderColor = ''; partial[f[0]] = n; }
-        });
+        var rawVals = {}; Object.keys(inputs).forEach(function (k) { rawVals[k] = inputs[k].value; });
+        var res = bwnCfgPartial(OPS_CFG_FIELDS.concat(OPS_PREF_FIELDS), rawVals, lsGet('bwn:config', {}) || {});
+        Object.keys(inputs).forEach(function (k) { inputs[k].style.borderColor = res.bad.indexOf(k) !== -1 ? 'var(--bwn-bad)' : ''; });
+        var partial = res.partial, ok = res.ok;
         // AI knobs ride along in bwn:config.ai. Start from the STORED object so
         // non-panel keys (e.g. a hand-set includeVendor) survive; panel-owned keys
         // are then set-or-cleared explicitly. Invalid window values block the save
@@ -11094,8 +11180,8 @@
         '.bwn-ops-row input[type=checkbox]{width:16px;height:16px;accent-color:var(--bwn-green);cursor:pointer;flex:none;}' +
         '.bwn-ops-grid{display:grid;grid-template-columns:repeat(3,1fr);gap:9px;}' +
         '.bwn-ops-grid label{display:block;font:500 9px ui-monospace,"Segoe UI Mono","SF Mono",monospace;color:var(--bwn-green);margin-bottom:3px;}' +
-        '.bwn-ops-grid input{width:100%;box-sizing:border-box;padding:6px 8px;border:1px solid var(--bwn-border);border-radius:7px;font:500 13px -apple-system,BlinkMacSystemFont,"Segoe UI","Helvetica Neue",Arial,sans-serif;text-align:right;outline:none;background:var(--bwn-surface);color:var(--bwn-text);}' +
-        '.bwn-ops-grid input:focus{border-color:var(--bwn-accent);box-shadow:0 0 0 3px rgba(46,204,113,.15);}' +
+        '.bwn-ops-grid input,.bwn-ops-grid select{width:100%;box-sizing:border-box;padding:6px 8px;border:1px solid var(--bwn-border);border-radius:7px;font:500 13px -apple-system,BlinkMacSystemFont,"Segoe UI","Helvetica Neue",Arial,sans-serif;text-align:right;outline:none;background:var(--bwn-surface);color:var(--bwn-text);}' +
+        '.bwn-ops-grid input:focus,.bwn-ops-grid select:focus{border-color:var(--bwn-accent);box-shadow:0 0 0 3px rgba(46,204,113,.15);}' +
         '.bwn-ops-kv{display:flex;justify-content:space-between;gap:10px;font-size:12px;padding:5px 2px;border-bottom:1px solid var(--bwn-surface-3);color:var(--bwn-text-muted);}' +
         '.bwn-ops-kv .v{font:500 11px ui-monospace,"Segoe UI Mono","SF Mono",monospace;}' +
         '.bwn-ops-kv .v.ok{color:var(--bwn-green);}' +
