@@ -43,6 +43,7 @@ var ADOPTED = [
   'bwn-notes.user.js',           // note templates fill the composer
   'bwn-proposal-actions.user.js',// the three proposal workflows and their steps
   'bwn-proposal-copy.user.js',   // copy = create + fill a draft proposal
+  'bwn-proposal-pricing.user.js',// push-to-draft = create + fill a draft proposal
   'bwn-suite-core.user.js',      // dock needPerm, WO-Assist writes, and the PRODUCER
   'bwn-temp-vendor.user.js',     // activate / deactivate a vendor
   'bwn-write-queue.user.js'      // per-verb gate on the queue drain
