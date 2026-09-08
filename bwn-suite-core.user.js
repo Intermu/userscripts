@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         BWN Suite - Core (Broadway National)
 // @namespace    broadwaynational.bwn
-// @version      1.83.0
+// @version      1.84.0
 // @downloadURL  https://raw.githubusercontent.com/Intermu/userscripts/main/bwn-suite-core.user.js
 // @updateURL    https://raw.githubusercontent.com/Intermu/userscripts/main/bwn-suite-core.user.js
 // @description  Runs several Umbrava helpers for BWN coordinators, in the browser with no privileged grants. Includes: PO Approval + ETA Builder; WO Assist (GP/ETA, a stall watchdog, DNE calculator, and a next-action playbook); Email Leak Guard (checks recipients against vendor names, PO amounts, and client budget references before an outbound email sends); WO List Heat (a triage overlay + My Day strip on the work-order list, with an optional same-origin Umbrava API scan for deterministic full-board coverage); and the BWN Launcher (opens the Azure Static Web App tools with the current WO's context). Modules share state through sessionStorage/localStorage. The only network calls are same-origin Umbrava GraphQL requests (app.umbrava.com/api/graphql, the app's own session): List Heat's full-board scan and WO Assist's work-order / trip / clock-in / document reads, plus ONE write - BWN Views saves the column layout through Umbrava's own putUserPreference, the same preference the column chooser writes; everything else is offline. Toggle modules in BWN_MODULES below.
@@ -8720,6 +8720,37 @@
     }
     var heatActsWarned = false;
 
+    // ===== BWN-ACCT-FILTER START v1 (pure; sliced by scripts/test-acct-filter.js) ================
+    // Core 1.84.0: the standing ACCOUNT SCOPE, set in the Ops Suite panel > Preferences and stored
+    // at bwn:config.filters.accounts as a comma-separated list (typed spec OPS_PREF_FIELDS).
+    // It is a per-user VIEW scope, not a session filter and not a data filter:
+    //   - the list pass DIMS every row whose Client cell is out of scope (same treatment the pill
+    //     and by-client filters get - hiding rows breaks the virtualizer's layout math);
+    //   - the Audit panel scopes its entry set, so the columns, Matching WOs and Top offenders all
+    //     speak about the same rows the list is highlighting.
+    // Deliberately NOT scoped, because they are board truth that outlives one user's preference:
+    // the My Day counts and their over-30 trend, the daily bwn:heat:snap snapshot, the Over-30
+    // batch, the SWA dataset push and __bwnHeatRows. A scoped number written into either history
+    // would be silently compared against whole-board days later, so the Audit panel drops its
+    // day-over-day delta while a scope is on rather than print a mixed-basis one.
+    // Empty, absent, or all-blank -> no scope, which is exactly the pre-1.84.0 behaviour.
+    // Matching is case-insensitive SUBSTRING on the Client cell ("dollar" matches "Dollar General"),
+    // and a row with NO readable client is IN scope - fail open. The Client column can be hidden by
+    // the column chooser, and a scope that blanks the whole board because a column is off screen is
+    // worse than one that quietly does nothing (the strip's "signals off" tooltip says which).
+    function acctList(v) {
+      return String(v == null ? '' : v).split(',').map(function (s) { return s.trim().toLowerCase(); })
+        .filter(function (s) { return s.length > 0; });
+    }
+    function acctInScope(list, client) {
+      if (!list || !list.length) return true;
+      var c = String(client == null ? '' : client).trim().toLowerCase();
+      if (!c) return true;   // no readable client - fail open, never hide work on a hidden column
+      for (var i = 0; i < list.length; i++) if (c.indexOf(list[i]) !== -1) return true;
+      return false;
+    }
+    // ===== BWN-ACCT-FILTER END v1 =====
+
     // ---- Heat pass ----------------------------------------------------------------
     var heatStore = null;     // { heatKey(href): {sev, reasons[], wo, client, status, assignee, prio, hrs, days, dne, sched, lastNote, exp, sourceJob, sourcePo, projectType, woDate} }
     // The RAW API rows behind an API scan, parallel to heatStore and keyed the same way.
@@ -8797,6 +8828,12 @@
       if (!anySignal) { diag(table, H, 0); BWN.beat('listHeat', 'waiting', 'no heat columns in view - add "Time in Status" / "# Days" / "Last Note Date" via the column chooser'); return; }
       ensureStyle();
       var C = bwnConfig();
+      // Standing account scope (1.84.0). Read per pass, so a Preferences save takes effect on the
+      // next repaint like every other cfg value. With the Client column off screen every row reads
+      // as unknown and stays IN scope by design - say so on the strip instead of dimming nothing
+      // silently.
+      var acct = acctList(C.filters && C.filters.accounts);
+      if (acct.length && H.client < 0) missing.push('"Client" → account scope off');
 
       var rows = table.querySelectorAll('tbody tr');
       if (!rows.length) rows = table.rows;
@@ -8877,6 +8914,7 @@
           var dimVal = heatDim.field === 'status' ? status : heatDim.field === 'assignee' ? assignee : client;
           if (dimVal !== heatDim.value) dimmed = true;
         }
+        if (!dimmed && !acctInScope(acct, client)) dimmed = true;   // standing account scope (1.84.0)
         if (dimmed) tr.classList.add('bwn-heat-dim');
         if (reasons.length) { tr.title = (acked ? 'Snoozed \u00b7 ' : '') + reasons.join(' \u00b7 '); tr.dataset.bwnHt = '1'; }
         else if (tr.dataset.bwnHt === '1') { tr.removeAttribute('title'); delete tr.dataset.bwnHt; }
@@ -8988,8 +9026,11 @@
       if (mydayFilter) filtBits.push(mfLabel[mydayFilter] + ' only');
       if (heatDim) filtBits.push(heatDim.field + ' = ' + heatDim.value);
       var lgEl = sum.querySelector('.lg');
+      // The scope is a stored PREFERENCE, so it is reported separately from the session filters
+      // above - Clear filters must not look like it will turn it off, because it does not.
+      var scopeTxt = acct.length ? ' · account scope: ' + acct.join(', ') + ' (Preferences)' : '';
       if (lgEl) lgEl.textContent = (filtBits.length ? 'highlighting: ' + filtBits.join(' · ') + ' · full match list in Audit' : 'hover a tinted row for the why · click a pill or audit row to filter') +
-        (nAcked ? ' · ' + nAcked + ' snoozed' : '');
+        (nAcked ? ' · ' + nAcked + ' snoozed' : '') + scopeTxt;
       var clearEl = document.getElementById('bwn-heat-clear');
       if (clearEl) clearEl.style.display = filtBits.length ? '' : 'none';
       renderMyDay();
@@ -9001,7 +9042,13 @@
       if (old) { old.remove(); return; }
       var sum = document.getElementById(SUM_ID);
       if (!sum || !sum.parentNode) return;
-      var entries = heatStore ? Object.keys(heatStore).map(function (k) { var e = heatStore[k]; e._href = k; return e; }) : [];
+      // Account scope (1.84.0): the panel speaks about the same rows the list is highlighting, so
+      // it is applied ONCE here and every section below (columns, Matching WOs, Top offenders, the
+      // TSV copy) inherits it. `scanned` keeps the whole-board count so the header can say "of".
+      var acctP = acctList((bwnConfig().filters || {}).accounts);
+      var scanned = heatStore ? Object.keys(heatStore).length : 0;
+      var entries = heatStore ? Object.keys(heatStore).map(function (k) { var e = heatStore[k]; e._href = k; return e; })
+        .filter(function (e) { return acctInScope(acctP, e.client); }) : [];
       var panel = document.createElement('div');
       panel.id = PANEL_ID;
       function closePanel() { document.removeEventListener('keydown', onPanelKey); panel.remove(); }
@@ -9010,7 +9057,7 @@
 
       var ph = document.createElement('div'); ph.className = 'ph';
       ph.textContent = entries.length
-        ? 'AUDIT \u00b7 ' + entries.length + ' WOs SCANNED'
+        ? 'AUDIT \u00b7 ' + (acctP.length ? entries.length + ' of ' + scanned + ' WOs \u00b7 accounts: ' + acctP.join(', ') : entries.length + ' WOs SCANNED')
         : 'AUDIT';
       panel.appendChild(ph);
 
@@ -9025,7 +9072,10 @@
         var curS = auditOpenTally(entries);
         var bkt = curS.bkt, noHrs = curS.noHrs, noNote = curS.noNote;
         var dl = document.createElement('div'); dl.className = 'dl';
-        var pS = priorKey ? snaps[priorKey] : null;
+        // bwn:heat:snap is written whole-board (heatSnapshot reads heatStore, never this scoped
+        // set), so a scoped count minus a whole-board day is not a delta. Drop the compare rather
+        // than print a mixed-basis number.
+        var pS = (priorKey && !acctP.length) ? snaps[priorKey] : null;
         function dseg(label, nowV, thenV) {
           var sp = document.createElement('span');
           sp.appendChild(document.createTextNode(label + ' ' + nowV));
@@ -9045,7 +9095,9 @@
         dseg('open', curS.open, pS ? pS.open : undefined);
         dseg('over-30', curS.over30, pS ? pS.over30 : undefined);
         var dTail = document.createElement('span');
-        dTail.textContent = pS ? 'vs ' + priorKey : 'no prior full scan on record yet';
+        dTail.textContent = pS ? 'vs ' + priorKey
+          : acctP.length ? 'account scope on - day-over-day compare off (the daily snapshot is whole-board)'
+            : 'no prior full scan on record yet';
         dl.appendChild(dTail);
         panel.appendChild(dl);
         var ql = document.createElement('div'); ql.className = 'dl';
@@ -9080,7 +9132,11 @@
       if (!entries.length) {
         var empty = document.createElement('div'); empty.className = 'empty';
         var p1 = document.createElement('p');
-        p1.textContent = 'No scan yet \u2014 the audit needs a full sweep of the list to give book-wide numbers.';
+        // A scan that ran and was scoped to nothing is NOT "no scan yet" - saying so would send a
+        // coordinator to re-run a sweep that already succeeded.
+        p1.textContent = scanned
+          ? 'The scan read ' + scanned + ' WOs and none match your account scope (' + acctP.join(', ') + ') \u2014 clear or widen it in the Ops Suite panel > Preferences.'
+          : 'No scan yet \u2014 the audit needs a full sweep of the list to give book-wide numbers.';
         var runBtn = document.createElement('button');
         runBtn.type = 'button'; runBtn.className = 'primary'; runBtn.textContent = 'Run Scan All now';
         runBtn.addEventListener('click', function () {
@@ -9091,7 +9147,8 @@
             if (/scan/i.test(btns[b].textContent)) { btns[b].click(); break; }
           }
         });
-        empty.appendChild(p1); empty.appendChild(runBtn);
+        empty.appendChild(p1);
+        if (!scanned) empty.appendChild(runBtn);   // re-scanning cannot fix a scope that matched nothing
         panel.appendChild(empty);
       }
 
@@ -10476,16 +10533,17 @@
     // Per-user preferences (Core 1.82.0). Group names must not collide with the blob's existing
     // top-level objects (ai, keys, clients, clientDefaults, v).
     // Readers: bwn-wo-audit 0.9.0 reads audit.*; bwn-kanban 0.9.0 reads view.defaultWO at load;
-    // the Follow-up reminders module (this file, remChannel) reads notify.channel at fire time.
+    // the Follow-up reminders module (this file, remChannel) reads notify.channel at fire time;
+    // List Heat (this file, BWN-ACCT-FILTER) reads filters.accounts on every list pass - it dims
+    // out-of-scope rows and scopes the Audit panel, and leaves every stored number whole-board.
     // notify.channel's def moved 'toast' -> 'desktop' in 1.83.0: 'toast' was never stored under
     // 1.82.0 (a value equal to def clears), so no client carries a stale value.
-    // ponytail: filters.accounts has NO reader yet (stored so the knob exists when one lands).
     var OPS_PREF_FIELDS = [
       { k: 'audit.gpLow', label: 'Audit: low GP %', type: 'number', def: 15, min: 0, max: 100 },
       { k: 'audit.staleDays', label: 'Audit: stale note (d)', type: 'number', def: 7, min: 0, max: 365 },
       { k: 'notify.channel', label: 'Reminder alerts', type: 'select', def: 'desktop', options: [['desktop', 'Desktop notification (toast if blocked)'], ['toast', 'In-page toast only'], ['quiet', 'Quiet (mute)']] },
       { k: 'view.defaultWO', label: 'Default WO view', type: 'select', def: 'list', options: [['list', 'List (remember last toggle)'], ['board', 'Kanban board on every load']] },
-      { k: 'filters.accounts', label: 'Account filter (comma-sep)', type: 'text', def: '' }
+      { k: 'filters.accounts', label: 'Account scope (comma-sep)', type: 'text', def: '' }
     ];
     // Current value of a spec key from a cfg object (dotted = one level).
     function bwnCfgGet(c, k) {
@@ -10692,7 +10750,7 @@
       body.appendChild(fieldGrid(OPS_CFG_FIELDS, cfg));
 
       // Per-user preferences: nested overrides in bwn:config (audit.*, notify.*, view.*, filters.*).
-      section('Preferences', 'per user · audit thresholds · notifications · default view · account filter');
+      section('Preferences', 'per user · audit thresholds · notifications · default view · account scope');
       body.appendChild(fieldGrid(OPS_PREF_FIELDS, storedCfg));
 
       // AI drafting knobs (consumed by the AI script via bwn:config.ai; blank = default).

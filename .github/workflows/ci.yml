@@ -122,6 +122,15 @@ jobs:
       - name: Reminders delivery-channel harness (Core 1.83.0)
         run: node scripts/test-reminders-channel.js
 
+      # Core 1.84.0: List Heat reads the standing account scope off bwn:config.filters.accounts
+      # (BWN-ACCT-FILTER block). Pins: unset/blank -> no scope; case-insensitive substring match; a
+      # row with no readable client stays IN scope (the Client column can be hidden); the panel
+      # stores exactly what the reader parses; and the whole-board numbers (heatSnapshot, My Day,
+      # the Over-30 batch) never see the scope. Two mutation controls - dropping the fail-open
+      # branch, dropping the empty-scope return - must each turn it red.
+      - name: List Heat account-scope harness (Core 1.84.0)
+        run: node scripts/test-acct-filter.js
+
       - name: Bid-out dock registration + ACT_TOOL harness
         run: node scripts/test-bidout-dock.js
 
