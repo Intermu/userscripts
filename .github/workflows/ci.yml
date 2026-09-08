@@ -115,6 +115,13 @@ jobs:
       - name: Ops Suite typed settings fields harness (Core 1.82.0)
         run: node scripts/test-ops-settings.js
 
+      # Core 1.83.0: Follow-up reminders read their delivery channel off bwn:config.notify.channel
+      # (BWN-REM-CHANNEL block). Pins: unset/unknown/malformed -> desktop (the 1.82.0 behaviour),
+      # quiet fires nothing, toast never takes the desktop path, desktop falls back to toast unless
+      # permission is granted. Mutation control: dropping the quiet branch makes quiet toast.
+      - name: Reminders delivery-channel harness (Core 1.83.0)
+        run: node scripts/test-reminders-channel.js
+
       - name: Bid-out dock registration + ACT_TOOL harness
         run: node scripts/test-bidout-dock.js
 
