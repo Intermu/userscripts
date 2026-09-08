@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         BWN Suite - Core (Broadway National)
 // @namespace    broadwaynational.bwn
-// @version      1.82.0
+// @version      1.83.0
 // @downloadURL  https://raw.githubusercontent.com/Intermu/userscripts/main/bwn-suite-core.user.js
 // @updateURL    https://raw.githubusercontent.com/Intermu/userscripts/main/bwn-suite-core.user.js
 // @description  Runs several Umbrava helpers for BWN coordinators, in the browser with no privileged grants. Includes: PO Approval + ETA Builder; WO Assist (GP/ETA, a stall watchdog, DNE calculator, and a next-action playbook); Email Leak Guard (checks recipients against vendor names, PO amounts, and client budget references before an outbound email sends); WO List Heat (a triage overlay + My Day strip on the work-order list, with an optional same-origin Umbrava API scan for deterministic full-board coverage); and the BWN Launcher (opens the Azure Static Web App tools with the current WO's context). Modules share state through sessionStorage/localStorage. The only network calls are same-origin Umbrava GraphQL requests (app.umbrava.com/api/graphql, the app's own session): List Heat's full-board scan and WO Assist's work-order / trip / clock-in / document reads, plus ONE write - BWN Views saves the column layout through Umbrava's own putUserPreference, the same preference the column chooser writes; everything else is offline. Toggle modules in BWN_MODULES below.
@@ -10475,13 +10475,15 @@
     ];
     // Per-user preferences (Core 1.82.0). Group names must not collide with the blob's existing
     // top-level objects (ai, keys, clients, clientDefaults, v).
-    // Readers: bwn-wo-audit 0.9.0 reads audit.*; bwn-kanban 0.9.0 reads view.defaultWO at load.
-    // ponytail: notify.channel and filters.accounts have NO reader yet (stored so the knob exists
-    // when one lands).
+    // Readers: bwn-wo-audit 0.9.0 reads audit.*; bwn-kanban 0.9.0 reads view.defaultWO at load;
+    // the Follow-up reminders module (this file, remChannel) reads notify.channel at fire time.
+    // notify.channel's def moved 'toast' -> 'desktop' in 1.83.0: 'toast' was never stored under
+    // 1.82.0 (a value equal to def clears), so no client carries a stale value.
+    // ponytail: filters.accounts has NO reader yet (stored so the knob exists when one lands).
     var OPS_PREF_FIELDS = [
       { k: 'audit.gpLow', label: 'Audit: low GP %', type: 'number', def: 15, min: 0, max: 100 },
       { k: 'audit.staleDays', label: 'Audit: stale note (d)', type: 'number', def: 7, min: 0, max: 365 },
-      { k: 'notify.channel', label: 'Notifications', type: 'select', def: 'toast', options: [['toast', 'Toast (in-page)'], ['quiet', 'Quiet']] },
+      { k: 'notify.channel', label: 'Reminder alerts', type: 'select', def: 'desktop', options: [['desktop', 'Desktop notification (toast if blocked)'], ['toast', 'In-page toast only'], ['quiet', 'Quiet (mute)']] },
       { k: 'view.defaultWO', label: 'Default WO view', type: 'select', def: 'list', options: [['list', 'List (remember last toggle)'], ['board', 'Kanban board on every load']] },
       { k: 'filters.accounts', label: 'Account filter (comma-sep)', type: 'text', def: '' }
     ];
@@ -13038,7 +13040,31 @@
     function load() { var a = BWN.lsGetJSON(STORE, []); return Array.isArray(a) ? a : []; }
     function save(a) { BWN.lsSetJSON(STORE, a); }
     function rid() { return Date.now().toString(36) + Math.random().toString(36).slice(2, 7); }
-    function reqPerm() { try { if (window.Notification && Notification.permission === 'default') Notification.requestPermission(); } catch (e) { } }
+    // ===== BWN-REM-CHANNEL START v1 (pure; sliced by scripts/test-reminders-channel.js) ==========
+    // Core 1.83.0: per-user delivery channel, set in the Ops Suite panel > Preferences and stored
+    // at bwn:config.notify.channel (typed spec OPS_PREF_FIELDS). Values:
+    //   desktop (default) - desktop Notification when granted, in-page toast otherwise. This IS
+    //                       the 1.82.0 behaviour, so an unset key changes nothing.
+    //   toast             - in-page toast only; never asks for Notification permission.
+    //   quiet             - the reminder is marked fired and nothing is shown. It leaves the
+    //                       Pending list like any fired reminder. Mute, not snooze.
+    // Anything else (absent, malformed blob, unknown value) -> desktop.
+    function remChannel(cfgRaw) {
+      try { var c = JSON.parse(cfgRaw || 'null'); var v = c && c.notify && c.notify.channel; if (v === 'toast' || v === 'quiet') return v; } catch (e) { /* malformed - default */ }
+      return 'desktop';
+    }
+    // Which path a due reminder takes for a channel + Notification.permission
+    // ('granted' | 'denied' | 'default' | null when the API is absent): 'desktop' | 'toast' | 'none'.
+    function remPlan(channel, perm) {
+      if (channel === 'quiet') return 'none';
+      if (channel === 'desktop' && perm === 'granted') return 'desktop';
+      return 'toast';
+    }
+    // ===== BWN-REM-CHANNEL END v1 =====
+    function channel() { var raw = null; try { raw = localStorage.getItem('bwn:config'); } catch (e) { } return remChannel(raw); }
+    function permState() { try { return window.Notification ? Notification.permission : null; } catch (e) { return null; } }
+    // Only the desktop channel ever asks - a toast-only or quiet user never sees the browser prompt.
+    function reqPerm() { try { if (channel() === 'desktop' && window.Notification && Notification.permission === 'default') Notification.requestPermission(); } catch (e) { } }
     function pad(n) { return (n < 10 ? '0' : '') + n; }
     function fmtWhen(ts) {
       var d = new Date(ts), now = new Date();
@@ -13052,14 +13078,16 @@
     function notify(r) {
       var title = 'WO follow-up' + (r.tracking ? ' · #' + r.tracking : '');
       var body = (r.note ? r.note + ' - ' : '') + (r.client || '') + (r.location ? ' · ' + r.location : '');
-      try {
-        if (window.Notification && Notification.permission === 'granted') {
+      var plan = remPlan(channel(), permState());
+      if (plan === 'none') return;   // quiet: fired, listed as fired, shown nowhere
+      if (plan === 'desktop') {
+        try {
           var n = new Notification(title, { body: body || 'Time to follow up.', tag: 'bwn-rem-' + r.id });
           n.onclick = function () { try { window.focus(); } catch (e) { } if (r.url) location.href = r.url; try { n.close(); } catch (e2) { } };
           return;
-        }
-      } catch (e) { }
-      toast(title + (body ? ' - ' + body : ''), r.url);   // notifications blocked → in-page fallback
+        } catch (e) { /* constructor refused - fall through to the toast */ }
+      }
+      toast(title + (body ? ' - ' + body : ''), r.url);   // toast channel, or desktop blocked / unsupported
     }
     function fireDue() {
       var arr = load(), now = Date.now(), changed = false;
@@ -13164,8 +13192,11 @@
 
       var ft = document.createElement('div'); ft.className = 'bwn-rem-ft';
       var perm = document.createElement('span'); perm.className = 'sp';
-      perm.textContent = (window.Notification && Notification.permission === 'denied') ? 'Notifications blocked - reminders show as an in-page banner instead.' :
-        (window.Notification && Notification.permission === 'granted') ? '' : 'First reminder will ask to allow notifications.';
+      var ch = channel(), ps = permState();
+      perm.textContent = ch === 'quiet' ? 'Quiet: due reminders are muted (Ops Suite > Preferences > Reminder alerts).' :
+        ch === 'toast' ? 'In-page toast only (Ops Suite > Preferences > Reminder alerts).' :
+        ps === 'denied' ? 'Notifications blocked - reminders show as an in-page banner instead.' :
+        ps === 'granted' ? '' : 'First reminder will ask to allow notifications.';
       ft.appendChild(perm);
       var closeB = document.createElement('button'); closeB.type = 'button'; closeB.textContent = 'Close'; closeB.addEventListener('click', close);
       ft.appendChild(closeB); card.appendChild(ft);
