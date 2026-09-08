@@ -144,6 +144,49 @@ A.eq('  Location = PFJ 0199', wo2.location, 'PFJ 0199');
 A.eq('  Asset Name = DRYER', wo2.assetName, 'DRYER');
 A.eq('  Trade = Appliances (DRYER -> Appliances auto-trade)', wo2.trade, 'Appliances');
 
+// --- Real PFJ layout (0.9.29): the "Asset Information:" label is TAB-JOINED to the store phone line
+// in the Store Information block ("(803) 868-6034\t Asset Information:"), NOT on its own line as the
+// BODY2 fixture above assumed. A pure line-start anchor dropped the whole asset block on every real
+// Pilot appliance WO. Grounded on the dropped .msg for PFJ 4581 (washer/dryer combo).
+var SENDER2b = 'tonia.roe@pilottravelcenters.com';
+var SUBJECT2b = 'Store: 4599-Travel Center Exampletown, South Carolina PO: 170101999003  Priority: P2 - Normal (24 hrs)';
+var BODY2b = [
+  'Store: 4599-Travel Center Exampletown, South Carolina PO: 170101999003  Priority: P2 - Normal (24 hrs)',
+  '',
+  'Washer and dryer combo is out of order',
+  '',
+  '**Please respond with an ETA on the Purchase Order**',
+  'Priority: P2 - Normal (24 hrs)\t Created: 9/1/2026\t ',
+  'PO: 170101999003\t NTE:$800.00\t ',
+  'Store Information:',
+  'PFJ#: 4599 Pilot',
+  '1340 Example Hwy',
+  'Exampletown, South Carolina 29099',
+  '(555) 555-0134\t Asset Information:',            // <- phone and label share one line, tab-separated
+  'Asset Name: WASHER DRYER COMBO',
+  'Model: STENYASP176TW01',
+  'Serial#: 2103056937',
+  'Parts Warranty End Date: 4/13/2024',
+  'Labor Warranty End Date: \t',
+  'Description:',
+  'Washer and dryer combo is out of order\t ',
+  'Dispatcher',
+  'Tonia Roe',
+  'tonia.roe@pilottravelcenters.com'
+].join('\r\n');
+
+console.log('\n# real PFJ layout: Asset Information block is kept even when tab-joined to the phone line');
+var wo2b = api.extractWo(SUBJECT2b, BODY2b, SENDER2b);
+A.eq('  Scope = the Description value + the tab-joined Asset Information block',
+  wo2b.scope,
+  'Washer and dryer combo is out of order\n\n' +
+  'Asset Information:\nAsset Name: WASHER DRYER COMBO\nModel: STENYASP176TW01\nSerial#: 2103056937\n' +
+  'Parts Warranty End Date: 4/13/2024\nLabor Warranty End Date:');
+A.ok('  Asset Information block was NOT dropped', wo2b.scope.indexOf('Asset Information:') !== -1, 'got ' + JSON.stringify(wo2b.scope));
+A.ok('  the store phone did NOT leak into the scope', wo2b.scope.indexOf('555-0134') === -1, 'got ' + JSON.stringify(wo2b.scope));
+A.eq('  Trade = Appliances (WASHER DRYER COMBO)', wo2b.trade, 'Appliances');
+A.eq('  Location = PFJ 4599', wo2b.location, 'PFJ 4599');
+
 console.log('\n# assetToTrade Appliances mapping + anti-collision guards');
 A.eq('  DRYER -> Appliances', api.assetToTrade('DRYER'), 'Appliances');
 A.eq('  Washer -> Appliances', api.assetToTrade('Washer'), 'Appliances');
