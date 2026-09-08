@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         BWN Drop Upload (Broadway National)
 // @namespace    broadwaynational.bwn
-// @version      1.24.0
+// @version      1.25.0
 // @downloadURL  https://raw.githubusercontent.com/Intermu/userscripts/main/bwn-drop-upload.user.js
 // @updateURL    https://raw.githubusercontent.com/Intermu/userscripts/main/bwn-drop-upload.user.js
 // @description  Drop files anywhere on an Umbrava work order to upload them. Opens the Documents tab and upload dialog, hands over the files, and builds each file's description from its contents. Emails are parsed locally (.msg via an OLE/MAPI reader, .eml via RFC822) into an Outlook-style block - From/Sent/To/Cc/Subject and the body - that becomes the WO note, led by a one-line summary from Chrome's on-device built-in AI (zero cost, zero egress, nothing leaves the browser), falling back to local WO-field extraction (store, city/state, priority, PO, NTE, problem, requester) when the on-device model is unavailable. That same summary fills each file's Description. The WO note's Type is chosen from the email's parties: inbound is typed by the sender (client -> Client, else Vendor); outbound from Broadway is typed by the recipients (a client recipient -> Client, any vendor recipient -> Vendor, all-internal -> Internal). Umbrava's Description field is a TipTap/ProseMirror rich-text editor. It rejects synthetic paste, beforeinput, insertHTML and raw innerHTML, but honours execCommand('insertText') plus a synthetic Enter keydown - so the note is filled line by line (Enter between lines to keep paragraphs), paced ~12ms/line so ProseMirror's async commit doesn't drop lines (measured live 2026-08-10). The text is also placed on your clipboard as a backup, and if every fill method fails a "Copy the WO note" button appears (its click supplies the gesture for a reliable copy, then Ctrl+V). A console diagnostic reports which editor was found and which fill method stuck. When WO Intake hands off a just-created WO's request email, each uploaded file's Label (document type) is set to "Work Order Request" and the note Type is forced to Client (a WO Intake handoff is a client's request, even when the sender is a broker like Fairmarkit that reads as a Vendor domain). Fairmarkit / bulk-email footer boilerplate (the Fairmarkit company block: tagline + Boston address + FAQ/Privacy/Terms/Unsubscribe, and the -----!{...}!----- machine tail) plus ALL tracking URLs (safelinks/awstrack/logo) are stripped from the note body, keeping content through the suppliers@ email. A Fairmarkit RFQ body is also condensed to one line per entry - single-spaced, with each line-item rejoined to its QTY and each Details label (Buyer/Close date/RFQ ID/Shipping address) rejoined to its value. Files upload via Umbrava's own API (initializeJobDocument -> Azure blob PUT -> bulkAddWorkOrderDocuments, captured live 2026-08-12), Label set by id, so the brittle upload-dialog combobox is bypassed; the dialog remains the automatic fallback if the API is unavailable. A manual drop does NOT auto-upload: the review box shows a "Document type" picker plus an Upload button, so the coordinator CHOOSES the document type before it is committed (there is no update-label mutation, so the label must be right at upload time). The picker defaults to MATCH the note Type we assigned (Client -> Client Correspondence, Vendor -> Vendor Correspondence, Internal -> Internal) and stays in sync as the note Type is changed, until the coordinator overrides the doc type directly; for an unknown external party the on-device classifier upgrades Vendor -> Supplier Correspondence when it reads as a parts supplier. The file Description is still filled automatically from the file's contents / the email summary. Only the WO Intake handoff still uploads automatically, and it labels per file: the request email itself is the "Work Order Request", while any image attachment is filed as a "Photo". The email note is shown in a centered BWN review box (editable; the Type picker offers a curated set of the note types a drop is actually filed under, defaulted to the party-derived Client/Vendor/Internal) and posted via addEditJobNote ONLY when you click Post - it is never auto-posted, and posts under your own Umbrava session for correct attribution. A dropped email is a CONTAINER, so its real attachments (the PDF, the site photos) are extracted and uploaded as documents of their own, listed under the note - the sender's signature graphics are left behind, identified by their MAPI hidden / MHTML-reference marks (.msg) or by being disposed inline with a cited Content-ID (.eml) rather than by size or filename; an attached image is filed as a "Photo" while the email keeps the document type you picked. Ticking "This client email needs a response" now also posts an Action note that @-mentions the work order's assignee (the notify rides the TipTap mention span the SPA itself sends), then prompts them every 15 minutes until they log a Client note on that WO; after 5 unanswered prompts it posts an Escalation note @-mentioning their supervisor and manager. Who that is is READ FROM UMBRAVA, not configured anywhere: Company > Users shows each person's Teams, and the ops behind that page (user(id){parentTeams{parentTeam}} then users(teamId:){role{name}}) give the assignee's team and its members, from which whoever ranks supervisor or manager is told. A team may carry both or only one; the assignee is excluded, so a manager's own unanswered work does not escalate to themselves. Role-to-rank mirrors the SWA's own ladder so the two cannot disagree. Nothing to set up and no name is written down - fix the team in Umbrava and the escalation follows. The prompt ladder is local (localStorage + a ticker + a browser notification, falling back to an in-page toast), so it runs while an Umbrava tab is open; the Action note and the escalation are work-order notes, so the record of the chase survives a closed browser. Network calls are same-origin to app.umbrava.com's own /api/graphql (the app's Auth0 bearer, no @connect/GM) plus the SAS-authorized blob PUT the SPA itself makes - nothing goes to any third party. @grant none.
@@ -15,7 +15,7 @@
 (function () {
   'use strict';
 
-  var VER = '1.24.0';   // keep in step with @version (drift caught earlier: banner had lagged two releases)
+  var VER = '1.25.0';   // keep in step with @version (drift caught earlier: banner had lagged two releases)
   var BWN_VER = VER;   // stamped into BWN-OPS audit entries; the wrapper references BWN_VER
   console.info('[BWN DROP UPLOAD] v' + VER + ' · Uploads via Umbrava API (initializeJobDocument→blob PUT→bulkAddWorkOrderDocuments, Label by id), DOM dialog is the fallback · manual drop HOLDS the upload: the review box shows a Document type picker (defaulted to MATCH the note Type - Client->Client Correspondence, Vendor->Vendor Correspondence, Internal->Internal - and re-synced as the note Type changes, until overridden) + an Upload button, so the type is CHOSEN, not assumed · email→note in a human-gated BWN review box, posted via addEditJobNote on an explicit Post click (never auto-posted) · note Type by parties (inbound=sender, outbound=recipient) · note box shows instantly with a mechanical lead; the slow on-device AI brief (Gemini Nano / Edge Phi) fills in async · a dropped email is a CONTAINER: its real attachments upload as their own documents (signature graphics dropped by their MAPI/Content-ID marks; an attached image files as Photo) · "needs a response" also posts an Action note @-mentioning the WO assignee, then prompts every 15 min until they log a Client note, escalating after 5 to the supervisor + manager READ from their Umbrava team (Company > Users/Teams), nothing configured · bwn:cmd dropupload:files bridge (handoff labels per file: the email = Work Order Request, image attachments = Photo)');
 
@@ -1387,24 +1387,176 @@
   // claimed); a merge drop re-runs and only touches the newly added files. Never throws.
   function enrichNoteWithAI(pend) {
     if (!pend || !pend.files || !pend.files.length) return;
+    // Shared: rebuild the note text and refresh the box IN PLACE, but only if this drop is still
+    // the current pending, its box is still open, and the user has not edited it (their edits win).
+    function refresh() {
+      if (pending !== pend || !noteBox) return;
+      var newText; try { newText = buildNoteText(pend.files); } catch (e) { return; }
+      pend.noteText = newText;
+      var ta = noteBox.__ta;
+      if (ta && !noteBox.__noteEdited) { ta.value = newText; }
+    }
     pend.files.forEach(function (f) {
-      if (!f || !f.isEmail || !f.email || !f.aiPending) return;
-      f.aiPending = false;   // claim once - a failed/empty call keeps the mechanical lead, no retry
-      aiBrief(f.email).then(function (brief) {
-        if (!brief) return;
-        var block;
-        try { block = formatEmailBlock(f.email, brief); } catch (e) { return; }
-        if (!block) return;
-        f.summary = brief; f.aiUsed = true; f.noteBlock = block;
-        // Only touch the live UI if this drop is still the current pending and its box is still open.
-        if (pending !== pend || !noteBox) return;
-        var newText;
-        try { newText = buildNoteText(pend.files); } catch (e2) { return; }
-        pend.noteText = newText;
-        var ta = noteBox.__ta;
-        if (ta && !noteBox.__noteEdited) { ta.value = newText; }
-      }).catch(function () { });
+      // (a) Emails: swap the mechanical lead for the on-device AI brief.
+      if (f && f.isEmail && f.email && f.aiPending) {
+        f.aiPending = false;   // claim once - a failed/empty call keeps the mechanical lead, no retry
+        aiBrief(f.email).then(function (brief) {
+          if (!brief) return;
+          var block;
+          try { block = formatEmailBlock(f.email, brief); } catch (e) { return; }
+          if (!block) return;
+          f.summary = brief; f.aiUsed = true; f.noteBlock = block;
+          refresh();
+        }).catch(function () { });
+      }
+      // (b) Documents (PDF / plain text): read the text, get a cloud-first 1-line summary, add it
+      // to the file's note line. Never blocks the drop/upload; each doc is summarized once.
+      if (f && f.aiDocPending && f.docFile) {
+        f.aiDocPending = false;
+        extractDocText(f.docFile, f.docKind).then(function (text) {
+          if (!text || text.replace(/\s/g, '').length < 40) return;   // scanned/image PDF etc. - keep the mechanical line
+          return summarizeDocText(text).then(function (sum) {
+            if (!sum) return;
+            f.summaryLine = sum; f.aiUsed = true;
+            refresh();
+          });
+        }).catch(function () { });
+      }
     });
+  }
+
+  // ---- PDF text reader (ported verbatim from bwn-wo-intake.user.js) ----------
+  // Pure browser, on-device, no library: inflate FlateDecode streams with the native
+  // DecompressionStream, union the ToUnicode CMaps, read the text ops. TEXT PDFs only -
+  // a scanned/image PDF has no text ops and yields '' (its "summary" then stays the
+  // mechanical filename line). @grant none is preserved: nothing leaves the browser here.
+  function inflate(bytes) {
+    function attempt(fmt) {
+      return new Promise(function (resolve) {
+        var d; try { d = new DecompressionStream(fmt); } catch (e) { resolve(null); return; }
+        var chunks = [], total = 0;
+        var w = d.writable.getWriter(); w.write(bytes).catch(function () { }); w.close().catch(function () { });
+        var r = d.readable.getReader();
+        (function pump() {
+          r.read().then(function (x) { if (x.done) { fin(); return; } chunks.push(x.value); total += x.value.length; pump(); }).catch(function () { fin(); });
+        })();
+        function fin() { if (!chunks.length) { resolve(null); return; } var out = new Uint8Array(total), o = 0; chunks.forEach(function (c) { out.set(c, o); o += c.length; }); resolve(out); }
+      });
+    }
+    return attempt('deflate').then(function (r) { return r || attempt('deflate-raw'); });
+  }
+  function latin1Of(u8) {
+    var CH = 0x8000, parts = [];
+    for (var i = 0; i < u8.length; i += CH) parts.push(String.fromCharCode.apply(null, u8.subarray(i, Math.min(i + CH, u8.length))));
+    return parts.join('');
+  }
+  function hexToStr(h) { var o = ''; for (var k = 0; k + 4 <= h.length; k += 4) o += String.fromCharCode(parseInt(h.substr(k, 4), 16)); return o; }
+  function pdfToText(bytes) {
+    var u8 = bytes instanceof Uint8Array ? bytes : new Uint8Array(bytes);
+    var raws = [], i = 0;
+    var STREAM = [0x73, 0x74, 0x72, 0x65, 0x61, 0x6d], ENDS = [0x65, 0x6e, 0x64, 0x73, 0x74, 0x72, 0x65, 0x61, 0x6d];
+    function indexOfSeq(hay, seq, from) {
+      outer: for (var p = from; p <= hay.length - seq.length; p++) { for (var q = 0; q < seq.length; q++) if (hay[p + q] !== seq[q]) continue outer; return p; } return -1;
+    }
+    while (true) {
+      var s = indexOfSeq(u8, STREAM, i); if (s < 0) break;
+      var ds = s + 6; if (u8[ds] === 0x0d) ds++; if (u8[ds] === 0x0a) ds++;
+      var e = indexOfSeq(u8, ENDS, ds); if (e < 0) break;
+      raws.push(u8.subarray(ds, e)); i = e + 9;
+    }
+    return Promise.all(raws.map(inflate)).then(function (streams) {
+      streams = streams.filter(Boolean);
+      var uni = {};
+      streams.forEach(function (d) {
+        var t = latin1Of(d);
+        if (t.indexOf('beginbfchar') < 0 && t.indexOf('beginbfrange') < 0) return;
+        var m, re;
+        var bc = /beginbfchar([\s\S]*?)endbfchar/g;
+        while ((m = bc.exec(t))) { re = /<([0-9A-Fa-f]+)>\s*<([0-9A-Fa-f]+)>/g; var mm; while ((mm = re.exec(m[1]))) uni[parseInt(mm[1], 16)] = hexToStr(mm[2]); }
+        var br = /beginbfrange([\s\S]*?)endbfrange/g;
+        while ((m = br.exec(t))) {
+          re = /<([0-9A-Fa-f]+)>\s*<([0-9A-Fa-f]+)>\s*(<([0-9A-Fa-f]+)>|\[([\s\S]*?)\])/g; var m2;
+          while ((m2 = re.exec(m[1]))) {
+            var lo = parseInt(m2[1], 16), hi = parseInt(m2[2], 16);
+            if (m2[4]) { var base = m2[4]; for (var c = lo; c <= hi; c++) uni[c] = hexToStr((parseInt(base, 16) + (c - lo)).toString(16).padStart(base.length, '0')); }
+            else if (m2[5]) { (m2[5].match(/<([0-9A-Fa-f]+)>/g) || []).forEach(function (a, idx) { uni[lo + idx] = hexToStr(a.replace(/[<>]/g, '')); }); }
+          }
+        }
+      });
+      function mapHex(h) { var o = ''; for (var k = 0; k + 4 <= h.length; k += 4) { var cc = parseInt(h.substr(k, 4), 16); o += (uni[cc] != null) ? uni[cc] : ''; } return o; }
+      var out = [];
+      streams.forEach(function (d) {
+        var t = latin1Of(d);
+        if (t.indexOf('beginbfchar') >= 0 || t.indexOf('beginbfrange') >= 0) return;
+        if (t.indexOf('BT') < 0 || (t.indexOf('Tj') < 0 && t.indexOf('TJ') < 0)) return;
+        var toks = [], m, advances = [];
+        var re = /(-?[\d.]+)\s+(-?[\d.]+)\s+(?:Td|TD)|T\*|<([0-9A-Fa-f]+)>\s*Tj|\[([\s\S]*?)\]\s*TJ/g;
+        while ((m = re.exec(t))) {
+          if (m[3] != null) { toks.push({ s: mapHex(m[3]) }); continue; }
+          if (m[4] != null) { (m[4].match(/<([0-9A-Fa-f]+)>|(-?[\d.]+)/g) || []).forEach(function (a) { if (a.charAt(0) === '<') toks.push({ s: mapHex(a.replace(/[<>]/g, '')) }); else if (parseFloat(a) < -120) toks.push({ s: ' ' }); }); continue; }
+          if (m[0] === 'T*') { toks.push({ nl: true }); continue; }
+          var tx = parseFloat(m[1]), ty = parseFloat(m[2]);
+          if (Math.abs(ty) > 0.5) toks.push({ nl: true }); else { toks.push({ tx: tx }); if (tx > 0) advances.push(tx); }
+        }
+        advances.sort(function (a, b) { return a - b; });
+        var med = advances.length ? advances[Math.floor(advances.length / 2)] : 3;
+        var spaceAt = Math.max(3, med * 1.6);
+        var buf = '';
+        toks.forEach(function (k) { if (k.nl != null) buf += '\n'; else if (k.tx != null) { if (k.tx > spaceAt) buf += ' '; } else buf += k.s; });
+        if (buf.replace(/\s/g, '').length > 20) out.push(buf);
+      });
+      return out.join('\n');
+    });
+  }
+
+  // ---- Document → readable text → one-line AI summary ------------------------
+  // Feeds the WO note a 1-liner per uploaded DOCUMENT. Text sources handled on-device:
+  // a text PDF (pdfToText) and plain-text files (.txt/.csv/.md/.log/.tsv). Photos and
+  // binary Office docs (.docx/.xlsx) have no readable text here and are SKIPPED (they keep
+  // the mechanical filename line) - OCR / office-unzip is a separate, heavier build.
+  function isPlainText(f) { return /\.(txt|csv|md|log|tsv)$/i.test(f && f.name || '') || /^text\//.test(f && f.type || ''); }
+  function summarizableDoc(f, kind) { return kind === 'PDF' || isPlainText(f); }
+  function readFileU8(f) { return new Promise(function (res, rej) { var r = new FileReader(); r.onerror = function () { rej(r.error); }; r.onload = function () { res(new Uint8Array(r.result)); }; r.readAsArrayBuffer(f); }); }
+  function readFileText(f) { return new Promise(function (res, rej) { var r = new FileReader(); r.onerror = function () { rej(r.error); }; r.onload = function () { res(String(r.result || '')); }; r.readAsText(f); }); }
+  function extractDocText(f, kind) {
+    try {
+      if (kind === 'PDF') return readFileU8(f).then(function (u8) { return pdfToText(u8); }).catch(function () { return ''; });
+      if (isPlainText(f)) return readFileText(f).then(function (t) { return String(t || ''); }).catch(function () { return ''; });
+    } catch (e) { }
+    return Promise.resolve('');
+  }
+  function oneLineClip(s, cap) {
+    s = String(s || '').replace(/\s+/g, ' ').trim().replace(/^["'\-–—\s]+/, '').replace(/["'\s]+$/, '');   // strip a leading dash and surrounding quotes the model may add
+    if (!s) return '';
+    return s.length > (cap || 160) ? s.slice(0, cap || 160).replace(/\s+\S*$/, '') + '…' : s;
+  }
+  // Ask the grant-holding sibling (bwn-suite-ai) to summarize over the shared bus: it runs the
+  // CLOUD model (the same /api/ai WO Audit uses), falling back to on-device, and replies. A missing
+  // reply (suite-ai not installed) is the ONLY case we then try our OWN on-device tier, since an
+  // empty reply already means suite-ai's on-device tier missed too (same browser, same model).
+  // Mirrors the rid + timeout + bwn:evt pattern of the domp / dispatch:sync bridges.
+  function busSummarize(text) {
+    return new Promise(function (resolve) {
+      var rid = 'dsum-' + Date.now() + '-' + Math.random().toString(36).slice(2, 8);
+      function onEvt(e) { var d = e && e.detail; if (!d || d.id !== 'ai:summarized' || d.rid !== rid) return; cleanup(); resolve({ answered: true, text: String(d.text || '') }); }
+      function cleanup() { clearTimeout(to); try { document.removeEventListener('bwn:evt', onEvt); } catch (e2) { } }
+      var to = setTimeout(function () { cleanup(); resolve({ answered: false, text: '' }); }, 14000);
+      document.addEventListener('bwn:evt', onEvt);
+      try { document.dispatchEvent(new CustomEvent('bwn:cmd', { detail: { id: 'ai:summarize', rid: rid, text: String(text || '').slice(0, 6000), oneLine: true, maxChars: 160 } })); }
+      catch (e3) { cleanup(); resolve({ answered: false, text: '' }); }
+    });
+  }
+  function summarizeDocText(text) {
+    text = String(text || '').replace(/[ \t]+/g, ' ').trim();
+    if (text.replace(/\s/g, '').length < 40) return Promise.resolve('');   // too little to summarize
+    return busSummarize(text).then(function (r) {
+      if (r.answered) return oneLineClip(r.text);   // suite-ai handled it (cloud/on-device) - final, empty or not
+      return bwnAI({                                // suite-ai absent -> our own on-device tier
+        task: 'summarize', tier: 'ondevice', oneLine: true, maxChars: 160,
+        system: 'You write ONE terse line summarizing what a work-order document is and says, for a facilities coordinator. Max 20 words. No preamble, no label, no quotes; output only the sentence.',
+        prompt: text.slice(0, 6000), fallback: ['ondevice'], timeoutMs: 9000
+      }).then(oneLineClip);
+    }).catch(function () { return ''; });
   }
 
   // Build per file: {kind, name, size, desc (short - Description field/clipboard),
@@ -1418,6 +1570,10 @@
     if (kind !== 'Email') {
       base.desc = kind + ' - ' + base.name + ' (' + base.size + (f.lastModified ? ', ' + shortDate(f.lastModified) : '') + ')';
       base.noteLine = '• ' + base.name + ' - ' + kind + ', ' + base.size;
+      // Mark a text-readable document (PDF / plain text) for the background AI 1-liner. The File
+      // ref is kept so enrichNoteWithAI can read its bytes AFTER the box is up - the summary must
+      // never block the drop or the upload. Photos / binary Office docs are not marked (no text).
+      if (summarizableDoc(f, kind)) { base.docFile = f; base.docKind = kind; base.aiDocPending = true; }
       return Promise.resolve(base);
     }
     return new Promise(function (resolve) {
@@ -1542,14 +1698,14 @@
       var t = emailBlocks[0].noteBlock;
       if (atts.length) {
         t += '\n\nAttachments uploaded (' + atts.length + '):\n' +
-          atts.map(function (d) { return '• ' + d.name + ' - ' + d.kind + ', ' + d.size; }).join('\n');
+          atts.map(function (d) { return '• ' + d.name + ' - ' + d.kind + ', ' + d.size + (d.summaryLine ? '\n    ' + d.summaryLine : ''); }).join('\n');
       }
       return t.length > NOTE_CAP ? t.slice(0, NOTE_CAP) + '…' : t;
     }
     var out = ['Uploaded to Documents (' + shortDate() + '):'];
     files.forEach(function (d) {
       if (d.isEmail && d.noteBlock) { out.push(''); out.push('- ' + d.name + ' -'); out.push(d.noteBlock); }
-      else out.push(d.noteLine);
+      else out.push(d.noteLine + (d.summaryLine ? '\n    ' + d.summaryLine : ''));
     });
     var text = out.join('\n');
     return text.length > NOTE_CAP ? text.slice(0, NOTE_CAP) + '…' : text;
