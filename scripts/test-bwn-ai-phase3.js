@@ -397,10 +397,10 @@ function staticChecks() {
     var end = s.indexOf('\n', b);
     return crypto.createHash('sha256').update(s.slice(a, end), 'utf8').digest('hex');
   }
-  var carriers = ['bwn-drop-upload.user.js', 'bwn-suite-ai.user.js', 'bwn-wo-audit.user.js'];
+  var carriers = ['bwn-drop-upload.user.js', 'bwn-proposal-pricing.user.js', 'bwn-suite-ai.user.js', 'bwn-wo-audit.user.js'];
   var shas = carriers.map(blockSha);
   var allEq = shas.every(function (h) { return h && h === shas[0]; });
-  ok('bwnAI block byte-identical across drop-upload/suite-ai/wo-audit', allEq, carriers.map(function (f, i) { return f + '=' + (shas[i] || 'MISSING'); }).join(' '));
+  ok('bwnAI block byte-identical across drop-upload/proposal-pricing/suite-ai/wo-audit', allEq, carriers.map(function (f, i) { return f + '=' + (shas[i] || 'MISSING'); }).join(' '));
   console.log('  ... block SHA: ' + shas[0]);
   ok('bid-out carries NO bwnAI block (migration deferred)', blockSha('bwn-bid-out.user.js') === null);
 

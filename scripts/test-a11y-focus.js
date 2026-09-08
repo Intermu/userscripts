@@ -54,10 +54,10 @@ function sliceFn(src, decl) {
 
 // The seven drawer-modal owners that carry the helper.
 var FAMILY = ['bwn-cc-auth.user.js', 'bwn-cc-purchase.user.js', 'bwn-dispatch.user.js',
-  'bwn-inventory.user.js', 'bwn-wo-assist.user.js', 'bwn-wo-audit.user.js', 'bwn-ask.user.js'];
+  'bwn-inventory.user.js', 'bwn-proposal-pricing.user.js', 'bwn-wo-assist.user.js', 'bwn-wo-audit.user.js', 'bwn-ask.user.js'];
 
 // ---- 1. drift guard: every copy is byte-identical -------------------------------------------
-console.log('\n-- bwnFocusTrap: one helper, seven identical copies --');
+console.log('\n-- bwnFocusTrap: one helper, eight identical copies --');
 var canonical = sliceFn(read(FAMILY[0]), 'function bwnFocusTrap(');
 A.ok(FAMILY[0] + ' defines bwnFocusTrap', canonical.indexOf('function bwnFocusTrap(modalEl)') === 0);
 FAMILY.slice(1).forEach(function (f) {
@@ -236,6 +236,7 @@ var OPEN_CALL = {
   'bwn-dispatch.user.js': 'bwnFocusTrap(back);',
   'bwn-inventory.user.js': 'bwnFocusTrap(back);',
   'bwn-wo-assist.user.js': 'bwnFocusTrap(back);',
+  'bwn-proposal-pricing.user.js': 'bwnFocusTrap(ov);',
   'bwn-wo-audit.user.js': 'bwnFocusTrap(ov);',
   'bwn-ask.user.js': 'bwnFocusTrap(panelEl);'
 };

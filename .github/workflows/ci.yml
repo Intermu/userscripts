@@ -448,6 +448,18 @@ jobs:
       - name: Proposal Copy engine harness (createDraftProposal + editProposal replay)
         run: node scripts/test-proposal-copy.js
 
+      # Proposal Pricing (bwn-proposal-pricing.user.js) - the two PURE marker-sliced blocks. Each
+      # assertion here is a bug that reached a number on screen against the live tenant: GP off the
+      # taxed total (35.19% vs the platform's 30.00%), a cost-category map with Other=3 and Shipping
+      # aliased onto Other, a lump-sum line priced off a placeholder quantity, a quantity lost on a
+      # rate switch, and a "no contracted rate" warning firing on a category that had just priced.
+      # Every guarantee carries a mutation control. 90 + 54 assertions.
+      - name: Proposal Pricing engine harness (pre-tax GP, categories, crew, rate-match rows)
+        run: node scripts/test-proposal-pricing-engine.js
+
+      - name: Proposal Pricing line-mapper harness (no invented unit; lump-sum verdict)
+        run: node scripts/test-proposal-pricing-linemap.js
+
       # Proposal Actions write path (bwn-proposal-actions.user.js): the Approval / TSP / Kickback
       # workflow's three newly-pinned mutations - addClientProposalNote (proposal "billing note", NOT a
       # WO note), addTask (entityType 1 / entityId = WO# String / assignedTo GUID), completeTask ({id}).

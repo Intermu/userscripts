@@ -20,6 +20,7 @@
     "bwn-notes.user.js": { "expectedInstalled": true },
     "bwn-proposal-actions.user.js": { "expectedInstalled": true },
     "bwn-proposal-copy.user.js": { "expectedInstalled": true },
+    "bwn-proposal-pricing.user.js": { "expectedInstalled": true },
     "bwn-suite-ai.user.js": { "expectedInstalled": true },
     "bwn-suite-core.user.js": { "expectedInstalled": true },
     "bwn-temp-vendor.user.js": { "expectedInstalled": true },

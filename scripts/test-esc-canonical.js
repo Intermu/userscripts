@@ -113,6 +113,7 @@ var EXPECT = {
   'bwn-notes.user.js':            ['esc'],
   'bwn-proposal-actions.user.js': ['escapeHtml'],
   'bwn-proposal-copy.user.js':    ['escapeHtml'],
+  'bwn-proposal-pricing.user.js': ['esc'],
   'bwn-suite-ai.user.js':         ['escapeHtml', 'srEsc'],   // ported jobView escapeHtml + supplier-search srEsc
   'bwn-suite-core.user.js':       ['esc', 'esc', 'esc'],     // three render/copy paths
   'bwn-temp-vendor.user.js':      ['tvEsc'],
