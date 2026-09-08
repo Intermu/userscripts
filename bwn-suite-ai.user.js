@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         BWN Suite - AI (Broadway National)
 // @namespace    broadwaynational.bwn
-// @version      1.45.24
+// @version      1.45.25
 // @downloadURL  https://raw.githubusercontent.com/Intermu/userscripts/main/bwn-suite-ai.user.js
 // @updateURL    https://raw.githubusercontent.com/Intermu/userscripts/main/bwn-suite-ai.user.js
 // @description  The Umbrava tools that call outside APIs, kept separate from the zero-egress Core script. Client Update and WO Audit drafts (Anthropic Claude; draft-only, scrubbed before sending, you review before posting); Find Techs / Find Suppliers (Google Places; vendor leads near a WO); and Job View (opens the Ops-Dashboard job card on the WO page - WO details from Umbrava plus the authored case file and next actions, read-only). Network access is limited by the browser to the declared API hosts and the BWN Static Web App. API keys are stored in Tampermonkey's storage via the menu commands and never enter the page. Toggle modules in BWN_MODULES below.
@@ -2044,6 +2044,30 @@
   // Wire the real transport into the shared router. The bwnAI block above stays paste-identical
   // across the suite; ONLY this injection differs (PAT-002 / [[bwn-ai-tiering]] injected-sender).
   bwnAI.setProxy(aiProxySend);
+
+  // ---- AI summarize bridge (serves @grant none siblings, e.g. Drop Upload) --------------
+  // Drop Upload is @grant none / zero-egress and cannot reach the cloud model itself, so it asks
+  // over the shared document bus and WE run the summary through the router - cloud proxy primary
+  // (this script holds the /api/ai transport), on-device fallback, mechanical floor. Same
+  // request/reply shape as the domp / dispatch:sync bridges already on this bus:
+  //   in   bwn:cmd  { id:'ai:summarize', rid, text, oneLine?, maxChars? }
+  //   out  bwn:evt  { id:'ai:summarized', rid, text }
+  // Always replies (empty text on any miss) so the caller's own timeout is only for "AI absent".
+  document.addEventListener('bwn:cmd', function (e) {
+    var d = e && e.detail;
+    if (!d || d.id !== 'ai:summarize' || d.rid == null) return;
+    function reply(t) { try { document.dispatchEvent(new CustomEvent('bwn:evt', { detail: { id: 'ai:summarized', rid: d.rid, text: String(t || '') } })); } catch (e2) { } }
+    var text = String(d.text || '').slice(0, 6000);
+    if (text.replace(/\s/g, '').length < 30) { reply(''); return; }   // too little to summarize
+    try {
+      bwnAI({
+        task: 'summarize', tier: 'proxy', fallback: ['ondevice', 'local'],
+        oneLine: d.oneLine !== false, maxChars: d.maxChars || 160,
+        system: 'You write ONE terse line summarizing what a work-order document is and what it says, for a facilities coordinator. State the document kind (invoice, proposal, quote, report, permit, photo log, etc.) and its key facts - amount, vendor, scope, dates - if present. Max 20 words. No preamble, no label, no quotes; output only the sentence.',
+        prompt: text, timeoutMs: 12000
+      }).then(reply, function () { reply(''); });
+    } catch (e3) { reply(''); }
+  }, false);
   // ===== END BWN AI TRANSPORT =========================================================
 
 
