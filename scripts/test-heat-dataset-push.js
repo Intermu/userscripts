@@ -79,6 +79,9 @@ A.eq('vendors carried when known', w.vendors, 'Acme, Bolt');
 A.eq('nextOnsiteDate = sched', w.nextOnsiteDate, '08/10/2026');
 A.eq('expectedCompletion = exp', w.expectedCompletion, '05/01/2026');
 A.eq('lastNoteDate = lastNote', w.lastNoteDate, '08/05/2026');
+// Umbrava's own lifecycle phase, carried so the SWA can stop guessing openness from the status
+// NAME (BN.woDone). heatDone already trusts it in five places in Core; it just never shipped.
+A.eq('phase = phase', w.phase, 'Open');
 // v2 dataset fields (Job ID / Source PO # / WO Date / Project Type) - route maps sourceJob/sourcePo/
 // projectType (STR_MAP) and woDate (DATE_MAP); the cross-file guard below re-checks all four.
 A.eq('sourceJob -> Job ID', w.sourceJob, 'J-5567');
@@ -106,7 +109,7 @@ var ROUTE_WIRE_KEYS = {
   target: 1, woNumber: 1, status: 1, priority: 1, client: 1, coordinator: 1, statusHrs: 1, aged: 1,
   amount: 1, vendorNte: 1, vendors: 1, nextOnsiteDate: 1, expectedCompletion: 1, lastNoteDate: 1,
   lastUpdated: 1, woDate: 1, firstTripDate: 1, daysSinceUpdate: 1, sourceJob: 1, sourcePo: 1,
-  fm: 1, location: 1, city: 1, state: 1, projectType: 1
+  fm: 1, location: 1, city: 1, state: 1, projectType: 1, phase: 1
 };
 var emitted = {};
 heatDatasetRows(store([rec()])).forEach(function (r) { Object.keys(r).forEach(function (k) { emitted[k] = 1; }); });
@@ -121,5 +124,19 @@ A.ok('[neg] without the guard, "(unresolved member)" leaks as coordinator',
 var g2 = build(mutate(SRC, "if (!row.target && !row.woNumber) continue;", ""));
 A.eq('[neg] without the identity check, an id-less row is not dropped',
   g2.heatDatasetRows(store([rec({ tracking: '', wo: '' })])).length, 1);
+
+// ---- phase: present when read, ABSENT when the row has none -------------------------------
+// A DOM-scanned row has no phase column at all. An empty string downstream is indistinguishable
+// from a blank cell, and BN.woDone's third rung ("no phase read -> judge on the name") depends on
+// the key being missing rather than "".
+A.ok('a row with no phase omits the key entirely',
+  !('phase' in heatDatasetRows(store([rec({ phase: '' })]))[0]));
+A.eq('a terminal phase is carried verbatim, not normalized',
+  heatDatasetRows(store([rec({ phase: 'WorkComplete' })]))[0].phase, 'WorkComplete');
+
+var g3 = build(mutate(SRC, "if (r.phase) row.phase = r.phase;", ""));
+A.ok('[neg] without the push line, phase never reaches the route',
+  g3.heatDatasetRows(store([rec()]))[0].phase === undefined);
+
 
 A.finish();

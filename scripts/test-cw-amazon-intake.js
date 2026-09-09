@@ -47,98 +47,99 @@ vm.runInNewContext(BLOCK + exportLine, api);
 
 var SENDER = 'amazon@ilrs.360facility.net';
 
-// Each fixture is a real email: subject + the plain-text Case Summary body, and the field values
+// SANITIZED fixtures. Each reproduces the SHAPE of a FAMIS Case Summary email - subject plus the
+// plain-text body, every anchor the extractor keys on - with the field values
 // a human confirmed for that request. Tabs/newlines are kept realistic; the extractor flattens
 // whitespace, so exact spacing does not matter.
 var CASES = [
   {
-    name: '552751 Blauvelt dock door (Reactive, PO Amount)',
-    subject: 'NEW AMAZON - PKG_BLAUVELT1_DXY4 - 200 Oritani Drive - Dock Door Maintenance - ',
+    name: '990001 Blauvelt dock door (Reactive, PO Amount)',
+    subject: 'NEW AMAZON - PKG_EXAMPLE1_DXX4 - 200 Example Drive - Dock Door Maintenance - ',
     body: [
-      'Request ID: \t552751\t ',
-      'Location\t AMAZON - PKG_BLAUVELT1_DXY4 - 200 Oritani Drive \t',
-      'Address\t 200 Oritani Drive\n\nBlauvelt, NY 10913\n',
+      'Request ID: \t990001\t ',
+      'Location\t AMAZON - PKG_EXAMPLE1_DXX4 - 200 Example Drive \t',
+      'Address\t 200 Example Drive\n\nBlauvelt, NY 10999\n',
       'Type | Sub-Type\t Dock Door | Dock Door Maintenance \t',
-      'Statement of Work\t Description of the required work: Per onsite Ops Mgr Ari 347-490-8122, there is no power to the controls for overhead speed door #501 PO required (Y/N): y PO Amount: 2000.00 GL Account/Code: Dock Repair and Maintenance 610-542-00 R&M - Struc/Roof: Gates/Docks/Loading/Overhead Contract \t',
+      'Statement of Work\t Description of the required work: Per onsite Ops Mgr Rae 555-0110, there is no power to the controls for overhead speed door #501 PO required (Y/N): y PO Amount: 2000.00 GL Account/Code: Dock Repair and Maintenance 610-000-01 R&M - Struc/Roof: Gates/Docks/Loading/Overhead Contract \t',
       'Priority\t P5-Low - Minor Issues - 2D/30D\t ',
       'Assigned To\t VNDR BROADWAY NATIONAL GROUP LLC\t ',
       'Complete By\t 10 Sep 2026\t ',
-      'Requested By\t Julie Platnar, Cushman & Wakefield - 732-882-4232\t ',
-      'URL\t https://amazon.famis360.com/LB_Request_Update.asp?RequestID=552751\t '
+      'Requested By\t Jane Doe, Cushman & Wakefield - 555-0111\t ',
+      'URL\t https://amazon.famis360.com/LB_Request_Update.asp?RequestID=990001\t '
     ].join('\n'),
-    expect: { requestId: '552751', siteCode: 'PKG_BLAUVELT1_DXY4', woType: 'Reactive',
+    expect: { requestId: '990001', siteCode: 'PKG_EXAMPLE1_DXX4', woType: 'Reactive',
       trade: 'Doors and Hardware', priority: 'P5', dne: '2000.00', completeBy: '10 Sep 2026', warnAttach: false }
   },
   {
-    name: '544571 Sterling plumbing (Reactive, PO/NTE Amount, report attached)',
-    subject: 'NEW AMAZON - IAD228D - 45965 Nokes Blvd  - Repair and Maintenance - P5-Low - M',
+    name: '990002 Sterling plumbing (Reactive, PO/NTE Amount, report attached)',
+    subject: 'NEW AMAZON - IAX228D - 45965 Example Blvd  - Repair and Maintenance - P5-Low - M',
     body: [
-      'Request ID: \t544571\t ',
-      'Location\t AMAZON - IAD228D - 45965 Nokes Blvd \t',
-      'Address\t 45965 Nokes Blvd \n\nSterling, VA 20166\n',
+      'Request ID: \t990002\t ',
+      'Location\t AMAZON - IAX228D - 45965 Example Blvd \t',
+      'Address\t 45965 Example Blvd \n\nSterling, VA 20199\n',
       'Type | Sub-Type\t Plumbing | Repair and Maintenance \t',
-      'Statement of Work\t 1 backflow failed during inspection, failed report attached. Please contact property engineer, Anthony Milan, for access; contact number is (571) 318-7111. PO Required: Y PO/NTE Amount: $2000 GL Account/Code: 610-581-00 If this work requires an increase to the initial PO NTE, Vendor must request a change order for the increase through this work order. \t',
+      'Statement of Work\t 1 backflow failed during inspection, failed report attached. Please contact property engineer, Sam Roe, for access; contact number is 555-0112. PO Required: Y PO/NTE Amount: $2000 GL Account/Code: 610-000-02 If this work requires an increase to the initial PO NTE, Vendor must request a change order for the increase through this work order. \t',
       'Priority\t P5-Low - Minor Issues - 2D/30D\t ',
       'Assigned To\t VNDR BROADWAY NATIONAL GROUP LLC\t ',
       'Complete By\t 01 Aug 2026\t ',
-      'Requested By\t Kenyatta Johnson, Cushman and Wakefield-Asset Services - 703.898.3772\t ',
-      'URL\t https://amazon.famis360.com/LB_Request_Update.asp?RequestID=544571\t '
+      'Requested By\t Alex Poe, Cushman and Wakefield-Asset Services - 555.0113\t ',
+      'URL\t https://amazon.famis360.com/LB_Request_Update.asp?RequestID=990002\t '
     ].join('\n'),
-    expect: { requestId: '544571', siteCode: 'IAD228D', woType: 'Reactive',
+    expect: { requestId: '990002', siteCode: 'IAX228D', woType: 'Reactive',
       trade: 'Plumbing', priority: 'P5', dne: '2000', completeBy: '01 Aug 2026', warnAttach: true }
   },
   {
-    name: '542498 Acworth plumbing (Reactive, NTE $1,414.71, "Proposal #1" is not an RFP)',
-    subject: 'NEW AMAZON - FTY4 - 5663 Third Army Rd - Repair and Maintenance - P5-Low - Min',
+    name: '990003 Acworth plumbing (Reactive, NTE $1,414.71, "Proposal #1" is not an RFP)',
+    subject: 'NEW AMAZON - FTX4 - 5663 Example Rd - Repair and Maintenance - P5-Low - Min',
     body: [
-      'Request ID: \t542498\t ',
-      'Location\t AMAZON - FTY4 - 5663 Third Army Rd \t',
-      'Address\t 5663 Third Army Rd\n\nAcworth, GA 30101\n',
+      'Request ID: \t990003\t ',
+      'Location\t AMAZON - FTX4 - 5663 Example Rd \t',
+      'Address\t 5663 Example Rd\n\nAcworth, GA 30199\n',
       'Type | Sub-Type\t Plumbing | Repair and Maintenance \t',
-      'Statement of Work\t Proposal # 1 remove and dispose of existing shut off valve and supply and install new shut off valve. We will test to ensure proper function once repaired. PO: YES NTE: $1,414.71 coding: 610-585-00 \t',
+      'Statement of Work\t Proposal # 1 remove and dispose of existing shut off valve and supply and install new shut off valve. We will test to ensure proper function once repaired. PO: YES NTE: $1,414.71 coding: 610-000-03 \t',
       'Priority\t P5-Low - Minor Issues - 2D/30D\t ',
       'Assigned To\t VNDR BROADWAY NATIONAL GROUP LLC\t ',
       'Complete By\t 27 Jul 2026\t ',
-      'Requested By\t Melissa Maynard, Cushman & Wakefield - 419-348-4166\t ',
-      'URL\t https://amazon.famis360.com/LB_Request_Update.asp?RequestID=542498\t '
+      'Requested By\t Robin Loe, Cushman & Wakefield - 555-0114\t ',
+      'URL\t https://amazon.famis360.com/LB_Request_Update.asp?RequestID=990003\t '
     ].join('\n'),
-    expect: { requestId: '542498', siteCode: 'FTY4', woType: 'Reactive',
+    expect: { requestId: '990003', siteCode: 'FTX4', woType: 'Reactive',
       trade: 'Plumbing', priority: 'P5', dne: '1414.71', completeBy: '27 Jul 2026', warnAttach: false }
   },
   {
-    name: '546122 La Vergne RFP (Proposal, no NTE -> 0.00, backflow->Plumbing)',
-    subject: 'NEW AMAZON - PNA1 - 242 Mason Road - Corrective Work Proposal - P4-Scheduled -',
+    name: '990004 La Vergne RFP (Proposal, no NTE -> 0.00, backflow->Plumbing)',
+    subject: 'NEW AMAZON - PNX1 - 242 Example Road - Corrective Work Proposal - P4-Scheduled -',
     body: [
-      'Request ID: \t546122\t ',
-      'Location\t AMAZON - PNA1 - 242 Mason Road \t',
-      'Address\t 242 Mason Road\n\nLa Vergne, TN 37086\n',
+      'Request ID: \t990004\t ',
+      'Location\t AMAZON - PNX1 - 242 Example Road \t',
+      'Address\t 242 Example Road\n\nLa Vergne, TN 37099\n',
       'Type | Sub-Type\t Request for Proposal | Corrective Work Proposal \t',
       'Statement of Work\t Failed backflow repair - need quote to fully replace the backflow - irrigation backflow Please provide quote \t',
       'Priority\t P4-Scheduled - 2D/15D\t ',
       'Assigned To\t VNDR BROADWAY NATIONAL GROUP LLC\t ',
       'Complete By\t 28 Jul 2026\t ',
-      'Requested By\t Melissa Maynard, Cushman & Wakefield - 419-348-4166\t ',
-      'URL\t https://amazon.famis360.com/LB_Request_Update.asp?RequestID=546122\t '
+      'Requested By\t Robin Loe, Cushman & Wakefield - 555-0114\t ',
+      'URL\t https://amazon.famis360.com/LB_Request_Update.asp?RequestID=990004\t '
     ].join('\n'),
-    expect: { requestId: '546122', siteCode: 'PNA1', woType: 'Proposal',
+    expect: { requestId: '990004', siteCode: 'PNX1', woType: 'Proposal',
       trade: 'Plumbing', priority: 'P4', dne: '0.00', completeBy: '28 Jul 2026', warnAttach: false }
   },
   {
-    name: '539292 La Vergne RFP (Proposal, no NTE -> 0.00, attached unit)',
-    subject: 'NEW AMAZON - PNA1 - 242 Mason Road - Corrective Work Proposal - P4-Scheduled -',
+    name: '990005 La Vergne RFP (Proposal, no NTE -> 0.00, attached unit)',
+    subject: 'NEW AMAZON - PNX1 - 242 Example Road - Corrective Work Proposal - P4-Scheduled -',
     body: [
-      'Request ID: \t539292\t ',
-      'Location\t AMAZON - PNA1 - 242 Mason Road \t',
-      'Address\t 242 Mason Road\n\nLa Vergne, TN 37086\n',
+      'Request ID: \t990005\t ',
+      'Location\t AMAZON - PNX1 - 242 Example Road \t',
+      'Address\t 242 Example Road\n\nLa Vergne, TN 37099\n',
       'Type | Sub-Type\t Request for Proposal | Corrective Work Proposal \t',
-      'Statement of Work\t From backflow w/o 529308 - Failed backflow - leaking - please provide quote for repairs. Attached failed unit - documentation is fuzzy Please provide quote. \t',
+      'Statement of Work\t From backflow w/o 990009 - Failed backflow - leaking - please provide quote for repairs. Attached failed unit - documentation is fuzzy Please provide quote. \t',
       'Priority\t P4-Scheduled - 2D/15D\t ',
       'Assigned To\t VNDR BROADWAY NATIONAL GROUP LLC\t ',
       'Complete By\t 05 Jun 2026\t ',
-      'Requested By\t Melissa Maynard, Cushman & Wakefield - 419-348-4166\t ',
-      'URL\t https://amazon.famis360.com/LB_Request_Update.asp?RequestID=539292\t '
+      'Requested By\t Robin Loe, Cushman & Wakefield - 555-0114\t ',
+      'URL\t https://amazon.famis360.com/LB_Request_Update.asp?RequestID=990005\t '
     ].join('\n'),
-    expect: { requestId: '539292', siteCode: 'PNA1', woType: 'Proposal',
+    expect: { requestId: '990005', siteCode: 'PNX1', woType: 'Proposal',
       trade: 'Plumbing', priority: 'P4', dne: '0.00', completeBy: '05 Jun 2026', warnAttach: true }
   }
 ];
@@ -173,7 +174,7 @@ A.ok('Fairmarkit Amazon RFQ is NOT CW-Amazon',
 A.ok('a Pilot PO email is NOT CW-Amazon',
   api.isCwAmazon('orders@pilottravelcenters.com', 'Purchase Order 12345678', 'PO # 12345678 store 0421') === false);
 A.ok('CW-Amazon detected by body markers even without the famis sender',
-  api.isCwAmazon('someone@example.com', 'NEW AMAZON - PNA1', 'Case Summary Request ID: 999 amazon.famis360.com') === true);
+  api.isCwAmazon('someone@example.com', 'NEW AMAZON - PNX1', 'Case Summary Request ID: 999 amazon.famis360.com') === true);
 
 // WO-type mapping unit checks (the rule the user asked for).
 console.log('\n# WO Type rule (Type | Sub-Type)');
@@ -189,6 +190,6 @@ A.ok('PO Amount: 2000.00', api.cwAmazonDne('... PO Amount: 2000.00 GL ...') === 
 A.ok('PO/NTE Amount: $2000', api.cwAmazonDne('... PO/NTE Amount: $2000 GL ...') === '2000');
 A.ok('NTE: $1,414.71', api.cwAmazonDne('... PO: YES NTE: $1,414.71 coding ...') === '1414.71');
 A.ok('no ceiling -> 0.00', api.cwAmazonDne('Failed backflow repair - need quote') === '0.00');
-A.ok('does not grab the GL code digits', api.cwAmazonDne('GL Account/Code: 610-542-00') === '0.00');
+A.ok('does not grab the GL code digits', api.cwAmazonDne('GL Account/Code: 610-000-01') === '0.00');
 
 A.finish();

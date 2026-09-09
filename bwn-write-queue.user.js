@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         BWN Write Queue (Broadway National)
 // @namespace    broadwaynational.bwn
-// @version      0.5.0
+// @version      0.5.1
 // @downloadURL  https://raw.githubusercontent.com/Intermu/userscripts/main/bwn-write-queue.user.js
 // @updateURL    https://raw.githubusercontent.com/Intermu/userscripts/main/bwn-write-queue.user.js
 // @description  Drains the Track C write-back queue: claims THIS coordinator's own queued Umbrava write commands from the SWA, confirms each irreversible write, executes it via patchWorkOrder/addEditJobNote, and reports the result. Self-drain; every write is human-confirmed; disabled until you turn it on. v0.4 adds a gated Bulk Operations Console (whole-batch preview + zero-write dry-run + throttled cancellable execute with per-record results + CSV/JSON export).
@@ -38,7 +38,7 @@
 
 (function () {
   "use strict";
-  var VER = "0.5.0";   // keep in lockstep with @version (TM compares versions, not contents)
+  var VER = "0.5.1";   // keep in lockstep with @version (TM compares versions, not contents)
 
   var SWA_BASE = "https://green-stone-0717dab0f.7.azurestaticapps.net";
   var PROXY_URL = SWA_BASE + "/api/wo-write-queue";
@@ -1198,13 +1198,25 @@
   }
   // ==== BWN-BULK-CONSOLE UI END ====
 
+  // ---- SWA ingest key presence beacon ---------------------------------------
+  // Boolean only, never the key. GM storage is PER SCRIPT (measured 2026-09-03), so a blank key
+  // here is invisible to every sibling; Core's Ops panel reads these beacons to name the blank
+  // ones. ts is the LOAD time, never refreshed on save - Core's freshness handshake needs that.
+  var INGEST_BEACON_TS = Date.now();
+  function publishIngestPresence() {
+    try {
+      localStorage.setItem("bwn:ingest:write-queue", JSON.stringify({ k: ingestKey() ? 1 : 0, ts: INGEST_BEACON_TS }));
+    } catch (e) { /* best-effort */ }
+  }
+  publishIngestPresence();
+
   // ---- Menu commands + boot ----
   GM_registerMenuCommand("BWN Write Queue: open Bulk Operations Console", function () { try { openBulkConsole(); } catch (e) { alert("Could not open the console: " + ((e && e.message) || e)); } });
   GM_registerMenuCommand("BWN Write Queue: ENABLE bulk console live writes", function () { bulkSetFlag("bulkConsole", true); alert("Bulk Console LIVE writes ENABLED (bwn:modules.bulkConsole = true). Each batch still needs a typed EXECUTE confirmation."); });
   GM_registerMenuCommand("BWN Write Queue: disable bulk console live writes", function () { bulkSetFlag("bulkConsole", false); alert("Bulk Console live writes disabled. Preview + dry-run stay available."); });
   GM_registerMenuCommand("BWN Write Queue: set SWA ingest key", function () {
-    var v = prompt("SWA ingest key (same value as the connector WO_INGEST_KEY, shared across the BWN Ops Suite):", ingestKey() || "");
-    if (v !== null) GM_setValue("ingest_key", v.trim());
+    var v = prompt("SWA ingest key (same value as the connector WO_INGEST_KEY). Tampermonkey scopes this PER SCRIPT, so setting it here sets it for Write Queue only - every other suite script needs its own copy:", ingestKey() || "");
+    if (v !== null) { GM_setValue("ingest_key", v.trim()); publishIngestPresence(); }
   });
   GM_registerMenuCommand("BWN Write Queue: enable draining", function () { GM_setValue("wq_enabled", true); alert("Write-queue draining ENABLED. Each write still waits for your Approve."); });
   GM_registerMenuCommand("BWN Write Queue: disable draining", function () { GM_setValue("wq_enabled", false); alert("Write-queue draining disabled."); });
