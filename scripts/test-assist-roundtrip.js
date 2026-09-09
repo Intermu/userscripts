@@ -338,7 +338,7 @@ async function probeAssist(src) {
   // VER had drifted to 0.3.0 while @version read 0.3.3; the 2026-08-18 surgical-fix pass set them
   // in lockstep at 0.3.4, and these pins keep them from drifting apart again.
   A.ok('core @version is 1.84.1', coreFull.indexOf('// @version      1.84.1') !== -1, 'core version drift');
-  A.ok('core banner says WO Assist 2.73', coreFull.indexOf('WO Assist 2.73') !== -1, 'module banner drift');
+  A.ok('core banner says WO Assist 2.74', coreFull.indexOf('WO Assist 2.74') !== -1, 'module banner drift');
   A.ok('assist @version is 0.3.7', assistFull.indexOf('// @version      0.3.7') !== -1, 'assist version drift');
   A.ok("assist VER is '0.3.7'", assistFull.indexOf("var VER = '0.3.7';") !== -1, 'assist VER drift');
   // Step 4 hangs the client-response state read off the SAME tick, deliberately: two queues on

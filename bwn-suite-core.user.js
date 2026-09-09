@@ -113,7 +113,7 @@
   try { localStorage.setItem('bwn:status:core', JSON.stringify({ ver: BWN_VER, ts: Date.now() })); } catch (e) { /* best-effort */ }
 
   console.info('[BWN SUITE CORE] v' + BWN_VER + ' |',
-    'Shared Core 7 \u00b7 DOM Handles 1.0 \u00b7 PO Approval 1.13 \u00b7 WO Assist 2.73 \u00b7 Leak Guard 2.0 \u00b7 List Heat 3.28 \u00b7 Launcher 2.0 \u00b7 Views 3.1 \u00b7 Palette 1.1 \u00b7 Visit 1.2 \u00b7 Reminders 1.1 \u00b7 Timeline 1.1 \u00b7 TripCal 1.4 \u00b7 Bulk Ops 1.0 \u00b7 Connector 1.2 \u00b7 Governance 1.0 |',
+    'Shared Core 7 \u00b7 DOM Handles 1.0 \u00b7 PO Approval 1.13 \u00b7 WO Assist 2.74 \u00b7 Leak Guard 2.0 \u00b7 List Heat 3.28 \u00b7 Launcher 2.0 \u00b7 Views 3.1 \u00b7 Palette 1.1 \u00b7 Visit 1.2 \u00b7 Reminders 1.1 \u00b7 Timeline 1.1 \u00b7 TripCal 1.4 \u00b7 Bulk Ops 1.0 \u00b7 Connector 1.2 \u00b7 Governance 1.0 |',
     'enabled:', Object.keys(BWN_MODULES).filter(function (k) { return BWN_MODULES[k]; }).join(', '));
 
   // ===== BWN SHARED CORE v7 - KEEP IN SYNC across both suite scripts =====
@@ -2239,7 +2239,7 @@
   });
 
   // ==========================================================================
-  // MODULE: WO Assist: GP + ETA Watchdog + Playbook v2.73 (Connector 1.2)
+  // MODULE: WO Assist: GP + ETA Watchdog + Playbook v2.74 (Connector 1.2)
   // ==========================================================================
   bwnBoot('woAssist', BWN_MODULES.woAssist, function () {
     'use strict';
@@ -2269,7 +2269,7 @@
     var PANEL_ID = 'bwn-gp-panel';
     var GREEN = BWN.GREEN;
 
-    console.info('[BWN GP] WO Assist v2.73 loaded on', location.href);
+    console.info('[BWN GP] WO Assist v2.74 loaded on', location.href);
 
     // ---- Parsing helpers (shared via BWN core) -----------------------------
     var parseMoney = BWN.parseMoney;
@@ -5472,11 +5472,36 @@
     // watchdog's own judgement is untouched. Deliberately NOT bare "complete"/"completed":
     // "work completed 7/15" is a past-tense record, not a promise.
     var ECD_NOTE_WORDS = /\becd\b|\bcomplet(?:e|ed|ion)\s+(?:by|date)\b|\bfinish(?:ed)?\s+by\b|\bdone\s+by\b/i;
+    // A bare hyphenated pair is a RANGE, not a date - measured on W-386564 (2026-09-03), where a
+    // note containing "1-5" produced a proposal of 2027-01-05: CFG.DATE_RE accepts `-` as a date
+    // separator, so "1-5" read as January 5, and parseBodyDate then resolved that yearless date
+    // FORWARD from the note into the next year. Four months out, off a note that never mentioned
+    // a completion date, offered to a coordinator one click from Apply.
+    //
+    // Scoped deliberately to this function, which proposeECD is the only caller of. CFG.DATE_RE
+    // and parseBodyDate are SHARED with the ETA watchdog and are left exactly as they are - the
+    // watchdog's judgement is not this fix's business.
+    //
+    // Kept intact: a hyphen inside a longer run of digits and dashes, so an ISO "2026-09-03" and
+    // its "09-03" fragment still parse. The trade is that a completion date written "9-15" is no
+    // longer read as a date here; that form did not appear once in the 130-note history measured,
+    // and losing it costs the fallback (the 2nd upcoming Friday) rather than a wrong date.
+    function ecdDropHyphenRanges(body) {
+      return String(body == null ? '' : body).replace(/\d{1,2}-\d{1,2}/g, function (m, off, s) {
+        var before = off > 0 ? s.charAt(off - 1) : '';
+        var after = s.charAt(off + m.length);
+        if (/[\d-]/.test(before) || /[-\d]/.test(after)) return m;   // part of a longer date/range chain
+        return ' ';
+      });
+    }
     function latestNotedEta(state) {
       var notes = getNotes(), today = ecdToday(), best = null;
       for (var i = 0; i < notes.length; i++) {
-        var b = notes[i].body || '';
-        if (!((CFG.ETA_WORDS.test(b) || ECD_NOTE_WORDS.test(b)) && CFG.DATE_RE.test(b))) continue;
+        var raw = notes[i].body || '';
+        // Word tests run on the ORIGINAL text (stripping cannot add or remove ETA vocabulary);
+        // every DATE decision below runs on the stripped copy.
+        var b = ecdDropHyphenRanges(raw);
+        if (!((CFG.ETA_WORDS.test(raw) || ECD_NOTE_WORDS.test(raw)) && CFG.DATE_RE.test(b))) continue;
         // parseBodyDate (NOT the note-timestamp parser): scans ALL dates in the body,
         // takes the latest, and resolves a yearless "7/15" FORWARD relative to the
         // note - an ETA is a future promise, so bare M/D must look forward, not back.
