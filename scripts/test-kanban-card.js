@@ -511,11 +511,43 @@ A.ok('the old alarm class kb-hot is gone from both CSS and the render', !/\.kb-d
 // age chip only, it did not delete red everywhere. If this goes red the edge lost its colour too.
 A.ok('the severity EDGE still owns the red, so red still means a judged verdict', /\.kb-card\.sev2\{border-left-color:#a11;\}/.test(kbFull));
 
+// 0.9.0: the per-user default view. initialView is sliced from the shipped bytes and run bare -
+// it must read ONLY bwn:config.view.defaultWO === 'board' as a force, and otherwise reproduce the
+// 0.8.0 rule (remembered toggle, 'list' when unset). One mutation drops the preference read and
+// must go red; the toggle-only cases stay green under it, which is what proves the mutation hit
+// the preference path and not the fallback.
+console.log('\ninitialView (0.9.0 - Core Preferences > Default WO view)');
+(function () {
+  var S_IV = sliceKb('  function initialView(toggle, cfgRaw) {', '  var view = initialView(', 'initialView');
+  function build(src) { return (new Function(src + '\nreturn initialView;'))(); }
+  var iv = build(S_IV);
+  var BOARD = JSON.stringify({ v: 1, view: { defaultWO: 'board' } });
+  var LIST = JSON.stringify({ v: 1, view: { defaultWO: 'list' } });
+  A.eq('no preference, no toggle -> list (0.8.0 behaviour)', iv('list', null), 'list');
+  A.eq('no preference, toggle board -> board (remembered toggle)', iv('board', null), 'board');
+  A.eq('preference board, toggle list -> BOARD (the preference forces)', iv('list', BOARD), 'board');
+  A.eq('preference board, no toggle -> board', iv('list', BOARD), 'board');
+  A.eq('preference list, toggle board -> board (list means remember, it does not force)', iv('board', LIST), 'board');
+  A.eq('preference list, toggle list -> list', iv('list', LIST), 'list');
+  A.eq('blob without a view group -> toggle rules', iv('board', JSON.stringify({ v: 1, audit: { gpLow: 20 } })), 'board');
+  A.eq('unknown preference value -> toggle rules, not board', iv('list', JSON.stringify({ v: 1, view: { defaultWO: 'grid' } })), 'list');
+  A.eq('malformed blob -> toggle rules, no throw', iv('list', '{not json'), 'list');
+  A.eq('garbage toggle value -> list', iv('yes', null), 'list');
+  A.ok('the boot line feeds it the remembered toggle AND the shared blob',
+    /var view = initialView\(storeGet\(LS_VIEW, 'list'\), storeGet\('bwn:config', null\)\);/.test(kbFull));
+  A.ok('the toggle button still persists to LS_VIEW (a forced board can be flipped for the session)',
+    /storeSet\(LS_VIEW, view\);/.test(kbFull));
+  // Mutation control: drop the preference read. The forced case must go red; the toggle cases must not.
+  var noPref = build(mutate(S_IV, "c.view.defaultWO === 'board') return 'board';", "false) return 'board';"));
+  A.eq('control: without the preference read, board preference is ignored', noPref('list', BOARD), 'list');
+  A.eq('control: the fallback path is untouched by the mutation', noPref('board', null), 'board');
+})();
+
 // The 0.3.0 drift: @version said 0.3.0 while the console constant said 0.2.0.
 var mVer = kbFull.match(/@version\s+(\S+)/);
 var mConst = kbFull.match(/var VER = '([^']+)'/);
 A.ok('the metadata @version and the VER constant agree', !!(mVer && mConst) && mVer[1] === mConst[1]);
-A.eq('and this is the version under test', mVer && mVer[1], '0.7.8');
+A.eq('and this is the version under test', mVer && mVer[1], '0.9.1');
 // The mirror (Intermu/userscripts-public) is being retired now that the source repo is public
 // again; raw URLs must point at the SOURCE repo or auto-update dies with the mirror.
 A.ok('the script points at the source repo raw URL, so it can auto-update at all',

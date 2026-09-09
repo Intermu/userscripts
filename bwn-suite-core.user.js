@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         BWN Suite - Core (Broadway National)
 // @namespace    broadwaynational.bwn
-// @version      1.80.1
+// @version      1.84.1
 // @downloadURL  https://raw.githubusercontent.com/Intermu/userscripts/main/bwn-suite-core.user.js
 // @updateURL    https://raw.githubusercontent.com/Intermu/userscripts/main/bwn-suite-core.user.js
 // @description  Runs several Umbrava helpers for BWN coordinators, in the browser with no privileged grants. Includes: PO Approval + ETA Builder; WO Assist (GP/ETA, a stall watchdog, DNE calculator, and a next-action playbook); Email Leak Guard (checks recipients against vendor names, PO amounts, and client budget references before an outbound email sends); WO List Heat (a triage overlay + My Day strip on the work-order list, with an optional same-origin Umbrava API scan for deterministic full-board coverage); and the BWN Launcher (opens the Azure Static Web App tools with the current WO's context). Modules share state through sessionStorage/localStorage. The only network calls are same-origin Umbrava GraphQL requests (app.umbrava.com/api/graphql, the app's own session): List Heat's full-board scan and WO Assist's work-order / trip / clock-in / document reads, plus ONE write - BWN Views saves the column layout through Umbrava's own putUserPreference, the same preference the column chooser writes; everything else is offline. Toggle modules in BWN_MODULES below.
@@ -50,13 +50,19 @@
                          // the destructive bulk ops (status change / reassign). v1 exposes only
                          // add-note + set-ECD; this flag gates nothing yet - it exists so the
                          // destructive ops land behind a SECOND, separately-flipped gate later.
-    bulkSource: false,   // SHIPPING DEFAULT OFF: Bulk Source Job# - per-row checkboxes on the Work
-                         // Orders list + a dock drawer that stamps Source Job# in bulk from a Q/R or
-                         // RF shorthand (blanks only). The WHOLE module - checkboxes, dock, drawer,
-                         // reads and writes - mounts only when this is on, so nothing writes until it
-                         // is flipped after a live smoke test. Even then each batch passes a dry-run +
-                         // a typed confirm, and every write routes through bwnGqlOp feature:'bulkSource'
-                         // (its per-feature kill switch + audit ring) via the proven patchWorkOrder.
+    bulkSource: true,    // ON for coordinators (2026-09-02, after a live write round-trip smoke:
+                         // one Apply stamped Source Job# across 22 WOs at once). Bulk Source Job# -
+                         // per-row checkboxes on the Work Orders list + a dock drawer that stamps
+                         // Source Job# in bulk from a Q/R or RF shorthand (blanks only). Each batch
+                         // still passes a dry-run + a typed confirm, and every write routes through
+                         // bwnGqlOp feature:'bulkSource' (its per-feature kill switch + audit ring)
+                         // via the proven patchWorkOrder. Flip back to false to kill the module.
+    permGate: true,      // decode this user's Umbrava permission checkboxes (me.permissions) once a
+                         // session and hide the suite controls they are not allowed to use - the
+                         // dock rail rows, the WO-Assist write buttons, the bulk consoles. Core is
+                         // the only PRODUCER; sibling scripts read the published slot. Off = nothing
+                         // is decoded, everything reads as unknown, and every control shows (the
+                         // pre-2026-09-02 behaviour). Umbrava's server enforces regardless.
     routeHelper: false,  // RM-B4, SHIPPING DEFAULT OFF: when on, consumers that have adopted the
                          // central BWN.onRoute (window.bwnOnRoute) route helper use it INSTEAD of
                          // pasting their own history.pushState/popstate trio. Off = each adopter
@@ -107,7 +113,7 @@
   try { localStorage.setItem('bwn:status:core', JSON.stringify({ ver: BWN_VER, ts: Date.now() })); } catch (e) { /* best-effort */ }
 
   console.info('[BWN SUITE CORE] v' + BWN_VER + ' |',
-    'Shared Core 7 \u00b7 DOM Handles 1.0 \u00b7 PO Approval 1.13 \u00b7 WO Assist 2.71 \u00b7 Leak Guard 2.0 \u00b7 List Heat 3.28 \u00b7 Launcher 2.0 \u00b7 Views 3.1 \u00b7 Palette 1.1 \u00b7 Visit 1.2 \u00b7 Reminders 1.1 \u00b7 Timeline 1.1 \u00b7 TripCal 1.4 \u00b7 Bulk Ops 1.0 \u00b7 Connector 1.2 \u00b7 Governance 1.0 |',
+    'Shared Core 7 \u00b7 DOM Handles 1.0 \u00b7 PO Approval 1.13 \u00b7 WO Assist 2.73 \u00b7 Leak Guard 2.0 \u00b7 List Heat 3.28 \u00b7 Launcher 2.0 \u00b7 Views 3.1 \u00b7 Palette 1.1 \u00b7 Visit 1.2 \u00b7 Reminders 1.1 \u00b7 Timeline 1.1 \u00b7 TripCal 1.4 \u00b7 Bulk Ops 1.0 \u00b7 Connector 1.2 \u00b7 Governance 1.0 |',
     'enabled:', Object.keys(BWN_MODULES).filter(function (k) { return BWN_MODULES[k]; }).join(', '));
 
   // ===== BWN SHARED CORE v7 - KEEP IN SYNC across both suite scripts =====
@@ -299,6 +305,20 @@
     }
 
     // ---- Field readers / React-safe setter ------------------------------------
+    // Umbrava rebuilt the WO detail form (measured live 2026-09-03, W-371126): the header
+    // wrapper now holds NO inputs at all, and the fields that used to carry a data-testid
+    // carry a `name` equal to their API field path instead - `priority.expectedCompletionDate`,
+    // `priority.firstTripDate`, `sourceJobNumber`, `doNotExceed`, `scopeOfWork`. Key on that
+    // `name`: it is the same string the GraphQL patch uses, so DOM and API stay in step, and
+    // unlike the label's `for` (`mui-32`) it is not MUI's per-render counter.
+    // A PO edit form can carry the same field names, so anything inside a PO accordion is
+    // skipped - the WO's own field is the one that is not in a POAccordion.
+    function woFieldInput(name) {
+      var els = document.querySelectorAll('input[name="' + name + '"], textarea[name="' + name + '"]');
+      for (var i = 0; i < els.length; i++) { if (!els[i].closest('[data-testid^="POAccordion-"]')) return els[i]; }
+      return null;
+    }
+    function woFieldVal(name) { var el = woFieldInput(name); return el ? (el.value || '') : ''; }
     function inputVal(testid) {
       var el = document.querySelector('[data-testid="' + testid + '"]');
       if (!el) return '';
@@ -870,7 +890,7 @@
       CLIENT_DEFAULTS_SEED: CLIENT_DEFAULTS_SEED, CLIENT_PROFILE_SEED: CLIENT_PROFILE_SEED, bwnClientProfile: bwnClientProfile,
       money: money, parseMoney: parseMoney, parseBare: parseBare, parseUSDate: parseUSDate,
       alphaOnly: alphaOnly, lcsLen: lcsLen,
-      inputVal: inputVal, setNativeValue: setNativeValue,
+      inputVal: inputVal, woFieldInput: woFieldInput, woFieldVal: woFieldVal, setNativeValue: setNativeValue,
       GREEN: GREEN, injectTokens: injectTokens,
       getTheme: getTheme, setTheme: setTheme, applyTheme: applyTheme,
       makeDropdown: makeDropdown, a11yDialog: a11yDialog,
@@ -1449,6 +1469,10 @@
   //              kind==='read' OR idempotent===true. A non-idempotent write is NEVER auto-retried
   //              (there is no idempotency key for these Umbrava mutations).
   //   metered    a paid / server-side-LLM call - never retried, never looped over a board
+  //   perm       (writes) the Umbrava permission checkbox(es) this write needs: a 'Group.Flag'
+  //              string, an array of them, or fn(variables) returning either - the function form
+  //              is how patchWorkOrder asks per FIELD. Enforced in bwnGqlOp (G7); missing = the
+  //              write is not permission-gated. Fails OPEN on an undecoded user ([[BWN-PERM]]).
   //   ok / fail  user-facing toast text a caller may surface
   var BWN_OPS = {
     // ---- reads (idempotent; a transient failure may be retried) ----
@@ -1467,6 +1491,7 @@
     tasks:                   { kind: 'read', target: 'task',       retry: 'safe' },
     tasksByEntityTypeAndId:  { kind: 'read', target: 'task',       retry: 'safe' },
     user:                    { kind: 'read', target: 'user',       retry: 'safe' },
+    me:                      { kind: 'read', target: 'user',       retry: 'safe' },
     userPreference:          { kind: 'read', target: 'preference', retry: 'safe' },
     listVendorProposals:     { kind: 'read', target: 'proposal',   retry: 'safe' },
     listClientProposals:     { kind: 'read', target: 'proposal',   retry: 'safe' },
@@ -1478,19 +1503,19 @@
       ok: 'View saved.', fail: 'Could not save the view.' },
 
     // ---- moderate-risk writes ----
-    addEditJobNote: { kind: 'write', target: 'note', risk: 'moderate', idempotent: false, retry: 'none',
+    addEditJobNote: { kind: 'write', perm: 'WorkOrderNote.AddNew', target: 'note', risk: 'moderate', idempotent: false, retry: 'none',
       ok: 'Note posted.', fail: 'The note was not posted.' },
-    addClientProposalNote: { kind: 'write', target: 'proposal', risk: 'moderate', idempotent: false, retry: 'none',
+    addClientProposalNote: { kind: 'write', perm: 'WorkOrderProposal.AddNote', target: 'proposal', risk: 'moderate', idempotent: false, retry: 'none',
       ok: 'Proposal note posted.', fail: 'The proposal note was not posted.' },
-    initializeJobDocument: { kind: 'write', target: 'document', risk: 'moderate', idempotent: false, retry: 'none',
+    initializeJobDocument: { kind: 'write', perm: 'WorkOrderDocument.AddNew', target: 'document', risk: 'moderate', idempotent: false, retry: 'none',
       ok: 'Document upload started.', fail: 'The upload could not start.' },
-    bulkAddWorkOrderDocuments: { kind: 'write', target: 'document', risk: 'moderate', idempotent: false, retry: 'none',
+    bulkAddWorkOrderDocuments: { kind: 'write', perm: 'WorkOrderDocument.AddNew', target: 'document', risk: 'moderate', idempotent: false, retry: 'none',
       ok: 'Documents attached.', fail: 'The documents were not attached.' },
-    addTask: { kind: 'write', target: 'task', risk: 'moderate', idempotent: false, retry: 'none',
+    addTask: { kind: 'write', perm: 'Task.AddNew', target: 'task', risk: 'moderate', idempotent: false, retry: 'none',
       ok: 'Task created.', fail: 'The task was not created.' },
-    completeTask: { kind: 'write', target: 'task', risk: 'moderate', idempotent: true, retry: 'none',
+    completeTask: { kind: 'write', perm: 'Task.Complete', target: 'task', risk: 'moderate', idempotent: true, retry: 'none',
       ok: 'Task completed.', fail: 'The task was not completed.' },
-    deactivateVendor: { kind: 'write', target: 'vendor', risk: 'moderate', idempotent: true, retry: 'none',
+    deactivateVendor: { kind: 'write', perm: 'Vendor.ManageProfile', target: 'vendor', risk: 'moderate', idempotent: true, retry: 'none',
       ok: 'Vendor deactivated.', fail: 'The vendor was not deactivated.' },
 
     // ---- high-risk writes (dispatch, status/ECD, activation) ----
@@ -1500,13 +1525,16 @@
     // registry write entry has no bwnGqlOp call-site (or a call-site has no entry). Their captured
     // mutation shapes live in wiki/umbrava-graphql-operations.md - re-add an entry here only when a
     // real caller is wired.
-    patchWorkOrder: { kind: 'write', target: 'workOrder', risk: 'high', idempotent: false, retry: 'none',
+    patchWorkOrder: { kind: 'write', perm: bwnPermsForPatch, target: 'workOrder', risk: 'high', idempotent: false, retry: 'none',
       ok: 'Work order updated.', fail: 'The work order was not updated.' },
-    activateVendor: { kind: 'write', target: 'vendor', risk: 'high', idempotent: true, retry: 'none',
+    activateVendor: { kind: 'write', perm: 'Vendor.ManageProfile', target: 'vendor', risk: 'high', idempotent: true, retry: 'none',
       ok: 'Vendor activated.', fail: 'The vendor was not activated.' }
   };
 
-  // ===== BWN-OPS-WRAP START v2 (paste-identical across adopters; SHA-gated by scripts/test-bwn-ops.js) =====
+  // ===== BWN-OPS-WRAP START v3 (paste-identical across adopters; SHA-gated by scripts/test-bwn-ops.js) =====
+  // v3 (2026-09-02) adds the Umbrava permission gate (G7 below). It closes over bwnCan/bwnCanAll
+  // from the BWN-PERM block, so an adopter of this wrapper must carry that block too - the ledger
+  // in scripts/test-perm-block-ledger.js is what keeps the two lists in step.
   // Generic machinery only - NO registry, NO window hook - so it is byte-identical in every
   // sandbox that adopts it (Core, drop-upload, ...). It closes over four things each sandbox
   // supplies on its own: BWN_OPS (that file's registry), BWN_MODULES (kill switches), BWN_VER,
@@ -1614,6 +1642,29 @@
       writeAudit('denied', { reason: 'feature-off:' + opts.feature });
       return Promise.reject(new Error('bwnGqlOp: feature "' + opts.feature + '" is disabled'));
     }
+    // Umbrava permission gate (G7). The UI hides a control the operator's checkboxes do not cover,
+    // but hiding is not enforcement: a palette entry, a stale drawer, a queued command, or a future
+    // caller can all reach a write whose button was never rendered. This is the enforcement point -
+    // every registered write passes through here, so ONE guard covers every caller.
+    //   meta.perm  'Group.Flag' | ['Group.Flag', ...] | fn(variables) -> either of those
+    // A function is how a multi-field mutation (patchWorkOrder) asks per FIELD instead of per op.
+    // bwnCanAll fails OPEN on anything undecided - no slot, a stale slot, an unmapped group - so
+    // this refuses ONLY a positively-known missing checkbox. Refusals are non-transient (retrying
+    // cannot grant a permission) and audited `denied`, so a refusal is visible in the ring rather
+    // than silent. The reason carries the permission NAME, which is a static key, never user data.
+    if (isWrite && meta.perm) {
+      var need = (typeof meta.perm === 'function') ? meta.perm(variables) : meta.perm;
+      if (typeof need === 'string') need = [need];
+      if (!Array.isArray(need)) need = [];
+      if (need.length && !bwnCanAll(need)) {
+        var missing = need.filter(function (k) { return !bwnCan(k); });
+        writeAudit('denied', { reason: 'permission:' + missing.join('+') });
+        var noPerm = new Error('bwnGqlOp: "' + op + '" needs Umbrava permission ' + missing.join(' + ') + ' - the write was NOT sent.');
+        noPerm.bwnNonTransient = true;
+        noPerm.bwnPermissionDenied = missing;
+        return Promise.reject(noPerm);
+      }
+    }
     // Validate a write BEFORE it leaves the browser.
     if (isWrite && typeof opts.validate === 'function') {
       var vr = opts.validate(variables);
@@ -1698,7 +1749,7 @@
     return attempt(1);
   }
   bwnGqlOp.setConfirm = function (fn) { _confirmFn = (typeof fn === 'function') ? fn : null; };
-  // ===== BWN-OPS-WRAP END v2 =====
+  // ===== BWN-OPS-WRAP END v3 =====
 
   // Console diagnostics/export hook - lets a coordinator or admin read and export the local
   // audit trail today, before any writer adopts the wrapper. Read-only; carries no PII beyond
@@ -1711,6 +1762,144 @@
     };
   } catch (e) { /* non-fatal */ }
   // ===== BWN-OPS END v1 =====
+
+  // ===== BWN-PERM START v1 (paste-identical; pinned by scripts/test-perm-block-ledger.js) =====
+  // Umbrava's own per-user permission checkboxes, as the one question a control has:
+  //   bwnCan('WorkOrderNote.AddNew') -> true | false
+  // Umbrava returns me.permissions as a JSON STRING of {"<Type>Permissions": "<bitmask>"} - one
+  // bit per checkbox on /company/users/<id>/permissions. bwn-suite-core decodes it once a session
+  // and publishes the DECODED grant list to `bwn:perm:last` + the `bwn:perm` bus event, the same
+  // one-way producer/consumer shape as bwn:role. This block only READS that slot, so every
+  // sandbox that pastes it needs neither the query, the token, nor the flag numbers.
+  //
+  // FAIL-OPEN on anything unknown - no slot yet, a stale slot, or a group the producer does not
+  // map. Umbrava's server is the real boundary (it refuses the mutation either way), so an
+  // unreadable cache must never strand a coordinator mid-shift. Fail-CLOSED only on a
+  // positively-known missing bit. localStorage is per-origin, so this answers "unknown" (and
+  // therefore allows) anywhere but app.umbrava.com - by design.
+  var BWN_PERM_KEY = 'bwn:perm:last';
+  var BWN_PERM_TTL_MS = 24 * 3600 * 1000;
+  var _bwnPermSlot = null;      // memoized parse; invalidated by the bwn:perm listener below
+  function bwnPermSlot() {
+    if (_bwnPermSlot) return _bwnPermSlot;
+    try {
+      var p = JSON.parse(localStorage.getItem(BWN_PERM_KEY) || 'null');
+      if (p && p.ts && (Date.now() - p.ts) < BWN_PERM_TTL_MS &&
+        Array.isArray(p.groups) && Array.isArray(p.granted)) _bwnPermSlot = p;
+    } catch (e) { /* an unreadable cache reads as unknown, which fails open */ }
+    return _bwnPermSlot;
+  }
+  function bwnCan(key) {
+    var p = bwnPermSlot();
+    if (!p) return true;                                          // nothing decoded yet -> allow
+    var grp = String(key).split('.')[0];
+    if (p.groups.indexOf(grp) === -1) return true;                // group unmapped/absent -> allow
+    return p.granted.indexOf(key) !== -1;
+  }
+  // keys: a 'Group.Flag' string, or an array of them (ALL must be granted).
+  function bwnCanAll(keys) {
+    if (!keys) return true;
+    if (typeof keys === 'string') return bwnCan(keys);
+    for (var i = 0; i < keys.length; i++) { if (!bwnCan(keys[i])) return false; }
+    return true;
+  }
+  // patchWorkOrder is ONE mutation over MANY fields and Umbrava gates each field separately, so
+  // its permission depends on the variables rather than the operation. This maps the data keys the
+  // suite actually sends, all of them wire-proven; a key this map does not know contributes NO
+  // requirement, which is the block's unknown -> allow rule and keeps a future field from being
+  // blocked by a map nobody updated. `workOrderNumber` is the identifier, not a field write.
+  var BWN_PATCH_FIELD_PERM = {
+    statusId: 'WorkOrderField.Status',
+    assignedTo: 'WorkOrderField.AssignedTo',
+    // ECD rides inside the whole-object `priority` replace, and the SPA bundles the SLA id with it.
+    priority: 'WorkOrderField.CompletionSLA',
+    serviceLevelAgreementId: 'WorkOrderField.CompletionSLA',
+    sourceJobNumber: 'WorkOrderField.SourceJobNumber',
+    sourcePurchaseOrderNumber: 'WorkOrderField.SourcePurchaseOrderNumber'
+  };
+  // -> [] | ['WorkOrderField.Status', ...]; deduped, so a bundled priority+SLA asks once.
+  function bwnPermsForPatch(variables) {
+    var data = (variables && variables.data) || {};
+    var out = [];
+    Object.keys(data).forEach(function (k) {
+      var p = BWN_PATCH_FIELD_PERM[k];
+      if (p && out.indexOf(p) === -1) out.push(p);
+    });
+    return out;
+  }
+  try {
+    document.addEventListener('bwn:evt', function (e) {
+      var d = e && e.detail;
+      if (d && d.id === 'bwn:perm') _bwnPermSlot = null;          // a fresh decode landed
+    });
+  } catch (e) { }
+  // ===== BWN-PERM END v1 =====
+
+  // ---- Permission PRODUCER (bwn-suite-core only) ------------------------------
+  // The flag numbers are Umbrava's own, read live from the SPA bundle that renders the
+  // permissions page (2026-09-02) and spot-checked against a real user's page counts (Note 5/9
+  // decoded to exactly the 5 boxes shown ticked). They are per TYPE, so the alias on the left is
+  // just the short name call sites use. A group missing from this map is reported as unknown and
+  // fails OPEN - add a group here only when something actually gates on it.
+  var BWN_PERM_MAP = {
+    WorkOrder: { type: 'WorkOrderActionPermissions', flags: { View: 1, Export: 2, ViewAudit: 16, EditAnyPhase: 64, Flag: 128, BulkUpdate: 512, Complete: 1024, Cancel: 2048, ReOpen: 4096, BulkAdd: 8192, Reject: 16384, Accept: 32768, Recall: 65536, Hold: 262144, Close: 524288, CreateWorkOrder: 1048576, ManageTrips: 2097152, LinkWorkOrder: 4194304, ViewDispatchBoard: 8388608, ManageInventory: 16777216, ManageExpense: 33554432 } },
+    WorkOrderField: { type: 'WorkOrderFieldPermissions', flags: { ClientDNE: 1, AssignedTo: 2, Status: 4, Priority: 8, SourceJobNumber: 16, SourcePurchaseOrderNumber: 32, Location: 64, Trades: 128, FirstTripSLA: 256, CompletionSLA: 512, Asset: 1024, Type: 2048 } },
+    WorkOrderNote: { type: 'WorkOrderNoteActionPermissions', flags: { AddNew: 2, EditOwnNote: 4, EditOtherUsersNote: 8, ExportAllNotes: 16, ExportSelectionOfNotes: 32, ViewAudit: 64, Share: 128, DeleteOwnNote: 256, DeleteOtherUsersNote: 512 } },
+    WorkOrderDocument: { type: 'WorkOrderDocumentActionPermissions', flags: { View: 1, AddNew: 2, Download: 4, Share: 8, Archive: 16 } },
+    WorkOrderPO: { type: 'WorkOrderPurchaseOrderActionPermissions', flags: { AddNew: 2, ViewAudit: 4, Export: 16, GetIVRLink: 32, AssignVendor: 64, EditAnyPhase: 128, Complete: 256, Cancel: 512, ReOpen: 1024, Recall: 2048, Revoke: 4096, Hold: 8192, Close: 16384, AssignInactiveVendor: 32768, ManageTrips: 65536, AcceptOnVendorsBehalf: 131072 } },
+    WorkOrderPOField: { type: 'WorkOrderPurchaseOrderFieldPermissions', flags: { Status: 1, Trades: 2, VendorNTE: 4, Priority: 8, FirstTripSLA: 16, CompletionSLA: 32 } },
+    WorkOrderProposal: { type: 'WorkOrderProposalActionPermissions', flags: { View: 1, AddNew: 2, ChangeState: 4, ViewAudit: 8, EditFields: 16, Export: 32, ConvertToInvoice: 64, AddNote: 128, EditNote: 256, DeleteNote: 512, EditAnyState: 1024 } },
+    WorkOrderInvoice: { type: 'WorkOrderInvoiceActionPermissions', flags: { View: 1, AddNew: 2, ChangeState: 4, Export: 8, ViewAudit: 16, EditFields: 32, SubmitOverDNE: 64, EditAnyState: 128, AddNote: 512, EditNote: 1024, DeleteNote: 2048 } },
+    WorkOrderBill: { type: 'WorkOrderBillActionPermissions', flags: { View: 1, AddNew: 2, ChangeState: 4, ViewAudit: 8, EditFields: 16, ApproveOverNTE: 32, EditAnyState: 64, AddNote: 128, EditNote: 256, DeleteNote: 512, Download: 1024 } },
+    Task: { type: 'TaskActionPermissions', flags: { AddNew: 2, Complete: 4, CompleteAddNew: 8, EditTask: 16, Flag: 32 } },
+    Vendor: { type: 'VendorV2ActionPermissions', flags: { CreateVendor: 2, ManageProfile: 4, ManageBilling: 8, ManageNotes: 16, ManageDocuments: 32, ManageRelationship: 64, ManageCompliance: 128, ManageRehireEligibility: 256 } },
+    Inventory: { type: 'InventoryPermissions', flags: { ViewInventory: 1, ViewMasterInventory: 2, ManageItems: 4, ManageGlobalInventory: 8, ViewInventoryAudit: 16, ManageStorageAreas: 32, ManageStock: 64 } },
+    Analytics: { type: 'AnalyticsPermissions', flags: { ViewCompanyAnalytics: 2, ViewLocationsAnalytics: 4, ViewFinancialAnalytics: 8, ViewWorkOrdersAnalytics: 16, ViewProjectsAnalytics: 32, ViewVendorsAnalytics: 64, ViewDataDiscoveryAnalytics: 128, EditDataDiscoveryAnalytics: 256 } }
+  };
+  // Verified live 2026-09-02 against the real schema: `me` is the ONLY no-arg current-user root
+  // ([[umbrava-role-auth]]) and `permissions` is an `Any!` scalar carrying the JSON string.
+  var BWN_PERM_Q = '{ me { id permissions } }';
+  var BWN_PERM_REFRESH_MS = 6 * 3600 * 1000;   // re-decode at most this often; TTL above is 24h
+
+  // Bit test by division, NOT `&`: JavaScript's bitwise operators truncate to 32 bits signed and
+  // these masks are already at 2^25 with room to grow. Math.floor stays exact to 2^53.
+  function bwnPermHasBit(mask, flag) { return Math.floor(mask / flag) % 2 === 1; }
+
+  function bwnPermPublish(raw) {
+    var obj = null;
+    try { obj = (typeof raw === 'string') ? JSON.parse(raw) : raw; } catch (e) { obj = null; }
+    if (!obj || typeof obj !== 'object') return null;
+    var groups = [], granted = [];
+    Object.keys(BWN_PERM_MAP).forEach(function (alias) {
+      var def = BWN_PERM_MAP[alias];
+      if (!Object.prototype.hasOwnProperty.call(obj, def.type)) return;   // Umbrava did not send it
+      var mask = Number(obj[def.type]);
+      if (!isFinite(mask)) return;
+      groups.push(alias);
+      Object.keys(def.flags).forEach(function (f) {
+        if (bwnPermHasBit(mask, def.flags[f])) granted.push(alias + '.' + f);
+      });
+    });
+    if (!groups.length) return null;             // an empty decode is drift, not "no permissions"
+    var rec = { v: 1, ts: Date.now(), ver: BWN_VER, groups: groups, granted: granted };
+    try { localStorage.setItem(BWN_PERM_KEY, JSON.stringify(rec)); } catch (e) { }
+    _bwnPermSlot = null;
+    try { document.dispatchEvent(new CustomEvent('bwn:evt', { detail: { id: 'bwn:perm', groups: groups.length, granted: granted.length, ts: rec.ts } })); } catch (e) { }
+    return rec;
+  }
+  // Resolves to the record, or null when nothing could be decoded - callers never see a rejection,
+  // because a failed refresh is not an error condition: it just leaves everything unknown, and
+  // unknown fails open.
+  function bwnPermRefresh(force) {
+    if (BWN_MODULES.permGate === false) return Promise.resolve(null);
+    var p = bwnPermSlot();
+    if (!force && p && (Date.now() - p.ts) < BWN_PERM_REFRESH_MS) return Promise.resolve(p);
+    return bwnGqlOp('me', BWN_PERM_Q, {}, {}).then(function (d) {
+      return bwnPermPublish(d && d.me && d.me.permissions);
+    }, function () { return null; });
+  }
+  bwnBoot('permGate', BWN_MODULES.permGate !== false, function () { bwnPermRefresh(); });
+  try { window.__bwnPerm = { can: bwnCan, canAll: bwnCanAll, slot: bwnPermSlot, refresh: bwnPermRefresh, map: BWN_PERM_MAP }; } catch (e) { }
 
   // ---- Core-local shared helpers (PO Approval + Leak Guard) --------------------
   // Distinctive-token vendor matching: "does this recipient text belong to this
@@ -1840,7 +2029,13 @@
       for (var i = 0; i < rows.length; i++) {
         var row = rows[i];
         // Prefer the dedicated vendor-name element; fall back to the row's text.
-        var vEl = row.querySelector('[data-testid="purchase-order-vendor-name"]');
+        // Measured 2026-09-03: Umbrava now renders the vendor as `purchase-order-vendor-link`
+        // on every PO row and `-name` did not appear once, so without the link fallback this
+        // silently degraded to the WHOLE row text - which carries amounts and dates and makes
+        // the vendor match noisier exactly where it guards an outbound mail. vendorOf() below
+        // already had this fallback; this call site did not.
+        var vEl = row.querySelector('[data-testid="purchase-order-vendor-name"]') ||
+                  row.querySelector('[data-testid="purchase-order-vendor-link"]');
         var vendorRaw = (vEl ? vEl.textContent : row.textContent) || '';
         // v1.10: same amount semantics as WO Assist/Leak Guard - every $ figure in
         // the row, cents optional, largest wins. The old cents-required first-match
@@ -2044,7 +2239,7 @@
   });
 
   // ==========================================================================
-  // MODULE: WO Assist: GP + ETA Watchdog + Playbook v2.71 (Connector 1.2)
+  // MODULE: WO Assist: GP + ETA Watchdog + Playbook v2.73 (Connector 1.2)
   // ==========================================================================
   bwnBoot('woAssist', BWN_MODULES.woAssist, function () {
     'use strict';
@@ -2074,7 +2269,7 @@
     var PANEL_ID = 'bwn-gp-panel';
     var GREEN = BWN.GREEN;
 
-    console.info('[BWN GP] WO Assist v2.71 loaded on', location.href);
+    console.info('[BWN GP] WO Assist v2.73 loaded on', location.href);
 
     // ---- Parsing helpers (shared via BWN core) -----------------------------
     var parseMoney = BWN.parseMoney;
@@ -2084,6 +2279,7 @@
     function daysUntil(ts) { return Math.ceil((ts - Date.now()) / 86400000); }
     function daysSince(ts) { return Math.floor((Date.now() - ts) / 86400000); }
     var inputVal = BWN.inputVal;
+    var woFieldInput = BWN.woFieldInput, woFieldVal = BWN.woFieldVal;
 
     // ---- BWN bus (suite data contract v1; shared via BWN core) -------------
     // WO Assist is the PRODUCER of bwn:wo:{id}; others consume DOM-first, bus-fallback.
@@ -2817,8 +3013,7 @@
         var dates = labeled.map(function (p) { return p.schedDate; }).join(', ');
         return { ok: true, label: 'POs sched: ' + dates, detail: 'Every active PO shows a scheduled date.' };
       }
-      var ftEl = document.querySelector('[data-testid="work-order-first-trip-date-picker"]');
-      var ft = ftEl ? (ftEl.tagName === 'INPUT' ? ftEl.value : (ftEl.querySelector('input') ? ftEl.querySelector('input').value : '')) : '';
+      var ft = woFieldVal('priority.firstTripDate');
       if (ft && ft.trim()) return { ok: true, label: 'Trip: ' + ft.trim(), detail: 'First-trip date set on the WO (no per-PO dates found).' };
       var hit = null;
       notes.forEach(function (n) {
@@ -2842,8 +3037,31 @@
       return { ok: false, label: 'No ETA found', detail: 'No per-PO scheduled dates, no first-trip date, and no note pairs an ETA word with a date. Use Deep Scan to cover the full note history.' };
     }
 
+    // ---- ECD write echo (the DOM does not re-render after our patch) ----------
+    // Setting the ECD is an API patch (patchWorkOrder) since Umbrava rebuilt the WO form -
+    // and the form does NOT re-render from it, so until a reload the field still reads the
+    // PRE-write date. Every consumer of state.due then reads the WO as overdue/undated: the
+    // header pill, the checklist, and the once-per-WO auto-pop, which re-fires on the very WO
+    // that was just fixed the moment its guard re-arms (a tab hop). So the write leaves an
+    // echo here and dueStatus substitutes it - trusted ONLY while the field still shows
+    // `before`. Any other value means the DOM has caught up (reload) or moved on (edited in
+    // Umbrava's own UI), and the echo is dropped rather than believed over the page.
+    // sessionStorage, so it cannot outlive the tab.
+    function ecdEcho(domRaw) {
+      var w = currentWOId(); if (!w) return null;
+      var k = 'bwn:ecdset:' + w;
+      var rec = BWN.ssGetJSON(k, null);
+      if (!rec || !rec.after) return null;
+      var domTs = parseUSDate(domRaw), beforeTs = rec.before ? parseUSDate(ecdFmtUS(new Date(rec.before))) : null;
+      if (domTs !== beforeTs) { try { sessionStorage.removeItem(k); } catch (e) { } return null; }
+      return rec.after;
+    }
     function dueStatus(C) {
-      var v = inputVal('work-order-expected-completion-date-picker');
+      var v = woFieldVal('priority.expectedCompletionDate');
+      var echo = ecdEcho(v);
+      // Same convention either way: the day at LOCAL midnight, so an echoed date reads
+      // exactly as the field's own "MM/DD/YYYY, 11:59 PM" would once it catches up.
+      if (echo) v = ecdFmtUS(new Date(echo));
       var ts = parseUSDate(v);
       if (!ts) return null;
       var d = daysUntil(ts);
@@ -4048,6 +4266,18 @@
       }
       return null;
     }
+    // The WO tab that hosts the notes list (and therefore the Add Note button). Matched by
+    // EXACT label so a "Notes" tab is never confused with "Note Templates" or a card heading;
+    // the href form is the belt for a router link that carries no tab role. Visible only -
+    // an unmounted tab panel's link is not something a click can reach.
+    function noteTabControl() {
+      var els = document.querySelectorAll('[role="tab"], a[href*="/notes"]');
+      for (var i = 0; i < els.length; i++) {
+        if (!els[i].offsetParent) continue;
+        if (/^notes?$/i.test((els[i].textContent || '').trim())) return els[i];
+      }
+      return null;
+    }
     // Best-effort: set the Add Note composer's note-type control to `label` (e.g. "Internal").
     // Scoped to the just-opened composer. No-ops safely (the note still posts) when the control
     // isn't found. Umbrava's CURRENT note-type control is a custom autocomplete (an
@@ -4146,9 +4376,28 @@
         try { document.execCommand('insertHTML', false, html); } catch (e3) { try { ed.textContent = String(text); ed.dispatchEvent(new Event('input', { bubbles: true })); } catch (e4) { } }
       }
     }
-    function insertWONote(text, cb, noteType) {
+    // `_hopped` is internal: set on the one retry after a tab hop, so a view that still
+    // has no Add Note button falls back instead of hopping forever.
+    function insertWONote(text, cb, noteType, _hopped) {
       var btn = findAddNoteBtn();
-      if (!btn) { noteFallback(text); if (cb) cb(false); return; }
+      if (!btn) {
+        // The Add Note button only exists on the WO views that host the notes list. The ECD
+        // helper - and every other drafted note - runs on the DETAILS route, and the note
+        // steps fire from the AI Job View too, so on those views the draft used to die
+        // straight into the clipboard fallback with nothing opened. Hop to the Notes tab and
+        // retry once. Same ladder as bwn-drop-upload's triggerNoteComposer (live-proven),
+        // minus its Documents-only split-button branch, which has no target here.
+        var tab = _hopped ? null : noteTabControl();
+        if (!tab) { noteFallback(text); if (cb) cb(false); return; }
+        tab.click();
+        var hops = 0;
+        (function waitTab() {
+          if (findAddNoteBtn()) { insertWONote(text, cb, noteType, true); return; }
+          if (++hops > 20) { noteFallback(text); if (cb) cb(false); return; }   // 5s
+          setTimeout(waitTab, 250);
+        })();
+        return;
+      }
       var beforeEls = Array.prototype.slice.call(document.querySelectorAll('textarea, [contenteditable="true"], [contenteditable=""]'));
       btn.click();
       var tries = 0;
@@ -4172,7 +4421,7 @@
       // the flow when the clipboard write rejects, e.g. the tab isn't focused). Copy
       // best-effort and surface a dismissible toast instead.
       try { navigator.clipboard.writeText(text).catch(function () { }); } catch (e) { }
-      ecdToast('Add Note composer not found - the note text was copied to your clipboard. Open a new note and paste it.', null);
+      ecdToast('Add Note composer not found - the note text was copied to your clipboard. Open a new note and paste it.', 'error');
     }
 
     // The FULL-WIDTH block to insert the card before, derived STRUCTURALLY (never
@@ -5167,14 +5416,18 @@
           if (BWN_MODULES.woAssistWrites) {
             // "Create task…" - on every non-anchor act row (spin a follow-up off any next action).
             (function (act) {
-              var tkb = document.createElement('button');
-              tkb.type = 'button'; tkb.className = 'bwn-wa-btn ghost'; tkb.textContent = 'Create task…';
-              tkb.style.cssText = 'padding:3px 9px;font-size:10px;';
-              tkb.title = 'Create a follow-up task on this work order (assigned to the coordinator)';
-              tkb.addEventListener('click', function () { taskHelperOpen(state, act); });
-              btns.appendChild(tkb);
+              // Third gate, and the per-USER one: Umbrava's own checkboxes. bwnCan fails OPEN on
+              // anything it cannot decide, so these render exactly as before for an undecoded user.
+              if (bwnCan('Task.AddNew')) {
+                var tkb = document.createElement('button');
+                tkb.type = 'button'; tkb.className = 'bwn-wa-btn ghost'; tkb.textContent = 'Create task…';
+                tkb.style.cssText = 'padding:3px 9px;font-size:10px;';
+                tkb.title = 'Create a follow-up task on this work order (assigned to the coordinator)';
+                tkb.addEventListener('click', function () { taskHelperOpen(state, act); });
+                btns.appendChild(tkb);
+              }
               // "Change status…" - only on the advance-to-complete gate + the phase-chase rows.
-              if (act.key === 'advance:workcomplete' || act.key.indexOf('phase:') === 0) {
+              if (bwnCan('WorkOrderField.Status') && (act.key === 'advance:workcomplete' || act.key.indexOf('phase:') === 0)) {
                 var csb = document.createElement('button');
                 csb.type = 'button'; csb.className = 'bwn-wa-btn ghost'; csb.textContent = 'Change status…';
                 csb.style.cssText = 'padding:3px 9px;font-size:10px;';
@@ -5201,15 +5454,17 @@
     // the best available signal - the latest FUTURE PO scheduled date, else a noted
     // ETA (same ETA-word+date heuristic etaStatus uses), else the 2nd upcoming
     // Friday - and let the coordinator confirm + capture the reason. On Apply it
-    // TYPES the date into the WO's own field (never clicks a separate Save - Umbrava
-    // persists per its normal flow) and prefills a client-facing note for manual
-    // posting. (Scheduled-trip reading is a future add, pending a Trips-tab recon.)
-    var ECD_FIELD = 'work-order-expected-completion-date-picker';
+    // PATCHES the date through the audited API (waEcdSubmit; Umbrava's rebuilt form has no
+    // Save button and no header input to type into) and prefills a client-facing note for
+    // manual posting. The page does not re-render from that patch, so the write leaves the
+    // ecdEcho record dueStatus reads. (Scheduled-trip reading is a future add, pending a
+    // Trips-tab recon.)
+    var ECD_FIELD = 'priority.expectedCompletionDate';   // a form field NAME now, not a testid - see woFieldInput
     function ecdToday() { var d = new Date(); return new Date(d.getFullYear(), d.getMonth(), d.getDate()).getTime(); }
     function ecdSecondFriday() { var d = new Date(); d.setHours(0, 0, 0, 0); var add = (5 - d.getDay() + 7) % 7; if (add === 0) add = 7; d.setDate(d.getDate() + add + 7); return d; }   // upcoming Friday + 1 week
     function ecdFmtUS(dt) { var p = function (n) { return (n < 10 ? '0' : '') + n; }; return p(dt.getMonth() + 1) + '/' + p(dt.getDate()) + '/' + dt.getFullYear(); }   // MM/DD/YYYY - mask-safe for the picker
     function ecdFmtISO(dt) { var p = function (n) { return (n < 10 ? '0' : '') + n; }; return dt.getFullYear() + '-' + p(dt.getMonth() + 1) + '-' + p(dt.getDate()); }
-    function ecdFieldInput() { var el = document.querySelector('[data-testid="' + ECD_FIELD + '"]'); if (!el) return null; return el.tagName === 'INPUT' ? el : el.querySelector('input'); }
+    function ecdFieldInput() { return woFieldInput(ECD_FIELD); }
     // CFG.ETA_WORDS is the watchdog's vocabulary and it is about a vendor ARRIVING. A
     // completion promise is written in different words - "ECD 8/20", "complete by 8/20",
     // "done by Friday" - and those notes are precisely what a coordinator means when they
@@ -5261,15 +5516,6 @@
       if (cands.length) { cands.sort(function (a, b) { return b.ms - a.ms; }); return { date: new Date(cands[0].ms), from: 'signal', why: cands[0].why, noteCount: meta.noteCount, noteSrc: meta.noteSrc, noteSrcLabel: meta.noteSrcLabel }; }   // latest of trip/PO/ETA = complete-by ≥ last scheduled work
       return { date: ecdSecondFriday(), from: 'default', why: 'no scheduled trip, PO date, or noted completion date - defaulted to the 2nd upcoming Friday', noteCount: meta.noteCount, noteSrc: meta.noteSrc, noteSrcLabel: meta.noteSrcLabel };
     }
-    // True when the WO already carries the ETA info the helper would ask for - used
-    // to SUPPRESS the auto-pop (don't nag when a PO date or a noted ETA is on file).
-    function ecdHasEtaSignal(state) {
-      if (state.pos.some(function (p) { return !p.done && p.amount > 0 && p.schedDate; })) return true;
-      if (latestNotedEta(state)) return true;
-      try { var tb = BWN.ssGetJSON('bwn:trips:' + currentWOId(), null); if (tb && tb.latestScheduled && tb.latestScheduled >= ecdToday()) return true; } catch (e) { }
-      return false;
-    }
-
     function ensureEcdStyle() {
       if (document.getElementById('bwn-ecd-style')) return;
       var st = document.createElement('style'); st.id = 'bwn-ecd-style';
@@ -5306,68 +5552,23 @@
         // VENDOR button and can move anything absolutely positioned inside it. Two 420ms passes
         // repainting one small button is the cheaper risk. Do not extend this pattern to
         // anything larger or more frequent.
-        '@keyframes bwnEcdPulse{from{box-shadow:0 0 0 0 rgba(46,160,90,.75);}to{box-shadow:0 0 0 9px rgba(46,160,90,0);}}' +
-        '.bwn-ecd-savepulse{animation:bwnEcdPulse .42s cubic-bezier(.23,1,.32,1) 2;outline:2px solid var(--bwn-green)!important;outline-offset:2px;border-radius:6px;}' +
-        '@media (prefers-reduced-motion:reduce){.bwn-ecd-savepulse{animation:none;}}';
       document.head.appendChild(st);
     }
 
-    // The WO header's Save (submit) button - persisting an edited Complete-By date
-    // requires clicking it (Umbrava does NOT autosave the field on blur, verified
-    // 2026-07-13). Scoped to the header wrapper; prefer the submit button, fall back
-    // to text so a markup tweak can't blind it.
-    function ecdSaveButton() {
-      var scope = document.querySelector('[data-testid="work-order-header-wrapper"]') || document;
-      var subs = scope.querySelectorAll('button[type="submit"]');
-      for (var i = 0; i < subs.length; i++) { if (/^\s*save\s*$/i.test(subs[i].textContent || '')) return subs[i]; }
-      var all = scope.querySelectorAll('button');
-      for (var j = 0; j < all.length; j++) { if (/^\s*save\s*$/i.test(all[j].textContent || '')) return all[j]; }
-      return null;
-    }
-    function ecdPulse(el) {
-      try { el.classList.add('bwn-ecd-savepulse'); setTimeout(function () { try { el.classList.remove('bwn-ecd-savepulse'); } catch (e) { } }, 5500); } catch (e2) { }
-    }
     // Dismissible, non-blocking toast (the module has no shared toast - the reminders
-    // module's is out of scope). Optional Save button gets a "Show Save" jump.
-    function ecdToast(msg, saveBtn) {
-      // Routed through the unified BWN.toast (Task 2). Extra preserved: the "Show Save"
-      // button that scrolls to + pulses the WO-header Save. id keeps it single-instance
-      // (a follow-up toast replaces the prior one, as the old getElementById did).
-      var opts = { id: 'ecd', timeout: 16000 };
-      if (saveBtn) opts.action = { label: 'Show Save', onClick: function () { try { saveBtn.scrollIntoView({ block: 'center', behavior: 'smooth' }); } catch (e) { } ecdPulse(saveBtn); } };
-      BWN.toast('success', msg, opts);
+    // module's is out of scope). The old "Show Save" action went with the Save button:
+    // Umbrava's rebuilt WO form has none, and the write no longer touches the page.
+    // id keeps it single-instance, so a follow-up toast replaces the prior one.
+    function ecdToast(msg, sev) {
+      BWN.toast(sev || 'success', msg, { id: 'ecd', timeout: 16000 });
     }
-    // Auto-persist (coordinator opted in 2026-07-13): Umbrava doesn't autosave the
-    // Complete-By field on blur, so click the WO header Save ourselves. React marks the
-    // header form dirty a tick after the write, so give it a moment then poll for the
-    // Save button to enable. If it never does, fall back to pointing them at Save
-    // (with pulse) so the filled date is never silently lost.
-    function ecdFlagSave(usDT) {
-      var tries = 0;
-      function poll() {
-        var save = ecdSaveButton();
-        if (save && !save.disabled && save.offsetWidth > 0) {
-          try { save.click(); ecdToast('Completion date saved: ' + usDT + '.', null); }
-          catch (e) { ecdToast('Completion date filled: ' + usDT + ' - click “Save” in the WO header to persist it.', save); if (save) ecdPulse(save); }
-          return;
-        }
-        if (++tries > 16) {   // ~4s: Save never enabled - hand it back to the coordinator
-          ecdToast('Completion date filled: ' + usDT + ' - click “Save” in the WO header to persist it.' + (save ? '' : ' (Save button not found on this view.)'), save);
-          if (save) ecdPulse(save);
-          return;
-        }
-        setTimeout(poll, 250);
-      }
-      setTimeout(poll, 200);   // let React commit the write before reading Save's state
-    }
-
     function ecdHelperOpen(state) {
       if (!onWO() || !currentWOId()) { alert('Open a work order to set its expected completion date.'); return; }
       fetchNotesApi(currentWOId());   // no-op if the engine already warmed it; arms the re-propose below otherwise
       ensureEcdStyle();
       var old = document.getElementById('bwn-ecd-overlay'); if (old) old.remove();
       var prop = proposeECD(state);
-      var curRaw = inputVal(ECD_FIELD);
+      var curRaw = woFieldVal(ECD_FIELD);
       var ov = document.createElement('div'); ov.id = 'bwn-ecd-overlay';
       var card = document.createElement('div'); card.className = 'bwn-ecd';
       var releaseA11y = null;
@@ -5415,30 +5616,46 @@
       card.appendChild(body);
 
       var ft = document.createElement('div'); ft.className = 'bwn-ecd-ft';
-      var note = document.createElement('span'); note.className = 'sp'; note.textContent = 'Fills the date and saves it to the WO for you.'; ft.appendChild(note);
+      var note = document.createElement('span'); note.className = 'sp'; note.textContent = 'Writes the date to the WO record, then drafts the note.'; ft.appendChild(note);
       var apply = document.createElement('button'); apply.type = 'button'; apply.className = 'pri'; apply.textContent = 'Apply + draft note';
       apply.addEventListener('click', function () {
         var iso = di.value; if (!iso) { alert('Pick a date.'); return; }
-        var pp = iso.split('-'); var dt = new Date(parseInt(pp[0], 10), parseInt(pp[1], 10) - 1, parseInt(pp[2], 10));
+        var pp = iso.split('-');
+        // 11:59 PM LOCAL on the chosen day, which is what the SPA stores: the field showing
+        // "08/07/2026, 11:59 PM" reads back as 2026-08-08T03:59:00Z. Building the instant the
+        // same way keeps the no-op comparison in waSetEcd honest.
+        var dt = new Date(parseInt(pp[0], 10), parseInt(pp[1], 10) - 1, parseInt(pp[2], 10), 23, 59, 0);
         if (isNaN(dt.getTime())) { alert('That date is not valid.'); return; }
-        // The Complete-By field is a DATETIME (e.g. "07/01/2026, 11:59 PM") - a bare
-        // date is rejected. Always stamp 11:59 PM (end of the target day).
-        var us = ecdFmtUS(dt), usDT = us + ', 11:59 PM';
-        var f = ecdFieldInput();
-        var wrote = false;
-        if (f) { try { BWN.setNativeValue(f, usDT); f.dispatchEvent(new Event('blur', { bubbles: true })); wrote = true; } catch (e) { } }
-        try { navigator.clipboard.writeText(usDT).catch(function () { }); } catch (e) { }   // backup if the picker rejects the typed value
-        ingestPush('ecd-set', usDT);   // connector: log the ECD set (drained + POSTed by the AI script)
+        var usDT = ecdFmtUS(dt) + ', 11:59 PM';       // display + note wording only
+        var woNum = currentWOId();
+        if (!woNum) { ecdToast('Could not tell which work order this is - the date was NOT written.', 'error'); return; }
         var reason = ri.value.trim();
         var noteText = 'Expected completion date set to ' + usDT + '.' + (reason ? ' ' + reason : '') + (state.status ? ' Current status: ' + state.status + '.' : '');
-        close();
-        // Umbrava no longer persists the Complete-By field on blur - it needs the WO
-        // header Save. Per the coordinator's choice we DON'T auto-submit; instead point
-        // them straight at Save so the filled date can't silently revert (verified: a
-        // write+blur without Save reverts on reload).
-        if (wrote) ecdFlagSave(usDT); else ecdToast('Couldn’t find the Complete-By field to fill - set it manually in the WO header.', null);
-        // ECD notes are internal audit records - label the composer's note type accordingly.
-        insertWONote(noteText, function () { /* posted manually by the coordinator */ }, 'Internal');
+        // The write goes through the API now, not the page. Umbrava's rebuilt form has no Save
+        // button to click and its header holds no input to fill, so patchWorkOrder is the only
+        // path that still persists this - and it cannot half-apply the way fill-without-Save did.
+        waEcdSubmit(apply, woNum, dt.toISOString(), {
+          ok: function () {
+            close();
+            ingestPush('ecd-set', usDT);   // connector: log the ECD set (drained + POSTed by the AI script)
+            ecdToast('Expected completion date set to ' + usDT + '.');
+            // ECD notes are internal audit records - label the composer's note type accordingly.
+            insertWONote(noteText, function () { /* posted manually by the coordinator */ }, 'Internal');
+            refresh();   // the header's "days left" is derived from the ECD - recompute it
+          },
+          noop: function () {
+            close();
+            ecdToast('That is already the expected completion date - nothing was written.');
+          },
+          fail: function (e) {
+            // Stay OPEN on failure so the typed reason is not lost, and say what actually
+            // happened: a missing Umbrava permission is not a transient error to retry.
+            var msg = (e && e.bwnPermissionDenied)
+              ? 'Umbrava does not allow you to change the completion date on this work order, so nothing was written.'
+              : 'The expected completion date was NOT written: ' + ((e && e.message) || 'the request failed') + '.';
+            ecdToast(msg, 'error');
+          }
+        });
       });
       var cancel = document.createElement('button'); cancel.type = 'button'; cancel.textContent = 'Cancel'; cancel.addEventListener('click', close);
       ft.appendChild(apply); ft.appendChild(cancel); card.appendChild(ft);
@@ -5535,6 +5752,89 @@
         return r;
       }, function (e) {
         btn.disabled = false;
+        if (hooks.fail) hooks.fail(e);
+        throw e;
+      });
+    }
+    // B3 - SET ECD via patchWorkOrder, replacing the old type-into-the-picker + click-Save path.
+    // Umbrava rebuilt the WO form (2026-09-03): the header carries no inputs and there is no
+    // button reading "Save" anywhere on the details route, so the DOM writer's two halves - fill
+    // the field, then point the coordinator at Save - both lost their target. The API does not
+    // depend on either, and it is the same field the DOM now names `priority.expectedCompletionDate`.
+    //
+    // patchWorkOrder REPLACES the whole `priority` object, so every sibling field must be copied
+    // back or Umbrava blanks it. priorityWriteValue + WA_ECD_WO_Q are copied VERBATIM from
+    // bwn-dispatch.user.js (wire-proven 2026-08-12) - the read's `hasPriorityOverride` maps onto
+    // the input's `hasOverridePriority`, forced true because a hand-set ECD IS an override.
+    // ponytail: this is the third verbatim copy of the same 20 lines (bwn-write-queue, Core's
+    // bulk console, here). Fold all three into one shared-scope helper when a fourth caller
+    // appears - not sooner: the bulk console sits in a different bwnBoot closure that ships
+    // flag-OFF, so hoisting today would mean editing a sentinel region two harnesses slice.
+    var WA_ECD_WO_Q = 'query($n:Int!){ workOrder(workOrderNumber:$n){ serviceLevelAgreementId priority{ label responseMinutes firstTripDate serviceLevelAgreementMinutes expirationMinutes expectedCompletionDate hasPriorityOverride category skipWeekends } } }';
+    function waNum(v) { var n = Number(v); return isFinite(n) ? n : null; }
+    function waPriorityWriteValue(readPriority, newEcd) {
+      var p = readPriority || {};
+      return {
+        label: (p.label == null ? null : String(p.label)),
+        responseMinutes: waNum(p.responseMinutes),
+        firstTripDate: (p.firstTripDate == null ? null : String(p.firstTripDate)),
+        serviceLevelAgreementMinutes: waNum(p.serviceLevelAgreementMinutes),
+        expirationMinutes: waNum(p.expirationMinutes),
+        expectedCompletionDate: newEcd,
+        hasOverridePriority: true,
+        category: (p.category == null ? null : String(p.category)),
+        skipWeekends: !!p.skipWeekends
+      };
+    }
+    // newEcd is an ISO instant. Reads the WO first (the sibling priority fields are not on the
+    // page any more, and guessing them would blank real SLA data), no-ops when the stored ECD is
+    // already that calendar day, then sends ONE atomic patch.
+    function waSetEcd(woNumber, newEcd) {
+      var wo = Number(woNumber);
+      return bwnGqlOp('workOrder', WA_ECD_WO_Q, { n: wo }, { feature: 'woAssist' }).then(function (rd) {
+        var rec = rd && rd.workOrder;
+        if (!rec) { var e = new Error('W-' + wo + ' could not be read, so the ECD was NOT written'); e.bwnNonTransient = true; throw e; }
+        var oldEcd = rec.priority && rec.priority.expectedCompletionDate;
+        // Same-day = nothing to change. A high-risk write that alters nothing is pure downside.
+        if (oldEcd && String(oldEcd).slice(0, 10) === String(newEcd).slice(0, 10)) {
+          return { noop: true, before: oldEcd, after: newEcd };
+        }
+        var data = { workOrderNumber: wo, priority: { shouldInclude: true, value: waPriorityWriteValue(rec.priority, newEcd) } };
+        // Bundled by the SPA on a real ECD edit, but ONLY when the WO carries one.
+        if (rec.serviceLevelAgreementId) data.serviceLevelAgreementId = { shouldInclude: true, value: rec.serviceLevelAgreementId };
+        return bwnGqlOp('patchWorkOrder', PATCH_M, { data: data }, {
+          confirmed: true,
+          feature: 'woAssist',
+          validate: function (v) {
+            var d = v && v.data || {};
+            if (!d.workOrderNumber) return 'no WO number';
+            if (!(d.priority && d.priority.value && d.priority.value.expectedCompletionDate)) return 'no expected completion date';
+            return true;
+          },
+          ids: { wo: wo },
+          current: { ecd: oldEcd || null }, proposed: { ecd: newEcd }, irreversible: true,
+          before: { ecd: oldEcd || null }, after: { ecd: newEcd }
+        }).then(function () {
+          // Leave the echo dueStatus reads (see ecdEcho): the page keeps showing oldEcd until a
+          // reload, and without this the WO stays "overdue" and re-pops its own auto-prompt.
+          try { BWN.ssSetJSON('bwn:ecdset:' + wo, { v: 1, ts: Date.now(), before: oldEcd || null, after: newEcd }); } catch (e) { }
+          return { noop: false, before: oldEcd || null, after: newEcd };
+        });
+      });
+    }
+    // Re-entry-guarded ECD set, same shape as waTaskSubmit / waStatusSubmit: the first click
+    // disables the button before the write lands, a failure re-enables it so the coordinator can
+    // retry, and the hooks let the dialog observe the outcome without this function touching DOM.
+    function waEcdSubmit(btn, woNumber, newEcd, hooks) {
+      hooks = hooks || {};
+      if (btn && btn.disabled) return null;
+      if (btn) btn.disabled = true;
+      return waSetEcd(woNumber, newEcd).then(function (r) {
+        if (r && r.noop) { if (hooks.noop) hooks.noop(r); return r; }
+        if (hooks.ok) hooks.ok(r);
+        return r;
+      }, function (e) {
+        if (btn) btn.disabled = false;
         if (hooks.fail) hooks.fail(e);
         throw e;
       });
@@ -5757,7 +6057,16 @@
       if (!missingOrPast) return;
       var hasActivePO = state.pos.some(function (p) { return !p.done && p.amount > 0; });
       if (!state.due && !hasActivePO) return;   // no ECD and no active work → nothing to target yet
-      if (ecdHasEtaSignal(state)) return;        // ETA is on file → the ecd action + "Set ECD…" button cover it without a popup
+      // NO signal suppressor. Until 1.81.1 this returned early whenever the WO carried a PO
+      // scheduled date, a noted ETA, or a cached scheduled trip - "an ETA is on file, don't
+      // nag". That was backwards: those three signals are exactly what proposeECD ranks a
+      // real date from, so suppressing on them left the auto-pop able to fire ONLY when it
+      // had nothing to propose but the fallback 2nd-upcoming-Friday, and silent on every WO
+      // where it had something useful to say. The signal sources accumulated over time (the
+      // trips cache, then PO schedDate capture), so the popup went quiet by degrees rather
+      // than in one commit. An overdue or empty ECD is a wrong record whether or not a date
+      // is promised somewhere - the promise is the proposal, not a reason to stay silent.
+      // Volume is held by the once-per-WO `ecdAutoShownFor` guard, not by this.
       // Defer while an Umbrava modal is open (Create WO / Vendor / Build Requests, etc.): the
       // ECD overlay would sit on top and block it. Do NOT burn the once-per-WO guard - the
       // refresh loop re-checks, so the popup opens once the modal closes.
@@ -6298,7 +6607,16 @@
         var acn = document.getElementById(ACT_CARD_ID); if (acn) acn.remove();   // checklist is per-WO; never carry it across
         var eo = document.getElementById('bwn-ecd-overlay'); if (eo) eo.remove();
         var pfb = document.getElementById('bwn-pf-banner'); if (pfb) pfb.remove();
-        ecdAutoShownFor = null;   // re-arm the once-per-WO ECD auto-pop for the new WO
+        // The ECD auto-pop guard holds the WO NUMBER it fired for, so a different WO re-arms it
+        // by itself and a tab hop inside ONE WO does not (nulling it on any path change is what
+        // re-popped the prompt on a WO whose ECD had just been set - 1.81.8). But LEAVING the WO
+        // ends the visit: a route with no WO at all (the board, a client, a vendor) is a real
+        // departure, and coming back should ask again if the date is still missing or overdue.
+        // Why that was the whole "never fires on a warm revisit" report: on a first visit the
+        // note read's own refresh re-runs the gate a beat later, but on a revisit that read
+        // short-circuits on the cached history, so the ONLY thing that could have re-opened the
+        // prompt was a re-armed guard - and nothing re-armed it.
+        if (!currentWOId()) ecdAutoShownFor = null;
         prevStatus = null;        // don't treat an already-terminal WO opened fresh as a "change"
       }
       clearTimeout(debounce);
@@ -8181,6 +8499,13 @@
         if (r.sched) row.nextOnsiteDate = r.sched;
         if (r.exp) row.expectedCompletion = r.exp;
         if (r.lastNote) row.lastNoteDate = r.lastNote;   // the primary staleness signal; paired with the route's DATE_MAP entry
+        // Umbrava's OWN lifecycle phase, the signal heatDone already trusts over the status
+        // NAME in five places in this file. It never crossed the wire, so every SWA-side "is
+        // this open" stayed a name guess - the exact disagreement heatDone's comment block
+        // records twice from the live board (19 rows, then 5). Carried so the Dashboard can ask
+        // BN.woDone(status, phase) instead. Absent on a DOM-scanned row (the board has no phase
+        // column), and the classifier degrades to the name there exactly as it does here.
+        if (r.phase) row.phase = r.phase;
         // v2 dataset fields - emitted when the scan captured them (column/field dependent); the
         // route maps sourceJob/sourcePo/projectType (STR_MAP) and woDate (DATE_MAP).
         if (r.sourceJob) row.sourceJob = r.sourceJob;
@@ -8417,6 +8742,37 @@
     }
     var heatActsWarned = false;
 
+    // ===== BWN-ACCT-FILTER START v1 (pure; sliced by scripts/test-acct-filter.js) ================
+    // Core 1.84.0: the standing ACCOUNT SCOPE, set in the Ops Suite panel > Preferences and stored
+    // at bwn:config.filters.accounts as a comma-separated list (typed spec OPS_PREF_FIELDS).
+    // It is a per-user VIEW scope, not a session filter and not a data filter:
+    //   - the list pass DIMS every row whose Client cell is out of scope (same treatment the pill
+    //     and by-client filters get - hiding rows breaks the virtualizer's layout math);
+    //   - the Audit panel scopes its entry set, so the columns, Matching WOs and Top offenders all
+    //     speak about the same rows the list is highlighting.
+    // Deliberately NOT scoped, because they are board truth that outlives one user's preference:
+    // the My Day counts and their over-30 trend, the daily bwn:heat:snap snapshot, the Over-30
+    // batch, the SWA dataset push and __bwnHeatRows. A scoped number written into either history
+    // would be silently compared against whole-board days later, so the Audit panel drops its
+    // day-over-day delta while a scope is on rather than print a mixed-basis one.
+    // Empty, absent, or all-blank -> no scope, which is exactly the pre-1.84.0 behaviour.
+    // Matching is case-insensitive SUBSTRING on the Client cell ("dollar" matches "Dollar General"),
+    // and a row with NO readable client is IN scope - fail open. The Client column can be hidden by
+    // the column chooser, and a scope that blanks the whole board because a column is off screen is
+    // worse than one that quietly does nothing (the strip's "signals off" tooltip says which).
+    function acctList(v) {
+      return String(v == null ? '' : v).split(',').map(function (s) { return s.trim().toLowerCase(); })
+        .filter(function (s) { return s.length > 0; });
+    }
+    function acctInScope(list, client) {
+      if (!list || !list.length) return true;
+      var c = String(client == null ? '' : client).trim().toLowerCase();
+      if (!c) return true;   // no readable client - fail open, never hide work on a hidden column
+      for (var i = 0; i < list.length; i++) if (c.indexOf(list[i]) !== -1) return true;
+      return false;
+    }
+    // ===== BWN-ACCT-FILTER END v1 =====
+
     // ---- Heat pass ----------------------------------------------------------------
     var heatStore = null;     // { heatKey(href): {sev, reasons[], wo, client, status, assignee, prio, hrs, days, dne, sched, lastNote, exp, sourceJob, sourcePo, projectType, woDate} }
     // The RAW API rows behind an API scan, parallel to heatStore and keyed the same way.
@@ -8494,6 +8850,12 @@
       if (!anySignal) { diag(table, H, 0); BWN.beat('listHeat', 'waiting', 'no heat columns in view - add "Time in Status" / "# Days" / "Last Note Date" via the column chooser'); return; }
       ensureStyle();
       var C = bwnConfig();
+      // Standing account scope (1.84.0). Read per pass, so a Preferences save takes effect on the
+      // next repaint like every other cfg value. With the Client column off screen every row reads
+      // as unknown and stays IN scope by design - say so on the strip instead of dimming nothing
+      // silently.
+      var acct = acctList(C.filters && C.filters.accounts);
+      if (acct.length && H.client < 0) missing.push('"Client" → account scope off');
 
       var rows = table.querySelectorAll('tbody tr');
       if (!rows.length) rows = table.rows;
@@ -8574,6 +8936,7 @@
           var dimVal = heatDim.field === 'status' ? status : heatDim.field === 'assignee' ? assignee : client;
           if (dimVal !== heatDim.value) dimmed = true;
         }
+        if (!dimmed && !acctInScope(acct, client)) dimmed = true;   // standing account scope (1.84.0)
         if (dimmed) tr.classList.add('bwn-heat-dim');
         if (reasons.length) { tr.title = (acked ? 'Snoozed \u00b7 ' : '') + reasons.join(' \u00b7 '); tr.dataset.bwnHt = '1'; }
         else if (tr.dataset.bwnHt === '1') { tr.removeAttribute('title'); delete tr.dataset.bwnHt; }
@@ -8685,8 +9048,11 @@
       if (mydayFilter) filtBits.push(mfLabel[mydayFilter] + ' only');
       if (heatDim) filtBits.push(heatDim.field + ' = ' + heatDim.value);
       var lgEl = sum.querySelector('.lg');
+      // The scope is a stored PREFERENCE, so it is reported separately from the session filters
+      // above - Clear filters must not look like it will turn it off, because it does not.
+      var scopeTxt = acct.length ? ' · account scope: ' + acct.join(', ') + ' (Preferences)' : '';
       if (lgEl) lgEl.textContent = (filtBits.length ? 'highlighting: ' + filtBits.join(' · ') + ' · full match list in Audit' : 'hover a tinted row for the why · click a pill or audit row to filter') +
-        (nAcked ? ' · ' + nAcked + ' snoozed' : '');
+        (nAcked ? ' · ' + nAcked + ' snoozed' : '') + scopeTxt;
       var clearEl = document.getElementById('bwn-heat-clear');
       if (clearEl) clearEl.style.display = filtBits.length ? '' : 'none';
       renderMyDay();
@@ -8698,7 +9064,13 @@
       if (old) { old.remove(); return; }
       var sum = document.getElementById(SUM_ID);
       if (!sum || !sum.parentNode) return;
-      var entries = heatStore ? Object.keys(heatStore).map(function (k) { var e = heatStore[k]; e._href = k; return e; }) : [];
+      // Account scope (1.84.0): the panel speaks about the same rows the list is highlighting, so
+      // it is applied ONCE here and every section below (columns, Matching WOs, Top offenders, the
+      // TSV copy) inherits it. `scanned` keeps the whole-board count so the header can say "of".
+      var acctP = acctList((bwnConfig().filters || {}).accounts);
+      var scanned = heatStore ? Object.keys(heatStore).length : 0;
+      var entries = heatStore ? Object.keys(heatStore).map(function (k) { var e = heatStore[k]; e._href = k; return e; })
+        .filter(function (e) { return acctInScope(acctP, e.client); }) : [];
       var panel = document.createElement('div');
       panel.id = PANEL_ID;
       function closePanel() { document.removeEventListener('keydown', onPanelKey); panel.remove(); }
@@ -8707,7 +9079,7 @@
 
       var ph = document.createElement('div'); ph.className = 'ph';
       ph.textContent = entries.length
-        ? 'AUDIT \u00b7 ' + entries.length + ' WOs SCANNED'
+        ? 'AUDIT \u00b7 ' + (acctP.length ? entries.length + ' of ' + scanned + ' WOs \u00b7 accounts: ' + acctP.join(', ') : entries.length + ' WOs SCANNED')
         : 'AUDIT';
       panel.appendChild(ph);
 
@@ -8722,7 +9094,10 @@
         var curS = auditOpenTally(entries);
         var bkt = curS.bkt, noHrs = curS.noHrs, noNote = curS.noNote;
         var dl = document.createElement('div'); dl.className = 'dl';
-        var pS = priorKey ? snaps[priorKey] : null;
+        // bwn:heat:snap is written whole-board (heatSnapshot reads heatStore, never this scoped
+        // set), so a scoped count minus a whole-board day is not a delta. Drop the compare rather
+        // than print a mixed-basis number.
+        var pS = (priorKey && !acctP.length) ? snaps[priorKey] : null;
         function dseg(label, nowV, thenV) {
           var sp = document.createElement('span');
           sp.appendChild(document.createTextNode(label + ' ' + nowV));
@@ -8742,7 +9117,9 @@
         dseg('open', curS.open, pS ? pS.open : undefined);
         dseg('over-30', curS.over30, pS ? pS.over30 : undefined);
         var dTail = document.createElement('span');
-        dTail.textContent = pS ? 'vs ' + priorKey : 'no prior full scan on record yet';
+        dTail.textContent = pS ? 'vs ' + priorKey
+          : acctP.length ? 'account scope on - day-over-day compare off (the daily snapshot is whole-board)'
+            : 'no prior full scan on record yet';
         dl.appendChild(dTail);
         panel.appendChild(dl);
         var ql = document.createElement('div'); ql.className = 'dl';
@@ -8777,7 +9154,11 @@
       if (!entries.length) {
         var empty = document.createElement('div'); empty.className = 'empty';
         var p1 = document.createElement('p');
-        p1.textContent = 'No scan yet \u2014 the audit needs a full sweep of the list to give book-wide numbers.';
+        // A scan that ran and was scoped to nothing is NOT "no scan yet" - saying so would send a
+        // coordinator to re-run a sweep that already succeeded.
+        p1.textContent = scanned
+          ? 'The scan read ' + scanned + ' WOs and none match your account scope (' + acctP.join(', ') + ') \u2014 clear or widen it in the Ops Suite panel > Preferences.'
+          : 'No scan yet \u2014 the audit needs a full sweep of the list to give book-wide numbers.';
         var runBtn = document.createElement('button');
         runBtn.type = 'button'; runBtn.className = 'primary'; runBtn.textContent = 'Run Scan All now';
         runBtn.addEventListener('click', function () {
@@ -8788,7 +9169,8 @@
             if (/scan/i.test(btns[b].textContent)) { btns[b].click(); break; }
           }
         });
-        empty.appendChild(p1); empty.appendChild(runBtn);
+        empty.appendChild(p1);
+        if (!scanned) empty.appendChild(runBtn);   // re-scanning cannot fix a scope that matched nothing
         panel.appendChild(empty);
       }
 
@@ -10152,7 +10534,78 @@
       { k: 'notesTimeline', script: 'Core', label: 'Notes timeline (chronological read)' },
       { k: 'tripCal', script: 'Core', label: 'Trips → calendar (.ics export)' }
     ];
-    var OPS_CFG_FIELDS = [['targetGP', 'Target GP %'], ['gpWarn', 'GP warn %'], ['gpBad', 'GP red %'], ['hrsWarn', 'Hours warn'], ['hrsBad', 'Hours red'], ['activeMult', 'Active ×'], ['dueWarnDays', 'Due warn (d)'], ['schedGraceDays', 'Sched grace (d)'], ['noteStaleDays', 'Note stale (d)']];
+    // ===== BWN-SETTINGS START v1 (pure; sliced by scripts/test-ops-settings.js) ==================
+    // Typed field specs for the Ops Suite panel. Spec: k (dotted = ONE level of nesting in the
+    // bwn:config blob, 'audit.gpLow' -> cfg.audit.gpLow), label, type (number|select|text), def,
+    // number min/max, select options [[value, label]]. Top-level number keys are the CFG_DEFAULTS
+    // thresholds and are always stored; nested keys are per-user OVERRIDES - blank or equal to def
+    // clears the key so the consumer's own default applies. The declarative field map is the
+    // pattern borrowed from GM_config (see wiki gm-config-assessment); its iframe renderer was not.
+    var OPS_CFG_FIELDS = [
+      { k: 'targetGP', label: 'Target GP %', type: 'number', min: 0, max: 100 },
+      { k: 'gpWarn', label: 'GP warn %', type: 'number', min: 0, max: 100 },
+      { k: 'gpBad', label: 'GP red %', type: 'number', min: 0, max: 100 },
+      { k: 'hrsWarn', label: 'Hours warn', type: 'number', min: 0, max: 8760 },
+      { k: 'hrsBad', label: 'Hours red', type: 'number', min: 0, max: 8760 },
+      { k: 'activeMult', label: 'Active ×', type: 'number', min: 0, max: 10 },
+      { k: 'dueWarnDays', label: 'Due warn (d)', type: 'number', min: 0, max: 365 },
+      { k: 'schedGraceDays', label: 'Sched grace (d)', type: 'number', min: 0, max: 365 },
+      { k: 'noteStaleDays', label: 'Note stale (d)', type: 'number', min: 0, max: 365 }
+    ];
+    // Per-user preferences (Core 1.82.0). Group names must not collide with the blob's existing
+    // top-level objects (ai, keys, clients, clientDefaults, v).
+    // Readers: bwn-wo-audit 0.9.0 reads audit.*; bwn-kanban 0.9.0 reads view.defaultWO at load;
+    // the Follow-up reminders module (this file, remChannel) reads notify.channel at fire time;
+    // List Heat (this file, BWN-ACCT-FILTER) reads filters.accounts on every list pass - it dims
+    // out-of-scope rows and scopes the Audit panel, and leaves every stored number whole-board.
+    // notify.channel's def moved 'toast' -> 'desktop' in 1.83.0: 'toast' was never stored under
+    // 1.82.0 (a value equal to def clears), so no client carries a stale value.
+    var OPS_PREF_FIELDS = [
+      { k: 'audit.gpLow', label: 'Audit: low GP %', type: 'number', def: 15, min: 0, max: 100 },
+      { k: 'audit.staleDays', label: 'Audit: stale note (d)', type: 'number', def: 7, min: 0, max: 365 },
+      { k: 'notify.channel', label: 'Reminder alerts', type: 'select', def: 'desktop', options: [['desktop', 'Desktop notification (toast if blocked)'], ['toast', 'In-page toast only'], ['quiet', 'Quiet (mute)']] },
+      { k: 'view.defaultWO', label: 'Default WO view', type: 'select', def: 'list', options: [['list', 'List (remember last toggle)'], ['board', 'Kanban board on every load']] },
+      { k: 'filters.accounts', label: 'Account scope (comma-sep)', type: 'text', def: '' }
+    ];
+    // Current value of a spec key from a cfg object (dotted = one level).
+    function bwnCfgGet(c, k) {
+      var p = k.split('.');
+      if (p.length === 1) return c ? c[k] : undefined;
+      return (c && c[p[0]] && typeof c[p[0]] === 'object') ? c[p[0]][p[1]] : undefined;
+    }
+    // Validate raw input strings against specs and build the cfgSave partial:
+    // { ok, bad: [k...], partial }. Nested groups start from the STORED object so sibling keys the
+    // panel does not own survive (same rule as the AI block), and an unchanged group is dropped
+    // from the partial so an untouched save fires no scan-invalidating churn. Never touches the DOM.
+    function bwnCfgPartial(fields, raw, stored) {
+      var partial = {}, bad = [];
+      fields.forEach(function (f) {
+        var s = String(raw[f.k] == null ? '' : raw[f.k]).trim();
+        var p = f.k.split('.'), nested = p.length === 2, val, clear = false;
+        if (f.type === 'number') {
+          if (s === '' && nested) clear = true;
+          else {
+            var n = parseFloat(s);
+            if (isNaN(n) || (typeof f.min === 'number' && n < f.min) || (typeof f.max === 'number' && n > f.max)) { bad.push(f.k); return; }
+            val = n; if (nested && n === f.def) clear = true;
+          }
+        } else if (f.type === 'select') {
+          if (!(f.options || []).some(function (o) { return o[0] === s; })) { bad.push(f.k); return; }
+          val = s; if (nested && s === f.def) clear = true;
+        } else {
+          val = s; if (s === '' || (nested && s === f.def)) clear = true;
+        }
+        if (!nested) { if (!clear) partial[f.k] = val; return; }
+        var g = p[0];
+        if (!partial[g]) partial[g] = Object.assign({}, (stored && stored[g] && typeof stored[g] === 'object') ? stored[g] : {});
+        if (clear) delete partial[g][p[1]]; else partial[g][p[1]] = val;
+      });
+      Object.keys(partial).forEach(function (g) {
+        if (partial[g] && typeof partial[g] === 'object' && JSON.stringify(partial[g]) === JSON.stringify((stored && stored[g]) || {})) delete partial[g];
+      });
+      return { ok: !bad.length, bad: bad, partial: partial };
+    }
+    // ===== BWN-SETTINGS END v1 =====
     var opsConfig = BWN.cfg;        // defaults + read/save now in the BWN core (single source of truth)
     var opsConfigSave = BWN.cfgSave;
 
@@ -10291,15 +10744,36 @@
 
       // Thresholds
       section('Thresholds', 'shared by WO Assist + List Heat');
-      var grid = document.createElement('div'); grid.className = 'bwn-ops-grid';
       var cfg = opsConfig(); var inputs = {};
-      OPS_CFG_FIELDS.forEach(function (f) {
-        var w = document.createElement('div');
-        var l = document.createElement('label'); l.textContent = f[1];
-        var inp = document.createElement('input'); inp.type = 'number'; inp.step = 'any'; inp.value = String(cfg[f[0]]);
-        inputs[f[0]] = inp; w.appendChild(l); w.appendChild(inp); grid.appendChild(w);
-      });
-      body.appendChild(grid);
+      var storedCfg = lsGet('bwn:config', {}) || {};
+      // One renderer for every typed spec (number / select / text); inputs[k] is read by Save.
+      function fieldGrid(fields, cur) {
+        var grid = document.createElement('div'); grid.className = 'bwn-ops-grid';
+        fields.forEach(function (f) {
+          var w = document.createElement('div');
+          var l = document.createElement('label'); l.textContent = f.label;
+          var v = bwnCfgGet(cur, f.k), el;
+          if (f.type === 'select') {
+            el = document.createElement('select');
+            (f.options || []).forEach(function (o) { var op = document.createElement('option'); op.value = o[0]; op.textContent = o[1]; el.appendChild(op); });
+            el.value = (f.options || []).some(function (o) { return o[0] === v; }) ? v : f.def;
+          } else {
+            el = document.createElement('input');
+            el.type = f.type === 'number' ? 'number' : 'text';
+            if (f.type === 'number') { el.step = 'any'; if (typeof f.min === 'number') el.min = String(f.min); if (typeof f.max === 'number') el.max = String(f.max); }
+            else el.style.textAlign = 'left';
+            el.value = (v === undefined || v === null) ? (f.def === undefined ? '' : String(f.def)) : String(v);
+          }
+          el.setAttribute('aria-label', f.label);
+          inputs[f.k] = el; w.appendChild(l); w.appendChild(el); grid.appendChild(w);
+        });
+        return grid;
+      }
+      body.appendChild(fieldGrid(OPS_CFG_FIELDS, cfg));
+
+      // Per-user preferences: nested overrides in bwn:config (audit.*, notify.*, view.*, filters.*).
+      section('Preferences', 'per user · audit thresholds · notifications · default view · account scope');
+      body.appendChild(fieldGrid(OPS_PREF_FIELDS, storedCfg));
 
       // AI drafting knobs (consumed by the AI script via bwn:config.ai; blank = default).
       section('AI drafting', 'model · recent window · preflight');
@@ -10347,8 +10821,36 @@
       if (aiFresh) {
         kv('Anthropic key', status.ai.anthropic ? 'set' : 'not set', status.ai.anthropic ? 'ok' : 'no');
         kv('Google Places key', status.ai.places ? 'set' : 'not set', status.ai.places ? 'ok' : 'no');
-        kv('SWA ingest key', status.ai.ingest ? 'set' : 'not set', status.ai.ingest ? 'ok' : 'no');
       }
+
+      // SWA ingest key, PER SCRIPT. This row used to read status.ai.ingest and call it "the"
+      // ingest key, which was a false suite-wide fact: GM storage is scoped per script, not per
+      // @namespace (measured 2026-09-03 on TM 5.x - [[gm-storage-is-per-script]]), so each script
+      // holds its own private copy and a newly installed one starts blank while its siblings keep
+      // working. That is the silent failure this row exists to make loud. Every script using the
+      // key publishes a BOOLEAN beacon at bwn:ingest:<slug> (never the key itself) stamped with
+      // its own load time; a script that did not load this session leaves a stale beacon and is
+      // skipped, so an uninstalled script cannot raise a permanent red row - same rule as the
+      // AI/Ask freshness rows above.
+      (function ingestKeyRollup() {
+        var PFX = 'bwn:ingest:', set = [], blank = [];
+        try {
+          for (var i = 0; i < localStorage.length; i++) {
+            var lk = localStorage.key(i);
+            if (!lk || lk.indexOf(PFX) !== 0) continue;
+            var b = lsGet(lk, null);
+            if (!b || !status.core.ts || Math.abs(status.core.ts - (b.ts || 0)) >= 60000) continue;
+            (b.k ? set : blank).push(lk.slice(PFX.length));
+          }
+        } catch (e) { /* storage refusal - fall through to the "no script reported" row */ }
+        set.sort(); blank.sort();
+        var total = set.length + blank.length;
+        if (!total) { kv('SWA ingest key', 'no script reported this session', ''); return; }
+        kv('SWA ingest key', blank.length
+          ? (set.length + ' of ' + total + ' set · BLANK: ' + blank.join(', '))
+          : ('set in all ' + total + ' loaded script' + (total === 1 ? '' : 's')),
+          blank.length ? 'no' : 'ok');
+      })();
       // Ask is its own script and can be disabled on its own, so it gets the same freshness
       // treatment as AI rather than being assumed present.
       var askFresh = !!status.ask.ver && !!status.core.ts && Math.abs((status.core.ts || 0) - (status.ask.ts || 0)) < 60000;
@@ -10576,12 +11078,10 @@
       var ft = document.createElement('div'); ft.className = 'bwn-ops-ft';
       var saveBtn = document.createElement('button'); saveBtn.type = 'button'; saveBtn.className = 'bwn-ops-btn primary'; saveBtn.textContent = 'Save settings';
       saveBtn.addEventListener('click', function () {
-        var partial = {}, ok = true;
-        OPS_CFG_FIELDS.forEach(function (f) {
-          var n = parseFloat(inputs[f[0]].value);
-          if (isNaN(n) || n < 0) { inputs[f[0]].style.borderColor = 'var(--bwn-bad)'; ok = false; }
-          else { inputs[f[0]].style.borderColor = ''; partial[f[0]] = n; }
-        });
+        var rawVals = {}; Object.keys(inputs).forEach(function (k) { rawVals[k] = inputs[k].value; });
+        var res = bwnCfgPartial(OPS_CFG_FIELDS.concat(OPS_PREF_FIELDS), rawVals, lsGet('bwn:config', {}) || {});
+        Object.keys(inputs).forEach(function (k) { inputs[k].style.borderColor = res.bad.indexOf(k) !== -1 ? 'var(--bwn-bad)' : ''; });
+        var partial = res.partial, ok = res.ok;
         // AI knobs ride along in bwn:config.ai. Start from the STORED object so
         // non-panel keys (e.g. a hand-set includeVendor) survive; panel-owned keys
         // are then set-or-cleared explicitly. Invalid window values block the save
@@ -10779,8 +11279,8 @@
         '.bwn-ops-row input[type=checkbox]{width:16px;height:16px;accent-color:var(--bwn-green);cursor:pointer;flex:none;}' +
         '.bwn-ops-grid{display:grid;grid-template-columns:repeat(3,1fr);gap:9px;}' +
         '.bwn-ops-grid label{display:block;font:500 9px ui-monospace,"Segoe UI Mono","SF Mono",monospace;color:var(--bwn-green);margin-bottom:3px;}' +
-        '.bwn-ops-grid input{width:100%;box-sizing:border-box;padding:6px 8px;border:1px solid var(--bwn-border);border-radius:7px;font:500 13px -apple-system,BlinkMacSystemFont,"Segoe UI","Helvetica Neue",Arial,sans-serif;text-align:right;outline:none;background:var(--bwn-surface);color:var(--bwn-text);}' +
-        '.bwn-ops-grid input:focus{border-color:var(--bwn-accent);box-shadow:0 0 0 3px rgba(46,204,113,.15);}' +
+        '.bwn-ops-grid input,.bwn-ops-grid select{width:100%;box-sizing:border-box;padding:6px 8px;border:1px solid var(--bwn-border);border-radius:7px;font:500 13px -apple-system,BlinkMacSystemFont,"Segoe UI","Helvetica Neue",Arial,sans-serif;text-align:right;outline:none;background:var(--bwn-surface);color:var(--bwn-text);}' +
+        '.bwn-ops-grid input:focus,.bwn-ops-grid select:focus{border-color:var(--bwn-accent);box-shadow:0 0 0 3px rgba(46,204,113,.15);}' +
         '.bwn-ops-kv{display:flex;justify-content:space-between;gap:10px;font-size:12px;padding:5px 2px;border-bottom:1px solid var(--bwn-surface-3);color:var(--bwn-text-muted);}' +
         '.bwn-ops-kv .v{font:500 11px ui-monospace,"Segoe UI Mono","SF Mono",monospace;}' +
         '.bwn-ops-kv .v.ok{color:var(--bwn-green);}' +
@@ -10977,10 +11477,21 @@
       var p = document.getElementById(DOCK_ID); if (p) p.style.display = '';
       dockSig = '';   // next render must rebuild, not match a signature whose DOM is gone
     }
+    // Normalize whatever a registrant sent into null | [ 'Group.Flag', ... ]. Anything that is not
+    // a non-empty string (or an array of them) becomes null = "no permission needed", because a
+    // malformed spec must not silently hide a working tool.
+    function dockPermSpec(v) {
+      var a = (typeof v === 'string') ? [v] : (Array.isArray(v) ? v : []);
+      a = a.filter(function (k) { return typeof k === 'string' && k.indexOf('.') > 0; });
+      return a.length ? a : null;
+    }
     function dockVisible() {
       var arr = Object.keys(dockRoster).map(function (k) { return dockRoster[k]; });
       // Fail-OPEN when rank is unknown (show the entry; the server rejects if truly unauthorized).
       arr = arr.filter(function (en) { return en.minRank == null || dockRank == null || dockRank >= en.minRank; });
+      // Same fail-open rule for Umbrava's own permissions: bwnCanAll answers true for anything it
+      // cannot decide, so a row disappears ONLY when the checkbox is known to be off.
+      arr = arr.filter(function (en) { return bwnCanAll(en.needPerm); });
       arr.sort(function (a, b) { return (a.weight - b.weight) || (a.order - b.order); });
       return arr;
     }
@@ -11002,6 +11513,10 @@
       // an UNKNOWN tool; these two are not unknown.
       assist: ['M6 3v18', 'M6 4h13l-3 4 3 4H6z'],
       bidout: ['M4 6h16v12H4z', 'M4 7l8 6 8-6'],
+      // Edit PO#/WO# (bulk-source) registers from Core, so the dock-icon completeness test (which
+      // scans SIBLING .user.js files) never covered it - it fell back to its 🔖 emoji beside the
+      // line-icon rows. A pencil, matching the "Edit" name.
+      'bulk-source': ['M12 20h9', 'M16.5 3.5a2.121 2.121 0 0 1 3 3L7 19l-4 1 1-4z'],
       dispatch: ['M7 17a2 2 0 1 0 4 0 2 2 0 0 0-4 0z', 'M15 17a2 2 0 1 0 4 0 2 2 0 0 0-4 0z',
         'M5 17H3V6a1 1 0 0 1 1-1h9v12m-2 0h4m4 0h2v-6h-8m0-5h5l3 5'],
       // A 3D box (📦): the front silhouette, the top edges meeting at centre, and the seam down.
@@ -11209,6 +11724,9 @@
     document.addEventListener('bwn:evt', BWN.guard(function (e) {
       var d = e && e.detail; if (!d || !d.id) return;
       if (d.id === 'bwn:role' && typeof d.rank === 'number') { dockRank = d.rank; scheduleDockRender(); return; }
+      // A permission decode landed after the rail already rendered: re-render so a row the user
+      // may not use drops out (and one that was hidden on a stale slot comes back).
+      if (d.id === 'bwn:perm') { scheduleDockRender(); return; }
       if (d.id === 'bwn:dock:host') { if (dockOtherWins(d)) { dockAmHost = false; dockOtherSeen = Date.now(); removeDockStack(); } return; }
       // A host that is still alive re-announces AND pings every DOCK_PING_MS; that traffic is what
       // holds off the reclaim in the heartbeat. Guarded on hostId so our own ping - same document,
@@ -11224,6 +11742,8 @@
           weight: typeof d.weight === 'number' ? d.weight : 50,
           badge: (d.badge != null && d.badge !== '') ? String(d.badge) : '',
           minRank: typeof d.minRank === 'number' ? d.minRank : null,
+          // 'Group.Flag' or an array of them: the Umbrava permission(s) the row's tool needs.
+          needPerm: dockPermSpec(d.needPerm),
           title: d.title ? String(d.title) : '',
           order: ex ? ex.order : (++dockOrderSeq),
           seen: Date.now()
@@ -11235,6 +11755,7 @@
         if (d.icon != null) en.icon = String(d.icon);
         if (d.badge != null) en.badge = d.badge === '' ? '' : String(d.badge);
         if (typeof d.minRank === 'number') en.minRank = d.minRank;
+        if (d.needPerm != null) en.needPerm = dockPermSpec(d.needPerm);
         en.seen = Date.now();
         scheduleDockRender();
       } else if (d.id === 'bwn:dock:unregister' && d.key) {
@@ -12615,7 +13136,31 @@
     function load() { var a = BWN.lsGetJSON(STORE, []); return Array.isArray(a) ? a : []; }
     function save(a) { BWN.lsSetJSON(STORE, a); }
     function rid() { return Date.now().toString(36) + Math.random().toString(36).slice(2, 7); }
-    function reqPerm() { try { if (window.Notification && Notification.permission === 'default') Notification.requestPermission(); } catch (e) { } }
+    // ===== BWN-REM-CHANNEL START v1 (pure; sliced by scripts/test-reminders-channel.js) ==========
+    // Core 1.83.0: per-user delivery channel, set in the Ops Suite panel > Preferences and stored
+    // at bwn:config.notify.channel (typed spec OPS_PREF_FIELDS). Values:
+    //   desktop (default) - desktop Notification when granted, in-page toast otherwise. This IS
+    //                       the 1.82.0 behaviour, so an unset key changes nothing.
+    //   toast             - in-page toast only; never asks for Notification permission.
+    //   quiet             - the reminder is marked fired and nothing is shown. It leaves the
+    //                       Pending list like any fired reminder. Mute, not snooze.
+    // Anything else (absent, malformed blob, unknown value) -> desktop.
+    function remChannel(cfgRaw) {
+      try { var c = JSON.parse(cfgRaw || 'null'); var v = c && c.notify && c.notify.channel; if (v === 'toast' || v === 'quiet') return v; } catch (e) { /* malformed - default */ }
+      return 'desktop';
+    }
+    // Which path a due reminder takes for a channel + Notification.permission
+    // ('granted' | 'denied' | 'default' | null when the API is absent): 'desktop' | 'toast' | 'none'.
+    function remPlan(channel, perm) {
+      if (channel === 'quiet') return 'none';
+      if (channel === 'desktop' && perm === 'granted') return 'desktop';
+      return 'toast';
+    }
+    // ===== BWN-REM-CHANNEL END v1 =====
+    function channel() { var raw = null; try { raw = localStorage.getItem('bwn:config'); } catch (e) { } return remChannel(raw); }
+    function permState() { try { return window.Notification ? Notification.permission : null; } catch (e) { return null; } }
+    // Only the desktop channel ever asks - a toast-only or quiet user never sees the browser prompt.
+    function reqPerm() { try { if (channel() === 'desktop' && window.Notification && Notification.permission === 'default') Notification.requestPermission(); } catch (e) { } }
     function pad(n) { return (n < 10 ? '0' : '') + n; }
     function fmtWhen(ts) {
       var d = new Date(ts), now = new Date();
@@ -12629,14 +13174,16 @@
     function notify(r) {
       var title = 'WO follow-up' + (r.tracking ? ' · #' + r.tracking : '');
       var body = (r.note ? r.note + ' - ' : '') + (r.client || '') + (r.location ? ' · ' + r.location : '');
-      try {
-        if (window.Notification && Notification.permission === 'granted') {
+      var plan = remPlan(channel(), permState());
+      if (plan === 'none') return;   // quiet: fired, listed as fired, shown nowhere
+      if (plan === 'desktop') {
+        try {
           var n = new Notification(title, { body: body || 'Time to follow up.', tag: 'bwn-rem-' + r.id });
           n.onclick = function () { try { window.focus(); } catch (e) { } if (r.url) location.href = r.url; try { n.close(); } catch (e2) { } };
           return;
-        }
-      } catch (e) { }
-      toast(title + (body ? ' - ' + body : ''), r.url);   // notifications blocked → in-page fallback
+        } catch (e) { /* constructor refused - fall through to the toast */ }
+      }
+      toast(title + (body ? ' - ' + body : ''), r.url);   // toast channel, or desktop blocked / unsupported
     }
     function fireDue() {
       var arr = load(), now = Date.now(), changed = false;
@@ -12741,8 +13288,11 @@
 
       var ft = document.createElement('div'); ft.className = 'bwn-rem-ft';
       var perm = document.createElement('span'); perm.className = 'sp';
-      perm.textContent = (window.Notification && Notification.permission === 'denied') ? 'Notifications blocked - reminders show as an in-page banner instead.' :
-        (window.Notification && Notification.permission === 'granted') ? '' : 'First reminder will ask to allow notifications.';
+      var ch = channel(), ps = permState();
+      perm.textContent = ch === 'quiet' ? 'Quiet: due reminders are muted (Ops Suite > Preferences > Reminder alerts).' :
+        ch === 'toast' ? 'In-page toast only (Ops Suite > Preferences > Reminder alerts).' :
+        ps === 'denied' ? 'Notifications blocked - reminders show as an in-page banner instead.' :
+        ps === 'granted' ? '' : 'First reminder will ask to allow notifications.';
       ft.appendChild(perm);
       var closeB = document.createElement('button'); closeB.type = 'button'; closeB.textContent = 'Close'; closeB.addEventListener('click', close);
       ft.appendChild(closeB); card.appendChild(ft);
@@ -15811,6 +16361,10 @@
       try {
         document.dispatchEvent(new CustomEvent('bwn:evt', { detail: {
           id: 'bwn:dock:register', key: DOCK_KEY, label: 'Bulk Ops', icon: '📦', weight: 22,
+          // ponytail: ONE permission for the whole console, not one per op. v1 writes notes + ECD,
+          // and a user who may not bulk-update work orders has no business in a bulk console at
+          // all. Upgrade path if that ever splits: gate each op row on its own bwnCan.
+          needPerm: 'WorkOrder.BulkUpdate',
           title: 'BWN Bulk Operations Console - batch note / ECD writes from an .xlsx (dry-run + typed confirm)'
         } }));
       } catch (e) { /* dock host not up yet - the heartbeat will re-register us */ }
@@ -16556,7 +17110,11 @@
     function dockRegister() {
       try {
         document.dispatchEvent(new CustomEvent('bwn:evt', { detail: {
-          id: 'bwn:dock:register', key: DOCK_KEY, label: 'Src Job#', icon: '🔖', weight: 23,
+          id: 'bwn:dock:register', key: DOCK_KEY, label: 'Edit PO#/WO#', icon: '🔖', weight: 23,
+          // The drawer's primary write. Source PO# is the optional second column, deliberately NOT
+          // required here: a user allowed one field and not the other should still get the drawer
+          // rather than lose the tool over the column they were not going to fill.
+          needPerm: 'WorkOrderField.SourceJobNumber',
           title: 'BWN Bulk Source Job# - check work orders on the list, then stamp Source Job# (Q/R or RF) in bulk (dry-run + typed confirm)'
         } }));
       } catch (e) { /* dock host not up yet - the heartbeat re-registers us */ }

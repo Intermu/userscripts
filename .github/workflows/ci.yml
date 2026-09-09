@@ -119,6 +119,29 @@ jobs:
       - name: WO Audit deterministic flags harness
         run: node scripts/test-wo-audit-flags.js
 
+      # Core 1.82.0: the Ops Suite panel's typed field specs (BWN-SETTINGS block) - number/select/
+      # text, min/max, one-level nesting into bwn:config, sibling-preserving group writes, and the
+      # unchanged-group drop that keeps an untouched Save from firing bwn:config churn. Two mutation
+      # controls (drop the max check, drop the sibling preserve) must each turn it red.
+      - name: Ops Suite typed settings fields harness (Core 1.82.0)
+        run: node scripts/test-ops-settings.js
+
+      # Core 1.83.0: Follow-up reminders read their delivery channel off bwn:config.notify.channel
+      # (BWN-REM-CHANNEL block). Pins: unset/unknown/malformed -> desktop (the 1.82.0 behaviour),
+      # quiet fires nothing, toast never takes the desktop path, desktop falls back to toast unless
+      # permission is granted. Mutation control: dropping the quiet branch makes quiet toast.
+      - name: Reminders delivery-channel harness (Core 1.83.0)
+        run: node scripts/test-reminders-channel.js
+
+      # Core 1.84.0: List Heat reads the standing account scope off bwn:config.filters.accounts
+      # (BWN-ACCT-FILTER block). Pins: unset/blank -> no scope; case-insensitive substring match; a
+      # row with no readable client stays IN scope (the Client column can be hidden); the panel
+      # stores exactly what the reader parses; and the whole-board numbers (heatSnapshot, My Day,
+      # the Over-30 batch) never see the scope. Two mutation controls - dropping the fail-open
+      # branch, dropping the empty-scope return - must each turn it red.
+      - name: List Heat account-scope harness (Core 1.84.0)
+        run: node scripts/test-acct-filter.js
+
       - name: Bid-out dock registration + ACT_TOOL harness
         run: node scripts/test-bidout-dock.js
 
@@ -534,6 +557,15 @@ jobs:
       - name: Drop Upload party/label classifier harness (broker is not a vendor)
         run: node scripts/test-drop-upload-classify.js
 
+      - name: Drop Upload response-ladder harness (@-mention wire format, answered, escalation)
+        run: node scripts/test-drop-upload-response-ladder.js
+
+      - name: Drop Upload doc-summary harness (cloud-bus primary, on-device fallback, note emission)
+        run: node scripts/test-drop-upload-doc-summary.js
+
+      - name: Drop Upload queue dedup harness (re-dropped file skipped, kept pair stays aligned)
+        run: node scripts/test-drop-upload-queue.js
+
       - name: WO Intake .eml MIME-parse harness (parseEml multipart walk)
         run: node scripts/test-eml-parse.js
 
@@ -593,6 +625,51 @@ jobs:
       # shows, nothing logged) - with three negative controls (PII leak, uncapped ring, gate removed).
       - name: Error reporter harness (BWN.report toast + PII-free capped ring + negative controls)
         run: node scripts/test-error-reporter.js
+
+      # Umbrava permission gate. Two jobs in one harness: the paste LEDGER over the BWN-PERM reader
+      # block (every bwn-*.user.js classified ADOPTED or NA, one SHA across all adopters, no rival
+      # bwnCan anywhere else) and the DECODE itself, driven with real masks captured from a live
+      # user - so a decode that quietly grants everything, or nothing, cannot pass. Four negative
+      # controls, including the 32-bit `&` regression the division bit-test exists to prevent.
+      # Step name carries NO colon-space (the parser bug that killed this workflow once already).
+      - name: Permission gate harness (BWN-PERM paste ledger + real-mask decode + negative controls)
+        run: node scripts/test-perm-block-ledger.js
+
+      # WO Intake cross-client guards. The five per-client harnesses each prove their own field
+      # mapping; this one pins the guarantees that span them: sanitizeWo() strips inline contact
+      # details out of Scope/_note/_warn AND is actually wired into fillWo (with a control proving
+      # that check can fail), the script still carries no write path, no egress primitive and no
+      # synthesized click on a Create control, the .msg directory maps stay null-prototype, and every
+      # extractor degrades to blank fields on an anchor-missing, truncated or entity-laden document.
+      - name: WO Intake guards (PII containment + no-auto-create + malformed input)
+        run: node scripts/test-intake-guards.js
+
+      # The stage-2 handoff's consume-once claim. Live on 2026-09-03 (W-392732) every handed-off
+      # document uploaded TWICE: the pending files were read with a readonly transaction and deleted
+      # with a separate one, so two overlapping checkers both claimed the same record. Pins that the
+      # read + delete happen in ONE readwrite transaction (exactly one of two racing claims wins),
+      # that a failed create still leaves the record for the real one, and that a stale record is
+      # dropped. Carries a negative control: the old readonly-get pattern double-claims.
+      - name: WO Intake stage-2 claim (consume-once, no duplicate uploads)
+        run: node scripts/test-intake-claim.js
+
+      # US-0: the canonical roster vs the shipped bytes. Enumerates every bwn-*.user.js, forces each
+      # into a scripts/userscript-manifest.json row (both directions), and checks the auto-update
+      # chain end to end: @updateURL == @downloadURL == the raw main URL for that filename, @version
+      # in step with the in-body VER const, the canonical @namespace (Tampermonkey's identity key),
+      # a #sha384= pin on every @require/@resource, and a unique identity per script. Ten negative
+      # controls mutate real shipped bytes to prove each guard fires.
+      - name: US-0 manifest ledger (roster vs shipped metadata + negative controls)
+        run: node scripts/test-manifest-ledger.js
+
+      # US-0: the installed half. Drives the real scripts/selfcheck-installed.js against synthesised
+      # Tampermonkey-export fixtures (em-dash shadow duplicate, ungoverned copy with no @updateURL,
+      # source-less script, third-party script, hostile __proto__ / markup / ANSI names, an
+      # over-cap file, a secret-bearing storage.json) and asserts the guarantees that justify the
+      # tool: the GM storage sidecar is never opened, no secret reaches either output mode, and the
+      # source contains no egress primitive, no write and no bwn:audit path.
+      - name: US-0 installed self-check (export fixtures + no-egress/no-write guarantee)
+        run: node scripts/test-selfcheck-installed.js
 
   lint:
     name: Lint

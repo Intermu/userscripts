@@ -146,6 +146,10 @@ function load(transform) {
     // Real value, so the logo <img> src the full render path builds is the shipped one.
     "var LAUNCHER_BASE = 'https://green-stone-0717dab0f.7.azurestaticapps.net';\n" +
     'function ensureStyle() { __ensureStyleCalls.push(1); }\n' +
+    // The rail now also filters rows on the reader's Umbrava permissions (BWN-PERM block, ledgered
+    // by test-perm-block-ledger.js). __can is injected so a case can deny a specific key; the
+    // default allows everything, which is what every pre-existing case below expects.
+    'function bwnCanAll(keys) { if (!keys) return true; var a = (typeof keys === "string") ? [keys] : keys; for (var i = 0; i < a.length; i++) { if (!__can(a[i])) return false; } return true; }\n' +
     'function toolItems() { return []; }\n' +
     'function openSuitePanel() { }\n' +
     'function ensureDock() { }\n';
@@ -157,13 +161,16 @@ function load(transform) {
     '  state: function () { return { amHost: dockAmHost, keys: Object.keys(dockRoster), vis: dockVisible().length, sig: dockSig }; }\n' +
     '};\n';
 
+  var permDeny = {};   // 'Group.Flag' -> true; set through api.denyPerm below
+  function canFn(k) { return !permDeny[k]; }
+
   var fn = new Function(
     'document', 'localStorage', 'CustomEvent', 'Date', 'setTimeout', 'clearTimeout', 'setInterval',
-    'BWN', '__ensureStyleCalls', '__beats',
+    'BWN', '__ensureStyleCalls', '__beats', '__can',
     pre + section + post
   );
   var mod = fn(doc, localStorage, CustomEvent, VDate, fakeSetTimeout, fakeClearTimeout,
-    fakeSetInterval, BWN, ensureStyleCalls, beats);
+    fakeSetInterval, BWN, ensureStyleCalls, beats, canFn);
 
   // Watch the bus from outside so the module's own emissions are observable.
   doc.addEventListener('bwn:evt', function (ev) { emitted.push(ev.detail); });
@@ -180,6 +187,7 @@ function load(transform) {
       if (extra) Object.keys(extra).forEach(function (k) { d[k] = extra[k]; });
       return api.emit(d);
     },
+    denyPerm: function (key) { permDeny[key] = true; return api; },
     render: function () { renders++; mod.renderDock(); return api; },
     beat: function () { mod.beat(); return api; },
     styleCalls: function () { return ensureStyleCalls.length; },
@@ -421,6 +429,39 @@ var m4 = missingIcons(mutate(SECTION, "      bidout: ['M4 6h16v12H4z', 'M4 7l8 6
 A.ok('removing the bidout icon is detected by the completeness check',
   m4.length === 1 && m4[0].key === 'bidout', JSON.stringify(m4));
 
-console.log('\n(3 fixes x real source + 4 mutations, plus the rail icon-set check. Nothing here' +
-  ' proves the rail RENDERS - that is the live Umbrava dock test on the open-work board.)');
+// ---- needPerm: a rail row the operator's Umbrava permissions do not cover -------------------
+// Same fail-open rule as minRank: a row with no needPerm, or one whose permission is unknown,
+// stays visible. Only a positively-denied key removes it.
+console.log('\n--- needPerm (Umbrava permission filter on the rail) ---');
+(function () {
+  var d = load();
+  d.register('plain');
+  d.register('gated', { needPerm: 'WorkOrderField.Status' });
+  d.register('multi', { needPerm: ['WorkOrderField.Status', 'Task.AddNew'] });
+  d.register('junk', { needPerm: 42 });          // malformed spec must not hide a working tool
+  A.eq('all rows visible while every permission is allowed', d.state().vis, 4);
+
+  d.denyPerm('WorkOrderField.Status');
+  d.render();
+  A.eq('denying one key hides exactly the rows that asked for it', d.state().vis, 2);
+  A.ok('the ungated row survives', d.state().keys.indexOf('plain') !== -1);
+  A.ok('...and so does the malformed one (a bad spec is not a gate)', d.state().keys.indexOf('junk') !== -1);
+
+  // The roster keeps the row - only the RENDER filters - so a later decode can bring it back
+  // without the module having to re-register.
+  A.eq('the hidden rows are still registered, not dropped', d.state().keys.length, 4);
+
+  // Control: with the filter removed, the denied rows would still render.
+  var noFilter = mutate(SECTION,
+    '      arr = arr.filter(function (en) { return bwnCanAll(en.needPerm); });\n', '');
+  var c = load(function () { return noFilter; });
+  c.register('gated', { needPerm: 'WorkOrderField.Status' });
+  c.denyPerm('WorkOrderField.Status');
+  c.render();
+  A.eq('CONTROL: without the filter, a denied row still shows', c.state().vis, 1);
+})();
+
+console.log('\n(3 fixes x real source + 4 mutations, plus the rail icon-set check and the needPerm' +
+  ' filter. Nothing here proves the rail RENDERS - that is the live Umbrava dock test on the' +
+  ' open-work board.)');
 A.finish();

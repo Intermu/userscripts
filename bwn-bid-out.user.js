@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         BWN Bid-Out (Broadway National)
 // @namespace    broadwaynational.bwn
-// @version      0.27.2
+// @version      0.27.3
 // @downloadURL  https://raw.githubusercontent.com/Intermu/userscripts/main/bwn-bid-out.user.js
 // @updateURL    https://raw.githubusercontent.com/Intermu/userscripts/main/bwn-bid-out.user.js
 // @description  Email RFP to outside / net-new vendors, launched from a caret on Umbrava's own "See Who Is Available" button (network-vendor bidding stays native - no separate Bid-Out button). The caret menu opens the tracked email RFP wizard: finds net-new vendors nearby through Google Places, looks up their emails via the BWN scrape-contacts function, takes pasted outside addresses, and can still include assignable Umbrava vendors in the same email. You pick who's included, then review the exact recipient list and the rendered email before anything sends. Send from your own mailbox via the SWA send-bid function (Microsoft Graph), or open a plain Outlook draft. Vendors are BCC'd; nothing sends until you click Send. Network access is limited to Umbrava (same-origin), Google Places, and your SWA host.
@@ -20,7 +20,7 @@
 (function () {
   'use strict';
 
-  var VER = '0.27.2';
+  var VER = '0.27.3';
   console.info('[BWN BID-OUT] v' + VER + ' - Build Requests wizard (WO details -> select vendors -> review -> sent) · Umbrava vendors + Places net-new discovery + email scrape · one-click Graph send via SWA (Outlook-draft fallback) · sent-state flip persists bid-sent + GM baseline per WO');
 
   var COMPANY_ADDR = 'Broadway National Group, 100 Davids Dr, Hauppauge, NY 11788';
@@ -1994,15 +1994,29 @@
     else if (d.id === 'bwn:dock:open' && d.key === DOCK_KEY && woNumber()) launchPanel({ invite: true });
   }, false);
 
+  // ---- SWA ingest key presence beacon ---------------------------------------
+  // Boolean only, never the key. GM storage is PER SCRIPT (measured 2026-09-03), so a blank key
+  // here is invisible to every sibling; Core's Ops panel reads these beacons to name the blank
+  // ones. ts is the LOAD time, never refreshed on save - Core's freshness handshake needs that.
+  var INGEST_BEACON_TS = Date.now();
+  function publishIngestPresence() {
+    try {
+      localStorage.setItem('bwn:ingest:bid-out', JSON.stringify({ k: GM_getValue('ingest_key', '') ? 1 : 0, ts: INGEST_BEACON_TS }));
+    } catch (e) { /* best-effort */ }
+  }
+  publishIngestPresence();
+
   // ---- Key management (Tampermonkey menu) ------------------------------------
+  // Every key here is THIS script's own copy: Tampermonkey scopes GM storage per script, so
+  // none of these values reach any sibling script, whatever their @namespace.
   try {
     GM_registerMenuCommand('Set Google Places API key', function () {
       var v = prompt('Google Places API key (for net-new vendor discovery):', GM_getValue('places_key', '') || '');
       if (v !== null) { GM_setValue('places_key', v.trim()); toast(v.trim() ? 'Places key saved.' : 'Places key cleared.'); }
     });
     GM_registerMenuCommand('Set SWA ingest key', function () {
-      var v = prompt('SWA ingest key (same value as the connector WO_INGEST_KEY - used to fetch net-new emails + one-click send):', GM_getValue('ingest_key', '') || '');
-      if (v !== null) { GM_setValue('ingest_key', v.trim()); toast(v.trim() ? 'Ingest key saved.' : 'Ingest key cleared.'); }
+      var v = prompt('SWA ingest key (same value as the connector WO_INGEST_KEY - fetches net-new emails + one-click send). Tampermonkey scopes this PER SCRIPT, so setting it here sets it for Bid Out only - every other suite script needs its own copy:', GM_getValue('ingest_key', '') || '');
+      if (v !== null) { GM_setValue('ingest_key', v.trim()); publishIngestPresence(); toast(v.trim() ? 'Ingest key saved.' : 'Ingest key cleared.'); }
     });
     GM_registerMenuCommand('Set send-from email (one-click send)', function () {
       var v = prompt('Your send-from mailbox (must be on the server allowlist; the bid email sends from + replies to this):', GM_getValue('send_from', '') || (actor().email || ''));

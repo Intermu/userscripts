@@ -306,7 +306,7 @@ A.ok('control: a copy that never runs the entry transition is caught',
 
 // ---- 4. suite-wide invariant: every animation answers prefers-reduced-motion ------------------
 // This section exists because the same hole shipped FOUR separate times in this one file
-// (.bwn-ops-card, .bwn-ecd-savepulse, .bwn-wa-card, #bwn-heat-set) and each was found by hand,
+// (.bwn-ops-card, .bwn-ecd-savepulse - since deleted, .bwn-wa-card, #bwn-heat-set) and each was found by hand,
 // one at a time. Enumerating the declarations finds them all at once, and the count pin makes a
 // NEW animation a conscious edit rather than a silent fifth.
 console.log('\n-- every animating selector honours reduced motion --');
@@ -321,8 +321,7 @@ var ANIMATED_BY_FILE = {
     { sel: '#bwn-heat-panel', keyframe: 'bwnPanelIn' },
     { sel: '#bwn-heat-set', keyframe: 'bwnPanelIn' },
     { sel: '#bwn-heat-prog.indet .fill', keyframe: 'bwnIndet' },
-    { sel: '.bwn-wa-card', keyframe: 'bwnWaIn' },
-    { sel: '.bwn-ecd-savepulse', keyframe: 'bwnEcdPulse' }
+    { sel: '.bwn-wa-card', keyframe: 'bwnWaIn' }
   ],
   'bwn-suite-ai.user.js': [
     { sel: '#bwn-cu-overlay', keyframe: 'bwnFade' },
@@ -382,7 +381,9 @@ rmBlocks.forEach(function (block) {
   });
 });
 
-A.ok('the file still has reduced-motion blocks to read', rmBlocks.length >= 4, 'found ' + rmBlocks.length);
+// Floor, not a pin: it guards against the query silently matching nothing. Was >= 4 until the
+// ECD save-ring block went with the Save button (Umbrava rebuilt the WO form, 2026-09-03).
+A.ok('the file still has reduced-motion blocks to read', rmBlocks.length >= 3, 'found ' + rmBlocks.length);
 ANIMATED.forEach(function (a) {
   A.ok(a.sel + ' (' + a.keyframe + ') is switched off under reduced motion', rmCovered[a.sel] === true,
     'covered: ' + Object.keys(rmCovered).join(' | '));
@@ -533,10 +534,11 @@ A.ok('C8 control: an animating selector missing from the query is caught',
   c8covered['#bwn-heat-set'] !== true && c8covered['#bwn-heat-panel'] === true,
   'the sweep would have passed the defect it exists to find');
 
-// C9: and the count pin must fire when an animation is added without a row in ANIMATED. Anchored
-// on the ECD ring because the eg flash this used to hang off no longer exists.
-var c9 = mutate(CORE, "'.bwn-ecd-savepulse{animation:bwnEcdPulse",
-  "'.bwn-fake{animation:bwnFake 1s linear;}' + '.bwn-ecd-savepulse{animation:bwnEcdPulse");
+// C9: and the count pin must fire when an animation is added without a row in ANIMATED.
+// Re-anchored on .bwn-wa-card: the ECD save-ring it used to hang off was deleted with the
+// Save button, when Umbrava rebuilt the WO form and the ECD write moved to patchWorkOrder.
+var c9 = mutate(CORE, "'.bwn-wa-card{background:",
+  "'.bwn-fake{animation:bwnFake 1s linear;}' + '.bwn-wa-card{background:");
 A.ok('C9 control: a new undeclared animation trips the count pin',
   (c9.match(/animation:(?!none)[a-zA-Z]/g) || []).length === ANIMATED.length + 1,
   'found ' + (c9.match(/animation:(?!none)[a-zA-Z]/g) || []).length + ' want ' + (ANIMATED.length + 1));

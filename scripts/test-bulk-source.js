@@ -1,4 +1,4 @@
-// test-bulk-source.js - the Bulk Source Job# engine (Core module, flag bulkSource default OFF).
+// test-bulk-source.js - the Bulk Source Job# engine (Core module, flag bulkSource ON since 2026-09-02).
 //
 // WHAT THIS PROVES, against the REAL shipped bytes of bwn-suite-core.user.js: the
 // BULK-SOURCE-ENGINE region (the pure, DOM-free write engine) is sliced out and CONCATENATED with
@@ -48,7 +48,13 @@ function mutate(src, from, to) {
   return src.slice(0, i) + to + src.slice(i + from.length);
 }
 
-var S_OPS = slice('  // ===== BWN-OPS START v1', '  // ===== BWN-OPS END v1 =====', 'BWN-OPS block');
+// WRAP v3's permission gate closes over bwnCan/bwnCanAll and the registry over bwnPermsForPatch,
+// so the REAL BWN-PERM reader block is prepended to the slice rather than stubbed. With no
+// localStorage slot planted in these sandboxes every permission reads as unknown, which fails
+// OPEN - so every case below runs against the same behaviour it had before the gate existed.
+// (The gate itself is proven in scripts/test-bwn-ops.js and scripts/test-perm-block-ledger.js.)
+var S_PERM = slice('  // ===== BWN-PERM START v1', '  // ===== BWN-PERM END v1 =====', 'BWN-PERM block');
+var S_OPS = S_PERM + "\n" + slice('  // ===== BWN-OPS START v1', '  // ===== BWN-OPS END v1 =====', 'BWN-OPS block');
 var S_ENG = slice('    // ===== BULK-SOURCE-ENGINE START v1', '    // ===== BULK-SOURCE-ENGINE END v1 =====', 'BULK-SOURCE-ENGINE block');
 
 // The engine must never touch the DOM - that is what lets this harness drive the shipped bytes.
@@ -60,8 +66,8 @@ A.ok('WOSRC_READ_Q reads sourceJobNumber + sourcePurchaseOrderNumber + clientWor
 A.ok('WOSRC_PATCH_M is the patchWorkOrder success/message mutation',
   S_ENG.indexOf("var WOSRC_PATCH_M = 'mutation PatchWorkOrder($data: PatchWorkOrderInput!) { patchWorkOrder(data: $data) { success message } }';") !== -1);
 
-// ---- source-level ship-safety: the module is gated OFF and nothing mounts when the flag is off ----
-A.ok('bulkSource flag ships default OFF', /bulkSource: false,/.test(coreFull));
+// ---- source-level ship-safety: the module mounts only behind the flag; kill switch flips it off ----
+A.ok('bulkSource flag ships ON (enabled for coordinators 2026-09-02)', /bulkSource: true,/.test(coreFull));
 A.ok('the whole module mounts only behind BWN_MODULES.bulkSource', /bwnBoot\('bulkSource', BWN_MODULES\.bulkSource, function \(\) \{/.test(coreFull));
 A.ok('the write passes feature:bulkSource + confirmed:true to the wrapper', /feature: 'bulkSource', confirmed: true/.test(S_ENG));
 

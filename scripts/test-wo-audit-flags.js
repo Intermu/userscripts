@@ -158,4 +158,29 @@ console.log('\n8. absent-input safety, constants, multi-flag WO');
   A.ok('bad WO: NO NOTES', has(ff, 'NO NOTES'));
 })();
 
+// 9. per-user overrides (0.9.0): thresholds read off bwn:config.audit.* written by Core's Ops
+// Suite panel. The block is rebuilt with an injected `localStorage` (the shipped code reads the
+// page's; the node harness has none, which case 8 above already proves falls back to the pins).
+console.log('\n9. per-user threshold overrides from bwn:config.audit');
+(function () {
+  function withCfg(blob) {
+    var ls = { getItem: function (k) { return k === 'bwn:config' ? blob : null; } };
+    return (new Function('MS_DAY', '_date', 'localStorage', SECTION + '\n;return { computeFlags: computeFlags };'))(MS_DAY, _date, ls);
+  }
+  var h = healthy();   // 50% GP, 3d-old note is not stale at the 7d default
+  var hi = withCfg(JSON.stringify({ v: 1, audit: { gpLow: 60, staleDays: 2 } }));
+  A.ok('gpLow 60 -> a 50% WO now reads LOW GP', has(hi.computeFlags(h, noteDaysAgo(3), NOW), 'LOW GP'));
+  A.ok('staleDays 2 -> a 3d note now reads STALE', has(hi.computeFlags(h, noteDaysAgo(3), NOW), 'STALE'));
+  var lo = withCfg(JSON.stringify({ v: 1, audit: { gpLow: 40 } }));
+  A.ok('gpLow 40 -> the same 50% WO is clean', !has(lo.computeFlags(h, noteDaysAgo(3), NOW), 'LOW GP'));
+  A.ok('staleDays absent -> 7d default still applies (3d note not stale)', !has(lo.computeFlags(h, noteDaysAgo(3), NOW), 'STALE'));
+  var junk = withCfg(JSON.stringify({ v: 1, audit: { gpLow: 'sixty', staleDays: null } }));
+  A.ok('non-numeric override -> default (50% WO clean at 15)', !has(junk.computeFlags(h, noteDaysAgo(3), NOW), 'LOW GP'));
+  var broken = withCfg('{not json');
+  A.ok('malformed blob -> default, no throw', !has(broken.computeFlags(h, noteDaysAgo(3), NOW), 'LOW GP'));
+  // Negative control: the SAME override blob against the pinned-constant reading must NOT flip -
+  // proves the assertions above are driven by the override read, not by the fixture.
+  A.ok('control: default build ignores the blob (no localStorage) - 50% WO clean', !has(T.computeFlags(h, noteDaysAgo(3), NOW), 'LOW GP'));
+})();
+
 A.finish();

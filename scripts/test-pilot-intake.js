@@ -2,11 +2,11 @@
 // path in bwn-wo-intake.user.js (extractWo). Locks the 0.9.16 scope fix:
 //
 //   Scope of Work comes from the email BODY (the actual work description), NOT the email SUBJECT.
-//   The subject ("Store 305, Jamestown NM, PO 170101430655, P2 dispatch") is a routing header and
+//   The subject ("Store 399, Jamestown NM, PO 170101999001, P2 dispatch") is a routing header and
 //   is only the LAST resort when the body yields nothing (image-only requests).
 //
 // Grounded on the REAL dropped email (.msg) Mike used:
-//   subject: "Store 305, Jamestown NM, PO 170101430655, P2 dispatch"
+//   subject: "Store 399, Jamestown NM, PO 170101999001, P2 dispatch"
 //   body:    "Pump sign on light pole on pump 13 and 14 staring to fall off the pole please
 //             inspect and resolve this issue." then "NTE 800.00" then the sender's signature.
 //
@@ -33,26 +33,30 @@ function slice(startNeedle, endNeedle, what) {
 // CLIENT_BY_DOMAIN + clientFromDomain + calTrade + extractCaleres + assetToTrade + genericBodyScope
 // + extractWo, verbatim. Only function declarations and the CLIENT_BY_DOMAIN literal execute at load.
 var BLOCK = slice('var CLIENT_BY_DOMAIN = {', '// Image-based Caleres/Corrigo request', 'Pilot/generic extractor cluster');
+// extractWo also calls amazonTrade - the WORD-BOUNDARIED keyword map - for the subject-derived
+// Trade on free-text requests with no Asset Name, so the generic path needs it in scope too.
+// (It lives further down the file with the Amazon extractor; it is shared, not Amazon-only.)
+var TRADE = slice('function amazonTrade(', '  function extractAmazon(', 'shared keyword trade map');
 var exportLine = '\n;this.extractWo=extractWo;this.genericBodyScope=genericBodyScope;' +
   'this.assetToTrade=assetToTrade;this.clientFromDomain=clientFromDomain;' +
-  'this.extractCaleres=extractCaleres;';
+  'this.extractCaleres=extractCaleres;this.amazonTrade=amazonTrade;';
 var api = {};
-vm.runInNewContext(BLOCK + exportLine, api);
+vm.runInNewContext(BLOCK + '\n' + TRADE + exportLine, api);
 
-// The real email, reconstructed with the same line structure the .msg carries (description, then a
+// SANITIZED fixture, reconstructed with the same line structure the .msg carries (description, then a
 // blank line, then the NTE amount, then the signature block).
-var SENDER = 'tiff.ogle@pilottravelcenters.com';
-var SUBJECT = 'Store 305, Jamestown NM, PO 170101430655, P2 dispatch';
+var SENDER = 'robin.loe@pilottravelcenters.com';
+var SUBJECT = 'Store 399, Jamestown NM, PO 170101999001, P2 dispatch';
 var BODY = [
   'Pump sign on light pole on pump 13 and 14 staring to fall off the pole please inspect and resolve this issue.',
   '',
   'NTE 800.00',
   '',
-  'Tiffany Tolliver',
+  'Robin Loe',
   'Sr Technician, Maintenance Call Center',
-  'Tiff.Ogle@pilottravelcenters.com <mailto:Tiff.Ogle@pilottravelcenters.com>',
-  'office: (865) 474.5548 <tel:5548>',
-  '5508 Lonas Drive / Knoxville, TN 37909'
+  'Robin.Loe@pilottravelcenters.com <mailto:Robin.Loe@pilottravelcenters.com>',
+  'office: (555) 555.0140 <tel:0140>',
+  '5508 Example Drive / Knoxville, TN 37999'
 ].join('\r\n');
 
 console.log('Pilot Travel Centers / generic intake - extractWo scope-from-body fix (0.9.16 -> 0.9.17 real-label + asset block)\n');
@@ -64,13 +68,13 @@ A.eq('  Scope = body description',
   wo.scope,
   'Pump sign on light pole on pump 13 and 14 staring to fall off the pole please inspect and resolve this issue.');
 A.ok('  Scope is NOT the subject line', wo.scope.indexOf('Jamestown') === -1 && wo.scope.indexOf('dispatch') === -1, 'got ' + JSON.stringify(wo.scope));
-A.ok('  Scope excludes the NTE line + signature', wo.scope.indexOf('NTE') === -1 && wo.scope.indexOf('Tiffany') === -1, 'got ' + JSON.stringify(wo.scope));
+A.ok('  Scope excludes the NTE line + signature', wo.scope.indexOf('NTE') === -1 && wo.scope.indexOf('Robin') === -1, 'got ' + JSON.stringify(wo.scope));
 
 console.log('\n# the other fields still map correctly');
-A.eq('  Source PO # = the 12-digit PO from the subject', wo.po, '170101430655');
+A.eq('  Source PO # = the 12-digit PO from the subject', wo.po, '170101999001');
 A.eq('  Client DNE = the body NTE amount', wo.clientDne, '800.00');
 A.eq('  Priority = P2 (from the subject)', wo.priorityLevel, 'P2');
-A.eq('  Location search = PFJ 0305 (store 305)', wo.location, 'PFJ 0305');
+A.eq('  Location search = PFJ 0399 (store 399)', wo.location, 'PFJ 0399');
 A.eq('  Client = Pilot Travel Centers (by sender domain)', wo.client, 'Pilot Travel Centers');
 A.eq('  Trade = blank (let the scope-driven suggester + user pick; never a wrong confident guess)', wo.trade, '');
 
@@ -79,48 +83,48 @@ A.eq('  cuts at NTE',
   api.genericBodyScope('The sign is broken.\r\n\r\nNTE 500.00\r\nJohn Doe'),
   'The sign is broken.');
 A.eq('  cuts at a signature email',
-  api.genericBodyScope('Fix the leak under sink 3.\r\njdoe@client.com'),
+  api.genericBodyScope('Fix the leak under sink 3.\r\njdoe@example.com'),
   'Fix the leak under sink 3.');
 A.eq('  cuts at a quoted reply chain',
   api.genericBodyScope('Please replace the door closer.\r\n\r\nFrom: someone\r\nSent: yesterday\r\nold text'),
   'Please replace the door closer.');
 A.eq('  skips a lone salutation',
-  api.genericBodyScope('Hi team,\r\nThe canopy light is out.\r\njdoe@client.com'),
+  api.genericBodyScope('Hi team,\r\nThe canopy light is out.\r\njdoe@example.com'),
   'The canopy light is out.');
 A.eq('  empty body -> empty (extractWo then falls back to the subject)', api.genericBodyScope(''), '');
 
 // --- Second real format: the ASSET/LABELED Pilot email (0.9.17) ---------------------------------
-// Grounded on Mike's dropped .msg "Pilot Store: 114 ... PO 170101431647 ... P2 - Normal (24 hrs)".
+// Grounded on Mike's dropped .msg "Pilot Store: 114 ... PO 170101999002 ... P2 - Normal (24 hrs)".
 // This format carries a real "Description:" FIELD LABEL near the BOTTOM, under a routing/asset block.
 // The intro line "Need service for per description below." is a DECOY - a loose /Description/ match
 // latched onto it and produced the boilerplate block instead of the request. The scope must be the
 // real Description value, with the Asset Information block kept under it.
-var SENDER2 = 'bradley.crockett@pilottravelcenters.com';
-var SUBJECT2 = 'Pilot Store: 114-Travel Center Purchase Order: 170101431647 Priority: P2 - Normal (24 hrs)';
+var SENDER2 = 'sam.roe@pilottravelcenters.com';
+var SUBJECT2 = 'Pilot Store: 199-Travel Center Purchase Order: 170101999002 Priority: P2 - Normal (24 hrs)';
 var BODY2 = [
   'Hello Broadway National Group,',
   'Need service for per description below.',
   '**Please respond with an ETA on the Purchase Order**',
   'Priority: P2 - Normal (24 hrs)',
   'Created: 8/14/2026',
-  'PO: 170101431647',
+  'PO: 170101999002',
   'NTE:$500.00',
   'Store Information:',
-  'PFJ#: 114 Pilot',
-  '2449 Genesis Road',
-  'Crossville, Tennessee 38571',
-  '(931) 450-3018',
+  'PFJ#: 199 Pilot',
+  '2449 Example Road',
+  'Crossville, Tennessee 38599',
+  '(555) 555-0141',
   'Asset Information:',
   'Asset Name: DRYER',
   'Model: MLG26PRBWW1',
-  'Serial#: M94402946',
+  'Serial#: M90000001',
   'Parts Warranty End Date: 5/27/2026',
   'Labor Warranty End Date: 5/27/2026',
   'Description:',
   'Left dryer needs new drum and belt strip. When running the lip of the drum came off in metal shavings.',
   'Dispatcher',
-  'Bradley Crockett',
-  'bradley.crockett@pilottravelcenters.com'
+  'Sam Roe',
+  'sam.roe@pilottravelcenters.com'
 ].join('\r\n');
 
 console.log('\n# the asset/labeled Pilot format - scope from the REAL "Description:" label, not the decoy');
@@ -128,17 +132,60 @@ var wo2 = api.extractWo(SUBJECT2, BODY2, SENDER2);
 A.eq('  Scope = the real Description value + the Asset Information block',
   wo2.scope,
   'Left dryer needs new drum and belt strip. When running the lip of the drum came off in metal shavings.\n\n' +
-  'Asset Information:\nAsset Name: DRYER\nModel: MLG26PRBWW1\nSerial#: M94402946\n' +
+  'Asset Information:\nAsset Name: DRYER\nModel: MLG26PRBWW1\nSerial#: M90000001\n' +
   'Parts Warranty End Date: 5/27/2026\nLabor Warranty End Date: 5/27/2026');
 A.ok('  Scope does NOT start with the decoy "below." block', wo2.scope.indexOf('below.') === -1 && wo2.scope.indexOf('respond with an ETA') === -1, 'got ' + JSON.stringify(wo2.scope));
 A.ok('  Scope excludes the routing block (Priority/PO/NTE/Store)', wo2.scope.indexOf('NTE') === -1 && wo2.scope.indexOf('Store Information') === -1 && wo2.scope.indexOf('PO: 1701') === -1, 'got ' + JSON.stringify(wo2.scope));
-A.ok('  Scope excludes the Dispatcher/signature trailer', wo2.scope.indexOf('Dispatcher') === -1 && wo2.scope.indexOf('Bradley') === -1, 'got ' + JSON.stringify(wo2.scope));
-A.eq('  Source PO # = 170101431647', wo2.po, '170101431647');
+A.ok('  Scope excludes the Dispatcher/signature trailer', wo2.scope.indexOf('Dispatcher') === -1 && wo2.scope.indexOf('Sam') === -1, 'got ' + JSON.stringify(wo2.scope));
+A.eq('  Source PO # = 170101999002', wo2.po, '170101999002');
 A.eq('  Client DNE = 500.00 (body NTE)', wo2.clientDne, '500.00');
 A.eq('  Priority = P2', wo2.priorityLevel, 'P2');
-A.eq('  Location = PFJ 0114', wo2.location, 'PFJ 0114');
+A.eq('  Location = PFJ 0199', wo2.location, 'PFJ 0199');
 A.eq('  Asset Name = DRYER', wo2.assetName, 'DRYER');
 A.eq('  Trade = Appliances (DRYER -> Appliances auto-trade)', wo2.trade, 'Appliances');
+
+// --- Real PFJ layout (0.9.29): the "Asset Information:" label is TAB-JOINED to the store phone line
+// in the Store Information block ("(803) 868-6034\t Asset Information:"), NOT on its own line as the
+// BODY2 fixture above assumed. A pure line-start anchor dropped the whole asset block on every real
+// Pilot appliance WO. Grounded on the dropped .msg for PFJ 4581 (washer/dryer combo).
+var SENDER2b = 'tonia.roe@pilottravelcenters.com';
+var SUBJECT2b = 'Store: 4599-Travel Center Exampletown, South Carolina PO: 170101999003  Priority: P2 - Normal (24 hrs)';
+var BODY2b = [
+  'Store: 4599-Travel Center Exampletown, South Carolina PO: 170101999003  Priority: P2 - Normal (24 hrs)',
+  '',
+  'Washer and dryer combo is out of order',
+  '',
+  '**Please respond with an ETA on the Purchase Order**',
+  'Priority: P2 - Normal (24 hrs)\t Created: 9/1/2026\t ',
+  'PO: 170101999003\t NTE:$800.00\t ',
+  'Store Information:',
+  'PFJ#: 4599 Pilot',
+  '1340 Example Hwy',
+  'Exampletown, South Carolina 29099',
+  '(555) 555-0134\t Asset Information:',            // <- phone and label share one line, tab-separated
+  'Asset Name: WASHER DRYER COMBO',
+  'Model: STENYASP176TW01',
+  'Serial#: 2103056937',
+  'Parts Warranty End Date: 4/13/2024',
+  'Labor Warranty End Date: \t',
+  'Description:',
+  'Washer and dryer combo is out of order\t ',
+  'Dispatcher',
+  'Tonia Roe',
+  'tonia.roe@pilottravelcenters.com'
+].join('\r\n');
+
+console.log('\n# real PFJ layout: Asset Information block is kept even when tab-joined to the phone line');
+var wo2b = api.extractWo(SUBJECT2b, BODY2b, SENDER2b);
+A.eq('  Scope = the Description value + the tab-joined Asset Information block',
+  wo2b.scope,
+  'Washer and dryer combo is out of order\n\n' +
+  'Asset Information:\nAsset Name: WASHER DRYER COMBO\nModel: STENYASP176TW01\nSerial#: 2103056937\n' +
+  'Parts Warranty End Date: 4/13/2024\nLabor Warranty End Date:');
+A.ok('  Asset Information block was NOT dropped', wo2b.scope.indexOf('Asset Information:') !== -1, 'got ' + JSON.stringify(wo2b.scope));
+A.ok('  the store phone did NOT leak into the scope', wo2b.scope.indexOf('555-0134') === -1, 'got ' + JSON.stringify(wo2b.scope));
+A.eq('  Trade = Appliances (WASHER DRYER COMBO)', wo2b.trade, 'Appliances');
+A.eq('  Location = PFJ 4599', wo2b.location, 'PFJ 4599');
 
 console.log('\n# assetToTrade Appliances mapping + anti-collision guards');
 A.eq('  DRYER -> Appliances', api.assetToTrade('DRYER'), 'Appliances');
@@ -150,6 +197,72 @@ A.eq('  Walk-in Freezer stays HVAC (not Appliances)', api.assetToTrade('Walk-in 
 A.eq('  Reach-in Cooler stays HVAC (not Appliances)', api.assetToTrade('Reach-in Cooler'), 'HVAC');
 A.eq('  Medium Range LSI fixture stays Lighting (bare "range" not an appliance)', api.assetToTrade('Medium Range LSI V-locity fixture'), 'Lighting');
 
+// --- Third real format: the free-text BID REQUEST (0.9.27) --------------------------------------
+// Grounded on Mike's dropped .msg "<store#> store Painting" from a Pilot capital-projects manager -
+// no PO, no NTE, no priority, no Description: label, no Asset Name. Three things broke on it:
+//   1. Location was BLANK. The store number LEADS the word ("258 store Painting"); the label-first
+//      pattern only matched "Store 399, ...". The correct value is the Umbrava locationNumber
+//      "PFJ 0258" (live-verified: store 258 = 2966 Lee Highway South, Troutville VA).
+//   2. Trade was BLANK. With no Asset Name nothing fed assetToTrade, though the subject says
+//      "Painting" - a real Umbrava system trade, and the one the coordinator picked on W-392889.
+//   3. Scope led with the bare-name salutation "Ronny/Mike," and trailed into the Outlook
+//      signature table (name + job title), because neither is a greeting word or an email address.
+// Sanitized: store 299, a fictional requester and address; the LINE STRUCTURE is the real one -
+// blank lines between every content line, then a tab-only row, then TAB-separated signature cells.
+var SENDER3 = 'alex.roe@pilottravelcenters.com';
+var SUBJECT3 = '299 store Painting';
+var BODY3 = [
+  'Ronny/Mike,',
+  '',
+  'See attached store.  I need to get a quote to paint this location.  Would you like to submit a bid?',
+  '',
+  ' ',
+  '',
+  '2999 Example Highway South',
+  '',
+  'Exampleville, Virginia 24199',
+  '',
+  'United States',
+  '',
+  ' ',
+  '',
+  '\t',
+  'Alex Roe\t\t',
+  'Manager, Maintenance Capital Projects\t',
+  'Alex.Roe@pilottravelcenters.com <mailto:Alex.Roe@pilottravelcenters.com> \t',
+  'office: (555) 555-0173 <tel:0173> \t'
+].join('\r\n');
+
+console.log('\n# the free-text BID REQUEST format (no PO / NTE / priority / label / asset)');
+var wo3 = api.extractWo(SUBJECT3, BODY3, SENDER3);
+A.eq('  Location = PFJ 0299 (store number LEADS the word "store")', wo3.location, 'PFJ 0299');
+A.eq('  Trade = Painting (from the subject, no Asset Name in the email)', wo3.trade, 'Painting');
+A.eq('  Scope = the request + the site address, no salutation, no signature',
+  wo3.scope,
+  'See attached store. I need to get a quote to paint this location. Would you like to submit a bid? ' +
+  '2999 Example Highway South Exampleville, Virginia 24199 United States');
+A.ok('  Scope drops the bare-name salutation', wo3.scope.indexOf('Ronny') === -1, 'got ' + JSON.stringify(wo3.scope));
+A.ok('  Scope stops at the Outlook signature table', wo3.scope.indexOf('Alex Roe') === -1 && wo3.scope.indexOf('Capital Projects') === -1, 'got ' + JSON.stringify(wo3.scope));
+A.eq('  Client = Pilot Travel Centers (by sender domain)', wo3.client, 'Pilot Travel Centers');
+A.eq('  Source PO # stays blank (none in the email)', wo3.po, '');
+A.eq('  Client DNE stays blank (no NTE - the coordinator sets it)', wo3.clientDne, '');
+A.eq('  Priority stays blank (none in the email)', wo3.priorityLevel, '');
+
+console.log('\n# the new scope/store/trade rules do not fire where they should not');
+A.eq('  a real one-line request is NOT mistaken for a name salutation',
+  api.genericBodyScope('Replace the broken sign,'),
+  'Replace the broken sign,');
+// The name-salutation skip sits BELOW the sign-off break on purpose: "Thanks," fits the same
+// name-comma shape, and skipping it would let the signature under it become the scope.
+A.eq('  a sign-off-only body still yields nothing, not the signature under it',
+  api.genericBodyScope('Thanks,\nJane Doe\noffice: 555-0100\njane@example.com'), '');
+A.eq('  a tab BEFORE any content does not truncate the scope',
+  api.genericBodyScope('\t\r\nThe canopy light is out.\r\njdoe@example.com'),
+  'The canopy light is out.');
+A.eq('  "Pilot Store: 199-Travel Center" still reads 199, not a number in front of it', wo2.location, 'PFJ 0199');
+A.eq('  subject Trade never overrides an Asset Name trade', wo2.trade, 'Appliances');
+A.eq('  subject Trade stays BLANK when the subject names no trade', wo.trade, '');
+
 console.log('\n# regression guard: the subject stays the LAST resort in extractWo source');
 A.ok('  genericBodyScope is tried before the subject fallback',
   full.indexOf("out.scope = genericBodyScope(body)") < full.indexOf("out.scope = subject.replace(/purchase order"),
@@ -160,27 +273,27 @@ A.ok('  image-only path still keeps the subject fallback',
 // ---- Caleres priority comes ENTIRELY from the SUBJECT word, not the PDF ------
 // Ground truth: Mike, 2026-08-17. Caleres subjects use words (never P-codes): EMERGENCY -> Priority 1,
 // URGENT -> Priority 2, anything else -> Priority 3 (Normal). The EMCOR/Corrigo PDF P-tier is IGNORED -
-// the real WO 1135344-00000006 arrived subject "...EMERGENCY" while its PDF says "P3 IMPORTANT", so
+// the real WO 1199001-00000009 arrived subject "...EMERGENCY" while its PDF says "P3 IMPORTANT", so
 // the WO is Priority 1, not the Priority 2 the PDF tier would give.
 console.log('\n# Caleres priority: SUBJECT word only (EMERGENCY/URGENT else Normal), PDF P-tier ignored');
-var CAL_PDF = 'Caleres/62336/FF - 1633 W BETHANY HOME ROAD DUE BY 8/19/2026 4:00 PM ' +
-  'P3 IMPORTANT - 1 DAY ETA, 3 DAY COMP WO# 1135344-00000006 NOT TO EXCEED $650.00 ' +
+var CAL_PDF = 'Caleres/69999/FF - 1633 W EXAMPLE ROAD DUE BY 8/19/2026 4:00 PM ' +
+  'P3 IMPORTANT - 1 DAY ETA, 3 DAY COMP WO# 1199001-00000009 NOT TO EXCEED $650.00 ' +
   'ON DEMAND WORK Doors - General Glass Doors - Exterior Back emergency exit glass on door cracked. ' +
   'ASSIGNMENT Assigned To Caleres Store Maintenance';
-var calEmerg = api.extractCaleres(CAL_PDF, 'FF62336 WO# 1135344-00000006 EMERGENCY');
+var calEmerg = api.extractCaleres(CAL_PDF, 'FF69999 WO# 1199001-00000009 EMERGENCY');
 A.eq('  subject EMERGENCY -> Priority 1 (PDF P3 IMPORTANT ignored)', calEmerg.priorityTarget, 'Priority 1');
 A.eq('  Client DNE still read from the PDF', calEmerg.dne, '650.00');
-A.eq('  Source WO # still read from the PDF', calEmerg.sourceNum, '1135344-00000006');
+A.eq('  Source WO # still read from the PDF', calEmerg.sourceNum, '1199001-00000009');
 
-var calUrgent = api.extractCaleres(CAL_PDF, 'FF62336 WO# 1135344-00000006 URGENT');
+var calUrgent = api.extractCaleres(CAL_PDF, 'FF69999 WO# 1199001-00000009 URGENT');
 A.eq('  subject URGENT -> Priority 2', calUrgent.priorityTarget, 'Priority 2');
 
 // No EMERGENCY/URGENT in the subject: fall back to Priority 3 (Normal) - NOT the PDF's P3-IMPORTANT
 // tier (which happens to also be 3 here, so use a subject the PDF would have mapped to P2 to prove
 // the PDF is truly ignored). "IMPORTANT" as a bare subject word is NOT urgent/emergency -> Normal.
-var calImportant = api.extractCaleres(CAL_PDF, 'FF62336 WO# 1135344-00000006 IMPORTANT');
+var calImportant = api.extractCaleres(CAL_PDF, 'FF69999 WO# 1199001-00000009 IMPORTANT');
 A.eq('  subject IMPORTANT (not urgent/emergency) -> Priority 3 Normal', calImportant.priorityTarget, 'Priority 3');
-var calNoWord = api.extractCaleres(CAL_PDF, 'FF62336 WO# 1135344-00000006');
+var calNoWord = api.extractCaleres(CAL_PDF, 'FF69999 WO# 1199001-00000009');
 A.eq('  no priority word in subject -> Priority 3 Normal (PDF tier ignored)', calNoWord.priorityTarget, 'Priority 3');
 
 A.finish();

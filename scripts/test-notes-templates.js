@@ -61,7 +61,7 @@ A.ok('completed + new-work + approvals are signed', TEMPLATES[1].items.concat(TE
 
 // ---- verbatim spot-checks ----------------------------------------------------------------
 function byLabel(re) { return allItems(TEMPLATES).find(function (t) { return re.test(t.label); }); }
-A.ok('reschedule template keeps the blank', /rescheduled for ______ ./.test(byLabel(/reschedule/).body));
+A.ok('reschedule template keeps the blank', /rescheduled for ______\./.test(byLabel(/reschedule/).body));
 A.ok('completed template mentions adjusting the NTE', /adjust the NTE accordingly/.test(byLabel(/Completed/).body));
 A.ok('too-far template mentions round-trip travel', /round-trip travel/.test(byLabel(/cost-effective/).body));
 A.ok('approval back-on-schedule template thanks for the approval + keeps the date blank', /Thank you for the approval, this is back on schedule for ______\./.test(byLabel(/back on schedule/).body));
@@ -104,8 +104,8 @@ A.eq('fmtDay -> weekday + M/D', fmtDay(2026, 8, 21), 'Friday 8/21');
 A.eq('fmtWeekOf -> that week\'s Monday, M/D', fmtWeekOf(2026, 8, 21), '8/17');
 A.eq('fmtWeekOf snaps a Monday to itself', fmtWeekOf(2026, 8, 17), '8/17');
 A.eq('fmtWeekOf snaps a Sunday back to its Monday', fmtWeekOf(2026, 8, 23), '8/17');
-A.ok('applyDate fills the reschedule blank', /rescheduled for Friday 8\/21 \./.test(applyDate(byLabel(/reschedule/).body, 'day', 2026, 8, 21)));
-A.ok('applyDate fills the week-of blank', /week of 8\/17 ,/.test(applyDate(byLabel(/week of/).body, 'weekOf', 2026, 8, 21)));
+A.ok('applyDate fills the reschedule blank', /rescheduled for Friday 8\/21\./.test(applyDate(byLabel(/reschedule/).body, 'day', 2026, 8, 21)));
+A.ok('applyDate fills the week-of blank', /week of 8\/17,/.test(applyDate(byLabel(/week of/).body, 'weekOf', 2026, 8, 21)));
 A.eq('applyDate leaves a blank-less body untouched', applyDate('no blank here', 'day', 2026, 8, 21), 'no blank here');
 
 // ---- vendor "spoke with" tag -------------------------------------------------------------

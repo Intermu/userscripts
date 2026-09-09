@@ -8,7 +8,7 @@
 //   the note read returned an empty array unless the coordinator had already opened the
 //   Notes tab and run a Deep Scan by hand. Both questions the popup answers are answered
 //   from the notes:
-//     - ecdHasEtaSignal() - "is a completion date already promised?" -> always false,
+//     - the signal suppressor (removed in 1.81.1) - "is a completion date already promised?" -> always false,
 //       so the popup nagged past a real ETA;
 //     - proposeECD()      - "what date should we propose?"           -> no noted date,
 //       so it defaulted to "the 2nd upcoming Friday" and burned the once-per-WO guard.
@@ -23,7 +23,7 @@
 //   4. ECD_NOTE_WORDS - completion-date phrasing ("ECD 8/20", "complete by 8/20") that the
 //      arrival-shaped CFG.ETA_WORDS never matched. Used ONLY here; the watchdog is untouched.
 //
-// Drives the REAL shipped bytes: four slices of bwn-suite-core.user.js, concatenated and run
+// Drives the REAL shipped bytes: five slices of bwn-suite-core.user.js, concatenated and run
 // against stubs. Multiple slices (the existing harnesses take one) because the engine's note
 // cache, the date parser, the ECD proposer and the auto-pop gate sit far apart in the file;
 // each slice is start/end pinned and non-unique markers throw.
@@ -74,7 +74,14 @@ var S_POP = slice(coreFull,
   '    var ecdAutoShownFor = null;',
   '    // ---- Status-change preflight', 'ECD auto-pop gate');
 
-var SOURCE = [S_WARM, S_PARSE, S_ECD, S_POP].join('\n');
+// The write echo + dueStatus, which decides `state.due` - the input maybeAutoECD's
+// missing-or-overdue gate turns on. Sliced too because the ECD write is an API patch that
+// the page never re-renders from (Core 1.81.8).
+var S_DUE = slice(coreFull,
+  '    // ---- ECD write echo (the DOM does not re-render after our patch)',
+  '    function staleness(notes) {', 'ECD write echo + dueStatus');
+
+var SOURCE = [S_WARM, S_PARSE, S_ECD, S_POP, S_DUE].join('\n');
 
 // ---- Stubs ---------------------------------------------------------------------------
 // Everything the four slices reach for that lives elsewhere in the module. Deliberately
@@ -89,6 +96,10 @@ var PRELUDE = [
   'function parseNoteDate(s) { var d = s ? new Date(s) : null; return (d && !isNaN(+d)) ? +d : null; }',
   'function parseUSDate(s) { var m = /^(\\d{1,2})\\/(\\d{1,2})\\/(\\d{4})/.exec(s || ""); return m ? +new Date(+m[3], +m[1] - 1, +m[2]) : null; }',
   'function inputVal() { return ""; }',
+  // Umbrava moved the WO form fields onto name="<api.field.path>" (2026-09-03); ecdFieldInput
+  // now goes through these, so the picker presence flag drives woFieldInput, not querySelector.
+  'function woFieldInput(n) { return H.ecdField ? { tagName: "INPUT", value: H.ecdValue } : null; }',
+  'function woFieldVal(n) { var e = woFieldInput(n); return e ? (e.value || "") : ""; }',
   'function onWO() { return true; }',
   'function getNotes() { lastNotesSrc = H.notesSrc; return H.notes; }',
   'function busNotesGet() { return H.busNotes; }',
@@ -97,11 +108,14 @@ var PRELUDE = [
   'function refresh() { H.refreshes++; }',
   'function bwnNotesApi(n) { return H.apiCall(n); }',
   'function ecdHelperOpen(state) { H.opened.push(state); }',
-  'var BWN = { ssGetJSON: function () { return H.trips; } };'
+  'function daysUntil(ts) { return Math.ceil((ts - Date.now()) / 86400000); }',
+  // Key-aware now: the auto-pop gate reads bwn:trips, the write echo reads bwn:ecdset.
+  'var BWN = { ssGetJSON: function (k) { return /^bwn:ecdset:/.test(String(k)) ? H.ecdSet : H.trips; } };',
+  'var sessionStorage = { removeItem: function (k) { H.removed.push(k); H.ecdSet = null; } };'
 ].join('\n');
 
 var EPILOGUE = 'H.api = { fetchNotesApi: fetchNotesApi, notesReadState: notesReadState, notesOnRead: notesOnRead,' +
-  ' latestNotedEta: latestNotedEta, proposeECD: proposeECD, ecdHasEtaSignal: ecdHasEtaSignal,' +
+  ' latestNotedEta: latestNotedEta, proposeECD: proposeECD, dueStatus: dueStatus, ecdEcho: ecdEcho,' +
   ' maybeAutoECD: maybeAutoECD, getShownFor: function () { return ecdAutoShownFor; },' +
   ' getDeepNotes: function () { return deepNotes; } };';
 
@@ -130,7 +144,10 @@ function build(opts) {
     notesSrc: o.notesSrc || 'view',
     busNotes: o.busNotes || null,
     trips: o.trips || null,
-    published: [], opened: [], refreshes: 0, apiCalls: [],
+    ecdField: o.ecdField !== false,
+    ecdValue: o.ecdValue || '',
+    ecdSet: o.ecdSet || null,      // the bwn:ecdset:<wo> write echo, as sessionStorage would hold it
+    published: [], opened: [], refreshes: 0, apiCalls: [], removed: [],
     apiCall: function (n) {
       H.apiCalls.push(n);
       if (o.api === 'never') return new Promise(function () { });          // stays pending
@@ -146,10 +163,7 @@ function build(opts) {
     document: {
       // maybeAutoECD bails unless the Complete-By picker is mounted (hydration guard), so
       // the auto-pop probes need it present.
-      querySelector: function (sel) {
-        if (o.ecdField !== false && /expected-completion-date-picker/.test(sel || '')) return { tagName: 'INPUT' };
-        return null;
-      },
+      querySelector: function () { return null; },   // the ECD field is reached via woFieldInput now
       querySelectorAll: function () { return []; },
       getElementById: function () { return null; }
     }
@@ -232,10 +246,30 @@ var t5 = Promise.resolve().then(function () {
   A.eq('with the read settled and no date on file, it pops', p2.H.opened.length, 1);
   A.eq('and burns the guard so it asks once', p2.api.getShownFor(), '283834');
 
-  // The read landed and the notes DO carry a completion date: suppressed, no nag.
+  // ---- The signals are the REASON to pop, not a reason to stay silent (1.81.1) --------
+  // Until 1.81.1 each of the three below returned early out of maybeAutoECD. That left the
+  // auto-pop able to fire ONLY on a WO it had nothing to propose from, which is the exact
+  // shape of "the ECD popup stopped appearing": the WOs a coordinator actually meets - a
+  // scheduled tech, a PO date, a noted ETA - were the silent ones.
   var p3 = build({ notes: [note('ECD 8/20 per vendor', '2026-08-04T09:00:00Z', 5)], notesSrc: 'api' });
   p3.api.maybeAutoECD(state({ pos: [{ done: false, amount: 500, schedDate: '' }] }));
-  A.eq('a completion date in the notes suppresses the popup', p3.H.opened.length, 0);
+  A.eq('a completion date in the notes POPS (it is the proposal, not a silencer)', p3.H.opened.length, 1);
+  A.eq('and the date proposed is the noted one, not the Friday fallback',
+    ymd(+p3.api.proposeECD(state()).date), '2026-8-20');
+
+  var p4 = build({ notes: [], notesSrc: 'api' });
+  p4.api.maybeAutoECD(state({ pos: [{ done: false, amount: 500, schedDate: '08/20/2026' }] }));
+  A.eq('a PO line with a scheduled date pops', p4.H.opened.length, 1);
+
+  var p5 = build({ notes: [], notesSrc: 'api', trips: { latestScheduled: +new RealDate(2026, 7, 20) } });
+  p5.api.maybeAutoECD(state({ pos: [{ done: false, amount: 500, schedDate: '' }] }));
+  A.eq('a cached scheduled trip pops', p5.H.opened.length, 1);
+
+  // The guards that are NOT about signals must still hold - this fix removed one early
+  // return, not the gate. A WO whose ECD is set and in the future is simply correct.
+  var p6 = build({ notes: [note('ECD 8/20', '2026-08-04T09:00:00Z', 5)], notesSrc: 'api' });
+  p6.api.maybeAutoECD(state({ due: { kind: 'ok', raw: '12/31/2026' }, pos: [{ done: false, amount: 500, schedDate: '08/20/2026' }] }));
+  A.eq('a healthy future ECD still never pops, signal or not', p6.H.opened.length, 0);
 });
 
 // ---- 3. What the notes are read FOR ---------------------------------------------------
@@ -324,6 +358,28 @@ var t7 = Promise.all([t2, t3, t4, t5, t6]).then(function () {
   });
   A.ok('M3 without ECD_NOTE_WORDS an "ECD 8/20" note is invisible', ymd(+m3.api.proposeECD(state()).date) === '2026-8-14', ymd(+m3.api.proposeECD(state()).date));
 
+  // M5: put the pre-1.81.1 signal suppressor back, inline and verbatim in behaviour. This is
+  // the control for the fix itself: with it restored, every one of p3/p4/p5 goes silent again,
+  // which is the reported symptom. Anchored on the line the suppressor used to sit under, so
+  // a future edit that moves that gate reddens here rather than passing on a stale anchor.
+  var OLD_SUPPRESSOR =
+    '      if (state.pos.some(function (p) { return !p.done && p.amount > 0 && p.schedDate; })) return;\n' +
+    '      if (latestNotedEta(state)) return;\n' +
+    '      try { var _tb = BWN.ssGetJSON(\'bwn:trips:\' + currentWOId(), null); if (_tb && _tb.latestScheduled && _tb.latestScheduled >= ecdToday()) return; } catch (e) { }\n';
+  var ANCHOR = '      if (!state.due && !hasActivePO) return;';
+  var m5src = mutate(SOURCE, ANCHOR, ANCHOR + '\n' + OLD_SUPPRESSOR);
+  [
+    ['a noted completion date', { notes: [note('ECD 8/20 per vendor', '2026-08-04T09:00:00Z', 5)], notesSrc: 'api' }, { done: false, amount: 500, schedDate: '' }],
+    ['a PO scheduled date', { notes: [], notesSrc: 'api' }, { done: false, amount: 500, schedDate: '08/20/2026' }]
+  ].forEach(function (c) {
+    var m = build({ notes: c[1].notes, notesSrc: c[1].notesSrc, src: m5src });
+    m.api.maybeAutoECD(state({ pos: [c[2]] }));
+    A.ok('M5 the old suppressor silences the popup on ' + c[0], m.H.opened.length === 0, 'opened=' + m.H.opened.length);
+  });
+  var m5t = build({ notes: [], notesSrc: 'api', trips: { latestScheduled: +new RealDate(2026, 7, 20) }, src: m5src });
+  m5t.api.maybeAutoECD(state({ pos: [{ done: false, amount: 500, schedDate: '' }] }));
+  A.ok('M5 ...and on a cached scheduled trip', m5t.H.opened.length === 0, 'opened=' + m5t.H.opened.length);
+
   // M4: drop the nav guard - WO A's history gets hung off WO B.
   var m4 = build({
     apiNotes: [note('eta 8/20', '2026-08-01T09:00:00Z', 7)],
@@ -338,8 +394,75 @@ var t7 = Promise.all([t2, t3, t4, t5, t6]).then(function () {
   });
 });
 
+// ---- 6. The write echo: the page does not re-render from our patch -------------------
+// Reported live 2026-09-04: the ECD had been set, and clicking through to /notes on the SAME
+// WO re-popped the prompt - "it has been updated but needs a refresh to reflect the data".
+// Two causes, both closed here. (a) The write is an API patch and Umbrava's form does not
+// re-render from it, so dueStatus kept reading the PRE-write date and every consumer read the
+// WO as overdue. (b) The once-per-WO guard was re-armed on ANY path change, so a tab hop
+// within one WO re-armed it. The echo is trusted only while the field still shows `before`.
+var t7b = t7.then(function () {
+  console.log('\nthe write echo covers the page until it catches up - real source');
+  var C = { dueWarnDays: 3 };
+  // Built the way waSetEcd stores them: local 11:59 PM, serialized ISO. TZ-independent.
+  var beforeIso = new RealDate(2026, 6, 15, 23, 59, 0).toISOString();   // 07/15/2026 - overdue at the frozen now
+  var afterIso = new RealDate(2026, 7, 20, 23, 59, 0).toISOString();    // 08/20/2026 - 15d out
+  var echo = { v: 1, ts: NOW, before: beforeIso, after: afterIso };
+  var DOM_BEFORE = '07/15/2026, 11:59 PM';
+
+  var noEcho = build({ ecdValue: DOM_BEFORE }).api.dueStatus(C);
+  A.eq('without the echo the stale field still reads overdue (the reported symptom)', noEcho.kind, 'bad');
+
+  var b6 = build({ ecdValue: DOM_BEFORE, ecdSet: echo });
+  var d6 = b6.api.dueStatus(C);
+  A.eq('the echoed date is used while the field still shows the pre-write value', d6.kind, 'ok');
+  A.eq('...and it is the date that is reported', d6.raw, '08/20/2026');
+  A.eq('nothing is discarded while the echo still matches', b6.H.removed, []);
+
+  // The field moved on: a reload (it now shows the written date) or an edit in Umbrava's own
+  // UI. Either way the page is authoritative again and the echo must be dropped, not believed.
+  var b7 = build({ ecdValue: '09/01/2026, 11:59 PM', ecdSet: echo });
+  var d7 = b7.api.dueStatus(C);
+  A.eq('once the field moves on, the page wins', d7.raw, '09/01/2026, 11:59 PM');
+  A.eq('...and the echo is discarded, not left to shadow it', b7.H.removed, ['bwn:ecdset:283834']);
+  A.eq('...permanently: a second read has nothing to fall back on', b7.api.dueStatus(C).raw, '09/01/2026, 11:59 PM');
+
+  // First ECD on a WO that had none: `before` is null and the field is empty.
+  var b8 = build({ ecdValue: '', ecdSet: { v: 1, ts: NOW, before: null, after: afterIso } });
+  A.eq('a first-ever ECD echoes over an empty field', b8.api.dueStatus(C).raw, '08/20/2026');
+  var b9 = build({ ecdValue: DOM_BEFORE, ecdSet: { v: 1, ts: NOW, before: null, after: afterIso } });
+  A.eq('...but an empty-field echo does not override a field that holds a date', b9.api.dueStatus(C).raw, '07/15/2026, 11:59 PM');
+
+  // A deliberately backdated ECD stays overdue - the echo reports the record, it does not
+  // launder it. The auto-pop is held off a second time by its own once-per-WO guard, which
+  // is now keyed on the WO number and no longer cleared by a tab hop (see the structural
+  // check below).
+  var b10 = build({ notesSrc: 'api', ecdValue: DOM_BEFORE, ecdSet: { v: 1, ts: NOW, before: beforeIso, after: new RealDate(2026, 7, 1, 23, 59, 0).toISOString() } });
+  var d10 = b10.api.dueStatus(C);
+  A.eq('a backdated ECD is still reported overdue', d10.kind, 'bad');
+  A.eq('...as the date that was actually written', d10.raw, '08/01/2026');
+  b10.api.maybeAutoECD(state({ due: d10, pos: [{ done: false, amount: 500, schedDate: '' }] }));
+  b10.api.maybeAutoECD(state({ due: d10, pos: [{ done: false, amount: 500, schedDate: '' }] }));
+  A.eq('and the popup fires once per WO, not once per tab hop', b10.H.opened.length, 1);
+
+  // M6: drop the substitution - the stale field wins and the fixed WO reads overdue again.
+  var m6 = build({
+    ecdValue: DOM_BEFORE, ecdSet: echo,
+    src: mutate(SOURCE, '      if (echo) v = ecdFmtUS(new Date(echo));', '      ')
+  });
+  A.eq('M6 without the substitution the just-written ECD reads overdue', m6.api.dueStatus(C).kind, 'bad');
+
+  // M7: trust the echo unconditionally - it then shadows a date the coordinator set in
+  // Umbrava's own UI, which is worse than the bug being fixed.
+  var m7 = build({
+    ecdValue: '09/01/2026, 11:59 PM', ecdSet: echo,
+    src: mutate(SOURCE, '      if (domTs !== beforeTs) {', '      if (false) {')
+  });
+  A.eq('M7 an unconditional echo shadows a newer date on the page', m7.api.dueStatus(C).raw, '08/20/2026');
+});
+
 // ---- Structural: the call sites the slices cannot see ---------------------------------
-var t8 = t7.then(function () {
+var t8 = t7b.then(function () {
   console.log('\nstructural (call sites outside the sliced regions)');
   A.ok('the engine warms the notes each refresh', coreFull.indexOf('fetchNotesApi(woIdent);') !== -1, 'refresh() call site missing');
   A.ok('the manual "Set ECD..." path warms them too', coreFull.indexOf('fetchNotesApi(currentWOId());') !== -1, 'ecdHelperOpen call site missing');
@@ -347,48 +470,76 @@ var t8 = t7.then(function () {
   A.ok('...but never over an edit the coordinator made', coreFull.indexOf('if (touched || document.getElementById(\'bwn-ecd-overlay\') !== ov') !== -1, 'touched guard missing');
   A.ok('the shared bwnNotesApi block is still the one Deep Scan uses', coreFull.indexOf('  // ===== BEGIN bwnNotesApi =====') !== -1, 'transport block missing');
 
-  // ---- The Save-button attention ring (animation review 2026-08-10) ---------------------
-  // It points at Umbrava's own Save button because the Complete-By date does not autosave, so
-  // this is a data-loss guard: the probes are about what it COSTS and whether it respects a
-  // reduced-motion user, never about removing it. It ran 1.2s x 4 = 4.8s of continuous repaint
-  // and was not covered by any reduced-motion query.
-  console.log('\nECD save-button attention ring (cost + accessibility)');
-  function pulseRuleOf(src) {
-    var i = src.indexOf("'.bwn-ecd-savepulse{animation:");
-    if (i === -1) throw new Error('the .bwn-ecd-savepulse rule is gone');
-    return src.slice(i, src.indexOf('\n', i));
-  }
-  // Total motion = one pass x iteration count, read out of the shipped rule rather than assumed.
-  function pulseMs(rule) {
-    var m = rule.match(/animation:bwnEcdPulse\s+([\d.]+)s\s+[^;]*?\s(\d+);/);
-    return m ? Math.round(parseFloat(m[1]) * 1000) * parseInt(m[2], 10) : null;
-  }
-  var pulseRule = pulseRuleOf(coreFull);
-  A.ok('one pass is 420ms', /animation:bwnEcdPulse \.42s /.test(pulseRule), pulseRule);
-  A.ok('it pulses twice - enough to catch an eye that was elsewhere, not a loop',
-    / 2;/.test(pulseRule), pulseRule);
-  A.ok('total motion is under a second (it was 4800ms)', pulseMs(pulseRule) === 840, 'got ' + pulseMs(pulseRule));
-  A.ok('the static outline stays, because that is the actual affordance',
-    pulseRule.indexOf('outline:2px solid var(--bwn-green)!important') !== -1, pulseRule);
-  A.ok('reduced motion drops the pulse',
-    coreFull.indexOf("'@media (prefers-reduced-motion:reduce){.bwn-ecd-savepulse{animation:none;}}'") !== -1,
-    'the ring animates for a user who asked for no motion');
-  A.ok('...and drops ONLY the animation, so the outline still guards the unsaved date',
-    coreFull.indexOf('{.bwn-ecd-savepulse{animation:none;}}') !== -1 &&
-    coreFull.indexOf('{.bwn-ecd-savepulse{display:none') === -1);
-  A.ok('the keyframe no longer holds a dead tail at 0 opacity',
-    coreFull.indexOf('@keyframes bwnEcdPulse{from{box-shadow:0 0 0 0 rgba(46,160,90,.75);}to{box-shadow:0 0 0 9px rgba(46,160,90,0);}}') !== -1,
-    'the 70%-to-100% hold is back');
-  A.ok('the class is still removed on a timer, so nothing outlives the edit',
-    coreFull.indexOf("el.classList.remove('bwn-ecd-savepulse');") !== -1);
+  // ---- The field moved off data-testid, and the write moved off the DOM (2026-09-03) --------
+  // Umbrava rebuilt the WO form: the header holds no inputs, the pickers lost their testids for
+  // a `name` equal to their API field path, and no button on the page reads "Save". Reading by
+  // the old testid returned nothing, which is why maybeAutoECD's `if (!ecdFieldInput()) return;`
+  // kept the popup silent no matter what the suppressor did.
+  A.ok('the ECD field is addressed by its form NAME, not the retired testid',
+    coreFull.indexOf("var ECD_FIELD = 'priority.expectedCompletionDate';") !== -1, 'ECD_FIELD is not the name');
+  A.ok('no reader anywhere still queries the retired date-picker testids',
+    coreFull.indexOf('work-order-expected-completion-date-picker') === -1 &&
+    coreFull.indexOf('work-order-first-trip-date-picker') === -1, 'a retired testid is still queried');
+  A.ok('the first-trip read moved with it', coreFull.indexOf("woFieldVal('priority.firstTripDate')") !== -1, 'first-trip read not remapped');
+  A.ok('a PO accordion cannot shadow the WO field (a PO form carries the same names)',
+    coreFull.indexOf('[data-testid^="POAccordion-"]') !== -1 &&
+    /woFieldInput[\s\S]{0,400}POAccordion/.test(coreFull), 'woFieldInput does not exclude PO rows');
+  A.ok('Apply writes through the audited API, not by typing into the page',
+    coreFull.indexOf('waEcdSubmit(apply, woNum, dt.toISOString()') !== -1, 'the Apply handler is not on waEcdSubmit');
+  A.ok('...and the DOM writer is gone with the Save button it depended on',
+    coreFull.indexOf('ecdFlagSave') === -1 && coreFull.indexOf('ecdSaveButton') === -1, 'the dead Save machinery survives');
+  A.ok('the ECD write is a whole-object priority replace (siblings blank if dropped)',
+    coreFull.indexOf('function waPriorityWriteValue(readPriority, newEcd)') !== -1, 'waPriorityWriteValue missing');
 
-  // Control: put the 4.8s version back and require the cost probe to go red. Mutating the real
-  // rule is the point - a control against a hand-written string would pass on deleted source.
-  var oldForm = pulseRule.replace('animation:bwnEcdPulse .42s cubic-bezier(.23,1,.32,1) 2;', 'animation:bwnEcdPulse 1.2s ease-out 4;');
-  if (oldForm === pulseRule) throw new Error('MUTATION TARGET ABSENT: the pulse rule did not change');
-  A.ok('control: the pre-fix 4.8s form is caught by the cost probe', pulseMs(oldForm) === 4800, 'got ' + pulseMs(oldForm));
+  // ---- The 2026-09-04 re-pop, whose two halves sit outside every slice ----------------
+  A.ok('a successful write leaves the echo dueStatus reads',
+    coreFull.indexOf("BWN.ssSetJSON('bwn:ecdset:' + wo,") !== -1, 'waSetEcd does not record the echo - the page stays stale');
+  // The guard holds the WO NUMBER it fired for, so it re-arms by itself on a WO change.
+  // Nulling it on a path change re-armed it on a TAB HOP inside one WO (/details -> /notes),
+  // which is exactly how the prompt came back on a WO whose ECD had just been set. The only
+  // `= null` left must be the declaration.
+  // The guard is cleared in exactly two places: its declaration, and on LEAVING the WO.
+  // A tab hop inside one WO must not re-arm it - that was the 1.81.8 re-pop, when any path
+  // change cleared it. But a route with no WO at all (the board, a client, a vendor) ends the
+  // visit, and coming back must ask again if the date is still missing or overdue: without
+  // that, the popup fired on a first visit and never on a return, because on a warm revisit
+  // the note read short-circuits on the cached history and its refresh - the one that carried
+  // the cold path - never happens.
+  A.eq('the auto-pop guard is cleared in exactly one place besides its declaration',
+    (coreFull.match(/ecdAutoShownFor = null/g) || []).length, 2);
+  A.ok('...its declaration', coreFull.indexOf('var ecdAutoShownFor = null;') !== -1, 'the guard declaration moved');
+  A.ok('...and the other is gated on having left the WO, not on the path changing',
+    coreFull.indexOf('if (!currentWOId()) ecdAutoShownFor = null;') !== -1,
+    'the re-arm is not gated on leaving the WO');
+  A.ok('the route handler still does that reset (it is inside the path-change block)',
+    /location\.pathname !== lastPath[\s\S]{0,1600}if \(!currentWOId\(\)\) ecdAutoShownFor = null;/.test(coreFull),
+    'the reset is not in the route-change block');
 
-  console.log('\n(auto-warm x auto-pop gate x proposal, real source, 4 mutations. Nothing here proves');
+  // ---- BWN-SHARED export/import contract ----------------------------------------------
+  // The shared block is an IIFE that hangs its helpers off BWN; every module then re-imports
+  // them (`var inputVal = BWN.inputVal;`). Defining a helper there is NOT enough to make it
+  // reachable, and neither `node --check` nor a harness that stubs the helper can tell -
+  // both were green while woFieldVal was undefined at all six of its call sites. CI's eslint
+  // caught it as no-undef. This probe is the local version of that catch.
+  ['bwn-suite-core.user.js', 'bwn-suite-ai.user.js'].forEach(function (f) {
+    var src = readLF(path.join(__dirname, '..', f));
+    // Everything before the export line is the shared block's own scope, where the helpers
+    // see each other directly (woFieldVal calls woFieldInput there). Only a call in MODULE
+    // code - after that line - needs an import.
+    var exportAt = src.indexOf('inputVal: inputVal');
+    A.ok(f + ': the BWN-SHARED export list is where it was', exportAt !== -1, 'export block moved');
+    var moduleCode = src.slice(exportAt);
+    ['woFieldInput', 'woFieldVal'].forEach(function (name) {
+      var usedBare = new RegExp('[^.\\w]' + name + '\\s*\\(').test(moduleCode);
+      if (!usedBare) return;
+      A.ok(f + ': ' + name + ' is exported on BWN',
+        src.indexOf(name + ': ' + name) !== -1, 'defined but never exported - unreachable from any module');
+      A.ok(f + ': ' + name + ' is imported into the module scope that calls it',
+        new RegExp('=\\s*BWN\\.' + name + '\\b').test(src), 'exported but never imported - no-undef at every call site');
+    });
+  });
+
+  console.log('\n(auto-warm x auto-pop gate x proposal x write echo, real source, 7 mutations. Nothing here proves');
   console.log(' the popup renders, that Umbrava answers in a real tab, or that the proposed date is');
   console.log(' the one the coordinator wanted - the live test on a WO with a noted ETA covers that.)');
   A.finish();
