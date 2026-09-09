@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         BWN CC Request (Broadway National)
 // @namespace    broadwaynational.bwn
-// @version      0.4.6
+// @version      0.4.7
 // @downloadURL  https://raw.githubusercontent.com/Intermu/userscripts/main/bwn-cc-auth.user.js
 // @updateURL    https://raw.githubusercontent.com/Intermu/userscripts/main/bwn-cc-auth.user.js
 // @description  Replaces the "CC Authorization Form" Microsoft Form with an in-page CC Request modal. Requesting a card purchase is a coordinator action (any vouched Broadway Umbrava user): fill the fields and submit; it POSTs to the broadway-internal-ops SWA proxy (x-bwn-key gated) which proves your Umbrava session token with Umbrava's own current-user API, injects your verified email as the Requester, and forwards to the HTTP-triggered Power Automate flow "CC Authorization (HTTP)". That flow starts an approval (mnajarro@, GKohlmann@, LPorzelt@) and, on approve, emails you back that the order will be placed. This script OWNS the single Credit Card entry in the shared dock tab: coordinators and leads see just "CC Request"; supervisors and above get a dropdown that also opens the Supervisor-only "Log CC Purchase" modal (provided by bwn-cc-purchase, driven over the bwn:evt bus so there is only ever one button). Opened on a work order it prefills the Tracking # and drops the client/location into the description, and defaults Supplier to whichever PO line you flipped to "Supplier" in the BWN Ops Suite. The flow's secret URL stays server-side; nothing sensitive lives in this script.
@@ -18,7 +18,7 @@
 (function () {
   'use strict';
 
-  var VER = '0.4.6';   // keep in step with @version
+  var VER = '0.4.7';   // keep in step with @version
   var FONT = "-apple-system,BlinkMacSystemFont,'Segoe UI','Helvetica Neue',Arial,sans-serif";
   var SWA_BASE = 'https://green-stone-0717dab0f.7.azurestaticapps.net';
   var PROXY_URL = SWA_BASE + '/api/cc-auth';
@@ -535,12 +535,24 @@
   // No self-drawn launcher: CC Request is reached from the dock tab only. The chooser
   // between Request and Purchase still lives in openCc().
 
+  // ---- SWA ingest key presence beacon ---------------------------------------
+  // Boolean only, never the key. GM storage is PER SCRIPT (measured 2026-09-03), so a blank key
+  // here is invisible to every sibling; Core's Ops panel reads these beacons to name the blank
+  // ones. ts is the LOAD time, never refreshed on save - Core's freshness handshake needs that.
+  var INGEST_BEACON_TS = Date.now();
+  function publishIngestPresence() {
+    try {
+      localStorage.setItem('bwn:ingest:cc-auth', JSON.stringify({ k: GM_getValue('ingest_key', '') ? 1 : 0, ts: INGEST_BEACON_TS }));
+    } catch (e) { /* best-effort */ }
+  }
+  publishIngestPresence();
+
   // ---- Tampermonkey menu --------------------------------------------------
   try {
     GM_registerMenuCommand('New CC Request', buildModal);
     GM_registerMenuCommand('Set SWA ingest key', function () {
-      var v = prompt('SWA ingest key (same value as the connector WO_INGEST_KEY - used across the BWN Ops Suite):', GM_getValue('ingest_key', '') || '');
-      if (v !== null) { GM_setValue('ingest_key', v.trim()); toast(v.trim() ? 'Ingest key saved.' : 'Ingest key cleared.'); resolveRank(); }
+      var v = prompt('SWA ingest key (same value as the connector WO_INGEST_KEY). Tampermonkey scopes this PER SCRIPT, so setting it here sets it for CC Request only - every other suite script needs its own copy:', GM_getValue('ingest_key', '') || '');
+      if (v !== null) { GM_setValue('ingest_key', v.trim()); publishIngestPresence(); toast(v.trim() ? 'Ingest key saved.' : 'Ingest key cleared.'); resolveRank(); }
     });
   } catch (e) { /* menu API absent - launcher button still works */ }
 

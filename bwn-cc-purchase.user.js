@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         BWN CC Purchase (Broadway National)
 // @namespace    broadwaynational.bwn
-// @version      0.7.6
+// @version      0.7.7
 // @downloadURL  https://raw.githubusercontent.com/Intermu/userscripts/main/bwn-cc-purchase.user.js
 // @updateURL    https://raw.githubusercontent.com/Intermu/userscripts/main/bwn-cc-purchase.user.js
 // @description  Replaces the "Log Credit Card Purchase Request" Microsoft Form with an in-page modal. Logging a purchase is a SUPERVISOR+ action (coordinators request via the CC Request form instead), and the server re-checks that rank on every submit - your Umbrava session token rides in the request body and the SWA proves it with Umbrava's own current-user API before forwarding. This script no longer draws its own floating button: the single Credit Card launcher is owned by bwn-cc-request, which shows a dropdown for supervisors+ and opens this modal over the bwn:evt bus (so there is only ever one button, never a stack). Fill the fields and submit; it POSTs to the broadway-internal-ops SWA proxy (x-bwn-key gated) which forwards to the HTTP-triggered Power Automate flow - logging a row to Credit Card Tracker.xlsx and emailing Mike, identically to the old Form. Opened on a work order, it prefills the Work Order # and drops the client/location into the description, and defaults Supplier to whichever PO line you flipped to "Supplier" in the BWN Ops Suite (falling back to the WO's vendors as suggestions). Card Used is a pick-list you maintain. An optional Receipt is uploaded (via /api/cc-receipt -> Graph) to the shared SharePoint folder and linked in the tracker. The flow's secret URL stays server-side; nothing sensitive lives in this script. Open it from the CC Request dropdown or the Tampermonkey menu.
@@ -18,7 +18,7 @@
 (function () {
   'use strict';
 
-  var VER = '0.7.6';   // keep in step with @version
+  var VER = '0.7.7';   // keep in step with @version
   var FONT = "-apple-system,BlinkMacSystemFont,'Segoe UI','Helvetica Neue',Arial,sans-serif";
   var SWA_BASE = 'https://green-stone-0717dab0f.7.azurestaticapps.net';
   var PROXY_URL = SWA_BASE + '/api/cc-purchase';
@@ -540,12 +540,24 @@
   // The menu is always available: the SERVER is the boundary and rejects a below-supervisor
   // submit with a clear ROLE_REQUIRED message. It is the fallback opener when the CC Request
   // dropdown is unavailable (that script not installed / rank unresolved).
+  // ---- SWA ingest key presence beacon ---------------------------------------
+  // Boolean only, never the key. GM storage is PER SCRIPT (measured 2026-09-03), so a blank key
+  // here is invisible to every sibling; Core's Ops panel reads these beacons to name the blank
+  // ones. ts is the LOAD time, never refreshed on save - Core's freshness handshake needs that.
+  var INGEST_BEACON_TS = Date.now();
+  function publishIngestPresence() {
+    try {
+      localStorage.setItem('bwn:ingest:cc-purchase', JSON.stringify({ k: GM_getValue('ingest_key', '') ? 1 : 0, ts: INGEST_BEACON_TS }));
+    } catch (e) { /* best-effort */ }
+  }
+  publishIngestPresence();
+
   try {
     GM_registerMenuCommand('Log a Credit Card Purchase', buildModal);
     GM_registerMenuCommand('Manage saved cards', manageCards);
     GM_registerMenuCommand('Set SWA ingest key', function () {
-      var v = prompt('SWA ingest key (same value as the connector WO_INGEST_KEY - used across the BWN Ops Suite):', GM_getValue('ingest_key', '') || '');
-      if (v !== null) { GM_setValue('ingest_key', v.trim()); toast(v.trim() ? 'Ingest key saved.' : 'Ingest key cleared.'); }
+      var v = prompt('SWA ingest key (same value as the connector WO_INGEST_KEY). Tampermonkey scopes this PER SCRIPT, so setting it here sets it for CC Purchase only - every other suite script needs its own copy:', GM_getValue('ingest_key', '') || '');
+      if (v !== null) { GM_setValue('ingest_key', v.trim()); publishIngestPresence(); toast(v.trim() ? 'Ingest key saved.' : 'Ingest key cleared.'); }
     });
   } catch (e) { /* menu API absent - the CC Request dropdown still opens this modal */ }
 

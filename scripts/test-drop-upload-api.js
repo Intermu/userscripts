@@ -242,6 +242,24 @@ function runCases(src) {
     });
   });
 
+  // ---- upload: a PER-FILE label resolver, so one drop can carry two document types
+  // The WO-intake handoff sends the request email plus its attachments in one batch; the email is
+  // a "Work Order Request" (17) but its photos are "Photo" (4). There is no update-label mutation,
+  // so each entry's label has to be right in this one bulkAdd.
+  chain = chain.then(function () {
+    var e3 = makeEnv({ replies: { InitializeJobDocument: initReply(), BulkAddWorkOrderDocuments: { bulkAddWorkOrderDocuments: { success: true, message: '', documentIds: ['id1', 'id2'] } } } });
+    var api3 = loadApi(src, e3);
+    var files = [{ name: 'request.msg', size: 100 }, { name: 'site.jpeg', size: 200 }];
+    var described = [{ desc: 'the email' }, { desc: 'a photo' }];
+    function byFile(f) { return /\.jpe?g$/i.test(f.name) ? 'Photo' : 'Work Order Request'; }
+    return api3.uploadViaApi(files, described, byFile, e3 && WO).then(function () {
+      var bulk = e3.calls.filter(function (x) { return x.op === 'BulkAddWorkOrderDocuments'; });
+      var docs = bulk[0] && bulk[0].vars && bulk[0].vars.data && bulk[0].vars.data.documents;
+      eq('a function labelName is resolved PER FILE (email 17, photo 4)', docs && [docs[0].label, docs[1].label], [17, 4]);
+      eq('still exactly one bulkAdd for the mixed batch', bulk.length, 1);
+    });
+  });
+
   // ---- upload failure modes all REJECT (so runApiUpload can fall back to the dialog)
   chain = chain.then(function () {
     var eBad = loadApi(src, makeEnv({ replies: { InitializeJobDocument: initReply(), BulkAddWorkOrderDocuments: { bulkAddWorkOrderDocuments: { success: true, documentIds: [] } }, blob: { ok: false, status: 403 } } }));
@@ -284,6 +302,10 @@ var MUTATIONS = [
     m: function (s) { return mutate(s, "if (!r.ok) throw new Error('blob PUT ' + r.status);", 'if (false) throw new Error(0);'); } },
   { what: 'the note mutation renamed',
     m: function (s) { return mutate(s, 'addEditJobNote(data: $addEditInput)', 'wrongNote(data: $addEditInput)'); } },
+  { what: 'the per-file label resolver ignored (every file back to one label)',
+    m: function (s) { return mutate(s, "(typeof labelName === 'function') ? labelName(rawFiles[i]) : labelName", 'labelName'); } },
+  { what: 'the doc-label map broken for Photo',
+    m: function (s) { return mutate(s, "'Photo': 4,", "'Photo': 998,"); } },
   { what: 'the doc-label map broken for Work Order Request',
     m: function (s) { return mutate(s, "'Work Order Request': 17,", "'Work Order Request': 999,"); } },
   { what: 'the doc upload bypasses the bwnGqlOp registry (audit lost)',

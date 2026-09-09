@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         BWN Suite - Core (Broadway National)
 // @namespace    broadwaynational.bwn
-// @version      1.81.3
+// @version      1.84.0
 // @downloadURL  https://raw.githubusercontent.com/Intermu/userscripts/main/bwn-suite-core.user.js
 // @updateURL    https://raw.githubusercontent.com/Intermu/userscripts/main/bwn-suite-core.user.js
 // @description  Runs several Umbrava helpers for BWN coordinators, in the browser with no privileged grants. Includes: PO Approval + ETA Builder; WO Assist (GP/ETA, a stall watchdog, DNE calculator, and a next-action playbook); Email Leak Guard (checks recipients against vendor names, PO amounts, and client budget references before an outbound email sends); WO List Heat (a triage overlay + My Day strip on the work-order list, with an optional same-origin Umbrava API scan for deterministic full-board coverage); and the BWN Launcher (opens the Azure Static Web App tools with the current WO's context). Modules share state through sessionStorage/localStorage. The only network calls are same-origin Umbrava GraphQL requests (app.umbrava.com/api/graphql, the app's own session): List Heat's full-board scan and WO Assist's work-order / trip / clock-in / document reads, plus ONE write - BWN Views saves the column layout through Umbrava's own putUserPreference, the same preference the column chooser writes; everything else is offline. Toggle modules in BWN_MODULES below.
@@ -3015,8 +3015,31 @@
       return { ok: false, label: 'No ETA found', detail: 'No per-PO scheduled dates, no first-trip date, and no note pairs an ETA word with a date. Use Deep Scan to cover the full note history.' };
     }
 
+    // ---- ECD write echo (the DOM does not re-render after our patch) ----------
+    // Setting the ECD is an API patch (patchWorkOrder) since Umbrava rebuilt the WO form -
+    // and the form does NOT re-render from it, so until a reload the field still reads the
+    // PRE-write date. Every consumer of state.due then reads the WO as overdue/undated: the
+    // header pill, the checklist, and the once-per-WO auto-pop, which re-fires on the very WO
+    // that was just fixed the moment its guard re-arms (a tab hop). So the write leaves an
+    // echo here and dueStatus substitutes it - trusted ONLY while the field still shows
+    // `before`. Any other value means the DOM has caught up (reload) or moved on (edited in
+    // Umbrava's own UI), and the echo is dropped rather than believed over the page.
+    // sessionStorage, so it cannot outlive the tab.
+    function ecdEcho(domRaw) {
+      var w = currentWOId(); if (!w) return null;
+      var k = 'bwn:ecdset:' + w;
+      var rec = BWN.ssGetJSON(k, null);
+      if (!rec || !rec.after) return null;
+      var domTs = parseUSDate(domRaw), beforeTs = rec.before ? parseUSDate(ecdFmtUS(new Date(rec.before))) : null;
+      if (domTs !== beforeTs) { try { sessionStorage.removeItem(k); } catch (e) { } return null; }
+      return rec.after;
+    }
     function dueStatus(C) {
       var v = woFieldVal('priority.expectedCompletionDate');
+      var echo = ecdEcho(v);
+      // Same convention either way: the day at LOCAL midnight, so an echoed date reads
+      // exactly as the field's own "MM/DD/YYYY, 11:59 PM" would once it catches up.
+      if (echo) v = ecdFmtUS(new Date(echo));
       var ts = parseUSDate(v);
       if (!ts) return null;
       var d = daysUntil(ts);
@@ -4221,6 +4244,18 @@
       }
       return null;
     }
+    // The WO tab that hosts the notes list (and therefore the Add Note button). Matched by
+    // EXACT label so a "Notes" tab is never confused with "Note Templates" or a card heading;
+    // the href form is the belt for a router link that carries no tab role. Visible only -
+    // an unmounted tab panel's link is not something a click can reach.
+    function noteTabControl() {
+      var els = document.querySelectorAll('[role="tab"], a[href*="/notes"]');
+      for (var i = 0; i < els.length; i++) {
+        if (!els[i].offsetParent) continue;
+        if (/^notes?$/i.test((els[i].textContent || '').trim())) return els[i];
+      }
+      return null;
+    }
     // Best-effort: set the Add Note composer's note-type control to `label` (e.g. "Internal").
     // Scoped to the just-opened composer. No-ops safely (the note still posts) when the control
     // isn't found. Umbrava's CURRENT note-type control is a custom autocomplete (an
@@ -4319,9 +4354,28 @@
         try { document.execCommand('insertHTML', false, html); } catch (e3) { try { ed.textContent = String(text); ed.dispatchEvent(new Event('input', { bubbles: true })); } catch (e4) { } }
       }
     }
-    function insertWONote(text, cb, noteType) {
+    // `_hopped` is internal: set on the one retry after a tab hop, so a view that still
+    // has no Add Note button falls back instead of hopping forever.
+    function insertWONote(text, cb, noteType, _hopped) {
       var btn = findAddNoteBtn();
-      if (!btn) { noteFallback(text); if (cb) cb(false); return; }
+      if (!btn) {
+        // The Add Note button only exists on the WO views that host the notes list. The ECD
+        // helper - and every other drafted note - runs on the DETAILS route, and the note
+        // steps fire from the AI Job View too, so on those views the draft used to die
+        // straight into the clipboard fallback with nothing opened. Hop to the Notes tab and
+        // retry once. Same ladder as bwn-drop-upload's triggerNoteComposer (live-proven),
+        // minus its Documents-only split-button branch, which has no target here.
+        var tab = _hopped ? null : noteTabControl();
+        if (!tab) { noteFallback(text); if (cb) cb(false); return; }
+        tab.click();
+        var hops = 0;
+        (function waitTab() {
+          if (findAddNoteBtn()) { insertWONote(text, cb, noteType, true); return; }
+          if (++hops > 20) { noteFallback(text); if (cb) cb(false); return; }   // 5s
+          setTimeout(waitTab, 250);
+        })();
+        return;
+      }
       var beforeEls = Array.prototype.slice.call(document.querySelectorAll('textarea, [contenteditable="true"], [contenteditable=""]'));
       btn.click();
       var tries = 0;
@@ -5378,9 +5432,11 @@
     // the best available signal - the latest FUTURE PO scheduled date, else a noted
     // ETA (same ETA-word+date heuristic etaStatus uses), else the 2nd upcoming
     // Friday - and let the coordinator confirm + capture the reason. On Apply it
-    // TYPES the date into the WO's own field (never clicks a separate Save - Umbrava
-    // persists per its normal flow) and prefills a client-facing note for manual
-    // posting. (Scheduled-trip reading is a future add, pending a Trips-tab recon.)
+    // PATCHES the date through the audited API (waEcdSubmit; Umbrava's rebuilt form has no
+    // Save button and no header input to type into) and prefills a client-facing note for
+    // manual posting. The page does not re-render from that patch, so the write leaves the
+    // ecdEcho record dueStatus reads. (Scheduled-trip reading is a future add, pending a
+    // Trips-tab recon.)
     var ECD_FIELD = 'priority.expectedCompletionDate';   // a form field NAME now, not a testid - see woFieldInput
     function ecdToday() { var d = new Date(); return new Date(d.getFullYear(), d.getMonth(), d.getDate()).getTime(); }
     function ecdSecondFriday() { var d = new Date(); d.setHours(0, 0, 0, 0); var add = (5 - d.getDay() + 7) % 7; if (add === 0) add = 7; d.setDate(d.getDate() + add + 7); return d; }   // upcoming Friday + 1 week
@@ -5736,7 +5792,12 @@
           ids: { wo: wo },
           current: { ecd: oldEcd || null }, proposed: { ecd: newEcd }, irreversible: true,
           before: { ecd: oldEcd || null }, after: { ecd: newEcd }
-        }).then(function () { return { noop: false, before: oldEcd || null, after: newEcd }; });
+        }).then(function () {
+          // Leave the echo dueStatus reads (see ecdEcho): the page keeps showing oldEcd until a
+          // reload, and without this the WO stays "overdue" and re-pops its own auto-prompt.
+          try { BWN.ssSetJSON('bwn:ecdset:' + wo, { v: 1, ts: Date.now(), before: oldEcd || null, after: newEcd }); } catch (e) { }
+          return { noop: false, before: oldEcd || null, after: newEcd };
+        });
       });
     }
     // Re-entry-guarded ECD set, same shape as waTaskSubmit / waStatusSubmit: the first click
@@ -6524,7 +6585,16 @@
         var acn = document.getElementById(ACT_CARD_ID); if (acn) acn.remove();   // checklist is per-WO; never carry it across
         var eo = document.getElementById('bwn-ecd-overlay'); if (eo) eo.remove();
         var pfb = document.getElementById('bwn-pf-banner'); if (pfb) pfb.remove();
-        ecdAutoShownFor = null;   // re-arm the once-per-WO ECD auto-pop for the new WO
+        // The ECD auto-pop guard holds the WO NUMBER it fired for, so a different WO re-arms it
+        // by itself and a tab hop inside ONE WO does not (nulling it on any path change is what
+        // re-popped the prompt on a WO whose ECD had just been set - 1.81.8). But LEAVING the WO
+        // ends the visit: a route with no WO at all (the board, a client, a vendor) is a real
+        // departure, and coming back should ask again if the date is still missing or overdue.
+        // Why that was the whole "never fires on a warm revisit" report: on a first visit the
+        // note read's own refresh re-runs the gate a beat later, but on a revisit that read
+        // short-circuits on the cached history, so the ONLY thing that could have re-opened the
+        // prompt was a re-armed guard - and nothing re-armed it.
+        if (!currentWOId()) ecdAutoShownFor = null;
         prevStatus = null;        // don't treat an already-terminal WO opened fresh as a "change"
       }
       clearTimeout(debounce);
@@ -8407,6 +8477,13 @@
         if (r.sched) row.nextOnsiteDate = r.sched;
         if (r.exp) row.expectedCompletion = r.exp;
         if (r.lastNote) row.lastNoteDate = r.lastNote;   // the primary staleness signal; paired with the route's DATE_MAP entry
+        // Umbrava's OWN lifecycle phase, the signal heatDone already trusts over the status
+        // NAME in five places in this file. It never crossed the wire, so every SWA-side "is
+        // this open" stayed a name guess - the exact disagreement heatDone's comment block
+        // records twice from the live board (19 rows, then 5). Carried so the Dashboard can ask
+        // BN.woDone(status, phase) instead. Absent on a DOM-scanned row (the board has no phase
+        // column), and the classifier degrades to the name there exactly as it does here.
+        if (r.phase) row.phase = r.phase;
         // v2 dataset fields - emitted when the scan captured them (column/field dependent); the
         // route maps sourceJob/sourcePo/projectType (STR_MAP) and woDate (DATE_MAP).
         if (r.sourceJob) row.sourceJob = r.sourceJob;
@@ -8643,6 +8720,37 @@
     }
     var heatActsWarned = false;
 
+    // ===== BWN-ACCT-FILTER START v1 (pure; sliced by scripts/test-acct-filter.js) ================
+    // Core 1.84.0: the standing ACCOUNT SCOPE, set in the Ops Suite panel > Preferences and stored
+    // at bwn:config.filters.accounts as a comma-separated list (typed spec OPS_PREF_FIELDS).
+    // It is a per-user VIEW scope, not a session filter and not a data filter:
+    //   - the list pass DIMS every row whose Client cell is out of scope (same treatment the pill
+    //     and by-client filters get - hiding rows breaks the virtualizer's layout math);
+    //   - the Audit panel scopes its entry set, so the columns, Matching WOs and Top offenders all
+    //     speak about the same rows the list is highlighting.
+    // Deliberately NOT scoped, because they are board truth that outlives one user's preference:
+    // the My Day counts and their over-30 trend, the daily bwn:heat:snap snapshot, the Over-30
+    // batch, the SWA dataset push and __bwnHeatRows. A scoped number written into either history
+    // would be silently compared against whole-board days later, so the Audit panel drops its
+    // day-over-day delta while a scope is on rather than print a mixed-basis one.
+    // Empty, absent, or all-blank -> no scope, which is exactly the pre-1.84.0 behaviour.
+    // Matching is case-insensitive SUBSTRING on the Client cell ("dollar" matches "Dollar General"),
+    // and a row with NO readable client is IN scope - fail open. The Client column can be hidden by
+    // the column chooser, and a scope that blanks the whole board because a column is off screen is
+    // worse than one that quietly does nothing (the strip's "signals off" tooltip says which).
+    function acctList(v) {
+      return String(v == null ? '' : v).split(',').map(function (s) { return s.trim().toLowerCase(); })
+        .filter(function (s) { return s.length > 0; });
+    }
+    function acctInScope(list, client) {
+      if (!list || !list.length) return true;
+      var c = String(client == null ? '' : client).trim().toLowerCase();
+      if (!c) return true;   // no readable client - fail open, never hide work on a hidden column
+      for (var i = 0; i < list.length; i++) if (c.indexOf(list[i]) !== -1) return true;
+      return false;
+    }
+    // ===== BWN-ACCT-FILTER END v1 =====
+
     // ---- Heat pass ----------------------------------------------------------------
     var heatStore = null;     // { heatKey(href): {sev, reasons[], wo, client, status, assignee, prio, hrs, days, dne, sched, lastNote, exp, sourceJob, sourcePo, projectType, woDate} }
     // The RAW API rows behind an API scan, parallel to heatStore and keyed the same way.
@@ -8720,6 +8828,12 @@
       if (!anySignal) { diag(table, H, 0); BWN.beat('listHeat', 'waiting', 'no heat columns in view - add "Time in Status" / "# Days" / "Last Note Date" via the column chooser'); return; }
       ensureStyle();
       var C = bwnConfig();
+      // Standing account scope (1.84.0). Read per pass, so a Preferences save takes effect on the
+      // next repaint like every other cfg value. With the Client column off screen every row reads
+      // as unknown and stays IN scope by design - say so on the strip instead of dimming nothing
+      // silently.
+      var acct = acctList(C.filters && C.filters.accounts);
+      if (acct.length && H.client < 0) missing.push('"Client" → account scope off');
 
       var rows = table.querySelectorAll('tbody tr');
       if (!rows.length) rows = table.rows;
@@ -8800,6 +8914,7 @@
           var dimVal = heatDim.field === 'status' ? status : heatDim.field === 'assignee' ? assignee : client;
           if (dimVal !== heatDim.value) dimmed = true;
         }
+        if (!dimmed && !acctInScope(acct, client)) dimmed = true;   // standing account scope (1.84.0)
         if (dimmed) tr.classList.add('bwn-heat-dim');
         if (reasons.length) { tr.title = (acked ? 'Snoozed \u00b7 ' : '') + reasons.join(' \u00b7 '); tr.dataset.bwnHt = '1'; }
         else if (tr.dataset.bwnHt === '1') { tr.removeAttribute('title'); delete tr.dataset.bwnHt; }
@@ -8911,8 +9026,11 @@
       if (mydayFilter) filtBits.push(mfLabel[mydayFilter] + ' only');
       if (heatDim) filtBits.push(heatDim.field + ' = ' + heatDim.value);
       var lgEl = sum.querySelector('.lg');
+      // The scope is a stored PREFERENCE, so it is reported separately from the session filters
+      // above - Clear filters must not look like it will turn it off, because it does not.
+      var scopeTxt = acct.length ? ' · account scope: ' + acct.join(', ') + ' (Preferences)' : '';
       if (lgEl) lgEl.textContent = (filtBits.length ? 'highlighting: ' + filtBits.join(' · ') + ' · full match list in Audit' : 'hover a tinted row for the why · click a pill or audit row to filter') +
-        (nAcked ? ' · ' + nAcked + ' snoozed' : '');
+        (nAcked ? ' · ' + nAcked + ' snoozed' : '') + scopeTxt;
       var clearEl = document.getElementById('bwn-heat-clear');
       if (clearEl) clearEl.style.display = filtBits.length ? '' : 'none';
       renderMyDay();
@@ -8924,7 +9042,13 @@
       if (old) { old.remove(); return; }
       var sum = document.getElementById(SUM_ID);
       if (!sum || !sum.parentNode) return;
-      var entries = heatStore ? Object.keys(heatStore).map(function (k) { var e = heatStore[k]; e._href = k; return e; }) : [];
+      // Account scope (1.84.0): the panel speaks about the same rows the list is highlighting, so
+      // it is applied ONCE here and every section below (columns, Matching WOs, Top offenders, the
+      // TSV copy) inherits it. `scanned` keeps the whole-board count so the header can say "of".
+      var acctP = acctList((bwnConfig().filters || {}).accounts);
+      var scanned = heatStore ? Object.keys(heatStore).length : 0;
+      var entries = heatStore ? Object.keys(heatStore).map(function (k) { var e = heatStore[k]; e._href = k; return e; })
+        .filter(function (e) { return acctInScope(acctP, e.client); }) : [];
       var panel = document.createElement('div');
       panel.id = PANEL_ID;
       function closePanel() { document.removeEventListener('keydown', onPanelKey); panel.remove(); }
@@ -8933,7 +9057,7 @@
 
       var ph = document.createElement('div'); ph.className = 'ph';
       ph.textContent = entries.length
-        ? 'AUDIT \u00b7 ' + entries.length + ' WOs SCANNED'
+        ? 'AUDIT \u00b7 ' + (acctP.length ? entries.length + ' of ' + scanned + ' WOs \u00b7 accounts: ' + acctP.join(', ') : entries.length + ' WOs SCANNED')
         : 'AUDIT';
       panel.appendChild(ph);
 
@@ -8948,7 +9072,10 @@
         var curS = auditOpenTally(entries);
         var bkt = curS.bkt, noHrs = curS.noHrs, noNote = curS.noNote;
         var dl = document.createElement('div'); dl.className = 'dl';
-        var pS = priorKey ? snaps[priorKey] : null;
+        // bwn:heat:snap is written whole-board (heatSnapshot reads heatStore, never this scoped
+        // set), so a scoped count minus a whole-board day is not a delta. Drop the compare rather
+        // than print a mixed-basis number.
+        var pS = (priorKey && !acctP.length) ? snaps[priorKey] : null;
         function dseg(label, nowV, thenV) {
           var sp = document.createElement('span');
           sp.appendChild(document.createTextNode(label + ' ' + nowV));
@@ -8968,7 +9095,9 @@
         dseg('open', curS.open, pS ? pS.open : undefined);
         dseg('over-30', curS.over30, pS ? pS.over30 : undefined);
         var dTail = document.createElement('span');
-        dTail.textContent = pS ? 'vs ' + priorKey : 'no prior full scan on record yet';
+        dTail.textContent = pS ? 'vs ' + priorKey
+          : acctP.length ? 'account scope on - day-over-day compare off (the daily snapshot is whole-board)'
+            : 'no prior full scan on record yet';
         dl.appendChild(dTail);
         panel.appendChild(dl);
         var ql = document.createElement('div'); ql.className = 'dl';
@@ -9003,7 +9132,11 @@
       if (!entries.length) {
         var empty = document.createElement('div'); empty.className = 'empty';
         var p1 = document.createElement('p');
-        p1.textContent = 'No scan yet \u2014 the audit needs a full sweep of the list to give book-wide numbers.';
+        // A scan that ran and was scoped to nothing is NOT "no scan yet" - saying so would send a
+        // coordinator to re-run a sweep that already succeeded.
+        p1.textContent = scanned
+          ? 'The scan read ' + scanned + ' WOs and none match your account scope (' + acctP.join(', ') + ') \u2014 clear or widen it in the Ops Suite panel > Preferences.'
+          : 'No scan yet \u2014 the audit needs a full sweep of the list to give book-wide numbers.';
         var runBtn = document.createElement('button');
         runBtn.type = 'button'; runBtn.className = 'primary'; runBtn.textContent = 'Run Scan All now';
         runBtn.addEventListener('click', function () {
@@ -9014,7 +9147,8 @@
             if (/scan/i.test(btns[b].textContent)) { btns[b].click(); break; }
           }
         });
-        empty.appendChild(p1); empty.appendChild(runBtn);
+        empty.appendChild(p1);
+        if (!scanned) empty.appendChild(runBtn);   // re-scanning cannot fix a scope that matched nothing
         panel.appendChild(empty);
       }
 
@@ -10378,7 +10512,78 @@
       { k: 'notesTimeline', script: 'Core', label: 'Notes timeline (chronological read)' },
       { k: 'tripCal', script: 'Core', label: 'Trips → calendar (.ics export)' }
     ];
-    var OPS_CFG_FIELDS = [['targetGP', 'Target GP %'], ['gpWarn', 'GP warn %'], ['gpBad', 'GP red %'], ['hrsWarn', 'Hours warn'], ['hrsBad', 'Hours red'], ['activeMult', 'Active ×'], ['dueWarnDays', 'Due warn (d)'], ['schedGraceDays', 'Sched grace (d)'], ['noteStaleDays', 'Note stale (d)']];
+    // ===== BWN-SETTINGS START v1 (pure; sliced by scripts/test-ops-settings.js) ==================
+    // Typed field specs for the Ops Suite panel. Spec: k (dotted = ONE level of nesting in the
+    // bwn:config blob, 'audit.gpLow' -> cfg.audit.gpLow), label, type (number|select|text), def,
+    // number min/max, select options [[value, label]]. Top-level number keys are the CFG_DEFAULTS
+    // thresholds and are always stored; nested keys are per-user OVERRIDES - blank or equal to def
+    // clears the key so the consumer's own default applies. The declarative field map is the
+    // pattern borrowed from GM_config (see wiki gm-config-assessment); its iframe renderer was not.
+    var OPS_CFG_FIELDS = [
+      { k: 'targetGP', label: 'Target GP %', type: 'number', min: 0, max: 100 },
+      { k: 'gpWarn', label: 'GP warn %', type: 'number', min: 0, max: 100 },
+      { k: 'gpBad', label: 'GP red %', type: 'number', min: 0, max: 100 },
+      { k: 'hrsWarn', label: 'Hours warn', type: 'number', min: 0, max: 8760 },
+      { k: 'hrsBad', label: 'Hours red', type: 'number', min: 0, max: 8760 },
+      { k: 'activeMult', label: 'Active ×', type: 'number', min: 0, max: 10 },
+      { k: 'dueWarnDays', label: 'Due warn (d)', type: 'number', min: 0, max: 365 },
+      { k: 'schedGraceDays', label: 'Sched grace (d)', type: 'number', min: 0, max: 365 },
+      { k: 'noteStaleDays', label: 'Note stale (d)', type: 'number', min: 0, max: 365 }
+    ];
+    // Per-user preferences (Core 1.82.0). Group names must not collide with the blob's existing
+    // top-level objects (ai, keys, clients, clientDefaults, v).
+    // Readers: bwn-wo-audit 0.9.0 reads audit.*; bwn-kanban 0.9.0 reads view.defaultWO at load;
+    // the Follow-up reminders module (this file, remChannel) reads notify.channel at fire time;
+    // List Heat (this file, BWN-ACCT-FILTER) reads filters.accounts on every list pass - it dims
+    // out-of-scope rows and scopes the Audit panel, and leaves every stored number whole-board.
+    // notify.channel's def moved 'toast' -> 'desktop' in 1.83.0: 'toast' was never stored under
+    // 1.82.0 (a value equal to def clears), so no client carries a stale value.
+    var OPS_PREF_FIELDS = [
+      { k: 'audit.gpLow', label: 'Audit: low GP %', type: 'number', def: 15, min: 0, max: 100 },
+      { k: 'audit.staleDays', label: 'Audit: stale note (d)', type: 'number', def: 7, min: 0, max: 365 },
+      { k: 'notify.channel', label: 'Reminder alerts', type: 'select', def: 'desktop', options: [['desktop', 'Desktop notification (toast if blocked)'], ['toast', 'In-page toast only'], ['quiet', 'Quiet (mute)']] },
+      { k: 'view.defaultWO', label: 'Default WO view', type: 'select', def: 'list', options: [['list', 'List (remember last toggle)'], ['board', 'Kanban board on every load']] },
+      { k: 'filters.accounts', label: 'Account scope (comma-sep)', type: 'text', def: '' }
+    ];
+    // Current value of a spec key from a cfg object (dotted = one level).
+    function bwnCfgGet(c, k) {
+      var p = k.split('.');
+      if (p.length === 1) return c ? c[k] : undefined;
+      return (c && c[p[0]] && typeof c[p[0]] === 'object') ? c[p[0]][p[1]] : undefined;
+    }
+    // Validate raw input strings against specs and build the cfgSave partial:
+    // { ok, bad: [k...], partial }. Nested groups start from the STORED object so sibling keys the
+    // panel does not own survive (same rule as the AI block), and an unchanged group is dropped
+    // from the partial so an untouched save fires no scan-invalidating churn. Never touches the DOM.
+    function bwnCfgPartial(fields, raw, stored) {
+      var partial = {}, bad = [];
+      fields.forEach(function (f) {
+        var s = String(raw[f.k] == null ? '' : raw[f.k]).trim();
+        var p = f.k.split('.'), nested = p.length === 2, val, clear = false;
+        if (f.type === 'number') {
+          if (s === '' && nested) clear = true;
+          else {
+            var n = parseFloat(s);
+            if (isNaN(n) || (typeof f.min === 'number' && n < f.min) || (typeof f.max === 'number' && n > f.max)) { bad.push(f.k); return; }
+            val = n; if (nested && n === f.def) clear = true;
+          }
+        } else if (f.type === 'select') {
+          if (!(f.options || []).some(function (o) { return o[0] === s; })) { bad.push(f.k); return; }
+          val = s; if (nested && s === f.def) clear = true;
+        } else {
+          val = s; if (s === '' || (nested && s === f.def)) clear = true;
+        }
+        if (!nested) { if (!clear) partial[f.k] = val; return; }
+        var g = p[0];
+        if (!partial[g]) partial[g] = Object.assign({}, (stored && stored[g] && typeof stored[g] === 'object') ? stored[g] : {});
+        if (clear) delete partial[g][p[1]]; else partial[g][p[1]] = val;
+      });
+      Object.keys(partial).forEach(function (g) {
+        if (partial[g] && typeof partial[g] === 'object' && JSON.stringify(partial[g]) === JSON.stringify((stored && stored[g]) || {})) delete partial[g];
+      });
+      return { ok: !bad.length, bad: bad, partial: partial };
+    }
+    // ===== BWN-SETTINGS END v1 =====
     var opsConfig = BWN.cfg;        // defaults + read/save now in the BWN core (single source of truth)
     var opsConfigSave = BWN.cfgSave;
 
@@ -10517,15 +10722,36 @@
 
       // Thresholds
       section('Thresholds', 'shared by WO Assist + List Heat');
-      var grid = document.createElement('div'); grid.className = 'bwn-ops-grid';
       var cfg = opsConfig(); var inputs = {};
-      OPS_CFG_FIELDS.forEach(function (f) {
-        var w = document.createElement('div');
-        var l = document.createElement('label'); l.textContent = f[1];
-        var inp = document.createElement('input'); inp.type = 'number'; inp.step = 'any'; inp.value = String(cfg[f[0]]);
-        inputs[f[0]] = inp; w.appendChild(l); w.appendChild(inp); grid.appendChild(w);
-      });
-      body.appendChild(grid);
+      var storedCfg = lsGet('bwn:config', {}) || {};
+      // One renderer for every typed spec (number / select / text); inputs[k] is read by Save.
+      function fieldGrid(fields, cur) {
+        var grid = document.createElement('div'); grid.className = 'bwn-ops-grid';
+        fields.forEach(function (f) {
+          var w = document.createElement('div');
+          var l = document.createElement('label'); l.textContent = f.label;
+          var v = bwnCfgGet(cur, f.k), el;
+          if (f.type === 'select') {
+            el = document.createElement('select');
+            (f.options || []).forEach(function (o) { var op = document.createElement('option'); op.value = o[0]; op.textContent = o[1]; el.appendChild(op); });
+            el.value = (f.options || []).some(function (o) { return o[0] === v; }) ? v : f.def;
+          } else {
+            el = document.createElement('input');
+            el.type = f.type === 'number' ? 'number' : 'text';
+            if (f.type === 'number') { el.step = 'any'; if (typeof f.min === 'number') el.min = String(f.min); if (typeof f.max === 'number') el.max = String(f.max); }
+            else el.style.textAlign = 'left';
+            el.value = (v === undefined || v === null) ? (f.def === undefined ? '' : String(f.def)) : String(v);
+          }
+          el.setAttribute('aria-label', f.label);
+          inputs[f.k] = el; w.appendChild(l); w.appendChild(el); grid.appendChild(w);
+        });
+        return grid;
+      }
+      body.appendChild(fieldGrid(OPS_CFG_FIELDS, cfg));
+
+      // Per-user preferences: nested overrides in bwn:config (audit.*, notify.*, view.*, filters.*).
+      section('Preferences', 'per user · audit thresholds · notifications · default view · account scope');
+      body.appendChild(fieldGrid(OPS_PREF_FIELDS, storedCfg));
 
       // AI drafting knobs (consumed by the AI script via bwn:config.ai; blank = default).
       section('AI drafting', 'model · recent window · preflight');
@@ -10573,8 +10799,36 @@
       if (aiFresh) {
         kv('Anthropic key', status.ai.anthropic ? 'set' : 'not set', status.ai.anthropic ? 'ok' : 'no');
         kv('Google Places key', status.ai.places ? 'set' : 'not set', status.ai.places ? 'ok' : 'no');
-        kv('SWA ingest key', status.ai.ingest ? 'set' : 'not set', status.ai.ingest ? 'ok' : 'no');
       }
+
+      // SWA ingest key, PER SCRIPT. This row used to read status.ai.ingest and call it "the"
+      // ingest key, which was a false suite-wide fact: GM storage is scoped per script, not per
+      // @namespace (measured 2026-09-03 on TM 5.x - [[gm-storage-is-per-script]]), so each script
+      // holds its own private copy and a newly installed one starts blank while its siblings keep
+      // working. That is the silent failure this row exists to make loud. Every script using the
+      // key publishes a BOOLEAN beacon at bwn:ingest:<slug> (never the key itself) stamped with
+      // its own load time; a script that did not load this session leaves a stale beacon and is
+      // skipped, so an uninstalled script cannot raise a permanent red row - same rule as the
+      // AI/Ask freshness rows above.
+      (function ingestKeyRollup() {
+        var PFX = 'bwn:ingest:', set = [], blank = [];
+        try {
+          for (var i = 0; i < localStorage.length; i++) {
+            var lk = localStorage.key(i);
+            if (!lk || lk.indexOf(PFX) !== 0) continue;
+            var b = lsGet(lk, null);
+            if (!b || !status.core.ts || Math.abs(status.core.ts - (b.ts || 0)) >= 60000) continue;
+            (b.k ? set : blank).push(lk.slice(PFX.length));
+          }
+        } catch (e) { /* storage refusal - fall through to the "no script reported" row */ }
+        set.sort(); blank.sort();
+        var total = set.length + blank.length;
+        if (!total) { kv('SWA ingest key', 'no script reported this session', ''); return; }
+        kv('SWA ingest key', blank.length
+          ? (set.length + ' of ' + total + ' set · BLANK: ' + blank.join(', '))
+          : ('set in all ' + total + ' loaded script' + (total === 1 ? '' : 's')),
+          blank.length ? 'no' : 'ok');
+      })();
       // Ask is its own script and can be disabled on its own, so it gets the same freshness
       // treatment as AI rather than being assumed present.
       var askFresh = !!status.ask.ver && !!status.core.ts && Math.abs((status.core.ts || 0) - (status.ask.ts || 0)) < 60000;
@@ -10786,12 +11040,10 @@
       var ft = document.createElement('div'); ft.className = 'bwn-ops-ft';
       var saveBtn = document.createElement('button'); saveBtn.type = 'button'; saveBtn.className = 'bwn-ops-btn primary'; saveBtn.textContent = 'Save settings';
       saveBtn.addEventListener('click', function () {
-        var partial = {}, ok = true;
-        OPS_CFG_FIELDS.forEach(function (f) {
-          var n = parseFloat(inputs[f[0]].value);
-          if (isNaN(n) || n < 0) { inputs[f[0]].style.borderColor = 'var(--bwn-bad)'; ok = false; }
-          else { inputs[f[0]].style.borderColor = ''; partial[f[0]] = n; }
-        });
+        var rawVals = {}; Object.keys(inputs).forEach(function (k) { rawVals[k] = inputs[k].value; });
+        var res = bwnCfgPartial(OPS_CFG_FIELDS.concat(OPS_PREF_FIELDS), rawVals, lsGet('bwn:config', {}) || {});
+        Object.keys(inputs).forEach(function (k) { inputs[k].style.borderColor = res.bad.indexOf(k) !== -1 ? 'var(--bwn-bad)' : ''; });
+        var partial = res.partial, ok = res.ok;
         // AI knobs ride along in bwn:config.ai. Start from the STORED object so
         // non-panel keys (e.g. a hand-set includeVendor) survive; panel-owned keys
         // are then set-or-cleared explicitly. Invalid window values block the save
@@ -10989,8 +11241,8 @@
         '.bwn-ops-row input[type=checkbox]{width:16px;height:16px;accent-color:var(--bwn-green);cursor:pointer;flex:none;}' +
         '.bwn-ops-grid{display:grid;grid-template-columns:repeat(3,1fr);gap:9px;}' +
         '.bwn-ops-grid label{display:block;font:500 9px ui-monospace,"Segoe UI Mono","SF Mono",monospace;color:var(--bwn-green);margin-bottom:3px;}' +
-        '.bwn-ops-grid input{width:100%;box-sizing:border-box;padding:6px 8px;border:1px solid var(--bwn-border);border-radius:7px;font:500 13px -apple-system,BlinkMacSystemFont,"Segoe UI","Helvetica Neue",Arial,sans-serif;text-align:right;outline:none;background:var(--bwn-surface);color:var(--bwn-text);}' +
-        '.bwn-ops-grid input:focus{border-color:var(--bwn-accent);box-shadow:0 0 0 3px rgba(46,204,113,.15);}' +
+        '.bwn-ops-grid input,.bwn-ops-grid select{width:100%;box-sizing:border-box;padding:6px 8px;border:1px solid var(--bwn-border);border-radius:7px;font:500 13px -apple-system,BlinkMacSystemFont,"Segoe UI","Helvetica Neue",Arial,sans-serif;text-align:right;outline:none;background:var(--bwn-surface);color:var(--bwn-text);}' +
+        '.bwn-ops-grid input:focus,.bwn-ops-grid select:focus{border-color:var(--bwn-accent);box-shadow:0 0 0 3px rgba(46,204,113,.15);}' +
         '.bwn-ops-kv{display:flex;justify-content:space-between;gap:10px;font-size:12px;padding:5px 2px;border-bottom:1px solid var(--bwn-surface-3);color:var(--bwn-text-muted);}' +
         '.bwn-ops-kv .v{font:500 11px ui-monospace,"Segoe UI Mono","SF Mono",monospace;}' +
         '.bwn-ops-kv .v.ok{color:var(--bwn-green);}' +
@@ -12846,7 +13098,31 @@
     function load() { var a = BWN.lsGetJSON(STORE, []); return Array.isArray(a) ? a : []; }
     function save(a) { BWN.lsSetJSON(STORE, a); }
     function rid() { return Date.now().toString(36) + Math.random().toString(36).slice(2, 7); }
-    function reqPerm() { try { if (window.Notification && Notification.permission === 'default') Notification.requestPermission(); } catch (e) { } }
+    // ===== BWN-REM-CHANNEL START v1 (pure; sliced by scripts/test-reminders-channel.js) ==========
+    // Core 1.83.0: per-user delivery channel, set in the Ops Suite panel > Preferences and stored
+    // at bwn:config.notify.channel (typed spec OPS_PREF_FIELDS). Values:
+    //   desktop (default) - desktop Notification when granted, in-page toast otherwise. This IS
+    //                       the 1.82.0 behaviour, so an unset key changes nothing.
+    //   toast             - in-page toast only; never asks for Notification permission.
+    //   quiet             - the reminder is marked fired and nothing is shown. It leaves the
+    //                       Pending list like any fired reminder. Mute, not snooze.
+    // Anything else (absent, malformed blob, unknown value) -> desktop.
+    function remChannel(cfgRaw) {
+      try { var c = JSON.parse(cfgRaw || 'null'); var v = c && c.notify && c.notify.channel; if (v === 'toast' || v === 'quiet') return v; } catch (e) { /* malformed - default */ }
+      return 'desktop';
+    }
+    // Which path a due reminder takes for a channel + Notification.permission
+    // ('granted' | 'denied' | 'default' | null when the API is absent): 'desktop' | 'toast' | 'none'.
+    function remPlan(channel, perm) {
+      if (channel === 'quiet') return 'none';
+      if (channel === 'desktop' && perm === 'granted') return 'desktop';
+      return 'toast';
+    }
+    // ===== BWN-REM-CHANNEL END v1 =====
+    function channel() { var raw = null; try { raw = localStorage.getItem('bwn:config'); } catch (e) { } return remChannel(raw); }
+    function permState() { try { return window.Notification ? Notification.permission : null; } catch (e) { return null; } }
+    // Only the desktop channel ever asks - a toast-only or quiet user never sees the browser prompt.
+    function reqPerm() { try { if (channel() === 'desktop' && window.Notification && Notification.permission === 'default') Notification.requestPermission(); } catch (e) { } }
     function pad(n) { return (n < 10 ? '0' : '') + n; }
     function fmtWhen(ts) {
       var d = new Date(ts), now = new Date();
@@ -12860,14 +13136,16 @@
     function notify(r) {
       var title = 'WO follow-up' + (r.tracking ? ' · #' + r.tracking : '');
       var body = (r.note ? r.note + ' - ' : '') + (r.client || '') + (r.location ? ' · ' + r.location : '');
-      try {
-        if (window.Notification && Notification.permission === 'granted') {
+      var plan = remPlan(channel(), permState());
+      if (plan === 'none') return;   // quiet: fired, listed as fired, shown nowhere
+      if (plan === 'desktop') {
+        try {
           var n = new Notification(title, { body: body || 'Time to follow up.', tag: 'bwn-rem-' + r.id });
           n.onclick = function () { try { window.focus(); } catch (e) { } if (r.url) location.href = r.url; try { n.close(); } catch (e2) { } };
           return;
-        }
-      } catch (e) { }
-      toast(title + (body ? ' - ' + body : ''), r.url);   // notifications blocked → in-page fallback
+        } catch (e) { /* constructor refused - fall through to the toast */ }
+      }
+      toast(title + (body ? ' - ' + body : ''), r.url);   // toast channel, or desktop blocked / unsupported
     }
     function fireDue() {
       var arr = load(), now = Date.now(), changed = false;
@@ -12972,8 +13250,11 @@
 
       var ft = document.createElement('div'); ft.className = 'bwn-rem-ft';
       var perm = document.createElement('span'); perm.className = 'sp';
-      perm.textContent = (window.Notification && Notification.permission === 'denied') ? 'Notifications blocked - reminders show as an in-page banner instead.' :
-        (window.Notification && Notification.permission === 'granted') ? '' : 'First reminder will ask to allow notifications.';
+      var ch = channel(), ps = permState();
+      perm.textContent = ch === 'quiet' ? 'Quiet: due reminders are muted (Ops Suite > Preferences > Reminder alerts).' :
+        ch === 'toast' ? 'In-page toast only (Ops Suite > Preferences > Reminder alerts).' :
+        ps === 'denied' ? 'Notifications blocked - reminders show as an in-page banner instead.' :
+        ps === 'granted' ? '' : 'First reminder will ask to allow notifications.';
       ft.appendChild(perm);
       var closeB = document.createElement('button'); closeB.type = 'button'; closeB.textContent = 'Close'; closeB.addEventListener('click', close);
       ft.appendChild(closeB); card.appendChild(ft);

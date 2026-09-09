@@ -108,6 +108,29 @@ jobs:
       - name: WO Audit deterministic flags harness
         run: node scripts/test-wo-audit-flags.js
 
+      # Core 1.82.0: the Ops Suite panel's typed field specs (BWN-SETTINGS block) - number/select/
+      # text, min/max, one-level nesting into bwn:config, sibling-preserving group writes, and the
+      # unchanged-group drop that keeps an untouched Save from firing bwn:config churn. Two mutation
+      # controls (drop the max check, drop the sibling preserve) must each turn it red.
+      - name: Ops Suite typed settings fields harness (Core 1.82.0)
+        run: node scripts/test-ops-settings.js
+
+      # Core 1.83.0: Follow-up reminders read their delivery channel off bwn:config.notify.channel
+      # (BWN-REM-CHANNEL block). Pins: unset/unknown/malformed -> desktop (the 1.82.0 behaviour),
+      # quiet fires nothing, toast never takes the desktop path, desktop falls back to toast unless
+      # permission is granted. Mutation control: dropping the quiet branch makes quiet toast.
+      - name: Reminders delivery-channel harness (Core 1.83.0)
+        run: node scripts/test-reminders-channel.js
+
+      # Core 1.84.0: List Heat reads the standing account scope off bwn:config.filters.accounts
+      # (BWN-ACCT-FILTER block). Pins: unset/blank -> no scope; case-insensitive substring match; a
+      # row with no readable client stays IN scope (the Client column can be hidden); the panel
+      # stores exactly what the reader parses; and the whole-board numbers (heatSnapshot, My Day,
+      # the Over-30 batch) never see the scope. Two mutation controls - dropping the fail-open
+      # branch, dropping the empty-scope return - must each turn it red.
+      - name: List Heat account-scope harness (Core 1.84.0)
+        run: node scripts/test-acct-filter.js
+
       - name: Bid-out dock registration + ACT_TOOL harness
         run: node scripts/test-bidout-dock.js
 
@@ -522,6 +545,15 @@ jobs:
 
       - name: Drop Upload party/label classifier harness (broker is not a vendor)
         run: node scripts/test-drop-upload-classify.js
+
+      - name: Drop Upload response-ladder harness (@-mention wire format, answered, escalation)
+        run: node scripts/test-drop-upload-response-ladder.js
+
+      - name: Drop Upload doc-summary harness (cloud-bus primary, on-device fallback, note emission)
+        run: node scripts/test-drop-upload-doc-summary.js
+
+      - name: Drop Upload queue dedup harness (re-dropped file skipped, kept pair stays aligned)
+        run: node scripts/test-drop-upload-queue.js
 
       - name: WO Intake .eml MIME-parse harness (parseEml multipart walk)
         run: node scripts/test-eml-parse.js

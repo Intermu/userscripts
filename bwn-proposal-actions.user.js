@@ -1,10 +1,10 @@
 // ==UserScript==
 // @name         BWN Proposal Actions (Broadway National)
 // @namespace    broadwaynational.bwn
-// @version      0.5.0
+// @version      0.6.0
 // @downloadURL  https://raw.githubusercontent.com/Intermu/userscripts/main/bwn-proposal-actions.user.js
 // @updateURL    https://raw.githubusercontent.com/Intermu/userscripts/main/bwn-proposal-actions.user.js
-// @description  On a Client Proposal DETAILS page, a "Proposal Actions" dropdown runs the internal review workflow in one confirmed action: Approval / TSP Review / Kickback. Each posts a note to the Proposal + the Work Order, sets the WO status, completes open tasks, and files a new task (assigned to the WO coordinator, or Ronny Sharp for TSP). Kickback drafts a rejection reason with the on-device browser AI for the operator to confirm. Every write is shown in a confirm dialog first; nothing fires until Confirm. @grant none.
+// @description  On a Client Proposal DETAILS page, a "Proposal Actions" dropdown runs the internal review workflow in one confirmed action: Approval / TSP Review / Kickback. Each posts a note to the Proposal + the Work Order, sets the WO status, completes open tasks, and files a new task (assigned to the WO coordinator, or Ronny Sharp for TSP). The posted note is an EDITABLE field seeded with the auto-generated text (Kickback's is drafted by the on-device browser AI) so the reviewer can add what they changed as coaching for the coordinator; a "changes since review opened" line (total + GP) is prepended automatically. Every write is shown in a confirm dialog first; nothing fires until Confirm. @grant none.
 // @match        https://app.umbrava.com/*
 // @match        https://*.umbrava.com/*
 // @run-at       document-idle
@@ -15,7 +15,7 @@
 (function () {
   'use strict';
 
-  var VER = '0.5.0';   // keep in step with @version
+  var VER = '0.6.0';   // keep in step with @version
   var DRY_RUN = false; // when true, every WRITE is console.logged instead of sent
   console.info('[BWN PROPOSAL ACTIONS] v' + VER + ' - Approval / TSP Review / Kickback workflow on the Client Proposal details page');
 
@@ -737,8 +737,7 @@
       '#bwn-pa-card .ok{color:#166534;}' +
       '#bwn-pa-card .err{color:#b42318;}' +
       '#bwn-pa-card .skip{color:#8a6d3b;}' +
-      '#bwn-pa-card .notebox{white-space:pre-wrap;background:#f6faf8;border:1px solid #e3efe9;border-radius:8px;padding:10px 12px;font-size:12px;margin:0 0 12px;}' +
-      '#bwn-pa-card textarea{width:100%;min-height:90px;box-sizing:border-box;border:1px solid #cddbd3;border-radius:8px;padding:9px 11px;font:inherit;font-size:13px;resize:vertical;}' +
+      '#bwn-pa-card textarea{width:100%;min-height:120px;box-sizing:border-box;border:1px solid #cddbd3;border-radius:8px;padding:9px 11px;font:inherit;font-size:13px;resize:vertical;white-space:pre-wrap;}' +
       '#bwn-pa-card .ft{display:flex;justify-content:flex-end;gap:10px;padding:12px 18px;border-top:1px solid #eef3f0;}' +
       '#bwn-pa-card .btn{padding:8px 16px;border-radius:8px;border:1px solid #1a5f3e;font:600 13px inherit;cursor:pointer;}' +
       '#bwn-pa-card .btn.go{background:#1a5f3e;color:#fff;}' +
@@ -759,7 +758,11 @@
   }
 
   // ===== confirm modal ======================================================
-  // plan = { title, subtitle, isKickback, aiReason, noteFn(reason)->text, steps:[{label,pending,run}] }
+  // plan = { title, subtitle, noteSeed, steps:[{label,pending,run(noteText)}] }
+  // The note preview is an EDITABLE textarea seeded with noteSeed (the auto-generated note, with any
+  // "what changed" delta line already prepended). The operator's final text is threaded to every
+  // note-posting step by runSteps, so what they see is exactly what posts to the Proposal, the WO
+  // note, and the coordinator's task. For kickback the seed is the AI-drafted reason + summary.
   // Each step.run() returns a Promise. A step whose run rejects with NOT_PINNED is SKIPPED
   // (shown "pending capture"); any other rejection STOPS the run and is reported.
   function openConfirm(plan) {
@@ -778,7 +781,6 @@
     card.setAttribute('role', 'dialog');
     card.setAttribute('aria-modal', 'true');
 
-    var reasonTa = null;
     var stepEls = [];
     var stepsHtml = plan.steps.map(function (s, i) {
       return '<li data-i="' + i + '" class="' + (s.pending ? 'pending' : '') + '">' +
@@ -790,9 +792,9 @@
       '<div class="hd"><div class="t">' + escapeHtml(plan.title) + '</div>' +
       (plan.subtitle ? '<div class="s">' + escapeHtml(plan.subtitle) + '</div>' : '') + '</div>' +
       '<div class="bd">' +
-      (plan.isKickback ? '<div style="font-size:12px;color:#5b6b62;margin:0 0 6px;">Kickback reason (editable) - drafted by the on-device AI:</div><textarea id="bwn-pa-reason"></textarea><div style="height:12px;"></div>' : '') +
-      '<div style="font-size:12px;color:#5b6b62;margin:0 0 4px;">Note that will be posted:</div>' +
-      '<div class="notebox" id="bwn-pa-notepreview"></div>' +
+      '<div style="font-size:12px;color:#5b6b62;margin:0 0 4px;">Note that will be posted (editable) - add what you changed for the coordinator:</div>' +
+      '<textarea id="bwn-pa-note"></textarea>' +
+      '<div style="height:12px;"></div>' +
       '<div style="font-size:12px;color:#5b6b62;margin:0 0 4px;">This will:</div>' +
       '<ul class="steps">' + stepsHtml + '</ul>' +
       '</div>' +
@@ -804,17 +806,10 @@
 
     var cancelBtn = card.querySelector('#bwn-pa-cancel');
     var goBtn = card.querySelector('#bwn-pa-go');
-    var notePreview = card.querySelector('#bwn-pa-notepreview');
-    reasonTa = card.querySelector('#bwn-pa-reason');
+    var noteTa = card.querySelector('#bwn-pa-note');
     plan.steps.forEach(function (s, i) { stepEls[i] = card.querySelector('li[data-i="' + i + '"]'); });
 
-    function currentReason() { return reasonTa ? reasonTa.value : ''; }
-    function refreshPreview() { notePreview.textContent = plan.noteFn(currentReason()); }
-    if (reasonTa) {
-      reasonTa.value = plan.aiReason || '';
-      reasonTa.addEventListener('input', refreshPreview);
-    }
-    refreshPreview();
+    noteTa.value = plan.noteSeed || '';
 
     function close() { try { overlay.remove(); } catch (e) { } document.removeEventListener('keydown', onKey); }
     function onKey(e) { if (e.key === 'Escape') close(); }
@@ -823,15 +818,13 @@
     cancelBtn.addEventListener('click', close);
 
     goBtn.addEventListener('click', function () {
-      goBtn.disabled = true; cancelBtn.disabled = true;
-      if (reasonTa) reasonTa.disabled = true;
-      var reason = currentReason();
-      if (plan.isKickback && !reason.trim()) {
-        paToast('Enter a kickback reason first.');
-        goBtn.disabled = false; cancelBtn.disabled = false; if (reasonTa) reasonTa.disabled = false;
+      var noteText = noteTa.value;
+      if (!noteText.trim()) {
+        paToast('Enter a note first.');
         return;
       }
-      runSteps(plan.steps, reason, stepEls).then(function (res) {
+      goBtn.disabled = true; cancelBtn.disabled = true; noteTa.disabled = true;
+      runSteps(plan.steps, noteText, stepEls).then(function (res) {
         if (res.ok) {
           goBtn.textContent = res.skipped ? 'Done (some pending)' : 'Done';
           paToast(res.skipped
@@ -854,8 +847,8 @@
     if (note) { var lb = li.querySelector('.lb'); if (lb) lb.innerHTML = lb.innerHTML.replace(/ <em>.*<\/em>/, '') + ' <em>' + escapeHtml(note) + '</em>'; }
   }
 
-  // Sequential runner. reason is threaded so kickback step closures can read the confirmed text.
-  function runSteps(steps, reason, stepEls) {
+  // Sequential runner. noteText (the operator's final, edited note) is threaded to each step's run.
+  function runSteps(steps, noteText, stepEls) {
     var skipped = 0;
     // Resume from the first not-yet-completed step: a step already marked 'ok' (a checkmark from a
     // previous run) is not re-run, so a Retry after a mid-sequence failure does NOT re-post a note,
@@ -868,7 +861,7 @@
       var s = steps[idx];
       var li = stepEls[idx];
       if (li) { var ic = li.querySelector('.ic'); if (ic) ic.textContent = '…'; }
-      return Promise.resolve().then(function () { return s.run(reason); }).then(function () {
+      return Promise.resolve().then(function () { return s.run(noteText); }).then(function () {
         mark(li, 'ok', '✓');
         idx++; return next();
       }, function (err) {
@@ -885,6 +878,44 @@
     return next();
   }
 
+  // ===== "what changed" delta (total + GP) ==================================
+  // Coaching aid: snapshot the proposal's total + GP the first time the reviewer lands on the
+  // details page (before they edit it in Umbrava), then compare at action time so the posted note
+  // tells the coordinator what moved. ponytail: total + GP only - line-level "added 4 hrs / revised
+  // scope" needs a proposal-revision read that is not pinned; that stays the reviewer's own words in
+  // the editable note. Baseline is best-effort: if the page is opened AFTER edits, or the read fails,
+  // no delta is shown (never a wrong one). Keyed by proposal id, per page session (memory only).
+  var _paBaseline = {};   // pid -> { amount, precision, gpPct } | null (in-flight or unavailable)
+  function captureBaseline(pid) {
+    if (pid == null || _paBaseline[pid] !== undefined) return;   // once per pid; null marks in-flight/failed
+    _paBaseline[pid] = null;
+    var n = woNumberFromUrl();
+    if (n == null) return;
+    readWO(n).then(function (wo) { return readTotals(wo.jobId, pid); }).then(function (tot) {
+      _paBaseline[pid] = { amount: tot.total && tot.total.amount, precision: tot.total && tot.total.precision, gpPct: tot.gpPct };
+    }).catch(function () { _paBaseline[pid] = null; });
+  }
+  function deltaLine(pid, curTot, curGpPct) {
+    var b = _paBaseline[pid];
+    if (!b) return '';
+    var parts = [];
+    var bAmt = b.amount, cAmt = curTot && curTot.amount;
+    if (bAmt != null && cAmt != null && Number(bAmt) !== Number(cAmt)) {
+      var p = (curTot.precision != null) ? curTot.precision : 2;
+      var d = (Number(cAmt) - Number(bAmt)) / Math.pow(10, p);
+      parts.push((d > 0 ? 'raised total ' : 'lowered total ') +
+        '$' + Math.abs(d).toLocaleString('en-US', { minimumFractionDigits: 2, maximumFractionDigits: 2 }));
+    }
+    if (b.gpPct != null && curGpPct != null && Math.abs(b.gpPct - curGpPct) >= 0.0001) {
+      parts.push('GP ' + (b.gpPct * 100).toFixed(1) + '% -> ' + (curGpPct * 100).toFixed(1) + '%');
+    }
+    return parts.length ? 'Changes since review opened: ' + parts.join(', ') + '.' : '';
+  }
+  function seedWithDelta(pid, curTot, curGpPct, baseNote) {
+    var dl = deltaLine(pid, curTot, curGpPct);
+    return dl ? dl + '\n\n' + baseNote : baseNote;
+  }
+
   // ===== action orchestration ===============================================
   function gatherContext() {
     var n = woNumberFromUrl();
@@ -895,7 +926,7 @@
         return readOpenTasks(n).then(function (openTasks) {
           return {
             n: n, pid: pid, wo: wo,
-            total: money(tot.total), gpPct: tot.gpPct, gp: gpLabel(tot.gpPct),
+            total: money(tot.total), totalRaw: tot.total, gpPct: tot.gpPct, gp: gpLabel(tot.gpPct),
             gpText: (tot.gpPct == null ? 'unknown' : (tot.gpPct * 100).toFixed(2) + '%'),
             openTasks: openTasks
           };
@@ -918,28 +949,29 @@
       }
     };
   }
-  function buildProposalNoteStep(ctx, noteFn) {
+  // The three workflows now post the SAME operator-editable note (threaded as noteText by runSteps),
+  // seeded from the auto-generated template. The step no longer rebuilds the text from a template fn.
+  function buildProposalNoteStep(ctx) {
     // ponytail: NOT deduped on Retry - no client-proposal-notes (billing-note) READ query is pinned,
     // and inventing one is the fabricated-`workOrderNotes` bug class (vault umbrava-graphql-operations).
     // The resume-from-first-incomplete-step fix above stops a re-post in the normal case; a true
     // read-then-skip dedup (like the WO note below) needs a billing-notes read query pinned first.
     if (!bwnCan('WorkOrderProposal.AddNote')) return null;   // dropped from the plan by openConfirm
     return { label: 'Add note to Proposal #' + ctx.pid + ' Notes tab', pending: false,
-      run: function (reason) { return addProposalNote(ctx.pid, noteFn(reason)); } };
+      run: function (noteText) { return addProposalNote(ctx.pid, noteText); } };
   }
-  function buildWONoteStep(ctx, noteFn) {
+  function buildWONoteStep(ctx) {
     if (!bwnCan('WorkOrderNote.AddNew')) return null;
     return { label: 'Add note to Work Order W-' + ctx.n + ' notes', pending: false,
-      run: function (reason) {
-        var text = noteFn(reason);
+      run: function (noteText) {
         // Idempotent (matches bwn-write-queue's note dedup, keyed on the note text via workOrderNotes):
         // skip the post when an identical, non-deleted note already exists, so a Retry does not
         // duplicate it. Fail OPEN - if the read fails, post anyway (a missing note is worse than a
         // rare duplicate, and the note text is itself the stable key).
         return readWONotes(ctx.n).then(function (notes) {
-          if (woNoteExists(notes, text)) return true;
-          return addWONote(ctx.n, text);
-        }, function () { return addWONote(ctx.n, text); });
+          if (woNoteExists(notes, noteText)) return true;
+          return addWONote(ctx.n, noteText);
+        }, function () { return addWONote(ctx.n, noteText); });
       } };
   }
   function buildCompleteStep(ctx) {
@@ -954,14 +986,15 @@
           function () { return completeAllTasks(ctx.openTasks); });
       } };
   }
-  function buildCreateTaskStep(ctx, assigneeGuid, assigneeName, noteFn) {
+  function buildCreateTaskStep(ctx, assigneeGuid, assigneeName, seedText) {
     if (!bwnCan('Task.AddNew')) return null;
     // ponytail: this append is NOT deduped - the created task carries no idempotency key we can read
     // back (the frozen addTask payload has no marker, and Task has no confirmed read field to match
     // on). It is the LAST step, so the resume fix means it only re-runs if it ITSELF failed; grounding
     // a read-then-skip here needs a task-identity field pinned first.
-    return { label: 'Create task for ' + assigneeName + ': ' + firstLine(noteFn('')), pending: false,
-      run: function (reason) { return createTask(ctx.n, assigneeGuid, noteFn(reason)); } };
+    // Label previews the seed's first line; the task actually posts the operator's final note text.
+    return { label: 'Create task for ' + assigneeName + ': ' + firstLine(seedText), pending: false,
+      run: function (noteText) { return createTask(ctx.n, assigneeGuid, noteText); } };
   }
 
   function startApproval() { startWorkflow('approval'); }
@@ -972,56 +1005,57 @@
     paToast('Reading proposal…');
     gatherContext().then(function (ctx) {
       if (kind === 'approval') {
-        var aNote = function () { return approvalNote(ctx.gp, ctx.total); };
+        var aSeed = seedWithDelta(ctx.pid, ctx.totalRaw, ctx.gpPct, approvalNote(ctx.gp, ctx.total));
         return resolveUserName(ctx.wo.coordinator).then(function (name) {
           openConfirm({
             title: 'Approve proposal - Internal Proposal Approved',
             subtitle: 'W-' + ctx.n + '  ·  Proposal #' + ctx.pid + '  ·  ' + ctx.total + '  ·  ' + ctx.gp,
-            isKickback: false, noteFn: aNote,
+            noteSeed: aSeed,
             steps: [
               buildStatusStep(ctx, 'Internal Proposal Approved'),
-              buildProposalNoteStep(ctx, aNote),
-              buildWONoteStep(ctx, aNote),
+              buildProposalNoteStep(ctx),
+              buildWONoteStep(ctx),
               buildCompleteStep(ctx),
-              buildCreateTaskStep(ctx, ctx.wo.coordinator, name, aNote)
+              buildCreateTaskStep(ctx, ctx.wo.coordinator, name, aSeed)
             ]
           });
         });
       }
       if (kind === 'tsp') {
-        var tNote = function () { return tspNote(ctx.gp, ctx.total); };
+        var tSeed = seedWithDelta(ctx.pid, ctx.totalRaw, ctx.gpPct, tspNote(ctx.gp, ctx.total));
         // RM-A3: resolve the TSP assignee LIVE and fail closed - never file a task on a stale RONNY_GUID.
         return resolveTspAssignee().then(function (tsp) {
           if (!tsp) { paToast('TSP assignee "' + TSP_ASSIGNEE_NAME + '" could not be verified live - nothing sent. (Set bwn:modules.paLegacyFallback=true to override.)'); return; }
           openConfirm({
             title: 'Send to Trade Specialist - Pending Trade Specialist',
             subtitle: 'W-' + ctx.n + '  ·  Proposal #' + ctx.pid + '  ·  ' + ctx.total + '  ·  ' + ctx.gp,
-            isKickback: false, noteFn: tNote,
+            noteSeed: tSeed,
             steps: [
               buildStatusStep(ctx, 'Pending Trade Specialist'),
-              buildProposalNoteStep(ctx, tNote),
-              buildWONoteStep(ctx, tNote),
+              buildProposalNoteStep(ctx),
+              buildWONoteStep(ctx),
               buildCompleteStep(ctx),
-              buildCreateTaskStep(ctx, tsp.guid, tsp.name, tNote)   // TSP is the ONLY action that reassigns the task (to Ronny)
+              buildCreateTaskStep(ctx, tsp.guid, tsp.name, tSeed)   // TSP is the ONLY action that reassigns the task (to Ronny)
             ]
           });
         });
       }
-      // kickback
-      var kNote = function (reason) { return kickbackNote(reason, ctx.total); };
+      // kickback: the on-device AI drafts the rejection reason; that becomes the editable seed, so
+      // the reviewer confirms/edits the WHOLE note (reason + summary) in one field.
       return readProposalContext(ctx.pid).then(function (pc) {
         return draftKickbackReason({ scope: pc.scope, items: pc.items, total: ctx.total, gpText: ctx.gpText }).then(function (reason) {
           return resolveUserName(ctx.wo.coordinator).then(function (name) {
+            var kSeed = seedWithDelta(ctx.pid, ctx.totalRaw, ctx.gpPct, kickbackNote(reason, ctx.total));
             openConfirm({
               title: 'Kick back proposal - Internal Proposal Rejected',
               subtitle: 'W-' + ctx.n + '  ·  Proposal #' + ctx.pid + '  ·  ' + ctx.total + '  ·  ' + ctx.gp,
-              isKickback: true, aiReason: reason, noteFn: kNote,
+              noteSeed: kSeed,
               steps: [
                 buildStatusStep(ctx, 'Internal Proposal Rejected'),
-                buildProposalNoteStep(ctx, kNote),
-                buildWONoteStep(ctx, kNote),
+                buildProposalNoteStep(ctx),
+                buildWONoteStep(ctx),
                 buildCompleteStep(ctx),
-                buildCreateTaskStep(ctx, ctx.wo.coordinator, name, kNote)
+                buildCreateTaskStep(ctx, ctx.wo.coordinator, name, kSeed)
               ]
             });
           });
@@ -1101,6 +1135,7 @@
       // checkbox is what makes this menu meaningful at all. The later steps gate themselves.
       // Fails OPEN while the decode is unknown.
       if (!bwnCan('WorkOrderField.Status')) { removeDropdown(); return; }
+      captureBaseline(proposalIdFromUrl());   // snapshot total+GP once, before the reviewer edits
       ensureStyle();
       if (document.getElementById(DROPDOWN_ID)) return;   // presence-based guard (React wipes; we re-add)
       var dd = buildDropdown();
