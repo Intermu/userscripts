@@ -552,6 +552,9 @@ jobs:
       - name: Drop Upload doc-summary harness (cloud-bus primary, on-device fallback, note emission)
         run: node scripts/test-drop-upload-doc-summary.js
 
+      - name: Drop Upload queue dedup harness (re-dropped file skipped, kept pair stays aligned)
+        run: node scripts/test-drop-upload-queue.js
+
       - name: WO Intake .eml MIME-parse harness (parseEml multipart walk)
         run: node scripts/test-eml-parse.js
 
