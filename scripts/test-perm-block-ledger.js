@@ -45,6 +45,7 @@ var ADOPTED = [
   'bwn-proposal-copy.user.js',   // copy = create + fill a draft proposal
   'bwn-suite-core.user.js',      // dock needPerm, WO-Assist writes, and the PRODUCER
   'bwn-temp-vendor.user.js',     // activate / deactivate a vendor
+  'bwn-wo-audit.user.js',        // posts a WO-audit internal note on aged jobs
   'bwn-write-queue.user.js'      // per-verb gate on the queue drain
 ];
 

@@ -1,10 +1,10 @@
 // ==UserScript==
 // @name         BWN WO Audit (Broadway National)
 // @namespace    broadwaynational.bwn
-// @version      0.9.0
+// @version      0.10.0
 // @downloadURL  https://raw.githubusercontent.com/Intermu/userscripts/main/bwn-wo-audit.user.js
 // @updateURL    https://raw.githubusercontent.com/Intermu/userscripts/main/bwn-wo-audit.user.js
-// @description  Batch WO-audit tool. Upload a WO audit .xlsx; for each work order this reads its two most recent notes DIRECTLY from Umbrava's GraphQL API in-page (using your live Umbrava session - the same read the BWN Ops Suite AI drafts use), then asks the broadway-internal-ops SWA summarize route (x-bwn-key gated, Anthropic key server-side) to write a 1-3 sentence client-ready status note. Fills the audit's notes column and downloads the workbook, preserving every other cell and formula. It also reads each WO's live header (status, phase, priority, GP, DNE/NTE, PO/vendor, schedule) in the same call and writes a deterministic Audit Flags column (OVERDUE, NEG/LOW GP, NTE>DNE, NO VENDOR, UNSCHEDULED, STALE) computed with no AI - so the exception audit survives an AI outage. Runs entirely in the app.umbrava.com page so it inherits your Umbrava auth - no MCP, no pasted keys, nothing sensitive in this script. This replaces the old standalone WO_Audit_Automation.html SWA tool, whose server-side MCP path could not authenticate to Umbrava.
+// @description  Batch WO-audit tool. Upload a WO audit .xlsx; for each work order this reads its two most recent notes DIRECTLY from Umbrava's GraphQL API in-page (using your live Umbrava session - the same read the BWN Ops Suite AI drafts use), then asks the broadway-internal-ops SWA summarize route (x-bwn-key gated, Anthropic key server-side) to write a 1-3 sentence client-ready status note. Fills the audit's notes column and downloads the workbook, preserving every other cell and formula. It also reads each WO's live header (status, phase, priority, GP, DNE/NTE, PO/vendor, schedule) in the same call and writes a deterministic Audit Flags column (OVERDUE, NEG/LOW GP, NTE>DNE, NO VENDOR, UNSCHEDULED, STALE) computed with no AI - so the exception audit survives an AI outage. Runs entirely in the app.umbrava.com page so it inherits your Umbrava auth - no MCP, no pasted keys, nothing sensitive in this script. This replaces the old standalone WO_Audit_Automation.html SWA tool, whose server-side MCP path could not authenticate to Umbrava. After a run drafts its notes, the coordinator can post each drafted note as an INTERNAL Umbrava note onto its aged (>30d) work order - one explicit click per note (human-gated, idempotent), routed through the governed bwnGqlOp write path with its permission gate and audit trail.
 // @match        https://app.umbrava.com/*
 // @run-at       document-idle
 // @noframes
@@ -19,7 +19,7 @@
 (function () {
   'use strict';
 
-  var VER = '0.9.0';
+  var VER = '0.10.0';
   var FONT = "-apple-system,BlinkMacSystemFont,'Segoe UI','Helvetica Neue',Arial,sans-serif";
 
   // Suite drawer exit, per the contract in Core's ensureStyle. Core's stylesheet owns the fade;
@@ -98,7 +98,7 @@
     { id: 'claude-haiku-4-5', label: 'Haiku 4.5 (cheapest)' },
   ];
   var XLSX_MIME = 'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet';
-  console.info('[BWN WO AUDIT] v' + VER + ' - in-page GraphQL header+notes read -> deterministic Audit Flags + bwnAI /api/ai status note -> filled .xlsx download; registers into the shared dock (bwn:dock:*)');
+  console.info('[BWN WO AUDIT] v' + VER + ' - in-page GraphQL header+notes read -> deterministic Audit Flags + bwnAI /api/ai status note -> filled .xlsx download; can then post each drafted note as an INTERNAL note onto its aged (>30d) work order, one click per note (governed bwnGqlOp write path); registers into the shared dock (bwn:dock:*)');
 
   // ====================================================================
   // Auth: the live Umbrava Auth0 bearer, read straight from the page (same
@@ -129,6 +129,78 @@
     } catch (e) { return ''; }
   }
   // ===== BWN-SHARED END v1 =====
+
+  // ===== BWN-PERM START v1 (paste-identical; pinned by scripts/test-perm-block-ledger.js) =====
+  // Umbrava's own per-user permission checkboxes, as the one question a control has:
+  //   bwnCan('WorkOrderNote.AddNew') -> true | false
+  // Umbrava returns me.permissions as a JSON STRING of {"<Type>Permissions": "<bitmask>"} - one
+  // bit per checkbox on /company/users/<id>/permissions. bwn-suite-core decodes it once a session
+  // and publishes the DECODED grant list to `bwn:perm:last` + the `bwn:perm` bus event, the same
+  // one-way producer/consumer shape as bwn:role. This block only READS that slot, so every
+  // sandbox that pastes it needs neither the query, the token, nor the flag numbers.
+  //
+  // FAIL-OPEN on anything unknown - no slot yet, a stale slot, or a group the producer does not
+  // map. Umbrava's server is the real boundary (it refuses the mutation either way), so an
+  // unreadable cache must never strand a coordinator mid-shift. Fail-CLOSED only on a
+  // positively-known missing bit. localStorage is per-origin, so this answers "unknown" (and
+  // therefore allows) anywhere but app.umbrava.com - by design.
+  var BWN_PERM_KEY = 'bwn:perm:last';
+  var BWN_PERM_TTL_MS = 24 * 3600 * 1000;
+  var _bwnPermSlot = null;      // memoized parse; invalidated by the bwn:perm listener below
+  function bwnPermSlot() {
+    if (_bwnPermSlot) return _bwnPermSlot;
+    try {
+      var p = JSON.parse(localStorage.getItem(BWN_PERM_KEY) || 'null');
+      if (p && p.ts && (Date.now() - p.ts) < BWN_PERM_TTL_MS &&
+        Array.isArray(p.groups) && Array.isArray(p.granted)) _bwnPermSlot = p;
+    } catch (e) { /* an unreadable cache reads as unknown, which fails open */ }
+    return _bwnPermSlot;
+  }
+  function bwnCan(key) {
+    var p = bwnPermSlot();
+    if (!p) return true;                                          // nothing decoded yet -> allow
+    var grp = String(key).split('.')[0];
+    if (p.groups.indexOf(grp) === -1) return true;                // group unmapped/absent -> allow
+    return p.granted.indexOf(key) !== -1;
+  }
+  // keys: a 'Group.Flag' string, or an array of them (ALL must be granted).
+  function bwnCanAll(keys) {
+    if (!keys) return true;
+    if (typeof keys === 'string') return bwnCan(keys);
+    for (var i = 0; i < keys.length; i++) { if (!bwnCan(keys[i])) return false; }
+    return true;
+  }
+  // patchWorkOrder is ONE mutation over MANY fields and Umbrava gates each field separately, so
+  // its permission depends on the variables rather than the operation. This maps the data keys the
+  // suite actually sends, all of them wire-proven; a key this map does not know contributes NO
+  // requirement, which is the block's unknown -> allow rule and keeps a future field from being
+  // blocked by a map nobody updated. `workOrderNumber` is the identifier, not a field write.
+  var BWN_PATCH_FIELD_PERM = {
+    statusId: 'WorkOrderField.Status',
+    assignedTo: 'WorkOrderField.AssignedTo',
+    // ECD rides inside the whole-object `priority` replace, and the SPA bundles the SLA id with it.
+    priority: 'WorkOrderField.CompletionSLA',
+    serviceLevelAgreementId: 'WorkOrderField.CompletionSLA',
+    sourceJobNumber: 'WorkOrderField.SourceJobNumber',
+    sourcePurchaseOrderNumber: 'WorkOrderField.SourcePurchaseOrderNumber'
+  };
+  // -> [] | ['WorkOrderField.Status', ...]; deduped, so a bundled priority+SLA asks once.
+  function bwnPermsForPatch(variables) {
+    var data = (variables && variables.data) || {};
+    var out = [];
+    Object.keys(data).forEach(function (k) {
+      var p = BWN_PATCH_FIELD_PERM[k];
+      if (p && out.indexOf(p) === -1) out.push(p);
+    });
+    return out;
+  }
+  try {
+    document.addEventListener('bwn:evt', function (e) {
+      var d = e && e.detail;
+      if (d && d.id === 'bwn:perm') _bwnPermSlot = null;          // a fresh decode landed
+    });
+  } catch (e) { }
+  // ===== BWN-PERM END v1 =====
 
   // Same-origin GraphQL POST -> resolves to `data`, throws on errors[]. Carries the
   // page's own Umbrava bearer; no @connect needed (app.umbrava.com is same-origin).
@@ -239,6 +311,329 @@
     return f;
   }
   // ===== BWN AUDIT FLAGS END ====================================================================
+
+  // ---- BWN-OPS: audited GraphQL write path for the note-posting step -----------
+  // Routes the posted status note through bwnGqlOp (the paste-identical BWN-OPS-WRAP below,
+  // SHA-gated to Core by scripts/test-bwn-ops.js): a correlation id + the shared bwn:audit entry +
+  // centralized success:false rejection + the Umbrava permission gate. addEditJobNote is moderate
+  // (no confirm gate; the human click IS the gate). bwnGql just forwards to this file's own gql()
+  // (POSTs /api/graphql, resolves `data`, throws on errors[]) - the transport contract the wrapper
+  // needs. Reads (header + notes) stay on gql() directly; only the WRITE goes through here.
+  var bwnGql = function (query, variables) { return gql(query, variables); };
+  var BWN_VER = '0.10.0';
+  var BWN_MODULES = (function () { try { return JSON.parse(localStorage.getItem('bwn:modules') || '{}') || {}; } catch (e) { return {}; } })();
+  // Central governance (governance-sync): fold the org flags bwn-suite-ai caches to bwn:gov into
+  // BWN_MODULES as ONE-WAY disables, the SAME shape as bwn-suite-core's bwnApplyGov(). A remote
+  // flags['lowGp']===false or flags.globalKillSwitch DISABLES this script's writes - the bwnGqlOp
+  // per-feature gate below reads BWN_MODULES['lowGp'] live - and can NEVER enable one. Fail-closed:
+  // an absent or corrupt bundle keeps the local defaults (last-known-good), never relaxes. Re-applies
+  // on the bwn:gov ping so a remote kill blocks new writes with no reload.
+  if (!('woAuditNotes' in BWN_MODULES)) BWN_MODULES.woAuditNotes = true;
+  function bwnApplyGov() {
+    try {
+      var g = JSON.parse(localStorage.getItem('bwn:gov') || 'null');
+      if (!g || typeof g !== 'object' || !g.flags || typeof g.flags !== 'object') return;
+      var f = g.flags, kill = f.globalKillSwitch === true;
+      Object.keys(BWN_MODULES).forEach(function (k) {
+        if (kill || f[k] === false) BWN_MODULES[k] = false;   // one-way: only ever disable
+      });
+    } catch (e) { /* corrupt bundle -> keep local defaults (safe) */ }
+  }
+  bwnApplyGov();
+  try { document.addEventListener('bwn:gov', function () { bwnApplyGov(); }); } catch (e) { }
+  var BWN_OPS = {
+    addEditJobNote: { kind: 'write', perm: 'WorkOrderNote.AddNew', target: 'note', risk: 'moderate', idempotent: false, retry: 'none',
+      ok: 'Note posted.', fail: 'The note was not posted.' }
+  };
+  // ===== BWN-OPS-WRAP START v3 (paste-identical across adopters; SHA-gated by scripts/test-bwn-ops.js) =====
+  // v3 (2026-09-02) adds the Umbrava permission gate (G7 below). It closes over bwnCan/bwnCanAll
+  // from the BWN-PERM block, so an adopter of this wrapper must carry that block too - the ledger
+  // in scripts/test-perm-block-ledger.js is what keeps the two lists in step.
+  // Generic machinery only - NO registry, NO window hook - so it is byte-identical in every
+  // sandbox that adopts it (Core, drop-upload, ...). It closes over four things each sandbox
+  // supplies on its own: BWN_OPS (that file's registry), BWN_MODULES (kill switches), BWN_VER,
+  // and bwnGql(query, variables) (that file's same-origin transport). The audit ring buffer
+  // writes to the shared localStorage key, so every sandbox's writes land in ONE audit trail.
+  function bwnCorrId() {
+    try { if (window.crypto && window.crypto.randomUUID) return 'bwn-' + window.crypto.randomUUID(); }
+    catch (e) { /* fall through to the timestamp form */ }
+    return 'bwn-' + Date.now().toString(36) + '-' + Math.random().toString(36).slice(2, 10);
+  }
+
+  // Bounded, PII-free audit ring buffer in localStorage. Records ONLY what the caller passes
+  // (ids + scalar before/after) plus operation metadata - NEVER the raw variables or the
+  // response, which can carry note text, addresses, or vendor identity.
+  var BWN_AUDIT_KEY = 'bwn:audit', BWN_AUDIT_MAX = 200, BWN_AUDIT_SCHEMA = 1;
+  function bwnAuditAll() {
+    try { var a = JSON.parse(localStorage.getItem(BWN_AUDIT_KEY) || '[]'); return Array.isArray(a) ? a : []; }
+    catch (e) { return []; }
+  }
+  function bwnAuditRecord(entry) {
+    try {
+      var a = bwnAuditAll();
+      a.push(entry);
+      if (a.length > BWN_AUDIT_MAX) a = a.slice(a.length - BWN_AUDIT_MAX);
+      localStorage.setItem(BWN_AUDIT_KEY, JSON.stringify(a));
+    } catch (e) { /* audit is best-effort - it must never block or fail a write */ }
+    return entry;
+  }
+  function bwnAuditExport() {
+    return JSON.stringify({ schema: BWN_AUDIT_SCHEMA, ver: BWN_VER, exportedTs: Date.now(), entries: bwnAuditAll() }, null, 2);
+  }
+  function bwnAuditClear() { try { localStorage.removeItem(BWN_AUDIT_KEY); } catch (e) { /* best-effort */ } }
+  function bwnAuditActor() {
+    try {
+      var r = JSON.parse(localStorage.getItem('bwn:role:last') || 'null');
+      return (r && (r.label || r.role)) || 'unknown';
+    } catch (e) { return 'unknown'; }
+  }
+
+  // Only a network-level failure is transient. A GraphQL validation error comes back through
+  // bwnGql as a thrown Error carrying the server's message (deterministic - retrying just
+  // repeats it), and a write refused with success:false is flagged bwnNonTransient below.
+  // ponytail: bwnGql does not surface the HTTP status, so 429/5xx are not distinguished here;
+  // attach r.status in bwnGql and widen this test if status-aware backoff is ever needed.
+  function bwnIsTransient(err) {
+    if (err && err.bwnNonTransient) return false;
+    return /network|failed to fetch|load failed|timeout|timed out/i.test(String(err && err.message || err));
+  }
+  function bwnBackoff(tryNo) { return Math.min(4000, 400 * Math.pow(2, tryNo - 1)); }
+  function bwnDelay(ms) { return new Promise(function (r) { setTimeout(r, ms); }); }
+
+  // bwnGqlOp(op, query, variables, opts) -> Promise(data)
+  //   op        BWN_OPS key. THROWS if unregistered - a captured op must be classified before
+  //             it can be sent, which is what keeps guessed selectors out of the suite.
+  //   query     the captured GraphQL document TEXT - the caller owns it, never invented here.
+  //   variables the variables object (sent as-is to bwnGql; never copied into the audit).
+  //   opts      { feature, validate, ids, before, after, actor } - all optional:
+  //     feature   BWN_MODULES key; if that module is switched off the op is REFUSED and, for a
+  //               write, audited outcome:'denied' - this is the per-feature kill switch.
+  //     validate  fn(variables) -> true | 'message'; a write is blocked before it is sent.
+  //     ids       { wo, po, vendorId, ... } scalar identifiers for the audit trail (NO PII).
+  //     before    scalar snapshot of the value(s) about to change (NO PII, NO bulk data).
+  //     after     scalar snapshot of the intended new value(s).
+  //     actor     who initiated; defaults to the last-known rank label, else 'unknown'.
+  // Reads resolve to `data`. A write whose {success,message} envelope says success:false is
+  // REJECTED (never a silent false - the exact bug class the op-catalog warns about) and
+  // audited outcome:'error'.
+  // Injected per-sandbox by a caller that owns a high-risk write's confirmation UI, via
+  // bwnGqlOp.setConfirm(fn). A risk:'high' write is refused unless the caller either passes
+  // opts.confirmed===true (it confirmed through its own UI) OR a confirm handler returns truthy.
+  var _confirmFn = null;
+  function bwnGqlOp(op, query, variables, opts) {
+    opts = opts || {};
+    var meta = BWN_OPS[op];
+    if (!meta) return Promise.reject(new Error('bwnGqlOp: unregistered operation "' + op + '"'));
+    var isWrite = meta.kind === 'write';
+    var corrId = bwnCorrId();
+    var t0 = Date.now();
+    var actor = opts.actor || bwnAuditActor();
+
+    function writeAudit(outcome, extra) {
+      if (!isWrite) return;
+      var e = {
+        ts: Date.now(), corrId: corrId, op: op, kind: meta.kind, target: meta.target,
+        risk: meta.risk || null, actor: actor, ids: opts.ids || null,
+        before: (opts.before === undefined ? null : opts.before),
+        after: (opts.after === undefined ? null : opts.after),
+        outcome: outcome, ms: Date.now() - t0, ver: BWN_VER
+      };
+      if (extra) { for (var k in extra) { if (Object.prototype.hasOwnProperty.call(extra, k)) e[k] = extra[k]; } }
+      bwnAuditRecord(e);
+    }
+
+    // Fail-closed write classification (G5): a WRITE must carry a RECOGNIZED risk tier. An
+    // unclassified write - a registry entry whose risk is missing or misspelled - is REFUSED here
+    // rather than sent unlabelled, so a new mutation cannot slip past the governance by omitting
+    // its risk. 'low'/'moderate' skip the confirm gate below; 'high' hits it; anything else fails
+    // closed. Reads are unaffected (isWrite guards this). Audited denied so the refusal is visible.
+    if (isWrite && meta.risk !== 'low' && meta.risk !== 'moderate' && meta.risk !== 'high') {
+      writeAudit('denied', { reason: 'unclassified-write:' + (meta.risk || 'none') });
+      return Promise.reject(new Error('bwnGqlOp: write "' + op + '" has no recognized risk classification'));
+    }
+    // Per-feature kill switch: a disabled module must not mutate even if its UI leaked in.
+    if (opts.feature && BWN_MODULES[opts.feature] === false) {
+      writeAudit('denied', { reason: 'feature-off:' + opts.feature });
+      return Promise.reject(new Error('bwnGqlOp: feature "' + opts.feature + '" is disabled'));
+    }
+    // Umbrava permission gate (G7). The UI hides a control the operator's checkboxes do not cover,
+    // but hiding is not enforcement: a palette entry, a stale drawer, a queued command, or a future
+    // caller can all reach a write whose button was never rendered. This is the enforcement point -
+    // every registered write passes through here, so ONE guard covers every caller.
+    //   meta.perm  'Group.Flag' | ['Group.Flag', ...] | fn(variables) -> either of those
+    // A function is how a multi-field mutation (patchWorkOrder) asks per FIELD instead of per op.
+    // bwnCanAll fails OPEN on anything undecided - no slot, a stale slot, an unmapped group - so
+    // this refuses ONLY a positively-known missing checkbox. Refusals are non-transient (retrying
+    // cannot grant a permission) and audited `denied`, so a refusal is visible in the ring rather
+    // than silent. The reason carries the permission NAME, which is a static key, never user data.
+    if (isWrite && meta.perm) {
+      var need = (typeof meta.perm === 'function') ? meta.perm(variables) : meta.perm;
+      if (typeof need === 'string') need = [need];
+      if (!Array.isArray(need)) need = [];
+      if (need.length && !bwnCanAll(need)) {
+        var missing = need.filter(function (k) { return !bwnCan(k); });
+        writeAudit('denied', { reason: 'permission:' + missing.join('+') });
+        var noPerm = new Error('bwnGqlOp: "' + op + '" needs Umbrava permission ' + missing.join(' + ') + ' - the write was NOT sent.');
+        noPerm.bwnNonTransient = true;
+        noPerm.bwnPermissionDenied = missing;
+        return Promise.reject(noPerm);
+      }
+    }
+    // Validate a write BEFORE it leaves the browser.
+    if (isWrite && typeof opts.validate === 'function') {
+      var vr = opts.validate(variables);
+      if (vr !== true) {
+        writeAudit('denied', { reason: 'validation:' + vr });
+        return Promise.reject(new Error('bwnGqlOp: validation failed for "' + op + '": ' + vr));
+      }
+    }
+
+    var maxTries = (meta.retry === 'safe' && (meta.kind === 'read' || meta.idempotent === true)) ? 3 : 1;
+    function attempt(tryNo) {
+      return bwnGql(query, variables).then(function (data) {
+        if (isWrite) {
+          var env = data && data[op];
+          // F3: fail closed on an unrecognized write response. A registered write MUST return
+          // { success: <bool>, ... } under its own field name (op === the response field name
+          // for every adopter). A missing data[op] (a name/alias mismatch) or a non-boolean
+          // success means the write cannot be confirmed to have landed - classify it as an
+          // error, never a silent 'ok'. Verified safe: every current adopter selects `success`.
+          if (!env || typeof env.success !== 'boolean') {
+            var badShape = new Error(op + ': unrecognized write response (no {success} under data.' + op + ')');
+            badShape.bwnNonTransient = true;
+            writeAudit('error', { tries: tryNo, reason: 'unexpected-response-shape' });
+            throw badShape;
+          }
+          if (env && env.success === false) {
+            var refused = new Error(env.message || (op + ' was refused'));
+            refused.bwnNonTransient = true;
+            // F5: record a fixed category, never the server message (env.message can echo
+            // input-derived text). The message still rides the thrown `refused` to the caller.
+            writeAudit('error', { tries: tryNo, reason: 'write-refused' });
+            throw refused;
+          }
+          writeAudit('ok', { tries: tryNo });
+        }
+        return data;
+      }, function (err) {
+        if (bwnIsTransient(err) && tryNo < maxTries) {
+          return bwnDelay(bwnBackoff(tryNo)).then(function () { return attempt(tryNo + 1); });
+        }
+        // F5: audit a fixed category, never the raw error text (which can echo input-derived
+        // server strings into the "PII-free" trail). The full error still rides the thrown err
+        // to the caller for its toast/log.
+        writeAudit('error', { tries: tryNo, reason: bwnIsTransient(err) ? 'transient-failure' : 'request-failed' });
+        throw err;
+      });
+    }
+    // High-risk confirmation gate (fail-closed, by construction). F4: a risk:'high' write has
+    // NO path to the transport except through this block - it returns in every sub-case (send
+    // or reject), so the trailing `return attempt(1)` below is reachable only by non-high-risk
+    // ops. A future high-risk writer therefore cannot skip the gate by omission: an absent
+    // confirmation is refused, never silently sent. Confirmation is proven EITHER by the
+    // caller's own UI (opts.confirmed===true, e.g. dispatch's modal) OR by an injected _confirmFn
+    // returning truthy.
+    // KNOWN RESIDUAL (flagged, NOT closed here): opts.confirmed===true is a caller assertion the
+    // wrapper trusts - it cannot tell a genuine confirm from a hardcoded literal. Closing that
+    // would mean dropping bare-boolean trust and mandating an injected _confirmFn, which every
+    // current high-risk adopter would fail (none inject one) - a live-behavior change, out of scope.
+    if (isWrite && meta.risk === 'high') {
+      if (opts.confirmed !== true) {
+        if (typeof _confirmFn !== 'function') {
+          writeAudit('denied', { reason: 'confirm-required' });
+          return Promise.reject(new Error('bwnGqlOp: "' + op + '" is high-risk and needs confirmation (no confirm handler set)'));
+        }
+        var details = {
+          op: op, target: meta.target, risk: meta.risk, ids: opts.ids || null,
+          current: (opts.current === undefined ? null : opts.current),
+          proposed: (opts.proposed === undefined ? null : opts.proposed),
+          count: (opts.count === undefined ? null : opts.count),
+          reason: opts.reason || null, irreversible: !!opts.irreversible
+        };
+        return Promise.resolve().then(function () { return _confirmFn(details); }).then(function (okd) {
+          if (!okd) {
+            writeAudit('denied', { reason: 'user-cancelled' });
+            throw new Error('bwnGqlOp: "' + op + '" cancelled at confirmation');
+          }
+          return attempt(1);
+        });
+      }
+      return attempt(1);
+    }
+    return attempt(1);
+  }
+  bwnGqlOp.setConfirm = function (fn) { _confirmFn = (typeof fn === 'function') ? fn : null; };
+  // ===== BWN-OPS-WRAP END v3 =====
+
+  // ===== BWN WO-AUDIT POST START (pure; sliced by scripts/test-wo-audit-post.js) ================
+  // The note-posting helpers, mirroring bwn-low-gp's note plumbing. Kept pure (no DOM, no network)
+  // so the node harness runs the shipped bytes: eligibility, the WorkOrderNoteInput shape, the
+  // idempotency marker, and the marker embed. postAuditNote (below, outside this slice) is the one
+  // impure piece - it calls bwnGqlOp.
+  var ADD_NOTE_M = "mutation AddEditWONote($addEditInput: WorkOrderNoteInput!) { addEditJobNote(data: $addEditInput) { success message note { id type } } }";
+  var AUDIT_MARKER = '[bwn:wo-audit]';
+  // Note-type id resolved by NAME from Core's bwn:noteTypes cache, floored to the one type this
+  // script posts. Mirrors low-gp's lgTypeId; never hardcode past the floor, never infer by position.
+  var WOA_TYPE_FLOOR = { internal: 13 };
+  function noteTypesRaw() { try { return localStorage.getItem('bwn:noteTypes'); } catch (e) { return null; } }
+  function noteTypeId(name) {
+    var want = String(name == null ? '' : name).toLowerCase();
+    try {
+      var c = JSON.parse(noteTypesRaw() || 'null');
+      if (c && c.map) { for (var id in c.map) { if (String(c.map[id]).toLowerCase() === want) return parseInt(id, 10); } }
+    } catch (e) { /* fall through to floor */ }
+    return (typeof WOA_TYPE_FLOOR[want] === 'number') ? WOA_TYPE_FLOOR[want] : null;
+  }
+  // WorkOrderNoteInput - matches the captured AddEditWONote shape exactly (mirrors lgNoteInput).
+  function noteInput(woNumber, typeId, content, contentHtml) {
+    return {
+      workOrderNumber: woNumber, type: typeId, content: String(content), contentHtml: contentHtml,
+      isCompletion: false, isInvoice: false, isPinned: false, actionNoteEmails: null, targetPurchaseOrderNumbers: []
+    };
+  }
+  // A single plain block -> one escaped <p>, newlines as <br>.
+  function simpleHtml(text) {
+    var s = String(text == null ? '' : text).replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;');
+    return '<p>' + s.replace(/\n/g, '<br>') + '</p>';
+  }
+  // The posted note carries a hidden idempotency marker so a re-run can SEE its own prior note.
+  function postBody(noteText) { return noteText + '\n\n' + AUDIT_MARKER; }
+  // True if any of the WO's notes already carries this tool's marker (idempotency: do not double-post).
+  function hasPriorAuditNote(notes) {
+    if (!notes) return false;
+    for (var i = 0; i < notes.length; i++) {
+      var c = notes[i] && notes[i].content;
+      if (c && String(c).indexOf(AUDIT_MARKER) !== -1) return true;
+    }
+    return false;
+  }
+  // Parse the workbook's days/aged cell to an integer age, or null when it is blank/non-numeric.
+  function parseAgeDays(cell) {
+    var n = parseInt(String(cell == null ? '' : cell).replace(/[^0-9.\-]/g, ''), 10);
+    return isFinite(n) ? n : null;
+  }
+  // Post-eligible only when the job is aged STRICTLY over 30 days. When the workbook has no days
+  // column (daysColAbsent), the export is over-30 by construction, so every row qualifies. Age
+  // exactly 30 is NOT eligible.
+  function postEligible(ageDays, daysColAbsent) {
+    if (daysColAbsent) return true;
+    return typeof ageDays === 'number' && isFinite(ageDays) && ageDays > 30;
+  }
+  // ===== BWN WO-AUDIT POST END ==================================================================
+
+  // Post one drafted status note as an INTERNAL note on its WO, through the governed write path.
+  // Impure (calls bwnGqlOp), so it sits OUTSIDE the sliced block above. ids carry the scalar WO
+  // number only; the note text stays in variables, never the audit trail.
+  function postAuditNote(woNumber, noteText) {
+    var t = noteTypeId('internal');
+    if (t == null) return Promise.reject(new Error('could not resolve the Internal note type'));
+    var body = postBody(noteText);
+    return bwnGqlOp('addEditJobNote', ADD_NOTE_M, { addEditInput: noteInput(woNumber, t, body, simpleHtml(body)) }, { feature: 'woAuditNotes', ids: { wo: woNumber } }).then(function (d) {
+      var r = d && d.addEditJobNote;
+      if (!r || r.success !== true) throw new Error((r && r.message) || 'addEditJobNote reported no success');
+      return r.note;
+    });
+  }
 
   function woFetch(number) {
     var n = parseInt(String(number).replace(/^W-?/i, '').replace(/[^0-9]/g, ''), 10);
@@ -936,6 +1331,9 @@
       '</div>' +
       '<div id="bwn-woaudit-prog" style="font-weight:600;margin:6px 0"></div>' +
       '<div id="bwn-woaudit-log" style="font:12px ui-monospace,Consolas,monospace;background:#f6f8f7;border:1px solid #e0e6e2;border-radius:8px;padding:10px;max-height:240px;overflow:auto;white-space:pre-wrap"></div>' +
+      // Post-step section: populated by renderPostSection() when a run finishes. One Post button per
+      // drafted note, human-gated - there is NO bulk "post all".
+      '<div id="bwn-woaudit-post"></div>' +
       '</div>';
     ov.appendChild(box);
     document.body.appendChild(ov);
@@ -1005,6 +1403,7 @@
       var rb0 = $('bwn-woaudit-retry'); if (rb0) rb0.style.display = 'none';
       var db0 = $('bwn-woaudit-dl'); if (db0) db0.style.display = 'none';
       setWarn('');   // the previous session's completeness state does not describe this workbook
+      var ph0 = $('bwn-woaudit-post'); if (ph0) ph0.innerHTML = '';   // stale post cards belong to the old workbook
       var ws = loaded.wb.Sheets[currentSheet()];
       var map = mapSheet(ws);
       var hdr = (map.aoa[map.headerRow] || []).map(function (x) { return String(x == null ? '' : x); });
@@ -1075,6 +1474,7 @@
       if (retryOnly && !targets.length) { logln('Nothing left to finish - every row has a note.'); return; }
 
       $('bwn-woaudit-start').disabled = true; $('bwn-woaudit-retry').style.display = 'none'; $('bwn-woaudit-dl').style.display = 'none';
+      var ph = $('bwn-woaudit-post'); if (ph) ph.innerHTML = '';   // rebuilt when the run finishes
       // Lock the inputs that can replace `session` under in-flight workers. describe() also
       // refuses while running; this stops the interaction reaching it at all.
       $('bwn-woaudit-file').disabled = true;
@@ -1124,14 +1524,24 @@
               assignedTo: cellStr(session.map.aoa, row.rowIdx, session.map.assigned),
             };
             var top2 = data.notes.slice(0, 2);
+            // priorAudit is read from the LIVE notes fetched this run, so a re-run sees a note this
+            // tool already posted (idempotency for the post step below).
+            var priorAudit = hasPriorAuditNote(data.notes);
             return summarize(woFacts, top2, model, onWait).then(function (note) {
-              return { note: note, notesFound: data.notes.length };
+              return { note: note, notesFound: data.notes.length, priorAudit: priorAudit };
             });
           })
           .then(function (out) {
             // Write into the worksheet cell, dropping any formula (string value only).
             ws[XLSX.utils.encode_cell({ c: session.map.note, r: row.rowIdx })] = { t: 's', v: out.note };
-            session.results[origIdx] = { key: row.key, note: out.note, notesFound: out.notesFound };
+            // Post-step state (used only by the "Post drafted notes" section after the run): a row
+            // is post-eligible when aged >30d, or when the workbook has no days column at all.
+            var daysColAbsent = session.map.days === -1;
+            var ageDays = daysColAbsent ? null : parseAgeDays(cellStr(session.map.aoa, row.rowIdx, session.map.days));
+            session.results[origIdx] = {
+              key: row.key, note: out.note, notesFound: out.notesFound,
+              ageDays: ageDays, eligible: postEligible(ageDays, daysColAbsent), priorAudit: !!out.priorAudit
+            };
             logln('  WO ' + row.key + ' (' + out.notesFound + ' notes): ' + (out.note ? out.note.slice(0, 90) : '(blank)'));
             return session.results[origIdx];
           })
@@ -1192,7 +1602,92 @@
           setWarn(tal.errs + tal.skipped
             ? 'This workbook is INCOMPLETE: ' + owedPhrase(tal) + ' of ' + session.rows.length + '. ' + UNWRITTEN_NOTE + ' Press Retry Unfinished before sending it.'
             : '');
+          // Reveal the per-note post buttons for the rows that drafted a note this run.
+          renderPostSection();
         });
+    }
+
+    // Renders the "Post drafted notes to work orders" section from session.results. One Post button
+    // per row that drafted a non-empty note. The button is shown+enabled ONLY when the row is aged
+    // >30d (or the workbook has no days column), has no prior WO-audit note, and has not been posted
+    // this session. Each button posts exactly ONE note on an explicit human click - there is
+    // deliberately NO bulk / auto "post all".
+    function renderPostSection() {
+      var host = $('bwn-woaudit-post');
+      if (!host) return;
+      host.innerHTML = '';
+      if (!session) return;
+      var rows = [];
+      for (var i = 0; i < session.rows.length; i++) {
+        var r = session.results[i];
+        if (r && !r.error && r.note) rows.push(r);
+      }
+      if (!rows.length) return;
+      var wrap = document.createElement('div');
+      wrap.style.cssText = 'margin-top:14px;border-top:1px solid #e0e6e2;padding-top:12px';
+      var h = document.createElement('div');
+      h.style.cssText = 'font-weight:600;margin-bottom:4px;color:' + GREEN;
+      h.textContent = 'Post drafted notes to work orders';
+      wrap.appendChild(h);
+      var sub = document.createElement('div');
+      sub.style.cssText = 'font-size:12px;color:#555;margin-bottom:10px';
+      sub.textContent = 'Posts the drafted note as an INTERNAL note on the work order. One click per note - jobs aged over 30 days only.';
+      wrap.appendChild(sub);
+      // If there is no days column, every row is eligible by construction - surface that once.
+      if (session.map.days === -1) {
+        var notice = document.createElement('div');
+        notice.style.cssText = 'font-size:12px;color:#8a4b00;background:#fff4e5;border:1px solid #ffcf99;border-radius:6px;padding:6px 8px;margin-bottom:10px';
+        notice.textContent = 'No days/aged column detected - treating every row as aged >30d (this export is over-30 by construction).';
+        wrap.appendChild(notice);
+      }
+      rows.forEach(function (r) {
+        var card = document.createElement('div');
+        card.style.cssText = 'border:1px solid #e0e6e2;border-radius:8px;padding:10px;margin-bottom:8px';
+        var head = document.createElement('div');
+        head.style.cssText = 'display:flex;justify-content:space-between;align-items:center;gap:8px;margin-bottom:6px';
+        var label = document.createElement('div');
+        label.style.cssText = 'font-weight:600';
+        label.textContent = 'WO ' + r.key + '  -  ' + (r.ageDays == null ? 'age n/a' : (r.ageDays + 'd'));
+        head.appendChild(label);
+        var status = document.createElement('span');
+        status.style.cssText = 'font-size:12px;color:#555';
+        head.appendChild(status);
+        card.appendChild(head);
+        var ta = document.createElement('textarea');
+        ta.readOnly = true;
+        ta.value = r.note;
+        ta.style.cssText = 'width:100%;box-sizing:border-box;min-height:56px;font:12px ' + FONT + ';border:1px solid #e0e6e2;border-radius:6px;padding:6px;resize:vertical;background:#fafbfa';
+        card.appendChild(ta);
+        if (!r.eligible) {
+          status.textContent = 'not aged >30d - skipped';
+        } else if (r.priorAudit) {
+          status.textContent = 'already has a WO-audit note - skipped';
+        } else if (r.posted) {
+          status.textContent = 'posted ✓';
+        } else {
+          var btn = document.createElement('button');
+          btn.textContent = 'Post';
+          btn.style.cssText = 'margin-top:8px;background:' + GREEN + ';color:#fff;border:0;padding:7px 14px;border-radius:8px;font-weight:600;cursor:pointer';
+          btn.onclick = function () {
+            btn.disabled = true;
+            status.textContent = 'posting...';
+            postAuditNote(r.key, r.note).then(function () {
+              r.posted = true;
+              status.textContent = 'posted ✓';
+              try { btn.remove(); } catch (e) { }
+              logln('  posted WO-audit note on WO ' + r.key);
+            }, function (e) {
+              var msg = (e && e.message) || String(e);
+              status.textContent = 'failed: ' + msg;
+              btn.disabled = false;   // re-enable so the coordinator can retry this one note
+              logln('  ! post failed for WO ' + r.key + ': ' + msg);
+            });
+          };
+          card.appendChild(btn);
+        }
+        wrap.appendChild(card);
+      });
+      host.appendChild(wrap);
     }
 
     function downloadResult() {

@@ -119,6 +119,12 @@ jobs:
       - name: WO Audit deterministic flags harness
         run: node scripts/test-wo-audit-flags.js
 
+      # WO Audit 0.10.0: the note-POST helpers - eligibility (aged >30d, strict), the
+      # WorkOrderNoteInput shape + fixed flags, the idempotency marker detect + embed. Each case
+      # carries a negative control.
+      - name: WO Audit note-post harness (0.10.0)
+        run: node scripts/test-wo-audit-post.js
+
       # Core 1.82.0: the Ops Suite panel's typed field specs (BWN-SETTINGS block) - number/select/
       # text, min/max, one-level nesting into bwn:config, sibling-preserving group writes, and the
       # unchanged-group drop that keeps an untouched Save from firing bwn:config churn. Two mutation
