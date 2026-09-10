@@ -1,10 +1,10 @@
 // ==UserScript==
 // @name         BWN WO Audit (Broadway National)
 // @namespace    broadwaynational.bwn
-// @version      0.10.1
+// @version      0.11.0
 // @downloadURL  https://raw.githubusercontent.com/Intermu/userscripts/main/bwn-wo-audit.user.js
 // @updateURL    https://raw.githubusercontent.com/Intermu/userscripts/main/bwn-wo-audit.user.js
-// @description  Batch WO-audit tool. Upload a WO audit .xlsx; for each work order this reads its two most recent notes DIRECTLY from Umbrava's GraphQL API in-page (using your live Umbrava session - the same read the BWN Ops Suite AI drafts use), then asks the broadway-internal-ops SWA summarize route (x-bwn-key gated, Anthropic key server-side) to write a 1-3 sentence client-ready status note. Fills the audit's notes column and downloads the workbook, preserving every other cell and formula. It also reads each WO's live header (status, phase, priority, GP, DNE/NTE, PO/vendor, schedule) in the same call and writes a deterministic Audit Flags column (OVERDUE, NEG/LOW GP, NTE>DNE, NO VENDOR, UNSCHEDULED, STALE) computed with no AI - so the exception audit survives an AI outage. Runs entirely in the app.umbrava.com page so it inherits your Umbrava auth - no MCP, no pasted keys, nothing sensitive in this script. This replaces the old standalone WO_Audit_Automation.html SWA tool, whose server-side MCP path could not authenticate to Umbrava. After a run drafts its notes, the coordinator can post each drafted note as an INTERNAL Umbrava note onto its aged (>30d) work order - one explicit click per note (human-gated, idempotent), routed through the governed bwnGqlOp write path with its permission gate and audit trail.
+// @description  Batch WO-audit tool. Upload a WO audit .xlsx; for each work order this reads its two most recent notes DIRECTLY from Umbrava's GraphQL API in-page (using your live Umbrava session - the same read the BWN Ops Suite AI drafts use), then asks the broadway-internal-ops SWA summarize route (x-bwn-key gated, Anthropic key server-side) to write a status note - for jobs aged over 30 days a dated "Over 30 - trade - event timeline - ECD" chain built from the WO's FULL note history (with a PAST/needs-ECD flag when the committed date has lapsed), otherwise a 1-3 sentence client-ready status note. Fills the audit's notes column and downloads the workbook, preserving every other cell and formula. It also reads each WO's live header (status, phase, priority, GP, DNE/NTE, PO/vendor, schedule) in the same call and writes a deterministic Audit Flags column (OVERDUE, NEG/LOW GP, NTE>DNE, NO VENDOR, UNSCHEDULED, STALE) computed with no AI - so the exception audit survives an AI outage. Runs entirely in the app.umbrava.com page so it inherits your Umbrava auth - no MCP, no pasted keys, nothing sensitive in this script. This replaces the old standalone WO_Audit_Automation.html SWA tool, whose server-side MCP path could not authenticate to Umbrava. After a run drafts its notes, the coordinator can post each drafted note as an INTERNAL Umbrava note onto its aged (>30d) work order - one explicit click per note (human-gated, idempotent), routed through the governed bwnGqlOp write path with its permission gate and audit trail.
 // @match        https://app.umbrava.com/*
 // @run-at       document-idle
 // @noframes
@@ -19,7 +19,7 @@
 (function () {
   'use strict';
 
-  var VER = '0.10.1';
+  var VER = '0.11.0';
   var FONT = "-apple-system,BlinkMacSystemFont,'Segoe UI','Helvetica Neue',Arial,sans-serif";
 
   // Suite drawer exit, per the contract in Core's ensureStyle. Core's stylesheet owns the fade;
@@ -906,6 +906,99 @@
     return lines.join('\n');
   }
 
+  // ===== BWN WO-AUDIT TIMELINE START (pure; sliced by scripts/test-wo-audit-timeline.js) ==========
+  // The over-30 note is a dated event CHAIN the model extracts from the job's full note history,
+  // wrapped by these DETERMINISTIC pieces: the "Over 30 - <trade> -" prefix and the "- ECD <date>"
+  // tail with a PAST flag. Trade, ECD and the past-flag are computed here, never by the model, so a
+  // gap can never be filled with an invented date ([[worst-reading-of-a-gap-is-invention]]).
+
+  // Format an Umbrava date to M/D. A bare YYYY-MM-DD is UTC midnight, so read the parts from the
+  // STRING to avoid the local-timezone off-by-one (the dashboard date trap). '' when unparseable.
+  function fmtMD(dateStr) {
+    var s = String(dateStr == null ? '' : dateStr).trim();
+    var m = /^(\d{4})-(\d{2})-(\d{2})/.exec(s);
+    if (m) return parseInt(m[2], 10) + '/' + parseInt(m[3], 10);
+    var d = new Date(s);
+    return isNaN(+d) ? '' : ((d.getMonth() + 1) + '/' + d.getDate());
+  }
+  // {str, past} for the WO's expected completion date, or null when none is set. `past` is computed
+  // against today's LOCAL date (midnight) from the same parts fmtMD shows, so display and flag agree.
+  // nowMs is INJECTED so the harness asserts past/future on a fixed clock (headless cannot time).
+  function ecdInfo(h, nowMs) {
+    var raw = h && h.priority && h.priority.expectedCompletionDate;
+    var str = fmtMD(raw);
+    if (!str) return null;
+    var now = (typeof nowMs === 'number') ? new Date(nowMs) : new Date();
+    var today = new Date(now.getFullYear(), now.getMonth(), now.getDate());
+    var d = null, m = /^(\d{4})-(\d{2})-(\d{2})/.exec(String(raw).trim());
+    if (m) d = new Date(parseInt(m[1], 10), parseInt(m[2], 10) - 1, parseInt(m[3], 10));
+    else { var p = new Date(String(raw)); if (!isNaN(+p)) d = new Date(p.getFullYear(), p.getMonth(), p.getDate()); }
+    return { str: str, past: !!(d && d < today) };
+  }
+  // The trade label from the header (first named trade), '' when none.
+  function tradeLabel(h) {
+    var t = h && h.trades;
+    if (t && t.length) { for (var i = 0; i < t.length; i++) { var nm = t[i] && t[i].name; if (nm) return String(nm).trim(); } }
+    return '';
+  }
+  // Wrap the model's event chain into the final over-30 note. The chain is the ONLY model-authored
+  // part; the ends are deterministic. A past OR absent ECD both flag that a fresh ECD is owed - the
+  // whole point of the over-30 report is to surface a job whose committed date has lapsed.
+  function composeTimelineNote(chain, h, nowMs) {
+    var trade = tradeLabel(h);
+    var head = 'Over 30' + (trade ? ' - ' + trade : '');
+    // defence: strip an "Over 30" the model echoed despite the instruction, then trim stray dashes.
+    var body = String(chain == null ? '' : chain).trim()
+      .replace(/^over\s*30\b[\s-]*/i, '').replace(/^[-\s]+|[-\s]+$/g, '');
+    var ecd = ecdInfo(h, nowMs), tail;
+    if (!ecd) tail = ' - ECD not set - needs ECD';
+    else if (ecd.past) tail = ' - ECD ' + ecd.str + ' PAST - awaiting new ECD';
+    else tail = ' - ECD ' + ecd.str;
+    return head + (body ? ' - ' + body : '') + tail;
+  }
+  // ===== BWN WO-AUDIT TIMELINE END ================================================================
+
+  var WO_TIMELINE_SYSTEM = [
+    'You summarize a facilities work order\'s note history into a compact, dated event timeline for',
+    'an over-30-days aging report.',
+    '',
+    'You are given the work order\'s notes, OLDEST first. Output a SINGLE line: the key events in',
+    'chronological order, separated by " - ", each with its date as M/D when the note gives one,',
+    'describing what happened and any delay and its reason.',
+    '',
+    'Example output:',
+    'panels damaged received 7/29 refused delivery - claim filed - replacement panels fabricating delayed - new panels ship 8/6 - received 8/13 - install sched 8/25 cancelled truck breakdown - onsite 8/27 - wrong cutouts detected 8/28 - reorder pending',
+    '',
+    'Rules:',
+    '- Use ONLY events, dates and reasons actually present in the notes. Never invent a date, ETA,',
+    '  approval, or event. If a note gives no date, state the event without one.',
+    '- Oldest to newest. Keep each event terse (a few words).',
+    '- Focus on WHERE the job stands and WHY it is delayed.',
+    '- Do NOT add a heading, the trade, an "Over 30" prefix, or an ECD line - those are added',
+    '  separately. Output ONLY the dash-separated event chain: no preamble, no quotes, no markdown.',
+    '- If no note says anything about status, output exactly: no status notes on file'
+  ].join('\n');
+
+  // Build the timeline user turn: the WO's FULL note history OLDEST-FIRST (the chronology lives
+  // across all notes, not the last two). Capped so a very chatty job cannot blow the AI row budget.
+  // ponytail: 40-note / 600-char cap; widen if a real job's early history is being truncated.
+  function buildTimelineInput(wo, notesNewestFirst) {
+    var oldestFirst = (notesNewestFirst || []).slice().reverse();
+    var capped = oldestFirst.slice(-40);   // keep the 40 most recent, still oldest->newest
+    var lines = capped.map(function (n) {
+      n = (n && typeof n === 'object') ? n : {};
+      var when = fmtMD(n.createdDate);
+      var txt = String(n.content || '').trim().replace(/\s+/g, ' ').slice(0, 600);
+      return (when ? when + ': ' : '') + (txt || '(empty)');
+    });
+    return [
+      'Work order ' + (String(wo.raw || wo.number || '').trim() || '(unknown)') + ' note history, oldest first:',
+      lines.length ? lines.join('\n') : '(no notes on file)',
+      '',
+      'Output ONLY the dated event chain per the instructions.'
+    ].join('\n');
+  }
+
   // Parse `retry-after` out of GM_xmlhttpRequest's raw CRLF header blob. Accepts either form
   // RFC 9110 allows (delay-seconds or an HTTP-date). Returns 0 when absent or unparseable so
   // callers fall back to their own table; clamped to 120s so a wild value cannot park a row.
@@ -1113,6 +1206,29 @@
       // case the key/role hint ever described, and the run summary states it once.
       if (!note) throw new Error(ctx.reason || 'Umbrava rank not resolved - run alongside the BWN Ops Suite');
       return note;
+    });
+  }
+
+  // Over-30 timeline note: the model extracts the dated event CHAIN from the full history; the
+  // deterministic prefix (Over 30 - trade) and ECD tail are added by composeTimelineNote, never by
+  // the model. Same transport/budget as summarize; oneLine collapses the chain onto one line.
+  function summarizeTimeline(woFacts, notes, header, model, onWait) {
+    var ctx = { onWait: onWait };
+    return bwnAI({
+      task: 'summarize',
+      tier: 'proxy',
+      minRank: 1,
+      prompt: buildTimelineInput(woFacts, notes),
+      system: WO_TIMELINE_SYSTEM,
+      oneLine: true,
+      maxChars: 2000,
+      timeoutMs: AI_ROUTER_TIMEOUT_MS,
+      fallback: [],
+      proxySend: function (p) { p.model = model; return aiProxySend(p, ctx); }
+    }).then(function (chain) {
+      chain = String(chain || '').trim();
+      if (!chain) throw new Error(ctx.reason || 'Umbrava rank not resolved - run alongside the BWN Ops Suite');
+      return composeTimelineNote(chain, header, Date.now());
     });
   }
 
@@ -1523,24 +1639,31 @@
               days: cellStr(session.map.aoa, row.rowIdx, session.map.days),
               assignedTo: cellStr(session.map.aoa, row.rowIdx, session.map.assigned),
             };
-            var top2 = data.notes.slice(0, 2);
             // priorAudit is read from the LIVE notes fetched this run, so a re-run sees a note this
             // tool already posted (idempotency for the post step below).
             var priorAudit = hasPriorAuditNote(data.notes);
-            return summarize(woFacts, top2, model, onWait).then(function (note) {
-              return { note: note, notesFound: data.notes.length, priorAudit: priorAudit };
+            // Over-30 rows get the dated timeline note (full note history + trade + ECD); every other
+            // row keeps the 1-3 sentence status note. Age is read from the workbook days column - or,
+            // when there is no days column, the export is over-30 by construction so all rows qualify.
+            var daysColAbsent = session.map.days === -1;
+            var ageDays = daysColAbsent ? null : parseAgeDays(cellStr(session.map.aoa, row.rowIdx, session.map.days));
+            var over30 = postEligible(ageDays, daysColAbsent);
+            var draftP = over30
+              ? summarizeTimeline(woFacts, data.notes, h, model, onWait)
+              : summarize(woFacts, data.notes.slice(0, 2), model, onWait);
+            return draftP.then(function (note) {
+              return { note: note, notesFound: data.notes.length, priorAudit: priorAudit, ageDays: ageDays, over30: over30 };
             });
           })
           .then(function (out) {
             // Write into the worksheet cell, dropping any formula (string value only).
             ws[XLSX.utils.encode_cell({ c: session.map.note, r: row.rowIdx })] = { t: 's', v: out.note };
             // Post-step state (used only by the "Post drafted notes" section after the run): a row
-            // is post-eligible when aged >30d, or when the workbook has no days column at all.
-            var daysColAbsent = session.map.days === -1;
-            var ageDays = daysColAbsent ? null : parseAgeDays(cellStr(session.map.aoa, row.rowIdx, session.map.days));
+            // is post-eligible when aged >30d, or when the workbook has no days column at all. Both
+            // were already computed to pick the draft style above; reuse them, do not re-parse.
             session.results[origIdx] = {
               key: row.key, note: out.note, notesFound: out.notesFound,
-              ageDays: ageDays, eligible: postEligible(ageDays, daysColAbsent), priorAudit: !!out.priorAudit
+              ageDays: out.ageDays, eligible: !!out.over30, priorAudit: !!out.priorAudit
             };
             logln('  WO ' + row.key + ' (' + out.notesFound + ' notes): ' + (out.note ? out.note.slice(0, 90) : '(blank)'));
             return session.results[origIdx];
