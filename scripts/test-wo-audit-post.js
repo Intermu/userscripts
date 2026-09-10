@@ -109,4 +109,23 @@ console.log('\n4. postBody embeds AUDIT_MARKER');
     T.hasPriorAuditNote([{ content: 'the drafted status note' }]), false);
 })();
 
+// 5. days-column detector recognizes the coordinator export's "# Days" header (and safe variants),
+// without grabbing an unrelated "... Days" column (SLA/response/completion).
+console.log('\n5. days-column header detection ("# Days")');
+(function () {
+  var src = fs.readFileSync(SRC, 'utf8');
+  var m = src.match(/days:\s*findCol\(hdr,\s*\[(\/[^\]]+\/i)\]\)/);
+  A.ok('found the days findCol pattern in source', !!m, m && m[0]);
+  var re = eval(m[1]);   // the literal regex from the shipped bytes
+  A.ok('matches "# Days" (the real coordinator export header)', re.test('# Days'));
+  A.ok('matches "#Days" (no space)', re.test('#Days'));
+  A.ok('matches "Days"', re.test('Days'));
+  A.ok('matches "Days Open"', re.test('Days Open'));
+  A.ok('matches "Aged"', re.test('Aged'));
+  // negative controls: a non-aging "... Days" column must NOT be grabbed as the age column.
+  A.eq('control: "SLA Days" -> not matched', re.test('SLA Days'), false);
+  A.eq('control: "Response Days" -> not matched', re.test('Response Days'), false);
+  A.eq('control: "Days to Complete" -> not matched', re.test('Days to Complete'), false);
+})();
+
 A.finish();
