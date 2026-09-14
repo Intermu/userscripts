@@ -27,6 +27,7 @@
     "bwn-wide-list.user.js": { "expectedInstalled": true },
     "bwn-wo-assist.user.js": { "expectedInstalled": true },
     "bwn-wo-audit.user.js": { "expectedInstalled": true },
+    "bwn-wo-extract.user.js": { "expectedInstalled": true },
     "bwn-wo-intake.user.js": { "expectedInstalled": true },
     "bwn-write-queue.user.js": { "expectedInstalled": true }
   }

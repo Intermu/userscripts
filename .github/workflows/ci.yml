@@ -131,6 +131,14 @@ jobs:
       - name: WO Audit over-30 timeline harness (0.11.0)
         run: node scripts/test-wo-audit-timeline.js
 
+      # bwn-wo-extract (Operations Assist): the thin, read-only caller for the deployed
+      # /api/extract-work-order endpoint. Byte-sliced + fake-env harness pinning the bounded
+      # allowlist payload, the NTE-semantic exclusion of client-DNE, the refusal gate (route /
+      # ingest key / token / Core-context / id-agreement), and the no-write / no-GraphQL /
+      # sourceUrl-metadata-only structural guards, each with a negative control.
+      - name: WO Context (Operations Assist) caller harness
+        run: node scripts/test-wo-extract.js
+
       # Core 1.82.0: the Ops Suite panel's typed field specs (BWN-SETTINGS block) - number/select/
       # text, min/max, one-level nesting into bwn:config, sibling-preserving group writes, and the
       # unchanged-group drop that keeps an untouched Save from firing bwn:config churn. Two mutation

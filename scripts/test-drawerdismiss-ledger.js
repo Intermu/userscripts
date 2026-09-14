@@ -113,6 +113,7 @@ var LEDGER = {
   'bwn-wide-list.user.js':        { status: 'NONE' },
   'bwn-wo-assist.user.js':        { status: 'CANONICAL' },
   'bwn-wo-audit.user.js':         { status: 'CANONICAL' },
+  'bwn-wo-extract.user.js':       { status: 'NONE' },
   'bwn-wo-intake.user.js':        { status: 'NONE' },
   'bwn-write-queue.user.js':      { status: 'NONE' }
 };
@@ -151,7 +152,7 @@ onDisk.slice().sort().forEach(function (f) {
 console.log('\n-- 3. aggregate counts + one canonical SHA + exit contract --');
 A.ok('CANONICAL count is 6', ledgerWith('CANONICAL').length === 6, 'got ' + ledgerWith('CANONICAL').length);
 A.ok('VARIANT count is 1', ledgerWith('VARIANT').length === 1, 'got ' + ledgerWith('VARIANT').length);
-A.ok('NONE count is 14', ledgerWith('NONE').length === 14, 'got ' + ledgerWith('NONE').length);
+A.ok('NONE count is 15', ledgerWith('NONE').length === 15, 'got ' + ledgerWith('NONE').length);
 var shas = {};
 ledgerWith('CANONICAL').forEach(function (f) { shas[sha(sliceAllEl(SRC[f])[0])] = true; });
 A.ok('all CANONICAL adopters share ONE drawerDismiss SHA', Object.keys(shas).length === 1, 'distinct: ' + Object.keys(shas).join(','));

@@ -134,6 +134,10 @@ var LEDGER = {
   'bwn-wide-list.user.js':     { drawer: 'NA',        toast: 'NA',        rmotion: 'NA',  rail: 'NA'  },
   'bwn-wo-assist.user.js':     { drawer: 'HAS',       toast: 'HAS',       rmotion: 'NA',  rail: 'NA'  },
   'bwn-wo-audit.user.js':      { drawer: 'HAS',       toast: 'DIVERGENT', rmotion: 'NA',  rail: 'NA'  },
+  // Non-modal informational dock panel (#bwn-woext-panel, own inline cssText, class bwn-woext);
+  // renders read-only WO context as text and closes by plain remove. Carries NONE of the four SHARED
+  // primitives (no .bwn-drawer, no toast(), no animation:, no --bwn-dock-shift).
+  'bwn-wo-extract.user.js':    { drawer: 'NA',        toast: 'NA',        rmotion: 'NA',  rail: 'NA'  },
   'bwn-wo-intake.user.js':     { drawer: 'NA',        toast: 'HAS',       rmotion: 'NA',  rail: 'NA'  },
   // Headless Track C write-back executor + catalog pusher: no coordinator-facing UI surface at all
   // (no drawer, toast, animation, or rail). NONE of the four SHARED primitives.
