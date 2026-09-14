@@ -141,6 +141,7 @@ var LEDGER = {
   'bwn-wide-list.user.js':        { status: 'NA' },
   'bwn-wo-assist.user.js':        { status: 'ADOPTED' },
   'bwn-wo-audit.user.js':         { status: 'ADOPTED' },
+  'bwn-wo-extract.user.js':       { status: 'ADOPTED' },   // reads the Umbrava bearer to send userToken; carries the canonical picker block
   'bwn-wo-intake.user.js':        { status: 'NA' },
   'bwn-write-queue.user.js':      { status: 'ADOPTED' }
 };
@@ -184,7 +185,7 @@ onDisk.slice().sort().forEach(function (f) {
 // SAME canonical bytes (one distinct SHA across all adopters, equal to CANON_SHA).
 // =============================================================================================
 console.log('\n-- 3. aggregate counts + one canonical SHA --');
-A.ok('ADOPTED count is 16', ledgerWith('ADOPTED').length === 16, 'got ' + ledgerWith('ADOPTED').length);
+A.ok('ADOPTED count is 17', ledgerWith('ADOPTED').length === 17, 'got ' + ledgerWith('ADOPTED').length);
 A.ok('PENDING count is 0', ledgerWith('PENDING').length === 0, 'got ' + ledgerWith('PENDING').length);
 A.ok('NA count is 5', ledgerWith('NA').length === 5, 'got ' + ledgerWith('NA').length);
 A.ok('PENDING is empty (both mega scripts folded in US-1 1b)',
