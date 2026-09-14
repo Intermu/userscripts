@@ -106,7 +106,7 @@ function makeDoc() {
 
 // ---- module loader --------------------------------------------------------------------------
 // `transform` lets a negative control revert one fix in the real sliced source.
-function load(transform) {
+function load(transform, opts) {
   var section = transform ? transform(SECTION) : SECTION;
   var now = 1700000000000;
   var doc = makeDoc();
@@ -117,6 +117,10 @@ function load(transform) {
   var guardErrors = [];
 
   var store = {};
+  // Seed a KNOWN rank (5) so policy-classified rows clear the fail-closed rank floor - the dock's
+  // in-section seed block reads exactly this slot. dockVisible now hides every row when the rank is
+  // unknown, so a probe that wants the unknown-rank path passes { noRank: true }.
+  if (!(opts && opts.noRank)) store['bwn:role:last'] = JSON.stringify({ ok: true, rank: 5, ts: now });
   var localStorage = {
     getItem: function (k) { return Object.prototype.hasOwnProperty.call(store, k) ? store[k] : null; },
     setItem: function (k, v) { store[k] = String(v); },
@@ -150,6 +154,9 @@ function load(transform) {
     // by test-perm-block-ledger.js). __can is injected so a case can deny a specific key; the
     // default allows everything, which is what every pre-existing case below expects.
     'function bwnCanAll(keys) { if (!keys) return true; var a = (typeof keys === "string") ? [keys] : keys; for (var i = 0; i < a.length; i++) { if (!__can(a[i])) return false; } return true; }\n' +
+    // dockVisible now reads the decoded permission slot directly for its fail-CLOSED perm branch.
+    // __permSlotRef.cur is null (decode not ready) unless a case sets it via api.setPermSlot.
+    'function bwnPermSlot() { return __permSlotRef.cur; }\n' +
     'function toolItems() { return []; }\n' +
     'function openSuitePanel() { }\n' +
     'function ensureDock() { }\n';
@@ -158,19 +165,20 @@ function load(transform) {
     '  renderDock: renderDock,\n' +
     '  beat: function () { __beats.forEach(function (f) { f(); }); },\n' +
     '  hostId: dockHostId,\n' +
-    '  state: function () { return { amHost: dockAmHost, keys: Object.keys(dockRoster), vis: dockVisible().length, sig: dockSig }; }\n' +
+    '  state: function () { return { amHost: dockAmHost, keys: Object.keys(dockRoster), vis: dockVisible().length, visKeys: dockVisible().map(function (e) { return e.key; }), sig: dockSig }; }\n' +
     '};\n';
 
   var permDeny = {};   // 'Group.Flag' -> true; set through api.denyPerm below
   function canFn(k) { return !permDeny[k]; }
+  var permSlotRef = { cur: null };   // the decoded { groups, granted } dockVisible sees; null = not ready
 
   var fn = new Function(
     'document', 'localStorage', 'CustomEvent', 'Date', 'setTimeout', 'clearTimeout', 'setInterval',
-    'BWN', '__ensureStyleCalls', '__beats', '__can',
+    'BWN', '__ensureStyleCalls', '__beats', '__can', '__permSlotRef',
     pre + section + post
   );
   var mod = fn(doc, localStorage, CustomEvent, VDate, fakeSetTimeout, fakeClearTimeout,
-    fakeSetInterval, BWN, ensureStyleCalls, beats, canFn);
+    fakeSetInterval, BWN, ensureStyleCalls, beats, canFn, permSlotRef);
 
   // Watch the bus from outside so the module's own emissions are observable.
   doc.addEventListener('bwn:evt', function (ev) { emitted.push(ev.detail); });
@@ -188,6 +196,7 @@ function load(transform) {
       return api.emit(d);
     },
     denyPerm: function (key) { permDeny[key] = true; return api; },
+    setPermSlot: function (groups, granted) { permSlotRef.cur = { groups: groups || [], granted: granted || [] }; return api; },
     render: function () { renders++; mod.renderDock(); return api; },
     beat: function () { mod.beat(); return api; },
     styleCalls: function () { return ensureStyleCalls.length; },
@@ -276,8 +285,9 @@ function probeRosterPollution() {
     m.register('__proto__', { weight: -999, minRank: 9999 });
     var st = m.state();
     r.ownProperty = st.keys.indexOf('__proto__') !== -1;
-    // minRank 9999 with an unknown rank fails OPEN by design, so the row is visible.
-    r.rendersRow = st.vis === 1;
+    // '__proto__' is an unclassified key, so the fail-CLOSED policy hides it (the point of Fix 3 is
+    // that it becomes a benign OWN property that pollutes nothing - not that it renders a row).
+    r.rendersRow = st.vis === 0;
 
     // The gate bypass, observed through the render each gate triggers rather than through the
     // roster keys - `delete` on an INHERITED property changes no own key, so a key comparison
@@ -336,7 +346,7 @@ A.ok('our own ping does not hold the reclaim off', h.ownPingIgnored === true, JS
 console.log('\n== FIX 3: dockRoster has no prototype to pollute');
 var p = probeRosterPollution();
 A.ok("'__proto__' becomes an OWN property", p.ownProperty === true, JSON.stringify(p));
-A.ok("'__proto__' renders as an ordinary row", p.rendersRow === true, JSON.stringify(p));
+A.ok("'__proto__' is hidden by policy (unclassified), never a phantom row", p.rendersRow === true, JSON.stringify(p));
 A.ok("update gate shut against key 'weight'", p.updateGateShut === true, JSON.stringify(p));
 A.ok("unregister gate shut against key 'seen'", p.unregisterGateShut === true, JSON.stringify(p));
 A.ok('a real key still registers/updates/unregisters', p.realKeyStillWorks === true, JSON.stringify(p));
@@ -429,39 +439,126 @@ var m4 = missingIcons(mutate(SECTION, "      bidout: ['M4 6h16v12H4z', 'M4 7l8 6
 A.ok('removing the bidout icon is detected by the completeness check',
   m4.length === 1 && m4[0].key === 'bidout', JSON.stringify(m4));
 
-// ---- needPerm: a rail row the operator's Umbrava permissions do not cover -------------------
-// Same fail-open rule as minRank: a row with no needPerm, or one whose permission is unknown,
-// stays visible. Only a positively-denied key removes it.
-console.log('\n--- needPerm (Umbrava permission filter on the rail) ---');
+// ---- fail-CLOSED dock visibility policy (BWN_DOCK_POLICY) -----------------------------------
+// A row shows ONLY when the reader's rank is KNOWN and >= the tool's minRank, and (when the
+// policy lists perms) the decode is ready and every checkbox is granted. Every unknown hides.
+// ---- policy completeness: every rail registrant is classified ------------------------------
+// The fail-closed gate HIDES any unclassified key, so a registrant added without a
+// BWN_DOCK_POLICY entry would silently vanish for everyone (the wo-extract near-miss). Derive the
+// keys from the sibling scripts AND core's own internal registrants, so a new tool fails here
+// instead of shipping invisible.
+console.log('\n--- policy completeness (every registrant has a BWN_DOCK_POLICY entry) ---');
+function policyKeys(section) {
+  var re = /BWN_DOCK_POLICY\['([^']+)'\]/g, m, out = [];
+  while ((m = re.exec(section))) out.push(m[1]);
+  return out;
+}
+function coreInternalKeys() {
+  var re = /var DOCK_KEY = '([^']+)'/g, t = fs.readFileSync(SRC, 'utf8'), m, out = [];
+  while ((m = re.exec(t))) out.push(m[1]);
+  return out;
+}
+function unclassified(section) {
+  var have = policyKeys(section);
+  var keys = registrantKeys().map(function (r) { return r.key; }).concat(coreInternalKeys());
+  return keys.filter(function (k, i, a) { return a.indexOf(k) === i && have.indexOf(k) === -1; });
+}
+A.eq('every rail registrant (siblings + core-internal) has a policy entry',
+  unclassified(SECTION), []);
+// Control: drop wo-extract's entry and the check must see it.
+var m5 = unclassified(mutate(SECTION,
+  "    BWN_DOCK_POLICY['wo-extract']  = { minRank: 1, perms: [] };  // Ops Assist - read-only WO context\n", ''));
+A.ok('removing a policy entry is detected by the completeness check',
+  m5.length === 1 && m5[0] === 'wo-extract', JSON.stringify(m5));
+
+// The final shipped policy, asserted per rank tier. dispatch is registered directly here to
+// exercise Core's rank floor; live, bwn-dispatch ALSO keeps its Pending-Dispatch context gate
+// (registrant-side, additive - not exercised by this Core harness).
+console.log('\n--- dock visibility policy (rank floor, fail-closed) ---');
 (function () {
-  var d = load();
-  d.register('plain');
-  d.register('gated', { needPerm: 'WorkOrderField.Status' });
-  d.register('multi', { needPerm: ['WorkOrderField.Status', 'Task.AddNew'] });
-  d.register('junk', { needPerm: 42 });          // malformed spec must not hide a working tool
-  A.eq('all rows visible while every permission is allowed', d.state().vis, 4);
+  var ALL = ['ask', 'assist', 'inventory', 'cc', 'bidout', 'wo-extract', 'bulk-source', 'wo-audit', 'dispatch', 'operate', 'bulk-ops'];
+  var RANK1 = ['ask', 'assist', 'inventory', 'cc', 'bidout', 'wo-extract'];
+  function atRank(rank) {
+    var m = (rank == null) ? load(null, { noRank: true }) : load();
+    if (rank != null) m.emit({ id: 'bwn:role', rank: rank });
+    ALL.forEach(function (k) { m.register(k); });
+    return m;
+  }
+  function has(m, k) { return m.state().visKeys.indexOf(k) !== -1; }
 
-  d.denyPerm('WorkOrderField.Status');
-  d.render();
-  A.eq('denying one key hides exactly the rows that asked for it', d.state().vis, 2);
-  A.ok('the ungated row survives', d.state().keys.indexOf('plain') !== -1);
-  A.ok('...and so does the malformed one (a bad spec is not a gate)', d.state().keys.indexOf('junk') !== -1);
+  // Rank 1 = a coordinator like Daniel: exactly the six rank-1 rows, by name.
+  var r1 = atRank(1);
+  A.eq('rank 1 sees exactly six rows', r1.state().vis, 6);
+  RANK1.forEach(function (k) { A.ok('rank 1 sees ' + k, has(r1, k)); });
+  ['bulk-source', 'wo-audit', 'dispatch', 'operate', 'bulk-ops'].forEach(function (k) {
+    A.ok('rank 1 does NOT see ' + k, !has(r1, k));
+  });
+  A.eq('the hidden higher-rank rows are still registered, not dropped', r1.state().keys.length, 11);
 
-  // The roster keeps the row - only the RENDER filters - so a later decode can bring it back
-  // without the module having to re-register.
-  A.eq('the hidden rows are still registered, not dropped', d.state().keys.length, 4);
+  // Each tier adds exactly the tools at its floor.
+  var r2 = atRank(2);
+  A.eq('rank 2 adds bulk-source (7 total)', r2.state().vis, 7);
+  A.ok('rank 2 sees bulk-source', has(r2, 'bulk-source'));
+  A.ok('rank 2 still does NOT see wo-audit', !has(r2, 'wo-audit'));
 
-  // Control: with the filter removed, the denied rows would still render.
-  var noFilter = mutate(SECTION,
-    '      arr = arr.filter(function (en) { return bwnCanAll(en.needPerm); });\n', '');
-  var c = load(function () { return noFilter; });
-  c.register('gated', { needPerm: 'WorkOrderField.Status' });
-  c.denyPerm('WorkOrderField.Status');
-  c.render();
-  A.eq('CONTROL: without the filter, a denied row still shows', c.state().vis, 1);
+  var r3 = atRank(3);
+  A.eq('rank 3 adds wo-audit + dispatch (9 total)', r3.state().vis, 9);
+  A.ok('rank 3 sees wo-audit', has(r3, 'wo-audit'));
+  A.ok('rank 3 sees dispatch', has(r3, 'dispatch'));
+  A.ok('rank 3 still does NOT see operate', !has(r3, 'operate'));
+
+  var r4 = atRank(4);
+  A.eq('rank 4 adds operate + bulk-ops (all 11)', r4.state().vis, 11);
+  A.ok('rank 4 sees operate', has(r4, 'operate'));
+  A.ok('rank 4 sees bulk-ops', has(r4, 'bulk-ops'));
+
+  // An unclassified key is hidden at any rank - warned, not dropped.
+  r4.register('totally-unknown-tool');
+  A.eq('an unclassified key stays hidden even at rank 4', r4.state().vis, 11);
+  A.ok('...but it is still on the roster, not dropped', r4.state().keys.indexOf('totally-unknown-tool') !== -1);
+
+  // Unknown rank hides EVERYTHING - the pending-state contract - then resolves without re-register.
+  var nr = atRank(null);
+  A.eq('unknown rank hides every row (nothing flashes before rank resolves)', nr.state().vis, 0);
+  nr.emit({ id: 'bwn:role', rank: 1 });
+  A.eq('...and the six rank-1 rows appear once rank resolves, no re-register', nr.state().vis, 6);
 })();
 
-console.log('\n(3 fixes x real source + 4 mutations, plus the rail icon-set check and the needPerm' +
-  ' filter. Nothing here proves the rail RENDERS - that is the live Umbrava dock test on the' +
-  ' open-work board.)');
+// ---- permission branch (fail-closed when a policy entry lists perms) ------------------------
+// No shipped policy entry lists perms today, so exercise the branch by temporarily giving 'cc' a
+// required checkbox in the real sliced source.
+console.log('\n--- permission branch (fail-closed) ---');
+(function () {
+  var withPerm = function (t) {
+    return mutate(t, "BWN_DOCK_POLICY['cc']          = { minRank: 1, perms: [] };",
+      "BWN_DOCK_POLICY['cc']          = { minRank: 1, perms: ['WorkOrderNote.AddNew'] };");
+  };
+  var a = load(withPerm);
+  a.register('cc');
+  A.eq('decode not ready -> the perm-gated row is hidden', a.state().vis, 0);
+
+  var b = load(withPerm);
+  b.setPermSlot(['WorkOrderNote'], ['WorkOrderNote.AddNew']).register('cc');
+  A.eq('decode ready + checkbox granted -> visible', b.state().vis, 1);
+
+  var c = load(withPerm);
+  c.setPermSlot(['WorkOrderNote'], []).register('cc');       // group present, bit OFF
+  A.eq('decode ready + checkbox denied -> hidden', c.state().vis, 0);
+
+  var d = load(withPerm);
+  d.setPermSlot(['Task'], ['Task.AddNew']).register('cc');   // group absent from the decode
+  A.eq('a permission whose group the tenant never sent does not hide the row', d.state().vis, 1);
+})();
+
+// Control: revert the fail-closed rank floor and a below-floor row with an unknown rank shows.
+var noRankGate = mutate(SECTION,
+  'if (dockRank == null || dockRank < pol.minRank) return false;',
+  'if (false) return false;');
+var cg = load(function () { return noRankGate; }, { noRank: true });
+cg.register('operate');   // minRank 4, rank unknown
+A.eq('CONTROL: without the rank gate, an unqualified row shows', cg.state().vis, 1);
+
+console.log('\n(3 latent-defect fixes x real source + their mutations, the rail icon-set check, and' +
+  ' the fail-closed visibility policy - rank floor + permission branch. Nothing here proves the' +
+  ' rail RENDERS - that is the live Umbrava dock test on the open-work board.)');
 A.finish();
