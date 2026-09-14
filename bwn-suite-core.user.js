@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         BWN Suite - Core (Broadway National)
 // @namespace    broadwaynational.bwn
-// @version      1.84.2
+// @version      1.85.0
 // @downloadURL  https://raw.githubusercontent.com/Intermu/userscripts/main/bwn-suite-core.user.js
 // @updateURL    https://raw.githubusercontent.com/Intermu/userscripts/main/bwn-suite-core.user.js
 // @description  Runs several Umbrava helpers for BWN coordinators, in the browser with no privileged grants. Includes: PO Approval + ETA Builder; WO Assist (GP/ETA, a stall watchdog, DNE calculator, and a next-action playbook); Email Leak Guard (checks recipients against vendor names, PO amounts, and client budget references before an outbound email sends); WO List Heat (a triage overlay + My Day strip on the work-order list, with an optional same-origin Umbrava API scan for deterministic full-board coverage); and the BWN Launcher (opens the Azure Static Web App tools with the current WO's context). Modules share state through sessionStorage/localStorage. The only network calls are same-origin Umbrava GraphQL requests (app.umbrava.com/api/graphql, the app's own session): List Heat's full-board scan and WO Assist's work-order / trip / clock-in / document reads, plus ONE write - BWN Views saves the column layout through Umbrava's own putUserPreference, the same preference the column chooser writes; everything else is offline. Toggle modules in BWN_MODULES below.
@@ -11476,6 +11476,30 @@
     var dockRank = null;                           // reader's rank (UX gating only; server is the real boundary)
     var dockRenderT = null;
 
+    // Central dock-visibility policy (fail-CLOSED) - the single source of truth for which rail
+    // rows a reader sees, keyed by the entry's stable dock key. A row shows ONLY when the
+    // server-computed rank is KNOWN and >= minRank, AND (when perms are listed) the Umbrava
+    // permission decode is ready and every listed checkbox is granted. Any unknown - an
+    // unclassified key, an unresolved rank, or an undecoded required permission - HIDES the row.
+    // This is UI visibility only; every write still re-checks its own bwnCan at execution time
+    // (defense in depth), so a bug here can hide a tool but never grant an unauthorized write.
+    // Rank scale (from /api/user-role via bwn-suite-ai): 1 coordinator .. 5 director.
+    // A new registrant must be classified here before its row can appear.
+    // See wiki/bwn-dock-visibility-policy.md for the per-tool decision log.
+    var BWN_DOCK_POLICY = Object.create(null);
+    BWN_DOCK_POLICY['ask']         = { minRank: 1, perms: [] };  // read / draft AI assistant
+    BWN_DOCK_POLICY['assist']      = { minRank: 1, perms: [] };  // Escalate - advisory only
+    BWN_DOCK_POLICY['inventory']   = { minRank: 1, perms: [] };  // inventory view/lookup; writes self-gate at action time
+    BWN_DOCK_POLICY['cc']          = { minRank: 1, perms: [] };  // CC Request (coordinator workflow)
+    BWN_DOCK_POLICY['bidout']      = { minRank: 1, perms: [] };  // Email RFP / bid-out sourcing
+    BWN_DOCK_POLICY['wo-extract']  = { minRank: 1, perms: [] };  // Ops Assist - read-only WO context
+    BWN_DOCK_POLICY['bulk-source'] = { minRank: 2, perms: [] };  // Edit source PO#/WO# - PO/WO record integrity
+    BWN_DOCK_POLICY['wo-audit']    = { minRank: 3, perms: [] };  // WO Audit; note-post also self-gates on WorkOrderNote.AddNew
+    BWN_DOCK_POLICY['dispatch']    = { minRank: 3, perms: [] };  // Dispatch; registrant ALSO keeps its Pending-Dispatch context gate (additive)
+    BWN_DOCK_POLICY['operate']     = { minRank: 4, perms: [] };  // AI Operate - high blast radius
+    BWN_DOCK_POLICY['bulk-ops']    = { minRank: 4, perms: [] };  // Bulk Ops - mass action
+    var dockPolicyWarned = Object.create(null);   // one console.warn per unclassified key
+
     function dockEmit(id, extra) {
       try {
         var detail = { id: id };
@@ -11510,13 +11534,34 @@
       a = a.filter(function (k) { return typeof k === 'string' && k.indexOf('.') > 0; });
       return a.length ? a : null;
     }
+    // Is the reader allowed to SEE this row? Fail-CLOSED on every unknown: an unclassified key,
+    // an unknown rank, a rank below the floor, an undecoded-but-required permission, or a
+    // known-off checkbox all hide the row. A required permission whose GROUP is absent from the
+    // decode is treated as not-the-gate-here (Umbrava never provisioned that permission type for
+    // this user; the write gate + server still protect it) - this matches bwnCan's own contract
+    // and avoids hiding a working tool over a permission type the tenant does not send.
+    function dockPolicyAllows(en) {
+      var pol = BWN_DOCK_POLICY[en.key];
+      if (!pol) {                                                 // unclassified tool -> hidden
+        if (!dockPolicyWarned[en.key]) {
+          dockPolicyWarned[en.key] = 1;
+          try { console.warn('[BWN] dock: no visibility policy for "' + en.key + '" - row hidden. Add it to BWN_DOCK_POLICY in bwn-suite-core.'); } catch (e) { }
+        }
+        return false;
+      }
+      if (dockRank == null || dockRank < pol.minRank) return false;   // rank unknown or too low
+      if (pol.perms && pol.perms.length) {
+        var slot = bwnPermSlot();
+        if (!slot) return false;                                  // permission decode not ready -> hide
+        for (var i = 0; i < pol.perms.length; i++) {
+          var grp = String(pol.perms[i]).split('.')[0];
+          if (slot.groups.indexOf(grp) !== -1 && slot.granted.indexOf(pol.perms[i]) === -1) return false;
+        }
+      }
+      return true;
+    }
     function dockVisible() {
-      var arr = Object.keys(dockRoster).map(function (k) { return dockRoster[k]; });
-      // Fail-OPEN when rank is unknown (show the entry; the server rejects if truly unauthorized).
-      arr = arr.filter(function (en) { return en.minRank == null || dockRank == null || dockRank >= en.minRank; });
-      // Same fail-open rule for Umbrava's own permissions: bwnCanAll answers true for anything it
-      // cannot decide, so a row disappears ONLY when the checkbox is known to be off.
-      arr = arr.filter(function (en) { return bwnCanAll(en.needPerm); });
+      var arr = Object.keys(dockRoster).map(function (k) { return dockRoster[k]; }).filter(dockPolicyAllows);
       arr.sort(function (a, b) { return (a.weight - b.weight) || (a.order - b.order); });
       return arr;
     }
