@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         BWN Ask (Coordinator Copilot)
 // @namespace    https://broadwaynational.com/bwn
-// @version      0.10.0
+// @version      0.11.0
 // @description  Ask questions about the work order you're viewing. Reads the WO live from Umbrava via same-origin GraphQL (details + full note / site-visit history) AND a summary roster of the other work orders at the same location, plus the team knowledge doc, and answers through the Broadway AI proxy with dates and references. Phase 1.5 = page-scoped + location roster (Path A); no data leaves the trusted Broadway path.
 // @match        https://app.umbrava.com/*
 // @run-at       document-idle
@@ -152,7 +152,7 @@
   var ROSTER_VARS = { page: { skip: 0, take: ROSTER_TAKE }, sortBy: [{ columnName: 'formattedJobNumber', direction: 'DESC' }] };
 
   function fetchLocationRoster(locationId) {
-    if (locationId == null) return Promise.resolve({ ok: false });
+    if (locationId == null) return Promise.resolve({ ok: false, reason: 'no-location' });
     var key = String(locationId);
     if (_locRoster[key]) return Promise.resolve(_locRoster[key]);
     var vars = { page: ROSTER_VARS.page, sortBy: ROSTER_VARS.sortBy, loc: locationId };
@@ -161,7 +161,7 @@
       var arr = (root && Array.isArray(root.items)) ? root.items.filter(Boolean) : [];
       _locRoster[key] = { ok: true, wos: arr, total: (root && typeof root.rowCount === 'number') ? root.rowCount : arr.length };
       return _locRoster[key];
-    }, function () { _locRoster[key] = { ok: false }; return _locRoster[key]; });
+    }, function () { _locRoster[key] = { ok: false, reason: 'fetch-failed' }; return _locRoster[key]; });
   }
   /* ===== BWN-ASK-ROSTER:END ===== */
 
@@ -245,7 +245,10 @@
             ? 'SCOPE: You have the FULL notes/history for WO #' + (wo.number || n) + (wo.locationName ? ' at ' + wo.locationName : '') + ', PLUS a summary roster of ' + siteWOs + ' other work order(s) at this location (roster = status/trade/date only, NOT their notes). For detail on another WO the coordinator must open it. Do not invent notes for roster WOs.'
             : 'SCOPE: This is ONE work order (#' + (wo.number || n) + ')' + (wo.locationName ? ' at ' + wo.locationName : '') + '. ' + ((roster && roster.ok) ? 'It is the only work order at this location.' : 'Other work orders at this location could NOT be loaded - do not claim completeness across the site.');
           var text = scope + '\n\n' + body.join('\n');
-          return Object.assign({ text: text, wo: wo.number || n, degraded: degraded, siteWOs: siteWOs, siteOk: !!(roster && roster.ok) }, extra);
+          // Distinguish WHY the site read is unavailable (state-shape only; no new query):
+          //   'no-location' (this WO exposes no locationId) vs 'fetch-failed' vs 'empty' vs 'ok'.
+          var siteReason = (roster && roster.ok) ? (siteWOs ? 'ok' : 'empty') : ((roster && roster.reason) || 'fetch-failed');
+          return Object.assign({ text: text, wo: wo.number || n, degraded: degraded, siteWOs: siteWOs, siteOk: !!(roster && roster.ok), siteReason: siteReason }, extra);
         });
       }
 
@@ -485,7 +488,7 @@
       };
       var post = function (b) { return gmPost(AI_URL, { 'Content-Type': 'application/json', 'x-bwn-key': key }, b, 60000); };
       return askDriveLoop(body, post)
-        .then(function (r) { r._records = ctx.records; r._shown = ctx.shown; r._omitted = ctx.omitted; r._wo = ctx.wo; r._degraded = ctx.degraded; r._notesFailed = ctx.notesFailed; r._siteWOs = ctx.siteWOs; r._siteOk = ctx.siteOk; r._pageToolCalls = pageToolCalls; return r; });
+        .then(function (r) { r._records = ctx.records; r._shown = ctx.shown; r._omitted = ctx.omitted; r._wo = ctx.wo; r._degraded = ctx.degraded; r._notesFailed = ctx.notesFailed; r._siteWOs = ctx.siteWOs; r._siteOk = ctx.siteOk; r._siteReason = ctx.siteReason; r._pageToolCalls = pageToolCalls; return r; });
     });
   }
 
@@ -500,7 +503,8 @@
     if (r.status === 403) return 'The SWA ingest key is missing or wrong. Re-set it from the Tampermonkey menu.';
     if (r.status === 429) return 'Slow down - too many questions in a row. Try again in a moment.';
     if (r.status === 503) return 'The copilot is not fully configured on the server yet (' + (j.error || 'unavailable') + ').';
-    return (j && (j.error || j.detail)) ? ('Server error: ' + (j.error || j.detail)) : ('Server error (' + r.status + ').');
+    // Neutral fixed message + status code only - never pass raw server error text through to the UI.
+    return 'Server error (' + r.status + '). Please try again in a moment.';
   }
 
   // ---- Panel UI -------------------------------------------------------------
@@ -566,10 +570,15 @@
       return '<span class="bwn-ask-cite" style="display:inline-block;font:11px/1.4 -apple-system,Segoe UI,Roboto,sans-serif;background:#e7efe9;color:#1A5F3E;border:1px solid #cfe0d6;border-radius:5px;padding:0 5px;margin:0 1px;">' + m + '</span>';
     });
   }
+  // Defense-in-depth suppression: if a credential-like value ever appears in an answer, mask it
+  // BEFORE display and leave a generic non-revealing marker. Runs on raw text, then esc(), then
+  // citations. Nothing sensitive is logged. The server prompt already minimizes; this is a net.
+  var SECRET_RE = /(sk-[A-Za-z0-9]{16,}|ghp_[A-Za-z0-9]{20,}|github_pat_[A-Za-z0-9_]{20,}|xox[baprs]-[A-Za-z0-9-]{10,}|AKIA[0-9A-Z]{16}|eyJ[A-Za-z0-9_-]{10,}\.[A-Za-z0-9_-]{10,}\.[A-Za-z0-9_-]{6,}|Bearer\s+[A-Za-z0-9._-]{20,}|(?:api[_-]?key|secret|token|password|passwd|session[_-]?id)["']?\s*[:=]\s*["']?[^\s"']{8,})/gi;
+  function redactSensitive(text) { return String(text == null ? '' : text).replace(SECRET_RE, '[sensitive value hidden]'); }
   function para(text) {
     var d = document.createElement('div');
     d.style.cssText = 'white-space:pre-wrap;word-wrap:break-word;';
-    d.innerHTML = withCitations(esc(text).trim());
+    d.innerHTML = withCitations(esc(redactSensitive(text)).trim());
     return d;
   }
   function parseSections(text) {
@@ -644,7 +653,10 @@
     }
     var secs = parseSections(text);
     if (secs.length) { secs.forEach(function (s) { wrap.appendChild(renderSection(s.head, s.body)); }); return wrap; }
-    wrap.appendChild(para(text));   // graceful fallback: existing safe plain rendering
+    // Graceful fallback: existing safe plain rendering. A "not available through current tools"
+    // reply is intentionally rendered here as grounded answer text, NOT a separate UI state -
+    // matching model phrasing to force a distinct state would be brittle and could misfire.
+    wrap.appendChild(para(text));
     return wrap;
   }
   function addAnswer(text) {
@@ -692,8 +704,9 @@
       // Distinct, truthful degradation states (existing gatherContext flags only).
       if (r._notesFailed) addMsg('meta', 'Documented notes could not be retrieved for this work order; this answer is from the work-order details only.');
       else if ((r._records || 0) === 0) addMsg('meta', 'No notes were returned for this work order.');
-      if (r._degraded && r._degraded.indexOf('site-roster') !== -1) addMsg('meta', 'Site records could not be retrieved.');
-      else if (r._siteOk && (r._siteWOs || 0) === 0) addMsg('meta', 'No site work orders were returned for this location.');
+      if (r._siteReason === 'no-location') addMsg('meta', 'Site roster unavailable: no usable location ID on this record');
+      else if (r._siteReason === 'fetch-failed') addMsg('meta', 'Site records could not be retrieved.');
+      else if (r._siteReason === 'empty') addMsg('meta', 'No site work orders were returned for this location.');
 
       // Grounding footer.
       var foot = 'Grounded on WO #' + (r._wo || '?') + ' - ' + (r._records || 0) + ' note' + (r._records === 1 ? '' : 's');
@@ -802,9 +815,9 @@
       { label: 'Summarize this WO', primary: true, prompt: 'Summarize this work order from the record: status, assignment, scope, and where it stands. Cite the WO number and note dates.' },
       { label: 'Catch me up', primary: true, prompt: 'What is the recent documented activity on this work order, newest first? Cite note dates. Do not infer completion that is not documented.' },
       { label: 'What needs attention?', primary: true, prompt: 'From the record only, what is missing, unresolved, or conflicting on this work order? Do not assume cause, blame, or lateness unless a record or knowledge says so.' },
-      { label: 'Show current assignment', primary: true, prompt: 'Who is assigned and which vendor(s) are documented on this work order? Distinguish assigned from documented on-site activity.' },
-      { label: 'What is documented as the next step?', primary: true, prompt: 'What does the record document as the next step on this work order? If none is documented, say so.' },
-      { label: 'Prepare handoff summary', primary: true, prompt: 'Prepare a concise shift-handoff summary of this work order: status, assignment, documented next step, and open gaps. Cite WO number and note dates.' },
+      { label: 'Show current assignment', prompt: 'Who is assigned and which vendor(s) are documented on this work order? Distinguish assigned from documented on-site activity.' },
+      { label: 'What is documented as the next step?', prompt: 'What does the record document as the next step on this work order? If none is documented, say so.' },
+      { label: 'Prepare handoff summary', prompt: 'Prepare a concise shift-handoff summary of this work order: status, assignment, documented next step, and open gaps. Cite WO number and note dates.' },
       { label: 'Show schedule details', prompt: 'What scheduling is documented on this work order (scheduled/expected dates)? A scheduled date is not proof of a visit.' },
       { label: 'What is missing from this record?', prompt: 'Identify documentation that appears missing on this work order, based only on the retrieved fields and notes. Do not treat absence as proof an event did not happen.' },
       { label: 'Show documented vendor activity', prompt: 'What vendor activity is explicitly documented on this work order (assigned / named in a note), with dates? Do not claim a vendor attended or completed work unless documented.' },
@@ -847,6 +860,7 @@
         b.disabled = true; b.setAttribute('aria-disabled', 'true');
         b.style.opacity = '.5'; b.style.cursor = 'not-allowed';
         b.title = 'Site roster unavailable: no work order open on this screen';
+        b.setAttribute('aria-label', c.label + ' (unavailable: no work order open on this screen)');
       } else {
         b.addEventListener('click', function () { runCmd(c.prompt); });
       }

@@ -35,9 +35,24 @@ A.ok('status is not spinner-only (status text present)', /statusEl\.textContent/
   'Ask BWN could not identify a usable work order from the current screen',
   'No notes were returned for this work order',
   'Documented notes could not be retrieved for this work order',
+  'Site roster unavailable: no usable location ID on this record',
   'Site records could not be retrieved',
   'No site work orders were returned for this location'
 ].forEach(function (s) { has(s, 'degradation state: "' + s + '"'); });
+// missing-locationId is now DISTINCT from roster-failure (state-shape only, no query change).
+has(/reason: 'no-location'/, 'no-location reason is set (missing locationId)');
+has(/reason: 'fetch-failed'/, 'fetch-failed reason is set (roster query failed)');
+has(/siteReason === 'no-location'/, 'render distinguishes no-location from fetch-failed');
+has(/r\._siteReason = ctx\.siteReason/, 'siteReason is surfaced on the response');
+
+// --- P2: client-side sensitive suppression (defense-in-depth), not just a notice ---
+has(/function redactSensitive/, 'sensitive redactor present');
+has(/withCitations\(esc\(redactSensitive\(text\)\)/, 'redaction runs before escape + display');
+has("'[sensitive value hidden]'", 'redaction leaves a generic non-revealing marker');
+A.ok('redactor targets credential-like patterns', /sk-\[A-Za-z0-9\]/.test(SRC) && /Bearer/.test(SRC) && /api\[_-\]\?key|secret|token|password/.test(SRC));
+
+// --- P6: generic error does not pass raw server text through ---
+A.ok('errorFor does not echo raw server error text', !/'Server error: ' \+ \(j\.error/.test(SRC));
 
 // --- E. conditional answer-section rendering ---
 ["'### Answer'", "'### Evidence'", "'### Limits or Gaps'", "'### Suggested Next Check'"].forEach(function (h) {

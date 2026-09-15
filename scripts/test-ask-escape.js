@@ -54,6 +54,6 @@ A.ok('no new telemetry fetch endpoint (only same-origin graphql remains)', count
 
 // --- invariants ---
 A.ok('still exactly two bwnFocusTrap(panelEl) calls', (SRC.match(/bwnFocusTrap\(panelEl\)/g) || []).length === 2);
-A.ok('@version bumped to 0.10.0', SRC.indexOf('// @version      0.10.0') !== -1);
+A.ok('@version bumped past 0.9.x', SRC.indexOf('// @version      0.7.6') === -1 && /\/\/ @version\s+0\.1\d\./.test(SRC));
 
 A.finish();

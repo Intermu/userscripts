@@ -19,12 +19,14 @@ var BLOCK = slice(SRC, '/* ===== BWN-ASK-CMDS:START', '/* ===== BWN-ASK-CMDS:END
 var labels = (BLOCK.match(/label:\s*'([^']+)'/g) || []).map(function (m) { return m.replace(/label:\s*'/, '').replace(/'$/, ''); });
 
 // --- required library (exact labels) ---
+// Initial view trimmed to 5 high-value chips (one per group + core), per the empty-state 3-5
+// guideline; the rest live behind "More commands".
 var REQUIRED_PRIMARY = [
-  'Summarize this WO', 'Catch me up', 'What needs attention?', 'Show current assignment',
-  'What is documented as the next step?', 'Prepare handoff summary',
+  'Summarize this WO', 'Catch me up', 'What needs attention?',
   'Show other open WOs at this site', 'Show client/site instructions'
 ];
 var REQUIRED_MORE = [
+  'Show current assignment', 'What is documented as the next step?', 'Prepare handoff summary',
   'Show schedule details', 'What is missing from this record?', 'Show documented vendor activity',
   'Can we confirm completed work?', 'Show site work-order roster', 'Check for related site issues',
   'Compare this WO to site history', 'Possible repeat pattern?', 'What site context is available?',
@@ -36,10 +38,13 @@ REQUIRED_PRIMARY.concat(REQUIRED_MORE).forEach(function (l) {
   A.ok('library has "' + l + '"', labels.indexOf(l) !== -1, 'missing chip label');
 });
 
-// --- initial view is <=8 and is exactly the required primary set ---
+// --- initial view is 3-5 high-value chips (empty-state guideline) ---
 var primaryCount = (BLOCK.match(/,\s*primary:\s*true/g) || []).length;   // definition form only (not the prose in the block comment)
-A.ok('initial (primary) chip count is <= 8', primaryCount <= 8, 'got ' + primaryCount);
-A.ok('initial (primary) chip count is exactly 8', primaryCount === 8, 'got ' + primaryCount);
+A.ok('initial (primary) chip count is within 3-5', primaryCount >= 3 && primaryCount <= 5, 'got ' + primaryCount);
+A.ok('initial (primary) chip count is exactly 5', primaryCount === 5, 'got ' + primaryCount);
+REQUIRED_MORE.slice(0, 3).forEach(function (l) {
+  A.ok('"' + l + '" is behind More (not primary)', BLOCK.indexOf("label: '" + l + "', primary: true") === -1, 'still primary');
+});
 
 // --- site-history chips are marked site:true and gated on an open WO ---
 var siteCount = (BLOCK.match(/site:\s*true/g) || []).length;
@@ -47,6 +52,7 @@ A.ok('site-history chips are tagged site:true (6)', siteCount === 6, 'got ' + si
 A.ok('site chips are disabled when no WO is open', /c\.site && !hasWO/.test(BLOCK) && /disabled = true/.test(BLOCK),
   'no location/WO gating found for site commands');
 A.ok('disabled site chip explains why', /Site roster unavailable/.test(BLOCK));
+A.ok('disabled site chip carries an accessible reason (aria-label, not title-only)', /setAttribute\('aria-label', c\.label \+ ' \(unavailable:/.test(BLOCK));
 
 // --- no labels that promise unsupported certainty ---
 ['Confirm visit', 'Find last vendor', 'Show all site history'].forEach(function (bad) {
