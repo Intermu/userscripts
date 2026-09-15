@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         BWN Suite - AI (Broadway National)
 // @namespace    broadwaynational.bwn
-// @version      1.46.0
+// @version      1.47.0
 // @downloadURL  https://raw.githubusercontent.com/Intermu/userscripts/main/bwn-suite-ai.user.js
 // @updateURL    https://raw.githubusercontent.com/Intermu/userscripts/main/bwn-suite-ai.user.js
 // @description  The Umbrava tools that call outside APIs, kept separate from the zero-egress Core script. Client Update and WO Audit drafts (Anthropic Claude; draft-only, scrubbed before sending, you review before posting); Find Techs / Find Suppliers (Google Places; vendor leads near a WO); and Job View (opens the Ops-Dashboard job card on the WO page - WO details from Umbrava plus the authored case file and next actions, read-only). Network access is limited by the browser to the declared API hosts and the BWN Static Web App. API keys are stored in Tampermonkey's storage via the menu commands and never enter the page. Toggle modules in BWN_MODULES below.
@@ -2216,11 +2216,14 @@
     var BTN_ID = 'bwn-client-update-btn';
     var GREEN = BWN.GREEN;
 
-    // ESC-rank visibility floor (server-computed ladder: 1 staff .. 5 director). The merged Draft
-    // menu bundles WO Audit (rank 3 in the dock's BWN_DOCK_POLICY) with the client/recent drafts, so
-    // the whole button is gated to supervisor+ (rank 3). Fail-CLOSED: an unresolved rank keeps the
-    // button hidden until the rank proves >= floor. bwnAI.rank() returns null when unknown.
-    var DRAFT_MIN_RANK = 3;
+    // ESC-rank visibility floors (server-computed ladder: 1 staff .. 5 director), applied PER ITEM.
+    // Client Update is a client-safe, scrubbed, human-reviewed draft - core coordinator work, so it
+    // stays available to coordinators (rank 1+). The internal drafts (WO Audit / Recent / Next Actions
+    // / Over 30) and the Template flyout are supervisor+ (rank 3; WO Audit is rank 3 in the dock's
+    // BWN_DOCK_POLICY). The button shows whenever >= 1 item is visible. Fail-CLOSED: an unresolved
+    // rank keeps the button hidden until the rank resolves. bwnAI.rank() returns null when unknown.
+    var DRAFT_MIN_RANK = 3;             // internal drafts + templates
+    var CLIENT_UPDATE_MIN_RANK = 1;     // client-safe draft - coordinators keep it
 
     // Prompt-pack version: stamped on cached drafts so a prompt edit invalidates
     // stale caches. Bump when any SYSTEM_PROMPT_* changes materially.
@@ -3436,11 +3439,11 @@
     }
 
     function mount() {
-      // ESC-rank visibility floor (fail-closed): supervisor+ only. Unresolved rank keeps waiting
-      // (button hidden until rank proves >= floor); a known below-floor rank rests, no button.
+      // ESC-rank visibility floors (fail-closed), applied per item - see the DRAFT_MIN_RANK /
+      // CLIENT_UPDATE_MIN_RANK note above. Unresolved rank keeps waiting (button hidden until it
+      // resolves); the button shows whenever >= 1 item survives the filter.
       var _cuRank = bwnAI.rank();
       if (_cuRank === null) { BWN.beat('clientUpdate', 'waiting', 'role rank not resolved'); return false; }
-      if (_cuRank < DRAFT_MIN_RANK) { BWN.beat('clientUpdate', 'waiting', 'below Draft rank floor'); return true; }
       if (document.getElementById(BTN_ID)) { BWN.beat('clientUpdate', 'ok', 'AI Draft menu mounted'); return true; }
       // Only on a notes view that actually has notes loaded.
       if (!document.querySelector('[data-testid^="wo-note-"][data-testid$="-summary"]')) { BWN.beat('clientUpdate', 'waiting', 'notes view not open'); return false; }
@@ -3449,18 +3452,20 @@
       bar.id = BTN_ID;
       bar.style.cssText = 'display:inline-flex;gap:6px;align-items:center;vertical-align:middle;margin-right:8px;';
       var draftItems = [
-        { label: 'Client Update', desc: 'Client-safe draft', fn: function () { run(CLIENT_MODE); } },
-        { label: 'WO Audit', desc: 'Internal \u00b7 full case file', fn: function () { run(AUDIT_MODE); } },
-        { label: 'Recent Update', desc: 'Internal \u00b7 recent window', fn: function () { run(RECENT_MODE); } },
-        { label: 'Next Actions', desc: 'Action \u00b7 next actions', fn: function () { run(NEXTSTEPS_MODE); } },
-        { label: 'Over 30', desc: 'Internal \u00b7 one-line', fn: function () { run(OVER30_MODE); } }
-      ];
-      // The templates come from bwn-notes over the event bus (it is a @grant-none page-context script;
-      // we are GM_-sandboxed and cannot read its page-window globals). With the list in hand, fold it
-      // in as a "Template" flyout and relabel the button "Draft"; a leaf click sends the id back for
-      // bwn-notes to draft (calendar + fill). No list yet -> stay "AI Draft" and ask again.
+        { label: 'Client Update', desc: 'Client-safe draft', minRank: CLIENT_UPDATE_MIN_RANK, fn: function () { run(CLIENT_MODE); } },
+        { label: 'WO Audit', desc: 'Internal \u00b7 full case file', minRank: DRAFT_MIN_RANK, fn: function () { run(AUDIT_MODE); } },
+        { label: 'Recent Update', desc: 'Internal \u00b7 recent window', minRank: DRAFT_MIN_RANK, fn: function () { run(RECENT_MODE); } },
+        { label: 'Next Actions', desc: 'Action \u00b7 next actions', minRank: DRAFT_MIN_RANK, fn: function () { run(NEXTSTEPS_MODE); } },
+        { label: 'Over 30', desc: 'Internal \u00b7 one-line', minRank: DRAFT_MIN_RANK, fn: function () { run(OVER30_MODE); } }
+      ].filter(function (it) { return _cuRank >= it.minRank; });
+      if (!draftItems.length) { BWN.beat('clientUpdate', 'waiting', 'no draft items at this rank'); return true; }
+      // Templates (supervisor+) come from bwn-notes over the event bus (it is a @grant-none page-context
+      // script; we are GM_-sandboxed and cannot read its page-window globals). With the list in hand,
+      // fold it in as a "Template" flyout and relabel the button "Draft"; a leaf click sends the id back
+      // for bwn-notes to draft (calendar + fill). No list yet -> stay "AI Draft" and ask again. Below
+      // rank 3 the Template flyout is gated out entirely (coordinators see Client Update only).
       var draftLabel = 'AI Draft';
-      if (noteTplGroups) {
+      if (_cuRank >= DRAFT_MIN_RANK && noteTplGroups) {
         draftLabel = 'Draft';
         var tplKids = [];
         noteTplGroups.forEach(function (g) {
@@ -3468,7 +3473,7 @@
           (g.items || []).forEach(function (t) { tplKids.push({ label: t.label, fn: function () { pickBus(t.id); } }); });
         });
         draftItems.push({ label: 'Template', desc: 'Canned notes', children: tplKids });
-      } else {
+      } else if (_cuRank >= DRAFT_MIN_RANK) {
         try { document.dispatchEvent(new CustomEvent('bwn:cmd', { detail: { id: 'notes:tpl:req' } })); } catch (e) { }
       }
       bar.appendChild(bwnMakeDropdown(draftLabel, draftItems));
