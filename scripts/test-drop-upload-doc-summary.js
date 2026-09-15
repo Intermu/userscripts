@@ -62,6 +62,7 @@ var ctx = {
 vm.runInNewContext(
   DOC + '\n' + NOTE + '\n' +
   ';this.isPlainText=isPlainText;this.summarizableDoc=summarizableDoc;this.oneLineClip=oneLineClip;' +
+  'this.looksLikeVendorProposal=looksLikeVendorProposal;' +
   'this.busSummarize=busSummarize;this.summarizeDocText=summarizeDocText;this.buildNoteText=buildNoteText;',
   ctx
 );
@@ -138,6 +139,16 @@ var LONG = 'This invoice from Acme HVAC bills 1200 dollars for a compressor repl
   ]);
   A.ok('email block kept', note3.indexOf('From: a') !== -1, note3);
   A.ok('attachment listed with its summary', /• quote\.pdf - PDF, 80 KB\n    Quote for 2 RTUs, \$6k\./.test(note3), note3);
+
+  console.log('\n# looksLikeVendorProposal: an estimate/quote/proposal PDF text -> Vendor Proposal label');
+  var estimate = 'ESTIMATE\nHeritage Electrical Services, LLC\nEstimate no.: 2392\nEstimate details\n' +
+    'Product or service Description Qty Rate Amount\nIncurred Labor Labor Incurred 5 $112.50 $562.50\n' +
+    'Total $2,442.00\nProposal for Technician to replace contactor.\nAccepted date Accepted by';
+  A.ok('a vendor estimate reads as a proposal', ctx.looksLikeVendorProposal(estimate));
+  A.ok('a quote with priced lines reads as a proposal', ctx.looksLikeVendorProposal('Quotation for 2 RTUs\nQty 2 Rate $3,000.00 Total $6,000.00'));
+  A.ok('a client WO request with only an NTE figure does NOT trip it', !ctx.looksLikeVendorProposal('Please dispatch. NTE is $500 for this repair. Store 367 lighting out.'));
+  A.ok('an estimate keyword with no money does NOT trip it', !ctx.looksLikeVendorProposal('This is our estimate of the timeline: two weeks to complete.'));
+  A.ok('empty text is not a proposal', !ctx.looksLikeVendorProposal(''));
 
   A.finish();
 })();
