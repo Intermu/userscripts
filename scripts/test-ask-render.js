@@ -89,6 +89,37 @@ has('Ask about this work order or choose a quick command' + String.fromCharCode(
 A.ok('rendered text is escaped before display', /withCitations\(esc\(/.test(SRC));
 A.ok('answers are not injected as raw innerHTML', !/innerHTML\s*=\s*(ans|text|r\.json)/.test(SRC));
 
+// --- P2b: the draft display AND the clipboard share ONE redaction pass ---
+// A value masked on screen must not leak through Copy draft. draftPanel now redacts bodyText once
+// into `safe` and uses it for both para() and the clipboard; raw bodyText must not reach either.
+var draftSrc = SRC.slice(SRC.indexOf('function draftPanel'), SRC.indexOf('function buildAnswerNode'));
+A.ok('draftPanel computes one redacted copy (safe)', /var safe = redactSensitive\(bodyText\)/.test(draftSrc));
+A.ok('draft display renders the redacted copy', /para\(safe\)/.test(draftSrc) && !/para\(bodyText\)/.test(draftSrc));
+A.ok('clipboard write API copies redacted, not raw', /writeText\(safe\)/.test(draftSrc) && !/writeText\(bodyText\)/.test(draftSrc));
+A.ok('clipboard execCommand fallback copies redacted, not raw', /t\.value = safe/.test(draftSrc) && !/t\.value = bodyText/.test(draftSrc));
+
+// behavioral: exercise the SHIPPED redactSensitive over each credential family + ordinary text.
+// Fixtures are synthetic. Never pass a raw fixture into an assertion NAME/detail (no leak on fail).
+var redact = new Function(SRC.slice(SRC.indexOf('var SECRET_RE ='), SRC.indexOf('function para')) + '\n return redactSensitive;')();
+var MARK = '[sensitive value hidden]';
+function masks(name, raw) {
+  var out = redact('lead ' + raw + ' tail');
+  A.ok(name + ' is masked in redacted output', out.indexOf(raw) === -1 && out.indexOf(MARK) !== -1);
+}
+masks('sk- token', 'sk-' + 'A1b2C3d4E5f6G7h8i9');
+masks('ghp_ token', 'ghp_' + 'ABCDEFGHIJKLMNOPQRSTUV');
+masks('github_pat_ token', 'github_pat_' + 'ABCDEFGHIJKLMNOP1234567890');
+masks('xox token', 'xoxb-' + '1234567890-abcdEFGH');
+masks('AKIA key', 'AKIA' + 'ABCDEFGHIJKLMNOP');
+masks('JWT value', 'eyJhbGciOiJIUzI1' + '.eyJzdWIiOiIxMjM0' + '.SflKxw');
+masks('Bearer token', 'Bearer ' + 'abcDEF123456ghiJKL7890');
+masks('password= value', 'password=hunter2xyz');
+masks('api_key= value', 'api_key=abcd1234efgh5678');
+masks('session_id= value', 'session_id=abcd1234ef');
+A.ok('ordinary draft text is not masked', redact('Follow up on WO #375038, note dated Mar 12; vendor Acme.') === 'Follow up on WO #375038, note dated Mar 12; vendor Acme.');
+A.ok('citation-bearing text survives redaction unchanged', redact('See WO #123 and Knowledge: Escalation SOP.') === 'See WO #123 and Knowledge: Escalation SOP.');
+A.ok('redactSensitive is idempotent (double pass == single pass)', redact(redact('token=abcd1234efgh')) === redact('token=abcd1234efgh'));
+
 // --- H. narrow U+2014 exception (regression) ---
 var APPROVED = 'DRAFT ' + EMD + ' coordinator must review and submit manually';
 var emCount = (SRC.match(new RegExp(EMD, 'g')) || []).length;

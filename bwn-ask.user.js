@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         BWN Ask (Coordinator Copilot)
 // @namespace    https://broadwaynational.com/bwn
-// @version      0.11.0
+// @version      0.11.1
 // @description  Ask questions about the work order you're viewing. Reads the WO live from Umbrava via same-origin GraphQL (details + full note / site-visit history) AND a summary roster of the other work orders at the same location, plus the team knowledge doc, and answers through the Broadway AI proxy with dates and references. Phase 1.5 = page-scoped + location roster (Path A); no data leaves the trusted Broadway path.
 // @match        https://app.umbrava.com/*
 // @run-at       document-idle
@@ -614,6 +614,7 @@
     return sec;
   }
   function draftPanel(bodyText) {
+    var safe = redactSensitive(bodyText);   // ONE redaction pass drives BOTH the visible draft and the clipboard, so nothing masked on screen can leak via Copy draft. redactSensitive is idempotent (the marker never re-matches).
     var box = document.createElement('div');
     box.className = 'bwn-ask-draft';
     box.setAttribute('role', 'group'); box.setAttribute('aria-label', 'Manual draft');
@@ -626,15 +627,15 @@
     rem.textContent = DRAFT_REMINDER;
     rem.style.cssText = 'font:11px/1.4 -apple-system,Segoe UI,Roboto,sans-serif;color:#8a7a3a;margin:1px 0 6px;';
     box.appendChild(rem);
-    box.appendChild(para(bodyText));
+    box.appendChild(para(safe));
     var copy = document.createElement('button');
     copy.type = 'button'; copy.textContent = 'Copy draft'; copy.setAttribute('aria-label', 'Copy draft');
     copy.style.cssText = 'margin-top:7px;cursor:pointer;font:12px -apple-system,Segoe UI,Roboto,sans-serif;background:#1A5F3E;color:#fff;border:none;border-radius:7px;padding:5px 11px;';
     copy.addEventListener('click', function () {
       var done = function () { copy.textContent = 'Copied'; setTimeout(function () { copy.textContent = 'Copy draft'; }, 1500); };
       // Client-side ONLY: no network, no mutation, no autofill, no insertion into any field.
-      try { if (navigator.clipboard && navigator.clipboard.writeText) { navigator.clipboard.writeText(bodyText).then(done, done); return; } } catch (e) { }
-      try { var t = document.createElement('textarea'); t.value = bodyText; document.body.appendChild(t); t.select(); document.execCommand('copy'); document.body.removeChild(t); } catch (e2) { }
+      try { if (navigator.clipboard && navigator.clipboard.writeText) { navigator.clipboard.writeText(safe).then(done, done); return; } } catch (e) { }
+      try { var t = document.createElement('textarea'); t.value = safe; document.body.appendChild(t); t.select(); document.execCommand('copy'); document.body.removeChild(t); } catch (e2) { }
       done();
     });
     box.appendChild(copy);
