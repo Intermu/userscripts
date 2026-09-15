@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         BWN Suite - AI (Broadway National)
 // @namespace    broadwaynational.bwn
-// @version      1.47.0
+// @version      1.48.0
 // @downloadURL  https://raw.githubusercontent.com/Intermu/userscripts/main/bwn-suite-ai.user.js
 // @updateURL    https://raw.githubusercontent.com/Intermu/userscripts/main/bwn-suite-ai.user.js
 // @description  The Umbrava tools that call outside APIs, kept separate from the zero-egress Core script. Client Update and WO Audit drafts (Anthropic Claude; draft-only, scrubbed before sending, you review before posting); Find Techs / Find Suppliers (Google Places; vendor leads near a WO); and Job View (opens the Ops-Dashboard job card on the WO page - WO details from Umbrava plus the authored case file and next actions, read-only). Network access is limited by the browser to the declared API hosts and the BWN Static Web App. API keys are stored in Tampermonkey's storage via the menu commands and never enter the page. Toggle modules in BWN_MODULES below.
@@ -3459,13 +3459,14 @@
         { label: 'Over 30', desc: 'Internal \u00b7 one-line', minRank: DRAFT_MIN_RANK, fn: function () { run(OVER30_MODE); } }
       ].filter(function (it) { return _cuRank >= it.minRank; });
       if (!draftItems.length) { BWN.beat('clientUpdate', 'waiting', 'no draft items at this rank'); return true; }
-      // Templates (supervisor+) come from bwn-notes over the event bus (it is a @grant-none page-context
-      // script; we are GM_-sandboxed and cannot read its page-window globals). With the list in hand,
-      // fold it in as a "Template" flyout and relabel the button "Draft"; a leaf click sends the id back
-      // for bwn-notes to draft (calendar + fill). No list yet -> stay "AI Draft" and ask again. Below
-      // rank 3 the Template flyout is gated out entirely (coordinators see Client Update only).
+      // Templates come from bwn-notes over the event bus (it is a @grant-none page-context script; we
+      // are GM_-sandboxed and cannot read its page-window globals). bwn-notes ONLY broadcasts its list
+      // to a rostered user, so the mere presence of noteTplGroups is the roster gate here - no rank
+      // check (Templates are rank 1). With the list in hand, fold it in as a "Template" flyout and
+      // relabel the button "Draft"; a leaf click sends the id back for bwn-notes to draft (calendar +
+      // fill). No list yet -> stay "AI Draft" and ask again (bwn-notes answers only if rostered).
       var draftLabel = 'AI Draft';
-      if (_cuRank >= DRAFT_MIN_RANK && noteTplGroups) {
+      if (noteTplGroups) {
         draftLabel = 'Draft';
         var tplKids = [];
         noteTplGroups.forEach(function (g) {
@@ -3473,7 +3474,7 @@
           (g.items || []).forEach(function (t) { tplKids.push({ label: t.label, fn: function () { pickBus(t.id); } }); });
         });
         draftItems.push({ label: 'Template', desc: 'Canned notes', children: tplKids });
-      } else if (_cuRank >= DRAFT_MIN_RANK) {
+      } else {
         try { document.dispatchEvent(new CustomEvent('bwn:cmd', { detail: { id: 'notes:tpl:req' } })); } catch (e) { }
       }
       bar.appendChild(bwnMakeDropdown(draftLabel, draftItems));

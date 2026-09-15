@@ -38,7 +38,7 @@ var SRC = slice(readLF(path.join(__dirname, '..', 'bwn-notes.user.js')),
 
 function build(src) {
   var ctx = vm.createContext({ console: console });
-  vm.runInContext(src + '\nthis.firstNameFromUser = firstNameFromUser; this.TEMPLATES = TEMPLATES; this.buildNote = buildNote; this.fmtDay = fmtDay; this.fmtWeekOf = fmtWeekOf; this.applyDate = applyDate; this.spokeTag = spokeTag; this.prependSpokeTag = prependSpokeTag; this.mruAdd = mruAdd; this.ntRankGate = ntRankGate; this.NOTES_MIN_RANK = NOTES_MIN_RANK;', ctx);
+  vm.runInContext(src + '\nthis.firstNameFromUser = firstNameFromUser; this.TEMPLATES = TEMPLATES; this.buildNote = buildNote; this.fmtDay = fmtDay; this.fmtWeekOf = fmtWeekOf; this.applyDate = applyDate; this.spokeTag = spokeTag; this.prependSpokeTag = prependSpokeTag; this.mruAdd = mruAdd; this.ntTemplateAllowed = ntTemplateAllowed; this.ntFullNameFromUser = ntFullNameFromUser; this.ntNormName = ntNormName; this.TEMPLATE_ROSTER = TEMPLATE_ROSTER;', ctx);
   return ctx;
 }
 var env = build(SRC);
@@ -138,20 +138,22 @@ A.ok('[neg] without the signed gate, an unsigned call-out wrongly gets a signatu
 var g2 = build(mutate(SRC, 'dt.setDate(dt.getDate() - ((dt.getDay() + 6) % 7));', ''));
 A.eq('[neg] without the Monday snap, a Friday stays a Friday (8/21, not 8/17)', g2.fmtWeekOf(2026, 8, 21), '8/21');
 
-// ---- ESC-rank visibility floor (supervisor+, fail-closed) --------------------------------
-A.eq('floor is supervisor (rank 3)', env.NOTES_MIN_RANK, 3);
-A.eq('unresolved rank (null) waits, never shows', env.ntRankGate(null), 'wait');
-A.eq('non-numeric rank waits (fail-closed)', env.ntRankGate('3'), 'wait');
-A.eq('rank 1 staff (Daniel) is hidden', env.ntRankGate(1), 'hide');
-A.eq('rank 2 lead is still hidden', env.ntRankGate(2), 'hide');
-A.eq('rank 3 supervisor sees it', env.ntRankGate(3), 'show');
-A.eq('rank 5 director sees it', env.ntRankGate(5), 'show');
+// ---- Templates dropdown roster (rank 1, named users only; fail-closed) --------------------
+A.eq('roster has the 6 named users', env.TEMPLATE_ROSTER.length, 6);
+A.eq('roster names are normalized lowercase "first last"', env.TEMPLATE_ROSTER.slice().sort().join('|'),
+  ['alyssa phelps', 'daniel bartolomei', 'jeanell quinones', 'joshua wiggins', 'kennya zambrano', 'mike najarro'].join('|'));
+A.ok('a rostered user (given_name + family_name) is allowed', env.ntTemplateAllowed({ given_name: 'Alyssa', family_name: 'Phelps' }));
+A.ok('a rostered user via the full name claim is allowed', env.ntTemplateAllowed({ name: 'Joshua Wiggins' }));
+A.ok('match is case/space-insensitive', env.ntTemplateAllowed({ name: '  MIKE   NAJARRO ' }));
+A.ok('a non-rostered user (Daniel Russell) is NOT allowed', !env.ntTemplateAllowed({ given_name: 'Daniel', family_name: 'Russell' }));
+A.ok('a similar-but-different name is NOT allowed', !env.ntTemplateAllowed({ name: 'Daniel Bartoloni' }));  // Umbrava spells it Bartolomei
+A.ok('null user fails closed (not allowed)', !env.ntTemplateAllowed(null));
+A.ok('an identity with no name fails closed', !env.ntTemplateAllowed({ email: 'x@y.com' }));
+A.eq('given+family beats a stale name claim', env.ntFullNameFromUser({ given_name: 'Kennya', family_name: 'Zambrano', name: 'old' }), 'kennya zambrano');
 
-// ---- negative control: an off-by-one floor (<=) would leak the button to rank 3 ----------
-var g3 = build(mutate(SRC, 'rk < NOTES_MIN_RANK', 'rk <= NOTES_MIN_RANK'));
-A.ok('[neg] without the strict-< floor, rank 3 would be wrongly hidden', g3.ntRankGate(3) !== 'show');
-// ---- negative control: fail-OPEN on unknown rank would show it ----------------------------
-var g4 = build(mutate(SRC, "(typeof rk !== 'number') ? 'wait'", "(typeof rk !== 'number') ? 'show'"));
-A.ok('[neg] without fail-closed, an unresolved rank would wrongly show', g4.ntRankGate(null) !== 'wait');
+// ---- negative control: inverting the roster check admits non-roster + denies roster -------
+var g3 = build(mutate(SRC, 'return !!n && TEMPLATE_ROSTER.indexOf(n) !== -1;', 'return !!n && TEMPLATE_ROSTER.indexOf(n) === -1;'));
+A.ok('[neg] an inverted membership test would admit a non-roster user and deny a rostered one',
+  g3.ntTemplateAllowed({ name: 'Daniel Russell' }) && !g3.ntTemplateAllowed({ name: 'Alyssa Phelps' }));
 
 A.finish();

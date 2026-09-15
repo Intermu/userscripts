@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         BWN Suite - Note Templates (Broadway National)
 // @namespace    broadwaynational.bwn
-// @version      0.9.0
+// @version      0.10.0
 // @description  Canned dispatch-note templates in a "Templates" dropdown beside the "+ Add" note button in the Umbrava Dispatch Board's work-order detail panel (Notes tab). Picking a template opens Umbrava's own Add Note composer and DRAFTS the note into it (signed with your first name, ______ blanks left for you to fill) - it is NEVER auto-posted; you review, set the Type, and click Save. STANDALONE: carries its own tiptap/ProseMirror inserter, so in-house techs install this one script alone - no drop-upload dependency. Still prefers drop-upload's hook (window.__bwnFillNoteEditor) when that script is also installed, so coordinator machines keep a single live-tested fill path. Also, on the regular WO page, a "Spoke with" button stamps a [Spoke with: <Vendor>] tag at the TOP of a note (vendor picked from your recent vendors or typed) so you can record which of several WO vendors you spoke with - same human-gated draft, never auto-posted. @grant none, zero egress.
 // @match        https://app.umbrava.com/*
 // @run-at       document-idle
@@ -98,13 +98,24 @@
   var NICKNAMES = { nicholas: 'Nick' };
   function applyNickname(name) { return NICKNAMES[String(name).toLowerCase()] || name; }
 
-  // ESC-rank visibility floor (server-computed ladder: 1 staff .. 5 director). The Draft / Templates
-  // and "Spoke with" note affordances are gated to supervisor+ (rank 3), matching the merged AI Draft
-  // button. Pure decision so the test pins it; the localStorage rank read lives outside the slice.
-  // Fail-CLOSED: an unresolved rank yields 'wait' (nothing shown until the rank proves >= floor),
-  // mirroring the dock's BWN_DOCK_POLICY contract (bwn-suite-core, PR #106).
-  var NOTES_MIN_RANK = 3;
-  function ntRankGate(rk) { return (typeof rk !== 'number') ? 'wait' : (rk < NOTES_MIN_RANK ? 'hide' : 'show'); }
+  // The Templates dropdown is rank 1 (not rank-gated) but rostered to a named set of people (Mike's
+  // choice, 2026-09-15) - the "Spoke with" button below is NOT rostered and stays available to all.
+  // Roster keyed by Umbrava display identity (firstName lastName, exact spellings verified live via
+  // the member directory), normalized to lowercase "first last" and matched against the Auth0 token's
+  // name claims. Templates are non-sensitive canned notes, so this is a "who sees this UI" roster, not
+  // a security boundary: a @grant-none script cannot read a per-user email/GUID without a network call,
+  // so display name is the key. Pure decision so the test pins it; the token read lives outside the
+  // slice. Fail-CLOSED: an unreadable/absent identity hides the dropdown.
+  var TEMPLATE_ROSTER = ['mike najarro', 'alyssa phelps', 'jeanell quinones', 'joshua wiggins', 'daniel bartolomei', 'kennya zambrano'];
+  function ntNormName(s) { return String(s == null ? '' : s).toLowerCase().replace(/\s+/g, ' ').trim(); }
+  function ntFullNameFromUser(u) {
+    if (!u) return '';
+    var gn = u.given_name || u.givenName, fn = u.family_name || u.familyName || u.lastName;
+    if (gn && fn) return ntNormName(gn + ' ' + fn);
+    if (u.name) return ntNormName(u.name);
+    return '';
+  }
+  function ntTemplateAllowed(u) { var n = ntFullNameFromUser(u); return !!n && TEMPLATE_ROSTER.indexOf(n) !== -1; }
 
   // First name of the signed-in user. Read from the Auth0 SPA cache in localStorage (the same
   // decodedToken.user the suite's actor() helpers read) - a pure read, no network, no GUID lookup.
@@ -205,24 +216,17 @@
   }
   // BWN-NOTES-SLICE-END
 
-  // Reader for the server-computed ESC rank (grant-none-safe; mirrors bwnEscRank / bwn-ask). Live
-  // bus event trusted directly; the bwn:role:last slot is the cross-refresh fallback (ok + fresh).
-  var ROLE_TTL_MS = 6 * 3600 * 1000;
-  var _ntLiveRank = null;
-  try { document.addEventListener('bwn:evt', function (e) { var d = e && e.detail; if (d && d.id === 'bwn:role' && typeof d.rank === 'number') _ntLiveRank = d.rank; }); } catch (e) { }
-  function ntRank() {
-    if (typeof _ntLiveRank === 'number') return _ntLiveRank;
-    try { var r = JSON.parse(localStorage.getItem('bwn:role:last') || 'null'); if (r && r.ok && typeof r.rank === 'number' && r.ts && (Date.now() - r.ts) < ROLE_TTL_MS) return r.rank; } catch (e2) { }
-    return null;
-  }
-
-  function currentFirstName() {
+  // The signed-in Auth0 user object (decodedToken.user) from the SPA cache - a pure read, no network.
+  function currentUserObj() {
     try {
       var k = Object.keys(localStorage).find(function (x) { return /@@auth0spajs@@::.*::@@user@@/.test(x); });
-      var u = k ? ((JSON.parse(localStorage.getItem(k)) || {}).decodedToken || {}).user : null;
-      return firstNameFromUser(u);
-    } catch (e) { return ''; }
+      return k ? ((JSON.parse(localStorage.getItem(k)) || {}).decodedToken || {}).user : null;
+    } catch (e) { return null; }
   }
+  function currentFirstName() { return firstNameFromUser(currentUserObj()); }
+  // Live roster check for the Templates dropdown (see TEMPLATE_ROSTER in the slice). Fail-closed:
+  // no readable identity -> not allowed -> nothing mounts and nothing is broadcast to the AI script.
+  function templateRosterAllowed() { return ntTemplateAllowed(currentUserObj()); }
 
   // ===== Inlined tiptap/ProseMirror composer-fill (makes this script STANDALONE) ============
   // ponytail: verbatim copy of bwn-drop-upload's live-tested fill code (waitFor + setNativeValue +
@@ -416,7 +420,10 @@
     var p = String(id).split(':'), g = TEMPLATES[+p[0]];
     return g ? g.items[+p[1]] : null;
   }
-  function announceTpl() { try { document.dispatchEvent(new CustomEvent('bwn:evt', { detail: { id: 'notes:tpl:list', groups: tplList() } })); } catch (e) { } }
+  // Only broadcast the template list to the AI script for a rostered user - this is what makes the
+  // merged Draft button's "Template" flyout appear only for the roster, without the AI script needing
+  // its own roster copy.
+  function announceTpl() { if (!templateRosterAllowed()) return; try { document.dispatchEvent(new CustomEvent('bwn:evt', { detail: { id: 'notes:tpl:list', groups: tplList() } })); } catch (e) { } }
   document.addEventListener('bwn:cmd', function (e) {
     var d = e && e.detail; if (!d) return;
     if (d.id === 'notes:tpl:req') {
@@ -718,6 +725,8 @@
     return null;
   }
   function mount() {
+    // Roster gate (rank 1, named users only): non-roster never mounts. TRUE stops the poll.
+    if (!templateRosterAllowed()) return true;
     // Umbrava permission gate: the templates only ever fill the note composer, and a user who may
     // not add a note has no composer to fill. TRUE stops the mount poll. Fails OPEN when unknown.
     if (!bwnCan('WorkOrderNote.AddNew')) return true;
@@ -758,6 +767,8 @@
   var WO_BTN_ID = 'bwn-notes-wo-dd';
   function aiDraftPresent() { return !!document.getElementById('bwn-client-update-btn'); }
   function woMount() {
+    // Roster gate (rank 1, named users only): non-roster never mounts the standalone Templates button.
+    if (!templateRosterAllowed()) return true;
     // Stand our standalone button down whenever the AI script's Draft button is up (it renders the
     // merged flyout). Check the DOM, not just the bus flag: the AI script can pick up our load-time
     // broadcast without ever sending a req we hear, so the flag alone missed it and both mounted.
@@ -796,12 +807,7 @@
   // page uses woMount() for templates + mountSpoke() for the vendor tag. Returns true when nothing is
   // left to do so the poll can rest (run both WO mounts each tick - don't short-circuit one).
   function tick() {
-    // ESC-rank visibility floor (fail-closed): supervisor+ only, across board templates, WO-page
-    // templates, and "Spoke with". Unresolved rank keeps polling (nothing shown until rank proves
-    // >= floor); a known below-floor rank rests (nothing mounts).
-    var ntGate = ntRankGate(ntRank());
-    if (ntGate === 'wait') return false;
-    if (ntGate === 'hide') return true;
+    // Templates gate on the roster inside mount()/woMount(); "Spoke with" is ungated. No rank gate.
     if (/dispatch-board/.test(location.pathname)) return mount();
     if (/\/work-orders\//.test(location.pathname)) return [woMount(), mountSpoke()].every(Boolean);
     return true;
