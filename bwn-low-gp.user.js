@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         BWN Suite - Low GP Note (Broadway National)
 // @namespace    broadwaynational.bwn
-// @version      0.3.1
+// @version      0.4.0
 // @description  A "Low GP" button beside the global "Search Work Orders" box. Enter a WO#, Tracking#, Source PO#, or Source Job#; it finds the work order, shows a one-click CONFIRM card (WO / client / location / assignee), then posts TWO notes via Umbrava's own API: a Billing-type note reading "Low GP", and a second note that @-mentions the WO's assignee ("@Name Low GP note added") so they are notified. The @-mention is the real TipTap mention span the SPA sends (captured live 2026-08-17); actionNoteEmails stays null - the span alone notifies. Same-origin /api/graphql with the app's Auth0 bearer, @grant none, zero egress. Nothing posts until you click Confirm.
 // @match        https://app.umbrava.com/*
 // @run-at       document-idle
@@ -23,6 +23,14 @@
   function lgIsGuid(s) { return /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i.test(String(s == null ? '' : s)); }
 
   function lgEsc(s) { return String(s == null ? '' : s).replace(/[&<>"']/g, function (c) { return { '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;' }[c]; }); }
+
+  // ESC-rank visibility floor (server-computed ladder: 1 staff .. 5 director). The Low GP button
+  // posts a Billing GP write-down note - a management-visible call, gated to manager+ (rank 4).
+  // Pure decision so the test pins it; the localStorage rank read lives outside the slice.
+  // Fail-CLOSED: an unresolved rank yields 'wait' (button never shown until the rank proves
+  // >= floor), mirroring the dock's BWN_DOCK_POLICY contract (bwn-suite-core, PR #106).
+  var LOWGP_MIN_RANK = 4;
+  function lgRankGate(rk) { return (typeof rk !== 'number') ? 'wait' : (rk < LOWGP_MIN_RANK ? 'hide' : 'show'); }
 
   // Note-type id resolved by NAME from Core's bwn:noteTypes cache (82 types; Core populates it).
   // cacheRaw is the raw localStorage string (or null). Floor covers the two types this script needs,
@@ -247,7 +255,19 @@
     while (j < n) { var c = q.charAt(j); if ((c >= 'A' && c <= 'Z') || (c >= 'a' && c <= 'z') || (c >= '0' && c <= '9') || c === '_') j++; else break; }
     return lgGql(q.slice(i, j) || null, query, variables);
   };
-  var BWN_VER = '0.3.1';
+  var BWN_VER = '0.4.0';
+
+  // Reader for the server-computed ESC rank (grant-none-safe; mirrors bwnEscRank / bwn-ask). Live
+  // bus event trusted directly; the bwn:role:last slot is the cross-refresh fallback (ok + fresh).
+  // Script-local, kept OUT of the paste-identical BWN-OPS-WRAP block below.
+  var ROLE_TTL_MS = 6 * 3600 * 1000;
+  var _lgLiveRank = null;
+  try { document.addEventListener('bwn:evt', function (e) { var d = e && e.detail; if (d && d.id === 'bwn:role' && typeof d.rank === 'number') _lgLiveRank = d.rank; }); } catch (e) { }
+  function lgRank() {
+    if (typeof _lgLiveRank === 'number') return _lgLiveRank;
+    try { var r = JSON.parse(localStorage.getItem('bwn:role:last') || 'null'); if (r && r.ok && typeof r.rank === 'number' && r.ts && (Date.now() - r.ts) < ROLE_TTL_MS) return r.rank; } catch (e2) { }
+    return null;
+  }
   var BWN_MODULES = (function () { try { return JSON.parse(localStorage.getItem('bwn:modules') || '{}') || {}; } catch (e) { return {}; } })();
   // Central governance (governance-sync): fold the org flags bwn-suite-ai caches to bwn:gov into
   // BWN_MODULES as ONE-WAY disables, the SAME shape as bwn-suite-core's bwnApplyGov(). A remote
@@ -722,6 +742,11 @@
     // the caller stops polling for a mount that is never coming. bwnCan fails OPEN while the
     // decode is unknown, so nothing changes for a user Core has not decoded yet.
     if (!bwnCan('WorkOrderNote.AddNew')) return true;
+    // ESC-rank visibility floor (fail-closed): manager+ only. An unresolved rank keeps polling
+    // (button stays hidden until the rank proves >= floor); a known below-floor rank hides for good.
+    var lgGate = lgRankGate(lgRank());
+    if (lgGate === 'wait') return false;
+    if (lgGate === 'hide') return true;
     var existing = document.getElementById(BTN_ID);
     if (existing && existing.isConnected) return true;
     var ref = mountRef();
