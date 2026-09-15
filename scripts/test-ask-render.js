@@ -87,6 +87,6 @@ A.ok('the U+2014 exception does not leak to bwn-suite-ai.user.js', (SIB.match(ne
 
 // --- invariants preserved ---
 A.ok('still exactly two bwnFocusTrap(panelEl) calls', (SRC.match(/bwnFocusTrap\(panelEl\)/g) || []).length === 2);
-A.ok('@version bumped to 0.9.0', SRC.indexOf('// @version      0.9.0') !== -1);
+A.ok('@version bumped past 0.8.0', SRC.indexOf('// @version      0.7.6') === -1 && /\/\/ @version\s+0\.(?:9|1\d)\./.test(SRC));
 
 A.finish();

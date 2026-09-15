@@ -250,12 +250,21 @@ FAMILY.forEach(function (f) {
 A.ok('bwn-ask arms the trap on both show paths (reopen + first build)',
   (read('bwn-ask.user.js').match(/bwnFocusTrap\(panelEl\)/g) || []).length === 2);
 
-console.log('\n-- RM-A2: bwn-ask closes on Escape through the existing hidePanel() --');
+console.log('\n-- RM-A2: bwn-ask closes on Escape through hidePanel(), with unsent-text protection --');
 var ASK = read('bwn-ask.user.js');
-A.ok('bwn-ask has an Escape keydown that calls hidePanel()',
-  /e\.key === 'Escape'\)\s*\{\s*e\.preventDefault\(\);\s*hidePanel\(\);/.test(ASK),
+// Bundle A (Commit 3) made Escape safe: it still routes through the animated hidePanel(), but no
+// longer discards unsent text - it closes only when the input is empty or after a confirm (armed)
+// step. This assertion is STRENGTHENED accordingly (intent preserved: Escape supported,
+// preventDefault, hidePanel), not weakened. Slice the handler so we judge its actual body.
+var escH = ASK.slice(ASK.indexOf("if (e.key !== 'Escape') return;"));
+escH = escH.slice(0, escH.indexOf('});') + 3);
+A.ok('bwn-ask has an Escape keydown routed through hidePanel() with preventDefault',
+  /e\.key !== 'Escape'\) return;/.test(ASK) && /e\.preventDefault\(\)/.test(escH) && /hidePanel\(\)/.test(escH),
   'Escape is not routed through the animated close path');
-A.ok('bwn-ask still had NO Escape handler before this work (root-cause check held)',
+A.ok('Escape does not silently discard unsent text (gated on input value / confirmation)',
+  /_escArmed/.test(escH) && /inputEl[\s\S]*value[\s\S]*trim/.test(escH),
+  'Escape closes without protecting unsent text');
+A.ok('bwn-ask keeps exactly one \'Escape\' handler token (no stray handlers)',
   (ASK.match(/'Escape'/g) || []).length === 1, 'more than the one Escape handler we added');
 
 // ---- 4. scope: the three non-modal files were left alone on purpose --------------------------

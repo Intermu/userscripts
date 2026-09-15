@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         BWN Ask (Coordinator Copilot)
 // @namespace    https://broadwaynational.com/bwn
-// @version      0.9.0
+// @version      0.10.0
 // @description  Ask questions about the work order you're viewing. Reads the WO live from Umbrava via same-origin GraphQL (details + full note / site-visit history) AND a summary roster of the other work orders at the same location, plus the team knowledge doc, and answers through the Broadway AI proxy with dates and references. Phase 1.5 = page-scoped + location roster (Path A); no data leaves the trusted Broadway path.
 // @match        https://app.umbrava.com/*
 // @run-at       document-idle
@@ -509,6 +509,11 @@
 
   function esc(s) { return String(s == null ? '' : s).replace(/[&<>"']/g, function (c) { return { '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;' }[c]; }); }
 
+  // Scroll stability: only auto-scroll when the coordinator is already at the bottom; otherwise
+  // leave their scroll position alone and offer a Jump-to-latest control (built in buildPanel).
+  function atBottom() { return !msgsEl || (msgsEl.scrollHeight - msgsEl.scrollTop - msgsEl.clientHeight) < 40; }
+  function showJump(show) { if (jumpBtn) jumpBtn.hidden = !show; }
+
   function addMsg(role, text) {
     if (!msgsEl) return null;
     var wrap = document.createElement('div');
@@ -524,9 +529,10 @@
             : 'background:#eef2f0;color:#1c2b24;border-bottom-left-radius:3px;');
     }
     b.innerHTML = esc(text);
+    var stick = atBottom();
     wrap.appendChild(b);
     msgsEl.appendChild(wrap);
-    msgsEl.scrollTop = msgsEl.scrollHeight;
+    if (stick) { msgsEl.scrollTop = msgsEl.scrollHeight; showJump(false); } else { showJump(true); }
     return b;
   }
 
@@ -648,7 +654,9 @@
     var b = document.createElement('div');
     b.style.cssText = 'max-width:92%;padding:9px 12px;border-radius:12px;border-bottom-left-radius:3px;background:#eef2f0;color:#1c2b24;font:13px/1.45 -apple-system,Segoe UI,Roboto,sans-serif;';
     b.appendChild(buildAnswerNode(text));
-    row.appendChild(b); msgsEl.appendChild(row); msgsEl.scrollTop = msgsEl.scrollHeight;
+    var stick = atBottom();
+    row.appendChild(b); msgsEl.appendChild(row);
+    if (stick) { msgsEl.scrollTop = msgsEl.scrollHeight; showJump(false); } else { showJump(true); }
   }
   /* ===== BWN-ASK-RENDER:END =============================================================== */
 
@@ -890,7 +898,20 @@
     // RM-A2 (ACC2): Escape closes through the existing hidePanel() so the fade + cleanup fire.
     // Bound once on the reused node (buildPanel keeps panelEl alive across reopens), and focus is
     // trapped inside so a panel-scoped listener always sees the key.
-    panelEl.addEventListener('keydown', function (e) { if (e.key === 'Escape') { e.preventDefault(); hidePanel(); } });
+    // RM-A2 (ACC2) + Bundle A: Escape closes through hidePanel(), but never silently discards
+    // unsent text. Empty input closes immediately. Unsent text is preserved (the node persists
+    // across close/reopen) and a local confirmation is required: the first Escape arms, a second
+    // Escape closes; typing re-arms. No unsent text is ever transmitted.
+    var _escArmed = false;
+    panelEl.addEventListener('keydown', function (e) {
+      if (e.key !== 'Escape') return;
+      e.preventDefault();
+      var hasText = !!(inputEl && inputEl.value && inputEl.value.trim());
+      if (!hasText || _escArmed) { _escArmed = false; hidePanel(); return; }
+      _escArmed = true;
+      setStatus('Press Escape again to close (your text is kept)');
+    });
+    panelEl._escReset = function () { _escArmed = false; };   // input handler re-arms via this
 
     var head = document.createElement('div');
     head.className = 'bwn-drawer-hd';
@@ -948,6 +969,7 @@
     inputEl.setAttribute('aria-label', 'Ask about this work order');
     inputEl.style.cssText = 'flex:1;resize:none;font:13px -apple-system,Segoe UI,Roboto,sans-serif;padding:7px 9px;border:1px solid #cdd6d1;border-radius:9px;outline:none;';
     inputEl.addEventListener('keydown', function (e) { if (e.key === 'Enter' && !e.shiftKey) { e.preventDefault(); doAsk(); } });
+    inputEl.addEventListener('input', function () { if (panelEl && panelEl._escReset) panelEl._escReset(); if (statusEl && statusEl.textContent.indexOf('Press Escape') === 0) setStatus('Ready'); });
     sendBtn = document.createElement('button');
     sendBtn.type = 'button'; sendBtn.className = 'bwn-ops-btn primary';
     sendBtn.textContent = 'Ask';                 // neutral submit label (never Send/Post/Save/etc.)
@@ -956,6 +978,16 @@
     foot.appendChild(inputEl);
     foot.appendChild(sendBtn);
     panelEl.appendChild(foot);
+
+    // Jump-to-latest: shown only when new content lands below the reading position; read-only,
+    // scroll-only, never mutates or fetches. Hidden by default (excluded from the focus trap).
+    jumpBtn = document.createElement('button');
+    jumpBtn.type = 'button'; jumpBtn.textContent = 'Jump to latest'; jumpBtn.hidden = true;
+    jumpBtn.setAttribute('aria-label', 'Jump to latest messages');
+    jumpBtn.style.cssText = 'position:absolute;right:14px;bottom:72px;z-index:3;cursor:pointer;font:11px -apple-system,Segoe UI,Roboto,sans-serif;background:#1A5F3E;color:#fff;border:none;border-radius:999px;padding:5px 11px;box-shadow:0 2px 8px rgba(0,0,0,.22);';
+    jumpBtn.addEventListener('click', function () { if (msgsEl) msgsEl.scrollTop = msgsEl.scrollHeight; showJump(false); if (inputEl) inputEl.focus(); });
+    panelEl.appendChild(jumpBtn);
+    msgsEl.addEventListener('scroll', function () { if (atBottom()) showJump(false); });
 
     document.body.appendChild(panelEl);
     bwnFocusTrap(panelEl);
