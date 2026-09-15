@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         BWN Suite - Note Templates (Broadway National)
 // @namespace    broadwaynational.bwn
-// @version      0.8.1
+// @version      0.9.0
 // @description  Canned dispatch-note templates in a "Templates" dropdown beside the "+ Add" note button in the Umbrava Dispatch Board's work-order detail panel (Notes tab). Picking a template opens Umbrava's own Add Note composer and DRAFTS the note into it (signed with your first name, ______ blanks left for you to fill) - it is NEVER auto-posted; you review, set the Type, and click Save. STANDALONE: carries its own tiptap/ProseMirror inserter, so in-house techs install this one script alone - no drop-upload dependency. Still prefers drop-upload's hook (window.__bwnFillNoteEditor) when that script is also installed, so coordinator machines keep a single live-tested fill path. Also, on the regular WO page, a "Spoke with" button stamps a [Spoke with: <Vendor>] tag at the TOP of a note (vendor picked from your recent vendors or typed) so you can record which of several WO vendors you spoke with - same human-gated draft, never auto-posted. @grant none, zero egress.
 // @match        https://app.umbrava.com/*
 // @run-at       document-idle
@@ -97,6 +97,14 @@
   // (In-house team has one Nicholas; add a row here if another tech wants a nickname.)
   var NICKNAMES = { nicholas: 'Nick' };
   function applyNickname(name) { return NICKNAMES[String(name).toLowerCase()] || name; }
+
+  // ESC-rank visibility floor (server-computed ladder: 1 staff .. 5 director). The Draft / Templates
+  // and "Spoke with" note affordances are gated to supervisor+ (rank 3), matching the merged AI Draft
+  // button. Pure decision so the test pins it; the localStorage rank read lives outside the slice.
+  // Fail-CLOSED: an unresolved rank yields 'wait' (nothing shown until the rank proves >= floor),
+  // mirroring the dock's BWN_DOCK_POLICY contract (bwn-suite-core, PR #106).
+  var NOTES_MIN_RANK = 3;
+  function ntRankGate(rk) { return (typeof rk !== 'number') ? 'wait' : (rk < NOTES_MIN_RANK ? 'hide' : 'show'); }
 
   // First name of the signed-in user. Read from the Auth0 SPA cache in localStorage (the same
   // decodedToken.user the suite's actor() helpers read) - a pure read, no network, no GUID lookup.
@@ -196,6 +204,17 @@
     return out.slice(0, cap || 20);
   }
   // BWN-NOTES-SLICE-END
+
+  // Reader for the server-computed ESC rank (grant-none-safe; mirrors bwnEscRank / bwn-ask). Live
+  // bus event trusted directly; the bwn:role:last slot is the cross-refresh fallback (ok + fresh).
+  var ROLE_TTL_MS = 6 * 3600 * 1000;
+  var _ntLiveRank = null;
+  try { document.addEventListener('bwn:evt', function (e) { var d = e && e.detail; if (d && d.id === 'bwn:role' && typeof d.rank === 'number') _ntLiveRank = d.rank; }); } catch (e) { }
+  function ntRank() {
+    if (typeof _ntLiveRank === 'number') return _ntLiveRank;
+    try { var r = JSON.parse(localStorage.getItem('bwn:role:last') || 'null'); if (r && r.ok && typeof r.rank === 'number' && r.ts && (Date.now() - r.ts) < ROLE_TTL_MS) return r.rank; } catch (e2) { }
+    return null;
+  }
 
   function currentFirstName() {
     try {
@@ -777,6 +796,12 @@
   // page uses woMount() for templates + mountSpoke() for the vendor tag. Returns true when nothing is
   // left to do so the poll can rest (run both WO mounts each tick - don't short-circuit one).
   function tick() {
+    // ESC-rank visibility floor (fail-closed): supervisor+ only, across board templates, WO-page
+    // templates, and "Spoke with". Unresolved rank keeps polling (nothing shown until rank proves
+    // >= floor); a known below-floor rank rests (nothing mounts).
+    var ntGate = ntRankGate(ntRank());
+    if (ntGate === 'wait') return false;
+    if (ntGate === 'hide') return true;
     if (/dispatch-board/.test(location.pathname)) return mount();
     if (/\/work-orders\//.test(location.pathname)) return [woMount(), mountSpoke()].every(Boolean);
     return true;

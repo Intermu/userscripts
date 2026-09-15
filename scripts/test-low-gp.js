@@ -49,7 +49,7 @@ function load(mutations) {
   (mutations || []).forEach(function (m) { src = mutate(src, m[0], m[1]); });
   var sandbox = { JSON: JSON, RegExp: RegExp, String: String, Number: Number, parseInt: parseInt, Object: Object, Array: Array, Boolean: Boolean, Date: Date };
   // export the slice's functions/vars by evaluating then grabbing them off the sandbox
-  vm.runInNewContext(src + '\nthis.__api = { lgIsGuid: lgIsGuid, lgEsc: lgEsc, lgTypeId: lgTypeId, lgSimpleHtml: lgSimpleHtml, lgMentionHtml: lgMentionHtml, lgPingContent: lgPingContent, lgNoteInput: lgNoteInput, lgRow: lgRow, lgUnwrap: lgUnwrap };', sandbox, { filename: 'low-gp-slice.js' });
+  vm.runInNewContext(src + '\nthis.__api = { lgIsGuid: lgIsGuid, lgEsc: lgEsc, lgTypeId: lgTypeId, lgSimpleHtml: lgSimpleHtml, lgMentionHtml: lgMentionHtml, lgPingContent: lgPingContent, lgNoteInput: lgNoteInput, lgRow: lgRow, lgUnwrap: lgUnwrap, lgRankGate: lgRankGate, LOWGP_MIN_RANK: LOWGP_MIN_RANK };', sandbox, { filename: 'low-gp-slice.js' });
   return sandbox.__api;
 }
 
@@ -116,7 +116,24 @@ A.eq('a value with stray wrapping quotes is stripped', api.lgUnwrap('"abc"'), 'a
 A.ok('the unwrapped tenant would NOT inject escaped quotes into the mention',
   api.lgMentionHtml('N', UID, api.lgUnwrap('"' + TEN + '"'), 'm').indexOf('data-tenant="' + TEN + '"') !== -1, 'tenant not clean in attr');
 
+console.log('\n-- ESC-rank visibility floor (manager+, fail-closed) --');
+A.eq('floor is manager (rank 4)', api.LOWGP_MIN_RANK, 4);
+A.eq('unresolved rank (null) waits, never shows', api.lgRankGate(null), 'wait');
+A.eq('non-numeric rank waits (fail-closed)', api.lgRankGate('4'), 'wait');
+A.eq('rank 1 staff (Daniel) is hidden', api.lgRankGate(1), 'hide');
+A.eq('rank 3 supervisor is still hidden', api.lgRankGate(3), 'hide');
+A.eq('rank 4 manager sees it', api.lgRankGate(4), 'show');
+A.eq('rank 5 director sees it', api.lgRankGate(5), 'show');
+
 console.log('\n-- mutation controls (each MUST make an assertion above go red) --');
+(function () {
+  var m = load([['rk < LOWGP_MIN_RANK', 'rk <= LOWGP_MIN_RANK']]);
+  A.ok('M4: an off-by-one floor (<=) would leak the button to rank 4', m.lgRankGate(4) !== 'show', 'floor boundary not observable');
+})();
+(function () {
+  var m = load([["(typeof rk !== 'number') ? 'wait'", "(typeof rk !== 'number') ? 'show'"]]);
+  A.ok('M5: fail-OPEN on unknown rank would show it', m.lgRankGate(null) !== 'wait', 'fail-closed on null not observable');
+})();
 (function () {
   var m = load([['class="rich-text-editor-mention"', 'class="mention"']]);
   A.ok('M1: wrong mention class no longer matches the golden', m.lgMentionHtml('Lisa Porzelt', UID, TEN, 'Low GP note added') !== GOLDEN, 'class change was not observable');

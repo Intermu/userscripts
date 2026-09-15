@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         BWN Suite - AI (Broadway National)
 // @namespace    broadwaynational.bwn
-// @version      1.45.26
+// @version      1.46.0
 // @downloadURL  https://raw.githubusercontent.com/Intermu/userscripts/main/bwn-suite-ai.user.js
 // @updateURL    https://raw.githubusercontent.com/Intermu/userscripts/main/bwn-suite-ai.user.js
 // @description  The Umbrava tools that call outside APIs, kept separate from the zero-egress Core script. Client Update and WO Audit drafts (Anthropic Claude; draft-only, scrubbed before sending, you review before posting); Find Techs / Find Suppliers (Google Places; vendor leads near a WO); and Job View (opens the Ops-Dashboard job card on the WO page - WO details from Umbrava plus the authored case file and next actions, read-only). Network access is limited by the browser to the declared API hosts and the BWN Static Web App. API keys are stored in Tampermonkey's storage via the menu commands and never enter the page. Toggle modules in BWN_MODULES below.
@@ -2216,6 +2216,12 @@
     var BTN_ID = 'bwn-client-update-btn';
     var GREEN = BWN.GREEN;
 
+    // ESC-rank visibility floor (server-computed ladder: 1 staff .. 5 director). The merged Draft
+    // menu bundles WO Audit (rank 3 in the dock's BWN_DOCK_POLICY) with the client/recent drafts, so
+    // the whole button is gated to supervisor+ (rank 3). Fail-CLOSED: an unresolved rank keeps the
+    // button hidden until the rank proves >= floor. bwnAI.rank() returns null when unknown.
+    var DRAFT_MIN_RANK = 3;
+
     // Prompt-pack version: stamped on cached drafts so a prompt edit invalidates
     // stale caches. Bump when any SYSTEM_PROMPT_* changes materially.
     var PROMPT_V = 3;
@@ -3430,6 +3436,11 @@
     }
 
     function mount() {
+      // ESC-rank visibility floor (fail-closed): supervisor+ only. Unresolved rank keeps waiting
+      // (button hidden until rank proves >= floor); a known below-floor rank rests, no button.
+      var _cuRank = bwnAI.rank();
+      if (_cuRank === null) { BWN.beat('clientUpdate', 'waiting', 'role rank not resolved'); return false; }
+      if (_cuRank < DRAFT_MIN_RANK) { BWN.beat('clientUpdate', 'waiting', 'below Draft rank floor'); return true; }
       if (document.getElementById(BTN_ID)) { BWN.beat('clientUpdate', 'ok', 'AI Draft menu mounted'); return true; }
       // Only on a notes view that actually has notes loaded.
       if (!document.querySelector('[data-testid^="wo-note-"][data-testid$="-summary"]')) { BWN.beat('clientUpdate', 'waiting', 'notes view not open'); return false; }
