@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         BWN Ask (Coordinator Copilot)
 // @namespace    https://broadwaynational.com/bwn
-// @version      0.7.6
+// @version      0.8.0
 // @description  Ask questions about the work order you're viewing. Reads the WO live from Umbrava via same-origin GraphQL (details + full note / site-visit history) AND a summary roster of the other work orders at the same location, plus the team knowledge doc, and answers through the Broadway AI proxy with dates and references. Phase 1.5 = page-scoped + location roster (Path A); no data leaves the trusted Broadway path.
 // @match        https://app.umbrava.com/*
 // @run-at       document-idle
@@ -644,6 +644,95 @@
     clearTimeout(fadeTimer);
     fadeTimer = setTimeout(function () { if (panelEl) { try { panelEl.remove(); } catch (e) { } } }, 170);
   }
+  /* ===== BWN-ASK-CMDS:START ==============================================================
+   * Quick Commands: coordinator-friendly prompt shortcuts. NO new retrieval and NO prefetch -
+   * a chip only fills the input with a grounded prompt and runs the SAME ask flow. Site History
+   * chips are gated on a work order being open on the current screen (the zero-cost signal;
+   * roster availability itself is reported by the answer/footer). `primary:true` = the initial
+   * <=8 view; the rest live behind "More commands". Labels never promise unsupported certainty
+   * and never carry a write verb. scripts/test-ask-commands.js pins these bytes. */
+  var ASK_CMDS = {
+    'This Work Order': [
+      { label: 'Summarize this WO', primary: true, prompt: 'Summarize this work order from the record: status, assignment, scope, and where it stands. Cite the WO number and note dates.' },
+      { label: 'Catch me up', primary: true, prompt: 'What is the recent documented activity on this work order, newest first? Cite note dates. Do not infer completion that is not documented.' },
+      { label: 'What needs attention?', primary: true, prompt: 'From the record only, what is missing, unresolved, or conflicting on this work order? Do not assume cause, blame, or lateness unless a record or knowledge says so.' },
+      { label: 'Show current assignment', primary: true, prompt: 'Who is assigned and which vendor(s) are documented on this work order? Distinguish assigned from documented on-site activity.' },
+      { label: 'What is documented as the next step?', primary: true, prompt: 'What does the record document as the next step on this work order? If none is documented, say so.' },
+      { label: 'Prepare handoff summary', primary: true, prompt: 'Prepare a concise shift-handoff summary of this work order: status, assignment, documented next step, and open gaps. Cite WO number and note dates.' },
+      { label: 'Show schedule details', prompt: 'What scheduling is documented on this work order (scheduled/expected dates)? A scheduled date is not proof of a visit.' },
+      { label: 'What is missing from this record?', prompt: 'Identify documentation that appears missing on this work order, based only on the retrieved fields and notes. Do not treat absence as proof an event did not happen.' },
+      { label: 'Show documented vendor activity', prompt: 'What vendor activity is explicitly documented on this work order (assigned / named in a note), with dates? Do not claim a vendor attended or completed work unless documented.' },
+      { label: 'Can we confirm completed work?', prompt: 'Is completion of work explicitly documented on this work order? If it is not documented, say so plainly rather than inferring it.' }
+    ],
+    'Site History': [
+      { label: 'Show other open WOs at this site', primary: true, site: true, prompt: 'What other work orders are documented at this location, from the site roster? Summary rows only; do not invent notes for other WOs.' },
+      { label: 'Show site work-order roster', site: true, prompt: 'List the site work-order roster for this location (number, status, date only) as returned. Do not claim it is every work order at the site.' },
+      { label: 'Check for related site issues', site: true, prompt: 'From the site roster and this WO, are there documented related issues at this location? Cite the work orders you rely on.' },
+      { label: 'Compare this WO to site history', site: true, prompt: 'Compare this work order to the documented site roster. Keep each fact attributed to its own WO; do not carry facts between records.' },
+      { label: 'Possible repeat pattern?', site: true, prompt: 'Do the retrieved records show a possible repeat pattern at this location? A repeat pattern does not establish a root cause; cite the records.' },
+      { label: 'What site context is available?', site: true, prompt: 'What non-sensitive site context is available from the record for this location?' }
+    ],
+    'Guidance & Drafts': [
+      { label: 'Show client/site instructions', primary: true, prompt: 'What client or site instructions apply here, from the approved knowledge? Cite the knowledge section. If none applies, say so.' },
+      { label: 'What client rule applies here?', prompt: 'Which client rule applies to this work order, from the approved knowledge? Cite the knowledge section.' },
+      { label: 'What SOP applies to this issue?', prompt: 'Which SOP applies to this issue, from the approved knowledge? Cite the knowledge section.' },
+      { label: 'Show escalation guidance', prompt: 'What is the documented escalation guidance for this situation, from the approved knowledge? Cite the section.' },
+      { label: 'What should be verified before escalation?', prompt: 'From the record and approved knowledge, what should be verified before escalating this work order?' },
+      { label: 'Draft escalation summary', prompt: 'Draft an escalation summary for this work order for me to review and submit manually. Ground it only in the record; do not assert anything not documented.' },
+      { label: 'Draft vendor follow-up', prompt: 'Draft a vendor follow-up message for this work order for me to review and submit manually. Ground it only in the record.' },
+      { label: 'Draft client update', prompt: 'Draft a client update for this work order for me to review and submit manually. Ground it only in the record and minimize sensitive detail.' },
+      { label: 'Draft internal handoff', prompt: 'Draft an internal handoff note for this work order for me to review and submit manually. Ground it only in the record.' }
+    ]
+  };
+  function runCmd(promptText) { if (!inputEl || busy) return; inputEl.value = promptText; doAsk(); }
+  function buildCmdBar() {
+    var hasWO = woNumberFromUrl() != null;
+    var bar = document.createElement('div');
+    bar.className = 'bwn-ask-cmds';
+    bar.setAttribute('role', 'group'); bar.setAttribute('aria-label', 'Quick commands');
+    bar.style.cssText = 'padding:6px 10px 0;border-top:1px solid #e6ece9;';
+    var secondary = [];
+    function chip(c) {
+      var b = document.createElement('button');
+      b.type = 'button'; b.className = 'bwn-ask-chip';
+      b.textContent = c.label; b.setAttribute('aria-label', c.label);
+      b.style.cssText = 'cursor:pointer;font:11px/1 -apple-system,Segoe UI,Roboto,sans-serif;padding:5px 9px;margin:0 4px 5px 0;border:1px solid #cdd6d1;border-radius:999px;color:#1c2b24;background:#f4f7f5;';
+      if (c.site && !hasWO) {
+        b.disabled = true; b.setAttribute('aria-disabled', 'true');
+        b.style.opacity = '.5'; b.style.cursor = 'not-allowed';
+        b.title = 'Site roster unavailable: no work order open on this screen';
+      } else {
+        b.addEventListener('click', function () { runCmd(c.prompt); });
+      }
+      return b;
+    }
+    Object.keys(ASK_CMDS).forEach(function (group) {
+      var gEl = document.createElement('div');
+      gEl.setAttribute('role', 'group'); gEl.setAttribute('aria-label', group);
+      var hd = document.createElement('div');
+      hd.textContent = group;
+      hd.style.cssText = 'font:10px/1.4 -apple-system,Segoe UI,Roboto,sans-serif;color:#8a9a92;text-transform:uppercase;letter-spacing:.04em;margin:2px 0 3px;';
+      gEl.appendChild(hd);
+      ASK_CMDS[group].forEach(function (c) { var el = chip(c); gEl.appendChild(el); if (!c.primary) secondary.push(el); });
+      bar.appendChild(gEl);
+    });
+    // Progressive disclosure: hide non-primary chips until "More commands".
+    secondary.forEach(function (el) { el.hidden = true; });
+    var more = document.createElement('button');
+    more.type = 'button'; more.textContent = 'More commands';
+    more.setAttribute('aria-expanded', 'false'); more.setAttribute('aria-label', 'More commands');
+    more.style.cssText = 'cursor:pointer;font:11px/1 -apple-system,Segoe UI,Roboto,sans-serif;color:#1A5F3E;background:none;border:none;padding:4px 2px 6px;';
+    more.addEventListener('click', function () {
+      var open = more.getAttribute('aria-expanded') === 'true';
+      secondary.forEach(function (el) { el.hidden = open; });
+      more.setAttribute('aria-expanded', String(!open));
+      more.textContent = open ? 'More commands' : 'Fewer commands';
+    });
+    bar.appendChild(more);
+    return bar;
+  }
+  /* ===== BWN-ASK-CMDS:END ================================================================= */
+
   function buildPanel() {
     if (panelEl && panelEl.isConnected && !panelEl.classList.contains('bwn-closing')) { hidePanel(); return; }   // dock entry toggles
     try {
@@ -685,6 +774,8 @@
     msgsEl = document.createElement('div');
     msgsEl.className = 'bwn-drawer-body';
     panelEl.appendChild(msgsEl);
+
+    panelEl.appendChild(buildCmdBar());
 
     var foot = document.createElement('div');
     foot.className = 'bwn-drawer-ft';
