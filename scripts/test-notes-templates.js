@@ -38,7 +38,7 @@ var SRC = slice(readLF(path.join(__dirname, '..', 'bwn-notes.user.js')),
 
 function build(src) {
   var ctx = vm.createContext({ console: console });
-  vm.runInContext(src + '\nthis.firstNameFromUser = firstNameFromUser; this.TEMPLATES = TEMPLATES; this.buildNote = buildNote; this.fmtDay = fmtDay; this.fmtWeekOf = fmtWeekOf; this.applyDate = applyDate; this.spokeTag = spokeTag; this.prependSpokeTag = prependSpokeTag; this.mruAdd = mruAdd;', ctx);
+  vm.runInContext(src + '\nthis.firstNameFromUser = firstNameFromUser; this.TEMPLATES = TEMPLATES; this.buildNote = buildNote; this.fmtDay = fmtDay; this.fmtWeekOf = fmtWeekOf; this.applyDate = applyDate; this.spokeTag = spokeTag; this.prependSpokeTag = prependSpokeTag; this.mruAdd = mruAdd; this.ntRankGate = ntRankGate; this.NOTES_MIN_RANK = NOTES_MIN_RANK;', ctx);
   return ctx;
 }
 var env = build(SRC);
@@ -137,5 +137,21 @@ A.ok('[neg] without the signed gate, an unsigned call-out wrongly gets a signatu
 // ---- negative control: drop the Monday snap, assert weekOf no longer lands on Monday ------
 var g2 = build(mutate(SRC, 'dt.setDate(dt.getDate() - ((dt.getDay() + 6) % 7));', ''));
 A.eq('[neg] without the Monday snap, a Friday stays a Friday (8/21, not 8/17)', g2.fmtWeekOf(2026, 8, 21), '8/21');
+
+// ---- ESC-rank visibility floor (supervisor+, fail-closed) --------------------------------
+A.eq('floor is supervisor (rank 3)', env.NOTES_MIN_RANK, 3);
+A.eq('unresolved rank (null) waits, never shows', env.ntRankGate(null), 'wait');
+A.eq('non-numeric rank waits (fail-closed)', env.ntRankGate('3'), 'wait');
+A.eq('rank 1 staff (Daniel) is hidden', env.ntRankGate(1), 'hide');
+A.eq('rank 2 lead is still hidden', env.ntRankGate(2), 'hide');
+A.eq('rank 3 supervisor sees it', env.ntRankGate(3), 'show');
+A.eq('rank 5 director sees it', env.ntRankGate(5), 'show');
+
+// ---- negative control: an off-by-one floor (<=) would leak the button to rank 3 ----------
+var g3 = build(mutate(SRC, 'rk < NOTES_MIN_RANK', 'rk <= NOTES_MIN_RANK'));
+A.ok('[neg] without the strict-< floor, rank 3 would be wrongly hidden', g3.ntRankGate(3) !== 'show');
+// ---- negative control: fail-OPEN on unknown rank would show it ----------------------------
+var g4 = build(mutate(SRC, "(typeof rk !== 'number') ? 'wait'", "(typeof rk !== 'number') ? 'show'"));
+A.ok('[neg] without fail-closed, an unresolved rank would wrongly show', g4.ntRankGate(null) !== 'wait');
 
 A.finish();
