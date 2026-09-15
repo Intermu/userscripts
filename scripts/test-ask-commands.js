@@ -64,11 +64,19 @@ labels.forEach(function (l) { A.ok('label is not a candidate capability: "' + l 
 // --- wiring + version + hygiene invariants ---
 A.ok('command bar is wired into buildPanel', /panelEl\.appendChild\(buildCmdBar\(\)\)/.test(SRC));
 A.ok('runCmd fills the input and runs the existing ask flow', /function runCmd\([^)]*\)\s*\{[^}]*inputEl\.value\s*=\s*promptText;\s*doAsk\(\);/.test(SRC));
-A.ok('@version bumped to 0.8.0', SRC.indexOf('// @version      0.8.0') !== -1, 'userscript version not bumped');
+A.ok('@version bumped past 0.7.6', SRC.indexOf('// @version      0.7.6') === -1 && /\/\/ @version\s+0\.(?:[89]|\d\d)\./.test(SRC), 'userscript version not bumped');
 
 // invariants this commit must NOT disturb
 A.ok('still exactly one \'Escape\' literal (a11y invariant preserved)', (SRC.match(/'Escape'/g) || []).length === 1);
 A.ok('still exactly two bwnFocusTrap(panelEl) calls (a11y invariant preserved)', (SRC.match(/bwnFocusTrap\(panelEl\)/g) || []).length === 2);
-A.ok('no em-dash introduced (U+2014 count = 0)', (SRC.match(new RegExp(String.fromCharCode(0x2014), 'g')) || []).length === 0);
+// Narrow U+2014 exception: the ONLY approved em-dash in bwn-ask.user.js is the exact product-
+// mandated draft label. Any other U+2014 (a stray em-dash, or the label where a hyphen belongs)
+// is still rejected. See scripts/test-ask-render.js for the full render-side draft-label coverage.
+var EMD = String.fromCharCode(0x2014);
+var APPROVED_LABEL = 'DRAFT ' + EMD + ' coordinator must review and submit manually';
+var emCount = (SRC.match(new RegExp(EMD, 'g')) || []).length;
+var labelCount = SRC.split(APPROVED_LABEL).length - 1;
+A.ok('bwn-ask carries the exact approved em-dash draft label exactly once', labelCount === 1, 'label missing/duplicated');
+A.ok('every U+2014 in bwn-ask is inside the approved label (no stray em-dash)', emCount === labelCount, 'stray U+2014: ' + emCount + ' vs approved ' + labelCount);
 
 A.finish();

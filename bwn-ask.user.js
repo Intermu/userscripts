@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         BWN Ask (Coordinator Copilot)
 // @namespace    https://broadwaynational.com/bwn
-// @version      0.8.0
+// @version      0.9.0
 // @description  Ask questions about the work order you're viewing. Reads the WO live from Umbrava via same-origin GraphQL (details + full note / site-visit history) AND a summary roster of the other work orders at the same location, plus the team knowledge doc, and answers through the Broadway AI proxy with dates and references. Phase 1.5 = page-scoped + location roster (Path A); no data leaves the trusted Broadway path.
 // @match        https://app.umbrava.com/*
 // @run-at       document-idle
@@ -505,6 +505,7 @@
 
   // ---- Panel UI -------------------------------------------------------------
   var panelEl = null, msgsEl = null, inputEl = null, sendBtn = null, modelSel = null, busy = false;
+  var ctxChipEl = null, statusEl = null, jumpBtn = null;
 
   function esc(s) { return String(s == null ? '' : s).replace(/[&<>"']/g, function (c) { return { '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;' }[c]; }); }
 
@@ -529,6 +530,128 @@
     return b;
   }
 
+  /* ===== BWN-ASK-RENDER:START (Bundle A) =================================================
+   * Conditional answer sections, citation chips, and the manual-draft panel. All rendering
+   * runs through esc() first; citation chips are wrapped on the already-escaped string, so no
+   * raw HTML, raw payload, or raw preload object can reach the DOM. scripts/test-ask-render.js
+   * pins the section parser, citation safety, the exact draft label + reminder, and copy-only. */
+  // Product-mandated literal - the ONE approved U+2014 in this file (narrow hygiene exception in
+  // scripts/test-ask-commands.js). Rendered unchanged; also used to detect a draft in the answer.
+  var DRAFT_LABEL = 'DRAFT — coordinator must review and submit manually';
+  // Fallback marker: the server prompt is em-dash-free, so the model may emit the hyphen form;
+  // either triggers the SAME panel, which always renders the exact em-dash label above.
+  var DRAFT_LABEL_ASCII = 'DRAFT - coordinator must review and submit manually';
+  var DRAFT_REMINDER = 'Ask BWN cannot submit this for you.';
+  var SECTION_HEADS = ['### Answer', '### Evidence', '### Limits or Gaps', '### Suggested Next Check'];
+
+  function setStatus(txt) { if (statusEl) statusEl.textContent = txt || ''; }
+  function setContextChip(woNum) {
+    if (!ctxChipEl) return;
+    var n = (woNum != null) ? woNum : woNumberFromUrl();
+    ctxChipEl.textContent = (n != null) ? ('WO #' + n) : 'No record identified';
+  }
+
+  // Wrap recognizable citations in non-navigating source chips. Operates on the ESCAPED string so
+  // nothing raw can slip through; chips are informational + selectable only (no click, no nav, no
+  // payload). Only the WO number itself is chipped; any trailing "note dated ..." stays plain text.
+  function withCitations(escaped) {
+    var re = /(WO #\d+|Site roster for [^\n<]+|Current screen: [^\n<]+|Knowledge: [^\n<]+)/g;
+    return escaped.replace(re, function (m) {
+      return '<span class="bwn-ask-cite" style="display:inline-block;font:11px/1.4 -apple-system,Segoe UI,Roboto,sans-serif;background:#e7efe9;color:#1A5F3E;border:1px solid #cfe0d6;border-radius:5px;padding:0 5px;margin:0 1px;">' + m + '</span>';
+    });
+  }
+  function para(text) {
+    var d = document.createElement('div');
+    d.style.cssText = 'white-space:pre-wrap;word-wrap:break-word;';
+    d.innerHTML = withCitations(esc(text).trim());
+    return d;
+  }
+  function parseSections(text) {
+    var idxs = [];
+    SECTION_HEADS.forEach(function (h) { var i = text.indexOf(h); if (i !== -1) idxs.push({ h: h, i: i }); });
+    if (!idxs.length) return [];
+    idxs.sort(function (a, b) { return a.i - b.i; });
+    var out = [];
+    for (var k = 0; k < idxs.length; k++) {
+      var start = idxs[k].i + idxs[k].h.length;
+      var end = (k + 1 < idxs.length) ? idxs[k + 1].i : text.length;
+      out.push({ head: idxs[k].h.replace(/^###\s*/, ''), body: text.slice(start, end).trim() });
+    }
+    return out;
+  }
+  function renderSection(head, body) {
+    var sec = document.createElement('div');
+    var isAnswer = head === 'Answer', isEvidence = head === 'Evidence', isLimits = head === 'Limits or Gaps', isNext = head === 'Suggested Next Check';
+    sec.style.cssText = 'margin:6px 0;' + (isLimits ? 'border-left:3px solid #e0a94a;padding-left:8px;' : isNext ? 'border-left:3px solid #4a8fe0;padding-left:8px;' : '');
+    var hd = document.createElement('div');
+    hd.textContent = head;
+    hd.style.cssText = 'font:10px/1.4 -apple-system,Segoe UI,Roboto,sans-serif;text-transform:uppercase;letter-spacing:.04em;color:' + (isAnswer ? '#1A5F3E' : '#8a9a92') + ';margin-bottom:2px;';
+    sec.appendChild(hd);
+    var bodyEl = para(body);
+    if (isAnswer) bodyEl.style.font = '14px/1.5 -apple-system,Segoe UI,Roboto,sans-serif';
+    if (isEvidence && body.length > 320) {   // long evidence collapses behind an accessible control
+      var det = document.createElement('details');
+      var sum = document.createElement('summary');
+      sum.textContent = 'Show evidence'; sum.setAttribute('aria-label', 'Show evidence');
+      sum.style.cssText = 'cursor:pointer;font:12px -apple-system,Segoe UI,Roboto,sans-serif;color:#1A5F3E;';
+      det.appendChild(sum); det.appendChild(bodyEl); sec.appendChild(det);
+    } else { sec.appendChild(bodyEl); }
+    return sec;
+  }
+  function draftPanel(bodyText) {
+    var box = document.createElement('div');
+    box.className = 'bwn-ask-draft';
+    box.setAttribute('role', 'group'); box.setAttribute('aria-label', 'Manual draft');
+    box.style.cssText = 'margin:8px 0;border:1px dashed #b7a24a;background:#fbf7e8;border-radius:8px;padding:8px 10px;';
+    var lab = document.createElement('div');
+    lab.textContent = DRAFT_LABEL;                 // exact product literal, rendered unchanged
+    lab.style.cssText = 'font:11px/1.4 -apple-system,Segoe UI,Roboto,sans-serif;font-weight:600;color:#7a5c00;text-transform:uppercase;letter-spacing:.03em;';
+    box.appendChild(lab);
+    var rem = document.createElement('div');
+    rem.textContent = DRAFT_REMINDER;
+    rem.style.cssText = 'font:11px/1.4 -apple-system,Segoe UI,Roboto,sans-serif;color:#8a7a3a;margin:1px 0 6px;';
+    box.appendChild(rem);
+    box.appendChild(para(bodyText));
+    var copy = document.createElement('button');
+    copy.type = 'button'; copy.textContent = 'Copy draft'; copy.setAttribute('aria-label', 'Copy draft');
+    copy.style.cssText = 'margin-top:7px;cursor:pointer;font:12px -apple-system,Segoe UI,Roboto,sans-serif;background:#1A5F3E;color:#fff;border:none;border-radius:7px;padding:5px 11px;';
+    copy.addEventListener('click', function () {
+      var done = function () { copy.textContent = 'Copied'; setTimeout(function () { copy.textContent = 'Copy draft'; }, 1500); };
+      // Client-side ONLY: no network, no mutation, no autofill, no insertion into any field.
+      try { if (navigator.clipboard && navigator.clipboard.writeText) { navigator.clipboard.writeText(bodyText).then(done, done); return; } } catch (e) { }
+      try { var t = document.createElement('textarea'); t.value = bodyText; document.body.appendChild(t); t.select(); document.execCommand('copy'); document.body.removeChild(t); } catch (e2) { }
+      done();
+    });
+    box.appendChild(copy);
+    return box;
+  }
+  function buildAnswerNode(text) {
+    var wrap = document.createElement('div');
+    var di = text.indexOf(DRAFT_LABEL), markerLen = DRAFT_LABEL.length;
+    if (di === -1) { var da = text.indexOf(DRAFT_LABEL_ASCII); if (da !== -1) { di = da; markerLen = DRAFT_LABEL_ASCII.length; } }
+    if (di !== -1) {
+      var pre = text.slice(0, di).trim();
+      var draftBody = text.slice(di + markerLen).replace(/^[\s:.-]+/, '').trim();
+      if (pre) wrap.appendChild(para(pre));
+      wrap.appendChild(draftPanel(draftBody));
+      return wrap;
+    }
+    var secs = parseSections(text);
+    if (secs.length) { secs.forEach(function (s) { wrap.appendChild(renderSection(s.head, s.body)); }); return wrap; }
+    wrap.appendChild(para(text));   // graceful fallback: existing safe plain rendering
+    return wrap;
+  }
+  function addAnswer(text) {
+    if (!msgsEl) return;
+    var row = document.createElement('div');
+    row.style.cssText = 'margin:8px 0;display:flex;justify-content:flex-start;';
+    var b = document.createElement('div');
+    b.style.cssText = 'max-width:92%;padding:9px 12px;border-radius:12px;border-bottom-left-radius:3px;background:#eef2f0;color:#1c2b24;font:13px/1.45 -apple-system,Segoe UI,Roboto,sans-serif;';
+    b.appendChild(buildAnswerNode(text));
+    row.appendChild(b); msgsEl.appendChild(row); msgsEl.scrollTop = msgsEl.scrollHeight;
+  }
+  /* ===== BWN-ASK-RENDER:END =============================================================== */
+
   var convo = [];   // {q,a} of recent exchanges, so answer-referential follow-ups resolve
   function doAsk() {
     if (busy) return;
@@ -537,33 +660,48 @@
     addMsg('user', q);
     inputEl.value = '';
     busy = true; sendBtn.disabled = true; sendBtn.textContent = '...';
-    var thinking = addMsg('assistant', 'Thinking...');
+    setStatus('Reading record');
+    var thinking = addMsg('assistant', 'Reading the record...');
     var hist = convo.slice(-3).map(function (t) { return { q: t.q, a: (t.a || '').slice(0, 1500) }; });
     askServer(q, modelSel ? modelSel.value : 'claude-haiku-4-5', hist).then(function (r) {
-      var err = errorFor(r);
       if (thinking && thinking.parentNode) thinking.parentNode.remove();
-      if (err) { addMsg('error', err); return; }
-      var ans = (r.json && r.json.answer) || '(no answer returned)';
-      addMsg('assistant', ans);
-      convo.push({ q: q, a: ans });
-      if (r._notesFailed) {
-        addMsg('error', 'Heads up: I could not read this WO\'s note history, so that answer is from the WO details only. Reload and retry for the full history.');
-      } else {
-        var foot = 'Grounded on WO #' + (r._wo || '?') + ' - ' + (r._records || 0) + ' note' + (r._records === 1 ? '' : 's');
-        if (r._omitted) foot += ' (' + r._shown + ' shown, ' + r._omitted + ' oldest omitted)';
-        if (r._siteOk && r._siteWOs) foot += ' + ' + r._siteWOs + ' other WO' + (r._siteWOs === 1 ? '' : 's') + ' at this site';
-        if (r._degraded && r._degraded.length) foot += '; unavailable: ' + r._degraded.join(', ');
-        // Say when the answer came partly from the SCREEN rather than the record. The two have
-        // different lifetimes - the record is durable, the screen is whatever was rendered a
-        // moment ago - so a coordinator checking a claim needs to know which they are verifying.
-        if (r._pageToolCalls) foot += ' + read this screen (' + r._pageToolCalls + ' page ' + (r._pageToolCalls === 1 ? 'read' : 'reads') + ')';
-        addMsg('meta', foot);
+      // Client-side hard-fail (no WO / not found / all reads down): render the truthful state.
+      if (r && r.clientError) {
+        if (woNumberFromUrl() == null) { addMsg('error', 'Ask BWN could not identify a usable work order from the current screen'); setStatus('Needs work order'); }
+        else { addMsg('error', r.clientError); setStatus('Limited by available data'); }
+        return;
       }
+      var err = errorFor(r);
+      if (err) { addMsg('error', err); setStatus('Ready'); return; }
+      var ans = (r.json && r.json.answer) || '(no answer returned)';
+      addAnswer(ans);
+      convo.push({ q: q, a: ans });
+      setContextChip(r._wo);
+
+      // Tool-cap partial: preserve the answer, but say plainly it may be incomplete.
+      if (r.json && r.json.capped) addMsg('meta', 'Ask BWN reached its record-check limit for this request; this answer may be incomplete.');
+
+      // Distinct, truthful degradation states (existing gatherContext flags only).
+      if (r._notesFailed) addMsg('meta', 'Documented notes could not be retrieved for this work order; this answer is from the work-order details only.');
+      else if ((r._records || 0) === 0) addMsg('meta', 'No notes were returned for this work order.');
+      if (r._degraded && r._degraded.indexOf('site-roster') !== -1) addMsg('meta', 'Site records could not be retrieved.');
+      else if (r._siteOk && (r._siteWOs || 0) === 0) addMsg('meta', 'No site work orders were returned for this location.');
+
+      // Grounding footer.
+      var foot = 'Grounded on WO #' + (r._wo || '?') + ' - ' + (r._records || 0) + ' note' + (r._records === 1 ? '' : 's');
+      if (r._omitted) foot += ' (' + r._shown + ' shown, ' + r._omitted + ' oldest omitted)';
+      if (r._siteOk && r._siteWOs) foot += ' + ' + r._siteWOs + ' other WO' + (r._siteWOs === 1 ? '' : 's') + ' at this site';
+      // Say when the answer came partly from the SCREEN rather than the record - different
+      // lifetimes, so a coordinator checking a claim needs to know which they are verifying.
+      if (r._pageToolCalls) foot += ' + read this screen (' + r._pageToolCalls + ' page ' + (r._pageToolCalls === 1 ? 'read' : 'reads') + ')';
+      addMsg('meta', foot);
+      setStatus((r._degraded && r._degraded.length) ? 'Limited by available data' : 'Ready');
     }).catch(function (e) {
       if (thinking && thinking.parentNode) thinking.parentNode.remove();
       addMsg('error', 'Request failed: ' + (e && e.message ? e.message : 'unknown error'));
+      setStatus('Ready');
     }).then(function () {
-      busy = false; sendBtn.disabled = false; sendBtn.textContent = 'Send';
+      busy = false; sendBtn.disabled = false; sendBtn.textContent = 'Ask';
       inputEl.focus();
     });
   }
@@ -756,7 +894,31 @@
 
     var head = document.createElement('div');
     head.className = 'bwn-drawer-hd';
-    head.innerHTML = '<div><div class="t">Ask BWN</div><div class="s">reads this WO live</div></div>';
+    var hdLeft = document.createElement('div');
+    // Title + a persistent, compact Read-only badge that stays visible through every state.
+    var titleRow = document.createElement('div');
+    titleRow.className = 't';
+    titleRow.style.cssText = 'display:flex;align-items:center;gap:6px;';
+    var titleTxt = document.createElement('span'); titleTxt.textContent = 'Ask BWN';
+    var roBadge = document.createElement('span');
+    roBadge.className = 'bwn-ask-ro'; roBadge.textContent = 'Read-only';
+    roBadge.setAttribute('role', 'note'); roBadge.setAttribute('aria-label', 'Read-only assistant');
+    roBadge.style.cssText = 'font:9px/1.4 -apple-system,Segoe UI,Roboto,sans-serif;letter-spacing:.05em;text-transform:uppercase;background:rgba(255,255,255,.2);color:#fff;border:1px solid rgba(255,255,255,.55);border-radius:4px;padding:1px 5px;';
+    titleRow.appendChild(titleTxt); titleRow.appendChild(roBadge);
+    hdLeft.appendChild(titleRow);
+    // Sub-line: safe context chip + truthful status (no PII, no raw fields).
+    var sub = document.createElement('div'); sub.className = 's';
+    sub.style.cssText = 'display:flex;align-items:center;gap:6px;flex-wrap:wrap;';
+    ctxChipEl = document.createElement('span'); ctxChipEl.className = 'bwn-ask-ctx';
+    ctxChipEl.setAttribute('aria-label', 'Current record context');
+    ctxChipEl.style.cssText = 'font:11px/1.4 -apple-system,Segoe UI,Roboto,sans-serif;background:rgba(255,255,255,.15);color:#fff;border-radius:6px;padding:1px 7px;';
+    statusEl = document.createElement('span'); statusEl.className = 'bwn-ask-status';
+    statusEl.setAttribute('role', 'status'); statusEl.setAttribute('aria-live', 'polite');
+    statusEl.style.cssText = 'font:11px/1.4 -apple-system,Segoe UI,Roboto,sans-serif;color:rgba(255,255,255,.85);';
+    sub.appendChild(ctxChipEl); sub.appendChild(statusEl);
+    hdLeft.appendChild(sub);
+    head.appendChild(hdLeft);
+    setContextChip(); setStatus('Ready');
 
     modelSel = document.createElement('select');
     modelSel.style.cssText = 'all:unset;cursor:pointer;font:12px -apple-system,Segoe UI,Roboto,sans-serif;color:#fff;background:rgba(255,255,255,.15);padding:3px 6px;border-radius:6px;margin-right:6px;';
@@ -782,12 +944,14 @@
     foot.style.cssText = 'align-items:flex-end;gap:6px;';
     inputEl = document.createElement('textarea');
     inputEl.rows = 2;
-    inputEl.placeholder = 'Ask about the work order you\'re viewing...';
+    inputEl.placeholder = 'Ask about this work order or choose a quick command…';
+    inputEl.setAttribute('aria-label', 'Ask about this work order');
     inputEl.style.cssText = 'flex:1;resize:none;font:13px -apple-system,Segoe UI,Roboto,sans-serif;padding:7px 9px;border:1px solid #cdd6d1;border-radius:9px;outline:none;';
     inputEl.addEventListener('keydown', function (e) { if (e.key === 'Enter' && !e.shiftKey) { e.preventDefault(); doAsk(); } });
     sendBtn = document.createElement('button');
     sendBtn.type = 'button'; sendBtn.className = 'bwn-ops-btn primary';
-    sendBtn.textContent = 'Send';
+    sendBtn.textContent = 'Ask';                 // neutral submit label (never Send/Post/Save/etc.)
+    sendBtn.setAttribute('aria-label', 'Ask this question');
     sendBtn.addEventListener('click', doAsk);
     foot.appendChild(inputEl);
     foot.appendChild(sendBtn);
@@ -795,7 +959,7 @@
 
     document.body.appendChild(panelEl);
     bwnFocusTrap(panelEl);
-    addMsg('assistant', 'Hi. Open a work order, then ask - I read that WO live from Umbrava (details + full note / site-visit history) and a summary of the other work orders at the same location, plus Broadway\'s knowledge doc, and answer with dates and references. I never guess; if it\'s not in the record I\'ll say so.');
+    addMsg('assistant', 'Ask BWN is read-only. Open a work order, then ask or pick a quick command below. I read that WO live (details + notes + a roster of other work orders at the same location) plus Broadway\'s knowledge doc, answer with dates and references, and never guess - if it is not in the record I say so. I can draft text for you to review and submit manually; I cannot make any change in Umbrava.');
     inputEl.focus();
   }
 
