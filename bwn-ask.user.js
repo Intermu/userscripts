@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         BWN Ask (Coordinator Copilot)
 // @namespace    https://broadwaynational.com/bwn
-// @version      0.7.6
+// @version      0.11.1
 // @description  Ask questions about the work order you're viewing. Reads the WO live from Umbrava via same-origin GraphQL (details + full note / site-visit history) AND a summary roster of the other work orders at the same location, plus the team knowledge doc, and answers through the Broadway AI proxy with dates and references. Phase 1.5 = page-scoped + location roster (Path A); no data leaves the trusted Broadway path.
 // @match        https://app.umbrava.com/*
 // @run-at       document-idle
@@ -152,7 +152,7 @@
   var ROSTER_VARS = { page: { skip: 0, take: ROSTER_TAKE }, sortBy: [{ columnName: 'formattedJobNumber', direction: 'DESC' }] };
 
   function fetchLocationRoster(locationId) {
-    if (locationId == null) return Promise.resolve({ ok: false });
+    if (locationId == null) return Promise.resolve({ ok: false, reason: 'no-location' });
     var key = String(locationId);
     if (_locRoster[key]) return Promise.resolve(_locRoster[key]);
     var vars = { page: ROSTER_VARS.page, sortBy: ROSTER_VARS.sortBy, loc: locationId };
@@ -161,7 +161,7 @@
       var arr = (root && Array.isArray(root.items)) ? root.items.filter(Boolean) : [];
       _locRoster[key] = { ok: true, wos: arr, total: (root && typeof root.rowCount === 'number') ? root.rowCount : arr.length };
       return _locRoster[key];
-    }, function () { _locRoster[key] = { ok: false }; return _locRoster[key]; });
+    }, function () { _locRoster[key] = { ok: false, reason: 'fetch-failed' }; return _locRoster[key]; });
   }
   /* ===== BWN-ASK-ROSTER:END ===== */
 
@@ -245,7 +245,10 @@
             ? 'SCOPE: You have the FULL notes/history for WO #' + (wo.number || n) + (wo.locationName ? ' at ' + wo.locationName : '') + ', PLUS a summary roster of ' + siteWOs + ' other work order(s) at this location (roster = status/trade/date only, NOT their notes). For detail on another WO the coordinator must open it. Do not invent notes for roster WOs.'
             : 'SCOPE: This is ONE work order (#' + (wo.number || n) + ')' + (wo.locationName ? ' at ' + wo.locationName : '') + '. ' + ((roster && roster.ok) ? 'It is the only work order at this location.' : 'Other work orders at this location could NOT be loaded - do not claim completeness across the site.');
           var text = scope + '\n\n' + body.join('\n');
-          return Object.assign({ text: text, wo: wo.number || n, degraded: degraded, siteWOs: siteWOs, siteOk: !!(roster && roster.ok) }, extra);
+          // Distinguish WHY the site read is unavailable (state-shape only; no new query):
+          //   'no-location' (this WO exposes no locationId) vs 'fetch-failed' vs 'empty' vs 'ok'.
+          var siteReason = (roster && roster.ok) ? (siteWOs ? 'ok' : 'empty') : ((roster && roster.reason) || 'fetch-failed');
+          return Object.assign({ text: text, wo: wo.number || n, degraded: degraded, siteWOs: siteWOs, siteOk: !!(roster && roster.ok), siteReason: siteReason }, extra);
         });
       }
 
@@ -485,7 +488,7 @@
       };
       var post = function (b) { return gmPost(AI_URL, { 'Content-Type': 'application/json', 'x-bwn-key': key }, b, 60000); };
       return askDriveLoop(body, post)
-        .then(function (r) { r._records = ctx.records; r._shown = ctx.shown; r._omitted = ctx.omitted; r._wo = ctx.wo; r._degraded = ctx.degraded; r._notesFailed = ctx.notesFailed; r._siteWOs = ctx.siteWOs; r._siteOk = ctx.siteOk; r._pageToolCalls = pageToolCalls; return r; });
+        .then(function (r) { r._records = ctx.records; r._shown = ctx.shown; r._omitted = ctx.omitted; r._wo = ctx.wo; r._degraded = ctx.degraded; r._notesFailed = ctx.notesFailed; r._siteWOs = ctx.siteWOs; r._siteOk = ctx.siteOk; r._siteReason = ctx.siteReason; r._pageToolCalls = pageToolCalls; return r; });
     });
   }
 
@@ -500,13 +503,20 @@
     if (r.status === 403) return 'The SWA ingest key is missing or wrong. Re-set it from the Tampermonkey menu.';
     if (r.status === 429) return 'Slow down - too many questions in a row. Try again in a moment.';
     if (r.status === 503) return 'The copilot is not fully configured on the server yet (' + (j.error || 'unavailable') + ').';
-    return (j && (j.error || j.detail)) ? ('Server error: ' + (j.error || j.detail)) : ('Server error (' + r.status + ').');
+    // Neutral fixed message + status code only - never pass raw server error text through to the UI.
+    return 'Server error (' + r.status + '). Please try again in a moment.';
   }
 
   // ---- Panel UI -------------------------------------------------------------
   var panelEl = null, msgsEl = null, inputEl = null, sendBtn = null, modelSel = null, busy = false;
+  var ctxChipEl = null, statusEl = null, jumpBtn = null;
 
   function esc(s) { return String(s == null ? '' : s).replace(/[&<>"']/g, function (c) { return { '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;' }[c]; }); }
+
+  // Scroll stability: only auto-scroll when the coordinator is already at the bottom; otherwise
+  // leave their scroll position alone and offer a Jump-to-latest control (built in buildPanel).
+  function atBottom() { return !msgsEl || (msgsEl.scrollHeight - msgsEl.scrollTop - msgsEl.clientHeight) < 40; }
+  function showJump(show) { if (jumpBtn) jumpBtn.hidden = !show; }
 
   function addMsg(role, text) {
     if (!msgsEl) return null;
@@ -523,11 +533,145 @@
             : 'background:#eef2f0;color:#1c2b24;border-bottom-left-radius:3px;');
     }
     b.innerHTML = esc(text);
+    var stick = atBottom();
     wrap.appendChild(b);
     msgsEl.appendChild(wrap);
-    msgsEl.scrollTop = msgsEl.scrollHeight;
+    if (stick) { msgsEl.scrollTop = msgsEl.scrollHeight; showJump(false); } else { showJump(true); }
     return b;
   }
+
+  /* ===== BWN-ASK-RENDER:START (Bundle A) =================================================
+   * Conditional answer sections, citation chips, and the manual-draft panel. All rendering
+   * runs through esc() first; citation chips are wrapped on the already-escaped string, so no
+   * raw HTML, raw payload, or raw preload object can reach the DOM. scripts/test-ask-render.js
+   * pins the section parser, citation safety, the exact draft label + reminder, and copy-only. */
+  // Product-mandated literal - the ONE approved U+2014 in this file (narrow hygiene exception in
+  // scripts/test-ask-commands.js). Rendered unchanged; also used to detect a draft in the answer.
+  var DRAFT_LABEL = 'DRAFT — coordinator must review and submit manually';
+  // Fallback marker: the server prompt is em-dash-free, so the model may emit the hyphen form;
+  // either triggers the SAME panel, which always renders the exact em-dash label above.
+  var DRAFT_LABEL_ASCII = 'DRAFT - coordinator must review and submit manually';
+  var DRAFT_REMINDER = 'Ask BWN cannot submit this for you.';
+  var SECTION_HEADS = ['### Answer', '### Evidence', '### Limits or Gaps', '### Suggested Next Check'];
+
+  function setStatus(txt) { if (statusEl) statusEl.textContent = txt || ''; }
+  function setContextChip(woNum) {
+    if (!ctxChipEl) return;
+    var n = (woNum != null) ? woNum : woNumberFromUrl();
+    ctxChipEl.textContent = (n != null) ? ('WO #' + n) : 'No record identified';
+  }
+
+  // Wrap recognizable citations in non-navigating source chips. Operates on the ESCAPED string so
+  // nothing raw can slip through; chips are informational + selectable only (no click, no nav, no
+  // payload). Only the WO number itself is chipped; any trailing "note dated ..." stays plain text.
+  function withCitations(escaped) {
+    var re = /(WO #\d+|Site roster for [^\n<]+|Current screen: [^\n<]+|Knowledge: [^\n<]+)/g;
+    return escaped.replace(re, function (m) {
+      return '<span class="bwn-ask-cite" style="display:inline-block;font:11px/1.4 -apple-system,Segoe UI,Roboto,sans-serif;background:#e7efe9;color:#1A5F3E;border:1px solid #cfe0d6;border-radius:5px;padding:0 5px;margin:0 1px;">' + m + '</span>';
+    });
+  }
+  // Defense-in-depth suppression: if a credential-like value ever appears in an answer, mask it
+  // BEFORE display and leave a generic non-revealing marker. Runs on raw text, then esc(), then
+  // citations. Nothing sensitive is logged. The server prompt already minimizes; this is a net.
+  var SECRET_RE = /(sk-[A-Za-z0-9]{16,}|ghp_[A-Za-z0-9]{20,}|github_pat_[A-Za-z0-9_]{20,}|xox[baprs]-[A-Za-z0-9-]{10,}|AKIA[0-9A-Z]{16}|eyJ[A-Za-z0-9_-]{10,}\.[A-Za-z0-9_-]{10,}\.[A-Za-z0-9_-]{6,}|Bearer\s+[A-Za-z0-9._-]{20,}|(?:api[_-]?key|secret|token|password|passwd|session[_-]?id)["']?\s*[:=]\s*["']?[^\s"']{8,})/gi;
+  function redactSensitive(text) { return String(text == null ? '' : text).replace(SECRET_RE, '[sensitive value hidden]'); }
+  function para(text) {
+    var d = document.createElement('div');
+    d.style.cssText = 'white-space:pre-wrap;word-wrap:break-word;';
+    d.innerHTML = withCitations(esc(redactSensitive(text)).trim());
+    return d;
+  }
+  function parseSections(text) {
+    var idxs = [];
+    SECTION_HEADS.forEach(function (h) { var i = text.indexOf(h); if (i !== -1) idxs.push({ h: h, i: i }); });
+    if (!idxs.length) return [];
+    idxs.sort(function (a, b) { return a.i - b.i; });
+    var out = [];
+    for (var k = 0; k < idxs.length; k++) {
+      var start = idxs[k].i + idxs[k].h.length;
+      var end = (k + 1 < idxs.length) ? idxs[k + 1].i : text.length;
+      out.push({ head: idxs[k].h.replace(/^###\s*/, ''), body: text.slice(start, end).trim() });
+    }
+    return out;
+  }
+  function renderSection(head, body) {
+    var sec = document.createElement('div');
+    var isAnswer = head === 'Answer', isEvidence = head === 'Evidence', isLimits = head === 'Limits or Gaps', isNext = head === 'Suggested Next Check';
+    sec.style.cssText = 'margin:6px 0;' + (isLimits ? 'border-left:3px solid #e0a94a;padding-left:8px;' : isNext ? 'border-left:3px solid #4a8fe0;padding-left:8px;' : '');
+    var hd = document.createElement('div');
+    hd.textContent = head;
+    hd.style.cssText = 'font:10px/1.4 -apple-system,Segoe UI,Roboto,sans-serif;text-transform:uppercase;letter-spacing:.04em;color:' + (isAnswer ? '#1A5F3E' : '#8a9a92') + ';margin-bottom:2px;';
+    sec.appendChild(hd);
+    var bodyEl = para(body);
+    if (isAnswer) bodyEl.style.font = '14px/1.5 -apple-system,Segoe UI,Roboto,sans-serif';
+    if (isEvidence && body.length > 320) {   // long evidence collapses behind an accessible control
+      var det = document.createElement('details');
+      var sum = document.createElement('summary');
+      sum.textContent = 'Show evidence'; sum.setAttribute('aria-label', 'Show evidence');
+      sum.style.cssText = 'cursor:pointer;font:12px -apple-system,Segoe UI,Roboto,sans-serif;color:#1A5F3E;';
+      det.appendChild(sum); det.appendChild(bodyEl); sec.appendChild(det);
+    } else { sec.appendChild(bodyEl); }
+    return sec;
+  }
+  function draftPanel(bodyText) {
+    var safe = redactSensitive(bodyText);   // ONE redaction pass drives BOTH the visible draft and the clipboard, so nothing masked on screen can leak via Copy draft. redactSensitive is idempotent (the marker never re-matches).
+    var box = document.createElement('div');
+    box.className = 'bwn-ask-draft';
+    box.setAttribute('role', 'group'); box.setAttribute('aria-label', 'Manual draft');
+    box.style.cssText = 'margin:8px 0;border:1px dashed #b7a24a;background:#fbf7e8;border-radius:8px;padding:8px 10px;';
+    var lab = document.createElement('div');
+    lab.textContent = DRAFT_LABEL;                 // exact product literal, rendered unchanged
+    lab.style.cssText = 'font:11px/1.4 -apple-system,Segoe UI,Roboto,sans-serif;font-weight:600;color:#7a5c00;text-transform:uppercase;letter-spacing:.03em;';
+    box.appendChild(lab);
+    var rem = document.createElement('div');
+    rem.textContent = DRAFT_REMINDER;
+    rem.style.cssText = 'font:11px/1.4 -apple-system,Segoe UI,Roboto,sans-serif;color:#8a7a3a;margin:1px 0 6px;';
+    box.appendChild(rem);
+    box.appendChild(para(safe));
+    var copy = document.createElement('button');
+    copy.type = 'button'; copy.textContent = 'Copy draft'; copy.setAttribute('aria-label', 'Copy draft');
+    copy.style.cssText = 'margin-top:7px;cursor:pointer;font:12px -apple-system,Segoe UI,Roboto,sans-serif;background:#1A5F3E;color:#fff;border:none;border-radius:7px;padding:5px 11px;';
+    copy.addEventListener('click', function () {
+      var done = function () { copy.textContent = 'Copied'; setTimeout(function () { copy.textContent = 'Copy draft'; }, 1500); };
+      // Client-side ONLY: no network, no mutation, no autofill, no insertion into any field.
+      try { if (navigator.clipboard && navigator.clipboard.writeText) { navigator.clipboard.writeText(safe).then(done, done); return; } } catch (e) { }
+      try { var t = document.createElement('textarea'); t.value = safe; document.body.appendChild(t); t.select(); document.execCommand('copy'); document.body.removeChild(t); } catch (e2) { }
+      done();
+    });
+    box.appendChild(copy);
+    return box;
+  }
+  function buildAnswerNode(text) {
+    var wrap = document.createElement('div');
+    var di = text.indexOf(DRAFT_LABEL), markerLen = DRAFT_LABEL.length;
+    if (di === -1) { var da = text.indexOf(DRAFT_LABEL_ASCII); if (da !== -1) { di = da; markerLen = DRAFT_LABEL_ASCII.length; } }
+    if (di !== -1) {
+      var pre = text.slice(0, di).trim();
+      var draftBody = text.slice(di + markerLen).replace(/^[\s:.-]+/, '').trim();
+      if (pre) wrap.appendChild(para(pre));
+      wrap.appendChild(draftPanel(draftBody));
+      return wrap;
+    }
+    var secs = parseSections(text);
+    if (secs.length) { secs.forEach(function (s) { wrap.appendChild(renderSection(s.head, s.body)); }); return wrap; }
+    // Graceful fallback: existing safe plain rendering. A "not available through current tools"
+    // reply is intentionally rendered here as grounded answer text, NOT a separate UI state -
+    // matching model phrasing to force a distinct state would be brittle and could misfire.
+    wrap.appendChild(para(text));
+    return wrap;
+  }
+  function addAnswer(text) {
+    if (!msgsEl) return;
+    var row = document.createElement('div');
+    row.style.cssText = 'margin:8px 0;display:flex;justify-content:flex-start;';
+    var b = document.createElement('div');
+    b.style.cssText = 'max-width:92%;padding:9px 12px;border-radius:12px;border-bottom-left-radius:3px;background:#eef2f0;color:#1c2b24;font:13px/1.45 -apple-system,Segoe UI,Roboto,sans-serif;';
+    b.appendChild(buildAnswerNode(text));
+    var stick = atBottom();
+    row.appendChild(b); msgsEl.appendChild(row);
+    if (stick) { msgsEl.scrollTop = msgsEl.scrollHeight; showJump(false); } else { showJump(true); }
+  }
+  /* ===== BWN-ASK-RENDER:END =============================================================== */
 
   var convo = [];   // {q,a} of recent exchanges, so answer-referential follow-ups resolve
   function doAsk() {
@@ -537,33 +681,49 @@
     addMsg('user', q);
     inputEl.value = '';
     busy = true; sendBtn.disabled = true; sendBtn.textContent = '...';
-    var thinking = addMsg('assistant', 'Thinking...');
+    setStatus('Reading record');
+    var thinking = addMsg('assistant', 'Reading the record...');
     var hist = convo.slice(-3).map(function (t) { return { q: t.q, a: (t.a || '').slice(0, 1500) }; });
     askServer(q, modelSel ? modelSel.value : 'claude-haiku-4-5', hist).then(function (r) {
-      var err = errorFor(r);
       if (thinking && thinking.parentNode) thinking.parentNode.remove();
-      if (err) { addMsg('error', err); return; }
-      var ans = (r.json && r.json.answer) || '(no answer returned)';
-      addMsg('assistant', ans);
-      convo.push({ q: q, a: ans });
-      if (r._notesFailed) {
-        addMsg('error', 'Heads up: I could not read this WO\'s note history, so that answer is from the WO details only. Reload and retry for the full history.');
-      } else {
-        var foot = 'Grounded on WO #' + (r._wo || '?') + ' - ' + (r._records || 0) + ' note' + (r._records === 1 ? '' : 's');
-        if (r._omitted) foot += ' (' + r._shown + ' shown, ' + r._omitted + ' oldest omitted)';
-        if (r._siteOk && r._siteWOs) foot += ' + ' + r._siteWOs + ' other WO' + (r._siteWOs === 1 ? '' : 's') + ' at this site';
-        if (r._degraded && r._degraded.length) foot += '; unavailable: ' + r._degraded.join(', ');
-        // Say when the answer came partly from the SCREEN rather than the record. The two have
-        // different lifetimes - the record is durable, the screen is whatever was rendered a
-        // moment ago - so a coordinator checking a claim needs to know which they are verifying.
-        if (r._pageToolCalls) foot += ' + read this screen (' + r._pageToolCalls + ' page ' + (r._pageToolCalls === 1 ? 'read' : 'reads') + ')';
-        addMsg('meta', foot);
+      // Client-side hard-fail (no WO / not found / all reads down): render the truthful state.
+      if (r && r.clientError) {
+        if (woNumberFromUrl() == null) { addMsg('error', 'Ask BWN could not identify a usable work order from the current screen'); setStatus('Needs work order'); }
+        else { addMsg('error', r.clientError); setStatus('Limited by available data'); }
+        return;
       }
+      var err = errorFor(r);
+      if (err) { addMsg('error', err); setStatus('Ready'); return; }
+      var ans = (r.json && r.json.answer) || '(no answer returned)';
+      addAnswer(ans);
+      convo.push({ q: q, a: ans });
+      setContextChip(r._wo);
+
+      // Tool-cap partial: preserve the answer, but say plainly it may be incomplete.
+      if (r.json && r.json.capped) addMsg('meta', 'Ask BWN reached its record-check limit for this request; this answer may be incomplete.');
+
+      // Distinct, truthful degradation states (existing gatherContext flags only).
+      if (r._notesFailed) addMsg('meta', 'Documented notes could not be retrieved for this work order; this answer is from the work-order details only.');
+      else if ((r._records || 0) === 0) addMsg('meta', 'No notes were returned for this work order.');
+      if (r._siteReason === 'no-location') addMsg('meta', 'Site roster unavailable: no usable location ID on this record');
+      else if (r._siteReason === 'fetch-failed') addMsg('meta', 'Site records could not be retrieved.');
+      else if (r._siteReason === 'empty') addMsg('meta', 'No site work orders were returned for this location.');
+
+      // Grounding footer.
+      var foot = 'Grounded on WO #' + (r._wo || '?') + ' - ' + (r._records || 0) + ' note' + (r._records === 1 ? '' : 's');
+      if (r._omitted) foot += ' (' + r._shown + ' shown, ' + r._omitted + ' oldest omitted)';
+      if (r._siteOk && r._siteWOs) foot += ' + ' + r._siteWOs + ' other WO' + (r._siteWOs === 1 ? '' : 's') + ' at this site';
+      // Say when the answer came partly from the SCREEN rather than the record - different
+      // lifetimes, so a coordinator checking a claim needs to know which they are verifying.
+      if (r._pageToolCalls) foot += ' + read this screen (' + r._pageToolCalls + ' page ' + (r._pageToolCalls === 1 ? 'read' : 'reads') + ')';
+      addMsg('meta', foot);
+      setStatus((r._degraded && r._degraded.length) ? 'Limited by available data' : 'Ready');
     }).catch(function (e) {
       if (thinking && thinking.parentNode) thinking.parentNode.remove();
       addMsg('error', 'Request failed: ' + (e && e.message ? e.message : 'unknown error'));
+      setStatus('Ready');
     }).then(function () {
-      busy = false; sendBtn.disabled = false; sendBtn.textContent = 'Send';
+      busy = false; sendBtn.disabled = false; sendBtn.textContent = 'Ask';
       inputEl.focus();
     });
   }
@@ -644,6 +804,96 @@
     clearTimeout(fadeTimer);
     fadeTimer = setTimeout(function () { if (panelEl) { try { panelEl.remove(); } catch (e) { } } }, 170);
   }
+  /* ===== BWN-ASK-CMDS:START ==============================================================
+   * Quick Commands: coordinator-friendly prompt shortcuts. NO new retrieval and NO prefetch -
+   * a chip only fills the input with a grounded prompt and runs the SAME ask flow. Site History
+   * chips are gated on a work order being open on the current screen (the zero-cost signal;
+   * roster availability itself is reported by the answer/footer). `primary:true` = the initial
+   * <=8 view; the rest live behind "More commands". Labels never promise unsupported certainty
+   * and never carry a write verb. scripts/test-ask-commands.js pins these bytes. */
+  var ASK_CMDS = {
+    'This Work Order': [
+      { label: 'Summarize this WO', primary: true, prompt: 'Summarize this work order from the record: status, assignment, scope, and where it stands. Cite the WO number and note dates.' },
+      { label: 'Catch me up', primary: true, prompt: 'What is the recent documented activity on this work order, newest first? Cite note dates. Do not infer completion that is not documented.' },
+      { label: 'What needs attention?', primary: true, prompt: 'From the record only, what is missing, unresolved, or conflicting on this work order? Do not assume cause, blame, or lateness unless a record or knowledge says so.' },
+      { label: 'Show current assignment', prompt: 'Who is assigned and which vendor(s) are documented on this work order? Distinguish assigned from documented on-site activity.' },
+      { label: 'What is documented as the next step?', prompt: 'What does the record document as the next step on this work order? If none is documented, say so.' },
+      { label: 'Prepare handoff summary', prompt: 'Prepare a concise shift-handoff summary of this work order: status, assignment, documented next step, and open gaps. Cite WO number and note dates.' },
+      { label: 'Show schedule details', prompt: 'What scheduling is documented on this work order (scheduled/expected dates)? A scheduled date is not proof of a visit.' },
+      { label: 'What is missing from this record?', prompt: 'Identify documentation that appears missing on this work order, based only on the retrieved fields and notes. Do not treat absence as proof an event did not happen.' },
+      { label: 'Show documented vendor activity', prompt: 'What vendor activity is explicitly documented on this work order (assigned / named in a note), with dates? Do not claim a vendor attended or completed work unless documented.' },
+      { label: 'Can we confirm completed work?', prompt: 'Is completion of work explicitly documented on this work order? If it is not documented, say so plainly rather than inferring it.' }
+    ],
+    'Site History': [
+      { label: 'Show other open WOs at this site', primary: true, site: true, prompt: 'What other work orders are documented at this location, from the site roster? Summary rows only; do not invent notes for other WOs.' },
+      { label: 'Show site work-order roster', site: true, prompt: 'List the site work-order roster for this location (number, status, date only) as returned. Do not claim it is every work order at the site.' },
+      { label: 'Check for related site issues', site: true, prompt: 'From the site roster and this WO, are there documented related issues at this location? Cite the work orders you rely on.' },
+      { label: 'Compare this WO to site history', site: true, prompt: 'Compare this work order to the documented site roster. Keep each fact attributed to its own WO; do not carry facts between records.' },
+      { label: 'Possible repeat pattern?', site: true, prompt: 'Do the retrieved records show a possible repeat pattern at this location? A repeat pattern does not establish a root cause; cite the records.' },
+      { label: 'What site context is available?', site: true, prompt: 'What non-sensitive site context is available from the record for this location?' }
+    ],
+    'Guidance & Drafts': [
+      { label: 'Show client/site instructions', primary: true, prompt: 'What client or site instructions apply here, from the approved knowledge? Cite the knowledge section. If none applies, say so.' },
+      { label: 'What client rule applies here?', prompt: 'Which client rule applies to this work order, from the approved knowledge? Cite the knowledge section.' },
+      { label: 'What SOP applies to this issue?', prompt: 'Which SOP applies to this issue, from the approved knowledge? Cite the knowledge section.' },
+      { label: 'Show escalation guidance', prompt: 'What is the documented escalation guidance for this situation, from the approved knowledge? Cite the section.' },
+      { label: 'What should be verified before escalation?', prompt: 'From the record and approved knowledge, what should be verified before escalating this work order?' },
+      { label: 'Draft escalation summary', prompt: 'Draft an escalation summary for this work order for me to review and submit manually. Ground it only in the record; do not assert anything not documented.' },
+      { label: 'Draft vendor follow-up', prompt: 'Draft a vendor follow-up message for this work order for me to review and submit manually. Ground it only in the record.' },
+      { label: 'Draft client update', prompt: 'Draft a client update for this work order for me to review and submit manually. Ground it only in the record and minimize sensitive detail.' },
+      { label: 'Draft internal handoff', prompt: 'Draft an internal handoff note for this work order for me to review and submit manually. Ground it only in the record.' }
+    ]
+  };
+  function runCmd(promptText) { if (!inputEl || busy) return; inputEl.value = promptText; doAsk(); }
+  function buildCmdBar() {
+    var hasWO = woNumberFromUrl() != null;
+    var bar = document.createElement('div');
+    bar.className = 'bwn-ask-cmds';
+    bar.setAttribute('role', 'group'); bar.setAttribute('aria-label', 'Quick commands');
+    bar.style.cssText = 'padding:6px 10px 0;border-top:1px solid #e6ece9;';
+    var secondary = [];
+    function chip(c) {
+      var b = document.createElement('button');
+      b.type = 'button'; b.className = 'bwn-ask-chip';
+      b.textContent = c.label; b.setAttribute('aria-label', c.label);
+      b.style.cssText = 'cursor:pointer;font:11px/1 -apple-system,Segoe UI,Roboto,sans-serif;padding:5px 9px;margin:0 4px 5px 0;border:1px solid #cdd6d1;border-radius:999px;color:#1c2b24;background:#f4f7f5;';
+      if (c.site && !hasWO) {
+        b.disabled = true; b.setAttribute('aria-disabled', 'true');
+        b.style.opacity = '.5'; b.style.cursor = 'not-allowed';
+        b.title = 'Site roster unavailable: no work order open on this screen';
+        b.setAttribute('aria-label', c.label + ' (unavailable: no work order open on this screen)');
+      } else {
+        b.addEventListener('click', function () { runCmd(c.prompt); });
+      }
+      return b;
+    }
+    Object.keys(ASK_CMDS).forEach(function (group) {
+      var gEl = document.createElement('div');
+      gEl.setAttribute('role', 'group'); gEl.setAttribute('aria-label', group);
+      var hd = document.createElement('div');
+      hd.textContent = group;
+      hd.style.cssText = 'font:10px/1.4 -apple-system,Segoe UI,Roboto,sans-serif;color:#8a9a92;text-transform:uppercase;letter-spacing:.04em;margin:2px 0 3px;';
+      gEl.appendChild(hd);
+      ASK_CMDS[group].forEach(function (c) { var el = chip(c); gEl.appendChild(el); if (!c.primary) secondary.push(el); });
+      bar.appendChild(gEl);
+    });
+    // Progressive disclosure: hide non-primary chips until "More commands".
+    secondary.forEach(function (el) { el.hidden = true; });
+    var more = document.createElement('button');
+    more.type = 'button'; more.textContent = 'More commands';
+    more.setAttribute('aria-expanded', 'false'); more.setAttribute('aria-label', 'More commands');
+    more.style.cssText = 'cursor:pointer;font:11px/1 -apple-system,Segoe UI,Roboto,sans-serif;color:#1A5F3E;background:none;border:none;padding:4px 2px 6px;';
+    more.addEventListener('click', function () {
+      var open = more.getAttribute('aria-expanded') === 'true';
+      secondary.forEach(function (el) { el.hidden = open; });
+      more.setAttribute('aria-expanded', String(!open));
+      more.textContent = open ? 'More commands' : 'Fewer commands';
+    });
+    bar.appendChild(more);
+    return bar;
+  }
+  /* ===== BWN-ASK-CMDS:END ================================================================= */
+
   function buildPanel() {
     if (panelEl && panelEl.isConnected && !panelEl.classList.contains('bwn-closing')) { hidePanel(); return; }   // dock entry toggles
     try {
@@ -663,11 +913,48 @@
     // RM-A2 (ACC2): Escape closes through the existing hidePanel() so the fade + cleanup fire.
     // Bound once on the reused node (buildPanel keeps panelEl alive across reopens), and focus is
     // trapped inside so a panel-scoped listener always sees the key.
-    panelEl.addEventListener('keydown', function (e) { if (e.key === 'Escape') { e.preventDefault(); hidePanel(); } });
+    // RM-A2 (ACC2) + Bundle A: Escape closes through hidePanel(), but never silently discards
+    // unsent text. Empty input closes immediately. Unsent text is preserved (the node persists
+    // across close/reopen) and a local confirmation is required: the first Escape arms, a second
+    // Escape closes; typing re-arms. No unsent text is ever transmitted.
+    var _escArmed = false;
+    panelEl.addEventListener('keydown', function (e) {
+      if (e.key !== 'Escape') return;
+      e.preventDefault();
+      var hasText = !!(inputEl && inputEl.value && inputEl.value.trim());
+      if (!hasText || _escArmed) { _escArmed = false; hidePanel(); return; }
+      _escArmed = true;
+      setStatus('Press Escape again to close (your text is kept)');
+    });
+    panelEl._escReset = function () { _escArmed = false; };   // input handler re-arms via this
 
     var head = document.createElement('div');
     head.className = 'bwn-drawer-hd';
-    head.innerHTML = '<div><div class="t">Ask BWN</div><div class="s">reads this WO live</div></div>';
+    var hdLeft = document.createElement('div');
+    // Title + a persistent, compact Read-only badge that stays visible through every state.
+    var titleRow = document.createElement('div');
+    titleRow.className = 't';
+    titleRow.style.cssText = 'display:flex;align-items:center;gap:6px;';
+    var titleTxt = document.createElement('span'); titleTxt.textContent = 'Ask BWN';
+    var roBadge = document.createElement('span');
+    roBadge.className = 'bwn-ask-ro'; roBadge.textContent = 'Read-only';
+    roBadge.setAttribute('role', 'note'); roBadge.setAttribute('aria-label', 'Read-only assistant');
+    roBadge.style.cssText = 'font:9px/1.4 -apple-system,Segoe UI,Roboto,sans-serif;letter-spacing:.05em;text-transform:uppercase;background:rgba(255,255,255,.2);color:#fff;border:1px solid rgba(255,255,255,.55);border-radius:4px;padding:1px 5px;';
+    titleRow.appendChild(titleTxt); titleRow.appendChild(roBadge);
+    hdLeft.appendChild(titleRow);
+    // Sub-line: safe context chip + truthful status (no PII, no raw fields).
+    var sub = document.createElement('div'); sub.className = 's';
+    sub.style.cssText = 'display:flex;align-items:center;gap:6px;flex-wrap:wrap;';
+    ctxChipEl = document.createElement('span'); ctxChipEl.className = 'bwn-ask-ctx';
+    ctxChipEl.setAttribute('aria-label', 'Current record context');
+    ctxChipEl.style.cssText = 'font:11px/1.4 -apple-system,Segoe UI,Roboto,sans-serif;background:rgba(255,255,255,.15);color:#fff;border-radius:6px;padding:1px 7px;';
+    statusEl = document.createElement('span'); statusEl.className = 'bwn-ask-status';
+    statusEl.setAttribute('role', 'status'); statusEl.setAttribute('aria-live', 'polite');
+    statusEl.style.cssText = 'font:11px/1.4 -apple-system,Segoe UI,Roboto,sans-serif;color:rgba(255,255,255,.85);';
+    sub.appendChild(ctxChipEl); sub.appendChild(statusEl);
+    hdLeft.appendChild(sub);
+    head.appendChild(hdLeft);
+    setContextChip(); setStatus('Ready');
 
     modelSel = document.createElement('select');
     modelSel.style.cssText = 'all:unset;cursor:pointer;font:12px -apple-system,Segoe UI,Roboto,sans-serif;color:#fff;background:rgba(255,255,255,.15);padding:3px 6px;border-radius:6px;margin-right:6px;';
@@ -686,25 +973,40 @@
     msgsEl.className = 'bwn-drawer-body';
     panelEl.appendChild(msgsEl);
 
+    panelEl.appendChild(buildCmdBar());
+
     var foot = document.createElement('div');
     foot.className = 'bwn-drawer-ft';
     foot.style.cssText = 'align-items:flex-end;gap:6px;';
     inputEl = document.createElement('textarea');
     inputEl.rows = 2;
-    inputEl.placeholder = 'Ask about the work order you\'re viewing...';
+    inputEl.placeholder = 'Ask about this work order or choose a quick command…';
+    inputEl.setAttribute('aria-label', 'Ask about this work order');
     inputEl.style.cssText = 'flex:1;resize:none;font:13px -apple-system,Segoe UI,Roboto,sans-serif;padding:7px 9px;border:1px solid #cdd6d1;border-radius:9px;outline:none;';
     inputEl.addEventListener('keydown', function (e) { if (e.key === 'Enter' && !e.shiftKey) { e.preventDefault(); doAsk(); } });
+    inputEl.addEventListener('input', function () { if (panelEl && panelEl._escReset) panelEl._escReset(); if (statusEl && statusEl.textContent.indexOf('Press Escape') === 0) setStatus('Ready'); });
     sendBtn = document.createElement('button');
     sendBtn.type = 'button'; sendBtn.className = 'bwn-ops-btn primary';
-    sendBtn.textContent = 'Send';
+    sendBtn.textContent = 'Ask';                 // neutral submit label (never Send/Post/Save/etc.)
+    sendBtn.setAttribute('aria-label', 'Ask this question');
     sendBtn.addEventListener('click', doAsk);
     foot.appendChild(inputEl);
     foot.appendChild(sendBtn);
     panelEl.appendChild(foot);
 
+    // Jump-to-latest: shown only when new content lands below the reading position; read-only,
+    // scroll-only, never mutates or fetches. Hidden by default (excluded from the focus trap).
+    jumpBtn = document.createElement('button');
+    jumpBtn.type = 'button'; jumpBtn.textContent = 'Jump to latest'; jumpBtn.hidden = true;
+    jumpBtn.setAttribute('aria-label', 'Jump to latest messages');
+    jumpBtn.style.cssText = 'position:absolute;right:14px;bottom:72px;z-index:3;cursor:pointer;font:11px -apple-system,Segoe UI,Roboto,sans-serif;background:#1A5F3E;color:#fff;border:none;border-radius:999px;padding:5px 11px;box-shadow:0 2px 8px rgba(0,0,0,.22);';
+    jumpBtn.addEventListener('click', function () { if (msgsEl) msgsEl.scrollTop = msgsEl.scrollHeight; showJump(false); if (inputEl) inputEl.focus(); });
+    panelEl.appendChild(jumpBtn);
+    msgsEl.addEventListener('scroll', function () { if (atBottom()) showJump(false); });
+
     document.body.appendChild(panelEl);
     bwnFocusTrap(panelEl);
-    addMsg('assistant', 'Hi. Open a work order, then ask - I read that WO live from Umbrava (details + full note / site-visit history) and a summary of the other work orders at the same location, plus Broadway\'s knowledge doc, and answer with dates and references. I never guess; if it\'s not in the record I\'ll say so.');
+    addMsg('assistant', 'Ask BWN is read-only. Open a work order, then ask or pick a quick command below. I read that WO live (details + notes + a roster of other work orders at the same location) plus Broadway\'s knowledge doc, answer with dates and references, and never guess - if it is not in the record I say so. I can draft text for you to review and submit manually; I cannot make any change in Umbrava.');
     inputEl.focus();
   }
 
