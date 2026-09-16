@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         BWN Drop Upload (Broadway National)
 // @namespace    broadwaynational.bwn
-// @version      1.30.0
+// @version      1.31.0
 // @downloadURL  https://raw.githubusercontent.com/Intermu/userscripts/main/bwn-drop-upload.user.js
 // @updateURL    https://raw.githubusercontent.com/Intermu/userscripts/main/bwn-drop-upload.user.js
 // @description  Drop files anywhere on an Umbrava work order to upload them. Opens the Documents tab and upload dialog, hands over the files, and builds each file's description from its contents. Emails are parsed locally (.msg via an OLE/MAPI reader, .eml via RFC822) into an Outlook-style block - From/Sent/To/Cc/Subject and the body - that becomes the WO note, led by a one-line summary from Chrome's on-device built-in AI (zero cost, zero egress, nothing leaves the browser), falling back to local WO-field extraction (store, city/state, priority, PO, NTE, problem, requester) when the on-device model is unavailable. That same summary fills each file's Description. The WO note's Type is chosen from the email's parties: inbound is typed by the sender (client -> Client, else Vendor); outbound from Broadway is typed by the recipients (a client recipient -> Client, any vendor recipient -> Vendor, all-internal -> Internal). Umbrava's Description field is a TipTap/ProseMirror rich-text editor. It rejects synthetic paste, beforeinput, insertHTML and raw innerHTML, but honours execCommand('insertText') plus a synthetic Enter keydown - so the note is filled line by line (Enter between lines to keep paragraphs), paced ~12ms/line so ProseMirror's async commit doesn't drop lines (measured live 2026-08-10). The text is also placed on your clipboard as a backup, and if every fill method fails a "Copy the WO note" button appears (its click supplies the gesture for a reliable copy, then Ctrl+V). A console diagnostic reports which editor was found and which fill method stuck. When WO Intake hands off a just-created WO's request email, each uploaded file's Label (document type) is set to "Work Order Request" and the note Type is forced to Client (a WO Intake handoff is a client's request, even when the sender is a broker like Fairmarkit that reads as a Vendor domain). Fairmarkit / bulk-email footer boilerplate (the Fairmarkit company block: tagline + Boston address + FAQ/Privacy/Terms/Unsubscribe, and the -----!{...}!----- machine tail) plus ALL tracking URLs (safelinks/awstrack/logo) are stripped from the note body, keeping content through the suppliers@ email. A Fairmarkit RFQ body is also condensed to one line per entry - single-spaced, with each line-item rejoined to its QTY and each Details label (Buyer/Close date/RFQ ID/Shipping address) rejoined to its value. Files upload via Umbrava's own API (initializeJobDocument -> Azure blob PUT -> bulkAddWorkOrderDocuments, captured live 2026-08-12), Label set by id, so the brittle upload-dialog combobox is bypassed; the dialog remains the automatic fallback if the API is unavailable. A manual drop does NOT auto-upload: the review box gives EACH queued file its own "Document type" picker plus one Upload button, so the coordinator confirms the type per file before it is committed (there is no update-label mutation, so the label must be right at upload time). Each picker is auto-set: a photo files as Photo, an email as correspondence by party (Client -> Client Correspondence, Vendor -> Vendor Correspondence, Internal -> Internal), everything else as the WO-request default; the email rows stay in sync as the note Type is changed until overridden, and for an unknown external party the on-device classifier upgrades an email row Vendor -> Supplier Correspondence when it reads as a parts supplier. Any row can be changed individually. After Upload the button reports Uploaded (or a dialog fallback on failure). The file Description is still filled automatically from the file's contents / the email summary. Only the WO Intake handoff still uploads automatically, and it labels per file: the request email itself is the "Work Order Request", while any image attachment is filed as a "Photo". The email note is shown in a centered BWN review box (editable; the Type picker offers a curated set of the note types a drop is actually filed under, defaulted to the party-derived Client/Vendor/Internal) and posted via addEditJobNote ONLY when you click Post - it is never auto-posted, and posts under your own Umbrava session for correct attribution. A dropped email is a CONTAINER, so its real attachments (the PDF, the site photos) are extracted and uploaded as documents of their own, listed under the note - the sender's signature graphics are left behind, identified by their MAPI hidden / MHTML-reference marks (.msg) or by being disposed inline with a cited Content-ID (.eml) rather than by size or filename; an attached image is filed as a "Photo" while the email keeps the document type you picked. Ticking "This client email needs a response" now also posts an Action note that @-mentions the work order's assignee (the notify rides the TipTap mention span the SPA itself sends), then prompts them every 15 minutes until they log a Client note on that WO; after 5 unanswered prompts it posts an Escalation note @-mentioning their supervisor and manager. Who that is is READ FROM UMBRAVA, not configured anywhere: Company > Users shows each person's Teams, and the ops behind that page (user(id){parentTeams{parentTeam}} then users(teamId:){role{name}}) give the assignee's team and its members, from which whoever ranks supervisor or manager is told. A team may carry both or only one; the assignee is excluded, so a manager's own unanswered work does not escalate to themselves. Role-to-rank mirrors the SWA's own ladder so the two cannot disagree. Nothing to set up and no name is written down - fix the team in Umbrava and the escalation follows. The prompt ladder is local (localStorage + a ticker + a browser notification, falling back to an in-page toast), so it runs while an Umbrava tab is open; the Action note and the escalation are work-order notes, so the record of the chase survives a closed browser. Network calls are same-origin to app.umbrava.com's own /api/graphql (the app's Auth0 bearer, no @connect/GM) plus the SAS-authorized blob PUT the SPA itself makes - nothing goes to any third party. The review box lists every queued file (name, size, type icon) so it is clear what will be uploaded; each still-held file has a × to remove it before Upload (there is no delete-document mutation, so removal is pre-upload only), and a second drop of a file already in the queue (same name + size) is skipped with a count, so dragging the same thing twice does not upload it twice. @grant none.
@@ -15,7 +15,7 @@
 (function () {
   'use strict';
 
-  var VER = '1.30.0';   // keep in step with @version (drift caught earlier: banner had lagged two releases)
+  var VER = '1.31.0';   // keep in step with @version (drift caught earlier: banner had lagged two releases)
   var BWN_VER = VER;   // stamped into BWN-OPS audit entries; the wrapper references BWN_VER
   console.info('[BWN DROP UPLOAD] v' + VER + ' · Uploads via Umbrava API (initializeJobDocument→blob PUT→bulkAddWorkOrderDocuments, Label by id), DOM dialog is the fallback · manual drop HOLDS the upload: the review box shows a Document type picker (defaulted to MATCH the note Type - Client->Client Correspondence, Vendor->Vendor Correspondence, Internal->Internal - and re-synced as the note Type changes, until overridden) + an Upload button, so the type is CHOSEN, not assumed · email→note in a human-gated BWN review box, posted via addEditJobNote on an explicit Post click (never auto-posted) · note Type by parties (inbound=sender, outbound=recipient) · note box shows instantly with a mechanical lead; the slow on-device AI brief (Gemini Nano / Edge Phi) fills in async · a dropped email is a CONTAINER: its real attachments upload as their own documents (signature graphics dropped by their MAPI/Content-ID marks; an attached image files as Photo) · "needs a response" also posts an Action note @-mentioning the WO assignee, then prompts every 15 min until they log a Client note, escalating after 5 to the supervisor + manager READ from their Umbrava team (Company > Users/Teams), nothing configured · bwn:cmd dropupload:files bridge (handoff labels per file: the email = Work Order Request, image attachments = Photo) · review box LISTS every queued file with a × to remove one before Upload, and a re-dropped file (same name+size) is skipped with a count');
 
@@ -382,7 +382,10 @@
   // artifacts and cut at the first quoted header block (the prior thread), so the
   // note carries what was actually written, not the whole reply chain.
   var BODY_MAX = 20000;   // bound regex work on pathological bodies (real plain-text email bodies are tiny)
-  function tidyBody(raw) {
+  // keepThread=true leaves the quoted "From:/Sent:/Subject:" thread in place. A REPLY's content is
+  // the new text above that cut, so we drop it; a FORWARD's content IS the forwarded message below
+  // the cut, so callers summarizing a forward pass keepThread=true (then strip the envelope lines).
+  function tidyBody(raw, keepThread) {
     var rawStr = String(raw || '');
     // Fairmarkit RFQ bodies come through the plain-text stream double-spaced with every table cell on
     // its own line; they also carry a company footer + tracking URLs. Detect so the extra cleanup is
@@ -397,7 +400,7 @@
     var fcut = body.search(/Autonomous sourcing for all spend|Fairmarkit,\s*1 Beacon/i);
     if (fcut > 0) body = body.slice(0, fcut).replace(/\n[ \t]*Fairmarkit[ \t]*\s*$/i, '\n');
     var lines = body.split('\n');
-    for (var i = 0; i < lines.length; i++) {
+    if (!keepThread) for (var i = 0; i < lines.length; i++) {
       // Only treat a "From:" line as the start of the quoted reply thread if it
       // carries an actual address (@ or <…>) AND at least two more quoted-header
       // fields (Sent/To/Subject/Cc) follow within a few lines. Prose that merely
@@ -554,9 +557,21 @@
   // "Kind Regards," sign-off below. A bare "Thanks,"/"Thank you." sign-off is < 12 chars, so the length
   // guard drops it anyway.
   var SALUTATION_RE = /^(hi|hello|hey|dear|good\s+(morning|afternoon|evening)|greetings)\b/i;
+  // Drop a forwarded message's envelope header lines (From/Sent/To/Cc/Subject/Date and the
+  // "----- Forwarded message -----" rule) so a summary reads the forwarded PROSE, not the envelope.
+  function stripFwdHeaders(t) {
+    return String(t || '').split('\n').filter(function (l) {
+      return !/^\s*(from|sent|to|cc|bcc|subject|date|importance|reply-to)\s*:/i.test(l) &&
+             !/^\s*-+\s*(original|forwarded)\s+message\s*-+/i.test(l);
+    }).join('\n');
+  }
   function genericEmailSummary(m) {
     var who = (m.fromName || smtpAddr(m.fromEmail) || '').replace(/\s+/g, ' ').trim();
-    var body = tidyBody(m.body || '');
+    // A forward's content is the forwarded message BELOW the quoted-thread cut - keep it, then strip
+    // its envelope lines. A reply/original keeps the normal thread-cut (new text only).
+    var fwd = isForward(m);
+    var body = tidyBody(m.body || '', fwd);
+    if (fwd) body = stripFwdHeaders(body);
     if (!body) return '';
     var parts = body.split(/\n{2,}/), para = '';
     for (var i = 0; i < parts.length; i++) {
@@ -579,8 +594,12 @@
   // carries the real ask in its SUBJECT (WO#/store/EMERGENCY) over a body that's just a signature,
   // so lead with the subject instead ("<Sender>: Sent <Subject>"). Reply = an RE:/AW:/SV: subject.
   function isReplyEmail(m) { return /^\s*(re|aw|sv|res)\s*:/i.test((m && m.subject) || ''); }
+  function isForward(m) { return /^\s*(fw|fwd)\s*:/i.test((m && m.subject) || ''); }
   function emailLead(m) {
-    if (m && m.subject && !isReplyEmail(m)) {
+    // Only an ORIGINAL send leads with its subject. A REPLY carries its new text in the body, and a
+    // FORWARD carries the forwarded message in the body (genericEmailSummary keeps it, see below) -
+    // echoing "Sent FW: <subject>" just repeats the Outlook block's own subject line.
+    if (m && m.subject && !isReplyEmail(m) && !isForward(m)) {
       var who = (m.fromName || smtpAddr(m.fromEmail) || '').replace(/\s+/g, ' ').trim();
       return (who ? who + ': ' : '') + 'Sent ' + String(m.subject).replace(/\s+/g, ' ').trim();
     }
@@ -633,6 +652,26 @@
     if (sawExternal) return 'External';            // outbound to an unknown external party
     if (from === 'Internal') return 'Internal';    // internal <-> internal
     return '';
+  }
+  // Known SUPPLIERS (sell parts/materials/equipment, no on-site labor) by domain. Hand-maintained,
+  // mirrors CLIENT_DOMAINS: an unrecognized external domain listed here types as Supplier
+  // DETERMINISTICALLY, so a repeat supplier is never left to the flaky on-device vendor/supplier
+  // guess (reported: LSI / Power Play shipment notifications filed as Vendor Correspondence).
+  // Extend as suppliers surface; an unlisted external still falls to the AI split, not a wrong guess.
+  var SUPPLIER_DOMAINS = {
+    'lsicorp.com': 1
+    // ponytail: hand-maintained allowlist, same pattern as CLIENT_DOMAINS.
+  };
+  function knownSupplier(m) {
+    if (!m) return false;
+    var addrs = [m.fromEmail].concat(
+      (m.to || []).map(function (r) { return r && r.email; }),
+      (m.cc || []).map(function (r) { return r && r.email; }));
+    for (var i = 0; i < addrs.length; i++) {
+      var dom = (String(addrs[i] || '').split('@')[1] || '').toLowerCase().trim();
+      if (dom && SUPPLIER_DOMAINS[dom]) return true;
+    }
+    return false;
   }
   // Note Type is Client / Vendor / Internal only - there is no "Supplier" note type, so an
   // external party (vendor OR supplier) types the note as Vendor. The vendor-vs-supplier split
@@ -1385,7 +1424,10 @@
   function aiBrief(m) {
     var from = (m.fromName || smtpAddr(m.fromEmail) || '').trim();
     var to = (m.to || []).map(function (r) { return r.name || smtpAddr(r.email); }).filter(Boolean).join(', ');
-    var body = tidyBody(m.body).slice(0, 4000);   // the NEW message only - thread cut
+    // Reply/original: the NEW message only (thread cut). Forward: keep the forwarded message (its
+    // whole point sits below the cut) minus the envelope header lines, so the brief has real content.
+    var fwd = isForward(m);
+    var body = (fwd ? stripFwdHeaders(tidyBody(m.body, true)) : tidyBody(m.body)).slice(0, 4000);
     var content = 'From: ' + from + '\nTo: ' + to + '\nSubject: ' + String(m.subject || '') + '\n\n' + body;
     return bwnAI({
       task: 'summarize',
@@ -1439,7 +1481,10 @@
           // one. Mirrors the Vendor -> Supplier email-row upgrade: never over a touched/locked pick.
           if (looksLikeVendorProposal(text) && pending === pend && noteBox && noteBox.__lblSels) {
             var s = noteBox.__lblSels[i];
-            if (s && !s.__touched && !s.disabled && s.value === DEFAULT_DOC_LABEL) s.value = 'Vendor Proposal';
+            // Fire over the WO-request default OR a correspondence default (an estimate PDF attached
+            // to a vendor email now defaults to *Correspondence*, but is still a proposal). Never
+            // over a touched/locked pick.
+            if (s && !s.__touched && !s.disabled && (s.value === DEFAULT_DOC_LABEL || /Correspondence$/.test(s.value))) s.value = 'Vendor Proposal';
           }
           return summarizeDocText(text).then(function (sum) {
             if (!sum) return;
@@ -2390,6 +2435,7 @@
     if (m.__party) return Promise.resolve(m.__party);
     var p = partyByDomain(m);
     if (p !== 'External') { p = p || 'Client'; m.__party = p; return Promise.resolve(p); }
+    if (knownSupplier(m)) { m.__party = 'Supplier'; return Promise.resolve('Supplier'); }
     return vendorOrSupplier(m).then(function (r) { m.__party = r; return r; });
   }
   // Auto-pick the doc Label for a manual drop. An email is CORRESPONDENCE, labeled by the other party:
@@ -2808,6 +2854,10 @@
       if (!d) return DEFAULT_DOC_LABEL;
       if (d.kind === 'Photo') return 'Photo';
       if (d.isEmail) return noteToDocLabel(initType);
+      // A non-photo attachment of a correspondence email IS that correspondence, not a new Work
+      // Order Request (d.fromEmail is set only on an email's spliced-out attachment). It follows
+      // the note party like the email row, incl. the async Vendor -> Supplier upgrade below.
+      if (d.fromEmail) return noteToDocLabel(initType);
       return DEFAULT_DOC_LABEL;
     }
     var lblSels = [];     // per-file <select>, index-aligned with pending.files (only while held)
@@ -2832,7 +2882,9 @@
           lsel.value = autoDocLabel(d);
           lsel.addEventListener('change', function () { lsel.__touched = true; });
           lblSels[i] = lsel;
-          if (d.isEmail) emailSels.push(lsel);
+          // Email rows AND a correspondence email's non-photo attachments track the note party
+          // (sync on note-Type change + the Vendor -> Supplier upgrade). A photo stays 'Photo'.
+          if (d.isEmail || (d.fromEmail && d.kind !== 'Photo')) emailSels.push(lsel);
           row.appendChild(lsel);
           var x = document.createElement('button'); x.type = 'button'; x.textContent = '×'; x.title = 'Remove this file';
           x.style.cssText = 'flex:0 0 auto;width:20px;height:20px;padding:0;border:1px solid #d6c0c0;background:#fbf2f2;color:#a23;border-radius:5px;cursor:pointer;font:700 14px/1 Arial;';
@@ -2850,7 +2902,8 @@
     if (held) {
       var nUp = pendingUpload.raw.length;
       // An unknown external party can be a vendor OR a supplier; the note Type has no Supplier
-      // option, so ask the on-device classifier and upgrade an untouched email row Vendor -> Supplier.
+      // option, so a known-supplier domain / the on-device classifier upgrades untouched Vendor
+      // Correspondence rows (the email AND its attachments, both in emailSels) -> Supplier.
       if (hasEmail) {
         docLabelForFiles(pending.files).then(function (lbl) {
           if (lbl !== 'Supplier Correspondence') return;

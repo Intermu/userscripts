@@ -157,7 +157,7 @@ A.ok('base64 body decoded', /Unit down - please expedite\./.test(b.body), JSON.s
 // content in the body, so lead with "<Responder>: <reply text>". Slices the real lead cluster.
 var LEAD = slice('function smtpAddr(', '// ---- Note Type from the email', 'emailLead cluster');
 var lapi = { String: String };
-vm.runInNewContext(LEAD + '\n;this.emailLead=emailLead;this.isReplyEmail=isReplyEmail;', lapi);
+vm.runInNewContext(LEAD + '\n;this.emailLead=emailLead;this.isReplyEmail=isReplyEmail;this.isForward=isForward;', lapi);
 
 console.log('# emailLead - original (no RE:) leads with the subject');
 var orig = { subject: 'FF62336 WO# 1135344-00000006 EMERGENCY', fromName: 'Jo Woods', fromEmail: 'jwoods@caleres.com', body: 'Thanks,\n\n\nJo Woods\nSpecialist, Store Maintenance | CALERES' };
@@ -172,5 +172,20 @@ A.ok('reply lead leads with the responder + body (not the subject)',
   JSON.stringify(lapi.emailLead(reply)));
 A.ok('RE: / Re: / RE : / AW: all detected as replies',
   lapi.isReplyEmail({ subject: 'Re: x' }) && lapi.isReplyEmail({ subject: 'RE : x' }) && lapi.isReplyEmail({ subject: 'AW: x' }));
+
+console.log('# emailLead - FORWARD summarizes the forwarded content, not the "FW:" subject');
+// A forward's own text is empty; its point is the forwarded message below the quoted-thread cut.
+// The lead must read that content, never echo "Sent FW: <subject>" (the Outlook block shows it).
+var fwd = {
+  subject: 'FW: SHIPMENT NOTIFICATION | 4278378 | SO | BROADWAY NATIONAL SIGN & LIGHTING LLC | PILOT 436 AMARILLO TX',
+  fromName: 'Power Play Service', fromEmail: 'PowerPlayService@lsicorp.com',
+  body: '\n\nFrom: Power Play Service <PowerPlayService@lsicorp.com>\nSent: Wednesday, September 16, 2026 8:12 AM\nTo: Pilot <Pilot@broadwaynational.com>\nSubject: SHIPMENT NOTIFICATION\n\nYour order has shipped. Tracking information is below: FedEx 771234567890, ETA Friday.'
+};
+A.ok('FW: is detected as a forward, not an original', lapi.isForward(fwd) === true && lapi.isReplyEmail(fwd) === false);
+var fl = lapi.emailLead(fwd);
+A.ok('forward lead does NOT echo "Sent FW:"', !/Sent FW:/i.test(fl), JSON.stringify(fl));
+A.ok('forward lead reads the forwarded content (sender + tracking prose)',
+  /^Power Play Service: /.test(fl) && /Tracking information is below/.test(fl) && !/^\s*From:/m.test(fl),
+  JSON.stringify(fl));
 
 A.finish();

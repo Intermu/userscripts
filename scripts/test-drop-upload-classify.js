@@ -83,6 +83,10 @@ function run() {
     .then(function (l) { A.eq('label: unknown external + AI "supplier" -> Supplier Correspondence', l, 'Supplier Correspondence'); })
     .then(function () { ctx.setAI('vendor'); return ctx.docLabelForFiles([emailFile(inbound('tech@acmehvac.com'))]); })
     .then(function (l) { A.eq('label: unknown external + AI "vendor" -> Vendor Correspondence', l, 'Vendor Correspondence'); })
+    // A known SUPPLIER domain is deterministic - Supplier even when the AI would guess vendor (the reported LSI/Power Play case).
+    .then(function () { ctx.setAI('vendor'); return ctx.docLabelForFiles([emailFile(inbound('powerplayservice@lsicorp.com'))]); })
+    .then(function (l) { A.eq('label: known supplier domain -> Supplier Correspondence (no AI guess)', l, 'Supplier Correspondence'); })
+    .then(function () { A.eq('known supplier still types the NOTE as Vendor (no Supplier note type)', ctx.noteTypeForEmail(inbound('powerplayservice@lsicorp.com')), 'Vendor'); })
     .then(function () { ctx.setAI(''); return ctx.docLabelForFiles([emailFile(inbound('who@mystery.com'))]); })
     .then(function (l) { A.eq('label: unknown external + AI MISS -> Vendor Correspondence (fallback)', l, 'Vendor Correspondence'); })
     .then(function () { ctx.setAI('supplier'); return ctx.docLabelForFiles([emailFile(outbound('boss@broadwaynational.com'))]); })
