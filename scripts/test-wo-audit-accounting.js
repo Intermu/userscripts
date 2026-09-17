@@ -137,6 +137,24 @@ function section4() {
   A.eq('empty-string note counts as written', auditTally(res, 3), { ok: 1, errs: 1, skipped: 1 });
   A.eq('row with empty note is NOT pending',
     pendingRows(mkRows(3), res).map(function (r) { return r.key; }), ['W-1001', 'W-1002']);
+
+  // 0.12.0: a DEGRADED row is a fourth shape - it has a real (deterministic) note, so it is NOT
+  // "no note", but the AI never phrased it, so Retry Unfinished must still pick it up once the
+  // service is back. The tally shape is deliberately UNCHANGED (ok/errs/skipped): a degraded row
+  // did get written, and inventing a fourth counter here would silently rewrite every caller's
+  // arithmetic. The visibility lives on the row and in the log line instead.
+  var dres = new Array(3);
+  dres[0] = { key: 'a', note: 'Materials pending - parts on backorder (Materials) - ECD TBD', degraded: 'AI unavailable' };
+  dres[1] = { key: 'b', note: 'a real AI note' };
+  dres[2] = { key: 'c', error: 'boom' };
+  A.eq('a degraded row counts as WRITTEN, not failed', auditTally(dres, 3), { ok: 2, errs: 1, skipped: 0 });
+  A.eq('but it is still pending, so a retry re-drafts it',
+    pendingRows(mkRows(3), dres).map(function (r) { return r.key; }), ['W-1000', 'W-1002']);
+  A.ok('owedPhrase never counts a degraded row as having no note',
+    mod.owedPhrase(auditTally(dres, 3)).indexOf('1 row with no note') === 0, mod.owedPhrase(auditTally(dres, 3)));
+  // negative control: a plain successful row is NOT pending, so the degraded clause is targeted.
+  A.eq('control: a clean AI row is not pending',
+    pendingRows(mkRows(1), [{ key: 'b', note: 'ok note' }]).length, 0);
   return Promise.resolve();
 }
 
@@ -182,7 +200,16 @@ function section6() {
   A.ok('retry targets come from pendingRows, not an .error filter',
     /\? pendingRows\(session\.rows, session\.results\)/.test(TEXT));
   A.ok('retry button gate covers skipped rows',
-    /if \(tal\.errs \|\| tal\.skipped\) \{ var rb =/.test(TEXT));
+    /if \(tal\.errs \|\| tal\.skipped \|\| degraded\) \{ var rb =/.test(TEXT));
+  // 0.12.0: a degraded row wrote a deterministic note, so it never reaches tal.errs. Without it in
+  // this gate a total AI outage reads "Done. N written, 0 failed." with the Retry button HIDDEN -
+  // the exact silent-success the run-accounting layer exists to prevent.
+  A.ok('retry button gate also covers DEGRADED rows (AI fallback)',
+    /\|\| degraded\) \{ var rb =/.test(TEXT));
+  A.ok('the causes ladder reads degraded rows too, so the credits diagnosis still fires',
+    /rr\.error \|\| rr\.degraded/.test(TEXT));
+  A.ok('a degraded run says so in the log',
+    /fell back to the deterministic audit note/.test(TEXT));
   A.ok('gql is bounded by a timeout (UAT-4a)', /GQL_TIMEOUT_MS/.test(TEXT) && /ctl\.abort\(\)/.test(TEXT));
   A.ok('all-failed guidance is derived from observed causes (UAT-1a)',
     /allThrottle/.test(TEXT) && /Nothing is misconfigured/.test(TEXT));

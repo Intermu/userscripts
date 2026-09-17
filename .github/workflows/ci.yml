@@ -131,6 +131,17 @@ jobs:
       - name: WO Audit over-30 timeline harness (0.11.0)
         run: node scripts/test-wo-audit-timeline.js
 
+      # WO Audit 0.12.0: the normalized operational-state layer - the deterministic stage/blocker/
+      # owner/next-action/ECD derivation, the deterministic fallback note, and the STRICT AI output
+      # gate. Pins the rules that stop an audit note inventing operational facts: an arrival or
+      # delivery date NEVER becomes an ECD, a lapsed ECD reads TBD, age and silence NEVER assign an
+      # owner, this tool's own prior notes are not evidence for the next run, and any date the model
+      # prints that is absent from the evidence is rejected outright. Also re-pins the three shipped
+      # over-30 tails so the state layer cannot drift the established note format. Negative control
+      # on every rule.
+      - name: WO Audit operational-state + fallback + AI-output gate (0.12.0)
+        run: node scripts/test-wo-audit-state.js
+
       # bwn-wo-extract (Operations Assist): the thin, read-only caller for the deployed
       # /api/extract-work-order endpoint. Byte-sliced + fake-env harness pinning the bounded
       # allowlist payload, the NTE-semantic exclusion of client-DNE, the refusal gate (route /
