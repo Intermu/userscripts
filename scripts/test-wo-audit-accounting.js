@@ -200,7 +200,16 @@ function section6() {
   A.ok('retry targets come from pendingRows, not an .error filter',
     /\? pendingRows\(session\.rows, session\.results\)/.test(TEXT));
   A.ok('retry button gate covers skipped rows',
-    /if \(tal\.errs \|\| tal\.skipped\) \{ var rb =/.test(TEXT));
+    /if \(tal\.errs \|\| tal\.skipped \|\| degraded\) \{ var rb =/.test(TEXT));
+  // 0.12.0: a degraded row wrote a deterministic note, so it never reaches tal.errs. Without it in
+  // this gate a total AI outage reads "Done. N written, 0 failed." with the Retry button HIDDEN -
+  // the exact silent-success the run-accounting layer exists to prevent.
+  A.ok('retry button gate also covers DEGRADED rows (AI fallback)',
+    /\|\| degraded\) \{ var rb =/.test(TEXT));
+  A.ok('the causes ladder reads degraded rows too, so the credits diagnosis still fires',
+    /rr\.error \|\| rr\.degraded/.test(TEXT));
+  A.ok('a degraded run says so in the log',
+    /fell back to the deterministic audit note/.test(TEXT));
   A.ok('gql is bounded by a timeout (UAT-4a)', /GQL_TIMEOUT_MS/.test(TEXT) && /ctl\.abort\(\)/.test(TEXT));
   A.ok('all-failed guidance is derived from observed causes (UAT-1a)',
     /allThrottle/.test(TEXT) && /Nothing is misconfigured/.test(TEXT));

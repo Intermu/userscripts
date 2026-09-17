@@ -42,7 +42,7 @@ var T = (new Function('MS_DAY', '_date', 'auditCfg', 'STALE_DAYS',
   SECTION + '\n;return { deriveState: deriveState, composeAuditStatusNote: composeAuditStatusNote,' +
   ' validateAiNote: validateAiNote, meaningfulNotes: meaningfulNotes, woaAffirm: woaAffirm,' +
   ' woaDateTokens: woaDateTokens, woaDropHyphenRanges: woaDropHyphenRanges,' +
-  ' composeTimelineNote: composeTimelineNote, WOA_PHASE: WOA_PHASE };'
+  ' composeTimelineNote: composeTimelineNote, fallbackChain: fallbackChain, ungroundedDates: ungroundedDates, WOA_PHASE: WOA_PHASE };'
 ))(MS_DAY, _date, auditCfg, STALE_DAYS);
 
 // Fixed clock: 2026-09-17 local noon.
@@ -289,5 +289,124 @@ A.ok('no em dash anywhere in the composed note', styleNote.indexOf('—') === -1
 A.ok('no empty " -  - " runs from omitted clauses', styleNote.indexOf(' -  - ') === -1, styleNote);
 // negative control: the source file itself carries no em dash in the new block.
 A.ok('control: the STATE block ships no em dash', SECTION.indexOf('—') === -1);
+
+// ---------------------------------------------------------------------------
+// The blocks below were added after an adversarial review found four defects that the first pass
+// of this harness did not catch. Each one pins the FIXED behaviour and carries the exact input that
+// failed before the fix, so a regression re-opens the same hole loudly.
+
+console.log('\n16. The ECD strip must not eat the timeline (B2 regression)');
+// An over-30 chain routinely NAMES a lapsed ECD mid-history. A greedy /- ECD[\s\S]*$/ strip deleted
+// every segment after the first such mention - three of four dated events, the richest part of the
+// note, silently gone. This pins the anchored strip.
+var STRIP = /\s*-\s*ECD\s+(?:\d{1,2}\/\d{1,2}(?:\/\d{2,4})?|TBD|not set)\b[^-]*$/i;
+A.eq('a mid-chain ECD mention is PRESERVED in full',
+  'received 7/1 - ECD 8/15 committed - 8/20 vendor no-show - 9/2 awaiting reschedule'.replace(STRIP, '').trim(),
+  'received 7/1 - ECD 8/15 committed - 8/20 vendor no-show - 9/2 awaiting reschedule');
+A.eq('a genuinely ECHOED trailing ECD is still stripped',
+  'received 7/1 - 8/20 no-show - ECD 9/30'.replace(STRIP, '').trim(), 'received 7/1 - 8/20 no-show');
+A.eq('a trailing "ECD TBD" echo is stripped too',
+  'parts ordered 8/2 - ECD TBD'.replace(STRIP, '').trim(), 'parts ordered 8/2');
+// negative control: the strip is targeted - an ordinary chain is untouched.
+A.eq('control: a chain with no ECD token is left alone',
+  'received 7/1 - installed 8/3'.replace(STRIP, '').trim(), 'received 7/1 - installed 8/3');
+A.ok('control: the SHIPPED regex is the anchored one, not a greedy strip',
+  /ECD\\s\+\(\?:/.test(TEXT.replace(/\\/g, '\\')) || TEXT.indexOf("ECD\\s+(?:\\d{1,2}\\/\\d{1,2}") !== -1,
+  'the greedy [\\s\\S]*$ form must not return');
+A.ok('control: the greedy strip form is gone from the source',
+  TEXT.indexOf("/\\s*-\\s*ECD\\b[\\s\\S]*$/i") === -1);
+
+console.log('\n17. The printed ECD must be the DERIVED ECD (B3)');
+// The generic "is this date in the evidence" check is not enough: a parts-delivery or appointment
+// date IS in the evidence, so the model could lift it and print it as a completion commitment.
+var fB3 = st(H('Material Ordered'), [note('Parts are on backorder; supplier says they arrive 9/30. Tech appointment held 9/22.', 2)]);
+var groundB3 = 'Note 1 (9/15): Parts are on backorder; supplier says they arrive 9/30. Tech appointment held 9/22.';
+A.eq('derived ECD is TBD for this fixture', fB3.ecdText, 'TBD');
+var lifted = T.validateAiNote('Materials pending - parts on backorder (Materials) - Vendor to confirm delivery and rebook - ECD 9/30', fB3, groundB3);
+A.ok('a delivery date printed as the ECD is REJECTED', !!lifted, lifted);
+A.ok('...and the reason names the substitution', /9\/30/.test(lifted) && /derived facts did not supply/.test(lifted), lifted);
+A.ok('an appointment date printed as the ECD is REJECTED',
+  !!T.validateAiNote('Materials pending - parts on backorder (Materials) - Vendor to rebook the visit - ECD 9/22', fB3, groundB3));
+// negative control: the CORRECT ECD passes, so the rule is a pin and not a blanket refusal.
+A.eq('control: the derived ECD TBD is accepted',
+  T.validateAiNote('Materials pending - parts on backorder (Materials) - Vendor to confirm the delivery date - ECD TBD', fB3, groundB3), '');
+var fB3b = st(H('Scheduled', { priority: { expectedCompletionDate: '2026-09-25' } }), []);
+A.eq('control: a real derived date is accepted when printed exactly',
+  T.validateAiNote('Scheduled - Vendor to attend the visit and report the outcome - ECD 9/25', fB3b, ''), '');
+A.ok('control: a DIFFERENT date is rejected even when a derived ECD exists',
+  !!T.validateAiNote('Scheduled - Vendor to attend the visit and report the outcome - ECD 9/26', fB3b, 'note mentions 9/26'));
+
+console.log('\n18. Access vocabulary must not fire on ordinary notes (B4)');
+// Every line below is a note where the job is going RIGHT, or where "access" is the TRADE rather
+// than a problem. All five used to produce "site access not confirmed (Scheduling/Access)".
+var benign = [
+  'Replaced the badge reader at the main entrance, unit tested OK.',
+  'Site contact is Bob Smith 555-1234, tech has the number.',
+  'Access window confirmed for Monday 8-4.',
+  'Escort required per store policy - handled, no delay.',
+  'Badge access granted by the store manager without issue.',
+  'No access issues, tech got in fine.',
+  'Locked in pricing with the supplier for the panel.'
+];
+var wrong = [];
+benign.forEach(function (b) {
+  var fb = st(H('Scheduled', { nextOnsiteDate: '2026-09-20' }), [note(b, 2)]);
+  if (fb.primaryBlocker === 'site access/appointment window not confirmed') wrong.push(b);
+});
+A.eq('no benign note produces an access blocker', wrong, []);
+// positive control: a REAL access failure still fires - the tightening did not just disable the rule.
+var real = [
+  'Tech could not get access, the site was closed on arrival.',
+  'Vendor was denied access by the store manager.',
+  'Crew turned away, no one on site to let them in.'
+];
+var missed = [];
+real.forEach(function (b) {
+  var fr = st(H('Scheduled', { nextOnsiteDate: '2026-09-14' }), [note(b, 2)]);
+  if (fr.primaryBlocker !== 'site access/appointment window not confirmed') missed.push(b);
+});
+A.eq('every real access failure still fires', missed, []);
+
+console.log('\n19. Low confidence drops an INFERRED blocker but keeps a CERTAIN one (M10)');
+// The first pass of this harness could not catch a regression here: its only low-confidence fixture
+// had no blocker at all, so deleting the guard changed nothing.
+var fInf = st(H('Material Ordered'), [note('Parts are on backorder, supplier confirmed.', 40)]);
+A.eq('a stale materials row is low/medium confidence', fInf.confidence !== 'high', true);
+A.eq('...and its blocker is INFERRED, not header-certain', fInf.blockerCertain, false);
+var fLow = { currentStage: 'Materials pending', primaryBlocker: 'parts on backorder', blockerOwner: 'Materials', confidence: 'low', blockerCertain: false, ecdText: 'TBD', noteCount: 1, terminal: false };
+A.ok('an inferred blocker is SUPPRESSED at low confidence',
+  T.composeAuditStatusNote(fLow).indexOf('parts on backorder') === -1, T.composeAuditStatusNote(fLow));
+var fCert = { currentStage: 'Vendor scheduling pending', primaryBlocker: 'no vendor assigned yet', blockerOwner: 'Coordinator', confidence: 'low', blockerCertain: true, ecdText: 'TBD', noteCount: 0, terminal: false };
+A.ok('a header-CERTAIN blocker survives low confidence',
+  T.composeAuditStatusNote(fCert).indexOf('no vendor assigned yet') !== -1, T.composeAuditStatusNote(fCert));
+// negative control: the certain blocker still prints its owner, so the clause is whole.
+A.ok('control: the certain blocker keeps its owner label',
+  /no vendor assigned yet \(Coordinator\)/.test(T.composeAuditStatusNote(fCert)), T.composeAuditStatusNote(fCert));
+
+console.log('\n20. Deterministic over-30 fallback keeps the house format (N4)');
+var fOv = st(H('Material Ordered', { trades: [{ name: 'Exterior Lighting' }], priority: { expectedCompletionDate: '2026-09-25' } }),
+  [note('Parts on backorder, supplier lead time confirmed.', 3)]);
+var ovNote = T.composeTimelineNote(T.fallbackChain(fOv), H('Material Ordered', { trades: [{ name: 'Exterior Lighting' }], priority: { expectedCompletionDate: '2026-09-25' } }), NOW);
+A.ok('an AI-less over-30 row still opens "Over 30 - <trade>"', /^Over 30 - Exterior Lighting - /.test(ovNote), ovNote);
+A.ok('...and still closes on a shipped ECD tail', / - ECD 9\/25$/.test(ovNote), ovNote);
+A.ok('...and carries the stage and the blocker', /Materials pending/.test(ovNote) && /parts on backorder/.test(ovNote), ovNote);
+// negative control: the fallback chain is not empty filler.
+A.ok('control: the fallback chain has real content', T.fallbackChain(fOv).length > 30, T.fallbackChain(fOv));
+
+console.log('\n21. Internal money/margin detail never reaches the workbook note (N3)');
+var fMoney = st(H('Vendor Proposal Received'), [note('Vendor quoted $4,200 for the replacement, our GP is thin so push back on price.', 2)]);
+var mNote = T.composeAuditStatusNote(fMoney);
+A.ok('a dollar amount is redacted from the event clause', mNote.indexOf('$4,200') === -1, mNote);
+A.ok('margin talk is redacted too', !/GP is thin/.test(mNote), mNote);
+// negative control: the rest of the event survives - this is a redaction, not a deletion.
+A.ok('control: the non-money part of the note is still reported', /Vendor quoted/.test(mNote), mNote);
+
+console.log('\n22. Vague-filler gate covers the phrasings review found');
+var fV = st(H('Scheduled'), []);
+A.ok('"monitoring this closely" rejected', !!T.validateAiNote('Scheduled - the team is monitoring this closely - ECD TBD', fV, ''));
+A.ok('"no update available" rejected', !!T.validateAiNote('Scheduled - no update available at this time for this work order - ECD TBD', fV, ''));
+// negative control: a specific, named dependency is NOT filler.
+A.eq('control: a concrete blocker + owner is accepted',
+  T.validateAiNote('Scheduled - Vendor to attend the visit and report the outcome - ECD TBD', fV, ''), '');
 
 A.finish();

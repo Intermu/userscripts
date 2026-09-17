@@ -1066,7 +1066,11 @@
   // match. The pattern is therefore tightened to encode the failure directly, and matched raw -
   // which is why "no access ISSUES" (the healthy case) is excluded by requiring an object after
   // "no access to".
-  var WOA_ACCESS = /\b(could not (get |gain )?(access|in)\b|unable to (get |gain )?access\b|denied access\b|no access to the \w+|site (was )?(closed|locked)\b|locked out\b|access window\b|site contact\b|escort required\b|badge\b)/i;
+  // ONLY phrases that encode a FAILURE to get in. Bare nouns were removed after they inverted the
+  // truth on ordinary notes: "badge reader repair" is an access-control TRADE, "site contact is Bob"
+  // and "access window confirmed for Monday" are the job going RIGHT. Five of nine realistic notes
+  // read as an access blocker before this was tightened.
+  var WOA_ACCESS = /\b(could not (get |gain )?(access|in)\b|unable to (get |gain )?access\b|denied access\b|no access to the \w+|site (was )?(closed|locked)\b|locked out\b|turned away\b|could not enter\b|no one (on ?site|to let)\b)/i;
   var WOA_NTE = /\b((requested|submitted)\s+(a |an |the )?(dne|nte|change[- ]?order|increase)|(dne|nte|change[- ]?order)\s+(submitted|requested|sent|approved)|revised\s+(costs?|nte|dne|pricing)|price increase\s+(requested|submitted))\b/i;
 
   // A note that carries operational meaning. Excludes anything bearing a [bwn:*] marker - this
@@ -1181,7 +1185,14 @@
     // --- refinements the NOTES license --------------------------------------------------------
     var newest = mn.length ? mn[0] : null;
     if (newest) {
-      f.latestMeaningfulEvent = newest.content.replace(/\s+/g, ' ').slice(0, 160);
+      // The event clause quotes a note body verbatim, and the fallback path writes it straight into
+      // the downloaded workbook. buildAuditInput deliberately withholds GP/DNE/NTE from the note as
+      // internal-only signals, so the deterministic path must not reintroduce them through the back
+      // door - a note reading "vendor quoted $4,200, our GP is thin" would otherwise ship as-is.
+      f.latestMeaningfulEvent = newest.content.replace(/\s+/g, ' ')
+        .replace(/\$\s?[\d,]+(\.\d{2})?/g, '[amount]')
+        .replace(/\b(gross profit|GP)\b[^.;]*/gi, '[margin detail removed]')
+        .slice(0, 160);
       f.latestMeaningfulEventDate = newest.createdDate || null;
       ev.push({ kind: 'note', field: 'jobNotes', date: fmtMD(newest.createdDate) || null, value: f.latestMeaningfulEvent });
       if (newest.date) {
@@ -1308,19 +1319,49 @@
   // the caller records as the row's degradation cause. The date check is the real hallucination
   // gate: any M/D the model prints that appears in neither the note history nor the header is an
   // invented commitment, and that is exactly the failure this overhaul exists to stop.
-  var WOA_VAGUE = /\b(being handled|working on it|pending updates?|awaiting resolution|will (provide|keep you)|in progress as needed|as soon as possible)\b/i;
+  var WOA_VAGUE = /\b(being handled|working on it|pending updates?|awaiting resolution|will (provide|keep you)|in progress as needed|as soon as possible|monitoring (this|it)( closely)?|no update available)\b/i;
+  // Shared date gate, used by BOTH generated paths - the standard note and the over-30 chain that
+  // actually gets posted. Returns '' when every date in `text` appears in the evidence.
+  function ungroundedDates(text, groundText) {
+    var allowed = woaDateTokens(String(groundText || ''));
+    var used = woaDateTokens(String(text || ''));
+    for (var i = 0; i < used.length; i++) {
+      if (allowed.indexOf(used[i]) === -1) return 'AI output cited a date (' + used[i] + ') not present in the work order evidence';
+    }
+    return '';
+  }
+  // A deterministic stand-in for the model's event chain, so an over-30 row that loses the AI still
+  // ships in the house "Over 30 - <trade> - ... - ECD ..." format rather than a fourth note shape.
+  function fallbackChain(f) {
+    f = f || {};
+    var seg = [];
+    if (f.latestMeaningfulEventDate && f.latestMeaningfulEvent) {
+      var d = fmtMD(f.latestMeaningfulEventDate);
+      seg.push((d ? d + ' ' : '') + f.latestMeaningfulEvent.slice(0, 120));
+    }
+    seg.push(f.currentStage || 'status unclear');
+    if (f.primaryBlocker && (f.confidence !== 'low' || f.blockerCertain)) {
+      seg.push(f.primaryBlocker + (f.blockerOwner && f.blockerOwner !== 'Unknown' ? ' (' + f.blockerOwner + ')' : ''));
+    }
+    if (f.nextAction) seg.push(f.nextAction);
+    return seg.join(' - ');
+  }
   function validateAiNote(note, f, groundText) {
     var s = String(note == null ? '' : note).trim();
     if (!s) return 'empty AI note';
     if (s.length < 25) return 'AI note too short to be a status';
-    if (!/ - ECD (\d{1,2}\/\d{1,2}|TBD)$/.test(s)) return 'AI note did not end with the required ECD clause';
+    var m = / - ECD (\d{1,2}\/\d{1,2}|TBD)$/.exec(s);
+    if (!m) return 'AI note did not end with the required ECD clause';
+    // The ECD must be the DERIVED one, not merely a date that appears somewhere in the evidence.
+    // Without this the model could lift a parts-delivery or appointment date out of a note body and
+    // print it as a completion commitment - it would pass the generic date check below, because the
+    // date really is in the evidence, while still promising something nobody committed to.
+    var want = (f && f.ecdText) ? f.ecdText : 'TBD';
+    if (m[1] !== want) return 'AI note printed an ECD (' + m[1] + ') the derived facts did not supply (expected ' + want + ')';
     if (WOA_VAGUE.test(s)) return 'AI note used vague filler wording';
-    var allowed = woaDateTokens(String(groundText || '')).concat(woaDateTokens(f && f.ecdText ? f.ecdText : ''));
-    var used = woaDateTokens(s);
-    for (var i = 0; i < used.length; i++) {
-      if (allowed.indexOf(used[i]) === -1) return 'AI note cited a date (' + used[i] + ') not present in the work order evidence';
-    }
-    return '';
+    // The derived ECD is grounded BY DEFINITION - it came from the header field or an evidenced
+    // completion commitment - so it is always allowed, even if the caller passes a thin groundText.
+    return ungroundedDates(s, String(groundText || '') + ' ' + want);
   }
   // ===== BWN WO-AUDIT STATE END ==================================================================
 
@@ -1603,11 +1644,12 @@
   // the model. Same transport/budget as summarize; oneLine collapses the chain onto one line.
   function summarizeTimeline(woFacts, notes, header, model, onWait, facts) {
     var ctx = { onWait: onWait };
+    var prompt = buildTimelineInput(woFacts, notes, facts);
     return bwnAI({
       task: 'summarize',
       tier: 'proxy',
       minRank: 1,
-      prompt: buildTimelineInput(woFacts, notes, facts),
+      prompt: prompt,
       system: WO_TIMELINE_SYSTEM,
       oneLine: true,
       maxChars: 2000,
@@ -1620,7 +1662,15 @@
       // The wrapper is unchanged and still owns both ends; the chain is still the only model-authored
       // part. A chain that echoed an ECD token despite the instruction would put TWO ECDs on the line,
       // so strip a trailing one - the deterministic tail stays the single source of the ECD.
-      chain = chain.replace(/\s*-\s*ECD\b[\s\S]*$/i, '').trim();
+      // ANCHORED to a trailing ECD token, never greedy. An over-30 chain routinely NAMES a lapsed
+      // ECD mid-history ("... - ECD 8/15 committed - 8/20 vendor no-show - ..."), and a `[\s\S]*$`
+      // strip silently deleted every segment after the first such mention - the richest part of the
+      // note. Only a genuine trailing "- ECD <date|TBD|not set> ..." tail is removed.
+      chain = chain.replace(/\s*-\s*ECD\s+(?:\d{1,2}\/\d{1,2}(?:\/\d{2,4})?|TBD|not set)\b[^-]*$/i, '').trim();
+      // The posted path gets the same date-grounding gate as the standard note: this is the chain
+      // that reaches a real work order, so it is the LAST place an invented date should be allowed.
+      var ungrounded = ungroundedDates(chain, prompt);
+      if (ungrounded) return { note: composeTimelineNote(fallbackChain(facts), header, Date.now()), degraded: ungrounded };
       return { note: composeTimelineNote(chain, header, Date.now()), degraded: '' };
     });
   }
@@ -2055,7 +2105,12 @@
             // instead and the row is marked DEGRADED - visibly, and still retryable - so an outage
             // stays legible in the run summary rather than passing as a clean result.
             return draftP.catch(function (e) {
-              return { note: composeAuditStatusNote(facts), degraded: (e && e.message) || String(e) };
+              // An over-30 row keeps its house format even without the model: the deterministic
+              // chain goes through the SAME composeTimelineNote wrapper, so the note a coordinator
+              // posts still reads "Over 30 - <trade> - ... - ECD ..." and never becomes a fourth
+              // note shape the workbook convention has never carried.
+              var fb = over30 ? composeTimelineNote(fallbackChain(facts), h, Date.now()) : composeAuditStatusNote(facts);
+              return { note: fb, degraded: (e && e.message) || String(e) };
             }).then(function (out) {
               return {
                 note: out.note, degraded: out.degraded || '', facts: facts,
@@ -2100,11 +2155,23 @@
           // all failed. The old all-failed branch reprinted the key/role diagnosis that this
           // release exists to kill: when a whole batch throttles, ok is 0 and the last line the
           // coordinator reads told them to re-enter a key that was never the problem.
-          if (tal.errs) {
+          // A DEGRADED row wrote a deterministic note, so it is not an error - but its cause is the
+          // same outage an errored row would have reported. Counting only `.error` here is how a
+          // full credit exhaustion could read as "Done. 216 written, 0 failed." and hide both the
+          // billing diagnosis and the Retry button. The causes ladder reads BOTH.
+          var degraded = 0;
+          for (var di = 0; di < session.rows.length; di++) {
+            if (session.results[di] && session.results[di].degraded) degraded++;
+          }
+          if (degraded) {
+            logln('! ' + degraded + ' row' + (degraded === 1 ? '' : 's') +
+              ' fell back to the deterministic audit note (the AI did not supply a usable one). Those cells ARE written and are safe to send; press Retry Unfinished to re-draft them once the cause below clears.');
+          }
+          if (tal.errs || degraded) {
             var causes = [];
             for (var ci = 0; ci < session.rows.length; ci++) {
               var rr = session.results[ci];
-              if (rr && rr.error) causes.push(String(rr.error));
+              if (rr && (rr.error || rr.degraded)) causes.push(String(rr.error || rr.degraded));
             }
             var anyCredits = causes.some(function (c) { return /out of credits/i.test(c); });
             var allThrottle = causes.length && causes.every(function (c) { return /rate limited|was busy/i.test(c); });
@@ -2130,7 +2197,8 @@
           var sb = $('bwn-woaudit-start'); if (sb) sb.disabled = false;
           var cb = $('bwn-woaudit-cancel'); if (cb) cb.style.display = 'none';
           var db = $('bwn-woaudit-dl'); if (db) db.style.display = 'inline-block';
-          if (tal.errs || tal.skipped) { var rb = $('bwn-woaudit-retry'); if (rb) rb.style.display = 'inline-block'; }
+          // Degraded rows are in pendingRows, so the button that re-drafts them has to be REACHABLE.
+          if (tal.errs || tal.skipped || degraded) { var rb = $('bwn-woaudit-retry'); if (rb) rb.style.display = 'inline-block'; }
           // Persist the completeness state outside the scrolling log, where it survives the
           // coordinator being pulled away between finishing a run and pressing Download.
           setWarn(tal.errs + tal.skipped
