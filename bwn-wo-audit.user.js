@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         BWN WO Audit (Broadway National)
 // @namespace    broadwaynational.bwn
-// @version      0.11.0
+// @version      0.12.0
 // @downloadURL  https://raw.githubusercontent.com/Intermu/userscripts/main/bwn-wo-audit.user.js
 // @updateURL    https://raw.githubusercontent.com/Intermu/userscripts/main/bwn-wo-audit.user.js
 // @description  Batch WO-audit tool. Upload a WO audit .xlsx; for each work order this reads its two most recent notes DIRECTLY from Umbrava's GraphQL API in-page (using your live Umbrava session - the same read the BWN Ops Suite AI drafts use), then asks the broadway-internal-ops SWA summarize route (x-bwn-key gated, Anthropic key server-side) to write a status note - for jobs aged over 30 days a dated "Over 30 - trade - event timeline - ECD" chain built from the WO's FULL note history (with a PAST/needs-ECD flag when the committed date has lapsed), otherwise a 1-3 sentence client-ready status note. Fills the audit's notes column and downloads the workbook, preserving every other cell and formula. It also reads each WO's live header (status, phase, priority, GP, DNE/NTE, PO/vendor, schedule) in the same call and writes a deterministic Audit Flags column (OVERDUE, NEG/LOW GP, NTE>DNE, NO VENDOR, UNSCHEDULED, STALE) computed with no AI - so the exception audit survives an AI outage. Runs entirely in the app.umbrava.com page so it inherits your Umbrava auth - no MCP, no pasted keys, nothing sensitive in this script. This replaces the old standalone WO_Audit_Automation.html SWA tool, whose server-side MCP path could not authenticate to Umbrava. After a run drafts its notes, the coordinator can post each drafted note as an INTERNAL Umbrava note onto its aged (>30d) work order - one explicit click per note (human-gated, idempotent), routed through the governed bwnGqlOp write path with its permission gate and audit trail.
@@ -19,7 +19,7 @@
 (function () {
   'use strict';
 
-  var VER = '0.11.0';
+  var VER = '0.12.0';
   var FONT = "-apple-system,BlinkMacSystemFont,'Segoe UI','Helvetica Neue',Arial,sans-serif";
 
   // Suite drawer exit, per the contract in Core's ensureStyle. Core's stylesheet owns the fade;
@@ -848,32 +848,44 @@
 
   // The old /api/wo-audit system prompt, replicated verbatim (hyphens only, no em-dash)
   // so the status-note style matches the retired route (output parity, TASK-011).
+  // The model PHRASES facts the deterministic layer already established; it does not infer them.
+  // Written to the same compact, dash-joined register the over-30 notes use, because that is the
+  // style the audit's readers have actually been reading (108 of 108 notes in the 09/17 workbook).
   var WO_AUDIT_SYSTEM = [
-    'You are a work order audit assistant for a facilities-maintenance company.',
+    'You write one-line operational status notes for a facilities-maintenance work order audit.',
+    'Your reader is an operations manager scanning a spreadsheet. They need to know, at a glance,',
+    'where the job is, what is holding it, who owes the next move, and by when.',
     '',
-    'You are given one work order\'s header facts and its most recent notes (newest first).',
-    'Write a professional 1-3 sentence client-ready status note describing where the work',
-    'order stands right now, based ONLY on the notes and facts provided.',
+    'You are given DERIVED FACTS (already established from the live work order) and NOTE EVIDENCE.',
+    'You may use ONLY those. The derived facts outrank the notes wherever they disagree.',
     '',
-    'Note writing rules:',
-    '- Pending scheduling -> scheduling is in progress, state reason if known.',
-    '- Materials pending -> materials ordered/in transit, note next action if confirmed.',
-    '- Proposal in review -> state proposal status and awaiting approval.',
-    '- On-site active -> state progress and next confirmed milestone.',
-    '- Waiting on third party/client/vendor -> clearly state the dependency.',
-    '- Complete -> state completion, mention closeout items only if confirmed.',
-    '- Never invent ETAs, dates, approvals, or facts not present in the notes.',
-    '- If the notes are empty or say nothing about status, say so plainly',
-    '  (e.g. "No recent status notes on file.") - do NOT fabricate a status.',
+    'Output format - a single compact line, segments joined by " - " (space hyphen space):',
+    '<current stage> - <blocker and who owns it, only if one is given> - <M/D: latest meaningful',
+    'event, only if one is given> - <next action and owner, only if a blocker exists> - ECD <date or TBD>',
     '',
-    'Return ONLY the note text: 1-3 plain sentences, no preamble, no JSON, no markdown, no quotes.'
+    'Hard rules:',
+    '- NEVER invent a date, ETA, approval, vendor commitment, site visit, completion, cause,',
+    '  contact, or owner. If it is not in the derived facts or the note evidence, it does not exist.',
+    '- Every date you write must appear verbatim in the supplied evidence. Do not compute or guess one.',
+    '- The line MUST end with "ECD <M/D>" or "ECD TBD", exactly as the derived facts give it.',
+    '- Always state the current stage. State a blocker and an owner ONLY if the facts name one;',
+    '  if the job is progressing normally, say the stage and the next expected milestone instead.',
+    '- Prefer the latest meaningful update. Keep an older dated milestone only when it explains why',
+    '  the job sits where it does now.',
+    '- Do not blame anyone. Name the condition and the role that owes the next step, never a person.',
+    '- Banned as empty filler: "being handled", "working on it", "pending updates", "follow up",',
+    '  "awaiting resolution". Name WHAT is pending and WHO must act, or say nothing.',
+    '- If the evidence does not support a conclusion, say so plainly rather than filling the gap.',
+    '',
+    'Return ONLY the note line. No preamble, no labels, no quotes, no markdown, no bullet points.'
   ].join('\n');
 
-  // Build the user turn exactly as /api/wo-audit did (WO header facts + the two most
-  // recent notes, newest first) so the model sees the same input it always did.
-  function buildAuditInput(wo, notes) {
+  // Build the user turn: the DERIVED FACTS first (so the model phrases rather than infers), then
+  // the live header facts, then the note evidence. The facts block is what makes the output
+  // checkable - validateAiNote holds the model to the dates and the ECD token that appear here.
+  function buildAuditInput(wo, notes, facts) {
     wo = wo || {};
-    var top2 = (notes || []).slice(0, 2);
+    var top2 = (notes || []).slice(0, 5);
     var noteLines = top2.map(function (n, i) {
       n = (n && typeof n === 'object') ? n : {};
       var when = String(n.createdDate || '').trim().slice(0, 40);
@@ -896,12 +908,25 @@
       'Scheduled on-site: ' + (String(wo.schedule || '').trim() || '(none on file)')
     ];
     if (String(wo.overdue || '').trim()) lines.push('Overdue: ' + String(wo.overdue).trim());
+    var f = facts || {};
+    var factLines = [
+      'DERIVED FACTS (authoritative - phrase these, do not re-infer them):',
+      'Current stage: ' + (f.currentStage || '(unknown)'),
+      'Blocker: ' + (f.primaryBlocker || '(none evidenced - the job is progressing)'),
+      'Blocker owner: ' + (f.blockerOwner || 'Unknown'),
+      'Next action: ' + (f.nextAction || '(none evidenced)'),
+      'Next action owner: ' + (f.nextActionOwner || 'Unknown'),
+      'ECD to print verbatim: ECD ' + (f.ecdText || 'TBD') + (f.ecdSource ? '  [source: ' + f.ecdSource + ']' : ''),
+      'Confidence: ' + (f.confidence || 'low')
+    ];
+    if (f.confidence === 'low') factLines.push('NOTE: confidence is low - omit the blocker and the owner; state the stage, any dated event, and the ECD only.');
+    lines.unshift(factLines.join('\n'), '');
     lines.push(
       '',
-      'Most recent notes (newest first):',
+      'Note evidence (newest first):',
       noteLines.length ? noteLines.join('\n\n') : '(no notes provided)',
       '',
-      'Write ONLY the 1-3 sentence client-ready status note.'
+      'Write ONLY the single status line, ending in "ECD ' + (f.ecdText || 'TBD') + '".'
     );
     return lines.join('\n');
   }
@@ -958,6 +983,347 @@
   }
   // ===== BWN WO-AUDIT TIMELINE END ================================================================
 
+  // ===== BWN WO-AUDIT STATE START (pure; sliced by scripts/test-wo-audit-state.js) ================
+  // The normalized operational-state layer: where the WO is, what is holding it, who owns the next
+  // move, and by when - derived DETERMINISTICALLY from the live header + note history, with no AI,
+  // no network and no DOM. It exists so the audit still says something true when the AI is down,
+  // and so the model is asked to PHRASE grounded facts rather than to infer them.
+  //
+  // The stage is a TABLE LOOKUP on the live statusName, not a regex guess on note prose. The table
+  // is Core's measured WO_PHASE map (the ~50-status Umbrava taxonomy behind the WO Assist playbook)
+  // - COPIED, not imported, because GM sandboxes cannot share a runtime object across the @grant
+  // boundary (same reason bwnFocusTrap is duplicated). Notes only REFINE a blocker the stage has
+  // already established; a note can never invent a stage, an owner, or a date.
+  //
+  // nowMs is INJECTED, never Date.now() - the harness asserts ages/expiry on a fixed clock
+  // ([[fixture-clock-time-day-age]] / [[headless-harness-cannot-time]]).
+
+  // Status display name (lowercased) -> canonical phase. Copied from bwn-suite-core's WO_PHASE.
+  var WOA_PHASE = {
+    'new': 'intake', 'pending service request': 'schedule', 'pending dispatch': 'schedule',
+    'pending schedule': 'schedule', 'recruiting vendor': 'schedule', 'vendor compliance': 'schedule',
+    'vendor proposal required': 'proposal', 'vendor proposal received': 'proposal', 'supplier proposal pending': 'proposal',
+    'preparing client proposal': 'proposal', 'pending proposal review': 'proposal', 'internal proposal rejected': 'proposal',
+    'proposal rejected': 'proposal', 'pending trade specialist': 'proposal', 'atf prep': 'proposal', 'atf rejected': 'proposal',
+    'proposed': 'proposal-sent', 'atf submitted': 'proposal-sent',
+    'internal proposal approved': 'proposal-approved', 'proposal approved': 'proposal-approved', 'atf approved': 'proposal-approved',
+    'need material': 'materials', 'material ordered': 'materials', 'pending materials supplier': 'materials',
+    'awaiting supplier': 'materials', 'rma': 'materials', 'fabrication': 'materials', 'equipment rental': 'materials',
+    'pending materials client': 'materials-client',
+    'scheduled': 'scheduled', 'on the way': 'onsite', 'on-site': 'onsite',
+    'clocked out: in progress': 'inprogress', 'awaiting 3rd party': 'inprogress',
+    'client action required': 'client', 'on hold': 'onhold', 'pending acceptance': 'accept',
+    'confirm complete': 'confirmcomplete', 'confirm reopen': 'recall', 'recall': 'recall',
+    'clocked out: complete': 'costreview',
+    'work complete': 'terminal', 'resolved': 'terminal', 'pending ability to bill': 'terminal',
+    'invoice created': 'terminal', 'invoice rejected': 'terminal', 'invoiced': 'terminal',
+    'invoice approved': 'terminal', 'paid': 'terminal', 'closed': 'terminal', 'canceled': 'terminal',
+    'cancelled': 'terminal', 'declined': 'terminal', 'revoked': 'terminal', 'confirm cancel': 'terminal'
+  };
+
+  // Phase -> the operational reading. `blocker:null` means the phase is PROGRESSING NORMALLY: the
+  // note then states the stage and the next expected milestone and asserts no blocker, rather than
+  // manufacturing one to fill the slot.
+  var WOA_STATE = {
+    intake: { stage: 'Intake - not yet dispatched', owner: 'Coordinator', blocker: 'work order not yet dispatched to a vendor', next: 'Coordinator to dispatch this work order and record a vendor and on-site date' },
+    schedule: { stage: 'Vendor scheduling pending', owner: 'Vendor', blocker: 'no confirmed on-site date on file', next: 'Vendor to confirm an on-site date and technician' },
+    accept: { stage: 'Awaiting vendor acceptance', owner: 'Vendor', blocker: 'vendor has not accepted the assignment', next: 'Vendor to accept or decline so coverage can be confirmed or reassigned' },
+    proposal: { stage: 'Quote/proposal in preparation', owner: 'Coordinator', blocker: 'vendor quote not yet converted into a client proposal', next: 'Coordinator to obtain the vendor quote and submit the client proposal' },
+    'proposal-sent': { stage: 'Awaiting client approval', owner: 'Client', blocker: 'submitted proposal not yet approved', next: 'Client to approve the submitted proposal so work can be scheduled' },
+    'proposal-approved': { stage: 'Approved - awaiting PO release', owner: 'PO/Approval', blocker: 'proposal approved but the vendor purchase order has not been released', next: 'Coordinator to issue the purchase order and release the vendor' },
+    materials: { stage: 'Materials pending', owner: 'Materials', blocker: 'parts/materials not yet delivered', next: 'Vendor to confirm the delivery date and schedule the return visit on receipt' },
+    'materials-client': { stage: 'Materials pending - client supplied', owner: 'Client', blocker: 'client-supplied materials not yet delivered', next: 'Client to confirm the delivery date for the client-supplied materials' },
+    scheduled: { stage: 'Scheduled', owner: 'Vendor', blocker: null, next: 'Vendor to attend the scheduled visit and report the outcome' },
+    onsite: { stage: 'Technician on site', owner: 'Vendor', blocker: null, next: 'Vendor to report completion or the remaining scope at end of visit' },
+    inprogress: { stage: 'Service in progress', owner: 'Vendor', blocker: null, next: 'Vendor to report completion or the remaining scope' },
+    client: { stage: 'Awaiting client response', owner: 'Client', blocker: 'client response outstanding', next: 'Client to provide the outstanding direction on this work order' },
+    onhold: { stage: 'On hold', owner: 'Coordinator', blocker: 'work order on hold', next: 'Coordinator to review the hold and either release it or record the blocking condition' },
+    confirmcomplete: { stage: 'Work complete - closeout pending', owner: 'Coordinator', blocker: 'completion documentation outstanding', next: 'Coordinator to obtain the completion documentation and close the work order' },
+    costreview: { stage: 'Work complete - final cost review pending', owner: 'Coordinator', blocker: 'final vendor cost not yet confirmed on the purchase order', next: 'Coordinator to confirm the final vendor cost and advance the work order' },
+    recall: { stage: 'Recalled - return visit required', owner: 'Vendor', blocker: 'return visit not yet scheduled', next: 'Vendor to confirm the return-visit date and the corrective scope' },
+    terminal: { stage: 'Closed', owner: 'Unknown', blocker: null, next: null }
+  };
+
+  // Clause-scoped, negation-vetoed matching. Copied from Core's ACT_NEG/actClauses/actAffirm - the
+  // measured polarity guard, so "no parts ordered" / "haven't heard back" never read as positives.
+  // Over-vetoing is the safe direction: a missed refinement costs detail, a false one costs truth.
+  var WOA_NEG = /\b(no|nothing|none|not|never|without|cannot|can'?t|couldn'?t|won'?t|wouldn'?t|didn'?t|doesn'?t|don'?t|haven'?t|hasn'?t|hadn'?t|isn'?t|aren'?t|wasn'?t|weren'?t|shouldn'?t|unable)\b/i;
+  function woaClauses(b) { return String(b || '').split(/[.!?;\n•]+/); }
+  function woaAffirm(b, posRe) {
+    var cl = woaClauses(b);
+    for (var i = 0; i < cl.length; i++) { if (posRe.test(cl[i]) && !WOA_NEG.test(cl[i])) return true; }
+    return false;
+  }
+
+  // Blocker refinements. Each may only SHARPEN the wording of a blocker the phase already set - it
+  // never creates one where the phase said the job is progressing, and never changes the owner
+  // except where the evidence names a different party outright.
+  var WOA_BACKORDER = /\bback[- ]?order(ed)?\b/i;
+  var WOA_LEADTIME = /\blead[- ]?time\b|\bfabricat(ing|ion)\b/i;
+  var WOA_INTRANSIT = /\b(ship(ped|ping)|in transit|tracking\s*(#|number|no))\b/i;
+  // Access is the one signal the negation veto must NOT guard: the phrases are themselves negative
+  // ("could not get access", "denied access"), so running them through WOA_NEG vetoes every real
+  // match. The pattern is therefore tightened to encode the failure directly, and matched raw -
+  // which is why "no access ISSUES" (the healthy case) is excluded by requiring an object after
+  // "no access to".
+  var WOA_ACCESS = /\b(could not (get |gain )?(access|in)\b|unable to (get |gain )?access\b|denied access\b|no access to the \w+|site (was )?(closed|locked)\b|locked out\b|access window\b|site contact\b|escort required\b|badge\b)/i;
+  var WOA_NTE = /\b((requested|submitted)\s+(a |an |the )?(dne|nte|change[- ]?order|increase)|(dne|nte|change[- ]?order)\s+(submitted|requested|sent|approved)|revised\s+(costs?|nte|dne|pricing)|price increase\s+(requested|submitted))\b/i;
+
+  // A note that carries operational meaning. Excludes anything bearing a [bwn:*] marker - this
+  // tool's OWN prior posts most of all: reading yesterday's draft back as today's evidence would
+  // launder a guess into a fact. hasPriorAuditNote still sees them, so idempotency is untouched.
+  var WOA_MARKER_RE = /\[bwn:[^\]]+\]/;
+  function meaningfulNotes(notes, nowMs) {
+    var out = [];
+    for (var i = 0; i < (notes || []).length; i++) {
+      var n = notes[i] || {};
+      var body = String(n.content == null ? '' : n.content).trim();
+      if (body.length < 12) continue;
+      if (WOA_MARKER_RE.test(body)) continue;
+      var d = _date(n.createdDate);
+      // A note dated after the audit clock cannot be evidence of something that has happened.
+      if (d && typeof nowMs === 'number' && (+d) > nowMs) continue;
+      out.push({ content: body, createdDate: n.createdDate || '', date: d, by: n.by || '', isCompletion: !!n.isCompletion });
+    }
+    return out;
+  }
+
+  // Completion-commitment vocabulary + date shapes, copied from Core (ECD_NOTE_WORDS / CFG.DATE_RE).
+  // Deliberately NOT bare "complete": "work completed 7/15" is a past record, not a promise.
+  var WOA_ECD_WORDS = /\becd\b|\bcomplet(?:e|ed|ion)\s+(?:by|date)\b|\bfinish(?:ed)?\s+by\b|\bdone\s+by\b/i;
+  var WOA_DATE_RE = /\b\d{1,2}[\/\-]\d{1,2}(?:[\/\-]\d{2,4})?\b/;
+  // A bare hyphenated pair is a RANGE, not a date. Copied from Core's ecdDropHyphenRanges, which
+  // exists because a note containing "1-5" once produced a 2027-01-05 ECD proposal on W-386564.
+  function woaDropHyphenRanges(body) {
+    return String(body == null ? '' : body).replace(/\d{1,2}-\d{1,2}/g, function (m, off, s) {
+      var before = off > 0 ? s.charAt(off - 1) : '';
+      var after = s.charAt(off + m.length);
+      if (/[\d-]/.test(before) || /[-\d]/.test(after)) return m;
+      return ' ';
+    });
+  }
+  // Every M/D-shaped token in a text, normalized to "M/D" - the grounding set for date validation.
+  function woaDateTokens(text) {
+    var out = [], re = /\b(\d{1,2})[\/](\d{1,2})(?:[\/]\d{2,4})?\b/g, m;
+    while ((m = re.exec(String(text || '')))) {
+      var t = parseInt(m[1], 10) + '/' + parseInt(m[2], 10);
+      if (out.indexOf(t) === -1) out.push(t);
+    }
+    return out;
+  }
+
+  // The normalized fact set. Never throws, never returns null, always carries at least one evidence
+  // row - including for the "we could not read it" cases, because unread is not empty.
+  function deriveState(h, notes, nowMs) {
+    var ev = [];
+    var mn = meaningfulNotes(notes, nowMs);
+    var statusName = String((h && h.statusName) || '').trim();
+    var phase = WOA_PHASE[statusName.toLowerCase()] || null;
+    var base = phase ? WOA_STATE[phase] : null;
+
+    var f = {
+      currentStage: 'Status unclear', primaryBlocker: null, blockerOwner: 'Unknown',
+      latestMeaningfulEvent: null, latestMeaningfulEventDate: null,
+      nextAction: null, nextActionOwner: 'Unknown',
+      ecd: null, ecdText: 'TBD', ecdSource: 'none', ecdExpired: false,
+      confidence: 'low', evidence: ev, phase: phase, terminal: phase === 'terminal',
+      // A blocker read straight off a header FIELD is certain even when the overall picture is not
+      // (e.g. "no vendor assigned" with zero notes). The confidence gate exists to suppress blockers
+      // INFERRED from note prose, so it must not swallow a fact the work order states outright.
+      blockerCertain: false,
+      noteCount: mn.length, staleDays: null
+    };
+
+    if (!h) {
+      f.currentStage = 'Live work-order header unavailable';
+      f.nextAction = 'Coordinator to re-run the audit for this work order once the header read succeeds';
+      f.nextActionOwner = 'Coordinator';
+      ev.push({ kind: 'absence', field: 'workOrder', date: null, value: 'header read failed' });
+      return f;
+    }
+    ev.push({ kind: 'header', field: 'statusName', date: null, value: statusName || '(blank)' });
+
+    if (base) {
+      f.currentStage = base.stage;
+      f.primaryBlocker = base.blocker;
+      f.blockerOwner = base.blocker ? base.owner : 'Unknown';
+      f.nextAction = base.next;
+      f.nextActionOwner = base.next ? base.owner : 'Unknown';
+      f.confidence = 'high';
+    } else {
+      // Unmapped/custom status: say it verbatim rather than guessing a stage from it.
+      f.currentStage = statusName ? ('Status "' + statusName + '"') : 'Status not available';
+      f.confidence = 'low';
+    }
+
+    // --- refinements that the header alone licenses -------------------------------------------
+    var hasVendor = (typeof h.hasNonTerminatedPurchaseOrders === 'boolean')
+      ? h.hasNonTerminatedPurchaseOrders
+      : !!(h.purchaseOrders && h.purchaseOrders.length);
+    // No vendor holds the job -> the gap is an INTERNAL dispatch gap. It is never the vendor's:
+    // there is no vendor to own it. (Anti-rule: NO VENDOR must not read as "vendor at fault".)
+    if (phase === 'schedule' && !hasVendor) {
+      f.primaryBlocker = 'no vendor assigned yet';
+      f.blockerOwner = 'Coordinator';
+      f.nextAction = 'Coordinator to assign a vendor and record a confirmed on-site date';
+      f.nextActionOwner = 'Coordinator';
+      f.blockerCertain = true;   // the header states it outright; no note is needed to support it
+      ev.push({ kind: 'header', field: 'hasNonTerminatedPurchaseOrders', date: null, value: 'false' });
+    }
+    if (phase === 'scheduled' && h.nextOnsiteDate) {
+      var od = fmtMD(h.nextOnsiteDate);
+      if (od) {
+        f.nextAction = 'Vendor to attend the visit scheduled ' + od + ' and report the outcome';
+        ev.push({ kind: 'header', field: 'nextOnsiteDate', date: null, value: od });
+      }
+    }
+
+    // --- refinements the NOTES license --------------------------------------------------------
+    var newest = mn.length ? mn[0] : null;
+    if (newest) {
+      f.latestMeaningfulEvent = newest.content.replace(/\s+/g, ' ').slice(0, 160);
+      f.latestMeaningfulEventDate = newest.createdDate || null;
+      ev.push({ kind: 'note', field: 'jobNotes', date: fmtMD(newest.createdDate) || null, value: f.latestMeaningfulEvent });
+      if (newest.date) {
+        var age = Math.floor((nowMs - (+newest.date)) / MS_DAY);
+        f.staleDays = age;
+        if (age > auditCfg('staleDays', STALE_DAYS)) {
+          // Staleness is a fact about the NOTES, never about a party: it may not assign BLAME and
+          // may not invent a blocker - it only lowers confidence and states the gap.
+          f.confidence = (f.confidence === 'high') ? 'medium' : 'low';
+          // It does, however, replace the next action. A stage action is forward-looking ("attend
+          // the visit scheduled 8/20") and on a job with no update in weeks that date has usually
+          // already passed - shipping it would tell the reader to wait on something that is not
+          // happening. The honest move is to go find out. Chasing a status is an INTERNAL action,
+          // so naming Coordinator here assigns work, not fault.
+          f.nextAction = 'Coordinator to obtain a current status from the assigned party and record it on the work order';
+          f.nextActionOwner = 'Coordinator';
+        }
+      }
+      var body = newest.content;
+      if (phase === 'materials') {
+        if (woaAffirm(body, WOA_BACKORDER)) f.primaryBlocker = 'parts on backorder';
+        else if (woaAffirm(body, WOA_INTRANSIT)) f.primaryBlocker = 'parts in transit, not yet delivered';
+        else if (woaAffirm(body, WOA_LEADTIME)) f.primaryBlocker = 'parts still in fabrication/lead time';
+      }
+      if (phase === 'onhold' && woaAffirm(body, WOA_NTE)) {
+        f.primaryBlocker = 'NTE/change-order increase awaiting approval';
+        f.blockerOwner = 'PO/Approval';
+        f.nextAction = 'Approval of the NTE increase required before further work is authorized';
+        f.nextActionOwner = 'PO/Approval';
+      }
+      // Access is the one dependency with NO header field behind it, so it may only ever refine
+      // the wording of an existing scheduling blocker - never become a stage of its own, and never
+      // reassign ownership to the client. The vocabulary is unvalidated against a note corpus.
+      if ((phase === 'schedule' || phase === 'scheduled') && WOA_ACCESS.test(body)) {
+        f.primaryBlocker = 'site access/appointment window not confirmed';
+        f.blockerOwner = 'Scheduling/Access';
+        f.nextAction = 'Site access window and site contact to be confirmed before the visit is rebooked';
+        f.nextActionOwner = 'Scheduling/Access';
+      }
+    } else {
+      ev.push({ kind: 'absence', field: 'jobNotes', date: null, value: (notes && notes.length) ? 'no meaningful notes (all filtered as short/auto/prior-audit)' : 'no notes on file' });
+      f.confidence = 'low';
+      if (!base) {
+        f.nextAction = 'Coordinator to record a current status note stating the blocker, owner and expected completion date';
+        f.nextActionOwner = 'Coordinator';
+      }
+    }
+
+    // --- ECD ----------------------------------------------------------------------------------
+    // Only two sources may ever produce one: the WO's own expected-completion field, and a note
+    // clause that explicitly commits to a COMPLETION date. An arrival/delivery/appointment date is
+    // never an ECD - promising completion off a parts-delivery date is the invention this guards.
+    // There is deliberately no calendar default: Core's "second Friday" exists for a human-confirmed
+    // picker, and an unattended audit note must not manufacture a commitment.
+    var ei = ecdInfo(h, nowMs);
+    if (ei && !ei.past) {
+      f.ecd = String(h.priority.expectedCompletionDate); f.ecdText = ei.str; f.ecdSource = 'wo.expectedCompletionDate';
+      ev.push({ kind: 'header', field: 'priority.expectedCompletionDate', date: ei.str, value: ei.str });
+    } else if (ei && ei.past) {
+      f.ecdExpired = true; f.ecdText = 'TBD'; f.ecdSource = 'wo.expectedCompletionDate.expired';
+      ev.push({ kind: 'header', field: 'priority.expectedCompletionDate', date: ei.str, value: ei.str + ' (lapsed)' });
+    } else {
+      // Latest-WRITTEN commitment wins, not furthest-future: one stale over-promise from months ago
+      // must not outrank today's revision.
+      for (var i = 0; i < mn.length; i++) {
+        var stripped = woaDropHyphenRanges(mn[i].content);
+        if (!woaAffirm(mn[i].content, WOA_ECD_WORDS)) continue;
+        if (!WOA_DATE_RE.test(stripped)) continue;
+        var toks = woaDateTokens(stripped);
+        if (!toks.length) continue;
+        f.ecdText = toks[toks.length - 1]; f.ecdSource = 'note.vendorCommitment';
+        f.confidence = (f.confidence === 'high') ? 'medium' : f.confidence;
+        ev.push({ kind: 'note', field: 'jobNotes', date: fmtMD(mn[i].createdDate) || null, value: 'completion commitment: ' + mn[i].content.slice(0, 100) });
+        break;
+      }
+    }
+    if (f.ecdExpired) {
+      // The lapse is stated as a fact plus the action it owes, BEFORE the ECD token, so the note
+      // still ends on "ECD TBD" while losing none of what the over-30 tail has always conveyed.
+      // Fold into the existing action rather than chaining a second "Coordinator to ..." sentence:
+      // an audit line is scanned, not read, and two actors in one clause is what makes it unreadable.
+      if (f.nextAction && f.nextActionOwner === 'Coordinator') {
+        f.nextAction = f.nextAction + ' and reset the ECD (prior ECD ' + ei.str + ' lapsed)';
+      } else if (f.nextAction) {
+        f.nextAction = f.nextAction + '; prior ECD ' + ei.str + ' lapsed, Coordinator to reset it';
+      } else {
+        f.nextAction = 'prior ECD ' + ei.str + ' lapsed; Coordinator to reset the expected completion date';
+        f.nextActionOwner = 'Coordinator';
+      }
+    }
+    // Belt and braces: no path may leave a renderable ECD as undefined/null/empty/Invalid Date.
+    if (!f.ecdText || !/^(\d{1,2}\/\d{1,2}|TBD)$/.test(f.ecdText)) { f.ecdText = 'TBD'; f.ecdSource = 'none'; }
+    return f;
+  }
+
+  // Deterministic audit note. Every clause is omitted rather than invented when unsupported; the
+  // stage and the ECD tail are the only two that always render, and the ECD is always last.
+  function composeAuditStatusNote(f) {
+    f = f || {};
+    var parts = [];
+    parts.push(String(f.currentStage || 'Status unclear'));
+    // Low confidence SHORTENS the note - it never softens the wording. A blocker and an owner we
+    // cannot stand behind are dropped, not hedged.
+    if (f.primaryBlocker && (f.confidence !== 'low' || f.blockerCertain)) {
+      parts.push(f.primaryBlocker + (f.blockerOwner && f.blockerOwner !== 'Unknown' ? ' (' + f.blockerOwner + ')' : ''));
+    }
+    if (f.latestMeaningfulEvent && f.latestMeaningfulEventDate) {
+      var d = fmtMD(f.latestMeaningfulEventDate);
+      if (d) parts.push(d + ': ' + f.latestMeaningfulEvent.slice(0, 120));
+    } else if (!f.noteCount) {
+      parts.push(f.latestMeaningfulEventDate ? ('no documented update since ' + fmtMD(f.latestMeaningfulEventDate)) : 'no documented update available');
+    }
+    var next = f.nextAction;   // local: the formatter must not mutate the facts it was handed
+    if (typeof f.staleDays === 'number' && f.staleDays > auditCfg('staleDays', STALE_DAYS)) {
+      parts.push('no meaningful update in ' + f.staleDays + 'd');
+      if (!next) next = 'Coordinator to obtain a current status from the assigned party and record it on the work order';
+    }
+    if (!next && !f.terminal) next = 'Coordinator to obtain a current status from the assigned party and record it on the work order';
+    if (next) parts.push(next);
+    return parts.join(' - ') + ' - ECD ' + (f.ecdText || 'TBD');
+  }
+
+  // Accept the model's phrasing only when it is grounded. Returns '' when usable, else the reason
+  // the caller records as the row's degradation cause. The date check is the real hallucination
+  // gate: any M/D the model prints that appears in neither the note history nor the header is an
+  // invented commitment, and that is exactly the failure this overhaul exists to stop.
+  var WOA_VAGUE = /\b(being handled|working on it|pending updates?|awaiting resolution|will (provide|keep you)|in progress as needed|as soon as possible)\b/i;
+  function validateAiNote(note, f, groundText) {
+    var s = String(note == null ? '' : note).trim();
+    if (!s) return 'empty AI note';
+    if (s.length < 25) return 'AI note too short to be a status';
+    if (!/ - ECD (\d{1,2}\/\d{1,2}|TBD)$/.test(s)) return 'AI note did not end with the required ECD clause';
+    if (WOA_VAGUE.test(s)) return 'AI note used vague filler wording';
+    var allowed = woaDateTokens(String(groundText || '')).concat(woaDateTokens(f && f.ecdText ? f.ecdText : ''));
+    var used = woaDateTokens(s);
+    for (var i = 0; i < used.length; i++) {
+      if (allowed.indexOf(used[i]) === -1) return 'AI note cited a date (' + used[i] + ') not present in the work order evidence';
+    }
+    return '';
+  }
+  // ===== BWN WO-AUDIT STATE END ==================================================================
+
   var WO_TIMELINE_SYSTEM = [
     'You summarize a facilities work order\'s note history into a compact, dated event timeline for',
     'an over-30-days aging report.',
@@ -976,13 +1342,17 @@
     '- Focus on WHERE the job stands and WHY it is delayed.',
     '- Do NOT add a heading, the trade, an "Over 30" prefix, or an ECD line - those are added',
     '  separately. Output ONLY the dash-separated event chain: no preamble, no quotes, no markdown.',
+    '- END the chain with the CURRENT position: the last segment must say where the job stands now,',
+    '  what is holding it and who owes the next move, using the DERIVED FACTS block supplied below.',
+    '  Do not restate the facts block verbatim and do not add an ECD - just land the chain on the',
+    '  present state instead of trailing off at whatever the last note happened to mention.',
     '- If no note says anything about status, output exactly: no status notes on file'
   ].join('\n');
 
   // Build the timeline user turn: the WO's FULL note history OLDEST-FIRST (the chronology lives
   // across all notes, not the last two). Capped so a very chatty job cannot blow the AI row budget.
   // ponytail: 40-note / 600-char cap; widen if a real job's early history is being truncated.
-  function buildTimelineInput(wo, notesNewestFirst) {
+  function buildTimelineInput(wo, notesNewestFirst, facts) {
     var oldestFirst = (notesNewestFirst || []).slice().reverse();
     var capped = oldestFirst.slice(-40);   // keep the 40 most recent, still oldest->newest
     var lines = capped.map(function (n) {
@@ -991,9 +1361,22 @@
       var txt = String(n.content || '').trim().replace(/\s+/g, ' ').slice(0, 600);
       return (when ? when + ': ' : '') + (txt || '(empty)');
     });
+    var f = facts || {};
+    // Additive only: the note history stays the model's primary input and keeps its oldest-first
+    // framing and its caps, exactly as before. The facts block is appended so the chain can LAND on
+    // the present state - it never replaces the history the chronology is extracted from.
+    var factBlock = [
+      'DERIVED FACTS for the final segment only (do not restate verbatim, do not add an ECD):',
+      'Current stage: ' + (f.currentStage || '(unknown)'),
+      'Blocker: ' + (f.primaryBlocker || '(none evidenced)'),
+      'Blocker owner: ' + (f.blockerOwner || 'Unknown'),
+      'Next action: ' + (f.nextAction || '(none evidenced)')
+    ].join('\n');
     return [
       'Work order ' + (String(wo.raw || wo.number || '').trim() || '(unknown)') + ' note history, oldest first:',
       lines.length ? lines.join('\n') : '(no notes on file)',
+      '',
+      factBlock,
       '',
       'Output ONLY the dated event chain per the instructions.'
     ].join('\n');
@@ -1182,16 +1565,17 @@
   // (minRank 1) forces the /api/ai summarize call for any staff+ with a known role; the
   // server is key-only, so the client rank read is UX-only. A miss (connector down / role
   // not yet resolved) throws so the batch pool marks the row for "Retry Errors" (unchanged).
-  function summarize(woFacts, notes, model, onWait) {
+  function summarize(woFacts, notes, model, onWait, facts) {
     // Per-WO context, not module state: concurrency defaults to 3, so a shared object would
     // cross-report one row's reason onto another. `onWait` lets the batch log a liveness line
     // while the sender sits in backoff.
     var ctx = { onWait: onWait };
+    var prompt = buildAuditInput(woFacts, notes, facts);
     return bwnAI({
       task: 'summarize',
       tier: 'proxy',
       minRank: 1,
-      prompt: buildAuditInput(woFacts, notes),
+      prompt: prompt,
       system: WO_AUDIT_SYSTEM,
       oneLine: false,
       maxChars: 4000,
@@ -1205,20 +1589,25 @@
       // (`bwn:role:last` unpublished, i.e. running without the Ops Suite). That is the only
       // case the key/role hint ever described, and the run summary states it once.
       if (!note) throw new Error(ctx.reason || 'Umbrava rank not resolved - run alongside the BWN Ops Suite');
-      return note;
+      // Strict output gate. An ungrounded or malformed line is DISCARDED, not shipped and not
+      // patched up: the deterministic note is always available and is never worse than a note
+      // carrying a date nobody wrote. `degraded` tells the caller to say so on the row.
+      var bad = validateAiNote(note, facts, prompt);
+      if (bad) return { note: composeAuditStatusNote(facts), degraded: bad };
+      return { note: note, degraded: '' };
     });
   }
 
   // Over-30 timeline note: the model extracts the dated event CHAIN from the full history; the
   // deterministic prefix (Over 30 - trade) and ECD tail are added by composeTimelineNote, never by
   // the model. Same transport/budget as summarize; oneLine collapses the chain onto one line.
-  function summarizeTimeline(woFacts, notes, header, model, onWait) {
+  function summarizeTimeline(woFacts, notes, header, model, onWait, facts) {
     var ctx = { onWait: onWait };
     return bwnAI({
       task: 'summarize',
       tier: 'proxy',
       minRank: 1,
-      prompt: buildTimelineInput(woFacts, notes),
+      prompt: buildTimelineInput(woFacts, notes, facts),
       system: WO_TIMELINE_SYSTEM,
       oneLine: true,
       maxChars: 2000,
@@ -1228,7 +1617,11 @@
     }).then(function (chain) {
       chain = String(chain || '').trim();
       if (!chain) throw new Error(ctx.reason || 'Umbrava rank not resolved - run alongside the BWN Ops Suite');
-      return composeTimelineNote(chain, header, Date.now());
+      // The wrapper is unchanged and still owns both ends; the chain is still the only model-authored
+      // part. A chain that echoed an ECD token despite the instruction would put TWO ECDs on the line,
+      // so strip a trailing one - the deterministic tail stays the single source of the ECD.
+      chain = chain.replace(/\s*-\s*ECD\b[\s\S]*$/i, '').trim();
+      return { note: composeTimelineNote(chain, header, Date.now()), degraded: '' };
     });
   }
 
@@ -1272,12 +1665,15 @@
     return { ok: ok, errs: errs, skipped: total - ok - errs };
   }
 
-  // Everything that still owes a note: errored rows AND rows the cancel never reached.
+  // Everything that still owes a note: errored rows, rows the cancel never reached, AND rows that
+  // fell back to the deterministic note because the AI failed or returned something ungrounded.
+  // A degraded row DID get a usable note (so it is not counted as "no note" and auditTally still
+  // sees two outcomes) but it is exactly what "Retry Unfinished" should pick up once the AI is back.
   // Positional - `session.results` is indexed by position in `session.rows`.
   function pendingRows(rows, results) {
     return rows.filter(function (row, i) {
       var r = results[i];
-      return !r || !!r.error;
+      return !r || !!r.error || !!r.degraded;
     });
   }
 
@@ -1642,6 +2038,10 @@
             // priorAudit is read from the LIVE notes fetched this run, so a re-run sees a note this
             // tool already posted (idempotency for the post step below).
             var priorAudit = hasPriorAuditNote(data.notes);
+            // The normalized operational state: deterministic, computed from the SAME live header
+            // and notes, before any AI call. It grounds the prompt, backs the strict output check,
+            // and is the fallback note's only input - so a row is never left without a usable note.
+            var facts = deriveState(h, data.notes, Date.now());
             // Over-30 rows get the dated timeline note (full note history + trade + ECD); every other
             // row keeps the 1-3 sentence status note. Age is read from the workbook days column - or,
             // when there is no days column, the export is over-30 by construction so all rows qualify.
@@ -1649,10 +2049,18 @@
             var ageDays = daysColAbsent ? null : parseAgeDays(cellStr(session.map.aoa, row.rowIdx, session.map.days));
             var over30 = postEligible(ageDays, daysColAbsent);
             var draftP = over30
-              ? summarizeTimeline(woFacts, data.notes, h, model, onWait)
-              : summarize(woFacts, data.notes.slice(0, 2), model, onWait);
-            return draftP.then(function (note) {
-              return { note: note, notesFound: data.notes.length, priorAudit: priorAudit, ageDays: ageDays, over30: over30 };
+              ? summarizeTimeline(woFacts, data.notes, h, model, onWait, facts)
+              : summarize(woFacts, data.notes.slice(0, 5), model, onWait, facts);
+            // An AI failure must not cost the row its note. The deterministic note is written
+            // instead and the row is marked DEGRADED - visibly, and still retryable - so an outage
+            // stays legible in the run summary rather than passing as a clean result.
+            return draftP.catch(function (e) {
+              return { note: composeAuditStatusNote(facts), degraded: (e && e.message) || String(e) };
+            }).then(function (out) {
+              return {
+                note: out.note, degraded: out.degraded || '', facts: facts,
+                notesFound: data.notes.length, priorAudit: priorAudit, ageDays: ageDays, over30: over30
+              };
             });
           })
           .then(function (out) {
@@ -1663,9 +2071,12 @@
             // were already computed to pick the draft style above; reuse them, do not re-parse.
             session.results[origIdx] = {
               key: row.key, note: out.note, notesFound: out.notesFound,
-              ageDays: out.ageDays, eligible: !!out.over30, priorAudit: !!out.priorAudit
+              ageDays: out.ageDays, eligible: !!out.over30, priorAudit: !!out.priorAudit,
+              degraded: out.degraded || '', facts: out.facts || null
             };
-            logln('  WO ' + row.key + ' (' + out.notesFound + ' notes): ' + (out.note ? out.note.slice(0, 90) : '(blank)'));
+            logln('  WO ' + row.key + ' (' + out.notesFound + ' notes)' +
+              (out.degraded ? ' [deterministic note - ' + out.degraded + ']' : '') + ': ' +
+              (out.note ? out.note.slice(0, 90) : '(blank)'));
             return session.results[origIdx];
           })
           .catch(function (e) {
@@ -1776,6 +2187,25 @@
         status.style.cssText = 'font-size:12px;color:#555';
         head.appendChild(status);
         card.appendChild(head);
+        // The derived reading, shown BEFORE the post button: an operator should be able to see the
+        // stage, the blocker and who owns it without reading the whole note back out of the box.
+        if (r.facts) {
+          var fx = document.createElement('div');
+          fx.style.cssText = 'font-size:11.5px;color:#41613f;background:#f2f7f3;border:1px solid #dbe7dd;border-radius:6px;padding:5px 7px;margin-bottom:6px;line-height:1.45';
+          var bits = [r.facts.currentStage];
+          if (r.facts.primaryBlocker && r.facts.confidence !== 'low') {
+            bits.push(r.facts.primaryBlocker + (r.facts.blockerOwner && r.facts.blockerOwner !== 'Unknown' ? ' (' + r.facts.blockerOwner + ')' : ''));
+          }
+          bits.push('ECD ' + (r.facts.ecdText || 'TBD'));
+          fx.textContent = bits.join('  |  ') + '   [' + (r.facts.confidence || 'low') + ' confidence, ' + (r.facts.noteCount || 0) + ' usable notes]';
+          card.appendChild(fx);
+        }
+        if (r.degraded) {
+          var dg = document.createElement('div');
+          dg.style.cssText = 'font-size:11.5px;color:#8a4b00;background:#fff4e5;border:1px solid #ffcf99;border-radius:6px;padding:5px 7px;margin-bottom:6px';
+          dg.textContent = 'Deterministic note (no AI phrasing): ' + r.degraded;
+          card.appendChild(dg);
+        }
         var ta = document.createElement('textarea');
         ta.readOnly = true;
         ta.value = r.note;
