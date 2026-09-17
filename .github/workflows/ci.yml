@@ -275,6 +275,15 @@ jobs:
       - name: PO API harness (purchaseOrders reader + parity log)
         run: node scripts/test-po-api.js
 
+      # bwnGqlRead() - the classified GraphQL read envelope (kind / status / codes, never rejects) that
+      # the PO shadow reader's give-up warn uses to tell auth-empty from schema drift from a dead
+      # network. Fixture-driven: 200 data, 200 partial, 200 errors-only, 400 JSON, tokenless 500 HTML,
+      # malformed JSON, 200 data:null, a body stream that dies mid-read, free-text / over-long error
+      # codes, network rejection; plus the pins that bwnGql()'s own throwing contract is intact and that
+      # Core's single bwnGqlRead call site is a `query` document.
+      - name: bwnGqlRead envelope harness
+        run: node scripts/test-bwn-gql-read.js
+
       # drop-upload 1.11.0 writes notes + documents via Umbrava's own mutations
       # (addEditJobNote; initializeJobDocument -> blob PUT -> bulkAddWorkOrderDocuments),
       # captured live 2026-08-12, replacing the brittle combobox DOM automation. Slices the

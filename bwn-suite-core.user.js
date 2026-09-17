@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         BWN Suite - Core (Broadway National)
 // @namespace    broadwaynational.bwn
-// @version      1.86.0
+// @version      1.87.0
 // @downloadURL  https://raw.githubusercontent.com/Intermu/userscripts/main/bwn-suite-core.user.js
 // @updateURL    https://raw.githubusercontent.com/Intermu/userscripts/main/bwn-suite-core.user.js
 // @description  Runs several Umbrava helpers for BWN coordinators, in the browser with no privileged grants. Includes: PO Approval + ETA Builder; WO Assist (GP/ETA, a stall watchdog, DNE calculator, and a next-action playbook); Email Leak Guard (checks recipients against vendor names, PO amounts, and client budget references before an outbound email sends); WO List Heat (a triage overlay + My Day strip on the work-order list, with an optional same-origin Umbrava API scan for deterministic full-board coverage); and the BWN Launcher (opens the Azure Static Web App tools with the current WO's context). Modules share state through sessionStorage/localStorage. The only network calls are same-origin Umbrava GraphQL requests (app.umbrava.com/api/graphql, the app's own session): List Heat's full-board scan and WO Assist's work-order / trip / clock-in / document / purchase-order reads, plus ONE write - BWN Views saves the column layout through Umbrava's own putUserPreference, the same preference the column chooser writes; everything else is offline. Toggle modules in BWN_MODULES below.
@@ -1449,6 +1449,61 @@
     });
   }
 
+  // ===== BWN-GQL-READ START v1 (classified read envelope; sliced by scripts/test-bwn-gql-read.js) =====
+  // bwnGql() above resolves to `data` and throws errors[0].message - it drops the HTTP status and the
+  // GraphQL error CODE, which is the actionable part. Measured live 2026-09-17: UNAUTHENTICATED,
+  // BAD_USER_INPUT, GRAPHQL_VALIDATION_FAILED and FORBIDDEN all arrive as HTTP 200 bodies with
+  // `errors[]`; a tokenless POST is an HTTP 500 with a non-JSON body; ASP.NET validation is an HTTP 400
+  // JSON body with no `errors`. bwnGqlRead() NEVER rejects: it resolves an envelope
+  //   { kind, status, noToken, data, codes, messageLen }
+  // kind: 'ok' | 'partial' (data AND errors) | 'graphql-error' | 'no-data' | 'bad-json' |
+  //       'http-4xx-no-json' | 'http-5xx-no-json' | 'http-<status>' (4xx/5xx JSON without errors[]) | 'network'
+  // so a caller can tell auth-empty from schema drift from a dead network without reading a message.
+  // bwnGql()'s contract is unchanged and the per-script transport copies are untouched on purpose.
+  function bwnGqlClassify(status, body, parsed) {
+    if (status === 0) return 'network';
+    if (!parsed) return status >= 500 ? 'http-5xx-no-json' : status >= 400 ? 'http-4xx-no-json' : 'bad-json';
+    var errs = body && Array.isArray(body.errors) && body.errors.length ? body.errors : null;
+    if (status >= 400) return errs ? 'graphql-error' : 'http-' + status;
+    if (errs) return body.data ? 'partial' : 'graphql-error';
+    if (!body || body.data === undefined || body.data === null) return 'no-data';
+    return 'ok';
+  }
+  function bwnGqlEnvelope(status, body, parsed, noToken) {
+    var errs = body && Array.isArray(body.errors) ? body.errors : [];
+    return {
+      kind: bwnGqlClassify(status, body, parsed), status: status, noToken: !!noToken,
+      data: (parsed && body && body.data) || null,
+      codes: errs.slice(0, 5).map(function (e) {
+        var c = String((e && e.extensions && e.extensions.code) || 'nocode');
+        return /^[A-Za-z][A-Za-z0-9_]{0,39}$/.test(c) ? c : 'othercode';   // server-authored: shape-gate it, never print a free-text extensions.code; at most 5
+      }),
+      messageLen: errs.map(function (e) { return String((e && e.message) || '').length; })
+    };
+  }
+  function bwnGqlRead(query, variables) {
+    var tok = authToken();
+    return fetch('/api/graphql', {
+      method: 'POST',
+      headers: { 'Authorization': 'Bearer ' + tok, 'Content-Type': 'application/json' },
+      body: JSON.stringify({ query: query, variables: variables || {} })
+    }).then(function (r) {
+      // r.text() has its OWN rejection (a body stream aborted mid-response). The fetch onRejected
+      // below never sees it, so without this handler the never-rejects contract would be false
+      // exactly when the connection dies late. A truncated body is unparseable: it classifies as bad-json.
+      return r.text().then(function (t) {
+        var j = null, parsed = true;
+        try { j = JSON.parse(t); } catch (e) { parsed = false; }
+        return bwnGqlEnvelope(r.status, j, parsed, !tok);
+      }, function () { return bwnGqlEnvelope(r.status, null, false, !tok); });
+    }, function (err) {
+      var env = bwnGqlEnvelope(0, null, false, !tok);
+      env.messageLen = [String((err && err.message) || err || '').length];
+      return env;
+    });
+  }
+  // ===== BWN-GQL-READ END v1 =====
+
   // ===== BWN-OPS START v1 (operation registry + audited GraphQL wrapper; sliced by scripts/test-bwn-ops.js) =====
   // The suite's safety spine for /api/graphql. bwnGqlOp() classifies an operation against
   // BWN_OPS, stamps a correlation id, applies a conservative retry policy, and - for writes -
@@ -2880,7 +2935,17 @@
       if (c === 'pending' || (c && c !== 'error')) return;
       if ((PO_TRIES[woNum] || 0) >= PO_MAX_TRIES) return;
       PO_CACHE[woNum] = 'pending';
-      bwnGql(PO_API_Q, { n: Number(woNum) }).then(function (d) {
+      bwnGqlRead(PO_API_Q, { n: Number(woNum) }).then(function (env) {
+        // Only a CLEAN read feeds the parity cache. A 'partial' (data AND errors[]) is a degraded body:
+        // a FORBIDDEN on one field nulls it while the rest of the row survives, which would cache a
+        // wrong-but-plausible row as a SUCCESS (no retry) and log a false DOM-vs-API mismatch; and it
+        // usually arrives as data:{purchaseOrders:null}, which would fall into the schema-drift branch
+        // below and throw the failure CLASS away - the thing this read exists to report. bwnGql() threw
+        // on any errors[]; this consumer keeps that bar. Everything but 'ok' is routed to the catch
+        // below carrying the class + GraphQL error codes (never a message), so the one warn per WO says
+        // network / http-500 / graphql-error:UNAUTHENTICATED instead of a server-authored string.
+        if (env.kind !== 'ok') { var fail = new Error(env.kind); fail.bwnKind = env.kind; fail.bwnCodes = env.codes; fail.bwnStatus = env.status; fail.bwnNoToken = env.noToken; throw fail; }
+        var d = env.data;
         var rows = d && d.purchaseOrders;
         if (!Array.isArray(rows)) { PO_CACHE[woNum] = 'error'; PO_TRIES[woNum] = (PO_TRIES[woNum] || 0) + 1; if (PO_TRIES[woNum] >= PO_MAX_TRIES) console.warn('[BWN PO] api read gave up for this page load', woNum); return; }   // schema drift = unknown, NEVER empty; schema-drift path
         var seenSids = {};
@@ -2899,7 +2964,7 @@
         if (PO_TRIES[woNum] >= PO_MAX_TRIES) console.warn('[BWN PO] api read gave up for this page load', woNum);   // rejected-fetch path
         if (!PO_WARNED[woNum]) {
           PO_WARNED[woNum] = true;
-          console.warn('[BWN PO] api read failed', woNum, String(err && err.message || err).slice(0, 200));
+          console.warn('[BWN PO] api read failed', woNum, err && err.bwnKind ? (err.bwnKind + (err.bwnCodes && err.bwnCodes.length ? ':' + err.bwnCodes.join(',') : '') + ' http' + err.bwnStatus + (err.bwnNoToken ? ' no-token' : '')) : String(err && err.message || err).slice(0, 200));   // class + code for a transport failure; the 200-char message slice only for a thrown exception inside the reader
         }
       });
     }
