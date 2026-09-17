@@ -33,7 +33,7 @@
 // no-ops cannot pass for a control.
 //
 // Fixtures are entirely synthetic: vendor names like "Vendor A"/"Vendor B", small integer ids,
-// dates in 2030, and work-order numbers in the 100001-100004 range (distinct from the real WO
+// dates in 2030, and work-order numbers in the 100001-100005 range (distinct from the real WO
 // numbers other harnesses in this repo pin).
 //
 // Run: "/c/Program Files/Adobe/Adobe Creative Cloud Experience/libs/node.exe" scripts/test-po-api.js
@@ -267,6 +267,8 @@ function runCases(readerSrc) {
   eq('the query pins clean (root purchaseOrders(workOrderNumber:), allowlisted fields)', checkQueryShape(e.q), []);
   eq('the WO number goes out as a NUMBER (Int!), not the string currentWOId() returned',
     typeof e.fetches[0].vars.n, 'number');
+  eq('and its VALUE is the URL work-order number, not an internal job/PO id (the wrong-id class this pin exists for)',
+    e.fetches[0].vars.n, 100001);
 
   // --- a second render while the first read is pending must NOT re-fire -------
   eq('a re-render during the pending read is still unknown', e.readPOsApi(), null);
@@ -370,7 +372,7 @@ function runCases(readerSrc) {
 // Each reverts one piece of the real behaviour. A control that cannot go red is worse than no
 // control, so every entry below is asserted to produce failures.
 var READER_MUTATIONS = [
-  { what: 'the Array.isArray guard dropped (a non-array response is no longer confidently unknown)',
+  { what: 'the Array.isArray guard dropped (the non-array path then throws into the catch and WARNS; the guard is what keeps schema drift a silent unknown)',
     reader: function (s) { return mutate(s, '!Array.isArray(rows)', 'false'); } },
   { what: 'WorkComplete dropped from the terminal phase set',
     reader: function (s) { return mutate(s, 'WorkComplete: 1, ', ''); } }

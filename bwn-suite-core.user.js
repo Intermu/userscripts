@@ -2825,6 +2825,7 @@
     // been read against live WOs - nothing here changes Next Actions behaviour.
     var PO_CACHE = Object.create(null);    // woNum -> { pos, apiCount, ts } | 'pending' | 'error'
     var PO_PARITY = Object.create(null);   // woNum -> true once poParityLog has logged it
+    var PO_WARNED = Object.create(null);   // woNum -> true once a failed read has been warned about (retries stay silent)
     var PO_API_Q = 'query BwnWOPOs($n: Int!) { purchaseOrders(workOrderNumber: $n) { id number formattedPurchaseOrderNumber phase statusId statusName state notToExceed { amount currency precision } nextOnsiteDate hasScheduledTrip trips { id number onSiteDate status completedDate canceledDate } vendorId vendorName vendorIdentity { id companyName isDependent hasActiveUsers } paidDate vendorAcceptedDate purchaseOrderDate acceptedEmailStatus } }';
     // Terminal phases (done=true). Closed counts as done here - an INTENTIONAL divergence from the
     // DOM regex above, which has no "Closed" keyword to match.
@@ -2884,8 +2885,11 @@
         try { poParityLog(woNum); } catch (e) { }
         try { refresh(); } catch (e) { }
       }).catch(function (err) {
-        PO_CACHE[woNum] = 'error';
-        console.warn('[BWN PO] api read failed', woNum, String(err && err.message || err).slice(0, 200));
+        PO_CACHE[woNum] = 'error';   // retried on the next render, like fetchDocs; warn once per WO, not once per retry
+        if (!PO_WARNED[woNum]) {
+          PO_WARNED[woNum] = true;
+          console.warn('[BWN PO] api read failed', woNum, String(err && err.message || err).slice(0, 200));
+        }
       });
     }
     function readPOsApi() {
@@ -2898,11 +2902,17 @@
     }
     // Parity: DOM readPOs() vs the API read above, joined by sid ('ln'-prefixed DOM sids only),
     // logged once per WO per page load. Counts, sids and field NAMES only - never amounts, dates,
-    // vendor strings, ids or GUIDs.
+    // vendor strings or GUIDs (a sid that collided on its line number carries the PO's internal Int
+    // id as a suffix; nothing else from the row reaches the summary).
     function poParityLog(woNum) {
       if (!woNum || PO_PARITY[woNum]) return;
       var c = PO_CACHE[woNum];
       if (!c || c === 'pending' || c === 'error') return;
+      // Never latch another WO's DOM: after an SPA route change the URL moves before the accordion
+      // re-renders, so require the URL AND the rendered header (when present) to name this WO.
+      if (String(currentWOId()) !== String(woNum)) return;
+      var hdr = (typeof document.querySelector === 'function') ? document.querySelector('[data-testid="work-order-header-number-formatted"]') : null;
+      if (hdr && (hdr.textContent || '').indexOf(String(woNum)) === -1) return;
       var domRows = readPOs();
       var domCount = domRows.length;
       if (!domCount) return;   // nothing to compare yet
