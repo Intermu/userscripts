@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         BWN Suite - Core (Broadway National)
 // @namespace    broadwaynational.bwn
-// @version      1.85.0
+// @version      1.86.0
 // @downloadURL  https://raw.githubusercontent.com/Intermu/userscripts/main/bwn-suite-core.user.js
 // @updateURL    https://raw.githubusercontent.com/Intermu/userscripts/main/bwn-suite-core.user.js
 // @description  Runs several Umbrava helpers for BWN coordinators, in the browser with no privileged grants. Includes: PO Approval + ETA Builder; WO Assist (GP/ETA, a stall watchdog, DNE calculator, and a next-action playbook); Email Leak Guard (checks recipients against vendor names, PO amounts, and client budget references before an outbound email sends); WO List Heat (a triage overlay + My Day strip on the work-order list, with an optional same-origin Umbrava API scan for deterministic full-board coverage); and the BWN Launcher (opens the Azure Static Web App tools with the current WO's context). Modules share state through sessionStorage/localStorage. The only network calls are same-origin Umbrava GraphQL requests (app.umbrava.com/api/graphql, the app's own session): List Heat's full-board scan and WO Assist's work-order / trip / clock-in / document reads, plus ONE write - BWN Views saves the column layout through Umbrava's own putUserPreference, the same preference the column chooser writes; everything else is offline. Toggle modules in BWN_MODULES below.
@@ -2817,6 +2817,146 @@
       }).catch(function () { TASKS_DONE[woNum] = 'error'; });
     }
 
+    // ===== BWN-PO-API START v1 (API purchase-order read + parity log; sliced by scripts/test-po-api.js) =====
+    // Root query field only - purchaseOrders(workOrderNumber). The nested workOrder { purchaseOrders }
+    // shape is DEPRECATED on this schema and returns null - do not switch to it.
+    // paidDate is the EMPTY STRING, not null/absent, when a PO has not been paid.
+    // ADDITIVE ONLY: state.pos stays sourced from the DOM readPOs() above until this parity log has
+    // been read against live WOs - nothing here changes Next Actions behaviour.
+    var PO_CACHE = Object.create(null);    // woNum -> { pos, apiCount, ts } | 'pending' | 'error'
+    var PO_PARITY = Object.create(null);   // woNum -> true once poParityLog has logged it
+    var PO_API_Q = 'query BwnWOPOs($n: Int!) { purchaseOrders(workOrderNumber: $n) { id number formattedPurchaseOrderNumber phase statusId statusName state notToExceed { amount currency precision } nextOnsiteDate hasScheduledTrip trips { id number onSiteDate status completedDate canceledDate } vendorId vendorName vendorIdentity { id companyName isDependent hasActiveUsers } paidDate vendorAcceptedDate purchaseOrderDate acceptedEmailStatus } }';
+    // Terminal phases (done=true). Closed counts as done here - an INTENTIONAL divergence from the
+    // DOM regex above, which has no "Closed" keyword to match.
+    var PO_DONE_PHASES = { Canceled: 1, Closed: 1, Declined: 1, Revoked: 1, WorkComplete: 1, ConfirmComplete: 1 };
+    var PO_COST_CLOSED_PHASES = { Canceled: 1, Declined: 1, Revoked: 1 };
+    function poApiDateStr(v) {
+      if (!v) return null;
+      var d = new Date(v);
+      return isNaN(+d) ? null : ((d.getMonth() + 1) + '/' + d.getDate() + '/' + d.getFullYear());
+    }
+    function poFromApi(row) {
+      var phase = String(row.phase || '');
+      var statusName = String(row.statusName || '');
+      var sn = statusName.toLowerCase();
+      var nte = row.notToExceed;
+      var precision = (nte && typeof nte.precision === 'number') ? nte.precision : 2;
+      var amount = (nte && typeof nte.amount === 'number') ? nte.amount / Math.pow(10, precision) : 0;
+      var done = !!PO_DONE_PHASES[phase];
+      var poStatus = '';
+      if (sn === 'confirm complete') poStatus = 'confirm';
+      else if (sn === 'material ordered' || sn === 'need material') poStatus = 'materials';
+      else if (sn === 'pending acceptance') poStatus = 'accept';   // "Unassigned" stays '' - no vendor to chase
+      var costOpen = amount > 0 && !PO_COST_CLOSED_PHASES[phase] && sn !== 'paid' && sn !== 'invoiced';
+      var vendor = String(row.vendorName || (row.vendorIdentity && row.vendorIdentity.companyName) || '(vendor n/a)')
+        .replace(/\s+/g, ' ').trim() || '(vendor n/a)';
+      var num = String(row.number);
+      var trips = Array.isArray(row.trips) ? row.trips : [];
+      var openTripCount = trips.filter(function (t) { return t && !t.completedDate && !t.canceledDate; }).length;
+      return {
+        vendor: vendor, num: num, sid: 'ln' + num.padStart(3, '0'),
+        amount: amount, schedDate: poApiDateStr(row.nextOnsiteDate), done: done,
+        poStatus: poStatus, statusText: statusName, costOpen: costOpen,
+        api: {
+          id: row.id, number: row.number, statusId: Number(row.statusId), phase: phase, state: row.state,
+          vendorId: row.vendorId, nextOnsiteDate: row.nextOnsiteDate || null,
+          hasScheduledTrip: !!row.hasScheduledTrip, openTripCount: openTripCount,
+          paid: sn === 'paid' || !!row.paidDate
+        }
+      };
+    }
+    function fetchPOs(woNum) {
+      if (!woNum) return;
+      var c = PO_CACHE[woNum];
+      if (c === 'pending' || (c && c !== 'error')) return;
+      PO_CACHE[woNum] = 'pending';
+      bwnGql(PO_API_Q, { n: Number(woNum) }).then(function (d) {
+        var rows = d && d.purchaseOrders;
+        if (!Array.isArray(rows)) { PO_CACHE[woNum] = 'error'; return; }   // schema drift = unknown, NEVER empty
+        var seenSids = {};
+        var pos = rows.map(function (row) {
+          var p = poFromApi(row);
+          if (seenSids[p.sid]) p.sid = p.sid + '-' + row.id;   // two POs can share a number - keys must stay distinct
+          seenSids[p.sid] = 1;
+          return p;
+        });
+        PO_CACHE[woNum] = { pos: pos, apiCount: pos.length, ts: Date.now() };
+        try { poParityLog(woNum); } catch (e) { }
+        try { refresh(); } catch (e) { }
+      }).catch(function (err) {
+        PO_CACHE[woNum] = 'error';
+        console.warn('[BWN PO] api read failed', woNum, String(err && err.message || err).slice(0, 200));
+      });
+    }
+    function readPOsApi() {
+      var woNum = currentWOId();
+      if (!woNum) return null;
+      var c = PO_CACHE[woNum];
+      if (c && c !== 'pending' && c !== 'error') return c.pos;
+      fetchPOs(woNum);
+      return null;   // pending / errored / just-fired - unknown, never a guessed empty
+    }
+    // Parity: DOM readPOs() vs the API read above, joined by sid ('ln'-prefixed DOM sids only),
+    // logged once per WO per page load. Counts, sids and field NAMES only - never amounts, dates,
+    // vendor strings, ids or GUIDs.
+    function poParityLog(woNum) {
+      if (!woNum || PO_PARITY[woNum]) return;
+      var c = PO_CACHE[woNum];
+      if (!c || c === 'pending' || c === 'error') return;
+      var domRows = readPOs();
+      var domCount = domRows.length;
+      if (!domCount) return;   // nothing to compare yet
+      var apiRows = c.pos;
+      function dayOf(s) { if (!s) return null; var d = new Date(s); return isNaN(+d) ? null : (d.getFullYear() + '-' + d.getMonth() + '-' + d.getDate()); }
+      var domBySid = {}, domLabelAbsent = 0;
+      domRows.forEach(function (r) {
+        if (r.sid && r.sid.indexOf('ln') === 0) domBySid[r.sid] = r;
+        if (r.schedDate === undefined) domLabelAbsent++;
+      });
+      var domMultiAmount = 0;
+      var amtRe = /\$\s*([\d,]+(?:\.\d{1,2})?)/g;
+      document.querySelectorAll('[data-testid^="POAccordion-"]').forEach(function (row) {
+        var n = 0, mm; amtRe.lastIndex = 0;
+        while ((mm = amtRe.exec(row.textContent || '')) !== null) n++;
+        if (n > 1) domMultiAmount++;
+      });
+      var apiBySid = {}, apiTerminalNoSched = 0;
+      apiRows.forEach(function (r) {
+        apiBySid[r.sid] = r;
+        if (r.done && !r.api.nextOnsiteDate) apiTerminalNoSched++;
+      });
+      var joined = 0, unjoinedDom = 0, unjoinedApiSids = [], mismatches = [];
+      Object.keys(domBySid).forEach(function (sid) {
+        var d = domBySid[sid], a = apiBySid[sid];
+        if (!a) { unjoinedDom++; return; }
+        joined++;
+        var fields = [];
+        if (Math.abs((d.amount || 0) - (a.amount || 0)) >= 0.005) fields.push('amount');
+        if (dayOf(d.schedDate) !== dayOf(a.schedDate)) fields.push('schedDate');
+        if (!!d.done !== !!a.done) fields.push('done');
+        if ((d.poStatus || '') !== (a.poStatus || '')) fields.push('poStatus');
+        if (!!d.costOpen !== !!a.costOpen) fields.push('costOpen');
+        if (nvVendor(d.vendor) !== nvVendor(a.vendor)) fields.push('vendor');
+        if (fields.length) mismatches.push({ sid: sid, fields: fields });
+      });
+      Object.keys(apiBySid).forEach(function (sid) { if (!domBySid[sid]) unjoinedApiSids.push(sid); });
+      var summary = {
+        wo: woNum, domCount: domCount, apiCount: apiRows.length, joined: joined,
+        unjoinedDom: unjoinedDom, unjoinedApi: unjoinedApiSids.length, unjoinedApiSids: unjoinedApiSids,
+        domMultiAmount: domMultiAmount, domLabelAbsent: domLabelAbsent,
+        apiTerminalNoSched: apiTerminalNoSched, mismatches: mismatches
+      };
+      PO_PARITY[woNum] = true;
+      console.info('[BWN PO parity]', summary);
+      try { window.__bwnPoParity = summary; } catch (e) { }
+    }
+    function poParityTick() {
+      readPOsApi();
+      var woNum = currentWOId();
+      if (woNum) poParityLog(woNum);
+    }
+    // ===== BWN-PO-API END v1 =====
+
     // ---- Documents via jobDocuments(workOrderNumber) ---------------------------
     // Third reader in this cluster, same cache shape as readWO/fetchTrips: async
     // fetch fills DOCS_CACHE, readDocs() is a SYNC cache read so compute() and the
@@ -3091,6 +3231,7 @@
       try { if (woApi && woApi.id) fetchProposals(currentWOId(), woApi.id); } catch (e) { }   // async: populates bwn:props open-count for the live-jobs push (needs jobId)
       try { fetchTasks(currentWOId()); } catch (e) { }   // async: populates bwn:tasks open-count for the live-jobs push (needs only the WO number)
       var pos = readPOs();
+      try { poParityTick(); } catch (e) { }
       var vendorTotal = pos.reduce(function (a, p) { return a + (p.amount > 0 ? p.amount : 0); }, 0);
       var nte = detectNTE();
       // WO-header override: when the workOrder API has landed, trust its exact money over the

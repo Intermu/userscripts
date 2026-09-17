@@ -257,6 +257,13 @@ jobs:
       - name: Docs API harness (jobDocuments reader + docs:none gate)
         run: node scripts/test-docs-api.js
 
+      # API purchase-order read (purchaseOrders(workOrderNumber)) added beside the DOM readPOs(),
+      # plus a field-level parity log between the two. state.pos stays DOM-sourced; this is the
+      # tripwire for the API reader and the query shape (root field, not the deprecated nested
+      # workOrder{purchaseOrders}) drifting or regressing.
+      - name: PO API harness (purchaseOrders reader + parity log)
+        run: node scripts/test-po-api.js
+
       # drop-upload 1.11.0 writes notes + documents via Umbrava's own mutations
       # (addEditJobNote; initializeJobDocument -> blob PUT -> bulkAddWorkOrderDocuments),
       # captured live 2026-08-12, replacing the brittle combobox DOM automation. Slices the
