@@ -41,8 +41,8 @@
 //     via document.querySelector, the header guard too - both must name the same WO.
 //   - an empty DOM logs a confident {domCount:0, apiCount:0} summary when the API agrees; it holds off
 //     entirely when API rows are cached but the DOM has simply not rendered yet.
-//   - every behaviour above is also driven by a negative control that must turn this harness red: 18
-//     total (2 query-shape + 16 reader), enforced by mutate()'s absent/non-unique throw.
+//   - every behaviour above is also driven by a negative control that must turn this harness red: 21
+//     total (2 query-shape + 19 reader), enforced by mutate()'s absent/non-unique throw.
 //
 // WHAT IT DOES NOT PROVE:
 //   - that `purchaseOrders(workOrderNumber:)` exists on the live schema for this tenant, or that the
@@ -82,6 +82,16 @@ var S_READER = slice(
   '    // ===== BWN-PO-API END v1 =====',
   'BWN-PO-API block'
 );
+
+// coreFull with the sliced reader block removed - so a hermeticity pin can prove a shadow-read
+// symbol never leaks outside the marked block, over the REAL shipped bytes.
+var OUTSIDE_READER = coreFull.split(S_READER).join('');
+
+function countOccurrences(hay, needle) {
+  var c = 0, i = 0;
+  while ((i = hay.indexOf(needle, i)) !== -1) { c++; i += needle.length; }
+  return c;
+}
 
 function mutate(src, from, to) {
   var i = src.indexOf(from);
@@ -554,6 +564,35 @@ function runCases(readerSrc) {
     var fetchesBefore9 = e.fetches.length;
     eq('a 4th read after the drift cap is still unknown', e.readPOsApi(), null);
     eq('and does not fire another request', e.fetches.length, fetchesBefore9);
+
+    // --- positive case: an API sid collision suffixed by a NON-NUMERIC row id (ln005-x1), and a
+    // null-number row (lnnull), both fail the publish filter while the plain collision half
+    // (ln005) still passes it - proving unjoinedApi (the raw count) can exceed
+    // unjoinedApiSids.length (the published, redaction-safe list) without leaking either odd sid
+    // into it. One ordinary DOM row keeps the DOM side of the join unaffected. ---
+    e.wo = '100010';
+    e.domRows = [makeDomRow({ vendor: 'Vendor A', num: '1', sid: 'ln001', amount: 100, schedDate: '3/5/30', statusText: 'New' })];
+    e.readPOsApi();
+    e.fetches[e.fetches.length - 1].resolve({ purchaseOrders: [
+      makeRow({ id: 70, number: 1, statusId: -1, statusName: 'New', phase: 'Open' }),
+      makeRow({ id: 71, number: 5, statusId: -4, statusName: 'Scheduled', phase: 'Open' }),
+      makeRow({ id: 'x1', number: 5, statusId: -4, statusName: 'Scheduled', phase: 'Open' }),
+      makeRow({ id: 72, number: null, statusId: -1, statusName: 'New', phase: 'Open' })
+    ] });
+    return tick();
+  }).then(function () {
+    e.poParityTick();
+    var s10 = e.win.__bwnPoParity;
+    ok('the null-number/non-numeric-id positive case published a summary', !!s10, JSON.stringify(s10));
+    eq('the collision sid built from a non-numeric row id (ln005-x1) does not appear in unjoinedApiSids',
+      s10.unjoinedApiSids.indexOf('ln005-x1'), -1);
+    eq('the null-number sid (lnnull) does not appear in unjoinedApiSids',
+      s10.unjoinedApiSids.indexOf('lnnull'), -1);
+    eq('the plain collision half (ln005) still passes the publish filter, alone', s10.unjoinedApiSids, ['ln005']);
+    eq('unjoinedApi (the raw count) exceeds unjoinedApiSids.length by 2 - the two unpublishable sids',
+      s10.unjoinedApi - s10.unjoinedApiSids.length, 2);
+    eq('the DOM side is unaffected: the one real DOM row still joins normally', s10.joined, 1);
+    eq('and nothing is skipped on the DOM side', s10.domSkipped, 0);
     return out;
   }, function (err) {
     out.push({ name: 'cases ran without throwing', ok: false, detail: String(err && err.message || err) });
@@ -600,7 +639,9 @@ var READER_MUTATIONS = [
   { what: 'the give-up warning threshold disabled on the schema-drift path (a persistent non-array payload never announces that it gave up)',
     reader: function (s) { return mutate(s, "PO_TRIES[woNum] >= PO_MAX_TRIES) console.warn('[BWN PO] api read gave up for this page load', woNum); return; }   // schema drift = unknown, NEVER empty; schema-drift path", "PO_TRIES[woNum] >= 999) console.warn('[BWN PO] api read gave up for this page load', woNum); return; }   // schema drift = unknown, NEVER empty; schema-drift path"); } },
   { what: 'the digit-suffix collision group dropped from the join regex (a valid ln005-2-style collision sid can no longer join)',
-    reader: function (s) { return mutate(s, "(-\\d+)?$/.test(r.sid)", "$/.test(r.sid)"); } }
+    reader: function (s) { return mutate(s, "(-\\d+)?$/.test(r.sid)", "$/.test(r.sid)"); } },
+  { what: 'the API-side unjoinedApiSids filter dropped (a non-digit-label API sid, like a null-number or non-numeric-id collision suffix, gets published unfiltered)',
+    reader: function (s) { return mutate(s, "if (/^ln\\d{2,4}(-\\d+)?$/.test(sid)) unjoinedApiSids.push(sid);", "unjoinedApiSids.push(sid);"); } }
 ];
 
 // The query-shape pin, driven directly (not via the vm-sliced reader) with synthetic query text.
@@ -612,6 +653,30 @@ var QUERY_MUTATIONS = [
 ];
 
 function main() {
+  console.log('\n-- source-level pins, over the REAL shipped bytes --');
+  A.ok('the shipped state.pos assignment is untouched by the shadow read (exactly one "var pos = readPOs();")',
+    countOccurrences(coreFull, 'var pos = readPOs();') === 1,
+    'got ' + countOccurrences(coreFull, 'var pos = readPOs();'));
+  A.ok('poParityTick() is fired from exactly one guarded call site',
+    countOccurrences(coreFull, 'try { poParityTick(); } catch (e) { }') === 1,
+    'got ' + countOccurrences(coreFull, 'try { poParityTick(); } catch (e) { }'));
+  // The guarded-site count alone would still pass with a second, UNGUARDED poParityTick() planted
+  // elsewhere (post-edit review experiment E3) - so pin the total outside the block to one.
+  A.ok('and no unguarded poParityTick( call exists anywhere outside the block',
+    countOccurrences(OUTSIDE_READER, 'poParityTick(') === 1,
+    'got ' + countOccurrences(OUTSIDE_READER, 'poParityTick(') + ' occurrences outside the block');
+  ['readPOsApi(', 'poFromApi(', 'PO_CACHE', 'poParityLog('].forEach(function (needle) {
+    A.ok('the shadow read is hermetic: ' + JSON.stringify(needle) + ' never appears outside the sliced block',
+      countOccurrences(OUTSIDE_READER, needle) === 0,
+      'got ' + countOccurrences(OUTSIDE_READER, needle) + ' occurrences outside the block');
+  });
+  A.ok('woId() identifies the WO from the URL digits segment, never a jobId',
+    coreFull.indexOf('location.pathname.match(/work-orders\\/(\\d+)/)') !== -1);
+  A.ok('@description names the purchase-order read', coreFull.indexOf('purchase-order reads') !== -1);
+  A.ok('the sid-publish regex literal appears exactly twice in the sliced reader (DOM side + API side)',
+    countOccurrences(S_READER, '/^ln\\d{2,4}(-\\d+)?$/.test(') === 2,
+    'got ' + countOccurrences(S_READER, '/^ln\\d{2,4}(-\\d+)?$/.test('));
+
   console.log('\n-- the shipped PO API route --');
   return runCases(S_READER).then(function (results) {
     results.forEach(function (r) { A.ok(r.name, r.ok, r.detail); });
@@ -621,6 +686,8 @@ function main() {
     });
 
     console.log('\n-- negative controls: each must turn the cases above red --');
+    A.ok('READER_MUTATIONS count matches the header claim (19)', READER_MUTATIONS.length === 19, 'got ' + READER_MUTATIONS.length);
+    A.ok('QUERY_MUTATIONS count matches the header claim (2)', QUERY_MUTATIONS.length === 2, 'got ' + QUERY_MUTATIONS.length);
     return READER_MUTATIONS.reduce(function (chain, m) {
       return chain.then(function () {
         var reader = m.reader(S_READER);

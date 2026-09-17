@@ -4,7 +4,7 @@
 // @version      1.86.0
 // @downloadURL  https://raw.githubusercontent.com/Intermu/userscripts/main/bwn-suite-core.user.js
 // @updateURL    https://raw.githubusercontent.com/Intermu/userscripts/main/bwn-suite-core.user.js
-// @description  Runs several Umbrava helpers for BWN coordinators, in the browser with no privileged grants. Includes: PO Approval + ETA Builder; WO Assist (GP/ETA, a stall watchdog, DNE calculator, and a next-action playbook); Email Leak Guard (checks recipients against vendor names, PO amounts, and client budget references before an outbound email sends); WO List Heat (a triage overlay + My Day strip on the work-order list, with an optional same-origin Umbrava API scan for deterministic full-board coverage); and the BWN Launcher (opens the Azure Static Web App tools with the current WO's context). Modules share state through sessionStorage/localStorage. The only network calls are same-origin Umbrava GraphQL requests (app.umbrava.com/api/graphql, the app's own session): List Heat's full-board scan and WO Assist's work-order / trip / clock-in / document reads, plus ONE write - BWN Views saves the column layout through Umbrava's own putUserPreference, the same preference the column chooser writes; everything else is offline. Toggle modules in BWN_MODULES below.
+// @description  Runs several Umbrava helpers for BWN coordinators, in the browser with no privileged grants. Includes: PO Approval + ETA Builder; WO Assist (GP/ETA, a stall watchdog, DNE calculator, and a next-action playbook); Email Leak Guard (checks recipients against vendor names, PO amounts, and client budget references before an outbound email sends); WO List Heat (a triage overlay + My Day strip on the work-order list, with an optional same-origin Umbrava API scan for deterministic full-board coverage); and the BWN Launcher (opens the Azure Static Web App tools with the current WO's context). Modules share state through sessionStorage/localStorage. The only network calls are same-origin Umbrava GraphQL requests (app.umbrava.com/api/graphql, the app's own session): List Heat's full-board scan and WO Assist's work-order / trip / clock-in / document / purchase-order reads, plus ONE write - BWN Views saves the column layout through Umbrava's own putUserPreference, the same preference the column chooser writes; everything else is offline. Toggle modules in BWN_MODULES below.
 // @match        https://app.umbrava.com/*
 // @match        https://*.umbrava.com/*
 // @run-at       document-start
@@ -2923,6 +2923,12 @@
     // interpretable for the date-boundary question). This re-calls readPOs(), which re-fires its own
     // pre-existing '[BWN GP] PO row has multiple amounts' info line on a multi-$ row - that line is
     // old and carries amounts; the parity summary itself never does.
+    // Both published sid lists (unjoinedDomSids, unjoinedApiSids) pass the same digit-line-label
+    // filter above, so unjoinedApi may exceed unjoinedApiSids.length - the difference is
+    // unpublishable API sids, a schema-drift signal, never a value from those rows.
+    // Redaction in full: the console.warn above carries only the WO number and an error string
+    // truncated to 200 chars (never a row value); the summary itself carries only counts, sids,
+    // field names, booleans, and tzOffsetMin.
     function poParityLog(woNum) {
       if (!woNum || PO_PARITY[woNum]) return;
       var c = PO_CACHE[woNum];
@@ -2957,7 +2963,7 @@
         if (r.done && !r.api.nextOnsiteDate) apiTerminalNoSched++;
         if (r.api.nteAbsent) apiAmountAbsent++;
       });
-      var joined = 0, unjoinedDomSids = [], unjoinedApiSids = [], mismatches = [];
+      var joined = 0, unjoinedDomSids = [], unjoinedApiSids = [], unjoinedApiCount = 0, mismatches = [];
       Object.keys(domBySid).forEach(function (sid) {
         var d = domBySid[sid], a = apiBySid[sid];
         if (!a) { unjoinedDomSids.push(sid); return; }
@@ -2975,11 +2981,11 @@
         var as = nvVendor(a.statusText || '').replace(/[^A-Z0-9]+/g, ' ').trim(); if (!as || nvVendor(d.statusText || '').replace(/[^A-Z0-9]+/g, ' ').trim().indexOf(as) === -1) fields.push('statusText');
         if (fields.length) mismatches.push({ sid: sid, fields: fields });
       });
-      Object.keys(apiBySid).forEach(function (sid) { if (!domBySid[sid]) unjoinedApiSids.push(sid); });
+      Object.keys(apiBySid).forEach(function (sid) { if (!domBySid[sid]) { unjoinedApiCount++; if (/^ln\d{2,4}(-\d+)?$/.test(sid)) unjoinedApiSids.push(sid); } });
       var summary = {
         wo: woNum, domCount: domCount, apiCount: apiRows.length, joined: joined,
         unjoinedDom: unjoinedDomSids.length, unjoinedDomSids: unjoinedDomSids,
-        unjoinedApi: unjoinedApiSids.length, unjoinedApiSids: unjoinedApiSids,
+        unjoinedApi: unjoinedApiCount, unjoinedApiSids: unjoinedApiSids,
         domMultiAmount: domMultiAmount, domLabelAbsent: domLabelAbsent, domSkipped: domSkipped,
         apiTerminalNoSched: apiTerminalNoSched, apiAmountAbsent: apiAmountAbsent, mismatches: mismatches,
         hdrSeen: !!hdr, tzOffsetMin: new Date().getTimezoneOffset()
