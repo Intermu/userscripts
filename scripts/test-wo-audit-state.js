@@ -311,7 +311,7 @@ A.eq('a trailing "ECD TBD" echo is stripped too',
 A.eq('control: a chain with no ECD token is left alone',
   'received 7/1 - installed 8/3'.replace(STRIP, '').trim(), 'received 7/1 - installed 8/3');
 A.ok('control: the SHIPPED regex is the anchored one, not a greedy strip',
-  /ECD\\s\+\(\?:/.test(TEXT.replace(/\\/g, '\\')) || TEXT.indexOf("ECD\\s+(?:\\d{1,2}\\/\\d{1,2}") !== -1,
+  /ECD\\s\+\(\?:/.test(TEXT) || TEXT.indexOf("ECD\\s+(?:\\d{1,2}\\/\\d{1,2}") !== -1,
   'the greedy [\\s\\S]*$ form must not return');
 A.ok('control: the greedy strip form is gone from the source',
   TEXT.indexOf("/\\s*-\\s*ECD\\b[\\s\\S]*$/i") === -1);
