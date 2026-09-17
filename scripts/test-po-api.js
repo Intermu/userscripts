@@ -41,8 +41,11 @@
 //     via document.querySelector, the header guard too - both must name the same WO.
 //   - an empty DOM logs a confident {domCount:0, apiCount:0} summary when the API agrees; it holds off
 //     entirely when API rows are cached but the DOM has simply not rendered yet.
-//   - every behaviour above is also driven by a negative control that must turn this harness red: 21
-//     total (2 query-shape + 19 reader), enforced by mutate()'s absent/non-unique throw.
+//   - fetchPOs reads through bwnGqlRead() (1.87.0): a non-'ok' envelope - including a 'partial' body
+//     with data AND errors[] - is unknown, cached as 'error', and the one warn per WO names the failure
+//     CLASS + GraphQL error code (never a server message); its rows never reach the parity cache.
+//   - every behaviour above is also driven by a negative control that must turn this harness red: 23
+//     total (2 query-shape + 21 reader), enforced by mutate()'s absent/non-unique throw.
 //
 // WHAT IT DOES NOT PROVE:
 //   - that `purchaseOrders(workOrderNumber:)` exists on the live schema for this tenant, or that the
@@ -159,6 +162,18 @@ function makeReader(readerSrc) {
       env.fetches.push(rec);
       return rec.p;
     }
+  };
+  // fetchPOs reads through bwnGqlRead() (the classified envelope, 1.87.0). The stub keeps the
+  // deferred-per-call contract above: a resolved `data` is an 'ok' envelope, a rejection is a
+  // 'network' envelope, and a fixture may resolve a full envelope object directly (kind + codes)
+  // to drive the graphql-error / http paths. bwnGqlRead never rejects in production either.
+  sandbox.bwnGqlRead = function (query, variables) {
+    return sandbox.bwnGql(query, variables).then(function (d) {
+      if (d && typeof d === 'object' && typeof d.kind === 'string' && 'status' in d) return d;
+      return { kind: 'ok', status: 200, noToken: false, data: d, codes: [], messageLen: [] };
+    }, function (err) {
+      return { kind: 'network', status: 0, noToken: false, data: null, codes: [], messageLen: [String(err && err.message || err).length] };
+    });
   };
   vm.createContext(sandbox);
   var api = vm.runInContext(
@@ -593,6 +608,39 @@ function runCases(readerSrc) {
       s10.unjoinedApi - s10.unjoinedApiSids.length, 2);
     eq('the DOM side is unaffected: the one real DOM row still joins normally', s10.joined, 1);
     eq('and nothing is skipped on the DOM side', s10.domSkipped, 0);
+
+    // --- classified transport failure (1.87.0): a 'graphql-error' envelope is unknown, and the ONE warn
+    // names the failure CLASS + code, never a server message (drives the adapter's envelope branch) ---
+    e.wo = '100011';
+    e.domRows = [];
+    var warnsBefore11 = e.warns.length;
+    e.readPOsApi();
+    e.fetches[e.fetches.length - 1].resolve({ kind: 'graphql-error', status: 200, noToken: false, data: null, codes: ['UNAUTHENTICATED'], messageLen: [40] });
+    // The adapter adds a promise hop and the failure path resolves through .then -> throw -> .catch, one
+    // microtask deeper than tick() waits for; a macrotask yield lets the catch run before asserting.
+    return new Promise(function (r) { setTimeout(r, 10); }).then(function () {
+      eq('a graphql-error envelope leaves the read unknown', e.readPOsApi(), null);
+      eq('and warns exactly once', e.warns.length, warnsBefore11 + 1);
+      var w11 = e.warns[e.warns.length - 1].join(' ');
+      ok('the warn carries the WO, the failure class and the error code, never a message',
+        w11.indexOf('100011') !== -1 && w11.indexOf('api read failed') !== -1 && w11.indexOf('graphql-error:UNAUTHENTICATED') !== -1 && w11.indexOf('http200') !== -1 && w11.indexOf('Vendor') === -1, w11);
+    });
+  }).then(function () {
+    // --- a 'partial' envelope (data AND errors[]) is a FAILURE for this consumer: its rows never reach
+    // the parity cache (bwnGql threw on any errors[]; the classified read keeps that bar here) ---
+    e.wo = '100012';
+    e.domRows = [];
+    var warnsBefore12 = e.warns.length;
+    e.readPOsApi();
+    e.fetches[e.fetches.length - 1].resolve({ kind: 'partial', status: 200, noToken: false, data: { purchaseOrders: [makeRow({ id: 80, number: 1, statusId: -1, statusName: 'New', phase: 'Open' })] }, codes: ['FORBIDDEN'], messageLen: [9] });
+    return new Promise(function (r) { setTimeout(r, 10); }).then(function () {
+      eq('the partial read is cached as error (so it is retried), not as rows', e.cache['100012'], 'error');   // read the cache BEFORE readPOsApi(), which re-fires the retry and flips it back to pending
+      eq('a partial envelope is unknown - its rows are NOT fed to the parity cache', e.readPOsApi(), null);
+      eq('and warns exactly once', e.warns.length, warnsBefore12 + 1);
+      var w12 = e.warns[e.warns.length - 1].join(' ');
+      ok('the partial warn carries class + code and no row value', w12.indexOf('partial:FORBIDDEN') !== -1 && w12.indexOf('Vendor') === -1, w12);
+    });
+  }).then(function () {
     return out;
   }, function (err) {
     out.push({ name: 'cases ran without throwing', ok: false, detail: String(err && err.message || err) });
@@ -641,7 +689,11 @@ var READER_MUTATIONS = [
   { what: 'the digit-suffix collision group dropped from the join regex (a valid ln005-2-style collision sid can no longer join)',
     reader: function (s) { return mutate(s, "(-\\d+)?$/.test(r.sid)", "$/.test(r.sid)"); } },
   { what: 'the API-side unjoinedApiSids filter dropped (a non-digit-label API sid, like a null-number or non-numeric-id collision suffix, gets published unfiltered)',
-    reader: function (s) { return mutate(s, "if (/^ln\\d{2,4}(-\\d+)?$/.test(sid)) unjoinedApiSids.push(sid);", "unjoinedApiSids.push(sid);"); } }
+    reader: function (s) { return mutate(s, "if (/^ln\\d{2,4}(-\\d+)?$/.test(sid)) unjoinedApiSids.push(sid);", "unjoinedApiSids.push(sid);"); } },
+  { what: 'the classified warn collapsed back onto the server message slice (a transport failure prints text, never its class + code)',
+    reader: function (s) { return mutate(s, "err && err.bwnKind ? (err.bwnKind", "false ? (err.bwnKind"); } },
+  { what: "a 'partial' envelope accepted as a clean read (degraded rows would feed the parity cache as a success)",
+    reader: function (s) { return mutate(s, "if (env.kind !== 'ok') { var fail", "if (env.kind !== 'ok' && env.kind !== 'partial') { var fail"); } }
 ];
 
 // The query-shape pin, driven directly (not via the vm-sliced reader) with synthetic query text.
@@ -686,7 +738,7 @@ function main() {
     });
 
     console.log('\n-- negative controls: each must turn the cases above red --');
-    A.ok('READER_MUTATIONS count matches the header claim (19)', READER_MUTATIONS.length === 19, 'got ' + READER_MUTATIONS.length);
+    A.ok('READER_MUTATIONS count matches the header claim (21)', READER_MUTATIONS.length === 21, 'got ' + READER_MUTATIONS.length);
     A.ok('QUERY_MUTATIONS count matches the header claim (2)', QUERY_MUTATIONS.length === 2, 'got ' + QUERY_MUTATIONS.length);
     return READER_MUTATIONS.reduce(function (chain, m) {
       return chain.then(function () {
