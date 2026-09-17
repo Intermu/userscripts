@@ -2826,6 +2826,11 @@
     var PO_CACHE = Object.create(null);    // woNum -> { pos, apiCount, ts } | 'pending' | 'error'
     var PO_PARITY = Object.create(null);   // woNum -> true once poParityLog has logged it
     var PO_WARNED = Object.create(null);   // woNum -> true once a failed read has been warned about (retries stay silent)
+    var PO_TRIES = Object.create(null);    // woNum -> failed attempts
+    var PO_MAX_TRIES = 3;   // the shadow read must not add a second per-render retry loop on a persistent failure (e.g. a tokenless HTTP 500) - fetchDocs retries forever, this one goes quiet after PO_MAX_TRIES per page load
+    // Warn asymmetry: a rejected (network) failure warns once on first failure and once more at
+    // give-up (two warns); a schema-drift (non-array) failure never warns on first failure, only
+    // once at give-up (one warn) - both name the WO only, never a row value.
     var PO_API_Q = 'query BwnWOPOs($n: Int!) { purchaseOrders(workOrderNumber: $n) { id number formattedPurchaseOrderNumber phase statusId statusName state notToExceed { amount currency precision } nextOnsiteDate hasScheduledTrip trips { id number onSiteDate status completedDate canceledDate } vendorId vendorName vendorIdentity { id companyName isDependent hasActiveUsers } paidDate vendorAcceptedDate purchaseOrderDate acceptedEmailStatus } }';
     // Terminal phases (done=true). Closed counts as done here - an INTENTIONAL divergence from the
     // DOM regex above, which has no "Closed" keyword to match.
@@ -2841,6 +2846,9 @@
       var statusName = String(row.statusName || '');
       var sn = statusName.toLowerCase();
       var nte = row.notToExceed;
+      // precision defaults to 2 here on purpose (NOT bwnMoney's `|| 0`, which would 100x the dollars
+      // on a missing precision); a missing notToExceed reads amount 0 AND is flagged via api.nteAbsent
+      // below so parity can tell a real $0 from an absent NTE.
       var precision = (nte && typeof nte.precision === 'number') ? nte.precision : 2;
       var amount = (nte && typeof nte.amount === 'number') ? nte.amount / Math.pow(10, precision) : 0;
       var done = !!PO_DONE_PHASES[phase];
@@ -2862,7 +2870,7 @@
           id: row.id, number: row.number, statusId: Number(row.statusId), phase: phase, state: row.state,
           vendorId: row.vendorId, nextOnsiteDate: row.nextOnsiteDate || null,
           hasScheduledTrip: !!row.hasScheduledTrip, openTripCount: openTripCount,
-          paid: sn === 'paid' || !!row.paidDate
+          paid: sn === 'paid' || !!row.paidDate, nteAbsent: !nte
         }
       };
     }
@@ -2870,10 +2878,11 @@
       if (!woNum) return;
       var c = PO_CACHE[woNum];
       if (c === 'pending' || (c && c !== 'error')) return;
+      if ((PO_TRIES[woNum] || 0) >= PO_MAX_TRIES) return;
       PO_CACHE[woNum] = 'pending';
       bwnGql(PO_API_Q, { n: Number(woNum) }).then(function (d) {
         var rows = d && d.purchaseOrders;
-        if (!Array.isArray(rows)) { PO_CACHE[woNum] = 'error'; return; }   // schema drift = unknown, NEVER empty
+        if (!Array.isArray(rows)) { PO_CACHE[woNum] = 'error'; PO_TRIES[woNum] = (PO_TRIES[woNum] || 0) + 1; if (PO_TRIES[woNum] >= PO_MAX_TRIES) console.warn('[BWN PO] api read gave up for this page load', woNum); return; }   // schema drift = unknown, NEVER empty; schema-drift path
         var seenSids = {};
         var pos = rows.map(function (row) {
           var p = poFromApi(row);
@@ -2886,6 +2895,8 @@
         try { refresh(); } catch (e) { }
       }).catch(function (err) {
         PO_CACHE[woNum] = 'error';   // retried on the next render, like fetchDocs; warn once per WO, not once per retry
+        PO_TRIES[woNum] = (PO_TRIES[woNum] || 0) + 1;
+        if (PO_TRIES[woNum] >= PO_MAX_TRIES) console.warn('[BWN PO] api read gave up for this page load', woNum);   // rejected-fetch path
         if (!PO_WARNED[woNum]) {
           PO_WARNED[woNum] = true;
           console.warn('[BWN PO] api read failed', woNum, String(err && err.message || err).slice(0, 200));
@@ -2900,10 +2911,18 @@
       fetchPOs(woNum);
       return null;   // pending / errored / just-fired - unknown, never a guessed empty
     }
-    // Parity: DOM readPOs() vs the API read above, joined by sid ('ln'-prefixed DOM sids only),
+    // Parity: DOM readPOs() vs the API read above, joined by sid (digit line-label sids only, /^ln\d{2,4}(-\d+)?$/),
     // logged once per WO per page load. Counts, sids and field NAMES only - never amounts, dates,
     // vendor strings or GUIDs (a sid that collided on its line number carries the PO's internal Int
-    // id as a suffix; nothing else from the row reaches the summary).
+    // id as a suffix; nothing else from the row reaches the summary). schedDate mismatches report a
+    // fixed category string (schedDate:domAbsent/domNull/apiNull/day), never a date value. The summary
+    // also carries hdrSeen (did the header testid resolve - the URL guard stays the only gate when it
+    // did not), domSkipped (DOM rows excluded from the join - a vendor-GUID/render-index sid, or any other sid shape),
+    // unjoinedDomSids (the sid list, same redaction class as the existing unjoinedApiSids),
+    // apiAmountAbsent (API rows with no notToExceed), and tzOffsetMin (so a pasted summary is
+    // interpretable for the date-boundary question). This re-calls readPOs(), which re-fires its own
+    // pre-existing '[BWN GP] PO row has multiple amounts' info line on a multi-$ row - that line is
+    // old and carries amounts; the parity summary itself never does.
     function poParityLog(woNum) {
       if (!woNum || PO_PARITY[woNum]) return;
       var c = PO_CACHE[woNum];
@@ -2915,12 +2934,14 @@
       if (hdr && (hdr.textContent || '').indexOf(String(woNum)) === -1) return;
       var domRows = readPOs();
       var domCount = domRows.length;
-      if (!domCount) return;   // nothing to compare yet
       var apiRows = c.pos;
+      if (!domCount && apiRows.length) return;   // DOM not rendered yet (or the scrape is broken) - wait for it; a confident-empty API list + an empty DOM logs below (the stuck-handoff evidence)
       function dayOf(s) { if (!s) return null; var d = new Date(s); return isNaN(+d) ? null : (d.getFullYear() + '-' + d.getMonth() + '-' + d.getDate()); }
-      var domBySid = {}, domLabelAbsent = 0;
+      var domBySid = {}, domLabelAbsent = 0, domSkipped = 0;
       domRows.forEach(function (r) {
-        if (r.sid && r.sid.indexOf('ln') === 0) domBySid[r.sid] = r;
+        // Only digit line labels (optionally the numeric collision suffix) may reach unjoinedDomSids;
+        // anything else is counted, never published.
+        if (r.sid && /^ln\d{2,4}(-\d+)?$/.test(r.sid)) domBySid[r.sid] = r; else domSkipped++;
         if (r.schedDate === undefined) domLabelAbsent++;
       });
       var domMultiAmount = 0;
@@ -2930,31 +2951,38 @@
         while ((mm = amtRe.exec(row.textContent || '')) !== null) n++;
         if (n > 1) domMultiAmount++;
       });
-      var apiBySid = {}, apiTerminalNoSched = 0;
+      var apiBySid = {}, apiTerminalNoSched = 0, apiAmountAbsent = 0;
       apiRows.forEach(function (r) {
         apiBySid[r.sid] = r;
         if (r.done && !r.api.nextOnsiteDate) apiTerminalNoSched++;
+        if (r.api.nteAbsent) apiAmountAbsent++;
       });
-      var joined = 0, unjoinedDom = 0, unjoinedApiSids = [], mismatches = [];
+      var joined = 0, unjoinedDomSids = [], unjoinedApiSids = [], mismatches = [];
       Object.keys(domBySid).forEach(function (sid) {
         var d = domBySid[sid], a = apiBySid[sid];
-        if (!a) { unjoinedDom++; return; }
+        if (!a) { unjoinedDomSids.push(sid); return; }
         joined++;
         var fields = [];
         if (Math.abs((d.amount || 0) - (a.amount || 0)) >= 0.005) fields.push('amount');
-        if (dayOf(d.schedDate) !== dayOf(a.schedDate)) fields.push('schedDate');
+        if (dayOf(d.schedDate) !== dayOf(a.schedDate)) fields.push(d.schedDate === undefined ? 'schedDate:domAbsent' : !d.schedDate ? 'schedDate:domNull' : !a.schedDate ? 'schedDate:apiNull' : 'schedDate:day');
         if (!!d.done !== !!a.done) fields.push('done');
         if ((d.poStatus || '') !== (a.poStatus || '')) fields.push('poStatus');
         if (!!d.costOpen !== !!a.costOpen) fields.push('costOpen');
         if (nvVendor(d.vendor) !== nvVendor(a.vendor)) fields.push('vendor');
+        // The DOM status region may carry extra tokens ("Open Material Ordered") and punctuation
+        // differences ("On-Site" / "On Site"), so compare API statusName as a normalized substring;
+        // an EMPTY API name is flagged, never vacuously matched.
+        var as = nvVendor(a.statusText || '').replace(/[^A-Z0-9]+/g, ' ').trim(); if (!as || nvVendor(d.statusText || '').replace(/[^A-Z0-9]+/g, ' ').trim().indexOf(as) === -1) fields.push('statusText');
         if (fields.length) mismatches.push({ sid: sid, fields: fields });
       });
       Object.keys(apiBySid).forEach(function (sid) { if (!domBySid[sid]) unjoinedApiSids.push(sid); });
       var summary = {
         wo: woNum, domCount: domCount, apiCount: apiRows.length, joined: joined,
-        unjoinedDom: unjoinedDom, unjoinedApi: unjoinedApiSids.length, unjoinedApiSids: unjoinedApiSids,
-        domMultiAmount: domMultiAmount, domLabelAbsent: domLabelAbsent,
-        apiTerminalNoSched: apiTerminalNoSched, mismatches: mismatches
+        unjoinedDom: unjoinedDomSids.length, unjoinedDomSids: unjoinedDomSids,
+        unjoinedApi: unjoinedApiSids.length, unjoinedApiSids: unjoinedApiSids,
+        domMultiAmount: domMultiAmount, domLabelAbsent: domLabelAbsent, domSkipped: domSkipped,
+        apiTerminalNoSched: apiTerminalNoSched, apiAmountAbsent: apiAmountAbsent, mismatches: mismatches,
+        hdrSeen: !!hdr, tzOffsetMin: new Date().getTimezoneOffset()
       };
       PO_PARITY[woNum] = true;
       console.info('[BWN PO parity]', summary);

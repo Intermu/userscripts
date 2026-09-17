@@ -15,13 +15,34 @@
 //   - the query is the ROOT purchaseOrders(workOrderNumber) field, never the deprecated nested
 //     workOrder { purchaseOrders } shape, and carries only fields from the captured allowlist.
 //   - a pending read is null and does not re-fire once per render; a non-array payload and a
-//     rejected fetch are UNKNOWN (null), NEVER empty; a rejection logs exactly one warning that
-//     names the WO but never a row value.
-//   - poFromApi() classifies done/poStatus/costOpen off phase/statusName alone, verified against
-//     all 27 live Umbrava PO statuses, with Closed as an INTENTIONAL divergence from the DOM regex.
+//     rejected fetch are UNKNOWN (null), NEVER empty.
+//   - poFromApi() classifies done/poStatus/costOpen off phase/statusName alone, exercised over the
+//     27 live Umbrava PO status (id, name, phase) triples with expected done/poStatus/costOpen
+//     AUTHORED from the 2026-09-17 ruling - not observed on a live row per status - with Closed as
+//     an INTENTIONAL divergence from the DOM regex.
 //   - two POs sharing a number get distinct sids (the row id breaks the tie).
 //   - the parity log joins on sid, reports mismatches by FIELD NAME only, and never leaks a vendor
 //     string, a date, or an amount into its (redacted) summary.
+//   - a persistent failure stops re-firing after PO_MAX_TRIES (3) attempts per WO per page load.
+//   - a rejected (network) read warns once on its first failure and once more when it gives up -
+//     both warnings name the WO only, never a row value.
+//   - a schema-drift (non-array) read never warns on first failure, only once when it gives up.
+//   - a missing notToExceed reads amount 0 AND is flagged via api.nteAbsent, surfaced in the parity
+//     summary as apiAmountAbsent, so parity can tell a real $0 from an absent NTE.
+//   - the parity summary also reports hdrSeen (did the header testid resolve), unjoinedDomSids (the
+//     DOM-side sid list), and a schedDate mismatch as a fixed category (never a date value).
+//   - domBySid only joins a digit line-label sid matching /^ln\d{2,4}(-\d+)?$/; anything else -
+//     a non-digit collision suffix, a vendor-GUID sid, or any other sid shape - is counted in
+//     domSkipped and never published.
+//   - the statusText compare is punctuation-insensitive (containment, both sides normalized), and an
+//     empty API status name is always flagged, never vacuously matched.
+//   - tzOffsetMin rides along too, so a pasted summary is interpretable for the date-boundary question.
+//   - a stale-DOM log is held off by the URL guard (currentWOId()) and, when a header testid resolves
+//     via document.querySelector, the header guard too - both must name the same WO.
+//   - an empty DOM logs a confident {domCount:0, apiCount:0} summary when the API agrees; it holds off
+//     entirely when API rows are cached but the DOM has simply not rendered yet.
+//   - every behaviour above is also driven by a negative control that must turn this harness red: 18
+//     total (2 query-shape + 16 reader), enforced by mutate()'s absent/non-unique throw.
 //
 // WHAT IT DOES NOT PROVE:
 //   - that `purchaseOrders(workOrderNumber:)` exists on the live schema for this tenant, or that the
@@ -104,7 +125,7 @@ function checkQueryShape(q) {
 // later. readPOs (the DOM reader) and nvVendor are stubbed too - the parity log is exercised
 // against controlled fixtures, not a real DOM.
 function makeReader(readerSrc) {
-  var env = { fetches: [], refreshes: 0, wo: null, domRows: [], domNodes: [], infos: [], warns: [], win: {} };
+  var env = { fetches: [], refreshes: 0, wo: null, domRows: [], domNodes: [], hdr: null, infos: [], warns: [], win: {} };
   var sandbox = {
     Object: Object, Array: Array, Number: Number, String: String, Math: Math, Date: Date,
     JSON: JSON, Promise: Promise, Error: Error, isNaN: isNaN,
@@ -117,7 +138,10 @@ function makeReader(readerSrc) {
     refresh: function () { env.refreshes++; },
     readPOs: function () { return env.domRows; },
     nvVendor: function (s) { return (s || '').replace(/\s+/g, ' ').trim().toUpperCase(); },
-    document: { querySelectorAll: function () { return env.domNodes; } },
+    document: {
+      querySelector: function () { return env.hdr; },
+      querySelectorAll: function () { return env.domNodes; }
+    },
     window: env.win,
     bwnGql: function (query, variables) {
       var rec = { query: query, vars: variables };
@@ -297,6 +321,22 @@ function runCases(readerSrc) {
   }).then(function () {
     eq('an empty PO list is a CONFIDENT empty, not unknown', e.readPOsApi(), []);
 
+    // --- confident-empty parity: an empty DOM plus a confident-empty API list still logs (this
+    // is the stuck-handoff evidence the DOM-not-rendered-yet guard must NOT swallow) ---
+    e.domRows = [];
+    e.domNodes = [];
+    e.poParityLog('100002');
+    var emptySummary = e.win.__bwnPoParity;
+    ok('a confident-empty API list with an empty DOM published a summary', !!emptySummary, JSON.stringify(emptySummary));
+    eq('domCount is 0', emptySummary.domCount, 0);
+    eq('apiCount is 0', emptySummary.apiCount, 0);
+
+    // --- the DOM-not-rendered-yet guard: API rows are cached but the DOM is still empty, so wait ---
+    e.wo = '100001';   // 2 API rows already landed for this WO earlier
+    e.domRows = [];
+    e.poParityLog('100001');
+    ok('an empty DOM with API rows waiting holds off the log entirely', !e.parity['100001']);
+
     // --- a non-array payload is unknown, and self-heals on the next render ---
     e.wo = '100003';
     e.readPOsApi();
@@ -311,37 +351,78 @@ function runCases(readerSrc) {
     eq('the retry lands normally', (e.readPOsApi() || []).length, 1);
 
     // --- parity: joined by sid, mismatches by field name, summary is redacted ---
-    // Three DOM rows: ln001 will match an API row with a deliberate amount mismatch; the
+    // Seven DOM rows: ln001 will match an API row with a deliberate amount mismatch; the
     // guid-fallback row is excluded from the join entirely (ln-prefixed sids only); ln002 is
-    // ln-prefixed but has no API counterpart, so it must count as unjoined.
+    // ln-prefixed but has no API counterpart, so it must count as unjoined; ln003 matches an API
+    // row with no scheduled-date label of its own (the schedDate:domAbsent category) and no
+    // statusText of its own either, so it also mismatches on statusText; ln07 is the 2-digit-label
+    // case - its own sid never matches the API's zero-padded ln007, so both sides count as unjoined
+    // instead of joining on the PO number they actually share; ln009-zz is the non-digit collision
+    // suffix - it must be counted as skipped, never joined or published as unjoined; ln005-2 is a
+    // DIGIT collision suffix - it must join the second of two same-numbered API rows, leaving the
+    // first API row (ln005, no suffix) unjoined instead.
     e.wo = '100005';
     e.domRows = [
-      makeDomRow({ vendor: 'Vendor A', num: '1', sid: 'ln001', amount: 250, schedDate: '3/5/30', done: false, poStatus: '', costOpen: true }),
+      makeDomRow({ vendor: 'Vendor A', num: '1', sid: 'ln001', amount: 250, schedDate: '3/5/30', done: false, poStatus: '', costOpen: true, statusText: 'Open Scheduled' }),
       makeDomRow({ vendor: 'Vendor C', num: '2', sid: 'v-guid-fallback', amount: 40, schedDate: undefined, done: false, poStatus: '', costOpen: true }),
-      makeDomRow({ vendor: 'Vendor D', num: '3', sid: 'ln002', amount: 75, schedDate: '4/1/30', done: false, poStatus: '', costOpen: true })
+      makeDomRow({ vendor: 'Vendor D', num: '3', sid: 'ln002', amount: 75, schedDate: '4/1/30', done: false, poStatus: '', costOpen: true }),
+      makeDomRow({ vendor: 'Vendor E', num: '4', sid: 'ln003', schedDate: undefined, amount: 60 }),
+      makeDomRow({ vendor: 'Vendor F', num: '5', sid: 'ln07', amount: 20, schedDate: '4/2/30', statusText: 'Open Scheduled' }),
+      makeDomRow({ vendor: 'Vendor G', num: '6', sid: 'ln009-zz', amount: 15, schedDate: '5/1/30', statusText: 'Open New' }),
+      makeDomRow({ vendor: 'Vendor H', num: '8', sid: 'ln005-2', amount: 100, schedDate: '3/5/30', statusText: 'Open Scheduled' })
     ];
     e.domNodes = [{ textContent: 'Vendor A $250.00' }, { textContent: 'Vendor C $40.00 $12.00' }];
     e.readPOsApi();   // kicks the fetch
     eq('one fetch fired for the parity WO', e.fetches.length, 5);
     // Deliberate amount mismatch against the DOM row above (250 DOM vs 300 API) on the same sid.
     // Noon UTC keeps the calendar day stable across the local timezone the harness runs under.
+    // vendorName on the ln003 API row matches its DOM counterpart so 'vendor' stays out of that
+    // row's mismatch list - the row exists to test the schedDate category, not vendor comparison.
+    // The last two rows share number 5: the first keeps the plain sid ln005 (and stays unjoined -
+    // no DOM row wears that plain sid), the second collides onto ln005-2 (poFromApi's row-id
+    // suffix) and joins the DOM row above with no mismatch.
     e.fetches[4].resolve({ purchaseOrders: [
-      makeRow({ id: 10, number: 1, statusId: -4, statusName: 'Scheduled', phase: 'Open', notToExceed: { amount: 30000, currency: 'USD', precision: 2 }, nextOnsiteDate: '2030-03-05T12:00:00Z' })
+      makeRow({ id: 10, number: 1, statusId: -4, statusName: 'Scheduled', phase: 'Open', notToExceed: { amount: 30000, currency: 'USD', precision: 2 }, nextOnsiteDate: '2030-03-05T12:00:00Z' }),
+      makeRow({ id: 12, number: 3, statusId: -4, statusName: 'Scheduled', phase: 'Open', vendorName: 'Vendor E', notToExceed: { amount: 6000, currency: 'USD', precision: 2 }, nextOnsiteDate: '2030-06-01T12:00:00Z' }),
+      makeRow({ id: 11, number: 7, statusId: -4, statusName: 'Scheduled', phase: 'Open', notToExceed: null }),
+      makeRow({ id: 30, number: 5, statusId: -4, statusName: 'Scheduled', phase: 'Open', nextOnsiteDate: '2030-03-05T12:00:00Z', vendorName: 'Vendor H' }),
+      makeRow({ id: 2, number: 5, statusId: -4, statusName: 'Scheduled', phase: 'Open', nextOnsiteDate: '2030-03-05T12:00:00Z', vendorName: 'Vendor H' })
     ] });
     return tick();
   }).then(function () {
     e.poParityTick();
     var summary = e.win.__bwnPoParity;
     ok('parity summary was published', !!summary, JSON.stringify(summary));
-    eq('parity joins the DOM and API rows on sid', summary.joined, 1);
-    eq('an ln-prefixed DOM row with no API match counts as unjoined', summary.unjoinedDom, 1);
-    eq('a deliberate amount mismatch is reported by FIELD NAME', summary.mismatches, [{ sid: 'ln001', fields: ['amount'] }]);
+    eq('parity joins the DOM and API rows on sid', summary.joined, 3);
+    eq('unjoinedDom counts both ln-prefixed DOM rows with no API match', summary.unjoinedDom, 2);
+    ok('unjoinedDomSids names them (ln002 and the 2-digit-label ln07)',
+      summary.unjoinedDomSids.indexOf('ln002') !== -1 && summary.unjoinedDomSids.indexOf('ln07') !== -1,
+      JSON.stringify(summary.unjoinedDomSids));
+    ok('unjoinedDomSids never names the non-digit collision suffix row (it was skipped, not joined)',
+      summary.unjoinedDomSids.indexOf('ln009-zz') === -1, JSON.stringify(summary.unjoinedDomSids));
+    ok('unjoinedDomSids never names the digit collision suffix row (it joined instead)',
+      summary.unjoinedDomSids.indexOf('ln005-2') === -1, JSON.stringify(summary.unjoinedDomSids));
+    eq('unjoinedApiSids names the 2-digit-label miss and the plain-sid half of the number-5 collision, in API row order',
+      summary.unjoinedApiSids, ['ln007', 'ln005']);
+    eq('mismatches report a deliberate amount mismatch and a schedDate:domAbsent + statusText category, by FIELD NAME - the digit-collision join (ln005-2) carries none',
+      summary.mismatches, [{ sid: 'ln001', fields: ['amount'] }, { sid: 'ln003', fields: ['schedDate:domAbsent', 'statusText'] }]);
     eq('the multi-$ DOM row is counted', summary.domMultiAmount, 1);
-    eq('the label-absent DOM row is counted', summary.domLabelAbsent, 1);
-    var blob = JSON.stringify(summary);
+    eq('the label-absent DOM rows are counted (guid-fallback and ln003)', summary.domLabelAbsent, 2);
+    eq('the vendor-GUID-fallback row and the non-digit collision suffix row are excluded from the join and counted as skipped', summary.domSkipped, 2);
+    eq('the API row with no notToExceed is counted', summary.apiAmountAbsent, 1);
+    eq('no header testid was seen', summary.hdrSeen, false);
+    ok('tzOffsetMin is an integer within a real UTC-offset range',
+      Number.isInteger(summary.tzOffsetMin) && summary.tzOffsetMin >= -840 && summary.tzOffsetMin <= 840, summary.tzOffsetMin);
+    // tzOffsetMin is excluded here: it's a real, machine-dependent integer (e.g. 300 on US Eastern,
+    // 360 on US Central) that can itself contain a banned digit sequence below by sheer coincidence -
+    // that would flake this leak-scan by timezone, which is not what it's checking for.
+    var blob = JSON.stringify(summary, function (k, v) { return k === 'tzOffsetMin' ? undefined : v; });
     ok('the parity summary carries no vendor string', blob.indexOf('Vendor') === -1, blob);
-    ok('the parity summary carries no amount', blob.indexOf('250') === -1 && blob.indexOf('300') === -1 && blob.indexOf('75') === -1, blob);
-    ok('the parity summary carries no date string', blob.indexOf('3/5') === -1 && blob.indexOf('4/1') === -1, blob);
+    ok('the parity summary carries no amount',
+      blob.indexOf('250') === -1 && blob.indexOf('300') === -1 && blob.indexOf('75') === -1 &&
+      blob.indexOf('60') === -1 && blob.indexOf('20') === -1 && blob.indexOf('15') === -1, blob);
+    ok('the parity summary carries no date string',
+      blob.indexOf('3/5') === -1 && blob.indexOf('4/1') === -1 && blob.indexOf('4/2') === -1 && blob.indexOf('6/1') === -1, blob);
 
     var infosBefore = e.infos.length;
     e.poParityLog('100005');
@@ -361,6 +442,118 @@ function runCases(readerSrc) {
     ok('the warning names the failing WO but carries no row values',
       warnText.indexOf('100004') !== -1 && warnText.indexOf('Vendor A') === -1 && warnText.indexOf('Vendor B') === -1,
       warnText);
+
+    // --- header guard: a rendered header naming a DIFFERENT WO holds off the log the same way
+    // the URL guard does; the URL guard alone is not enough once a header is present ---
+    // (DOM stays empty until after the fetch lands, so the auto parity-log inside fetchPOs' own
+    // .then bails via the DOM-not-rendered-yet guard instead of consuming the once-per-WO latch
+    // before the guard tests below get to run)
+    e.wo = '100006';
+    e.domRows = [];
+    e.readPOsApi();
+    e.fetches[e.fetches.length - 1].resolve({ purchaseOrders: [makeRow({ id: 20, number: 1 }), makeRow({ id: 21, number: 2 })] });
+    return tick();
+  }).then(function () {
+    ok('not latched yet - the DOM was still empty when the fetch landed', !e.parity['100006']);
+    e.domRows = [makeDomRow({ sid: 'ln001' }), makeDomRow({ sid: 'ln002', num: '2' })];
+
+    var infosBefore6 = e.infos.length;
+    e.wo = '100001';   // URL names a different WO than the one we ask about
+    e.poParityLog('100006');
+    eq('the URL guard holds off a WO that is not the current one', e.infos.length, infosBefore6);
+    ok('and nothing was latched for it', !e.parity['100006']);
+
+    e.wo = '100006';
+    e.hdr = { textContent: 'W-999999' };
+    e.poParityLog('100006');
+    eq('a rendered header naming a different WO holds off the log too', e.infos.length, infosBefore6);
+    ok('still not latched', !e.parity['100006']);
+
+    e.hdr = { textContent: 'Work Order W-100006' };
+    e.poParityLog('100006');
+    eq('a header that names this WO logs exactly once', e.infos.length, infosBefore6 + 1);
+    ok('and is now latched', !!e.parity['100006']);
+    eq('hdrSeen is true when the header resolved', e.win.__bwnPoParity.hdrSeen, true);
+    e.hdr = null;
+
+    // --- statusText comparator: an empty API statusName is flagged via the !as guard (never
+    // vacuously matched), and a punctuation-only difference ('On-Site' vs 'Open On Site') is not ---
+    e.wo = '100008';
+    e.domRows = [
+      makeDomRow({ sid: 'ln001', num: '1', statusText: 'Open Scheduled' }),
+      makeDomRow({ sid: 'ln002', num: '2', vendor: 'Vendor B', statusText: 'Open On Site' })
+    ];
+    e.readPOsApi();
+    e.fetches[e.fetches.length - 1].resolve({ purchaseOrders: [
+      makeRow({ id: 20, number: 1, statusId: -4, statusName: '', phase: 'Open', nextOnsiteDate: '2030-03-05T12:00:00Z' }),
+      makeRow({ id: 21, number: 2, statusId: -5, statusName: 'On-Site', phase: 'Open', vendorName: 'Vendor B', nextOnsiteDate: '2030-03-05T12:00:00Z' })
+    ] });
+    return tick();
+  }).then(function () {
+    e.poParityTick();
+    eq('an empty API statusName is flagged and a punctuation-only difference is not',
+      e.win.__bwnPoParity.mismatches, [{ sid: 'ln001', fields: ['statusText'] }]);
+
+    // --- retry cap: a persistently-failing WO stops re-firing after PO_MAX_TRIES, warns once on
+    // the first failure and once more when it gives up (placed last: like the 100004 case above,
+    // it consumes fetch indices) ---
+    e.wo = '100007';
+    var wo7Idx1 = e.fetches.length;
+    e.readPOsApi();
+    eq('retry cap attempt 1 fires a request', e.fetches.length, wo7Idx1 + 1);
+    e.fetches[wo7Idx1].reject(new Error('network'));
+    return tick();
+  }).then(function () {
+    var wo7Idx2 = e.fetches.length;
+    e.readPOsApi();
+    eq('retry cap attempt 2 fires a request', e.fetches.length, wo7Idx2 + 1);
+    e.fetches[wo7Idx2].reject(new Error('network'));
+    return tick();
+  }).then(function () {
+    var wo7Idx3 = e.fetches.length;
+    e.readPOsApi();
+    eq('retry cap attempt 3 fires a request', e.fetches.length, wo7Idx3 + 1);
+    e.fetches[wo7Idx3].reject(new Error('network'));
+    return tick();
+  }).then(function () {
+    var fetchesBefore = e.fetches.length;
+    eq('a 4th read after the cap is still unknown', e.readPOsApi(), null);
+    eq('and does not fire another request', e.fetches.length, fetchesBefore);
+    eq('exactly three warnings were logged for the whole run (100004 first-failure, 100007 first-failure, 100007 gave-up)', e.warns.length, 3);
+    var lastWarn = e.warns[e.warns.length - 1].join(' ');
+    ok('the last warning is the give-up warning, names 100007, and carries no vendor value',
+      lastWarn.indexOf('100007') !== -1 && lastWarn.indexOf('gave up') !== -1 && lastWarn.indexOf('Vendor') === -1,
+      lastWarn);
+
+    // --- schema-drift give-up: a non-array payload never warns on first failure (only a rejected
+    // fetch does); it still gives up and warns once after PO_MAX_TRIES, naming the WO only ---
+    e.wo = '100009';
+    var wo9Idx1 = e.fetches.length;
+    e.readPOsApi();
+    eq('drift cap attempt 1 fires a request', e.fetches.length, wo9Idx1 + 1);
+    e.fetches[wo9Idx1].resolve({ purchaseOrders: null });
+    return tick();
+  }).then(function () {
+    var wo9Idx2 = e.fetches.length;
+    e.readPOsApi();
+    eq('drift cap attempt 2 fires a request', e.fetches.length, wo9Idx2 + 1);
+    e.fetches[wo9Idx2].resolve({ purchaseOrders: null });
+    return tick();
+  }).then(function () {
+    var wo9Idx3 = e.fetches.length;
+    e.readPOsApi();
+    eq('drift cap attempt 3 fires a request', e.fetches.length, wo9Idx3 + 1);
+    e.fetches[wo9Idx3].resolve({ purchaseOrders: null });
+    return tick();
+  }).then(function () {
+    eq('the schema-drift give-up adds exactly one new warning (drift never warns on first failure)', e.warns.length, 4);
+    var lastWarn9 = e.warns[e.warns.length - 1].join(' ');
+    ok('the drift give-up warning names 100009 and carries no vendor value',
+      lastWarn9.indexOf('100009') !== -1 && lastWarn9.indexOf('gave up') !== -1 && lastWarn9.indexOf('Vendor') === -1,
+      lastWarn9);
+    var fetchesBefore9 = e.fetches.length;
+    eq('a 4th read after the drift cap is still unknown', e.readPOsApi(), null);
+    eq('and does not fire another request', e.fetches.length, fetchesBefore9);
     return out;
   }, function (err) {
     out.push({ name: 'cases ran without throwing', ok: false, detail: String(err && err.message || err) });
@@ -375,7 +568,39 @@ var READER_MUTATIONS = [
   { what: 'the Array.isArray guard dropped (the non-array path then throws into the catch and WARNS; the guard is what keeps schema drift a silent unknown)',
     reader: function (s) { return mutate(s, '!Array.isArray(rows)', 'false'); } },
   { what: 'WorkComplete dropped from the terminal phase set',
-    reader: function (s) { return mutate(s, 'WorkComplete: 1, ', ''); } }
+    reader: function (s) { return mutate(s, 'WorkComplete: 1, ', ''); } },
+  { what: 'the WO number goes out as the string currentWOId() returned, not an Int',
+    reader: function (s) { return mutate(s, '{ n: Number(woNum) }', '{ n: woNum }'); } },
+  { what: 'the query argument renamed off workOrderNumber (the wrong-id class the query-shape pin exists for)',
+    reader: function (s) { return mutate(s, 'purchaseOrders(workOrderNumber: $n)', 'purchaseOrders(jobId: $n)'); } },
+  { what: 'a mismatch entry carries a raw amount (the redaction the parity summary promises)',
+    reader: function (s) { return mutate(s, 'mismatches.push({ sid: sid, fields: fields })', 'mismatches.push({ sid: sid, fields: fields, amount: d.amount })'); } },
+  { what: 'the once-per-WO parity latch dropped (a second call for the same WO logs again)',
+    reader: function (s) { return mutate(s, 'PO_PARITY[woNum] = true;', ''); } },
+  { what: "a failed read caches a guessed empty instead of 'error' (never a guessed empty)",
+    reader: function (s) { return mutate(s, "PO_CACHE[woNum] = 'error';   // retried on the next render, like fetchDocs; warn once per WO, not once per retry", "PO_CACHE[woNum] = { pos: [], apiCount: 0, ts: 0 };   // retried on the next render, like fetchDocs; warn once per WO, not once per retry"); } },
+  { what: 'the URL guard dropped from poParityLog (a stale route can latch the wrong WO)',
+    reader: function (s) { return mutate(s, 'if (String(currentWOId()) !== String(woNum)) return;', ''); } },
+  { what: 'the header guard neutralized (a header naming a different WO no longer holds off the log)',
+    reader: function (s) { return mutate(s, "(hdr.textContent || '').indexOf(String(woNum)) === -1) return;", "(hdr.textContent || '').indexOf(String(woNum)) === -1 && false) return;"); } },
+  { what: 'the retry cap effectively disabled (a persistent failure would re-fire a request every render forever)',
+    reader: function (s) { return mutate(s, '>= PO_MAX_TRIES) return;', '>= 999) return;'); } },
+  { what: "the schedDate:domAbsent category collapsed onto schedDate:day (a mismatch category, never a value)",
+    reader: function (s) { return mutate(s, "'schedDate:domAbsent'", "'schedDate:day'"); } },
+  { what: 'the API sid loses its zero-padding (breaks every join against the DOM ln-prefixed sids)',
+    reader: function (s) { return mutate(s, "'ln' + num.padStart(3, '0')", "'ln' + num"); } },
+  { what: 'the whole statusText comparator dropped (an empty API statusName and a punctuation-only difference both go unflagged)',
+    reader: function (s) { return mutate(s, "var as = nvVendor(a.statusText || '').replace(/[^A-Z0-9]+/g, ' ').trim(); if (!as || nvVendor(d.statusText || '').replace(/[^A-Z0-9]+/g, ' ').trim().indexOf(as) === -1) fields.push('statusText');", ''); } },
+  { what: 'the empty-needle guard dropped from the statusText comparator (an empty API statusName vacuously matches instead of being flagged)',
+    reader: function (s) { return mutate(s, 'if (!as || ', 'if ('); } },
+  { what: 'the give-up warning threshold disabled on the rejected-fetch path (a persistent failure never announces that it gave up)',
+    reader: function (s) { return mutate(s, "PO_TRIES[woNum] >= PO_MAX_TRIES) console.warn('[BWN PO] api read gave up for this page load', woNum);   // rejected-fetch path", "PO_TRIES[woNum] >= 999) console.warn('[BWN PO] api read gave up for this page load', woNum);   // rejected-fetch path"); } },
+  { what: 'the domBySid join filter loosened back to a bare ln-prefix check (a non-digit collision suffix leaks into the join instead of being skipped)',
+    reader: function (s) { return mutate(s, "/^ln\\d{2,4}(-\\d+)?$/.test(r.sid)", "r.sid.indexOf('ln') === 0"); } },
+  { what: 'the give-up warning threshold disabled on the schema-drift path (a persistent non-array payload never announces that it gave up)',
+    reader: function (s) { return mutate(s, "PO_TRIES[woNum] >= PO_MAX_TRIES) console.warn('[BWN PO] api read gave up for this page load', woNum); return; }   // schema drift = unknown, NEVER empty; schema-drift path", "PO_TRIES[woNum] >= 999) console.warn('[BWN PO] api read gave up for this page load', woNum); return; }   // schema drift = unknown, NEVER empty; schema-drift path"); } },
+  { what: 'the digit-suffix collision group dropped from the join regex (a valid ln005-2-style collision sid can no longer join)',
+    reader: function (s) { return mutate(s, "(-\\d+)?$/.test(r.sid)", "$/.test(r.sid)"); } }
 ];
 
 // The query-shape pin, driven directly (not via the vm-sliced reader) with synthetic query text.
