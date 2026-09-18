@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         BWN WO Audit (Broadway National)
 // @namespace    broadwaynational.bwn
-// @version      0.13.0
+// @version      0.14.0
 // @downloadURL  https://raw.githubusercontent.com/Intermu/userscripts/main/bwn-wo-audit.user.js
 // @updateURL    https://raw.githubusercontent.com/Intermu/userscripts/main/bwn-wo-audit.user.js
 // @description  Batch WO-audit tool. Upload a WO audit .xlsx; for each work order this reads its two most recent notes DIRECTLY from Umbrava's GraphQL API in-page (using your live Umbrava session - the same read the BWN Ops Suite AI drafts use), then asks the broadway-internal-ops SWA summarize route (x-bwn-key gated, Anthropic key server-side) to write a status note - for jobs aged over 30 days a dated "Over 30 - trade - event timeline - ECD" chain built from the WO's FULL note history (with a PAST/needs-ECD flag when the committed date has lapsed), otherwise a 1-3 sentence client-ready status note. Fills the audit's notes column and downloads the workbook, preserving every other cell and formula. It also reads each WO's live header (status, phase, priority, GP, DNE/NTE, PO/vendor, schedule) in the same call and writes a deterministic Audit Flags column (OVERDUE, NEG/LOW GP, NTE>DNE, NO VENDOR, UNSCHEDULED, STALE) computed with no AI - so the exception audit survives an AI outage. Runs entirely in the app.umbrava.com page so it inherits your Umbrava auth - no MCP, no pasted keys, nothing sensitive in this script. This replaces the old standalone WO_Audit_Automation.html SWA tool, whose server-side MCP path could not authenticate to Umbrava. After a run drafts its notes, the coordinator can post each drafted note as an INTERNAL Umbrava note onto its aged (>30d) work order - one explicit click per note (human-gated, idempotent), routed through the governed bwnGqlOp write path with its permission gate and audit trail.
@@ -19,7 +19,7 @@
 (function () {
   'use strict';
 
-  var VER = '0.13.0';
+  var VER = '0.14.0';
   var FONT = "-apple-system,BlinkMacSystemFont,'Segoe UI','Helvetica Neue',Arial,sans-serif";
   // Inline SVG icons (no external image/font). 18px, stroke=currentColor so they take card color.
   function _svg(p, o) { return '<svg class="woa-i" viewBox="0 0 24 24" width="18" height="18" fill="none" stroke="currentColor" stroke-width="1.9" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"' + (o || '') + '>' + p + '</svg>'; }
@@ -701,8 +701,11 @@
   }
 
   function woFetch(number) {
-    var n = parseInt(String(number).replace(/^W-?/i, '').replace(/[^0-9]/g, ''), 10);
-    if (!n || isNaN(n)) return Promise.reject(new Error('not a WO number: "' + number + '"'));
+    // 0.13.0: strict normalization. The old reader stripped every non-digit, so a compound cell
+    // resolved to a DIFFERENT real work order and the audit read the wrong job with no sign of it.
+    var k = woaNormalizeKey(number);
+    if (!k.n) return Promise.reject(new Error(k.reason || ('not a WO number: "' + number + '"')));
+    var n = k.n;
     var headerP = gql(HEADER_Q, { n: n }).then(function (d) { return (d && d.workOrder) || null; }).catch(function () { return null; });
     var notesP = gql(NOTES_Q, { n: n }).then(function (d) { return (d && d.jobNotes) || []; });
     return Promise.all([headerP, notesP]).then(function (a) {
@@ -721,7 +724,10 @@
           source: x.workOrderNoteSource || '',
         };
       });
-      return { id: n, header: header, statusName: (header && header.statusName) || '', notes: notes };
+      return {
+        id: n, header: header, statusName: (header && header.statusName) || '', notes: notes,
+        matchConfidence: k.confidence, matchReason: k.reason
+      };
     });
   }
 
@@ -941,6 +947,17 @@
     '- Banned as empty filler: "being handled", "working on it", "pending updates", "follow up",',
     '  "awaiting resolution". Name WHAT is pending and WHO must act, or say nothing.',
     '- If the evidence does not support a conclusion, say so plainly rather than filling the gap.',
+    // 0.13.0: these mirror the claim gate the output is now checked against, so the model is told
+    // the rule rather than merely failed by it. Each line corresponds to a WOA_CLAIM_RULES row.
+    '- Do NOT say the work is complete, closed out or done unless the evidence states it outright.',
+    '- Do NOT say anything was approved, signed off, quoted, priced, or that an NTE/DNE/PO exists,',
+    '  unless the evidence says so.',
+    '- Do NOT say a visit is scheduled or dispatched, a technician is on site, or a vendor is',
+    '  assigned, unless the evidence says so.',
+    '- Do NOT say the client was contacted, notified or updated unless the evidence says so.',
+    '- Assign the next move only to the party the derived facts name. Coordinator is always',
+    '  acceptable for an internal chase.',
+    '- Never mention this tool, the audit process, a source system, a model, or a confidence level.',
     '',
     'Return ONLY the note line. No preamble, no labels, no quotes, no markdown, no bullet points.'
   ].join('\n');
@@ -955,7 +972,10 @@
       n = (n && typeof n === 'object') ? n : {};
       var when = String(n.createdDate || '').trim().slice(0, 40);
       var type = String(n.type || '').trim().slice(0, 40);
-      var txt = String(n.content || '').trim().slice(0, 4000);
+      // Belt and braces with meaningfulNotes, which already sanitizes: the model must never be
+      // shown pasted email headers, addresses or thread bodies, because it copies them into the
+      // note and they then ground its dates. Stripping twice is a no-op.
+      var txt = woaStripQuotedEmail(n.content).slice(0, 4000);
       var head = 'Note ' + (i + 1) + (when ? ' (' + when + ')' : '') + (type ? ' [' + type + ']' : '') + ':';
       return head + '\n' + (txt || '(empty)');
     });
@@ -1138,6 +1158,46 @@
   var WOA_ACCESS = /\b(could not (get |gain )?(access|in)\b|unable to (get |gain )?access\b|denied access\b|no access to the \w+|site (was )?(closed|locked)\b|locked out\b|turned away\b|could not enter\b|no one (on ?site|to let)\b)/i;
   var WOA_NTE = /\b((requested|submitted)\s+(a |an |the )?(dne|nte|change[- ]?order|increase)|(dne|nte|change[- ]?order)\s+(submitted|requested|sent|approved)|revised\s+(costs?|nte|dne|pricing)|price increase\s+(requested|submitted))\b/i;
 
+  // Quoted-email furniture. A coordinator's job note is very often a pasted email reply, and
+  // everything from the quote boundary on is header and thread, not event. Measured on the 09/18
+  // workbook (282 shipped notes): 64 carried this furniture and 32 carried live email addresses -
+  // 28 distinct, including client contacts, vendor addresses, internal @broadwaynational.com
+  // addresses and app@umbrava.com - all of which shipped in a client-facing column. The paste also
+  // ate a median 62% of the note.
+  //
+  // The boundary set is deliberately narrow. `From:` and friends are matched CASE-SENSITIVELY and
+  // only with the colon, so ordinary prose ("awaiting update from vendor", "findings from the
+  // technician", and the measured "Email attempted to be sent: -Type: ...") is never a boundary,
+  // while the real headers - which are always capitalized, and sometimes prefixed with a dash as
+  // "-From:" - always are. "Original Message" must appear in words: a run of hyphens alone is not a
+  // marker. This is NOT a general PII redactor; it removes pasted email furniture and addresses,
+  // nothing else.
+  var WOA_QUOTE_RE = /-{2,}\s*Original Message|(?:^|[\s>\-])(?:From|Sent|To|Subject|Cc|Bcc):\s/;
+  var WOA_EMAIL_RE = /[A-Za-z0-9._%+-]+@[A-Za-z0-9.-]+\.[A-Za-z]{2,}/g;
+  function woaStripQuotedEmail(text) {
+    var s = String(text == null ? '' : text);
+    var m = WOA_QUOTE_RE.exec(s);
+    if (m) s = s.slice(0, m.index);          // keep the real content BEFORE the quote boundary
+    // Addresses are REMOVED, not marked: a "[email]" token in a client-facing note is still noise,
+    // and the reader loses nothing by its absence. Bracketed forms go first so "<a@b.com>" does not
+    // leave an empty pair behind.
+    s = s.replace(/[<(\[]\s*[A-Za-z0-9._%+-]+@[A-Za-z0-9.-]+\.[A-Za-z]{2,}\s*[>)\]]/g, ' ')
+      .replace(WOA_EMAIL_RE, ' ');
+    // Tidy only what the removal can leave behind - empty brackets, doubled separators, dangling
+    // dashes and edge punctuation. Sentence-ending periods are deliberately untouched.
+    return s.replace(/[<(\[]\s*[>)\]]/g, ' ')
+      .replace(/\s+/g, ' ')
+      .replace(/\s+([,;:.])/g, '$1')
+      // Only comma/semicolon runs are collapsed - those are what a removed address list leaves
+      // ("Contact: a@b, c@d" -> "Contact: ,"). Colons and dashes are NOT touched: they are load
+      // bearing in real notes, and collapsing them turned the measured "sent: -Type: Purchase
+      // Order" into "sent-Type: Purchase Order".
+      .replace(/([,;])\s*(?=[,;])/g, '')
+      .replace(/^[\s,;:\-]+/, '')
+      .replace(/[\s,;:\-]+$/, '')
+      .trim();
+  }
+
   // A note that carries operational meaning. Excludes anything bearing a [bwn:*] marker - this
   // tool's OWN prior posts most of all: reading yesterday's draft back as today's evidence would
   // launder a guess into a fact. hasPriorAuditNote still sees them, so idempotency is untouched.
@@ -1146,13 +1206,22 @@
     var out = [];
     for (var i = 0; i < (notes || []).length; i++) {
       var n = notes[i] || {};
-      var body = String(n.content == null ? '' : n.content).trim();
+      var raw = String(n.content == null ? '' : n.content).trim();
+      // ORDER MATTERS. The [bwn:*] marker is tested on the RAW body first: the marker sits at the
+      // END of a posted note, so sanitizing first could cut it off and this tool would stop
+      // recognizing its own post as ineligible evidence - reopening the self-laundering hole.
+      if (WOA_MARKER_RE.test(raw)) continue;
+      // Then strip pasted email furniture, and only then judge whether anything operational is
+      // left. A note that was ONLY a forwarded thread now correctly reads as no usable evidence
+      // rather than shipping its headers into a client-facing cell.
+      var body = woaStripQuotedEmail(raw);
       if (body.length < 12) continue;
-      if (WOA_MARKER_RE.test(body)) continue;
       var d = _date(n.createdDate);
       // A note dated after the audit clock cannot be evidence of something that has happened.
       if (d && typeof nowMs === 'number' && (+d) > nowMs) continue;
-      out.push({ content: body, createdDate: n.createdDate || '', date: d, by: n.by || '', isCompletion: !!n.isCompletion });
+      // `type` is carried through because the AI prompts are now built from THIS filtered list
+      // (0.13.0) rather than the raw history, and the note type was part of what they showed.
+      out.push({ content: body, createdDate: n.createdDate || '', date: d, by: n.by || '', type: n.type || '', isCompletion: !!n.isCompletion });
     }
     return out;
   }
@@ -1204,8 +1273,12 @@
     };
 
     if (!h) {
-      f.currentStage = 'Live work-order header unavailable';
-      f.nextAction = 'Coordinator to re-run the audit for this work order once the header read succeeds';
+      // Client-neutral wording on purpose. This clause can reach the workbook's Notes column (a
+      // header miss with usable notes still composes a note), and "re-run the audit once the
+      // header read succeeds" names this tool's own internals to a reader who has never heard of
+      // it. State the gap and the action; the mechanism stays in the row result and the log.
+      f.currentStage = 'Current status unavailable';
+      f.nextAction = 'Coordinator to confirm the current work order status and record it on the work order';
       f.nextActionOwner = 'Coordinator';
       ev.push({ kind: 'absence', field: 'workOrder', date: null, value: 'header read failed' });
       return f;
@@ -1387,9 +1460,13 @@
   var WOA_VAGUE = /\b(being handled|working on it|pending updates?|awaiting resolution|will (provide|keep you)|in progress as needed|as soon as possible|monitoring (this|it)( closely)?|no update available)\b/i;
   // Shared date gate, used by BOTH generated paths - the standard note and the over-30 chain that
   // actually gets posted. Returns '' when every date in `text` appears in the evidence.
+  // 0.13.0: both sides now go through woaGroundTokens, not woaDateTokens. The old slash-only reader
+  // saw nothing in "ECD 2026-11-30", "by 11-30" or "by Nov 30", so three whole date FORMATS walked
+  // past the one gate that exists to catch an invented commitment. Widening it here cannot invent a
+  // date - the evidence set widens by exactly the same rule.
   function ungroundedDates(text, groundText) {
-    var allowed = woaDateTokens(String(groundText || ''));
-    var used = woaDateTokens(String(text || ''));
+    var allowed = woaGroundTokens(String(groundText || ''));
+    var used = woaGroundTokens(String(text || ''));
     for (var i = 0; i < used.length; i++) {
       if (allowed.indexOf(used[i]) === -1) return 'AI output cited a date (' + used[i] + ') not present in the work order evidence';
     }
@@ -1424,9 +1501,264 @@
     var want = (f && f.ecdText) ? f.ecdText : 'TBD';
     if (m[1] !== want) return 'AI note printed an ECD (' + m[1] + ') the derived facts did not supply (expected ' + want + ')';
     if (WOA_VAGUE.test(s)) return 'AI note used vague filler wording';
+    var claim = woaClaimIssue(s, f, String(groundText || ''));
+    if (claim) return 'AI note ' + claim;
     // The derived ECD is grounded BY DEFINITION - it came from the header field or an evidenced
     // completion commitment - so it is always allowed, even if the caller passes a thin groundText.
     return ungroundedDates(s, String(groundText || '') + ' ' + want);
+  }
+
+  // ---------------------------------------------------------------------------------------------
+  // 0.13.0: grounding tokens, the claim gate, key normalization and status coverage. All pure, all
+  // inside this slice, so scripts/test-wo-audit-evidence.js runs the shipped bytes.
+  // ---------------------------------------------------------------------------------------------
+
+  // The GROUNDING tokenizer, deliberately separate from woaDateTokens above. woaDateTokens feeds
+  // ECD DERIVATION, and widening THAT would start lifting ISO/month-name strings out of note prose
+  // as completion commitments - the invention the no-ECD rule exists to stop. This one only ever
+  // compares an AI line against the evidence it was given, and it is applied to BOTH sides, so it
+  // cannot invent a date: it can only refuse one the evidence does not carry. Everything normalizes
+  // to the same "M/D" family, so "2026-09-30", "9/30" and "Sept 30" are one token. A BARE hyphen
+  // pair is excluded - see the note on the hyphen pass below; it is a range in real audit notes,
+  // never a date, and reading it as one would hand out false grounding licences.
+  var WOA_MONTHS = { jan: 1, feb: 2, mar: 3, apr: 4, may: 5, jun: 6, jul: 7, aug: 8, sep: 9, sept: 9, oct: 10, nov: 11, dec: 12 };
+  function woaGroundTokens(text) {
+    var s = String(text || ''), out = [], m;
+    function add(mo, da) {
+      mo = parseInt(mo, 10); da = parseInt(da, 10);
+      if (!(mo >= 1 && mo <= 12 && da >= 1 && da <= 31)) return;
+      var t = mo + '/' + da;
+      if (out.indexOf(t) === -1) out.push(t);
+    }
+    // ISO first, then REMOVE it, so its inner "09-30" is not re-read as a bare hyphen date and a
+    // 4-digit year cannot leak into the hyphen pass.
+    var iso = /\b(\d{4})-(\d{1,2})-(\d{1,2})\b/g;
+    while ((m = iso.exec(s))) add(m[2], m[3]);
+    var rest = s.replace(/\b\d{4}-\d{1,2}-\d{1,2}\b/g, ' ');
+    var slash = /\b(\d{1,2})\/(\d{1,2})(?:\/\d{2,4})?\b/g;
+    while ((m = slash.exec(rest))) add(m[1], m[2]);
+    // A BARE hyphen pair is deliberately NOT a date token. Measured against the 09/18 workbook
+    // (282 shipped notes): 26 carried a date-shaped bare pair and not one of them was a date. They
+    // were the spillover between two slash dates ("5/4-5/5" -> "4-5", already tokenized correctly
+    // by the slash pass) or a quantity/lead-time range ("3-4 months", "4-6 weeks"). Tokenizing them
+    // would have let "4-6 weeks" in the evidence GROUND an invented "4/6" in the output - a false
+    // licence, which is the dangerous direction. The bypass this was meant to close is shut
+    // anyway: validateAiNote's tail rule only accepts "ECD <M>/<D>" or "ECD TBD", so an "ECD 9-30"
+    // is rejected before any grounding check runs.
+    // Month names must be real month spellings. A permissive /(dec)[a-z]*\s+\d/ read "declined 4"
+    // and "decline 8" as December dates in that same workbook - phantom tokens that could ground an
+    // invented 12/4.
+    var mon = /\b(jan(?:uary)?|feb(?:ruary)?|mar(?:ch)?|apr(?:il)?|may|jun(?:e)?|jul(?:y)?|aug(?:ust)?|sep(?:t|tember)?|oct(?:ober)?|nov(?:ember)?|dec(?:ember)?)\.?\s+(\d{1,2})\b/gi;
+    while ((m = mon.exec(rest))) add(WOA_MONTHS[m[1].toLowerCase().slice(0, 4) === 'sept' ? 'sept' : m[1].toLowerCase().slice(0, 3)], m[2]);
+    return out;
+  }
+
+  // Clause splitter for the claim gate. woaClauses above splits note PROSE on sentence punctuation,
+  // which is right for a note body and wrong for an audit LINE: the house format joins its segments
+  // with " - " and carries no full stops, so the whole line reads as one clause and a single "not"
+  // anywhere in it would veto every claim check on the line. This splitter adds the " - " separator
+  // so each segment is judged on its own polarity. Returns the MATCH (the owner rule needs the
+  // captured party), or null when no un-negated clause carries the pattern.
+  function woaClaimMatch(text, re) {
+    var cl = String(text || '').split(/[.!?;\n•]|\s+-\s+/);
+    for (var i = 0; i < cl.length; i++) {
+      if (WOA_NEG.test(cl[i])) continue;
+      var m = re.exec(cl[i]);
+      if (m) return m;
+    }
+    return null;
+  }
+  function woaEvidenceHas(ev, re) { return !!woaClaimMatch(ev, re); }
+
+  // The claim gate. Each row is {id, claim, allow, reason, literal}: `claim` is what the LINE
+  // asserts, `allow` is what the EVIDENCE (the note history the model was handed, PLUS the derived
+  // facts) must show for that assertion to be legitimate. Claim and evidence are BOTH matched
+  // clause-scoped and negation-vetoed, so "not yet approved" is neither a claim nor a licence.
+  // `literal: true` opts a row out of the veto, for rows whose text is inherently negative or where
+  // a negation does not redeem it ("there is no AI here" is still internal wording).
+  // Table-driven so a newly observed phrasing is one row, not a new branch.
+  var WOA_CLAIM_RULES = [
+    {
+      id: 'completion',
+      claim: /\b(work (is |was )?complete\b|job (is |was )?(done|complete)\b|installation (is |was )?complete\b|repair (is |was )?complete\b|completed on ?site|closed out\b|has been completed\b|was completed\b)/i,
+      allow: function (f, ev) {
+        return ['confirmcomplete', 'costreview', 'terminal'].indexOf(f.phase) !== -1 ||
+          woaEvidenceHas(ev, /\b(completed|work complete|closed out)\b/i);
+      },
+      reason: 'claimed the work is complete with no completion evidence'
+    },
+    {
+      id: 'approval',
+      claim: /\b(approved\b|approval (was )?(received|granted|given)\b|sign(ed)?[- ]off\b)/i,
+      allow: function (f, ev) {
+        return ['proposal-approved', 'terminal'].indexOf(f.phase) !== -1 ||
+          woaEvidenceHas(ev, /\b(approved|approval (was )?(received|granted|given)|sign(ed)?[- ]off)\b/i);
+      },
+      reason: 'claimed an approval with no approval evidence'
+    },
+    {
+      id: 'financial',
+      claim: /\b(nte\b|dne\b|purchase order\b|\bpo\b|quoted?\b|pricing\b|priced\b|cost(s)?\b|estimate[ds]?\b|change[- ]order\b|\$\s?\d)/i,
+      allow: function (f, ev) {
+        return woaEvidenceHas(ev, /\b(nte|dne|purchase order|\bpo\b|quoted?|pricing|priced|cost(s)?|estimate[ds]?|change[- ]order|\$\s?\d)/i);
+      },
+      reason: 'cited pricing/PO/NTE detail with no matching evidence'
+    },
+    {
+      id: 'operational',
+      // ASSERTIVE forms only. A directive is not a claim: "Vendor to confirm an on-site date" is
+      // the deterministic next action, and matching it here would have the gate reject the very
+      // fallback note it exists to protect. "technician is on-site now" is a claim; "so work can be
+      // scheduled" is not.
+      claim: /\b((is|was|has been) (scheduled|dispatched|on[- ]?site|assigned)|visit (is |was )?(booked|scheduled)|scheduled (for|on)\b|dispatched\b|crew (arrived|dispatched)|tech(nician)? (is |was )?(on[- ]?site|assigned)|vendor (is |was |has been )?assigned|attended\b|on[- ]?site now)/i,
+      allow: function (f, ev) {
+        return ['scheduled', 'onsite', 'inprogress'].indexOf(f.phase) !== -1 ||
+          woaEvidenceHas(ev, /\b((is|was|has been) (scheduled|dispatched|on[- ]?site|assigned)|visit (is |was )?(booked|scheduled)|scheduled (for|on)\b|dispatched\b|crew (arrived|dispatched)|tech(nician)? (is |was )?(on[- ]?site|assigned)|vendor (is |was |has been )?assigned|attended\b|on[- ]?site now)/i);
+      },
+      reason: 'claimed scheduling/dispatch/on-site activity with no supporting evidence'
+    },
+    {
+      id: 'client-contact',
+      claim: /\b(contacted the client\b|client (was |has been )?(notified|advised|updated|contacted|informed)\b|spoke (with|to) the client\b|emailed the client\b|called the client\b)/i,
+      allow: function (f, ev) {
+        return woaEvidenceHas(ev, /\b(contacted (the )?client|client (was |has been )?(notified|advised|updated|contacted|informed)|spoke (with|to) (the )?client|emailed (the )?client|called (the )?client)\b/i);
+      },
+      reason: 'claimed client contact with no evidence of it'
+    },
+    {
+      id: 'blame',
+      claim: /\b(unresponsive\b|failed to (respond|show|deliver|attend)\b|no[- ]show\b|at fault\b|negligen\w*|dropped the ball\b|ignored\b|neglected\b)/i,
+      allow: function (f, ev) {
+        // Matched RAW on both sides. This vocabulary is inherently negative - "no-show" trips the
+        // negation veto on the word "no" - so running either side through the clause filter would
+        // make the rule refuse a no-show the source note plainly records.
+        return /\b(unresponsive|failed to (respond|show|deliver|attend)|no[- ]show|negligen\w*|ignored|neglected)\b/i.test(String(ev || ''));
+      },
+      literal: true,   // "failed to respond" is itself negative; the veto would silence every match
+      reason: 'attributed fault with no evidence of it'
+    },
+    {
+      id: 'owner',
+      // Ownership may only be assigned to a party the DERIVED facts already put on the hook.
+      // Coordinator is always allowed: chasing a status is internal work, and assigning internal
+      // work is not blame - the same reading the stale-note rule above already relies on.
+      claim: /\b(vendor|client|supplier|materials|landlord)\s+(to|must|needs? to|is responsible|owes)\b/i,
+      allow: function (f, ev, m) {
+        var who = String(m[1] || '').toLowerCase();
+        var allowed = ['coordinator'];
+        [f.blockerOwner, f.nextActionOwner].forEach(function (o) {
+          if (o && o !== 'Unknown') allowed.push(String(o).toLowerCase());
+        });
+        // A caller that supplied no derived facts establishes no ownership, so there is nothing
+        // here for the line to contradict and this rule has no basis to refuse it. The other rules,
+        // and the date gate, still apply. Without this the gate would reject a perfectly ordinary
+        // line purely because the caller omitted the facts argument.
+        if (allowed.length === 1 && !f.nextAction) return true;
+        if (allowed.indexOf(who) !== -1) return true;
+        // PO/Approval covers the approval chain; a line naming the client as approver on a
+        // proposal-sent job is the same fact under the label the reader actually uses.
+        if (who === 'client' && allowed.indexOf('po/approval') !== -1) return true;
+        // The facts' own prose may name a party the LABEL does not: the materials stage is owned by
+        // "Materials" but its next action reads "Vendor to confirm the delivery date". A line that
+        // repeats what the derived facts already say is grounded, whatever the label.
+        return woaEvidenceHas(ev, new RegExp('\\b' + who + '\\s+(to|must|needs? to|is responsible|owes)\\b', 'i'));
+      },
+      reason: 'assigned the next move to a party the evidence does not put on the hook'
+    },
+    {
+      id: 'internal-wording',
+      claim: /\b(umbrava|graphql|\bbwn\b|\bai\b|\bllm\b|system prompt|derived facts|confidence|this audit\b|audit (tool|process|run|script)|source system)\b/i,
+      allow: function () { return false; },
+      literal: true,
+      reason: 'used internal tooling wording that must not reach a client-facing note'
+    },
+    {
+      id: 'contradicts-status',
+      claim: /\b(awaiting|pending|in progress|not yet|outstanding)\b/i,
+      allow: function (f) { return !f.terminal; },
+      literal: true,   // "not yet" is inherently negative; the veto would silence the rule
+      reason: 'asserted open work on a work order whose live status reports it closed'
+    }
+  ];
+  // The FIRST rule a line trips, or '' when it trips none. One reason, because the caller records
+  // one degradation cause and a list of nine would not change what the operator does about it.
+  // The derived facts are folded into the evidence haystack: in production the prompt always
+  // carries them, and a fact the deterministic layer established IS grounding - it is the same
+  // material the fallback note is built from, so the gate must not reject the fallback's own
+  // wording just because the caller passed a thin groundText.
+  function woaClaimIssue(text, f, evidence) {
+    var s = String(text || '');
+    f = f || {};
+    var ev = String(evidence || '') + '\n' +
+      [f.currentStage, f.primaryBlocker, f.nextAction].filter(Boolean).join(' - ');
+    for (var i = 0; i < WOA_CLAIM_RULES.length; i++) {
+      var r = WOA_CLAIM_RULES[i];
+      var m = r.literal ? r.claim.exec(s) : woaClaimMatch(s, r.claim);
+      if (!m) continue;
+      if (r.allow && r.allow(f, ev, m)) continue;
+      return r.reason;
+    }
+    return '';
+  }
+
+  // The over-30 chain is the line that actually reaches a work order, so it gets the SAME gate as
+  // the standard note - minus the ECD clause, because the wrapper owns that end and the model is
+  // instructed not to write one. Until 0.13.0 this path had only the date check, which made the
+  // posted note the least validated output in the tool.
+  function validateTimelineChain(chain, f, groundText) {
+    var s = String(chain == null ? '' : chain).trim();
+    if (!s) return 'empty AI timeline chain';
+    if (WOA_VAGUE.test(s)) return 'AI timeline used vague filler wording';
+    var claim = woaClaimIssue(s, f, String(groundText || ''));
+    if (claim) return 'AI timeline ' + claim;
+    return ungroundedDates(s, String(groundText || ''));
+  }
+
+  // Work-order key normalization. The old reader stripped EVERY non-digit, so a compound or
+  // mistyped cell silently CONCATENATED into a different, perfectly valid work-order number and the
+  // audit went and read someone else's job: "386564-2" became 3865642 and "386564/386565" became
+  // 386564386565. Anything carrying more than one candidate number is refused outright rather than
+  // guessed at. Returns {n, confidence, reason}; n === null means DO NOT FETCH.
+  function woaNormalizeKey(raw) {
+    var s = String(raw == null ? '' : raw).trim();
+    if (!s) return { n: null, confidence: 'low', reason: 'the work order cell is empty' };
+    var t = s.replace(/\.0+$/, '');                       // Excel numeric round-trip ("386564.0")
+    var groups = t.match(/\d+/g) || [];
+    if (!groups.length) return { n: null, confidence: 'low', reason: 'not a WO number: "' + s + '"' };
+    if (groups.length > 1) {
+      return { n: null, confidence: 'low', reason: '"' + s + '" holds more than one number - it was NOT guessed at; split or correct the cell and re-run' };
+    }
+    var n = parseInt(groups[0], 10);
+    if (!n || isNaN(n)) return { n: null, confidence: 'low', reason: 'not a WO number: "' + s + '"' };
+    // What is left once the number and the house decoration (W, W-, #, spaces) are removed.
+    var decor = t.replace(/\d+/, '').replace(/^\s*w[-\s]*/i, '').replace(/[#\s]/g, '');
+    return {
+      n: n,
+      confidence: decor ? 'medium' : 'high',
+      reason: decor ? 'unexpected characters ("' + decor + '") around the work order number' : null
+    };
+  }
+
+  // Read-only WOA_PHASE coverage. The table was COPIED from Core and has never been re-measured
+  // against the live tenant, so a status it does not carry is not an error - it is a fact about the
+  // table that nobody could see. This records what the run actually met. It never edits the table,
+  // never maps an unknown status to a stage, and asks Umbrava nothing extra: every name here came
+  // from a header the run had already read. Comparison is lowercased+trimmed; the RAW name is kept.
+  function statusCoverage(results) {
+    var seen = {}, order = [];
+    for (var i = 0; i < (results || []).length; i++) {
+      var r = results[i];
+      var raw = (r && r.sourceStatusName) ? String(r.sourceStatusName).trim() : '';
+      if (!raw) continue;
+      var k = raw.toLowerCase();
+      if (!seen[k]) { seen[k] = { status: raw, count: 0, mapped: WOA_PHASE[k] || null }; order.push(k); }
+      seen[k].count++;
+    }
+    var observed = order.map(function (k) { return seen[k]; });
+    return {
+      observed: observed,
+      unmapped: observed.filter(function (o) { return !o.mapped; })
+    };
   }
   // ===== BWN WO-AUDIT STATE END ==================================================================
 
@@ -1452,7 +1784,13 @@
     '  what is holding it and who owes the next move, using the DERIVED FACTS block supplied below.',
     '  Do not restate the facts block verbatim and do not add an ECD - just land the chain on the',
     '  present state instead of trailing off at whatever the last note happened to mention.',
-    '- If no note says anything about status, output exactly: no status notes on file'
+    '- If no note says anything about status, output exactly: no status notes on file',
+    // 0.13.0: the chain is now held to the same claim gate as the standard note (it is the line
+    // that actually gets posted onto a work order), so it is told the same rules.
+    '- Report only what the notes state. Never assert completion, approval, pricing/NTE/DNE/PO,',
+    '  scheduling, dispatch, on-site attendance, vendor assignment or client contact that the notes',
+    '  do not record, and never attribute fault to anyone.',
+    '- Never mention this tool, the audit process, a source system, a model, or a confidence level.'
   ].join('\n');
 
   // Build the timeline user turn: the WO's FULL note history OLDEST-FIRST (the chronology lives
@@ -1464,7 +1802,10 @@
     var lines = capped.map(function (n) {
       n = (n && typeof n === 'object') ? n : {};
       var when = fmtMD(n.createdDate);
-      var txt = String(n.content || '').trim().replace(/\s+/g, ' ').slice(0, 600);
+      // Same sanitization as the standard prompt, applied BEFORE the 600-char cap so the cap is
+      // spent on the event history rather than on an email header block (measured median: the
+      // paste took 62% of the note it appeared in).
+      var txt = woaStripQuotedEmail(n.content).replace(/\s+/g, ' ').slice(0, 600);
       return (when ? when + ': ' : '') + (txt || '(empty)');
     });
     var f = facts || {};
@@ -1732,10 +2073,12 @@
       // strip silently deleted every segment after the first such mention - the richest part of the
       // note. Only a genuine trailing "- ECD <date|TBD|not set> ..." tail is removed.
       chain = chain.replace(/\s*-\s*ECD\s+(?:\d{1,2}\/\d{1,2}(?:\/\d{2,4})?|TBD|not set)\b[^-]*$/i, '').trim();
-      // The posted path gets the same date-grounding gate as the standard note: this is the chain
-      // that reaches a real work order, so it is the LAST place an invented date should be allowed.
-      var ungrounded = ungroundedDates(chain, prompt);
-      if (ungrounded) return { note: composeTimelineNote(fallbackChain(facts), header, Date.now()), degraded: ungrounded };
+      // The posted path gets the FULL gate as of 0.13.0 - dates, vague filler, and every claim
+      // rule - not just the date check. This is the chain that reaches a real work order, so it is
+      // the last place an invented date OR an unevidenced claim should be allowed. The wrapper and
+      // its ECD tail are unchanged either way, so a rejected chain still ships the house format.
+      var bad = validateTimelineChain(chain, facts, prompt);
+      if (bad) return { note: composeTimelineNote(fallbackChain(facts), header, Date.now()), degraded: bad };
       return { note: composeTimelineNote(chain, header, Date.now()), degraded: '' };
     });
   }
@@ -2231,6 +2574,9 @@
           '<li>Your original workbook is never modified in the browser &mdash; the tool produces a separate downloadable copy.</li>' +
           '<li>The export preserves cell values and formulas where supported; some Excel presentation features (charts, conditional formatting, validation) may not be retained.</li>' +
         '</ul></div></details>' +
+        // Run diagnostics: unmapped live statuses + review-required rows, populated when a run
+        // finishes (quality 0.13.0). Read-only, in-memory, copyable - never written to bwn:audit.
+        '<div id="bwn-woaudit-diag"></div>' +
         '<div id="bwn-woaudit-post"></div>' +
         '<div id="bwn-woaudit-mapinfo"></div>' +
       '</div>';
@@ -2430,6 +2776,7 @@
       var db0 = $('bwn-woaudit-dl'); if (db0) { db0.disabled = true; }
       setWarn('');
       var ph0 = $('bwn-woaudit-post'); if (ph0) ph0.innerHTML = '';
+      var dg0 = $('bwn-woaudit-diag'); if (dg0) dg0.innerHTML = '';   // stale diagnostics belong to the old workbook
       var ws = loaded.wb.Sheets[currentSheet()];
       var map = mapSheet(ws);
       var hdr = (map.aoa[map.headerRow] || []).map(function (x) { return String(x == null ? '' : x); });
@@ -2607,12 +2954,17 @@
       $('woa-empty-prog').style.display = 'none';
       $('bwn-woaudit-prog').classList.add('is-show');
       $('woa-run-ctrls').classList.add('is-show');
+      var dgh = $('bwn-woaudit-diag'); if (dgh) dgh.innerHTML = '';   // clear last run's diagnostics
       $('bwn-woaudit-cancel').disabled = false;
       if (_paused) setPaused(false);
       _running = true; _cancelled = false;
       _runStart = Date.now(); _flagged = 0; _lastCur = '';
       setStatus('proc'); setStep(3);
       setWarn('');
+      // One id per pass so every row can be correlated in the diagnostics copy. In-memory only:
+      // per-row diagnostics deliberately do NOT go into the shared bwn:audit write trail (that ring
+      // buffer is the cross-script WRITE trail and per-row rows would bury real writes).
+      var RUN_ID = bwnCorrId();
       if (!retryOnly) { log.innerHTML = ''; log.style.display = 'none'; session.results = new Array(session.rows.length); }
       logln((retryOnly ? 'Retrying ' : 'Auditing ') + targets.length + ' work orders (' + conc + ' at a time)...');
       updateProgress(0, targets.length, null);
@@ -2627,6 +2979,9 @@
             ', waiting ' + Math.round(ms / 1000) + 's' +
             (throttled ? (hadHeader ? ' (server retry-after)' : ' (no retry-after header)') : ''));
         };
+        // The row's pre-audit workbook note from the aoa snapshot (ORIGINAL text even on a retry) -
+        // what a retention decision compares against. '' when the notes column was appended.
+        var priorNote = cellStr(session.map.aoa, row.rowIdx, session.map.note);
         // Park here (not mid-fetch) when paused: the worker holds before starting a new row, so
         // in-flight rows still finish and the workbook is never left half-written.
         return waitIfPaused().then(function () {
@@ -2637,10 +2992,12 @@
             var h = data.header;
             // Deterministic flags first, written straight to the sheet - they need no AI, so they
             // survive even if the summarize below fails (credits/throttle). A header miss -> [].
-            // applyChecks gates the flags by the operator's enabled checks and appends the
-            // cancellation review flag; an empty/partial cfg reproduces the full flag set.
+            // applyChecks gates the deterministic flags by the operator's enabled checks and appends
+            // the cancellation review flag; an empty/partial cfg reproduces the full flag set.
+            // Computed unconditionally so the structured row result can carry `flags` even when no
+            // flags column is written.
+            var flags = applyChecks(computeFlags(h, data.notes, Date.now()), data.notes, cfg.checks);
             if (session.map.flag > -1) {
-              var flags = applyChecks(computeFlags(h, data.notes, Date.now()), data.notes, cfg.checks);
               ws[XLSX.utils.encode_cell({ c: session.map.flag, r: row.rowIdx })] = { t: 's', v: flags.join(', ') };
               if (flags.length) _flagged++;
             }
@@ -2665,15 +3022,37 @@
             // and notes, before any AI call. It grounds the prompt, backs the strict output check,
             // and is the fallback note's only input - so a row is never left without a usable note.
             var facts = deriveState(h, data.notes, Date.now());
+            // THE evidence set, for the model and for the grounding check alike. Until 0.13.0 the
+            // prompts were handed the RAW history, so this tool's own prior [bwn:wo-audit] post was
+            // fed back as evidence - and, because ungroundedDates grounds against that same prompt,
+            // a date this tool invented last cycle validated as a fact this cycle. deriveState has
+            // always filtered; the prompts now use the SAME filtered list. hasPriorAuditNote above
+            // still reads the raw notes, so posting idempotency is untouched.
+            var evidenceNotes = meaningfulNotes(data.notes, Date.now());
             // Over-30 rows get the dated timeline note (full note history + trade + ECD); every other
             // row keeps the 1-3 sentence status note. Age is read from the workbook days column - or,
             // when there is no days column, the export is over-30 by construction so all rows qualify.
             var daysColAbsent = session.map.days === -1;
             var ageDays = daysColAbsent ? null : parseAgeDays(cellStr(session.map.aoa, row.rowIdx, session.map.days));
             var over30 = postEligible(ageDays, daysColAbsent);
+            var review = [];
+            if (data.matchReason) review.push(data.matchReason);
+            if (!h) review.push('the live work order record could not be read this run - the note below rests on job notes alone');
+            // RETENTION. A header miss with no usable notes leaves nothing that can be said
+            // truthfully, and the deterministic note would then be a statement about the TOOL, not
+            // the job - written over whatever the coordinator already had in the cell. Keep the
+            // existing note, say why, and put the row in front of a human.
+            if (!h && !evidenceNotes.length) {
+              return {
+                retained: true, note: priorNote, degraded: '', facts: facts, flags: flags,
+                notesFound: data.notes.length, evidenceCount: 0, priorAudit: priorAudit,
+                matchConfidence: data.matchConfidence,
+                ageDays: ageDays, over30: over30, header: h, review: review
+              };
+            }
             var draftP = over30
-              ? summarizeTimeline(woFacts, data.notes, h, model, onWait, facts)
-              : summarize(woFacts, data.notes.slice(0, 5), model, onWait, facts);
+              ? summarizeTimeline(woFacts, evidenceNotes, h, model, onWait, facts)
+              : summarize(woFacts, evidenceNotes.slice(0, 5), model, onWait, facts);
             // An AI failure must not cost the row its note. The deterministic note is written
             // instead and the row is marked DEGRADED - visibly, and still retryable - so an outage
             // stays legible in the run summary rather than passing as a clean result.
@@ -2686,29 +3065,66 @@
               return { note: fb, degraded: (e && e.message) || String(e) };
             }).then(function (out) {
               return {
-                note: out.note, degraded: out.degraded || '', facts: facts,
-                notesFound: data.notes.length, priorAudit: priorAudit, ageDays: ageDays, over30: over30
+                retained: false, note: out.note, degraded: out.degraded || '', facts: facts, flags: flags,
+                notesFound: data.notes.length, evidenceCount: evidenceNotes.length,
+                matchConfidence: data.matchConfidence,
+                priorAudit: priorAudit, ageDays: ageDays, over30: over30, header: h, review: review
               };
             });
           })
           .then(function (out) {
-            // Write into the worksheet cell, dropping any formula (string value only).
-            ws[XLSX.utils.encode_cell({ c: session.map.note, r: row.rowIdx })] = { t: 's', v: out.note };
+            var h = out.header;
+            // A RETAINED row is never written: the whole point is that the client's existing cell
+            // survives untouched. Every other row writes the drafted note, dropping any formula.
+            if (!out.retained) {
+              ws[XLSX.utils.encode_cell({ c: session.map.note, r: row.rowIdx })] = { t: 's', v: out.note };
+            }
+            var reasons = (out.review || []).slice();
+            if (out.retained) reasons.push('no live work order record and no usable job notes - the existing tracker note was kept rather than replaced with a statement about the read failure');
             // Post-step state (used only by the "Post drafted notes" section after the run): a row
             // is post-eligible when aged >30d, or when the workbook has no days column at all. Both
             // were already computed to pick the draft style above; reuse them, do not re-parse.
+            // 0.13.0 adds the structured fields ADDITIVELY - auditTally still reads `.error` only
+            // and pendingRows still reads `.error`/`.degraded`, so neither changes shape or meaning.
             session.results[origIdx] = {
+              correlationId: RUN_ID + ':' + row.key,
+              workOrderNumber: row.key,
+              rowIndex: row.rowIdx,
               key: row.key, note: out.note, notesFound: out.notesFound,
+              evidenceCount: out.evidenceCount,
+              fetchStatus: h ? 'ok' : 'error',
+              matchConfidence: out.matchConfidence || 'high',
+              sourceStatusName: (h && h.statusName) || '',
+              sourcePhase: (h && h.phase) || '',
+              flags: out.flags || [],
               ageDays: out.ageDays, eligible: !!out.over30, priorAudit: !!out.priorAudit,
-              degraded: out.degraded || '', facts: out.facts || null
+              degraded: out.degraded || '', facts: out.facts || null,
+              noteMode: out.retained ? 'retained' : (out.degraded ? 'deterministic_fallback' : 'ai'),
+              priorNote: priorNote,
+              proposedNote: out.retained ? '' : out.note,
+              finalNote: out.note,
+              noteValidation: { valid: !out.degraded, reasons: out.degraded ? [out.degraded] : [] },
+              reviewRequired: !!reasons.length,
+              reviewReasons: reasons,
+              changed: !out.retained && String(out.note || '') !== String(priorNote || ''),
+              postEligible: false, postIneligibleReason: null,
+              error: null
             };
-            logln('  WO ' + row.key + ' (' + out.notesFound + ' notes)' +
+            logln('  WO ' + row.key + ' (' + out.notesFound + ' notes, ' + out.evidenceCount + ' usable)' +
+              (out.retained ? ' [RETAINED - existing note kept]' : '') +
               (out.degraded ? ' [deterministic note - ' + out.degraded + ']' : '') + ': ' +
-              (out.note ? out.note.slice(0, 90) : '(blank)'));
+              (out.note ? out.note.slice(0, 90) : '(cell left as-is)'));
             return session.results[origIdx];
           })
           .catch(function (e) {
-            session.results[origIdx] = { key: row.key, error: (e && e.message) || String(e) };
+            session.results[origIdx] = {
+              correlationId: RUN_ID + ':' + row.key, workOrderNumber: row.key, rowIndex: row.rowIdx,
+              key: row.key, fetchStatus: 'error', matchConfidence: 'low',
+              noteMode: 'skipped', priorNote: priorNote, finalNote: priorNote, changed: false,
+              reviewRequired: true, reviewReasons: [(e && e.message) || String(e)],
+              postEligible: false, postIneligibleReason: 'the work order could not be read this run',
+              error: (e && e.message) || String(e)
+            };
             logln('  ! WO ' + row.key + ': ' + session.results[origIdx].error);
             throw e;   // marks the pool slot as errored too
           });
@@ -2789,9 +3205,99 @@
           setWarn(tal.errs + tal.skipped
             ? 'This workbook is INCOMPLETE: ' + owedPhrase(tal) + ' of ' + session.rows.length + '. ' + UNWRITTEN_NOTE + ' Press Retry Unfinished before sending it.'
             : '');
+          // Retained rows wrote nothing, on purpose. They are NOT errors and NOT skips - the row
+          // was audited, nothing safe could be said, and the coordinator's own note was kept - so
+          // they must be named explicitly or a silent no-write looks like a silent success.
+          var retained = 0, reviewN = 0;
+          for (var ri = 0; ri < session.rows.length; ri++) {
+            var rrr = session.results[ri];
+            if (!rrr) continue;
+            if (rrr.noteMode === 'retained') retained++;
+            if (rrr.reviewRequired) reviewN++;
+          }
+          if (retained) {
+            logln('! ' + retained + ' row' + (retained === 1 ? '' : 's') +
+              ' KEPT the workbook\'s existing note: the live work order could not be read and there were no usable job notes, so nothing could be said truthfully. Nothing was overwritten. Review those rows below.');
+          }
+          if (reviewN) {
+            logln('! ' + reviewN + ' row' + (reviewN === 1 ? '' : 's') + ' need a human look - see "Run diagnostics" below.');
+          }
           // Reveal the per-note post buttons for the rows that drafted a note this run.
+          renderDiagnostics();
           renderPostSection();
         });
+    }
+
+    // Run diagnostics: the two things a run knows that nothing else surfaces - live statuses that
+    // WOA_PHASE does not carry, and rows a human should look at. Read-only, in-memory, copyable.
+    // An unmapped status is not a failure; it is the measurement the table has never had, and the
+    // rows carrying it already degraded safely (stage printed verbatim, confidence low).
+    function renderDiagnostics() {
+      var host = $('bwn-woaudit-diag');
+      if (!host) return;
+      host.innerHTML = '';
+      if (!session) return;
+      var cov = statusCoverage(session.results);
+      var reviews = [];
+      for (var i = 0; i < session.rows.length; i++) {
+        var r = session.results[i];
+        if (r && r.reviewRequired) reviews.push(r);
+      }
+      if (!cov.unmapped.length && !reviews.length) return;
+      var wrap = document.createElement('div');
+      wrap.style.cssText = 'margin-top:14px;border-top:1px solid #e0e6e2;padding-top:12px';
+      var h = document.createElement('div');
+      h.style.cssText = 'font-weight:600;margin-bottom:6px;color:' + GREEN;
+      h.textContent = 'Run diagnostics';
+      wrap.appendChild(h);
+      var lines = [];
+      if (cov.unmapped.length) {
+        var box = document.createElement('div');
+        box.style.cssText = 'font-size:12px;color:#8a4b00;background:#fff4e5;border:1px solid #ffcf99;border-radius:6px;padding:7px 9px;margin-bottom:8px;line-height:1.5';
+        box.textContent = 'Umbrava status names this build does not map (' + cov.unmapped.length + '): ' +
+          cov.unmapped.map(function (o) { return '"' + o.status + '" x' + o.count; }).join(', ') +
+          '. Those rows printed the status verbatim at low confidence rather than being mapped to a guessed stage. Nothing was changed automatically.';
+        wrap.appendChild(box);
+        lines.push('UNMAPPED STATUSES (' + cov.unmapped.length + ' of ' + cov.observed.length + ' seen):');
+        cov.unmapped.forEach(function (o) { lines.push('  ' + o.status + '\tx' + o.count); });
+      }
+      if (reviews.length) {
+        var rb = document.createElement('div');
+        rb.style.cssText = 'font-size:12px;color:#444;background:#f6f8f7;border:1px solid #e0e6e2;border-radius:6px;padding:7px 9px;margin-bottom:8px;line-height:1.5';
+        rb.textContent = reviews.length + ' row' + (reviews.length === 1 ? '' : 's') + ' need review: ' +
+          reviews.slice(0, 12).map(function (r) { return 'WO ' + r.key; }).join(', ') +
+          (reviews.length > 12 ? ', ...' : '') + '. Reasons are in the copy below and on each card.';
+        wrap.appendChild(rb);
+        lines.push('', 'REVIEW REQUIRED (' + reviews.length + '):');
+        reviews.forEach(function (r) {
+          lines.push('  WO ' + r.key + '\t' + (r.noteMode || '') + '\t' + (r.sourceStatusName || '(status unread)'));
+          (r.reviewReasons || []).forEach(function (x) { lines.push('    - ' + x); });
+        });
+      }
+      var btn = document.createElement('button');
+      btn.type = 'button';
+      btn.textContent = 'Copy diagnostics';
+      btn.style.cssText = 'background:#fff;color:' + GREEN + ';border:1px solid ' + GREEN + ';padding:6px 12px;border-radius:8px;font-weight:600;cursor:pointer';
+      var payload = ['WO Audit ' + VER + ' run diagnostics', 'run: ' + (session.results[0] && session.results[0].correlationId ? String(session.results[0].correlationId).split(':')[0] : '(n/a)'), ''].concat(lines).join('\n');
+      btn.onclick = function () {
+        // Clipboard API is not available on every surface this drawer opens on, so fall back to a
+        // selected textarea rather than silently doing nothing.
+        function fallback() {
+          try {
+            var ta = document.createElement('textarea');
+            ta.value = payload; ta.style.cssText = 'position:fixed;left:-9999px;top:0';
+            document.body.appendChild(ta); ta.select(); document.execCommand('copy'); ta.remove();
+            btn.textContent = 'Copied';
+          } catch (e) { btn.textContent = 'Copy failed - see the log'; logln(payload); }
+        }
+        try {
+          if (navigator.clipboard && navigator.clipboard.writeText) {
+            navigator.clipboard.writeText(payload).then(function () { btn.textContent = 'Copied'; }, fallback);
+          } else fallback();
+        } catch (e) { fallback(); }
+      };
+      wrap.appendChild(btn);
+      host.appendChild(wrap);
     }
 
     // Renders the "Post drafted notes to work orders" section from session.results. One Post button
@@ -2799,6 +3305,20 @@
     // >30d (or the workbook has no days column), has no prior WO-audit note, and has not been posted
     // this session. Each button posts exactly ONE note on an explicit human click - there is
     // deliberately NO bulk / auto "post all".
+    // The ordered posting gate, as the operator sees it. The two global blocks come first because
+    // they make every row unpostable and a per-row reason would be misleading. Mirrors what
+    // bwnGqlOp enforces; it does NOT replace it.
+    function postBlockReason(r) {
+      if (BWN_MODULES.woAuditNotes === false) return 'note posting is switched off for this suite (kill switch)';
+      if (!bwnCan('WorkOrderNote.AddNew')) return 'your Umbrava permissions do not include WorkOrderNote.AddNew';
+      if (r.error) return 'the work order could not be read this run';
+      if (r.noteMode === 'retained') return 'no note was drafted - the workbook\'s existing note was retained';
+      if (!r.note) return 'no note was drafted for this row';
+      if (!r.eligible) return 'not aged over 30 days';
+      if (r.priorAudit) return 'this work order already carries a ' + AUDIT_MARKER + ' note';
+      return null;
+    }
+
     function renderPostSection() {
       var host = $('bwn-woaudit-post');
       if (!host) return;
@@ -2807,7 +3327,10 @@
       var rows = [];
       for (var i = 0; i < session.rows.length; i++) {
         var r = session.results[i];
-        if (r && !r.error && r.note) rows.push(r);
+        // Retained and review-required rows belong on this list too: they are exactly the rows a
+        // human has to look at, and dropping them for having no drafted note is what made a
+        // deliberate no-write indistinguishable from a row that was never processed.
+        if (r && !r.error && (r.note || r.noteMode === 'retained' || r.reviewRequired)) rows.push(r);
       }
       if (!rows.length) return;
       var wrap = document.createElement('div');
@@ -2853,6 +3376,26 @@
           fx.textContent = bits.join('  |  ') + '   [' + (r.facts.confidence || 'low') + ' confidence, ' + (r.facts.noteCount || 0) + ' usable notes]';
           card.appendChild(fx);
         }
+        // The operational line: what the audit found, and what it did with the cell. Flags are the
+        // deterministic exception signals (NOT narrative - they never enter the note), so they are
+        // shown as their own row rather than folded into the derived reading above.
+        var meta = document.createElement('div');
+        meta.style.cssText = 'font-size:11.5px;color:#555;margin-bottom:6px;line-height:1.45';
+        var metaBits = [
+          'note: ' + (r.noteMode === 'ai' ? 'AI-drafted' : r.noteMode === 'deterministic_fallback' ? 'deterministic fallback' : r.noteMode === 'retained' ? 'RETAINED (workbook note kept)' : String(r.noteMode || '-')),
+          (r.changed ? 'workbook cell CHANGED' : 'workbook cell unchanged'),
+          'status: ' + (r.sourceStatusName || '(unread)')
+        ];
+        if (r.matchConfidence && r.matchConfidence !== 'high') metaBits.push('match confidence: ' + r.matchConfidence);
+        meta.textContent = metaBits.join('  |  ') + ((r.flags && r.flags.length) ? ('\nflags: ' + r.flags.join(', ')) : '\nflags: none');
+        meta.style.whiteSpace = 'pre-line';
+        card.appendChild(meta);
+        if (r.reviewRequired && (r.reviewReasons || []).length) {
+          var rv = document.createElement('div');
+          rv.style.cssText = 'font-size:11.5px;color:#6b1d1d;background:#fdf1f1;border:1px solid #f0cccc;border-radius:6px;padding:5px 7px;margin-bottom:6px;line-height:1.45;white-space:pre-line';
+          rv.textContent = 'Review required:\n- ' + r.reviewReasons.join('\n- ');
+          card.appendChild(rv);
+        }
         if (r.degraded) {
           var dg = document.createElement('div');
           dg.style.cssText = 'font-size:11.5px;color:#8a4b00;background:#fff4e5;border:1px solid #ffcf99;border-radius:6px;padding:5px 7px;margin-bottom:6px';
@@ -2864,12 +3407,17 @@
         ta.value = r.note;
         ta.style.cssText = 'width:100%;box-sizing:border-box;min-height:56px;font:12px ' + FONT + ';border:1px solid #e0e6e2;border-radius:6px;padding:6px;resize:vertical;background:#fafbfa';
         card.appendChild(ta);
-        if (!r.eligible) {
-          status.textContent = 'not aged >30d - skipped';
-        } else if (r.priorAudit) {
-          status.textContent = 'already has a WO-audit note - skipped';
-        } else if (r.posted) {
+        // ONE ordered answer to "can this be posted, and if not why not", so the operator reads the
+        // reason on the card instead of discovering it from a failed click. Display only: bwnGqlOp
+        // remains the enforcement point for the kill switch and the Umbrava permission, and nothing
+        // here can widen what it allows.
+        var block = postBlockReason(r);
+        r.postIneligibleReason = block;
+        r.postEligible = !block && !r.posted;
+        if (r.posted) {
           status.textContent = 'posted ✓';
+        } else if (block) {
+          status.textContent = 'cannot post - ' + block;
         } else {
           var btn = document.createElement('button');
           btn.textContent = 'Post';
