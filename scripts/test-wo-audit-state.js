@@ -188,9 +188,15 @@ A.ok('fallback never emits ECD undefined/null/Invalid Date',
   !/ECD\s*(undefined|null|NaN|Invalid)/i.test(stages.map(function (s) { return T.composeAuditStatusNote(st(H(s), [])); }).join('\n')));
 // A null header (read failed) must say so rather than fabricate a clean bill of health.
 var fNull = st(null, []);
-A.eq('null header -> says the header is unavailable', fNull.currentStage, 'Live work-order header unavailable');
+// 0.13.0: the wording is client-neutral. This clause can reach the workbook's Notes column (a
+// header miss WITH usable notes still composes a note), and the old text named this tool's own
+// internals - "re-run the audit once the header read succeeds" - to a reader who has never heard
+// of it. The gap is still stated, and the mechanism now lives in the row result and the log.
+A.eq('null header -> says the status is unavailable', fNull.currentStage, 'Current status unavailable');
 A.ok('null header still ends in ECD TBD', / - ECD TBD$/.test(T.composeAuditStatusNote(fNull)));
 A.eq('null header records absence evidence', fNull.evidence[0].kind, 'absence');
+A.ok('null-header note carries no internal tooling wording',
+  !/\b(audit|umbrava|header|graphql|bwn)\b/i.test(T.composeAuditStatusNote(fNull)), T.composeAuditStatusNote(fNull));
 
 console.log('\n10. Required scenario: over-30 timeline note is unchanged');
 // The deterministic wrapper is the SAME shipped function; this pins that the state layer did not
@@ -239,6 +245,13 @@ A.eq('keeps only the real operational note', mn.length, 1);
 A.ok('kept the right one', /Vendor confirmed the appointment/.test(mn[0].content), mn[0].content);
 // negative control: the filter is not simply dropping everything.
 A.eq('control: two real notes both survive', T.meaningfulNotes([note('Vendor confirmed the appointment.', 1), note('Client approved the revised scope.', 2)], NOW).length, 2);
+// 0.13.0: this filtered list is now what the AI PROMPTS are built from, not just what deriveState
+// reads, so it has to carry the fields the prompt showed - the note type among them.
+var mnT = T.meaningfulNotes([note('Vendor confirmed the appointment for next Tuesday.', 1, { type: 'Internal' })], NOW);
+A.eq('the filtered evidence keeps the note type for the prompt', mnT[0].type, 'Internal');
+A.eq('...and its date', mnT[0].createdDate, daysAgo(1));
+A.eq('control: a note with no type reads as empty, not undefined',
+  T.meaningfulNotes([note('Vendor confirmed the appointment for next Tuesday.', 1)], NOW)[0].type, '');
 // A WO whose ONLY note is this tool's own prior post must read as having no usable evidence -
 // reading yesterday's draft back as today's fact would launder a guess into a fact.
 var fSelf = st(H('Some Unmapped Status'), [note('Awaiting client approval - ECD TBD\n\n[bwn:wo-audit]', 2)]);
