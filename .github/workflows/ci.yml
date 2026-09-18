@@ -217,6 +217,14 @@ jobs:
       - name: dispatch patchWorkOrder engine harness (status/assign/ECD writes)
         run: node scripts/test-dispatch-patch.js
 
+      # bwn-dispatch 0.12.3: the modal reported a failed ECD write as a contentless "GraphQL error"
+      # because gql() read errors[0].message and nothing else. Umbrava answers with three envelopes -
+      # standard GraphQL, an ASP.NET 400 whose `errors` is an OBJECT (no .length, so the old guard
+      # never even fired), and bare strings. Slices gqlErrText and pins that all three produce
+      # readable text, that a clean response stays null, and the 300-char cap. Four controls.
+      - name: dispatch GraphQL error-envelope harness (three envelopes, not just errors[0].message)
+        run: node scripts/test-dispatch-gql-errors.js
+
       # temp-vendor 0.3.0: the vendor activate/deactivate writes routed through bwnGqlOp. Slices the
       # real write block (real bwnGqlOp runs, not a stub) and pins: activate resolves the reason id by
       # NAME then fires activateVendor with an audit entry (high-risk, confirmed:true from its panel);

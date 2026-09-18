@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         BWN Dispatch (Broadway National)
 // @namespace    broadwaynational.bwn
-// @version      0.12.2
+// @version      0.12.3
 // @downloadURL  https://raw.githubusercontent.com/Intermu/userscripts/main/bwn-dispatch.user.js
 // @updateURL    https://raw.githubusercontent.com/Intermu/userscripts/main/bwn-dispatch.user.js
 // @description  One-click Dispatch for a work order - replaces manually typing a row into Dispatch_Notifications.xlsx. The Dispatch launcher shows only on a WO that is in "Pending Dispatch". It opens a confirm modal prefilled from the BWN Ops Suite bus (Tracking) and a same-origin Umbrava GraphQL read (Location as the site NUMBER, Priority, and the coordinator to ping): it uses the person this WO is assigned to (whoever a supervisor/manager assigned it to, read live when you open it), and when that is a team or blank it falls back to the coordinator from the most recent work order(s) at the same location. The coordinator name + email are editable before you send. On submit it POSTs the 5 typed fields plus the WO number (read from the URL, never typed - the flow needs it to deep-link the card, because Tracking is the CLIENT's tracking number and points at the wrong record) to the broadway-internal-ops SWA proxy (x-bwn-key gated) which forwards to the HTTP-triggered "Dispatch HTTP" Power Automate flow - the flow adds the row to Dispatch_Notifications.xlsx AND dispatches it (posts a Teams adaptive card to the coordinator and waits for their accept). Dispatching is a coordinator action, so there is no role gate (the x-bwn-key is the boundary). The assignee's email is not on the WO record (Umbrava exposes the coordinator NAME only), so it is resolved from a per-user name->email roster you maintain (seeded with you, and it remembers each coordinator you dispatch to); for a coordinator the roster has never met it falls back to a GUESS derived from the house name pattern and the signed-in user's own domain, shown with a "check it before you send" warning and always editable - never a silent send to an address nobody confirmed. The flow's secret URL stays server-side; nothing sensitive lives in this script. As of 0.10.0 the modal also writes the WO RECORD directly via the same-origin Umbrava GraphQL patchWorkOrder mutation (the write kanban proved live) - an operator-picked target status, an operator-picked assignee (a real Umbrava user, so the assign carries a proper GUID and the card name/email come from the record), and an auto priority-scaled Expected Completion Date - behind a confirm that spells out each write and warns that a status change resets the time-in-status clock. Writes run first and atomically; the Teams card is posted only if the record change succeeds. Registers a single "Dispatch" launcher into the shared dock (bwn:dock:*) - the dock tab is the only launcher; no floating fallback button.
@@ -18,7 +18,7 @@
 (function () {
   'use strict';
 
-  var VER = '0.12.2';   // keep in step with @version - this is what the console banner reports
+  var VER = '0.12.3';   // keep in step with @version - this is what the console banner reports
   var FONT = "-apple-system,BlinkMacSystemFont,'Segoe UI','Helvetica Neue',Arial,sans-serif";
   var GREEN = '#0d3d26';          // BWN Ops Suite brand green - matches CC Request / WO Audit
   var SWA_BASE = 'https://green-stone-0717dab0f.7.azurestaticapps.net';
@@ -168,6 +168,38 @@
   // app.umbrava.com is same-origin, so a plain fetch needs no @connect; the page's own
   // bearer is passed explicitly so it works from the GM_* sandbox. Best-effort only: any
   // miss leaves gating fail-open and the modal on its bus prefill, never blocks the send.
+  // Umbrava answers with THREE different error envelopes and only one of them is standard GraphQL,
+  // so a handler that reads `errors[0].message` alone reports a contentless "GraphQL error" for the
+  // other two. That is exactly what a live ECD dispatch hit 2026-09-18 (WO 1327282): the write was
+  // refused and the modal could only say "GraphQL error", with the real reason on the wire and
+  // nowhere else. The ASP.NET form was already documented as a known trap in
+  // [[umbrava-graphql-operations]] ("a handler that only inspects errors[0].message will
+  // mis-report it") and is worse than contentless here: `errors` is an OBJECT, so `.length` is
+  // undefined, the throw never fires, and gql resolves `undefined` - the failure then surfaces as
+  // bwnGqlOp's generic "unrecognized write response" instead of the field that was rejected.
+  //   GraphQL      { errors: [ { message: "..." } ] }
+  //   ASP.NET 400  { errors: { Field: ["The Field field is required."] } }   <- object, no .length
+  //   bare strings { errors: [ "..." ] }
+  // Returns null when there is no error. Capped so a server string cannot flood the modal; the text
+  // is shown to the operator only and never enters the PII-free audit ring (bwnGqlOp logs a fixed
+  // category, see F5).
+  function gqlErrText(j) {
+    var e = j && j.errors, parts;
+    if (!e) return null;
+    if (Object.prototype.toString.call(e) === '[object Array]') {
+      parts = e.map(function (x) {
+        if (typeof x === 'string') return x;
+        if (x && x.message) return String(x.message);
+        try { return JSON.stringify(x); } catch (err) { return String(x); }
+      });
+    } else if (typeof e === 'object') {
+      parts = Object.keys(e).map(function (k) { return k + ': ' + [].concat(e[k]).join(' '); });
+    } else {
+      parts = [String(e)];
+    }
+    var out = parts.join('; ').trim();
+    return out ? out.slice(0, 300) : null;
+  }
   function gql(query, variables) {
     var tok = authToken();
     return fetch('/api/graphql', {
@@ -176,7 +208,8 @@
       body: JSON.stringify({ query: query, variables: variables || {} })
     }).then(function (r) { return r.json(); })
       .then(function (j) {
-        if (j && j.errors && j.errors.length) throw new Error(j.errors[0].message || 'GraphQL error');
+        var em = gqlErrText(j);
+        if (em) throw new Error(em);
         return j && j.data;
       });
   }
@@ -530,11 +563,34 @@
     if (rm > 0) return { mins: rm, from: 'response' };
     return null;
   }
-  function computeEcd(priority, nowMs) {
+  // Umbrava hands every date back as a LOCAL-OFFSET, minute-precision string
+  // ("2026-09-21T11:41:00-04:00"). toISOString() emits UTC with milliseconds
+  // ("2026-09-20T16:01:47.656Z") - valid ISO 8601, but the only date in the patch body that is not
+  // in the record's own shape, and the REST backend behind the GraphQL gateway answers a bad patch
+  // with a 400 carrying an EMPTY body (measured 2026-09-18 on WO 396636: BAD_USER_INPUT, upstream
+  // http://jobrestapi/api/WorkOrder/Patch, body ""), so it can never name the field it disliked.
+  // Match the record's shape rather than argue with a server that does not explain itself.
+  function pad2(n) { return (n < 10 ? '0' : '') + n; }
+  function isoLocal(d) {
+    var off = -d.getTimezoneOffset(), sign = off < 0 ? '-' : '+', abs = Math.abs(off);
+    return d.getFullYear() + '-' + pad2(d.getMonth() + 1) + '-' + pad2(d.getDate()) +
+      'T' + pad2(d.getHours()) + ':' + pad2(d.getMinutes()) + ':' + pad2(d.getSeconds()) +
+      sign + pad2(Math.floor(abs / 60)) + ':' + pad2(abs % 60);
+  }
+  // FLOOR AT firstTripDate (Mike, 2026-09-18). The priority-scaled basis alone put the completion
+  // date BEFORE the WO's own first trip on a live dispatch - WO 396636 auto-ECD 09/20 12:01 against
+  // a firstTripDate of 09/21 11:41 - which is wrong data whether or not it is what the backend
+  // refused. A completion date can never precede the first trip, so the later of the two wins.
+  // `basis` reports which one did, so the modal and the confirm both name it.
+  function ecdPlan(priority, nowMs) {
     var b = ecdBasisMinutes(priority);
     if (!b) return null;
-    return new Date((nowMs == null ? Date.now() : nowMs) + b.mins * 60000).toISOString();
+    var ms = (nowMs == null ? Date.now() : nowMs) + b.mins * 60000, floored = false;
+    var trip = priority && priority.firstTripDate ? Date.parse(priority.firstTripDate) : NaN;
+    if (isFinite(trip) && trip > ms) { ms = trip; floored = true; }
+    return { iso: isoLocal(new Date(ms)), mins: b.mins, from: b.from, floored: floored };
   }
+  function computeEcd(priority, nowMs) { var p = ecdPlan(priority, nowMs); return p ? p.iso : null; }
   // Build the whole-object priority value for the ECD write: copy the READ priority verbatim, map the
   // read's `hasPriorityOverride` onto the input's `hasOverridePriority` (forced true - a manual ECD
   // IS a priority override, matching the captured write), and override only expectedCompletionDate.
@@ -1151,7 +1207,7 @@
       if (hasWrites) {
         if (sel.statusId) { var so = statusSel.options[statusSel.selectedIndex]; wlines.push('  • Status → ' + (so ? so.text.replace(/ - current$/, '') : sel.statusId) + '   (RESETS the time-in-status clock)'); }
         if (sel.assignedTo) { var ao = assigneeSel.options[assigneeSel.selectedIndex]; wlines.push('  • Assign → ' + (ao ? (ao.getAttribute('data-name') || ao.text) : sel.assignedTo)); }
-        if (sel.ecd) wlines.push('  • Expected completion → ' + fmtEcd(sel.ecd) + '   (auto, now + ' + _ecdBasis + ')');
+        if (sel.ecd) wlines.push('  • Expected completion → ' + fmtEcd(sel.ecd) + '   (auto, ' + _ecdBasis + ')');
       }
       var confirmMsg = hasWrites
         ? ('This will WRITE to work order ' + woId + ':\n\n' + wlines.join('\n') + '\n\nThen post a Teams dispatch card to ' + payload.AssignedToName + '.\n\nContinue?')
@@ -1379,11 +1435,16 @@
   // priority SLA to scale from, in which case ECD is simply not written (never a baseless date).
   function showEcd(priority) {
     if (!ecdEl) return;
-    var b = ecdBasisMinutes(priority);
-    _ecdIso = b ? computeEcd(priority) : null;
+    var b = ecdPlan(priority);
+    _ecdIso = b ? b.iso : null;
     if (!_ecdIso) { _ecdBasis = ''; ecdEl.textContent = 'Expected completion date: no priority SLA on this WO - ECD will not be written.'; return; }
-    _ecdBasis = (b.from === 'SLA' ? 'SLA ' + b.mins + ' min' : 'response ' + b.mins + ' min');
-    ecdEl.innerHTML = 'Expected completion date → <strong>' + esc(fmtEcd(_ecdIso)) + '</strong><br><span style="color:#5b7367;font-size:11.5px;">auto: now + ' + esc(_ecdBasis) + ' (priority-scaled)</span>';
+    // _ecdBasis is a COMPLETE phrase, not a fragment: the floored case is not "now + something", so
+    // a shared "now + " prefix would misdescribe it in both the modal line and the confirm.
+    var window_ = (b.from === 'SLA' ? 'SLA ' : 'response ') + b.mins + ' min';
+    _ecdBasis = b.floored
+      ? 'the WO first trip - the ' + window_ + ' window lands before it'
+      : 'now + ' + window_ + ' (priority-scaled)';
+    ecdEl.innerHTML = 'Expected completion date → <strong>' + esc(fmtEcd(_ecdIso)) + '</strong><br><span style="color:#5b7367;font-size:11.5px;">auto: ' + esc(_ecdBasis) + '</span>';
   }
 
   // ---- Shared launcher dock (bwn:dock:*) -----------------------------------
