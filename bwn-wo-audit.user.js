@@ -2102,6 +2102,146 @@
   function actSheetDate(ms) { var d = new Date(typeof ms === 'number' ? ms : Date.now()); return d.getFullYear() + '.' + actPad(d.getMonth() + 1) + '.' + actPad(d.getDate()); }
   // ===== BWN WO-AUDIT ACTIONS END ==================================================================
 
+  // ===== BWN WO-AUDIT DASHBOARD START (pure; sliced by scripts/test-wo-audit-dashboard.js) ========
+  // The manager-readable roll-ups + the rule catalog, as array-of-arrays for XLSX.utils.aoa_to_sheet.
+  // Everything here is a DETERMINISTIC aggregation of the action rows the engine already produced -
+  // no new judgement, no AI. Text-first: section labels in column A, no fills/tables/panes. The
+  // Action List sheet carries the one filterable table; the Dashboard is a mixed briefing layout.
+  var DASH_PRI_RANK = { P0: 0, P1: 1, P2: 2, MON: 3 };
+  // The bucket labels the run summary counts, in reading order (mirrors ACT_BUCKET values).
+  var DASH_BUCKETS = ['Overdue ECD', 'Vendor Scheduling', 'Vendor Quote / Proposal', 'Client Approval', 'PO Release', 'Material Delay', 'Completion Verification', 'Closeout / Cost Review', 'Stale Update', 'Data Quality'];
+  function dashCount(rows, pred) { var n = 0; for (var i = 0; i < rows.length; i++) { if (pred(rows[i])) n++; } return n; }
+  // {key,count}[] sorted by count desc then key asc. Blank/absent keys fold into '(none)'.
+  function dashRollup(rows, keyFn) {
+    var m = {}, order = [];
+    for (var i = 0; i < rows.length; i++) {
+      var k = keyFn(rows[i]); if (k == null || k === '') k = '(none)'; k = String(k);
+      if (!Object.prototype.hasOwnProperty.call(m, k)) { m[k] = 0; order.push(k); }
+      m[k]++;
+    }
+    return order.map(function (k) { return { key: k, count: m[k] }; })
+      .sort(function (a, b) { return (b.count - a.count) || (a.key < b.key ? -1 : a.key > b.key ? 1 : 0); });
+  }
+  // Manager-review rows, sorted priority -> due -> source row, capped at 20.
+  function dashTop20(rows) {
+    var mr = rows.filter(function (r) { return r.managerReviewBool; });
+    mr.sort(function (a, b) {
+      var ra = DASH_PRI_RANK[a.priorityKey] == null ? 9 : DASH_PRI_RANK[a.priorityKey];
+      var rb = DASH_PRI_RANK[b.priorityKey] == null ? 9 : DASH_PRI_RANK[b.priorityKey];
+      if (ra !== rb) return ra - rb;
+      if ((a.dueRank || 0) !== (b.dueRank || 0)) return (a.dueRank || 0) - (b.dueRank || 0);
+      return (a.sourceRow || 0) - (b.sourceRow || 0);
+    });
+    return mr.slice(0, 20);
+  }
+  // The full deterministic count set the run summary prints. rows = the actionRow objects.
+  function dashboardCounts(rows, total) {
+    rows = rows || [];
+    var byBucket = {};
+    DASH_BUCKETS.forEach(function (b) { byBucket[b] = dashCount(rows, function (r) { return r.bucket === b; }); });
+    return {
+      total: (typeof total === 'number') ? total : rows.length,
+      actionable: dashCount(rows, function (r) { return r.priorityKey !== 'MON'; }),
+      monitor: dashCount(rows, function (r) { return r.priorityKey === 'MON'; }),
+      p0: dashCount(rows, function (r) { return r.priorityKey === 'P0'; }),
+      p1: dashCount(rows, function (r) { return r.priorityKey === 'P1'; }),
+      p2: dashCount(rows, function (r) { return r.priorityKey === 'P2'; }),
+      overdueEcd: dashCount(rows, function (r) { return /OVERDUE ECD/.test(r.riskFlags || ''); }),
+      managerReview: dashCount(rows, function (r) { return r.managerReviewBool; }),
+      byBucket: byBucket
+    };
+  }
+  // The priority legend + interpretation, stated once so the sheet and the tests share them.
+  var DASH_LEGEND = [
+    ['P0 – Immediate', 'Act today. Critical priority with an overdue/uncommitted schedule, or explicit safety language.'],
+    ['P1 – Today', 'Act today. Overdue ECD, due today/next business day, or a critical operational exception.'],
+    ['P2 – This Week', 'Plan this week. Standard-priority blocker, stale update, or an aging job needing a documented plan.'],
+    ['Monitor', 'No action exception. Future schedule or valid future ECD; excluded from the Action List by default.']
+  ];
+  var DASH_INTERPRETATION = 'This workbook is a rules-based operational triage tool. It highlights conditions found in the exported or live work-order data; it does not replace coordinator judgment, vendor confirmation, or client direction.';
+
+  // buildDashboardAoa(rows, meta) -> aoa. meta: {sheetTitle, runStamp, sourceSheet, mode, includeMonitor, total}
+  function buildDashboardAoa(rows, meta) {
+    rows = rows || []; meta = meta || {};
+    var c = dashboardCounts(rows, meta.total);
+    var out = [];
+    out.push([meta.sheetTitle || 'WO Audit Dashboard']);
+    out.push(['Run: ' + (meta.runStamp || '') + '   |   Source sheet: ' + (meta.sourceSheet || '') + '   |   Mode: ' + (meta.mode || '') + '   |   Include Monitor: ' + (meta.includeMonitor ? 'yes' : 'no')]);
+    out.push([]);
+    out.push(['PRIORITY LEGEND']);
+    DASH_LEGEND.forEach(function (l) { out.push([l[0], l[1]]); });
+    out.push([]);
+    out.push(['RUN SUMMARY']);
+    out.push(['Total work orders reviewed', c.total]);
+    out.push(['Actionable work orders', c.actionable]);
+    out.push(['Monitor work orders', c.monitor]);
+    out.push(['Immediate / P0', c.p0]);
+    out.push(['Today / P1', c.p1]);
+    out.push(['This Week / P2', c.p2]);
+    out.push(['Overdue ECD (flagged, any bucket)', c.overdueEcd]);
+    out.push(['Manager Review', c.managerReview]);
+    out.push(['— by action bucket —']);
+    DASH_BUCKETS.forEach(function (b) { out.push([b, c.byBucket[b]]); });
+    out.push([]);
+    out.push(['BY AUDIT PRIORITY', 'count']);
+    dashRollup(rows, function (r) { return r.priority; }).forEach(function (x) { out.push([x.key, x.count]); });
+    out.push([]);
+    out.push(['BY ACTION BUCKET', 'count']);
+    dashRollup(rows, function (r) { return r.bucket; }).forEach(function (x) { out.push([x.key, x.count]); });
+    out.push([]);
+    out.push(['BY ACTION OWNER', 'count']);
+    dashRollup(rows, function (r) { return r.owner; }).forEach(function (x) { out.push([x.key, x.count]); });
+    out.push([]);
+    out.push(['BY FM', 'count']);
+    dashRollup(rows, function (r) { return r.fm; }).forEach(function (x) { out.push([x.key, x.count]); });
+    out.push([]);
+    out.push(['TOP 20 MANAGER REVIEW']);
+    out.push(['Audit Priority', 'Action Due', 'WO', 'Action Bucket', 'Action Owner', 'Primary Issue']);
+    dashTop20(rows).forEach(function (r) { out.push([r.priority, r.actionDue, r.wo, r.bucket, r.owner, r.primaryIssue]); });
+    return out;
+  }
+
+  // The rule catalog, declarative so a new rule is one row not a new branch. Mirrors deriveAction.
+  var RULE_CATALOG = [
+    { id: 'ECD_OVERDUE', cond: 'Expected completion date is before today, or the live WO reports negative remaining days.', bucket: 'Overdue ECD (or a risk flag on the phase bucket)', priority: 'Raises to P1; P0 when the source priority is critical.', next: 'Review the blocker, record a specific outcome, and reset the ECD to a defensible date.', own: 'Assigned To; escalates to Operations Manager (esp. when >7 days overdue or unassigned).', evid: 'Prints the ECD and its lapsed state.', limits: 'A lapsed ECD reads TBD in the note; no calendar date is invented.' },
+    { id: 'VENDOR_SCHEDULING', cond: 'Phase is intake / pending-schedule / recruiting-vendor / awaiting-acceptance / recall with no confirmed on-site date.', bucket: 'Vendor Scheduling', priority: 'P2; P1 when overdue/critical; P0 when critical + exception.', next: 'Obtain a confirmed on-site date, technician commitment, and next update from the vendor.', own: 'Assigned To; escalate Vendor Manager (+ Operations Manager when at risk).', evid: 'Status, any next-onsite date, NO VENDOR / UNSCHEDULED flags.', limits: 'A missing vendor is an internal dispatch gap, never blamed on the vendor.' },
+    { id: 'PROPOSAL_OR_QUOTE', cond: 'Phase indicates a vendor quote/proposal is being prepared but not yet a client proposal.', bucket: 'Vendor Quote / Proposal', priority: 'P2; P1 when overdue/critical.', next: 'Obtain the complete vendor quote, validate scope/cost, submit or revise the client proposal.', own: 'Assigned To; escalate Vendor Manager.', evid: 'Status + QUOTE/PROPOSAL BLOCKER flag.', limits: 'Financial detail is never invented; cited only when the evidence carries it.' },
+    { id: 'CLIENT_APPROVAL', cond: 'Status/phase is proposed / awaiting client approval / client action required.', bucket: 'Client Approval', priority: 'P2; P1 when overdue/critical.', next: 'Confirm the approval owner, decision status, and decision due date.', own: 'Assigned To; escalate Client Approval Owner (+ Operations Manager when overdue/stale).', evid: 'Status + CLIENT APPROVAL PENDING / CLIENT UPDATE OVERDUE flags.', limits: 'No ECD gap is raised at this phase (an ECD is not expected yet).' },
+    { id: 'PO_RELEASE', cond: 'Proposal approved but the vendor purchase order has not been released.', bucket: 'PO Release', priority: 'P2; P1 when a scheduled visit or ECD is at risk.', next: 'Confirm the PO is issued and released to the vendor; document the release.', own: 'Assigned To; escalate PO / Finance Owner.', evid: 'Status + PO RELEASE PENDING flag.', limits: 'Does not confirm PO existence in a finance system; a documentation prompt only.' },
+    { id: 'MATERIALS', cond: 'Phase indicates materials/parts pending (ordered, backorder, fabrication, in transit).', bucket: 'Material Delay', priority: 'P2; P1 when overdue/critical.', next: 'Obtain the delivery date, confirm receipt, and secure the return-visit date after delivery.', own: 'Assigned To; vendor as contributing party; escalate Vendor Manager.', evid: 'Status + MATERIALS PENDING flag; delivery detail only when the note carries it.', limits: 'Refines a blocker only where a note affirms backorder/lead-time/in-transit.' },
+    { id: 'ON_SITE_OR_SCHEDULED_FOLLOWUP', cond: 'Status is Scheduled / On-site / Awaiting 3rd party and the visit date has passed with no completion outcome.', bucket: 'Completion Verification', priority: 'P2 (due next business day); P1 when overdue/critical.', next: 'Obtain the vendor completion report, confirm completed vs remaining scope, update status/ECD.', own: 'Assigned To; escalate Vendor Manager (+ Operations Manager).', evid: 'Status, next-onsite date, COMPLETION UPDATE MISSING flag.', limits: 'A future-dated visit is Monitor, not a verification miss.' },
+    { id: 'CLOSEOUT', cond: 'Status is Clocked Out Complete / Complete, or a note indicates final cost review / billing pending.', bucket: 'Closeout / Cost Review', priority: 'P2 (due this week).', next: 'Confirm final vendor cost, completion documentation, and billing/closure readiness.', own: 'Assigned To; escalate Operations Manager when it lingers.', evid: 'Status + CLOSEOUT PENDING flag.', limits: 'Not raised from stale-update alone on an otherwise complete job unless closeout is pending.' },
+    { id: 'STALE_UPDATE', cond: 'Newest meaningful note is older than the configured threshold (P1 2 / P2 3 / P3-P4 5 business days; default 7).', bucket: 'Stale Update (or a risk flag on the phase bucket)', priority: 'Adds urgency; does not by itself set P0.', next: 'Post an outcome-based update: current blocker, responsible party, next commitment, revised ECD.', own: 'Assigned To (chasing a status is internal work, not fault).', evid: 'Days since the last meaningful note.', limits: 'Never assigns blame or invents a blocker; lowers confidence only.' },
+    { id: 'DATA_QUALITY', cond: 'Missing WO number / status, ERRORNAME-style assignee, unreadable live record, or conflicting status vs schedule.', bucket: 'Data Quality', priority: 'Forces Manager Review; confidence Review Needed.', next: 'Correct the missing or conflicting workflow data before the WO can be reliably managed.', own: 'Assigned To if valid, otherwise Unassigned – Manager Review.', evid: 'The specific gap(s) in Audit Data Gaps.', limits: 'Seizes the bucket only when there is no other actionable signal.' },
+    { id: 'SAFETY_OR_CRITICAL_SCOPE', cond: 'Explicit safety / business-continuity language in Scope or Notes (unsafe, exposed wiring, downed pole, structural damage, no power, ...).', bucket: 'Adds a SAFETY/CRITICAL RISK flag to the phase bucket.', priority: 'Raises to P0 when combined with an actionable blocker; always included.', next: 'Follows the phase bucket; the matched safety text is preserved in Evidence.', own: 'Phase owner; always Manager Review.', evid: 'The exact matched source text.', limits: 'Never inferred from a bare high priority; explicit text only.' }
+  ];
+  var RULE_CATALOG_COLS = ['Rule ID', 'Trigger / Condition', 'Action Bucket', 'Priority Effect', 'Required Next Action', 'Ownership / Escalation', 'Evidence', 'Limitations / Confidence'];
+
+  // buildAuditRulesAoa(meta) -> aoa. meta carries the run configuration for the transparency block.
+  function buildAuditRulesAoa(meta) {
+    meta = meta || {};
+    var out = [];
+    out.push([meta.sheetTitle || 'Audit Rules']);
+    out.push([DASH_INTERPRETATION]);
+    out.push([]);
+    out.push(RULE_CATALOG_COLS.slice());
+    RULE_CATALOG.forEach(function (r) { out.push([r.id, r.cond, r.bucket, r.priority, r.next, r.own, r.evid, r.limits]); });
+    out.push([]);
+    out.push(['RUN CONFIGURATION']);
+    out.push(['Output mode', meta.mode || '']);
+    out.push(['Include Monitor items', meta.includeMonitor ? 'yes' : 'no']);
+    out.push(['Enabled checks', meta.checks || '']);
+    out.push(['Client-update threshold (days)', (meta.clientDays == null ? '' : meta.clientDays)]);
+    out.push(['Run date/time', meta.runStamp || '']);
+    out.push(['Source sheet', meta.sourceSheet || '']);
+    out.push(['WO # column', meta.woCol || '']);
+    out.push(['Notes column', meta.noteCol || '']);
+    return out;
+  }
+  // The count of the rule catalog's data columns, so the Audit Rules autofilter spans the table only.
+  var RULE_CATALOG_HEADER_ROW = 3;   // 0-based row index of RULE_CATALOG_COLS in buildAuditRulesAoa
+  // ===== BWN WO-AUDIT DASHBOARD END ================================================================
+
   var WO_TIMELINE_SYSTEM = [
     'You summarize a facilities work order\'s note history into a compact, dated event timeline for',
     'an over-30-days aging report.',
@@ -2498,6 +2638,7 @@
   // Workbook mapping. Header-based (survives column reorder) with a scan for the
   // header row; write-back column detected dynamically, appended if absent.
   // ====================================================================
+  // ===== BWN WO-AUDIT MAP START (findCol/mapSheet aliases; sliced by scripts/test-wo-audit-dashboard.js) =====
   var KEY_PATTERNS = [/^wo\s*#?$/i, /work\s*order\s*#/i, /^wo\s*number/i];
   var KEY_FALLBACK = [/source\s*job\s*#?/i, /^job\s*id$/i, /^job\s*#?$/i];
   function findCol(hdr, patterns) {
@@ -2574,6 +2715,7 @@
     map.aoa = aoa;
     return map;
   }
+  // ===== BWN WO-AUDIT MAP END ======================================================================
   // Ensure a note column exists on the worksheet; append "Audit Notes" if none was found.
   function ensureNoteCol(ws, map) {
     if (map.note > -1) return map;
@@ -2628,6 +2770,20 @@
     if (next - 1 > range.e.c) { range.e.c = next - 1; ws['!ref'] = XLSX.utils.encode_range(range); }
     map.action = idx; map.actionAppended = true;
     return map;
+  }
+  // Append a generated worksheet from an array-of-arrays, replacing any same-named sheet (so a
+  // repeat download rebuilds it rather than throwing on a duplicate name). Optional column widths.
+  // Impure (XLSX), so it sits with the other worksheet helpers, not in a pure sliced block.
+  function appendAoaSheet(wb, name, aoa, widths) {
+    var sh = XLSX.utils.aoa_to_sheet(aoa);
+    if (widths) sh['!cols'] = widths.map(function (w) { return { wch: w }; });
+    if (wb.Sheets[name]) {
+      delete wb.Sheets[name];
+      var i = wb.SheetNames.indexOf(name);
+      if (i > -1) wb.SheetNames.splice(i, 1);
+    }
+    XLSX.utils.book_append_sheet(wb, sh, name);
+    return sh;
   }
 
   // ====================================================================
@@ -2914,7 +3070,9 @@
                 radio('woa-mode-hybrid', 'outMode', 'hybrid', 'Hybrid Audit', 'Both: detailed status notes and the structured manager action list.', true) +
                 '<div class="woa-check" id="woa-incmon-wrap" style="margin-top:6px"><div class="woa-check-txt"><div class="woa-check-t">Include Monitor items</div><div class="woa-check-s">Add non-actionable (Monitor) work orders to the Action List. Off by default &mdash; the list shows only work that needs action.</div></div><label class="woa-sw"><input type="checkbox" id="woa-inc-monitor" aria-label="Include Monitor items in the Action List"><span class="woa-sw-t"></span></label></div>' +
               '</div>' +
+              '<div class="woa-field"><label class="woa-lbl" for="woa-wocol">Work-order number column</label><div class="woa-help">The column that identifies each work order. Detected automatically &mdash; change it if the guess is wrong.</div><select id="woa-wocol" class="woa-select"></select></div>' +
               '<div class="woa-field"><label class="woa-lbl" for="bwn-woaudit-notecol">Write status notes to</label><div class="woa-help">The column that receives each work order\'s status note. Detected automatically &mdash; change it if the guess is wrong.</div><select id="bwn-woaudit-notecol" class="woa-select"></select></div>' +
+              '<details class="woa-disc" id="woa-advmap-wrap" style="margin:0 0 14px"><summary>' + ICON.settings + 'Advanced column mapping</summary><div class="woa-disc-b"><div class="woa-help" style="margin-bottom:8px">Operational fields the Action List can use. Live Umbrava data is the primary source for status, priority, trade, ECD and next-onsite; the workbook is used only as a fallback or where live data is not read. Override a detected column only where the field is actually read from the workbook.</div><div id="woa-advmap"></div></div></details>' +
               '<div class="woa-field" id="woa-outwrap"><label class="woa-lbl">Audit flags output</label>' +
                 radio('woa-out-new', 'flagsMode', 'new', 'Create a new "Audit Flags" column', 'Leaves any existing audit column untouched.', true) +
                 radio('woa-out-reuse', 'flagsMode', 'reuse', 'Reuse the detected audit column', 'Replaces the values already in that column.', false) +
@@ -2976,6 +3134,7 @@
               '</div></section>' +
           '</div>' +
         '</div>' +
+        '<div id="woa-preview"></div>' +
         '<div class="woa-actions">' +
           '<button id="bwn-woaudit-start" class="woa-btn woa-btn-primary">' + ICON.play + '<span>Start audit</span></button>' +
           '<button id="bwn-woaudit-retry" class="woa-btn woa-btn-retry" style="display:none">' + ICON.reset + '<span>Retry unfinished</span></button>' +
@@ -3120,8 +3279,10 @@
       // Include-Monitor only affects the Action List, which Detailed mode does not produce.
       var incw = $('woa-incmon-wrap'); if (incw) incw.style.opacity = (m === 'detailed') ? '.5' : '1';
       var inc = $('woa-inc-monitor'); if (inc) inc.disabled = (m === 'detailed');
+      if (typeof renderPreview === 'function') renderPreview();
     }
     ['detailed', 'operations', 'hybrid'].forEach(function (v) { var el = $('woa-mode-' + v); if (el) el.onchange = syncMode; });
+    var incMon = $('woa-inc-monitor'); if (incMon) incMon.onchange = syncMode;
     syncMode();
 
     // ---- audit-check switches sync the step indicator / nothing else here ----
@@ -3205,6 +3366,100 @@
       $('woa-filecard').style.display = 'flex';
     }
 
+    // Operational fields for the Advanced Column Mapping section. 'live' = read primarily from live
+    // Umbrava data (the workbook column is a fallback); 'workbook' = read from the workbook (or a gap
+    // when absent). Only these are consumed by the action layer, so only these get an override.
+    var FIELD_META = [
+      ['status', 'Status', 'live'], ['priority', 'Priority', 'live'], ['trade', 'Trade', 'live'],
+      ['ecd', 'Expected Completion Date', 'live'], ['nextOnsite', 'Next Onsite Date', 'live'], ['lastNote', 'Last Note Date', 'live'],
+      ['assigned', 'Assigned To', 'workbook'], ['fm', 'FM', 'workbook'], ['location', 'Location / Site', 'workbook'],
+      ['city', 'City', 'workbook'], ['state', 'State', 'workbook'], ['days', 'Days (age)', 'workbook'],
+      ['statusHours', 'Status Hours', 'workbook'], ['vendor', 'Vendor', 'workbook'], ['scope', 'Scope Of Work', 'workbook'],
+      ['po', 'Source PO', 'workbook'], ['nte', 'Total Vendor NTE', 'workbook'], ['type', 'Type', 'workbook']
+    ];
+    // The current data-row count under session.map.key. Recomputed when the WO # column changes.
+    function recountRows() {
+      if (!session) return 0;
+      var rows = [];
+      for (var r = session.map.headerRow + 1; r < session.map.aoa.length; r++) {
+        var key = cellStr(session.map.aoa, r, session.map.key);
+        if (key) rows.push({ rowIdx: r, key: key });
+      }
+      session.rows = rows;
+      return rows.length;
+    }
+    function populateWoCol(hdr, map) {
+      var sel = $('woa-wocol'); if (!sel) return;
+      sel.innerHTML = '';
+      hdr.forEach(function (h, i) { var o = document.createElement('option'); o.value = String(i); o.textContent = (h || ('(col ' + (i + 1) + ')')) + (i === map.key ? '  — detected' : ''); sel.appendChild(o); });
+      sel.value = String(map.key > -1 ? map.key : 0);
+      sel.onchange = function () {
+        if (_running || !session) return;
+        session.map.key = parseInt(sel.value, 10);
+        session.map.keyName = hdr[session.map.key] || null;
+        var n = recountRows();
+        $('bwn-woaudit-start').disabled = !(session.map.key > -1 && n > 0);
+        renderPreview();
+      };
+    }
+    // The Advanced Column Mapping rows: detected header + source classification + an override select.
+    function renderAdvMap(hdr, map) {
+      var host = $('woa-advmap'); if (!host) return;
+      host.innerHTML = '';
+      FIELD_META.forEach(function (fm) {
+        var key = fm[0], label = fm[1], cls = fm[2];
+        var idx = (typeof map[key] === 'number') ? map[key] : -1;
+        var detected = idx > -1;
+        var klass = cls === 'live'
+          ? (detected ? 'Live WO data (workbook fallback: "' + (hdr[idx] || '') + '")' : 'Live WO data')
+          : (detected ? 'Workbook: "' + (hdr[idx] || '') + '"' : 'Unavailable / data gap');
+        var row = document.createElement('div');
+        row.style.cssText = 'display:flex;align-items:center;gap:8px;padding:5px 0;border-top:1px solid #f0f3f1';
+        var lab = document.createElement('div');
+        lab.style.cssText = 'flex:0 0 150px;min-width:0';
+        lab.innerHTML = '<div style="font-weight:600;font-size:12px">' + esc(label) + '</div><div style="font-size:10.5px;color:' + (detected ? '#5f6f68' : '#b42318') + '">' + esc(klass) + '</div>';
+        row.appendChild(lab);
+        var sel = document.createElement('select');
+        sel.className = 'woa-select';
+        sel.style.cssText = 'flex:1;min-width:0;font-size:12px;padding:5px 7px';
+        var none = document.createElement('option'); none.value = '-1'; none.textContent = '(not mapped)'; sel.appendChild(none);
+        hdr.forEach(function (h, i) { var o = document.createElement('option'); o.value = String(i); o.textContent = h || ('(col ' + (i + 1) + ')'); sel.appendChild(o); });
+        sel.value = String(idx);
+        sel.setAttribute('aria-label', label + ' column');
+        sel.onchange = function () { if (_running || !session) return; session.map[key] = parseInt(sel.value, 10); renderPreview(); };
+        row.appendChild(sel);
+        host.appendChild(row);
+      });
+    }
+    // Pre-run preview: source-only estimate. Actionable/Monitor split needs the live run, so it is
+    // NOT claimed here - only what the parsed workbook + resolved mappings can support.
+    function renderPreview() {
+      var host = $('woa-preview'); if (!host) return;
+      host.innerHTML = '';
+      if (!session) return;
+      var map = session.map, n = session.rows.length;
+      var mode = $('woa-mode-operations').checked ? 'operations' : $('woa-mode-detailed').checked ? 'detailed' : 'hybrid';
+      var gaps = [];
+      if (map.key === -1) gaps.push('no work-order-number column (the audit cannot run)');
+      if (mode !== 'operations' && map.note === -1) gaps.push('no notes column detected - a new "Audit Notes" column will be appended');
+      // Optional fields absent from BOTH live and workbook that will leave Action List cells blank.
+      var wbOnly = [['fm', 'FM'], ['vendor', 'Vendor'], ['scope', 'Scope'], ['statusHours', 'Status Hours'], ['nte', 'Total Vendor NTE']];
+      var missing = wbOnly.filter(function (p) { return map[p[0]] === -1; }).map(function (p) { return p[1]; });
+      var wrap = document.createElement('div');
+      wrap.className = 'woa-banner is-info';
+      wrap.style.cssText = 'display:block;margin-top:4px';
+      var lines = [
+        '<b>Pre-run preview (estimate)</b>',
+        'Rows detected: ' + n + '  &middot;  work orders to audit: ' + n,
+        'Output mode: ' + (mode === 'detailed' ? 'Detailed WO Audit' : mode === 'operations' ? 'Operations Action List' : 'Hybrid Audit') + (mode === 'detailed' ? '' : '  &middot;  Include Monitor: ' + ($('woa-inc-monitor').checked ? 'yes' : 'no'))
+      ];
+      if (missing.length) lines.push('Workbook fields not found (those Action List columns stay blank): ' + esc(missing.join(', ')));
+      if (gaps.length) lines.push('<span style="color:#8f231c">Data gaps: ' + esc(gaps.join('; ')) + '</span>');
+      if (mode !== 'detailed') lines.push('<i>The priority / actionable / Monitor split is determined by the live audit run, not this estimate.</i>');
+      wrap.innerHTML = ICON.info + '<div style="line-height:1.5">' + lines.join('<br>') + '</div>';
+      host.appendChild(wrap);
+    }
+
     function currentSheet() { return loaded ? ($('bwn-woaudit-sheet').value || loaded.wb.SheetNames[0]) : null; }
     function describe() {
       if (!loaded || _running) return;
@@ -3248,6 +3503,9 @@
         setStatus('ready'); setStep(2);
       }
       session = { wb: loaded.wb, sheet: currentSheet(), map: map, rows: dataRows, results: [], name: loaded.name };
+      populateWoCol(hdr, map);
+      renderAdvMap(hdr, map);
+      renderPreview();
     }
 
     // ---- reset: back to the empty state, keep config defaults ----------------
@@ -3260,6 +3518,9 @@
       $('bwn-woaudit-sheetwrap').style.display = 'none';
       showFidelity(false);
       $('bwn-woaudit-post').innerHTML = '';
+      var am = $('woa-advmap'); if (am) am.innerHTML = '';
+      var pv = $('woa-preview'); if (pv) pv.innerHTML = '';
+      var dg = $('bwn-woaudit-diag'); if (dg) dg.innerHTML = '';
       setWarn('');
       $('bwn-woaudit-start').disabled = true;
       $('bwn-woaudit-start').classList.remove('is-complete');
@@ -3332,7 +3593,7 @@
     };
 
     // The config inputs locked while a run is in flight (values are preserved, not reset).
-    var CONFIG_IDS = ['bwn-woaudit-file', 'bwn-woaudit-sheet', 'bwn-woaudit-notecol', 'woa-mode-detailed', 'woa-mode-operations', 'woa-mode-hybrid', 'woa-inc-monitor', 'woa-out-new', 'woa-out-reuse', 'woa-ack-cb', 'woa-sp-1', 'woa-sp-3', 'woa-sp-6', 'bwn-woaudit-conc-adv', 'woa-reset', 'woa-chk-aged', 'woa-chk-notes', 'woa-chk-pricing', 'woa-chk-vendor', 'woa-chk-scheduling', 'woa-chk-cancel', 'woa-chk-clientUpdate', 'woa-chk-clientDays'];
+    var CONFIG_IDS = ['bwn-woaudit-file', 'bwn-woaudit-sheet', 'woa-wocol', 'bwn-woaudit-notecol', 'woa-mode-detailed', 'woa-mode-operations', 'woa-mode-hybrid', 'woa-inc-monitor', 'woa-out-new', 'woa-out-reuse', 'woa-ack-cb', 'woa-sp-1', 'woa-sp-3', 'woa-sp-6', 'bwn-woaudit-conc-adv', 'woa-reset', 'woa-chk-aged', 'woa-chk-notes', 'woa-chk-pricing', 'woa-chk-vendor', 'woa-chk-scheduling', 'woa-chk-cancel', 'woa-chk-clientUpdate', 'woa-chk-clientDays'];
     function lockConfig(dis) { CONFIG_IDS.forEach(function (id) { var el = $(id); if (el) el.disabled = dis; }); }
 
     function runAudit(retryOnly) {
@@ -3398,6 +3659,11 @@
       session.outputMode = cfg.outputMode;
       session.includeMonitor = cfg.includeMonitor;
       session.runDate = actRunDate(Date.now());       // 'YYYY-MM-DD' string, stable for this run
+      // Run configuration snapshot for the Audit Rules sheet's transparency block (Commit 2).
+      session.checksLabel = Object.keys(cfg.checks).filter(function (k) { return cfg.checks[k]; }).join(', ') || '(none)';
+      session.clientDays = clientDays;
+      session.woColName = session.map.keyName || '';
+      session.noteColName = wantNote ? (session.map.noteName || '') : '(not written in Operations mode)';
 
       // Resume, not just retry: rows a cancel skipped owe a note exactly as much as errored rows do.
       var targets = retryOnly
@@ -4048,7 +4314,29 @@
           }
           XLSX.utils.book_append_sheet(session.wb, alSheet, alName);
           logln('Built "' + alName + '" with ' + Math.max(0, aoa.length - 1) + ' action row' + (aoa.length === 2 ? '' : 's') + '.');
-        } catch (e) { logln('! Could not build the Action List sheet: ' + ((e && e.message) || e)); }
+
+          // Dashboard + Audit Rules sheets (Commit 2), built from the SAME settled action rows.
+          var sheetDate = actSheetDate(Date.now());
+          var runStamp = actRunDate(Date.now()) + ' ' + new Date().toTimeString().slice(0, 5);
+          var dashName = 'WO Audit Dashboard - ' + sheetDate;
+          var dashAoa = buildDashboardAoa(arows, {
+            sheetTitle: dashName, runStamp: runStamp, sourceSheet: session.sheet,
+            mode: session.outputMode, includeMonitor: session.includeMonitor, total: session.rows.length
+          });
+          appendAoaSheet(session.wb, dashName, dashAoa, [22, 60, 16, 26, 22, 60]);
+          var rulesName = 'Audit Rules - ' + sheetDate;
+          var rulesAoa = buildAuditRulesAoa({
+            sheetTitle: rulesName, runStamp: runStamp, mode: session.outputMode, includeMonitor: session.includeMonitor,
+            checks: session.checksLabel, clientDays: session.clientDays, sourceSheet: session.sheet,
+            woCol: session.woColName, noteCol: session.noteColName
+          });
+          var rulesSheet = appendAoaSheet(session.wb, rulesName, rulesAoa, [26, 52, 30, 30, 52, 40, 40, 44]);
+          // Autofilter over the rule TABLE only (header row + the 11 rule rows), not the config block.
+          try {
+            rulesSheet['!autofilter'] = { ref: XLSX.utils.encode_range({ s: { r: RULE_CATALOG_HEADER_ROW, c: 0 }, e: { r: RULE_CATALOG_HEADER_ROW + RULE_CATALOG.length, c: RULE_CATALOG_COLS.length - 1 } }) };
+          } catch (e) { /* autofilter is a nicety; a failure must not block the export */ }
+          logln('Built "' + dashName + '" and "' + rulesName + '".');
+        } catch (e) { logln('! Could not build the Action List / Dashboard sheets: ' + ((e && e.message) || e)); }
       }
       // The filename is the only part of this that survives into Downloads, an email, and the
       // client's inbox. A partial export must not arrive under the same name as a complete one.

@@ -173,6 +173,16 @@ jobs:
       - name: WO Audit operations action list engine (0.17.0)
         run: node scripts/test-wo-audit-actions.js
 
+      # WO Audit 0.17.0 Commit 2: the Dashboard + Audit Rules sheet builders and the workbook
+      # header-alias mapping. Slices the pure BWN WO-AUDIT DASHBOARD block (deterministic counts,
+      # owner/FM/bucket/priority rollups sorted count-desc, the manager-review top-20 sort+cap, the
+      # 11-row rule catalog and the interpretation statement) and the BWN WO-AUDIT MAP block driven
+      # with a stubbed XLSX (every operational alias resolves, an absent field records -1, and the
+      # "Last Note Date" trap is never mistaken for the note-content column). Negative controls on the
+      # rollup key, the top-20 cap and the note-column trap.
+      - name: WO Audit dashboard + rules + column mapping (0.17.0)
+        run: node scripts/test-wo-audit-dashboard.js
+
       # bwn-wo-extract (Operations Assist): the thin, read-only caller for the deployed
       # /api/extract-work-order endpoint. Byte-sliced + fake-env harness pinning the bounded
       # allowlist payload, the NTE-semantic exclusion of client-DNE, the refusal gate (route /
