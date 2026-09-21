@@ -1,10 +1,10 @@
 // ==UserScript==
 // @name         BWN WO Audit (Broadway National)
 // @namespace    broadwaynational.bwn
-// @version      0.16.1
+// @version      0.17.0
 // @downloadURL  https://raw.githubusercontent.com/Intermu/userscripts/main/bwn-wo-audit.user.js
 // @updateURL    https://raw.githubusercontent.com/Intermu/userscripts/main/bwn-wo-audit.user.js
-// @description  Batch WO-audit tool. Upload a WO audit .xlsx; for each work order this reads its two most recent notes DIRECTLY from Umbrava's GraphQL API in-page (using your live Umbrava session - the same read the BWN Ops Suite AI drafts use), then asks the broadway-internal-ops SWA summarize route (x-bwn-key gated, Anthropic key server-side) to write a status note - for jobs aged over 30 days a dated "Over 30 - trade - event timeline - ECD" chain built from the WO's FULL note history (with a PAST/needs-ECD flag when the committed date has lapsed), otherwise a 1-3 sentence client-ready status note. Fills the audit's notes column and downloads the workbook, preserving every other cell and formula. It also reads each WO's live header (status, phase, priority, GP, DNE/NTE, PO/vendor, schedule) in the same call and writes a deterministic Audit Flags column (OVERDUE, NEG/LOW GP, NTE>DNE, NO VENDOR, UNSCHEDULED, STALE) computed with no AI - so the exception audit survives an AI outage. Runs entirely in the app.umbrava.com page so it inherits your Umbrava auth - no MCP, no pasted keys, nothing sensitive in this script. This replaces the old standalone WO_Audit_Automation.html SWA tool, whose server-side MCP path could not authenticate to Umbrava. After a run drafts its notes, the coordinator can post each drafted note as an INTERNAL Umbrava note onto its aged (>30d) work order - one explicit click per note (human-gated, idempotent), routed through the governed bwnGqlOp write path with its permission gate and audit trail.
+// @description  Batch WO-audit tool. Upload a WO audit .xlsx; for each work order this reads its two most recent notes DIRECTLY from Umbrava's GraphQL API in-page (using your live Umbrava session - the same read the BWN Ops Suite AI drafts use), then asks the broadway-internal-ops SWA summarize route (x-bwn-key gated, Anthropic key server-side) to write a status note - for jobs aged over 30 days a dated "Over 30 - trade - event timeline - ECD" chain built from the WO's FULL note history (with a PAST/needs-ECD flag when the committed date has lapsed), otherwise a 1-3 sentence client-ready status note. Fills the audit's notes column and downloads the workbook, preserving every other cell and formula. It also reads each WO's live header (status, phase, priority, GP, DNE/NTE, PO/vendor, schedule) in the same call and writes a deterministic Audit Flags column (OVERDUE, NEG/LOW GP, NTE>DNE, NO VENDOR, UNSCHEDULED, STALE) computed with no AI - so the exception audit survives an AI outage. Runs entirely in the app.umbrava.com page so it inherits your Umbrava auth - no MCP, no pasted keys, nothing sensitive in this script. This replaces the old standalone WO_Audit_Automation.html SWA tool, whose server-side MCP path could not authenticate to Umbrava. After a run drafts its notes, the coordinator can post each drafted note as an INTERNAL Umbrava note onto its aged (>30d) work order - one explicit click per note (human-gated, idempotent), routed through the governed bwnGqlOp write path with its permission gate and audit trail. 0.17.0 adds an Operations Action List layer on top of the existing deterministic pipeline: three output modes (Detailed WO Audit / Operations Action List / Hybrid, default), a rules-based action engine that turns each WO into a prioritized (P0/P1/P2/Monitor) manager action with bucket, internal owner, external escalation, an operational-target due label, short risk flags, evidence and rule IDs, 16 structured audit columns appended to the source sheet, and a separate "WO Action List - YYYY.MM.DD" worksheet of the actionable rows - all deterministic, no AI opinions, source data never overwritten.
 // @match        https://app.umbrava.com/*
 // @run-at       document-idle
 // @noframes
@@ -19,7 +19,7 @@
 (function () {
   'use strict';
 
-  var VER = '0.16.1';
+  var VER = '0.17.0';
   var FONT = "-apple-system,BlinkMacSystemFont,'Segoe UI','Helvetica Neue',Arial,sans-serif";
   // Inline SVG icons (no external image/font). 18px, stroke=currentColor so they take card color.
   function _svg(p, o) { return '<svg class="woa-i" viewBox="0 0 24 24" width="18" height="18" fill="none" stroke="currentColor" stroke-width="1.9" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"' + (o || '') + '>' + p + '</svg>'; }
@@ -1800,6 +1800,308 @@
   }
   // ===== BWN WO-AUDIT STATE END ==================================================================
 
+  // ===== BWN WO-AUDIT ACTIONS START (pure; sliced by scripts/test-wo-audit-actions.js) ============
+  // The Operations Action List layer (0.17.0). A DETERMINISTIC post-processing pass over deriveState's
+  // fact set plus the deterministic flags (computeFlags/applyChecks). It assigns one management action
+  // bucket, a P0/P1/P2/Monitor priority, an internal action owner + an external escalation target, an
+  // operational-target due LABEL, short pipe-delimited risk flags, a recommended next step, evidence,
+  // confidence and the rule IDs that fired. No AI, no network, no DOM: it only RE-READS what
+  // deriveState already established, so it can never invent a stage, owner, date or blocker the
+  // deterministic layer did not ([[worst-reading-of-a-gap-is-invention]]).
+  //
+  // Action Due is a LABEL, never a calendar date. There is no business-day calendar in this tool, so
+  // manufacturing "2026-09-24" would be a commitment nobody made; the labels ARE the operational
+  // targets the spec asked for.
+  //
+  // nowMs / ecdDueSoon / visitPast / hasFutureOnsite are INJECTED by the caller (which owns the dates)
+  // so this stays pure and the harness asserts on a fixed clock ([[headless-harness-cannot-time]]).
+
+  var ACT_BUCKET = {
+    OVERDUE_ECD: 'Overdue ECD', VENDOR_SCHEDULING: 'Vendor Scheduling', CLIENT_APPROVAL: 'Client Approval',
+    PO_RELEASE: 'PO Release', MATERIAL: 'Material Delay', PROPOSAL: 'Vendor Quote / Proposal',
+    COMPLETION: 'Completion Verification', CLOSEOUT: 'Closeout / Cost Review', STALE: 'Stale Update',
+    DATA_QUALITY: 'Data Quality', MONITOR: 'Monitor'
+  };
+  // The en dash in the priority labels is intentional and matches the operator-facing spec exactly;
+  // it is a display string only (sorted by ACT_PRIORITY_RANK, never by the text).
+  var ACT_PRIORITY = { P0: 'P0 – Immediate', P1: 'P1 – Today', P2: 'P2 – This Week', MON: 'Monitor' };
+  var ACT_PRIORITY_RANK = { P0: 0, P1: 1, P2: 2, MON: 3 };
+  var ACT_DUE_RANK = { 'Today': 0, 'Next business day': 1, 'Next 2 business days': 2, 'This week': 3, 'Monitor / no action due': 4 };
+  // Bucket -> the spec rule ID it corresponds to (for the Audit Rule IDs column + the Audit Rules sheet).
+  var ACT_RULE = {
+    VENDOR_SCHEDULING: 'VENDOR_SCHEDULING', CLIENT_APPROVAL: 'CLIENT_APPROVAL', PO_RELEASE: 'PO_RELEASE',
+    MATERIAL: 'MATERIALS', PROPOSAL: 'PROPOSAL_OR_QUOTE', COMPLETION: 'ON_SITE_OR_SCHEDULED_FOLLOWUP',
+    CLOSEOUT: 'CLOSEOUT', OVERDUE_ECD: 'ECD_OVERDUE', STALE: 'STALE_UPDATE', DATA_QUALITY: 'DATA_QUALITY'
+  };
+  // deriveState phase -> the management bucket its blocker maps to. Progressing/terminal phases map to
+  // null and are resolved from the overlays (overdue ECD / stale) or fall through to Monitor.
+  var ACT_PHASE_BUCKET = {
+    intake: 'VENDOR_SCHEDULING', schedule: 'VENDOR_SCHEDULING', accept: 'VENDOR_SCHEDULING', recall: 'VENDOR_SCHEDULING',
+    proposal: 'PROPOSAL', 'proposal-sent': 'CLIENT_APPROVAL', 'proposal-approved': 'PO_RELEASE',
+    materials: 'MATERIAL', 'materials-client': 'MATERIAL',
+    scheduled: 'COMPLETION', onsite: 'COMPLETION', inprogress: 'COMPLETION',
+    client: 'CLIENT_APPROVAL', onhold: null, confirmcomplete: 'CLOSEOUT', costreview: 'CLOSEOUT', terminal: null
+  };
+  // Controlled fallback text per bucket. Used for Primary Issue / Required Next Action / Recommended
+  // Status ONLY where deriveState gave no grounded blocker/next-action of its own - the grounded value
+  // is always preferred so the action stays specific to the actual work order.
+  var ACT_TEMPLATE = {
+    OVERDUE_ECD: { issue: 'Expected completion date is overdue with no documented completed resolution.', next: 'Review the current blocker, update the work order with a specific outcome, and reset the ECD to a defensible date.', rec: 'Reset ECD' },
+    VENDOR_SCHEDULING: { issue: 'No confirmed on-site date on file for an open work order.', next: 'Obtain a confirmed on-site date, technician/crew commitment, and next update from the vendor; document all three on the work order.', rec: 'Confirm on-site date' },
+    CLIENT_APPROVAL: { issue: 'Submitted proposal is awaiting a client decision.', next: 'Confirm the approval owner, decision status, and decision due date; update the work order with the approval outcome.', rec: 'Confirm client decision' },
+    PO_RELEASE: { issue: 'Proposal approved but the vendor purchase order has not been released.', next: 'Confirm the purchase order is issued and released to the vendor; document PO status and vendor release confirmation.', rec: 'Issue / release PO' },
+    MATERIAL: { issue: 'Parts or materials are not yet delivered.', next: 'Obtain the material delivery date, confirm site/vendor receipt, and secure the return-visit date after delivery.', rec: 'Confirm delivery + return visit' },
+    PROPOSAL: { issue: 'Vendor quote is not yet converted into a client proposal.', next: 'Obtain the complete vendor quote, validate scope/cost, and submit or revise the client proposal.', rec: 'Obtain quote / submit proposal' },
+    COMPLETION: { issue: 'Scheduled or on-site visit has passed with no completion outcome recorded.', next: 'Obtain the vendor completion report, confirm completed versus remaining scope, and update the work order status and ECD.', rec: 'Obtain completion report' },
+    CLOSEOUT: { issue: 'Work reported complete but closeout / final cost review is outstanding.', next: 'Confirm final vendor cost, completion documentation, and billing/closure readiness; advance or close the work order.', rec: 'Confirm cost + close' },
+    STALE: { issue: 'No meaningful status update within the configured threshold.', next: 'Post an outcome-based update stating the current blocker, responsible party, next commitment, and revised ECD if needed.', rec: 'Post current status update' },
+    DATA_QUALITY: { issue: 'Work order data is missing or conflicting and cannot be reliably managed.', next: 'Correct the missing or conflicting workflow data before the work order can be reliably managed.', rec: 'Correct work order data' },
+    MONITOR: { issue: 'Progressing with a future schedule or valid ECD; no action exception detected.', next: 'No action required; continue to monitor.', rec: '' }
+  };
+  // Explicit safety / business-continuity language ONLY. Matched against Scope + Notes text the caller
+  // supplies; a bare high priority is NEVER enough (the spec is emphatic: do not manufacture a safety
+  // issue from a P1). The matched text is preserved verbatim in Evidence.
+  var ACT_SAFETY_RE = /\b(safety hazard|unsafe|fallen (?:pole|sign|tree)|downed pole|exposed (?:wir\w*|electr\w*)|hanging (?:metal|canopy|sign)|canopy (?:damage|failing|falling)|structural (?:damage|risk|failure|collapse)|power (?:failure|outage)|gas leak|live wire|electrical hazard|fire (?:hazard|risk)|life[- ]safety|no lighting)\b/i;
+
+  function actHasFlag(flags, re) { for (var i = 0; i < (flags || []).length; i++) { if (re.test(flags[i])) return true; } return false; }
+  // A usable internal owner: has a letter, and is not an ERRORNAME placeholder or an "unassigned" token.
+  function actValidOwner(s) { s = String(s == null ? '' : s).trim(); return !!s && /[a-z]/i.test(s) && !/errorname|error\s*name|\?\?\?|^unassigned|^unknown$|^n\/?a$|^tbd$/i.test(s); }
+
+  // deriveAction(ctx) -> the structured management record for one work order. ctx:
+  //   facts            deriveState output (authoritative; never re-inferred here)
+  //   flags            applyChecks output (array of short flag strings)
+  //   header           the live WorkOrder header (statusName / remainingDays / priority read only)
+  //   assignedTo, fm   the internal owner candidates (workbook or live)
+  //   scopeText, notesText   text scanned for explicit safety language ONLY
+  //   priorityLabel, priorityCategory   source priority, for the P1-Critical gate
+  //   ageDays, statusHours   display + manager-review inputs (numbers/strings, may be absent)
+  //   ecdDueSoon, visitPast, hasFutureOnsite   date facts the CALLER computes (kept pure here)
+  //   includeMonitor, staleDays, ageExpected
+  function deriveAction(ctx) {
+    ctx = ctx || {};
+    var f = ctx.facts || {};
+    var flags = ctx.flags || [];
+    var h = ctx.header || null;
+    var staleThr = (typeof ctx.staleDays === 'number') ? ctx.staleDays : 7;
+    var phase = f.phase || null;
+    var statusName = String((h && h.statusName) || '').trim();
+    var remaining = (h && typeof h.remainingDays === 'number') ? h.remainingDays : null;
+
+    // ---- signals -----------------------------------------------------------------------------
+    var overdueEcd = !!f.ecdExpired || actHasFlag(flags, /^OVERDUE/) || (remaining != null && remaining < 0);
+    var overdueDays = (remaining != null && remaining < 0) ? Math.abs(remaining)
+      : (typeof ctx.ecdOverdueDays === 'number' ? ctx.ecdOverdueDays : 0);
+    var stale = (typeof f.staleDays === 'number' && f.staleDays > staleThr) || actHasFlag(flags, /^STALE/);
+    var noVendor = actHasFlag(flags, /^NO VENDOR/);
+    var unscheduled = actHasFlag(flags, /^UNSCHEDULED/);
+    var pricing = actHasFlag(flags, /^(NEG GP|LOW GP|NTE>DNE)/);
+    var clientUpd = actHasFlag(flags, /^CLIENT UPDATE|^NO CLIENT NOTE/);
+    var cancel = actHasFlag(flags, /CANCEL\?/);
+    var ecdDueSoon = !!ctx.ecdDueSoon;
+    var visitPast = !!ctx.visitPast;
+    var safetyText = '';
+    var sm = ACT_SAFETY_RE.exec(String(ctx.scopeText || '') + ' ' + String(ctx.notesText || ''));
+    if (sm) safetyText = sm[0];
+    var safety = !!safetyText;
+    var critical = /\b(critical|emergency|life[- ]safety|priority\s*1|p1)\b/i.test(String(ctx.priorityLabel || '') + ' ' + String(ctx.priorityCategory || ''));
+
+    // ---- internal owner ----------------------------------------------------------------------
+    var owner = actValidOwner(ctx.assignedTo) ? String(ctx.assignedTo).trim()
+      : actValidOwner(ctx.fm) ? String(ctx.fm).trim()
+        : 'Unassigned – Manager Review';
+    var ownerInvalid = owner === 'Unassigned – Manager Review';
+
+    // ---- data quality: the RECORD itself cannot be managed (not merely a thin field) ---------
+    var dqReasons = [];
+    if (!h) dqReasons.push('work order record could not be read');
+    if (h && !statusName) dqReasons.push('status is missing');
+    if (/errorname|error\s*name/i.test(String(ctx.assignedTo || ''))) dqReasons.push('assignee is an ERRORNAME placeholder');
+    var severeDq = !h || (!!h && !statusName);
+
+    // ---- primary bucket ----------------------------------------------------------------------
+    var bk = Object.prototype.hasOwnProperty.call(ACT_PHASE_BUCKET, phase) ? ACT_PHASE_BUCKET[phase] : null;
+    // Scheduled/on-site with a FUTURE visit and no other exception is not yet a verification miss.
+    if ((phase === 'scheduled' || phase === 'onsite' || phase === 'inprogress') && !visitPast && !stale && !overdueEcd) bk = null;
+    if (!bk) {
+      if (overdueEcd) bk = 'OVERDUE_ECD';
+      else if (stale && phase !== 'terminal') bk = 'STALE';
+      else if (severeDq) bk = 'DATA_QUALITY';
+      else bk = 'MONITOR';
+    }
+    if (severeDq && bk === 'MONITOR') bk = 'DATA_QUALITY';
+    // Safety must NEVER be hidden as Monitor: force an actionable bucket so the row is included as P0.
+    if (safety && bk === 'MONITOR') bk = ACT_PHASE_BUCKET[phase] || 'COMPLETION';
+    var actionable = bk !== 'MONITOR';
+
+    // ---- priority ----------------------------------------------------------------------------
+    var noSchedule = bk === 'VENDOR_SCHEDULING' || unscheduled || noVendor;
+    var pk;
+    if (safety && actionable) pk = 'P0';
+    else if (critical && (overdueEcd || noSchedule || stale || safety)) pk = 'P0';
+    else if (!actionable) pk = 'MON';
+    else if (overdueEcd || ecdDueSoon || critical) pk = 'P1';
+    else pk = 'P2';
+
+    // ---- risk flags (short, controlled, multiple allowed) ------------------------------------
+    var risk = [];
+    if (safety) risk.push('SAFETY/CRITICAL RISK');
+    if (overdueEcd) risk.push('OVERDUE ECD');
+    if (bk === 'VENDOR_SCHEDULING') risk.push(noVendor ? 'NO VENDOR' : 'UNSCHEDULED');
+    if (bk === 'MATERIAL') risk.push('MATERIALS PENDING');
+    if (bk === 'CLIENT_APPROVAL') risk.push('CLIENT APPROVAL PENDING');
+    if (bk === 'PO_RELEASE') risk.push('PO RELEASE PENDING');
+    if (bk === 'PROPOSAL') risk.push('QUOTE/PROPOSAL BLOCKER');
+    if (bk === 'COMPLETION') risk.push('COMPLETION UPDATE MISSING');
+    if (bk === 'CLOSEOUT') risk.push('CLOSEOUT PENDING');
+    if (stale) risk.push('STALE UPDATE');
+    if (clientUpd) risk.push('CLIENT UPDATE OVERDUE');
+    if (pricing) risk.push('PRICING EXCEPTION');
+    if (cancel) risk.push('CANCELLATION REVIEW');
+    if (severeDq || dqReasons.length) risk.push('DATA QUALITY');
+    risk = actUniq(risk);
+
+    // ---- rule IDs ----------------------------------------------------------------------------
+    var rules = [];
+    if (ACT_RULE[bk]) rules.push(ACT_RULE[bk]);
+    if (overdueEcd) rules.push('ECD_OVERDUE');
+    if (stale) rules.push('STALE_UPDATE');
+    if (safety) rules.push('SAFETY_OR_CRITICAL_SCOPE');
+    if (severeDq || dqReasons.length) rules.push('DATA_QUALITY');
+    rules = actUniq(rules);
+
+    // ---- contradiction (drives manager review) -----------------------------------------------
+    var contradiction = false;
+    if (phase === 'scheduled' && !ctx.hasFutureOnsite) contradiction = true;   // "Scheduled" but no future date
+    if (phase === 'terminal' && (bk === 'CLOSEOUT' || stale || overdueEcd)) contradiction = true;
+    if (cancel) contradiction = true;
+
+    // ---- confidence --------------------------------------------------------------------------
+    var conf = severeDq ? 'Review Needed'
+      : (f.confidence === 'high' ? 'High' : f.confidence === 'medium' ? 'Medium' : 'Low');
+    if (!h) conf = 'Review Needed';
+
+    // ---- manager review ----------------------------------------------------------------------
+    var manager = pk === 'P0' || ownerInvalid || (pk !== 'MON' && overdueDays > 7) ||
+      risk.length > 1 || safety || contradiction || conf === 'Review Needed';
+
+    // ---- action due (LABEL only) -------------------------------------------------------------
+    var due;
+    if (pk === 'MON') due = 'Monitor / no action due';
+    else if (pk === 'P0' || pk === 'P1') due = 'Today';
+    else if (bk === 'CLOSEOUT') due = 'This week';
+    else if (bk === 'COMPLETION' && visitPast) due = 'Next business day';
+    else due = 'Next 2 business days';
+
+    // ---- escalate to (external dependency + Operations Manager when severity warrants) -------
+    var em = {
+      VENDOR_SCHEDULING: 'Vendor Manager', MATERIAL: 'Vendor Manager', COMPLETION: 'Vendor Manager',
+      PROPOSAL: 'Vendor Manager', CLIENT_APPROVAL: 'Client Approval Owner', PO_RELEASE: 'PO / Finance Owner',
+      CLOSEOUT: 'Operations Manager', OVERDUE_ECD: 'Operations Manager', STALE: 'Operations Manager'
+    };
+    var esc = [];
+    if (bk === 'DATA_QUALITY' && ownerInvalid) esc.push('Unassigned – Manager Review');
+    if (em[bk]) esc.push(em[bk]);
+    if ((pk === 'P0' || pk === 'P1' || manager || ownerInvalid) && esc.indexOf('Operations Manager') === -1) esc.push('Operations Manager');
+    var escalateTo = actUniq(esc).join(' + ');
+
+    // ---- primary issue -----------------------------------------------------------------------
+    var tpl = ACT_TEMPLATE[bk] || ACT_TEMPLATE.MONITOR;
+    var stageBit = f.currentStage || '';
+    var issue;
+    if (bk === 'DATA_QUALITY') issue = tpl.issue + (dqReasons.length ? ' (' + dqReasons.join('; ') + ')' : '');
+    else if (stageBit && f.primaryBlocker && (f.confidence !== 'low' || f.blockerCertain)) issue = stageBit + ' – ' + f.primaryBlocker;
+    else if (stageBit && stageBit !== 'Status unclear') issue = stageBit + ' – ' + tpl.issue;
+    else issue = tpl.issue;
+    if (overdueEcd && !/ecd|overdue/i.test(issue)) issue = issue + ' ECD overdue.';
+    // [MANAGER REVIEW] prefix only when it adds signal and is not already present (spec).
+    if (manager && !/^\[MANAGER REVIEW\]/.test(issue)) issue = '[MANAGER REVIEW] ' + issue;
+
+    // ---- required next action (reuse the grounded deterministic action; template only if none)
+    var next = (f.nextAction && String(f.nextAction).trim()) || tpl.next;
+
+    // ---- evidence ----------------------------------------------------------------------------
+    var evb = [];
+    if (statusName) evb.push('Status: ' + statusName);
+    evb.push('ECD: ' + (f.ecdText || 'TBD') + (f.ecdExpired ? ' (lapsed)' : ''));
+    if (ctx.nextOnsiteMd) evb.push('Next onsite: ' + ctx.nextOnsiteMd);
+    if (ctx.lastNoteMd) evb.push('Last note ' + ctx.lastNoteMd + (f.latestMeaningfulEvent ? ': ' + String(f.latestMeaningfulEvent).slice(0, 90) : ''));
+    else if (f.latestMeaningfulEvent) evb.push('Latest: ' + String(f.latestMeaningfulEvent).slice(0, 90));
+    if (typeof ctx.ageDays === 'number') evb.push('Age: ' + ctx.ageDays + 'd');
+    if (ctx.statusHours) evb.push('Status hrs: ' + ctx.statusHours);
+    if (safetyText) evb.push('Safety text: "' + safetyText + '"');
+    if (flags && flags.length) evb.push('Flags: ' + flags.join(' | '));
+    var evidence = evb.join(' | ').slice(0, 500);
+
+    // ---- data gaps + confidence knock-down ---------------------------------------------------
+    // A missing ECD is a gap ONLY where the workflow requires one (spec). An early-phase job
+    // (intake/schedule/proposal/awaiting-approval/on-hold) legitimately has no ECD yet, so flagging
+    // it there would over-report and needlessly knock confidence on ordinary work.
+    var ECD_EXPECTED = { scheduled: 1, onsite: 1, inprogress: 1, materials: 1, 'materials-client': 1, 'proposal-approved': 1, confirmcomplete: 1, costreview: 1, recall: 1, client: 1 };
+    var gaps = dqReasons.slice();
+    if ((!f.ecdText || f.ecdText === 'TBD') && ECD_EXPECTED[phase] && !overdueEcd) gaps.push('no valid ECD on file');
+    if (ownerInvalid) gaps.push('no valid internal owner (Assigned To / FM)');
+    if (typeof ctx.ageDays !== 'number' && ctx.ageExpected) gaps.push('no work-order age available');
+    var dataGaps = gaps.join(' | ');
+    if (dataGaps && conf === 'High') conf = 'Medium';
+
+    var include = pk !== 'MON' || ctx.includeMonitor === true || safety;
+
+    return {
+      include: include, priorityKey: pk, priority: ACT_PRIORITY[pk], bucketKey: bk, bucket: ACT_BUCKET[bk],
+      primaryIssue: issue, nextAction: next, owner: owner, escalateTo: escalateTo,
+      actionDue: due, dueRank: (ACT_DUE_RANK[due] == null ? 9 : ACT_DUE_RANK[due]),
+      riskFlags: risk.join(' | '), riskList: risk, evidence: evidence, recommendedStatus: tpl.rec,
+      managerReview: manager ? 'YES' : 'NO', managerReviewBool: manager, confidence: conf,
+      ruleIds: rules.join(', '), ruleList: rules, dataGaps: dataGaps
+    };
+  }
+  function actUniq(a) { var o = [], i; for (i = 0; i < a.length; i++) { if (o.indexOf(a[i]) === -1) o.push(a[i]); } return o; }
+
+  // The 16 structured columns appended to the SOURCE sheet (in this order), and the WO Action List
+  // sheet's own column order (the leaner operating-review set). Kept as data so the tests and the
+  // sheet builder read ONE definition.
+  var ACTION_SOURCE_COLS = ['Audit Include', 'Audit Priority', 'Action Bucket', 'Primary Issue', 'Required Next Action', 'Action Owner', 'Escalate To', 'Action Due', 'Risk Flags', 'Evidence', 'Recommended Status', 'Manager Review', 'Audit Confidence', 'Audit Rule IDs', 'Audit Data Gaps', 'Audit Run Date'];
+  var ACTION_SHEET_COLS = ['Audit Priority', 'Action Due', 'Action Bucket', 'Required Next Action', 'Action Owner', 'Escalate To', 'Manager Review', 'WO', 'Status', 'Priority', 'Location', 'FM', 'Assigned To', 'Trade', 'Vendor', 'Expected Completion Date', 'Next Onsite Date', 'Last Note Date', 'Primary Issue', 'Risk Flags', 'Evidence', 'Audit Confidence', 'Audit Rule IDs', 'Source Row Number'];
+  var ACTION_SHEET_WIDTHS = [16, 20, 22, 52, 22, 26, 14, 12, 20, 12, 22, 16, 18, 16, 20, 16, 14, 14, 52, 30, 60, 14, 24, 12];
+
+  // Sort: priority, then due, then Manager Review = YES first, then owner, then oldest first.
+  function actionSort(a, b) {
+    var ra = ACT_PRIORITY_RANK[a.priorityKey] == null ? 9 : ACT_PRIORITY_RANK[a.priorityKey];
+    var rb = ACT_PRIORITY_RANK[b.priorityKey] == null ? 9 : ACT_PRIORITY_RANK[b.priorityKey];
+    if (ra !== rb) return ra - rb;
+    if (a.dueRank !== b.dueRank) return a.dueRank - b.dueRank;
+    var ma = a.managerReviewBool ? 0 : 1, mb = b.managerReviewBool ? 0 : 1;
+    if (ma !== mb) return ma - mb;
+    var oa = String(a.owner || ''), ob = String(b.owner || '');
+    if (oa !== ob) return oa < ob ? -1 : 1;
+    var aa = (typeof a.ageDays === 'number') ? a.ageDays : -1;
+    var ab = (typeof b.ageDays === 'number') ? b.ageDays : -1;
+    return ab - aa;
+  }
+  // rows: flat row objects carrying the deriveAction fields PLUS the display fields (wo/status/...).
+  // Returns an array-of-arrays (header first) for XLSX.utils.aoa_to_sheet. Only actionable rows are
+  // kept unless includeMonitor. Pure - the XLSX write itself lives at the impure call site.
+  function buildActionListAoa(rows, includeMonitor) {
+    var inc = (rows || []).filter(function (r) { return r && (r.include || (includeMonitor && r.priorityKey === 'MON')); });
+    inc.sort(actionSort);
+    var aoa = [ACTION_SHEET_COLS.slice()];
+    for (var i = 0; i < inc.length; i++) {
+      var r = inc[i];
+      aoa.push([
+        r.priority, r.actionDue, r.bucket, r.nextAction, r.owner, r.escalateTo, r.managerReview,
+        r.wo, r.status, r.srcPriority, r.location, r.fm, r.assignedTo, r.trade, r.vendor,
+        r.ecd, r.nextOnsite, r.lastNoteDate, r.primaryIssue, r.riskFlags, r.evidence,
+        r.confidence, r.ruleIds, r.sourceRow
+      ]);
+    }
+    return aoa;
+  }
+  // Run-date helpers. LOCAL date (the coordinator's day), zero-padded. nowMs injected for the harness.
+  function actPad(n) { return (n < 10 ? '0' : '') + n; }
+  function actRunDate(ms) { var d = new Date(typeof ms === 'number' ? ms : Date.now()); return d.getFullYear() + '-' + actPad(d.getMonth() + 1) + '-' + actPad(d.getDate()); }
+  function actSheetDate(ms) { var d = new Date(typeof ms === 'number' ? ms : Date.now()); return d.getFullYear() + '.' + actPad(d.getMonth() + 1) + '.' + actPad(d.getDate()); }
+  // ===== BWN WO-AUDIT ACTIONS END ==================================================================
+
   var WO_TIMELINE_SYSTEM = [
     'You summarize a facilities work order\'s note history into a compact, dated event timeline for',
     'an over-30-days aging report.',
@@ -2242,13 +2544,30 @@
       status: findCol(hdr, [/^status$/i, /wo\s*status/i]),
       city: findCol(hdr, [/^city$/i]),
       state: findCol(hdr, [/^state$/i]),
-      location: findCol(hdr, [/location|site|store/i]),
+      location: findCol(hdr, [/location|site|store|^asset$/i]),
       days: findCol(hdr, [/aged|days\s*open|^#?\s*days$/i]),
-      assigned: findCol(hdr, [/assigned|coordinator|owner/i]),
+      assigned: findCol(hdr, [/assigned\s*to|coordinator|^owner$/i]),
       note: findNoteCol(hdr),
       noteAppended: false,
       flag: findFlagCol(hdr),
       flagAppended: false,
+      // Operations Action List fields (0.17.0). Auto-detected only; live Umbrava data is the primary
+      // source for status/priority/trade/vendor/ECD/next-onsite, so these are display/fallback columns
+      // and never override the live read. An override UI is Commit 2. -1 = absent (recorded as a gap).
+      fm: findCol(hdr, [/^fm$/i, /facility\s*manager/i]),
+      priority: findCol(hdr, [/^priority$/i]),
+      trade: findCol(hdr, [/^trades?$/i]),
+      vendor: findCol(hdr, [/^vendors?$/i]),
+      scope: findCol(hdr, [/scope\s*of\s*work/i, /^scope$/i]),
+      ecd: findCol(hdr, [/expected\s*completion/i, /^ecd$/i]),
+      nextOnsite: findCol(hdr, [/next\s*onsite/i, /scheduled\s*date/i]),
+      lastNote: findCol(hdr, [/last\s*note\s*date/i, /latest\s*update/i]),
+      statusHours: findCol(hdr, [/status\s*hrs?\.?/i, /status\s*hours/i, /age\s*in\s*status/i]),
+      po: findCol(hdr, [/source\s*po/i, /^po\s*#?$/i]),
+      nte: findCol(hdr, [/total\s*vendor\s*nte/i, /vendor\s*nte/i, /^nte$/i]),
+      type: findCol(hdr, [/^type$/i]),
+      action: null,          // ensureActionCols fills this {colName: index} map on first write
+      actionAppended: false,
     };
     map.noteName = map.note > -1 ? hdr[map.note] : null;
     map.flagName = map.flag > -1 ? hdr[map.flag] : null;
@@ -2282,6 +2601,33 @@
     var row = aoa[r] || [];
     var v = row[c];
     return v == null ? '' : String(v).trim();
+  }
+
+  // Ensure the 16 Operations Action List columns (ACTION_SOURCE_COLS) exist on the worksheet, in
+  // order, after the last used column. On a recurring audit the workbook may already carry them (our
+  // own prior output): those are REUSED by exact header name rather than duplicated - low clobber risk
+  // because they are this tool's columns, not the client's data (unlike the Notes/Flags columns, which
+  // keep their new/reuse + acknowledgement protections). Returns map.action = {header: colIndex, ...}.
+  // Guarded by actionAppended so a retry never appends a second block.
+  function ensureActionCols(ws, map) {
+    if (map.action) return map;
+    var range = XLSX.utils.decode_range(ws['!ref']);
+    var hdr = (map.aoa[map.headerRow] || []).map(function (x) { return String(x == null ? '' : x); });
+    var idx = {};
+    var next = range.e.c + 1;
+    for (var i = 0; i < ACTION_SOURCE_COLS.length; i++) {
+      var name = ACTION_SOURCE_COLS[i];
+      var found = -1;
+      for (var c = 0; c < hdr.length; c++) { if (hdr[c] === name) { found = c; break; } }
+      if (found === -1) {
+        found = next++;
+        ws[XLSX.utils.encode_cell({ c: found, r: map.headerRow })] = { t: 's', v: name };
+      }
+      idx[name] = found;
+    }
+    if (next - 1 > range.e.c) { range.e.c = next - 1; ws['!ref'] = XLSX.utils.encode_range(range); }
+    map.action = idx; map.actionAppended = true;
+    return map;
   }
 
   // ====================================================================
@@ -2561,6 +2907,13 @@
               '<div id="woa-fidelity" class="woa-banner is-info" style="display:none;margin-top:12px">' + ICON.info + '<span>The exported workbook preserves cell values and formulas where supported. Some Excel-specific presentation features, such as charts, conditional formatting, or validation rules, may not be retained.</span></div>'
             ) +
             card('2 &middot; Audit configuration', ICON.settings, null,
+              '<div class="woa-field"><label class="woa-lbl">Output mode</label>' +
+                '<div class="woa-help">What the audit produces. <b>Detailed</b> keeps today\'s status-note audit unchanged. <b>Operations Action List</b> adds the manager action columns and the Action List sheet, and skips per-WO AI notes for a faster management-only run. <b>Hybrid</b> does both.</div>' +
+                radio('woa-mode-detailed', 'outMode', 'detailed', 'Detailed WO Audit', 'Status notes + Audit Flags, exactly as today.', false) +
+                radio('woa-mode-operations', 'outMode', 'operations', 'Operations Action List', 'Structured action columns + the WO Action List sheet. No AI status notes (fastest).', false) +
+                radio('woa-mode-hybrid', 'outMode', 'hybrid', 'Hybrid Audit', 'Both: detailed status notes and the structured manager action list.', true) +
+                '<div class="woa-check" id="woa-incmon-wrap" style="margin-top:6px"><div class="woa-check-txt"><div class="woa-check-t">Include Monitor items</div><div class="woa-check-s">Add non-actionable (Monitor) work orders to the Action List. Off by default &mdash; the list shows only work that needs action.</div></div><label class="woa-sw"><input type="checkbox" id="woa-inc-monitor" aria-label="Include Monitor items in the Action List"><span class="woa-sw-t"></span></label></div>' +
+              '</div>' +
               '<div class="woa-field"><label class="woa-lbl" for="bwn-woaudit-notecol">Write status notes to</label><div class="woa-help">The column that receives each work order\'s status note. Detected automatically &mdash; change it if the guess is wrong.</div><select id="bwn-woaudit-notecol" class="woa-select"></select></div>' +
               '<div class="woa-field" id="woa-outwrap"><label class="woa-lbl">Audit flags output</label>' +
                 radio('woa-out-new', 'flagsMode', 'new', 'Create a new "Audit Flags" column', 'Leaves any existing audit column untouched.', true) +
@@ -2633,7 +2986,9 @@
         '<details class="woa-disc"><summary>' + ICON.info + 'What will change?</summary><div class="woa-disc-b"><ul>' +
           '<li>Notes are read live from Umbrava for each work order; the status note is written to the column selected above.</li>' +
           '<li>Audit flags are written to the Audit Flags column according to the output mode you chose.</li>' +
-          '<li>Your original workbook is never modified in the browser &mdash; the tool produces a separate downloadable copy.</li>' +
+          '<li>In Operations Action List or Hybrid mode, 16 structured action columns are appended to the source sheet and a separate "WO Action List - date" worksheet lists the actionable work orders, sorted by priority.</li>' +
+          '<li>Your original workbook is never modified in the browser &mdash; the tool produces a separate downloadable copy, and the source Notes column is never overwritten.</li>' +
+          '<li>The Action List uses a text-first layout (explicit "P0 &ndash; Immediate" priorities, YES/NO Manager Review, column widths and filters). It does NOT use Excel fill colours, conditional formatting, native tables or frozen panes &mdash; the bundled spreadsheet library cannot write those.</li>' +
           '<li>The export preserves cell values and formulas where supported; some Excel presentation features (charts, conditional formatting, validation) may not be retained.</li>' +
         '</ul></div></details>' +
         // Run diagnostics: unmapped live statuses + review-required rows, populated when a run
@@ -2749,6 +3104,25 @@
     }
     $('woa-out-new').onchange = syncOutMode;
     $('woa-out-reuse').onchange = syncOutMode;
+
+    // ---- output mode (Detailed / Operations Action List / Hybrid) ------------
+    function currentMode() {
+      return $('woa-mode-operations').checked ? 'operations' : $('woa-mode-detailed').checked ? 'detailed' : 'hybrid';
+    }
+    function syncMode() {
+      var m = currentMode();
+      ['detailed', 'operations', 'hybrid'].forEach(function (v) {
+        var l = $('woa-mode-' + v + '-l'); if (l) l.classList.toggle('is-on', m === v);
+      });
+      // The status-note column only matters when a narrative note is written (Detailed / Hybrid).
+      var noteRelevant = m !== 'operations';
+      var ncw = $('bwn-woaudit-notecol'); if (ncw) ncw.disabled = !noteRelevant;
+      // Include-Monitor only affects the Action List, which Detailed mode does not produce.
+      var incw = $('woa-incmon-wrap'); if (incw) incw.style.opacity = (m === 'detailed') ? '.5' : '1';
+      var inc = $('woa-inc-monitor'); if (inc) inc.disabled = (m === 'detailed');
+    }
+    ['detailed', 'operations', 'hybrid'].forEach(function (v) { var el = $('woa-mode-' + v); if (el) el.onchange = syncMode; });
+    syncMode();
 
     // ---- audit-check switches sync the step indicator / nothing else here ----
     var loaded = null;   // { wb, name, file }
@@ -2958,7 +3332,7 @@
     };
 
     // The config inputs locked while a run is in flight (values are preserved, not reset).
-    var CONFIG_IDS = ['bwn-woaudit-file', 'bwn-woaudit-sheet', 'bwn-woaudit-notecol', 'woa-out-new', 'woa-out-reuse', 'woa-ack-cb', 'woa-sp-1', 'woa-sp-3', 'woa-sp-6', 'bwn-woaudit-conc-adv', 'woa-reset', 'woa-chk-aged', 'woa-chk-notes', 'woa-chk-pricing', 'woa-chk-vendor', 'woa-chk-scheduling', 'woa-chk-cancel', 'woa-chk-clientUpdate', 'woa-chk-clientDays'];
+    var CONFIG_IDS = ['bwn-woaudit-file', 'bwn-woaudit-sheet', 'bwn-woaudit-notecol', 'woa-mode-detailed', 'woa-mode-operations', 'woa-mode-hybrid', 'woa-inc-monitor', 'woa-out-new', 'woa-out-reuse', 'woa-ack-cb', 'woa-sp-1', 'woa-sp-3', 'woa-sp-6', 'bwn-woaudit-conc-adv', 'woa-reset', 'woa-chk-aged', 'woa-chk-notes', 'woa-chk-pricing', 'woa-chk-vendor', 'woa-chk-scheduling', 'woa-chk-cancel', 'woa-chk-clientUpdate', 'woa-chk-clientDays'];
     function lockConfig(dis) { CONFIG_IDS.forEach(function (id) { var el = $(id); if (el) el.disabled = dis; }); }
 
     function runAudit(retryOnly) {
@@ -2977,8 +3351,15 @@
           scheduling: $('woa-chk-scheduling').checked, cancel: $('woa-chk-cancel').checked,
           clientUpdate: $('woa-chk-clientUpdate').checked
         },
-        flagsMode: $('woa-out-reuse').checked ? 'reuse' : 'new'
+        flagsMode: $('woa-out-reuse').checked ? 'reuse' : 'new',
+        outputMode: currentMode(),                    // 'detailed' | 'operations' | 'hybrid'
+        includeMonitor: !!$('woa-inc-monitor').checked
       };
+      // Operations Action List and Hybrid produce the structured layer; Detailed is unchanged.
+      var wantActions = cfg.outputMode !== 'detailed';
+      // Operations mode is the fast management-only run: it skips the per-WO AI status note entirely
+      // (deriveState + flags + the action engine are all deterministic and need no network/AI).
+      var wantNote = cfg.outputMode !== 'operations';
       // Client-update context: the set of note-type ids that count as a client-facing update
       // (resolved live from Core's bwn:noteTypes; null when Core is not loaded -> the check no-ops),
       // and the operator-set day threshold from the modal (default 2, honours bwn:config.audit).
@@ -2995,8 +3376,9 @@
       var ws = session.wb.Sheets[session.sheet];
       // Resolve the write-back NOTES column from the picker (detection is only the default) - but
       // never again once a column has been APPENDED (defeating ensureNoteCol's guard would append a
-      // SECOND "Audit Notes" column and split one audit across two half-blank columns).
-      if (!session.map.noteAppended) {
+      // SECOND "Audit Notes" column and split one audit across two half-blank columns). Skipped in
+      // Operations mode: no narrative note is written, so there is no column to resolve or append.
+      if (wantNote && !session.map.noteAppended) {
         var pick = $('bwn-woaudit-notecol').value;
         if (pick === 'append') { session.map.note = -1; ensureNoteCol(ws, session.map); }
         else { session.map.note = parseInt(pick, 10); if (isNaN(session.map.note)) { session.map.note = -1; ensureNoteCol(ws, session.map); } }
@@ -3009,6 +3391,13 @@
       } else {
         if (session.map.flag === -1 && !session.map.flagAppended) ensureFlagCol(ws, session.map);
       }
+      // The 16 structured Operations columns (appended once; reused by name on a re-run).
+      if (wantActions) ensureActionCols(ws, session.map);
+      // Remember the mode + the run date for downloadResult (the Action List sheet is assembled at
+      // download from the settled results, so a cancel/retry always reflects the final state).
+      session.outputMode = cfg.outputMode;
+      session.includeMonitor = cfg.includeMonitor;
+      session.runDate = actRunDate(Date.now());       // 'YYYY-MM-DD' string, stable for this run
 
       // Resume, not just retry: rows a cancel skipped owe a note exactly as much as errored rows do.
       var targets = retryOnly
@@ -3039,6 +3428,80 @@
       if (!retryOnly) { log.innerHTML = ''; log.style.display = 'none'; session.results = new Array(session.rows.length); }
       logln((retryOnly ? 'Retrying ' : 'Auditing ') + targets.length + ' work orders (' + conc + ' at a time)...');
       updateProgress(0, targets.length, null);
+
+      // ---- Operations Action layer (wantActions). Computes the structured record for one row and a
+      // flat row object for the Action List sheet. The CALLER owns the dates (deriveAction is pure),
+      // so ECD-due-soon / visit-past / future-onsite are resolved here from the live header. Live
+      // Umbrava data is primary; the workbook cell is the fallback ONLY when the live field is absent.
+      var LOCAL_MID = function (raw) {
+        if (!raw) return null;
+        var m = /^(\d{4})-(\d{2})-(\d{2})/.exec(String(raw).trim());
+        if (m) return new Date(parseInt(m[1], 10), parseInt(m[2], 10) - 1, parseInt(m[3], 10));
+        var p = new Date(String(raw)); return isNaN(+p) ? null : new Date(p.getFullYear(), p.getMonth(), p.getDate());
+      };
+      function computeActionForRow(row, h, facts, flags, ageDays, notes) {
+        var now = Date.now(), map = session.map, aoa = map.aoa, ri = row.rowIdx;
+        var nd = new Date(now), todayMid = new Date(nd.getFullYear(), nd.getMonth(), nd.getDate());
+        var ecdRaw = h && h.priority && h.priority.expectedCompletionDate;
+        var ei = h ? ecdInfo(h, now) : null;
+        var ecdMid = LOCAL_MID(ecdRaw), du = ecdMid ? (ecdMid - todayMid) / MS_DAY : null;
+        var ecdDueSoon = !!(ecdMid && !(ei && ei.past) && du >= 0 && du <= 1);
+        var onsiteMid = LOCAL_MID(h && h.nextOnsiteDate);
+        var visitPast = !!(onsiteMid && onsiteMid < todayMid);
+        var hasFutureOnsite = !!(onsiteMid && onsiteMid >= todayMid);
+        var wbPriority = cellStr(aoa, ri, map.priority), wbFm = cellStr(aoa, ri, map.fm);
+        var wbAssigned = cellStr(aoa, ri, map.assigned), wbTrade = cellStr(aoa, ri, map.trade);
+        var wbVendor = cellStr(aoa, ri, map.vendor), wbScope = cellStr(aoa, ri, map.scope);
+        var wbEcd = cellStr(aoa, ri, map.ecd), wbNextOnsite = cellStr(aoa, ri, map.nextOnsite);
+        var wbLastNote = cellStr(aoa, ri, map.lastNote), wbStatusHrs = cellStr(aoa, ri, map.statusHours);
+        var wbLocation = cellStr(aoa, ri, map.location), wbStatus = cellStr(aoa, ri, map.status);
+        var liveTrade = tradeLabel(h);
+        var noteBodies = (notes || []).slice(0, 4).map(function (n) { return String((n && n.content) || ''); }).join(' ');
+        var nextOnsiteMd = fmtMD(h && h.nextOnsiteDate) || wbNextOnsite;
+        var lastNoteMd = fmtMD(facts.latestMeaningfulEventDate) || wbLastNote;
+        var action = deriveAction({
+          facts: facts, flags: flags, header: h,
+          assignedTo: wbAssigned, fm: wbFm,
+          scopeText: wbScope, notesText: (facts.latestMeaningfulEvent || '') + ' ' + noteBodies,
+          priorityLabel: (h && h.priority && h.priority.label) || wbPriority,
+          priorityCategory: (h && h.priority && h.priority.category) || '',
+          ageDays: (typeof ageDays === 'number') ? ageDays : undefined,
+          ageExpected: map.days !== -1, statusHours: wbStatusHrs,
+          nextOnsiteMd: nextOnsiteMd, lastNoteMd: lastNoteMd,
+          ecdDueSoon: ecdDueSoon, visitPast: visitPast, hasFutureOnsite: hasFutureOnsite,
+          staleDays: auditCfg('staleDays', STALE_DAYS), includeMonitor: session.includeMonitor
+        });
+        var ecdDisplay = fmtMD(ecdRaw) || wbEcd || (facts.ecdText && facts.ecdText !== 'TBD' ? facts.ecdText : '');
+        if (ecdDisplay && ei && ei.past) ecdDisplay += ' (lapsed)';
+        var actionRow = {
+          include: action.include, priorityKey: action.priorityKey, priority: action.priority,
+          actionDue: action.actionDue, dueRank: action.dueRank, bucket: action.bucket,
+          nextAction: action.nextAction, owner: action.owner, escalateTo: action.escalateTo,
+          managerReview: action.managerReview, managerReviewBool: action.managerReviewBool,
+          primaryIssue: action.primaryIssue, riskFlags: action.riskFlags, evidence: action.evidence,
+          confidence: action.confidence, ruleIds: action.ruleIds,
+          wo: row.key, status: (h && h.statusName) || wbStatus, srcPriority: (h && h.priority && h.priority.label) || wbPriority,
+          location: wbLocation || [cellStr(aoa, ri, map.city), cellStr(aoa, ri, map.state)].filter(Boolean).join(', '),
+          fm: wbFm, assignedTo: wbAssigned, trade: liveTrade || wbTrade, vendor: wbVendor,
+          ecd: ecdDisplay, nextOnsite: nextOnsiteMd, lastNoteDate: lastNoteMd,
+          ageDays: (typeof ageDays === 'number') ? ageDays : null, sourceRow: ri + 1
+        };
+        return { action: action, actionRow: actionRow };
+      }
+      function writeActionCols(ws, map, rowIdx, a, runDate) {
+        var v = {
+          'Audit Include': a.include ? 'Yes' : 'No', 'Audit Priority': a.priority, 'Action Bucket': a.bucket,
+          'Primary Issue': a.primaryIssue, 'Required Next Action': a.nextAction, 'Action Owner': a.owner,
+          'Escalate To': a.escalateTo, 'Action Due': a.actionDue, 'Risk Flags': a.riskFlags,
+          'Evidence': a.evidence, 'Recommended Status': a.recommendedStatus, 'Manager Review': a.managerReview,
+          'Audit Confidence': a.confidence, 'Audit Rule IDs': a.ruleIds, 'Audit Data Gaps': a.dataGaps,
+          'Audit Run Date': runDate
+        };
+        for (var name in map.action) {
+          if (!Object.prototype.hasOwnProperty.call(map.action, name)) continue;
+          ws[XLSX.utils.encode_cell({ c: map.action[name], r: rowIdx })] = { t: 's', v: String(v[name] == null ? '' : v[name]) };
+        }
+      }
 
       runPool(targets, function (row) {
         var origIdx = session.rows.indexOf(row);
@@ -3106,6 +3569,10 @@
             var daysColAbsent = session.map.days === -1;
             var ageDays = daysColAbsent ? null : parseAgeDays(cellStr(session.map.aoa, row.rowIdx, session.map.days));
             var over30 = postEligible(ageDays, daysColAbsent);
+            // The deterministic Operations Action record (bucket/priority/owner/escalation/due/...).
+            // Computed here from the SAME live header + facts + flags, before any AI, and attached to
+            // every return path so retained and note-skipped rows still carry their action row.
+            var actionRec = wantActions ? computeActionForRow(row, h, facts, flags, ageDays, data.notes) : null;
             var review = [];
             if (data.matchReason) review.push(data.matchReason);
             if (!h) review.push('the live work order record could not be read this run - the note below rests on job notes alone');
@@ -3118,7 +3585,17 @@
                 retained: true, note: priorNote, degraded: '', facts: facts, flags: flags,
                 notesFound: data.notes.length, evidenceCount: 0, priorAudit: priorAudit,
                 matchConfidence: data.matchConfidence,
-                ageDays: ageDays, over30: over30, header: h, review: review
+                ageDays: ageDays, over30: over30, header: h, review: review, action: actionRec
+              };
+            }
+            // Operations Action List mode is the fast management-only run: no per-WO AI note. The
+            // structured action layer + flags are already computed deterministically; skip the model.
+            if (!wantNote) {
+              return {
+                retained: false, noteSkipped: true, note: '', degraded: '', facts: facts, flags: flags,
+                notesFound: data.notes.length, evidenceCount: evidenceNotes.length,
+                matchConfidence: data.matchConfidence, priorAudit: priorAudit,
+                ageDays: ageDays, over30: over30, header: h, review: review, action: actionRec
               };
             }
             var draftP = over30
@@ -3139,17 +3616,20 @@
                 retained: false, note: out.note, degraded: out.degraded || '', facts: facts, flags: flags,
                 notesFound: data.notes.length, evidenceCount: evidenceNotes.length,
                 matchConfidence: data.matchConfidence,
-                priorAudit: priorAudit, ageDays: ageDays, over30: over30, header: h, review: review
+                priorAudit: priorAudit, ageDays: ageDays, over30: over30, header: h, review: review, action: actionRec
               };
             });
           })
           .then(function (out) {
             var h = out.header;
             // A RETAINED row is never written: the whole point is that the client's existing cell
-            // survives untouched. Every other row writes the drafted note, dropping any formula.
-            if (!out.retained) {
+            // survives untouched. A note-SKIPPED row (Operations mode) writes no note either. Every
+            // other row writes the drafted note, dropping any formula.
+            if (!out.retained && !out.noteSkipped && session.map.note > -1) {
               ws[XLSX.utils.encode_cell({ c: session.map.note, r: row.rowIdx })] = { t: 's', v: out.note };
             }
+            // The 16 structured Operations columns, for every mode that produces them.
+            if (wantActions && out.action) writeActionCols(ws, session.map, row.rowIdx, out.action.action, session.runDate);
             var reasons = (out.review || []).slice();
             if (out.retained) reasons.push('no live work order record and no usable job notes - the existing tracker note was kept rather than replaced with a statement about the read failure');
             // Post-step state (used only by the "Post drafted notes" section after the run): a row
@@ -3170,21 +3650,25 @@
               flags: out.flags || [],
               ageDays: out.ageDays, eligible: !!out.over30, priorAudit: !!out.priorAudit,
               degraded: out.degraded || '', facts: out.facts || null,
-              noteMode: out.retained ? 'retained' : (out.degraded ? 'deterministic_fallback' : 'ai'),
+              noteMode: out.noteSkipped ? 'operations' : (out.retained ? 'retained' : (out.degraded ? 'deterministic_fallback' : 'ai')),
               priorNote: priorNote,
-              proposedNote: out.retained ? '' : out.note,
+              proposedNote: (out.retained || out.noteSkipped) ? '' : out.note,
               finalNote: out.note,
               noteValidation: { valid: !out.degraded, reasons: out.degraded ? [out.degraded] : [] },
               reviewRequired: !!reasons.length,
               reviewReasons: reasons,
-              changed: !out.retained && String(out.note || '') !== String(priorNote || ''),
+              changed: !out.retained && !out.noteSkipped && String(out.note || '') !== String(priorNote || ''),
+              action: out.action ? out.action.action : null,
+              actionRow: out.action ? out.action.actionRow : null,
               postEligible: false, postIneligibleReason: null,
               error: null
             };
             logln('  WO ' + row.key + ' (' + out.notesFound + ' notes, ' + out.evidenceCount + ' usable)' +
               (out.retained ? ' [RETAINED - existing note kept]' : '') +
-              (out.degraded ? ' [deterministic note - ' + out.degraded + ']' : '') + ': ' +
-              (out.note ? out.note.slice(0, 90) : '(cell left as-is)'));
+              (out.noteSkipped ? ' [action list only]' : '') +
+              (out.degraded ? ' [deterministic note - ' + out.degraded + ']' : '') +
+              (out.action ? ' [' + out.action.action.priority + ' / ' + out.action.action.bucket + ']' : '') + ': ' +
+              (out.note ? out.note.slice(0, 90) : '(no status note)'));
             return session.results[origIdx];
           })
           .catch(function (e) {
@@ -3540,6 +4024,31 @@
             UNWRITTEN_NOTE + '\n\nDownload it anyway?');
         } catch (e) { proceed = true; }   // a page that breaks confirm must not trap the workbook
         if (!proceed) { logln('Download cancelled. Press Retry Unfinished to complete the batch.'); return; }
+      }
+      // Assemble the WO Action List worksheet from the settled results (Operations / Hybrid only).
+      // Built at download so a cancel/retry always reflects the final state; rebuilt (replaced) on a
+      // repeat download. Text-first: column widths + an autofilter are the only Excel features the
+      // bundled community SheetJS writes reliably - NO fills, tables, conditional formatting or panes.
+      if (session.outputMode && session.outputMode !== 'detailed') {
+        try {
+          var arows = [];
+          for (var ai = 0; ai < session.rows.length; ai++) {
+            var rr = session.results[ai];
+            if (rr && rr.actionRow) arows.push(rr.actionRow);
+          }
+          var aoa = buildActionListAoa(arows, session.includeMonitor);
+          var alName = 'WO Action List - ' + actSheetDate(Date.now());
+          var alSheet = XLSX.utils.aoa_to_sheet(aoa);
+          alSheet['!cols'] = ACTION_SHEET_WIDTHS.map(function (w) { return { wch: w }; });
+          if (alSheet['!ref']) alSheet['!autofilter'] = { ref: alSheet['!ref'] };
+          if (session.wb.Sheets[alName]) {
+            delete session.wb.Sheets[alName];
+            var exi = session.wb.SheetNames.indexOf(alName);
+            if (exi > -1) session.wb.SheetNames.splice(exi, 1);
+          }
+          XLSX.utils.book_append_sheet(session.wb, alSheet, alName);
+          logln('Built "' + alName + '" with ' + Math.max(0, aoa.length - 1) + ' action row' + (aoa.length === 2 ? '' : 's') + '.');
+        } catch (e) { logln('! Could not build the Action List sheet: ' + ((e && e.message) || e)); }
       }
       // The filename is the only part of this that survives into Downloads, an email, and the
       // client's inbox. A partial export must not arrive under the same name as a complete one.

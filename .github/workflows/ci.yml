@@ -162,6 +162,17 @@ jobs:
       - name: WO Audit evidence gate + key normalization + status coverage (0.13.0)
         run: node scripts/test-wo-audit-evidence.js
 
+      # WO Audit 0.17.0: the Operations Action List engine (deriveAction) + the sheet builder. Slices
+      # the pure BWN WO-AUDIT ACTIONS block and pins the deterministic manager layer that sits on top
+      # of deriveState - one action bucket per phase, the P0/P1/P2/Monitor priority model (safety and
+      # P1-Critical gates included), internal owner vs external escalation, LABEL-only action-due,
+      # short pipe risk flags, rule IDs, data gaps, the actionable-only + sorted sheet build, and the
+      # run-date helpers. Negative controls throughout: a bare P1 is NOT safety, a future-dated visit
+      # is Monitor (not a verification miss), a valid owner is never rewritten - the rules that would
+      # otherwise fire unconditionally and inflate the list.
+      - name: WO Audit operations action list engine (0.17.0)
+        run: node scripts/test-wo-audit-actions.js
+
       # bwn-wo-extract (Operations Assist): the thin, read-only caller for the deployed
       # /api/extract-work-order endpoint. Byte-sliced + fake-env harness pinning the bounded
       # allowlist payload, the NTE-semantic exclusion of client-DNE, the refusal gate (route /

@@ -383,9 +383,9 @@ A.ok('idempotency still reads the RAW notes', /hasPriorAuditNote\(data\.notes\)/
 A.ok('the timeline output runs the full gate, not just the date check',
   /validateTimelineChain\(chain, facts, prompt\)/.test(TEXT));
 A.ok('a retained row is never written to the sheet',
-  /if \(!out\.retained\) \{\n\s*ws\[XLSX\.utils\.encode_cell/.test(TEXT));
+  /if \(!out\.retained && !out\.noteSkipped && session\.map\.note > -1\) \{\n\s*ws\[XLSX\.utils\.encode_cell/.test(TEXT));
 A.ok('a retained row is review-required and unchanged',
-  /noteMode: out\.retained \? 'retained'/.test(TEXT) && /changed: !out\.retained &&/.test(TEXT));
+  /out\.retained \? 'retained'/.test(TEXT) && /changed: !out\.retained && !out\.noteSkipped &&/.test(TEXT));
 A.ok('retention fires only on a header miss with NO usable notes',
   /if \(!h && !evidenceNotes\.length\) \{/.test(TEXT));
 A.ok('the tally shape is untouched',
@@ -401,13 +401,15 @@ A.ok('...and the >30 gate and the idempotency marker are still both in it',
   /if \(r\.priorAudit\) return 'this work order already carries a ' \+ AUDIT_MARKER/.test(TEXT));
 A.ok('the post button is display-gated on the same reason',
   /r\.postIneligibleReason = block;/.test(TEXT) && /\} else if \(block\) \{/.test(TEXT));
-// Every worksheet write is either a Notes/Audit Flags DATA cell or the header cell of a column
-// this tool appended. A third kind of write would break the workbook contract.
+// Every worksheet write is either a Notes/Audit Flags DATA cell, a Operations action DATA cell
+// (c: map.action[name]), or the header cell of a column this tool appended (c: col | c: found, at
+// map.headerRow). A write outside those would break the "source data is never corrupted" contract.
 var writes = TEXT.match(/ws\[XLSX\.utils\.encode_cell\([^\]]+\]/g) || [];
 var strayWrites = writes.filter(function (w) {
-  return !/c: session\.map\.(note|flag)/.test(w) && !/c: col, r: map\.headerRow/.test(w);
+  return !/c: session\.map\.(note|flag)/.test(w) && !/c: col, r: map\.headerRow/.test(w) &&
+    !/c: found, r: map\.headerRow/.test(w) && !/c: map\.action\[name/.test(w);
 });
-A.eq('only Notes/Audit Flags cells and appended headers are written', strayWrites, []);
+A.eq('only Notes/Audit Flags/action cells and appended headers are written', strayWrites, []);
 A.ok('control: the scan actually sees the writes', writes.length >= 4, writes.length);
 A.ok('the SheetJS fidelity limit is stated to the operator',
   /charts, conditional formatting, or validation rules, may not be retained/.test(TEXT));
@@ -418,7 +420,7 @@ A.ok('the unmapped-status diagnostic is rendered and copyable',
 A.ok('a degraded row is still surfaced to the operator',
   /fell back to the deterministic audit note/.test(TEXT));
 A.ok('a retained row is surfaced too', /KEPT the workbook..s existing note/.test(TEXT));
-A.ok('the version was bumped (an unbumped push reaches nobody)', /@version\s+0\.16\.1/.test(TEXT));
+A.ok('the version was bumped (an unbumped push reaches nobody)', /@version\s+0\.17\.0/.test(TEXT));
 
 // ---------------------------------------------------------------------------------------------
 console.log('\n17. Quoted-email furniture never reaches a client-facing note (D3)');
