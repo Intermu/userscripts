@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         BWN Suite - Core (Broadway National)
 // @namespace    broadwaynational.bwn
-// @version      1.87.1
+// @version      1.87.2
 // @downloadURL  https://raw.githubusercontent.com/Intermu/userscripts/main/bwn-suite-core.user.js
 // @updateURL    https://raw.githubusercontent.com/Intermu/userscripts/main/bwn-suite-core.user.js
 // @description  Runs several Umbrava helpers for BWN coordinators, in the browser with no privileged grants. Includes: PO Approval + ETA Builder; WO Assist (GP/ETA, a stall watchdog, DNE calculator, and a next-action playbook); Email Leak Guard (checks recipients against vendor names, PO amounts, and client budget references before an outbound email sends); WO List Heat (a triage overlay + My Day strip on the work-order list, with an optional same-origin Umbrava API scan for deterministic full-board coverage); and the BWN Launcher (opens the Azure Static Web App tools with the current WO's context). Modules share state through sessionStorage/localStorage. The only network calls are same-origin Umbrava GraphQL requests (app.umbrava.com/api/graphql, the app's own session): List Heat's full-board scan and WO Assist's work-order / trip / clock-in / document / purchase-order reads, plus ONE write - BWN Views saves the column layout through Umbrava's own putUserPreference, the same preference the column chooser writes; everything else is offline. Toggle modules in BWN_MODULES below.
@@ -3154,9 +3154,15 @@
         consider(anchored(parseInt(m[1], 10), parseInt(m[2], 10), yr));
       }
       var MO = ['jan', 'feb', 'mar', 'apr', 'may', 'jun', 'jul', 'aug', 'sep', 'oct', 'nov', 'dec'];
-      var re2 = /\b(jan|feb|mar|apr|may|jun|jul|aug|sep|oct|nov|dec)[a-z]*\.?\s+(\d{1,2})\b/ig, m2;
+      // Honour an explicit year when the body gives one ("July 8, 2026"), exactly as the
+      // slash branch above already does. Without this a pasted email SIGNATURE line -
+      // "Sent: Wednesday, July 8, 2026" - was read as a yearless "July 8", and because that
+      // month is >45 days before the note it forward-projected to July 2027 and was proposed
+      // as the ECD (live-reported on W-368564 / tracking 1214704). The year is right there in
+      // the text; drop-it-then-guess was the whole defect.
+      var re2 = /\b(jan|feb|mar|apr|may|jun|jul|aug|sep|oct|nov|dec)[a-z]*\.?\s+(\d{1,2})(?:,?\s*(\d{4}))?\b/ig, m2;
       while ((m2 = re2.exec(s || '')) !== null) {
-        consider(anchored(MO.indexOf(m2[1].slice(0, 3).toLowerCase()) + 1, parseInt(m2[2], 10), null));
+        consider(anchored(MO.indexOf(m2[1].slice(0, 3).toLowerCase()) + 1, parseInt(m2[2], 10), m2[3] ? parseInt(m2[3], 10) : null));
       }
       return out;
     }

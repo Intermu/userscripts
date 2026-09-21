@@ -4,7 +4,7 @@
 // WHAT SHIPPED, and what each section proves:
 //   1. DRIFT GUARD. bwnFocusTrap is one helper, but GM sandboxes can't share a runtime object
 //      across the @grant boundary (Core's BWN block documents this), so the drawer-modal family
-//      each carries a BYTE-IDENTICAL copy. This slices the function out of all seven owners and
+//      each carries a BYTE-IDENTICAL copy. This slices the function out of all eight owners and
 //      asserts they are character-for-character identical - the same discipline test-drawer-motion
 //      uses for the five toast copies. A copy that drifts is the failure this section exists to
 //      catch.
@@ -52,12 +52,13 @@ function sliceFn(src, decl) {
   throw new Error('unbalanced braces after ' + decl);
 }
 
-// The seven drawer-modal owners that carry the helper.
+// The eight drawer-modal owners that carry the helper.
 var FAMILY = ['bwn-cc-auth.user.js', 'bwn-cc-purchase.user.js', 'bwn-dispatch.user.js',
-  'bwn-inventory.user.js', 'bwn-wo-assist.user.js', 'bwn-wo-audit.user.js', 'bwn-ask.user.js'];
+  'bwn-inventory.user.js', 'bwn-wo-assist.user.js', 'bwn-wo-audit.user.js', 'bwn-ask.user.js',
+  'bwn-proposal-copy.user.js'];
 
 // ---- 1. drift guard: every copy is byte-identical -------------------------------------------
-console.log('\n-- bwnFocusTrap: one helper, seven identical copies --');
+console.log('\n-- bwnFocusTrap: one helper, eight identical copies --');
 var canonical = sliceFn(read(FAMILY[0]), 'function bwnFocusTrap(');
 A.ok(FAMILY[0] + ' defines bwnFocusTrap', canonical.indexOf('function bwnFocusTrap(modalEl)') === 0);
 FAMILY.slice(1).forEach(function (f) {
@@ -237,7 +238,8 @@ var OPEN_CALL = {
   'bwn-inventory.user.js': 'bwnFocusTrap(back);',
   'bwn-wo-assist.user.js': 'bwnFocusTrap(back);',
   'bwn-wo-audit.user.js': 'bwnFocusTrap(ov);',
-  'bwn-ask.user.js': 'bwnFocusTrap(panelEl);'
+  'bwn-ask.user.js': 'bwnFocusTrap(panelEl);',
+  'bwn-proposal-copy.user.js': 'bwnFocusTrap(modal);'
 };
 FAMILY.forEach(function (f) {
   var src = read(f);

@@ -55,7 +55,7 @@ function makeEnv(opts) {
 var S_CORE = slice('  // ===== auth + gql', '  // ===== ui', 'core block');
 function loadCore(env) {
   var ctx = vm.createContext(env);
-  vm.runInContext('(function(){' + S_CORE + '\n; this.__api = { authToken: authToken, pcGql: pcGql, rank: rank, mapLineItem: mapLineItem, buildCreateVars: buildCreateVars, buildEditVars: buildEditVars, copyProposal: copyProposal, pickerFilter: pickerFilter, confirmReady: confirmReady }; }).call(globalThis);', ctx);
+  vm.runInContext('(function(){' + S_CORE + '\n; this.__api = { authToken: authToken, pcGql: pcGql, rank: rank, mapLineItem: mapLineItem, buildCreateVars: buildCreateVars, buildEditVars: buildEditVars, copyProposal: copyProposal, pickerFilter: pickerFilter, confirmReady: confirmReady, dupFindMatches: dupFindMatches }; }).call(globalThis);', ctx);
   return env.__api;
 }
 
@@ -248,6 +248,25 @@ function loadCore(env) {
   A.ok('confirmReady false when source empty', apiU.confirmReady({ hasToken: true, source: { proposalLineItems: [] }, target: TARGET }) === false);
   A.ok('confirmReady false when no token', apiU.confirmReady({ hasToken: false, source: SOURCE, target: TARGET }) === false);
   A.ok('confirmReady true when all present', apiU.confirmReady({ hasToken: true, source: SOURCE, target: TARGET }) === true);
+
+  // ---- 0.4.0 pre-copy duplicate check (dupFindMatches) --------------------------------------
+  // Non-blocking review signal: an existing target-WO client proposal matches the source by a
+  // normalized non-empty description OR an equal subtotal (amount+currency+precision).
+  var DUP_SRC = { description: '  Replace  RTU  ', subtotal: { amount: 284776, currency: 'USD', precision: 2 } };
+  var EXISTING = [
+    { id: 11, number: 1, description: 'Different scope', subtotal: { amount: 100, currency: 'USD', precision: 2 } },
+    { id: 12, number: 2, description: 'replace rtu', subtotal: { amount: 999, currency: 'USD', precision: 2 } },   // desc match (normalized)
+    { id: 13, number: 3, description: 'Another', subtotal: { amount: 284776, currency: 'USD', precision: 2 } }      // subtotal match
+  ];
+  var dm = apiU.dupFindMatches(DUP_SRC, EXISTING);
+  A.ok('dupFindMatches flags a normalized-description match', dm.some(function (p) { return p.id === 12; }));
+  A.ok('dupFindMatches flags an equal-subtotal match', dm.some(function (p) { return p.id === 13; }));
+  A.ok('dupFindMatches ignores a non-matching proposal', !dm.some(function (p) { return p.id === 11; }));
+  A.ok('dupFindMatches is empty on a clean target WO', apiU.dupFindMatches(DUP_SRC, [EXISTING[0]]).length === 0);
+  A.ok('dupFindMatches: an empty source description never matches on description alone',
+    apiU.dupFindMatches({ description: '', subtotal: null }, [{ id: 20, description: '', subtotal: { amount: 5, currency: 'USD', precision: 2 } }]).length === 0);
+  A.ok('dupFindMatches: two absent subtotals do not read as equal',
+    apiU.dupFindMatches({ description: 'x', subtotal: null }, [{ id: 21, description: 'y', subtotal: null }]).length === 0);
 
   A.finish();
 })();
