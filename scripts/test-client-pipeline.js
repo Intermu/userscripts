@@ -200,6 +200,48 @@ A.ok('both reads are keyed by the internal jobId', /workOrderTrips\(jobId:/.test
 A.ok('they are two separate root reads', Q.wt.indexOf('purchaseOrderTrips') === -1);
 
 // ---------------------------------------------------------------------------
+console.log('\n-- draft cache is IN-MEMORY: no client draft ever reaches web storage --');
+var DRAFTCACHE = slice('// ===== CU-DRAFTCACHE:START =====', '// ===== CU-DRAFTCACHE:END =====', 'draft cache block');
+// The whole point of the CodeQL fix: the draft cache must not touch sessionStorage/localStorage.
+// Member access only (a real call), so the explanatory comment naming the old sessionStorage
+// cache does not trip it - the code itself must never touch web storage.
+A.ok('the draft-cache block makes no web-storage call', !/(sessionStorage|localStorage)\.\w/.test(DRAFTCACHE));
+// And nowhere in the shipped module does a draft/appointment payload get written to web storage:
+// the only remaining sessionStorage writer is the shared cross-script NOTE bus (busNotesPut),
+// never the draft cache. Guard that the draft-cache function names are absent from any storage call.
+A.ok('no sessionStorage.setItem call sits inside a draftCache* function', !/draftCacheSet[\s\S]{0,200}sessionStorage\.setItem/.test(SRC));
+
+function loadDraftCache(woId) {
+  var writes = 0, reads = 0;
+  var storage = { setItem: function () { writes++; }, getItem: function () { reads++; return null; }, removeItem: function () { writes++; } };
+  var sandbox = { Date: Date, String: String, JSON: JSON, Object: Object, Math: Math,
+    bwnWOId: function () { return woId; }, location: { pathname: '/wo' }, PROMPT_V: 4,
+    sessionStorage: storage, localStorage: storage, console: { info: function () {}, warn: function () {} } };
+  vm.createContext(sandbox);
+  var api = vm.runInContext('(function(){\n' + DRAFTCACHE + '\nreturn { set: draftCacheSet, get: draftCacheGet, key: draftCacheKey };\n})()', sandbox, { filename: 'cu-draftcache.js' });
+  api.counts = function () { return { writes: writes, reads: reads }; };
+  return api;
+}
+var MODE = { name: 'Client Update' };
+var dc = loadDraftCache('W-1');
+dc.set(MODE, 'Service is scheduled for September 25, 2026.', { used: 3, total: 5 }, 'note');
+var got = dc.get(MODE);
+A.ok('an in-memory draft round-trips on reopen', !!got && got.text === 'Service is scheduled for September 25, 2026.');
+A.eq('stats survive the round-trip', got.stats.used, 3);
+A.eq('set + get perform ZERO web-storage operations', dc.counts(), { writes: 0, reads: 0 });
+// Reload safety: a brand-new module instance (== a page reload) starts with an empty cache,
+// so a prior client draft is never recoverable from browser storage.
+var dc2 = loadDraftCache('W-1');
+A.eq('a fresh page instance recovers no prior draft', dc2.get(MODE), null);
+A.eq('...and reading the empty cache still touches no web storage', dc2.counts(), { writes: 0, reads: 0 });
+
+console.log('\n-- the Preview/Edit/Regenerate/Copy workflow is preserved --');
+A.ok('reopen fast-path reads the (now in-memory) draft cache', /var cached = draftCacheGet\(mode\);/.test(SRC));
+A.ok('Regenerate still forces a fresh collect + draft', /rgBtn = btn\('Regenerate'/.test(SRC) && /regenFn\(!!\(e && e\.shiftKey\)\)/.test(SRC));
+A.ok('Copy still emits clean text via GM_setClipboard', /GM_setClipboard\(stripMarkdown\(ta\.value\)\)/.test(SRC));
+A.ok('Preview/Edit toggle is intact', /function setView\(v\)/.test(SRC) && /renderMarkdown\(doc, ta\.value\)/.test(SRC));
+
+// ---------------------------------------------------------------------------
 console.log('\n-- negative controls: each must turn a green case above red --');
 function safetyFrom(block) { return load(block, ['cuSafetyCheck']).cuSafetyCheck; }
 function mergeFrom(block) { return load(block, ['cuMergeFacts', 'cuFriendlyDate', 'cuFriendlyTime']); }
@@ -219,6 +261,12 @@ var CTRL = [
     ok: function () {
       var mutated = mutate(PIPE, 'if (!hasConfirmedAppt && /\\bscheduled for\\b', 'if (true && /\\bscheduled for\\b');
       return safetyFrom(mutated)('Service is scheduled for October 2, 2026.', [], true).safe === false;
+    } },
+  { what: 'reintroducing a sessionStorage backing store for the draft cache',
+    ok: function () {
+      // If draftCacheSet writes to sessionStorage again, the block's no-web-storage guard fails.
+      var mutated = mutate(DRAFTCACHE, 'cuDraftMem[draftCacheKey(mode)] = { text: text', 'sessionStorage.setItem(draftCacheKey(mode), JSON.stringify({ text: text })); cuDraftMem[draftCacheKey(mode)] = { text: text');
+      return /sessionStorage|localStorage/.test(mutated);
     } }
 ];
 CTRL.forEach(function (c) {

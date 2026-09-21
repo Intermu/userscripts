@@ -3381,28 +3381,32 @@
       firmer: { label: 'Firmer', directive: 'Make the tone firmer and more direct while staying professional: clearer asks and more urgency on outstanding items.' }
     };
 
-    // ---- Draft cache (per WO + mode, this browser tab only) ---------------
-    // A generated draft is cached so reopening the same mode on the same WO is
-    // instant and free (no re-scroll, no API call). Regenerate forces a fresh
-    // collect + draft. sessionStorage = clears when the tab closes, so a draft
-    // never goes stale across sessions.
+    // ---- Draft cache (per WO + mode, THIS page instance only) -------------
+    // ===== CU-DRAFTCACHE:START =====
+    // IN-MEMORY ONLY. A generated draft carries client-facing prose, appointment dates and
+    // normalized WO/client context, so none of it may touch web storage. The cache is a
+    // module-scope object that lives for the life of the injected page instance: it survives
+    // a modal close/reopen and an in-app (SPA) WO switch - it is keyed by WO id - but a full
+    // page reload starts empty, so no client draft is ever recoverable from
+    // sessionStorage/localStorage. This is the whole point of the change (CodeQL
+    // js/clear-text-storage-of-sensitive-data flagged the old sessionStorage draft cache on
+    // 2026-09-21); do not reintroduce a persistent backing store. Regenerate still forces a
+    // fresh collect + draft; the reopen fast-path just reuses the in-memory copy.
+    var cuDraftMem = {};
     function draftCacheKey(mode) {
       var id = bwnWOId() || location.pathname;
       return 'bwn_draft_' + id + '_' + mode.name.replace(/\s+/g, '');
     }
     function draftCacheSet(mode, text, stats, note) {
-      try { sessionStorage.setItem(draftCacheKey(mode), JSON.stringify({ text: text, stats: stats, note: note || '', ts: Date.now(), promptV: PROMPT_V })); } catch (e) { /* quota: non-fatal */ }
+      cuDraftMem[draftCacheKey(mode)] = { text: text, stats: stats, note: note || '', ts: Date.now(), promptV: PROMPT_V };
     }
     function draftCacheGet(mode) {
-      try {
-        var raw = sessionStorage.getItem(draftCacheKey(mode));
-        if (!raw) return null;
-        var d = JSON.parse(raw);
-        // promptV gate: a draft generated under an older prompt pack must not
-        // resurface as a "saved draft" after the prompts change.
-        return (d && d.text && d.stats && d.promptV === PROMPT_V) ? d : null;
-      } catch (e) { return null; }
+      var d = cuDraftMem[draftCacheKey(mode)];
+      // promptV gate kept for parity: an in-memory draft is always current-prompt within one
+      // page load, but the check costs nothing and documents the invariant.
+      return (d && d.text && d.stats && d.promptV === PROMPT_V) ? d : null;
     }
+    // ===== CU-DRAFTCACHE:END =====
     function draftAge(ts) {
       var mins = Math.round((Date.now() - (ts || 0)) / 60000);
       return mins < 1 ? 'just now' : mins === 1 ? '1 min ago' : mins < 60 ? mins + ' min ago' : Math.round(mins / 60) + 'h ago';
