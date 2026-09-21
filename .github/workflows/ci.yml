@@ -149,6 +149,19 @@ jobs:
       - name: WO Audit operational-state + fallback + AI-output gate (0.12.0)
         run: node scripts/test-wo-audit-state.js
 
+      # WO Audit 0.13.0: the evidence layer. Pins the four things that release added or hardened -
+      # the claim gate (an AI line may not assert completion, approval, pricing/NTE/DNE/PO,
+      # scheduling/dispatch/on-site, vendor assignment, client contact, fault, ownership or internal
+      # tooling wording the evidence does not carry), the widened GROUNDING date tokenizer that
+      # closes the ISO / hyphen / month-name bypass, strict work-order key normalization (a compound
+      # cell is REFUSED, never silently concatenated into a different real work order), and the
+      # read-only WOA_PHASE status-coverage diagnostic. Also pins that this tool's own [bwn:wo-audit]
+      # posts are excluded from AI evidence while still blocking a duplicate post, that the
+      # deterministic fallback passes its own gate for every stage, and that the over-30 ECD tails
+      # and the tally shape are unchanged. Table-driven, negative control on every rule.
+      - name: WO Audit evidence gate + key normalization + status coverage (0.13.0)
+        run: node scripts/test-wo-audit-evidence.js
+
       # bwn-wo-extract (Operations Assist): the thin, read-only caller for the deployed
       # /api/extract-work-order endpoint. Byte-sliced + fake-env harness pinning the bounded
       # allowlist payload, the NTE-semantic exclusion of client-DNE, the refusal gate (route /
