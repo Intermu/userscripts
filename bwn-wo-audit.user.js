@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         BWN WO Audit (Broadway National)
 // @namespace    broadwaynational.bwn
-// @version      0.16.0
+// @version      0.16.1
 // @downloadURL  https://raw.githubusercontent.com/Intermu/userscripts/main/bwn-wo-audit.user.js
 // @updateURL    https://raw.githubusercontent.com/Intermu/userscripts/main/bwn-wo-audit.user.js
 // @description  Batch WO-audit tool. Upload a WO audit .xlsx; for each work order this reads its two most recent notes DIRECTLY from Umbrava's GraphQL API in-page (using your live Umbrava session - the same read the BWN Ops Suite AI drafts use), then asks the broadway-internal-ops SWA summarize route (x-bwn-key gated, Anthropic key server-side) to write a status note - for jobs aged over 30 days a dated "Over 30 - trade - event timeline - ECD" chain built from the WO's FULL note history (with a PAST/needs-ECD flag when the committed date has lapsed), otherwise a 1-3 sentence client-ready status note. Fills the audit's notes column and downloads the workbook, preserving every other cell and formula. It also reads each WO's live header (status, phase, priority, GP, DNE/NTE, PO/vendor, schedule) in the same call and writes a deterministic Audit Flags column (OVERDUE, NEG/LOW GP, NTE>DNE, NO VENDOR, UNSCHEDULED, STALE) computed with no AI - so the exception audit survives an AI outage. Runs entirely in the app.umbrava.com page so it inherits your Umbrava auth - no MCP, no pasted keys, nothing sensitive in this script. This replaces the old standalone WO_Audit_Automation.html SWA tool, whose server-side MCP path could not authenticate to Umbrava. After a run drafts its notes, the coordinator can post each drafted note as an INTERNAL Umbrava note onto its aged (>30d) work order - one explicit click per note (human-gated, idempotent), routed through the governed bwnGqlOp write path with its permission gate and audit trail.
@@ -19,7 +19,7 @@
 (function () {
   'use strict';
 
-  var VER = '0.16.0';
+  var VER = '0.16.1';
   var FONT = "-apple-system,BlinkMacSystemFont,'Segoe UI','Helvetica Neue',Arial,sans-serif";
   // Inline SVG icons (no external image/font). 18px, stroke=currentColor so they take card color.
   function _svg(p, o) { return '<svg class="woa-i" viewBox="0 0 24 24" width="18" height="18" fill="none" stroke="currentColor" stroke-width="1.9" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"' + (o || '') + '>' + p + '</svg>'; }
@@ -2553,10 +2553,10 @@
                 '<div class="woa-drop-ic">' + ICON.upload + '</div>' +
                 '<div class="woa-drop-t">Drop your audit workbook here</div>' +
                 '<div class="woa-drop-s">or <span class="woa-browse">browse files</span></div>' +
-                '<div class="woa-drop-x">Excel .xlsx / .xls &middot; your original file is never modified</div>' +
+                '<div class="woa-drop-x">Excel .xlsx / .xlsm / .xls &middot; your original file is never modified</div>' +
               '</div>' +
               '<div id="woa-filecard" class="woa-file" style="display:none"></div>' +
-              '<input type="file" id="bwn-woaudit-file" accept=".xlsx,.xls" tabindex="-1" aria-hidden="true">' +
+              '<input type="file" id="bwn-woaudit-file" accept=".xlsx,.xlsm,.xls" tabindex="-1" aria-hidden="true">' +
               '<div id="bwn-woaudit-sheetwrap" class="woa-field" style="display:none;margin-top:12px"><label class="woa-lbl" for="bwn-woaudit-sheet">Worksheet</label><select id="bwn-woaudit-sheet" class="woa-select"></select></div>' +
               '<div id="woa-fidelity" class="woa-banner is-info" style="display:none;margin-top:12px">' + ICON.info + '<span>The exported workbook preserves cell values and formulas where supported. Some Excel-specific presentation features, such as charts, conditional formatting, or validation rules, may not be retained.</span></div>'
             ) +
@@ -2758,9 +2758,9 @@
     function readFile(f) {
       if (!f) return;
       if (_running) { logln('! A run is in progress - finish or cancel it before loading another workbook.'); return; }
-      if (!/\.(xlsx|xls)$/i.test(f.name || '')) {
+      if (!/\.(xlsx|xlsm|xls)$/i.test(f.name || '')) {
         showFidelity(false);
-        showError('That file is not an Excel workbook. Upload an .xlsx (or .xls) audit file.');
+        showError('That file is not an Excel workbook. Upload an .xlsx, .xlsm, or .xls audit file.');
         return;
       }
       var fr = new FileReader();
@@ -2768,7 +2768,7 @@
         try {
           if (typeof XLSX === 'undefined') throw new Error('spreadsheet library not loaded - reload the page');
           var wb = XLSX.read(new Uint8Array(fr.result), { type: 'array', cellFormula: true, cellStyles: true });
-          loaded = { wb: wb, name: (f.name || 'wo-audit.xlsx').replace(/\.(xlsx|xls)$/i, ''), file: f };
+          loaded = { wb: wb, name: (f.name || 'wo-audit.xlsx').replace(/\.(xlsx|xlsm|xls)$/i, ''), file: f };
           var sw = $('bwn-woaudit-sheetwrap'), ss = $('bwn-woaudit-sheet');
           ss.innerHTML = '';
           wb.SheetNames.forEach(function (nm) { var o = document.createElement('option'); o.value = nm; o.textContent = nm; ss.appendChild(o); });
