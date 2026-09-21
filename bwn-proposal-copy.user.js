@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         BWN Proposal Copy (Broadway National)
 // @namespace    broadwaynational.bwn
-// @version      0.3.0
+// @version      0.4.0
 // @downloadURL  https://raw.githubusercontent.com/Intermu/userscripts/main/bwn-proposal-copy.user.js
 // @updateURL    https://raw.githubusercontent.com/Intermu/userscripts/main/bwn-proposal-copy.user.js
 // @description  Copy a client proposal from an aged-out work order onto a chosen replacement WO as an un-submitted Draft, in one confirmed action. Replays Umbrava's own createDraftProposal + editProposal mutations (line items copied verbatim); never submits, deletes, or retries. Manager-gated visibility. @grant none.
@@ -15,7 +15,7 @@
 (function () {
   'use strict';
 
-  var VER = '0.3.0';   // keep in step with @version
+  var VER = '0.4.0';   // keep in step with @version
   var DRY_RUN = false; // when true, the two WRITE mutations are logged, not sent
   var FONT = "-apple-system,BlinkMacSystemFont,'Segoe UI','Helvetica Neue',Arial,sans-serif";
   var GREEN = '#0d3d26';
@@ -77,14 +77,10 @@
     return release;
   }
 
-  function drawerDismiss(el) {
-    var reduce = false;
-    try { reduce = !!(window.matchMedia && window.matchMedia('(prefers-reduced-motion: reduce)').matches); } catch (e) { }
-    if (reduce) { el.remove(); return; }
-    el.removeAttribute('id'); el.setAttribute('aria-hidden', 'true');   // id freed now: a reopen builds a fresh node
-    el.classList.add('bwn-closing');
-    setTimeout(function () { try { el.remove(); } catch (e) { } }, 170);
-  }
+  // 0.4.0 note: the shared drawerDismiss helper was dropped when Copy Proposal moved OFF the dock-rail
+  // .bwn-drawer into its own wide centered workflow modal (see the DESIGN NOTE in the UI section). The
+  // modal owns a self-contained reduced-motion-aware close (bcpRemove) instead. bwnFocusTrap above is
+  // kept - the centered modal still traps focus.
 
   // RM-B2 error-reporter adoption: leave a bounded, PII-FREE bwn:errlog breadcrumb via Core's
   // window.bwnReport (both @grant none, shared page window) when the errorReporter flag is ON, so a
@@ -482,6 +478,11 @@
   // the first dry-run/live create confirms it.
   var M_CREATE_DRAFT = 'mutation CreateDraftProposal($proposalData: CreateDraftProposalInput!) { createDraftProposal(proposalData: $proposalData) { success message proposal { id number } } }';
   var M_EDIT = 'mutation EditProposal($proposalData: EditProposalInput!) { editProposal(proposalData: $proposalData) { success message proposal { id number } } }';
+  // Existing client proposals on a WO, for the pre-copy duplicate check (0.4.0). READ-ONLY.
+  // Shape verified from [[umbrava-graphql-operations]] (listClientProposals, introspected): keys off
+  // jobId (== ProposalWO's job.id), jobType enum literal WorkOrder. Selects only what the dup panel
+  // shows - number, description, type, state, status, subtotal - never line items or PII.
+  var Q_LIST_CLIENT_PROPOSALS = 'query ListClientProposals($jobId: Int, $page: PageInput!) { listClientProposals(jobId: $jobId, jobType: WorkOrder, page: $page) { rowCount items { id number description state type { id name } status { id name } subtotal { amount currency precision } } } }';
 
   // ===== copy engine ========================================================
   // (mapLineItem, buildCreateVars, buildEditVars, copyProposal land here in
@@ -661,21 +662,50 @@
     return true;
   }
 
+  // ---- duplicate check (DOM-free, sliced + tested by the node harness) ------
+  // Non-blocking REVIEW only. We compare the source proposal against the target WO's existing client
+  // proposals (from Q_LIST_CLIENT_PROPOSALS) and surface a "similar proposal may already exist"
+  // review when a candidate matches - NEVER an auto-block, because neither signal below establishes
+  // an EXACT duplicate (a shared description or a coincident subtotal is common and legitimate). The
+  // operator reviews the evidence and decides. Match = same normalized non-empty description OR the
+  // same subtotal (amount+currency+precision). moneyEq guards null/precision so two absent totals do
+  // not read as equal.
+  function dupNormDesc(s) { return String(s == null ? '' : s).replace(/\s+/g, ' ').trim().toLowerCase(); }
+  function dupMoneyEq(a, b) {
+    if (!a || !b || a.amount == null || b.amount == null) return false;
+    return Number(a.amount) === Number(b.amount) && (a.currency || '') === (b.currency || '') &&
+      (a.precision == null ? 2 : a.precision) === (b.precision == null ? 2 : b.precision);
+  }
+  // -> array of the existing proposals that look like the source. Empty = Safe. `source` is the
+  // ClientProposalDetails read; `items` is listClientProposals.items for the TARGET WO.
+  function dupFindMatches(source, items) {
+    source = source || {};
+    var srcDesc = dupNormDesc(source.description);
+    var srcSub = source.subtotal;
+    return (items || []).filter(function (p) {
+      if (!p) return false;
+      var descHit = srcDesc !== '' && dupNormDesc(p.description) === srcDesc;
+      var subHit = dupMoneyEq(srcSub, p.subtotal);
+      return descHit || subHit;
+    });
+  }
+
   // ===== ui =================================================================
-  // Actions-menu item injection, drawer, target picker, confirm card + progress.
+  // Actions-menu item injection + the Copy Proposal workflow modal (source review -> destination
+  // -> create & verify), plus its progress/success/error states.
   //
-  // DESIGN NOTE (0.3.0 UI overhaul - matches WO Audit's polished chrome): the drawer is now a
-  // suite-standard dock-rail panel (`<aside class="bwn-drawer">`) styled by Core's page-wide
-  // stylesheet - the same shared chrome bwn-wo-audit / bwn-dispatch / bwn-inventory ride: gradient
-  // header (.bwn-drawer-hd/.t/.s), .bwn-drawer-x close, .bwn-drawer-body, .bwn-drawer-ft footer,
-  // .bwn-ops-btn buttons, full light/dark via Core's CSS variables, the shared drawerDismiss exit
-  // fade and the bwnFocusTrap a11y trap. This is safe to depend on Core even though this script is
-  // @grant none: the drawer can ONLY open when gated() is true, and gated() needs the rank Core
-  // publishes to bwn:role:last - Core absent => no rank => the menu item never injects => the
-  // drawer never opens, so there is no Core-absent code path that would render it unstyled. The
-  // small #bwn-pc-style sheet below now carries ONLY the bits Core has no primitive for (the
-  // line-item summary table, the pick inputs, the warn/err/ok result banners), tokenized to Core's
-  // vars so they theme too. It still announces bwn:drawer:open so a real Core drawer yields the slot.
+  // DESIGN NOTE (0.4.0 workflow-modal redesign): Copy Proposal now renders as a SELF-CONTAINED,
+  // wide (760px) centered workflow modal with its own `.bcp-*` stylesheet - NOT the 0.3.0 dock-rail
+  // `.bwn-drawer`. Why the move: the operation needs a real review surface (source summary + line
+  // items + destination validation + pre-copy duplicate check + a confirmation card) that a 420px
+  // rail cannot hold without becoming a scroll tunnel. The modal borrows WO Audit's VISUAL LANGUAGE
+  // (deep evergreen header, off-white canvas, white cards with restrained borders/shadow, 8px
+  // rhythm, accessible green/amber/red/blue states, inline SVG icons only) but owns all of its own
+  // CSS so it does not depend on Core's sheet being present. It keeps the bwnFocusTrap a11y trap and
+  // adds its own reduced-motion-aware close (bcpRemove) using CSS transitions only. Still gated the
+  // same way (rank>=4 + both proposal permissions) and still announces bwn:drawer:open so a Core
+  // drawer yields. The copy ENGINE (copyProposal + queries + validation) is untouched - this is a
+  // UI layer over it.
   //
   // Selectors that touch the Proposals section FAIL SAFE: if the expected row/menu/anchor is not
   // found, the injector adds nothing rather than guessing (see the actions-menu block below).
@@ -813,7 +843,7 @@
     li.addEventListener('click', function (e) {
       e.preventDefault(); e.stopPropagation();
       closeActionsMenu();
-      openDrawer(pid);
+      openModal(pid);
     });
     // Place it just under the first native item (below "View Audit").
     var first = menu.querySelector('li[role="menuitem"],a[role="menuitem"]');
@@ -837,330 +867,684 @@
     setTimeout(function () { el.remove(); }, 5000);
   }
 
-  // ---- drawer shell (self-contained; see DESIGN NOTE above) ------------------
+  // ---- workflow-modal shell (self-contained .bcp-* UI; see DESIGN NOTE above) ----
   var DRAWER_KEY = 'proposal-copy';
-  var openEl = null;
-  var pcState = null;   // { hasToken, source, sourceWo, target }
-  // Only the bits Core's shared sheet has no primitive for: the line-item summary table, the pick
-  // inputs, and the three result banners. Everything else (drawer frame, header gradient, close
-  // button, footer, buttons) is Core's. Tokenized to Core's CSS vars so all of it themes in dark
-  // mode; falls back to light hexes when a var is somehow absent.
-  function ensurePcStyle() {
-    if (document.getElementById('bwn-pc-style')) return;
+  var activeModal = null;    // the current .bcp-ov overlay element, or null
+  var modalBusy = false;     // a create request is in flight (non-cancellable): block close/Escape
+
+  // Inline SVG icon set (Feather-style, 1.9 stroke, currentColor). aria-hidden - labels carry meaning.
+  function bcpIcon(name, size) {
+    var s = size || 16;
+    var p = {
+      copy: '<rect x="9" y="9" width="13" height="13" rx="2"></rect><path d="M5 15H4a2 2 0 0 1-2-2V4a2 2 0 0 1 2-2h9a2 2 0 0 1 2 2v1"></path>',
+      file: '<path d="M14 2H6a2 2 0 0 0-2 2v16a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2V8z"></path><polyline points="14 2 14 8 20 8"></polyline>',
+      list: '<line x1="8" y1="6" x2="21" y2="6"></line><line x1="8" y1="12" x2="21" y2="12"></line><line x1="8" y1="18" x2="21" y2="18"></line><line x1="3" y1="6" x2="3.01" y2="6"></line><line x1="3" y1="12" x2="3.01" y2="12"></line><line x1="3" y1="18" x2="3.01" y2="18"></line>',
+      pin: '<path d="M21 10c0 7-9 13-9 13s-9-6-9-13a9 9 0 0 1 18 0z"></path><circle cx="12" cy="10" r="3"></circle>',
+      search: '<circle cx="11" cy="11" r="8"></circle><line x1="21" y1="21" x2="16.65" y2="16.65"></line>',
+      check: '<polyline points="20 6 9 17 4 12"></polyline>',
+      warning: '<path d="M10.29 3.86 1.82 18a2 2 0 0 0 1.71 3h16.94a2 2 0 0 0 1.71-3L13.71 3.86a2 2 0 0 0-3.42 0z"></path><line x1="12" y1="9" x2="12" y2="13"></line><line x1="12" y1="17" x2="12.01" y2="17"></line>',
+      shield: '<path d="M12 22s8-4 8-10V5l-8-3-8 3v7c0 6 8 10 8 10z"></path>',
+      info: '<circle cx="12" cy="12" r="10"></circle><line x1="12" y1="16" x2="12" y2="12"></line><line x1="12" y1="8" x2="12.01" y2="8"></line>',
+      external: '<path d="M18 13v6a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2V8a2 2 0 0 1 2-2h6"></path><polyline points="15 3 21 3 21 9"></polyline><line x1="10" y1="14" x2="21" y2="3"></line>',
+      close: '<line x1="18" y1="6" x2="6" y2="18"></line><line x1="6" y1="6" x2="18" y2="18"></line>',
+      lock: '<rect x="3" y="11" width="18" height="11" rx="2"></rect><path d="M7 11V7a5 5 0 0 1 10 0v4"></path>',
+      target: '<circle cx="12" cy="12" r="10"></circle><circle cx="12" cy="12" r="6"></circle><circle cx="12" cy="12" r="2"></circle>'
+    }[name] || '';
+    return '<svg class="bcp-ic" width="' + s + '" height="' + s + '" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.9" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">' + p + '</svg>';
+  }
+
+  // Own stylesheet - no dependency on Core's sheet or its CSS vars. WO Audit's visual language
+  // (deep evergreen header, off-white canvas, white cards, 8px rhythm, accessible state colors),
+  // transitions only (no `animation:`) so a headless/reduced-motion path stays honest.
+  function ensureBcpStyle() {
+    if (document.getElementById('bcp-style')) return;
     var st = document.createElement('style');
-    st.id = 'bwn-pc-style';
-    st.textContent =
-      '.bwn-pc-sum{font-size:13px;line-height:1.6;color:var(--bwn-text,#1f2a24);}' +
-      '.bwn-pc-sum strong{color:var(--bwn-text-strong,#0d3d26);}' +
-      '.bwn-pc-table{width:100%;border-collapse:collapse;font-size:12px;margin-top:8px;color:var(--bwn-text,#1f2a24);}' +
-      '.bwn-pc-table th,.bwn-pc-table td{border-bottom:1px solid var(--bwn-border,#dde6e1);padding:5px 6px;text-align:left;}' +
-      '.bwn-pc-table th{color:var(--bwn-text-muted,#5a6b62);font-weight:600;}' +
-      '.bwn-pc-pick{margin-top:14px;border-top:1px solid var(--bwn-border,#dde6e1);padding-top:12px;}' +
-      '.bwn-pc-pick label,.bwn-pc-pick .lbl{font-weight:600;font-size:12.5px;color:var(--bwn-text,#1f2a24);}' +
-      '.bwn-pc-field{width:100%;box-sizing:border-box;padding:7px 9px;border:1px solid var(--bwn-border,#c6d2cc);border-radius:7px;' +
-      'font:400 13px ' + FONT + ';background:var(--bwn-surface,#fff);color:var(--bwn-text,#1f2a24);outline:none;}' +
-      '.bwn-pc-field:focus{border-color:var(--bwn-accent,#2ECC71);box-shadow:0 0 0 3px rgba(46,204,113,.15);}' +
-      '.bwn-pc-hint{font-size:11.5px;color:var(--bwn-text-muted,#5b6b8c);}' +
-      '.bwn-drawer .bwn-ops-btn:disabled{opacity:.5;cursor:default;}' +
-      '.bwn-pc-warn{background:var(--bwn-warn-bg,#fff4e8);border:1px solid var(--bwn-warn-fg,#f0dcb4);color:var(--bwn-warn-fg,#8a5a00);border-radius:8px;padding:8px 10px;font-size:12.5px;margin-top:8px;}' +
-      '.bwn-pc-err{background:var(--bwn-bad-bg,#fdecea);border:1px solid var(--bwn-bad,#f7c9c9);color:var(--bwn-bad-fg,#8b1a1a);border-radius:8px;padding:8px 10px;font-size:12.5px;margin-top:8px;}' +
-      '.bwn-pc-ok{background:var(--bwn-ok-bg,#e8f3ed);border:1px solid var(--bwn-accent,#bfe3cc);color:var(--bwn-ok-fg,#0d3d26);border-radius:8px;padding:8px 10px;font-size:12.5px;margin-top:8px;}';
+    st.id = 'bcp-style';
+    st.textContent = [
+      '.bcp-ov{position:fixed;inset:0;z-index:2147483000;display:flex;align-items:center;justify-content:center;padding:24px;box-sizing:border-box;background:rgba(9,24,18,.5);opacity:0;transition:opacity .16s ease;font-family:' + FONT + ';}',
+      '.bcp-ov.bcp-in{opacity:1;}',
+      '.bcp-ov.bcp-closing{opacity:0;}',
+      '.bcp-modal{width:760px;max-width:100%;max-height:88vh;display:flex;flex-direction:column;background:#f4f6f5;border-radius:12px;overflow:hidden;box-shadow:0 18px 60px rgba(0,0,0,.35);transform:translateY(8px);opacity:0;transition:transform .18s cubic-bezier(.23,1,.32,1),opacity .18s ease;color:#1f2a24;box-sizing:border-box;}',
+      '.bcp-ov.bcp-in .bcp-modal{transform:none;opacity:1;}',
+      '.bcp-hd{background:#0d3d26;color:#fff;padding:16px 20px;display:flex;align-items:flex-start;gap:14px;}',
+      '.bcp-hd-main{flex:1;min-width:0;}',
+      '.bcp-eyebrow{font:600 10px ui-monospace,"SF Mono","Segoe UI Mono",monospace;letter-spacing:.14em;color:rgba(255,255,255,.62);}',
+      '.bcp-title{font:600 18px ' + FONT + ';margin-top:3px;}',
+      '.bcp-sub{font:400 12.5px ' + FONT + ';color:rgba(255,255,255,.78);margin-top:3px;}',
+      '.bcp-badge{flex:none;display:inline-flex;align-items:center;gap:6px;padding:4px 11px;border-radius:999px;font:600 11px ' + FONT + ';background:rgba(255,255,255,.16);color:#fff;white-space:nowrap;}',
+      '.bcp-badge .bcp-bdot{width:7px;height:7px;border-radius:50%;background:currentColor;flex:none;}',
+      '.bcp-badge.busy{background:#f4e3c1;color:#6b4700;}',
+      '.bcp-badge.good{background:#bfe3cc;color:#0d3d26;}',
+      '.bcp-badge.review{background:#f6dca6;color:#6b4700;}',
+      '.bcp-badge.err{background:#f3c1bc;color:#7b1a12;}',
+      '.bcp-x{flex:none;width:30px;height:30px;border:none;border-radius:8px;cursor:pointer;background:rgba(255,255,255,.14);color:#fff;display:flex;align-items:center;justify-content:center;}',
+      '.bcp-x:hover{background:rgba(255,255,255,.26);}',
+      '.bcp-x:focus-visible{outline:2px solid #7fd3a3;outline-offset:2px;}',
+      '.bcp-steps{display:flex;align-items:center;padding:11px 20px;background:#0a3120;color:#fff;}',
+      '.bcp-step{display:flex;align-items:center;gap:8px;flex:0 0 auto;opacity:.5;}',
+      '.bcp-step.active,.bcp-step.done{opacity:1;}',
+      '.bcp-step-n{width:22px;height:22px;border-radius:50%;border:1.5px solid rgba(255,255,255,.5);display:flex;align-items:center;justify-content:center;font:600 11px ' + FONT + ';flex:none;}',
+      '.bcp-step.active .bcp-step-n{background:#fff;color:#0d3d26;border-color:#fff;}',
+      '.bcp-step.done .bcp-step-n{background:#2ecc71;border-color:#2ecc71;color:#0a3120;}',
+      '.bcp-step-l{font:600 12px ' + FONT + ';white-space:nowrap;}',
+      '.bcp-step-bar{flex:1;height:1.5px;background:rgba(255,255,255,.25);margin:0 12px;min-width:14px;}',
+      '.bcp-body{flex:1;overflow:auto;padding:16px 20px;display:flex;flex-direction:column;gap:16px;}',
+      '.bcp-card{background:#fff;border:1px solid #e3e9e5;border-radius:10px;box-shadow:0 1px 2px rgba(16,40,28,.05);overflow:hidden;}',
+      '.bcp-card.accent{border-color:#cfe6d8;box-shadow:0 1px 2px rgba(16,40,28,.05),0 0 0 1px rgba(21,121,74,.08);}',
+      '.bcp-card-hd{display:flex;align-items:center;gap:9px;padding:11px 14px;border-bottom:1px solid #eef2ef;}',
+      '.bcp-card-hd .bcp-ic{color:#15794a;flex:none;}',
+      '.bcp-card-t{font:600 13px ' + FONT + ';flex:1;min-width:0;}',
+      '.bcp-card-meta{font:600 11.5px ' + FONT + ';color:#5a6b62;display:flex;gap:12px;align-items:center;}',
+      '.bcp-card-bd{padding:14px;}',
+      '.bcp-chip{display:inline-block;padding:2px 8px;border-radius:6px;background:#eef3f0;color:#0d3d26;font:600 11px ui-monospace,"SF Mono",monospace;}',
+      '.bcp-tiles{display:grid;grid-template-columns:2fr 1fr 1fr;gap:10px;margin-bottom:12px;}',
+      '.bcp-tile{background:#f7faf8;border:1px solid #e8efe9;border-radius:9px;padding:10px 12px;}',
+      '.bcp-tile .k{font:600 10px ui-monospace,"SF Mono",monospace;letter-spacing:.04em;color:#5a6b62;text-transform:uppercase;}',
+      '.bcp-tile .v{font:600 15px ' + FONT + ';color:#1f2a24;margin-top:3px;}',
+      '.bcp-tile.total{background:#eef6f0;border-color:#cfe6d8;}',
+      '.bcp-tile.total .v{font-size:21px;color:#0d3d26;}',
+      '.bcp-meta{font:400 12.5px ' + FONT + ';color:#5a6b62;line-height:1.7;}',
+      '.bcp-meta strong{color:#1f2a24;font-weight:600;}',
+      '.bcp-note{display:flex;gap:8px;align-items:flex-start;border-radius:8px;padding:8px 11px;font:400 12.5px ' + FONT + ';margin-top:8px;line-height:1.5;}',
+      '.bcp-note .bcp-ic{flex:none;margin-top:1px;}',
+      '.bcp-note.info{background:#eaf1f8;color:#1c4f7c;}',
+      '.bcp-note.warn{background:#fff4e5;color:#8a5a00;}',
+      '.bcp-note.err{background:#fdecea;color:#8b1a1a;}',
+      '.bcp-note.ok{background:#e8f3ed;color:#0d3d26;}',
+      '.bcp-scroll{max-height:250px;overflow:auto;border:1px solid #eef2ef;border-radius:8px;}',
+      '.bcp-tbl{width:100%;border-collapse:collapse;font:400 12px ' + FONT + ';}',
+      '.bcp-tbl th{position:sticky;top:0;background:#f3f6f4;color:#5a6b62;font-weight:600;text-align:left;padding:7px 10px;border-bottom:1px solid #e3e9e5;z-index:1;}',
+      '.bcp-tbl td{padding:7px 10px;border-bottom:1px solid #f0f3f1;vertical-align:top;}',
+      '.bcp-tbl tr:last-child td{border-bottom:none;}',
+      '.bcp-tbl .num{text-align:right;white-space:nowrap;font-variant-numeric:tabular-nums;}',
+      '.bcp-tbl .zero{color:#8a5a00;font-weight:600;}',
+      '.bcp-linkbtn{background:none;border:none;color:#15794a;font:600 12px ' + FONT + ';cursor:pointer;padding:0;text-decoration:underline;}',
+      '.bcp-linkbtn:focus-visible{outline:2px solid #15794a;outline-offset:2px;}',
+      '.bcp-sumrow{display:flex;justify-content:space-between;align-items:center;padding:9px 2px 0;font:600 12.5px ' + FONT + ';color:#1f2a24;}',
+      '.bcp-lbl{display:block;font:600 12px ' + FONT + ';color:#1f2a24;margin:0 0 5px;}',
+      '.bcp-inp{width:100%;box-sizing:border-box;padding:9px 11px;border:1px solid #d3ddd7;border-radius:8px;font:400 13px ' + FONT + ';background:#fff;color:#1f2a24;outline:none;}',
+      '.bcp-inp:focus{border-color:#15794a;box-shadow:0 0 0 3px rgba(21,121,74,.14);}',
+      '.bcp-search{position:relative;}',
+      '.bcp-search>.bcp-ic{position:absolute;left:10px;top:50%;transform:translateY(-50%);color:#7a8a80;pointer-events:none;}',
+      '.bcp-search select,.bcp-search input{padding-left:32px;}',
+      '.bcp-or{font:600 11px ui-monospace,"SF Mono",monospace;color:#7a8a80;text-align:center;margin:9px 0;letter-spacing:.06em;}',
+      '.bcp-target{border:1px solid #cfe6d8;background:#f2f9f5;border-radius:9px;padding:11px 13px;display:flex;gap:10px;align-items:flex-start;}',
+      '.bcp-target>.bcp-ic{color:#15794a;flex:none;margin-top:2px;}',
+      '.bcp-target-main{flex:1;min-width:0;}',
+      '.bcp-target-wo{font:600 14px ' + FONT + ';color:#0d3d26;}',
+      '.bcp-target-loc{font:400 12.5px ' + FONT + ';color:#5a6b62;margin-top:2px;}',
+      '.bcp-check{display:flex;gap:9px;align-items:flex-start;padding:1px 0;font:400 12.5px ' + FONT + ';line-height:1.5;}',
+      '.bcp-check .bcp-ic{flex:none;margin-top:1px;}',
+      '.bcp-check.ok{color:#0d3d26;}.bcp-check.ok .bcp-ic{color:#15794a;}',
+      '.bcp-check.review{color:#8a5a00;}.bcp-check.review .bcp-ic{color:#b6791a;}',
+      '.bcp-check.err{color:#8b1a1a;}.bcp-check.err .bcp-ic{color:#b83a2e;}',
+      '.bcp-check.busy{color:#5a6b62;}',
+      '.bcp-evi{margin-top:9px;border:1px solid #f0dcb4;border-radius:8px;overflow:hidden;}',
+      '.bcp-evi-row{display:flex;justify-content:space-between;gap:12px;padding:7px 11px;font:400 12px ' + FONT + ';border-bottom:1px solid #f6ead1;background:#fffdf8;}',
+      '.bcp-evi-row:last-child{border-bottom:none;}',
+      '.bcp-evi-row .n{font-weight:600;color:#1f2a24;}',
+      '.bcp-confirm{background:#eef6f0;border:1px solid #cfe6d8;border-radius:10px;padding:12px 14px;font:400 13px ' + FONT + ';color:#1f2a24;line-height:1.55;}',
+      '.bcp-confirm strong{color:#0d3d26;}',
+      '.bcp-confirm .sub{font-size:12px;color:#5a6b62;margin-top:6px;}',
+      '.bcp-ft{flex:none;display:flex;gap:10px;align-items:center;padding:12px 20px;background:#fff;border-top:1px solid #e3e9e5;}',
+      '.bcp-ft-spacer{flex:1;}',
+      '.bcp-btn{display:inline-flex;align-items:center;gap:7px;padding:9px 16px;border-radius:8px;border:1px solid transparent;font:600 13px ' + FONT + ';cursor:pointer;}',
+      '.bcp-btn:focus-visible{outline:2px solid #15794a;outline-offset:2px;}',
+      '.bcp-btn.primary{background:#15794a;color:#fff;}',
+      '.bcp-btn.primary:hover{background:#0f6b40;}',
+      '.bcp-btn.ghost{background:#fff;border-color:#d3ddd7;color:#1f2a24;}',
+      '.bcp-btn.ghost:hover{background:#f4f6f5;}',
+      '.bcp-btn.neutral{background:#eef2ef;color:#3a4a42;}',
+      '.bcp-btn:disabled{opacity:.5;cursor:default;}',
+      '.bcp-btn .bcp-ic{flex:none;}',
+      '.bcp-empty{color:#7a8a80;font-style:italic;}',
+      '.bcp-tech{margin-top:8px;}',
+      '.bcp-tech summary{cursor:pointer;font:600 11.5px ' + FONT + ';color:#5a6b62;}',
+      '.bcp-tech pre{white-space:pre-wrap;word-break:break-word;font:11px ui-monospace,"SF Mono",monospace;color:#5a6b62;background:#f4f6f5;border-radius:6px;padding:8px;margin:6px 0 0;max-height:120px;overflow:auto;}',
+      '@media (max-width:720px){.bcp-tiles{grid-template-columns:1fr;}.bcp-step-l{display:none;}.bcp-step-bar{margin:0 8px;}.bcp-ft{flex-wrap:wrap;}}',
+      '@media (prefers-reduced-motion:reduce){.bcp-ov,.bcp-modal{transition:none;}}'
+    ].join('');
     document.head.appendChild(st);
   }
-  // Shared suite exit: the .bwn-closing fade Core's stylesheet owns, via the byte-identical
-  // drawerDismiss above. bwnFocusTrap self-releases when .bwn-closing lands, restoring focus.
-  function closeDrawer() {
-    if (!openEl) return;
-    document.removeEventListener('keydown', onKeyClose);
-    drawerDismiss(openEl);
-    openEl = null; pcState = null;
+
+  // Self-contained reduced-motion-aware close (replaces the shared drawerDismiss). bwnFocusTrap
+  // self-releases when the node leaves the DOM, restoring focus to the opener.
+  function bcpRemove(ov) {
+    var reduce = false;
+    try { reduce = !!(window.matchMedia && window.matchMedia('(prefers-reduced-motion: reduce)').matches); } catch (e) { }
+    if (reduce) { try { ov.remove(); } catch (e) { } return; }
+    ov.classList.add('bcp-closing'); ov.classList.remove('bcp-in');
+    setTimeout(function () { try { ov.remove(); } catch (e) { } }, 190);
   }
-  function onKeyClose(e) { if (e.key === 'Escape') closeDrawer(); }
-  // Suite bus: announce so a real Core drawer yields the slot, and yield ourselves if
-  // another suite tool opens (same contract bwn-dispatch's drawer follows).
+  function closeModal(force) {
+    if (!activeModal) return;
+    if (modalBusy && !force) return;   // a create request in flight is non-cancellable
+    document.removeEventListener('keydown', onKeyClose);
+    bcpRemove(activeModal);
+    activeModal = null; modalBusy = false;
+  }
+  function onKeyClose(e) { if (e.key === 'Escape' && !modalBusy) closeModal(); }
+  // Suite bus: yield the slot to any other suite panel that opens (unless a create is in flight).
   try {
     document.addEventListener('bwn:evt', function (e) {
       var d = e && e.detail;
-      if (d && d.id === 'bwn:drawer:open' && d.key !== DRAWER_KEY) closeDrawer();
+      if (d && d.id === 'bwn:drawer:open' && d.key !== DRAWER_KEY && !modalBusy) closeModal();
     });
   } catch (e) { }
 
-  function renderError(hd, body, msg) {
-    var s = hd.querySelector('.s'); if (s) s.textContent = 'error';
-    body.innerHTML = '';
-    var e = document.createElement('div'); e.className = 'bwn-pc-err'; e.textContent = msg;
-    body.appendChild(e);
+  // ---- state-machine helpers (badge + 3-step indicator; reflect REAL state only) --------------
+  var STEP_LABELS = ['Review source', 'Select destination', 'Create & verify'];
+  function setBadge(M, cls, text) {
+    if (!M.badge) return;
+    M.badge.className = 'bcp-badge' + (cls ? ' ' + cls : '');
+    M.badge.innerHTML = '<span class="bcp-bdot"></span>';
+    M.badge.appendChild(document.createTextNode(text));
+    M.badge.setAttribute('aria-label', 'Status: ' + text);
+  }
+  // active = the 0-based step in progress; done = number of fully-completed leading steps.
+  function setStep(M, active, done) {
+    (M.stepEls || []).forEach(function (el, i) {
+      var cls = 'bcp-step', mark = String(i + 1);
+      if (i < done) { cls += ' done'; mark = '✓'; }
+      else if (i === active) { cls += ' active'; }
+      el.className = cls;
+      var n = el.querySelector('.bcp-step-n'); if (n) n.textContent = mark;
+    });
   }
 
-  function openDrawer(sourceProposalId) {
+  function openModal(sourceProposalId) {
     if (sourceProposalId == null) return;
-    if (openEl) closeDrawer();
-    ensurePcStyle();
+    if (activeModal) closeModal(true);
+    ensureBcpStyle();
     try { document.dispatchEvent(new CustomEvent('bwn:evt', { detail: { id: 'bwn:drawer:open', key: DRAWER_KEY } })); } catch (e) { }
 
-    // Suite drawer: slides out from the dock rail, styled by Core's page-wide sheet (same chrome as
-    // WO Audit / Dispatch). The <aside> IS the panel - no page-covering backdrop.
-    var overlay = document.createElement('aside');
-    overlay.id = 'bwn-pc-overlay'; overlay.className = 'bwn-drawer';
-    overlay.setAttribute('role', 'dialog');
-    overlay.setAttribute('aria-label', 'Copy proposal to another work order');
+    var ov = document.createElement('div');
+    ov.className = 'bcp-ov';
+    var modal = document.createElement('div');
+    modal.className = 'bcp-modal';
+    modal.setAttribute('role', 'dialog');
+    modal.setAttribute('aria-modal', 'true');
+    modal.setAttribute('aria-labelledby', 'bcp-title');
+    ov.appendChild(modal);
 
-    var hd = document.createElement('div');
-    hd.className = 'bwn-drawer-hd';
-    hd.innerHTML = '<div><div class="t">Copy proposal to another WO</div><div class="s">loading source proposal…</div></div>';
+    // header
+    var hd = document.createElement('div'); hd.className = 'bcp-hd';
+    hd.innerHTML =
+      '<div class="bcp-hd-main">' +
+      '<div class="bcp-eyebrow">PROPOSAL OPERATIONS</div>' +
+      '<div class="bcp-title" id="bcp-title">Copy proposal</div>' +
+      '<div class="bcp-sub">Create a draft copy of this proposal on another work order.</div>' +
+      '</div>';
+    var badge = document.createElement('span');
     var x = document.createElement('button');
-    x.className = 'bwn-drawer-x'; x.type = 'button'; x.textContent = '×'; x.setAttribute('aria-label', 'Close');
-    x.addEventListener('click', closeDrawer);
-    hd.appendChild(x);
-    overlay.appendChild(hd);
+    x.className = 'bcp-x'; x.type = 'button'; x.setAttribute('aria-label', 'Close'); x.title = 'Close';
+    x.innerHTML = bcpIcon('close', 18);
+    x.addEventListener('click', function () { closeModal(); });
+    hd.appendChild(badge); hd.appendChild(x);
+    modal.appendChild(hd);
 
-    var body = document.createElement('div'); body.className = 'bwn-drawer-body'; body.textContent = 'Loading…';
-    overlay.appendChild(body);
-    var ft = document.createElement('div'); ft.className = 'bwn-drawer-ft';
-    overlay.appendChild(ft);
+    // step indicator
+    var steps = document.createElement('div'); steps.className = 'bcp-steps';
+    steps.setAttribute('aria-hidden', 'true');
+    var stepEls = [];
+    STEP_LABELS.forEach(function (lbl, i) {
+      if (i) { var bar = document.createElement('div'); bar.className = 'bcp-step-bar'; steps.appendChild(bar); }
+      var s = document.createElement('div'); s.className = 'bcp-step';
+      s.innerHTML = '<span class="bcp-step-n">' + (i + 1) + '</span><span class="bcp-step-l"></span>';
+      s.querySelector('.bcp-step-l').textContent = lbl;
+      steps.appendChild(s); stepEls.push(s);
+    });
+    modal.appendChild(steps);
 
-    document.body.appendChild(overlay);
-    bwnFocusTrap(overlay);
+    // body + footer (aria-live for status updates)
+    var body = document.createElement('div'); body.className = 'bcp-body';
+    body.setAttribute('role', 'status'); body.setAttribute('aria-live', 'polite');
+    body.textContent = 'Loading source proposal…';
+    modal.appendChild(body);
+    var ft = document.createElement('div'); ft.className = 'bcp-ft';
+    modal.appendChild(ft);
+
+    document.body.appendChild(ov);
+    try { requestAnimationFrame(function () { ov.classList.add('bcp-in'); }); } catch (e) { ov.classList.add('bcp-in'); }
+    bwnFocusTrap(modal);
     document.addEventListener('keydown', onKeyClose);
-    openEl = overlay;
+    activeModal = ov;
+
+    var M = {
+      ov: ov, modal: modal, badge: badge, stepEls: stepEls, body: body, ft: ft,
+      sourcePid: sourceProposalId, source: null, sourceWo: null,
+      target: null, dup: { state: 'idle', matches: [] }
+    };
+    setBadge(M, 'busy', 'Validating'); setStep(M, 0, 0);
 
     var sourceWoNumber = woNumberFromUrl();
-    pcState = { hasToken: !!authToken(), source: null, sourceWo: null, target: null };
-
     Promise.all([
       pcGql('ClientProposalDetails', Q_PROPOSAL_DETAILS, { proposalId: sourceProposalId }),
       sourceWoNumber ? pcGql('ProposalWO', Q_PROPOSAL_WO, { workOrderNumber: sourceWoNumber }) : Promise.resolve(null)
     ]).then(function (res) {
-      if (openEl !== overlay) return;   // closed while loading
+      if (activeModal !== ov) return;   // closed/replaced while loading
       var sourceData = res[0] && res[0].proposal;
-      var woData = res[1] && res[1].job;
-      if (!sourceData) { renderError(hd, body, 'Could not load the source proposal.'); return; }
-      pcState.source = sourceData;
-      pcState.sourceWo = woData;
-      renderLoaded(overlay, hd, body, ft, sourceData, woData, sourceProposalId);
+      if (!sourceData) { renderFatal(M, 'Could not load the source proposal', 'The proposal data came back empty. Close and try again from the proposal row.'); return; }
+      if (!Array.isArray(sourceData.proposalLineItems) || sourceData.proposalLineItems.length === 0) {
+        M.source = sourceData; renderFatal(M, 'This proposal has no line items', 'There is nothing to copy. Add line items to the source proposal first.'); return;
+      }
+      M.source = sourceData;
+      M.sourceWo = res[1] && res[1].job;
+      renderLoaded(M);
     }).catch(function (err) {
-      if (openEl !== overlay) return;
-      renderError(hd, body, 'Could not load the source proposal (' + ((err && err.message) || err) + ').');
+      if (activeModal !== ov) return;
+      renderFatal(M, 'Could not load the source proposal', (err && err.message) || String(err));
     });
   }
 
-  function renderLoaded(overlay, hd, body, ft, source, sourceWo, sourceProposalId) {
-    var s = hd.querySelector('.s');
-    if (s) s.textContent = 'Proposal #' + (source.number != null ? source.number : sourceProposalId);
-    body.innerHTML = '';
+  // A terminal load error: source could not be read / has nothing to copy. Header + a single card;
+  // footer collapses to Close.
+  function renderFatal(M, title, detail) {
+    setBadge(M, 'err', 'Error'); setStep(M, 0, 0);
+    M.body.innerHTML = '';
+    var card = document.createElement('div'); card.className = 'bcp-card';
+    card.innerHTML =
+      '<div class="bcp-card-hd">' + bcpIcon('warning') + '<div class="bcp-card-t">' + escapeHtml(title) + '</div></div>' +
+      '<div class="bcp-card-bd"><div class="bcp-note err">' + bcpIcon('info') + '<span></span></div></div>';
+    card.querySelector('.bcp-note span').textContent = detail;
+    M.body.appendChild(card);
+    M.ft.innerHTML = '';
+    var close = document.createElement('button'); close.className = 'bcp-btn ghost'; close.type = 'button'; close.textContent = 'Close';
+    close.addEventListener('click', function () { closeModal(); });
+    var sp = document.createElement('div'); sp.className = 'bcp-ft-spacer';
+    M.ft.appendChild(sp); M.ft.appendChild(close);
+  }
 
-    var summary = document.createElement('div');
-    summary.className = 'bwn-pc-sum';
-    summary.innerHTML =
-      '<div><strong>Type:</strong> ' + escapeHtml(source.type && source.type.name) + '</div>' +
-      '<div><strong>Description:</strong> ' + escapeHtml(source.description || '-') + '</div>' +
-      '<div><strong>Total:</strong> ' + fmtMoney(source.subtotal) + '</div>';
-    body.appendChild(summary);
-
+  function renderLoaded(M) {
+    var ov = M.ov, source = M.source, sourceWo = M.sourceWo, pid = M.sourcePid;
     var items = source.proposalLineItems || [];
-    var tbl = document.createElement('table'); tbl.className = 'bwn-pc-table';
-    tbl.innerHTML = '<thead><tr><th>Description</th><th>Qty</th><th>Unit charge</th></tr></thead>';
-    var tb = document.createElement('tbody');
-    items.forEach(function (li) {
-      var tr = document.createElement('tr');
-      tr.innerHTML = '<td>' + escapeHtml(li.description || li.item || '') + '</td>' +
-        '<td>' + escapeHtml(li.quantity) + '</td>' +
-        '<td>' + fmtMoney(li.unitCharge) + '</td>';
-      tb.appendChild(tr);
-    });
-    tbl.appendChild(tb);
-    body.appendChild(tbl);
+    var subEl = M.modal.querySelector('.bcp-sub');
+    if (subEl) subEl.textContent = 'Create a draft copy of Proposal #' + (source.number != null ? source.number : pid) + ' on another work order.';
+    setBadge(M, '', 'Ready'); setStep(M, 1, 1);
 
-    // ---- target picker ------------------------------------------------------
-    var pickWrap = document.createElement('div');
-    pickWrap.className = 'bwn-pc-pick';
-    pickWrap.innerHTML = '<div class="lbl" style="margin-bottom:6px;">Copy to</div>';
-    body.appendChild(pickWrap);
-
-    var sel = document.createElement('select');
-    sel.className = 'bwn-pc-field'; sel.style.marginBottom = '8px';
-    sel.innerHTML = '<option value="">Loading open work orders…</option>';
-    pickWrap.appendChild(sel);
-
-    var freeWrap = document.createElement('div');
-    freeWrap.style.cssText = 'display:flex;gap:8px;align-items:center;margin-bottom:4px;';
-    var freeLbl = document.createElement('span'); freeLbl.textContent = 'or WO #:'; freeLbl.className = 'bwn-pc-hint';
-    var freeInput = document.createElement('input'); freeInput.type = 'text'; freeInput.placeholder = 'e.g. 8002';
-    freeInput.className = 'bwn-pc-field'; freeInput.style.flex = '1';
-    freeWrap.appendChild(freeLbl); freeWrap.appendChild(freeInput);
-    pickWrap.appendChild(freeWrap);
-
-    var warnEl = document.createElement('div'); pickWrap.appendChild(warnEl);
-    var verifyStatus = document.createElement('div');
-    verifyStatus.className = 'bwn-pc-hint'; verifyStatus.style.marginTop = '4px';
-    pickWrap.appendChild(verifyStatus);
-
-    var cancelBtn = document.createElement('button');
-    cancelBtn.type = 'button'; cancelBtn.className = 'bwn-ops-btn ghost'; cancelBtn.textContent = 'Cancel';
-    cancelBtn.addEventListener('click', closeDrawer);
-    var confirmBtn = document.createElement('button');
-    confirmBtn.type = 'button'; confirmBtn.className = 'bwn-ops-btn primary'; confirmBtn.textContent = 'Copy proposal';
-    confirmBtn.disabled = true;
-    ft.appendChild(cancelBtn); ft.appendChild(confirmBtn);
-
-    function refreshConfirm() { confirmBtn.disabled = !confirmReady(pcState); }
-
-    function setTarget(t) {
-      // Guard against a stale async callback (a verify that started before this drawer was
-      // closed, or before a NEW drawer replaced it): once openEl no longer IS this overlay,
-      // pcState may be null (closed) or may belong to a different, currently-open drawer
-      // (superseded) - either way, this call must touch NOTHING.
-      if (openEl !== overlay) return;
-      pcState.target = t;
-      warnEl.innerHTML = '';
-      if (t && sourceWo && sourceWo.locationId != null && t.locationId != null && t.locationId !== sourceWo.locationId) {
-        var w = document.createElement('div'); w.className = 'bwn-pc-warn';
-        w.textContent = 'This work order is at a different location than the source - double check this is intended (it is not blocked).';
-        warnEl.appendChild(w);
-      }
-      refreshConfirm();
+    // ---- pure per-line helpers --------------------------------------------
+    // Extended = unit charge x charge-quantity, DISPLAY ONLY. The authoritative proposal value is
+    // source.subtotal (markup/tax/freight live at the proposal level), which we never recompute -
+    // extended is shown per row for scanability and blanks to "-" when the quantity is not numeric.
+    function qtyOf(li) { var v = (li.chargeQuantity != null ? li.chargeQuantity : li.quantity); var n = Number(v); return isFinite(n) ? n : null; }
+    function extMoney(li) {
+      var q = qtyOf(li); if (q == null || !li.unitCharge || li.unitCharge.amount == null) return null;
+      return { amount: Number(li.unitCharge.amount) * q, currency: li.unitCharge.currency, precision: li.unitCharge.precision };
     }
+    var anyZeroQty = items.some(function (li) { return qtyOf(li) === 0; });
+    var qtySum = 0, qtyKnown = true;
+    items.forEach(function (li) { var q = qtyOf(li); if (q == null) qtyKnown = false; else qtySum += q; });
 
-    // Same-location open WOs (VERIFIED page/sortBy shape - see Core's pinned PagedWorkOrders
-    // seed, [[umbrava-graphql-operations]]: page:{skip,take}, sortBy:[{columnName,direction}],
-    // phase enum literal). Filtered through the pure pickerFilter helper (excludes the source WO).
-    if (sourceWo && sourceWo.locationId != null) {
-      pcGql('PagedWorkOrders', Q_LOCATION_OPEN_WOS, {
-        page: { skip: 0, take: 100 },
-        sortBy: [{ columnName: 'formattedJobNumber', direction: 'ASC' }],
-        locationId: sourceWo.locationId,
-        phase: 'Open'
-      }).then(function (d) {
-        var list = (d && d.listWorkOrdersPaginated && d.listWorkOrdersPaginated.items) || [];
-        var filtered = pickerFilter(list, sourceWo.locationId, sourceWo.number);
-        sel.innerHTML = '';
-        var blank = document.createElement('option');
-        blank.value = '';
-        blank.textContent = filtered.length ? 'Choose an open work order…' : 'No other open WOs at this location';
-        sel.appendChild(blank);
-        filtered.forEach(function (w) {
-          var o = document.createElement('option');
-          o.value = String(w.number);
-          o.textContent = 'W-' + w.number + (w.scopeOfWork ? ' - ' + String(w.scopeOfWork).slice(0, 40) : '');
-          sel.appendChild(o);
-        });
-      }).catch(function () {
-        sel.innerHTML = '<option value="">Could not load open work orders - use the WO # field</option>';
+    M.body.removeAttribute('aria-live');   // per-region live areas take over from the whole-body one
+    M.body.innerHTML = '';
+
+    // ---- 1. Source proposal card ------------------------------------------
+    var srcClient = sourceWo ? [sourceWo.clientName, (sourceWo.locationName || (sourceWo.locationNumber != null ? 'Loc ' + sourceWo.locationNumber : ''))].filter(Boolean).join(' · ') : '';
+    var srcCard = document.createElement('div'); srcCard.className = 'bcp-card';
+    srcCard.innerHTML =
+      '<div class="bcp-card-hd">' + bcpIcon('file') + '<div class="bcp-card-t">Source proposal</div>' +
+      '<span class="bcp-chip">#' + escapeHtml(source.number != null ? source.number : pid) + '</span></div>' +
+      '<div class="bcp-card-bd">' +
+      '<div class="bcp-tiles">' +
+      '<div class="bcp-tile total"><div class="k">Proposal total</div><div class="v">' + escapeHtml(fmtMoney(source.subtotal)) + '</div></div>' +
+      '<div class="bcp-tile"><div class="k">Line items</div><div class="v">' + items.length + '</div></div>' +
+      '<div class="bcp-tile"><div class="k">Total qty</div><div class="v">' + (qtyKnown ? escapeHtml(String(qtySum)) : '-') + '</div></div>' +
+      '</div>' +
+      '<div class="bcp-meta">' +
+      (source.type && source.type.name ? '<div><strong>Type:</strong> ' + escapeHtml(source.type.name) + '</div>' : '') +
+      '<div><strong>Description:</strong> ' + (source.description ? escapeHtml(source.description) : '<span class="bcp-empty">No description provided.</span>') + '</div>' +
+      (sourceWo ? '<div><strong>Source WO:</strong> W-' + escapeHtml(sourceWo.number) + (srcClient ? ' · ' + escapeHtml(srcClient) : '') + '</div>' : '') +
+      (source.status && source.status.name ? '<div><strong>Status:</strong> ' + escapeHtml(source.status.name) + '</div>' : '') +
+      '</div>' +
+      '<div class="bcp-note info">' + bcpIcon('info') + '<span>This action creates a new draft proposal on the target work order. It does not modify the source proposal. All included line items will be copied to the new draft.</span></div>' +
+      '</div>';
+    M.body.appendChild(srcCard);
+
+    // ---- 2. Included line items card --------------------------------------
+    var liCard = document.createElement('div'); liCard.className = 'bcp-card';
+    var liHd = document.createElement('div'); liHd.className = 'bcp-card-hd';
+    liHd.innerHTML = bcpIcon('list') + '<div class="bcp-card-t">Included line items</div>' +
+      '<div class="bcp-card-meta"><span>' + items.length + ' item' + (items.length === 1 ? '' : 's') + '</span><span>' + escapeHtml(fmtMoney(source.subtotal)) + '</span></div>';
+    var toggle = document.createElement('button'); toggle.className = 'bcp-linkbtn'; toggle.type = 'button';
+    liHd.querySelector('.bcp-card-meta').appendChild(toggle);
+    var liBd = document.createElement('div'); liBd.className = 'bcp-card-bd';
+    liCard.appendChild(liHd); liCard.appendChild(liBd);
+    M.body.appendChild(liCard);
+    var expanded = items.length <= 8;
+    function renderItems() {
+      liBd.innerHTML = '';
+      var showAll = expanded;
+      var shown = showAll ? items : items.slice(0, 5);
+      var scroll = document.createElement('div'); scroll.className = 'bcp-scroll';
+      var t = document.createElement('table'); t.className = 'bcp-tbl';
+      t.innerHTML = '<thead><tr><th>Description</th><th class="num">Qty</th><th class="num">Unit charge</th><th class="num">Extended</th></tr></thead>';
+      var tb = document.createElement('tbody');
+      shown.forEach(function (li) {
+        var q = qtyOf(li), ext = extMoney(li), tr = document.createElement('tr');
+        tr.innerHTML =
+          '<td>' + escapeHtml(li.description || li.item || '-') + '</td>' +
+          '<td class="' + (q === 0 ? 'num zero' : 'num') + '">' + escapeHtml(q == null ? '-' : String(q)) + '</td>' +
+          '<td class="num">' + escapeHtml(fmtMoney(li.unitCharge)) + '</td>' +
+          '<td class="num">' + (ext ? escapeHtml(fmtMoney(ext)) : '-') + '</td>';
+        tb.appendChild(tr);
       });
-    } else {
-      sel.innerHTML = '<option value="">Source location unknown - use the WO # field</option>';
+      t.appendChild(tb); scroll.appendChild(t); liBd.appendChild(scroll);
+      if (!showAll) {
+        var more = document.createElement('button'); more.className = 'bcp-linkbtn'; more.type = 'button'; more.style.marginTop = '9px';
+        more.textContent = 'View all ' + items.length + ' line items';
+        more.addEventListener('click', function () { expanded = true; syncToggle(); renderItems(); });
+        liBd.appendChild(more);
+      }
+      var sum = document.createElement('div'); sum.className = 'bcp-sumrow';
+      sum.innerHTML = '<span>' + items.length + ' line' + (items.length === 1 ? '' : 's') + ' copied</span><span>' + escapeHtml(fmtMoney(source.subtotal)) + '</span>';
+      liBd.appendChild(sum);
+      if (anyZeroQty) {
+        var cav = document.createElement('div'); cav.className = 'bcp-note info'; cav.style.marginTop = '8px';
+        cav.innerHTML = bcpIcon('info') + '<span>Some lines have a zero quantity. These are valid in the source and are preserved and copied exactly.</span>';
+        liBd.appendChild(cav);
+      }
+    }
+    function syncToggle() { toggle.textContent = expanded ? 'Collapse' : ('View all ' + items.length); }
+    if (items.length > 8) { syncToggle(); toggle.addEventListener('click', function () { expanded = !expanded; syncToggle(); renderItems(); }); }
+    else { toggle.style.display = 'none'; }
+    renderItems();
+
+    // ---- 3. Destination card ----------------------------------------------
+    var destCard = document.createElement('div'); destCard.className = 'bcp-card accent';
+    destCard.innerHTML = '<div class="bcp-card-hd">' + bcpIcon('pin') + '<div class="bcp-card-t">Copy to work order</div></div>';
+    var destBd = document.createElement('div'); destBd.className = 'bcp-card-bd';
+    destCard.appendChild(destBd); M.body.appendChild(destCard);
+
+    // ---- 4. Pre-copy checks card (hidden until a target is validated) ------
+    var checksCard = document.createElement('div'); checksCard.className = 'bcp-card'; checksCard.style.display = 'none';
+    checksCard.innerHTML = '<div class="bcp-card-hd">' + bcpIcon('shield') + '<div class="bcp-card-t">Pre-copy checks</div></div>';
+    var checksBd = document.createElement('div'); checksBd.className = 'bcp-card-bd';
+    checksBd.setAttribute('role', 'status'); checksBd.setAttribute('aria-live', 'polite');
+    checksCard.appendChild(checksBd); M.body.appendChild(checksCard);
+
+    // ---- 5. Pre-copy confirmation (hidden until creation is possible) ------
+    var confirmWrap = document.createElement('div'); confirmWrap.style.display = 'none';
+    M.body.appendChild(confirmWrap);
+
+    // ---- footer ------------------------------------------------------------
+    M.ft.innerHTML = '';
+    var cancelBtn = document.createElement('button'); cancelBtn.className = 'bcp-btn ghost'; cancelBtn.type = 'button'; cancelBtn.textContent = 'Cancel';
+    cancelBtn.addEventListener('click', function () { closeModal(); });
+    var resetBtn = document.createElement('button'); resetBtn.className = 'bcp-btn neutral'; resetBtn.type = 'button'; resetBtn.textContent = 'Reset target'; resetBtn.style.display = 'none';
+    resetBtn.addEventListener('click', function () { clearTarget(); });
+    var spacer = document.createElement('div'); spacer.className = 'bcp-ft-spacer';
+    var primary = document.createElement('button'); primary.className = 'bcp-btn primary'; primary.type = 'button';
+    M.ft.appendChild(cancelBtn); M.ft.appendChild(resetBtn); M.ft.appendChild(spacer); M.ft.appendChild(primary);
+
+    // ---- destination state + logic ----------------------------------------
+    var openWos = [];       // same-location open WOs for the selector (once loaded)
+    var freeTimer = null;
+
+    function clearTarget() {
+      M.target = null; M.manualStr = ''; M.targetErr = ''; M.validating = false;
+      M.dup = { state: 'idle', matches: [] };
+      setBadge(M, '', 'Ready'); setStep(M, 1, 1);
+      renderDest(); renderChecks(); renderConfirm(); updateCTA();
     }
 
-    sel.addEventListener('change', function () {
-      if (!sel.value) { setTarget(null); verifyStatus.textContent = ''; return; }
-      freeInput.value = sel.value;
-      verifyTarget(sel.value);
-    });
+    function renderDest() {
+      destBd.innerHTML = '';
+      if (M.target) {
+        var loc = [M.target.clientName, (M.target.locationName || (M.target.locationNumber != null ? 'Loc ' + M.target.locationNumber : ''))].filter(Boolean).join(' · ');
+        var panel = document.createElement('div'); panel.className = 'bcp-target';
+        panel.innerHTML = bcpIcon('target') + '<div class="bcp-target-main"><div class="bcp-target-wo">Target: W-' + escapeHtml(M.target.number) + '</div>' + (loc ? '<div class="bcp-target-loc">' + escapeHtml(loc) + '</div>' : '') + '</div>';
+        var change = document.createElement('button'); change.className = 'bcp-linkbtn'; change.type = 'button'; change.textContent = 'Change';
+        change.addEventListener('click', function () { clearTarget(); });
+        panel.appendChild(change);
+        destBd.appendChild(panel);
+        if (sourceWo && sourceWo.locationId != null && M.target.locationId != null && M.target.locationId !== sourceWo.locationId) {
+          var w = document.createElement('div'); w.className = 'bcp-note warn'; w.style.marginTop = '9px';
+          w.innerHTML = bcpIcon('warning') + '<span>This work order is at a different location than the source. Double-check this is intended (it is not blocked).</span>';
+          destBd.appendChild(w);
+        }
+        return;
+      }
+      var selLbl = document.createElement('label'); selLbl.className = 'bcp-lbl'; selLbl.textContent = 'Search open work orders'; destBd.appendChild(selLbl);
+      var searchWrap = document.createElement('div'); searchWrap.className = 'bcp-search'; searchWrap.innerHTML = bcpIcon('search');
+      var sel = document.createElement('select'); sel.className = 'bcp-inp'; sel.setAttribute('aria-label', 'Open work orders at this location');
+      searchWrap.appendChild(sel); destBd.appendChild(searchWrap);
+      var blank = document.createElement('option'); blank.value = '';
+      if (M.woLoadErr) blank.textContent = 'Could not load work orders – use the field below';
+      else if (!sourceWo || sourceWo.locationId == null) blank.textContent = 'Source location unknown – use the field below';
+      else blank.textContent = openWos.length ? 'Search by WO number, site, or location' : 'No other open WOs at this location';
+      sel.appendChild(blank);
+      openWos.forEach(function (w) {
+        var o = document.createElement('option'); o.value = String(w.number);
+        o.textContent = 'W-' + w.number + (w.scopeOfWork ? ' – ' + String(w.scopeOfWork).slice(0, 46) : '');
+        sel.appendChild(o);
+      });
+      sel.addEventListener('change', function () { if (sel.value) { manual.value = sel.value; M.manualStr = sel.value; verifyTarget(sel.value); } });
 
-    var freeTimer = null;
-    freeInput.addEventListener('input', function () {
-      if (freeTimer) clearTimeout(freeTimer);
-      var v = freeInput.value.trim();
-      if (!v) { setTarget(null); verifyStatus.textContent = ''; return; }
-      freeTimer = setTimeout(function () { verifyTarget(v); }, 450);
-    });
+      var or = document.createElement('div'); or.className = 'bcp-or'; or.textContent = 'OR ENTER A WORK ORDER NUMBER'; destBd.appendChild(or);
+      var manLbl = document.createElement('label'); manLbl.className = 'bcp-lbl'; manLbl.setAttribute('for', 'bcp-wo'); manLbl.textContent = 'Work order number'; destBd.appendChild(manLbl);
+      var manual = document.createElement('input'); manual.className = 'bcp-inp'; manual.id = 'bcp-wo'; manual.type = 'text'; manual.placeholder = 'e.g., 396180'; manual.autocomplete = 'off';
+      manual.value = M.manualStr || ''; destBd.appendChild(manual);
+      var status = document.createElement('div'); status.style.marginTop = '8px'; destBd.appendChild(status);
+      if (M.validating) { status.className = 'bcp-check busy'; status.innerHTML = bcpIcon('search') + '<span>Checking target work order…</span>'; }
+      else if (M.targetErr) { status.className = 'bcp-note err'; status.innerHTML = bcpIcon('warning') + '<span></span>'; status.querySelector('span').textContent = M.targetErr; }
+      else { status.className = 'bcp-check'; status.innerHTML = '<span class="bcp-empty">Select or enter a target work order.</span>'; }
+      manual.addEventListener('input', function () {
+        M.manualStr = manual.value.trim(); M.targetErr = '';
+        if (freeTimer) clearTimeout(freeTimer);
+        if (M.manualStr) freeTimer = setTimeout(function () { verifyTarget(M.manualStr); }, 500);
+        updateCTA();
+      });
+      manual.addEventListener('keydown', function (e) { if (e.key === 'Enter') { e.preventDefault(); if (freeTimer) clearTimeout(freeTimer); if (M.manualStr) verifyTarget(M.manualStr); } });
+      manual.addEventListener('blur', function () { if (M.manualStr && !M.validating && !M.target) { if (freeTimer) clearTimeout(freeTimer); verifyTarget(M.manualStr); } });
+    }
 
-    // The free WO-number field is ALWAYS re-verified live via Q_PROPOSAL_WO before Confirm
-    // can enable - confirmReady requires target.id, which only a real read supplies.
+    // Live target verify (Q_PROPOSAL_WO). Same-as-source is blocked here; confirmReady still requires
+    // target.id, which only a real read supplies.
     function verifyTarget(numStr) {
       var n = parseInt(numStr, 10);
-      if (!isFinite(n)) { setTarget(null); verifyStatus.textContent = 'Not a valid WO number.'; return; }
-      verifyStatus.textContent = 'Verifying W-' + n + '…';
+      if (!isFinite(n)) { M.target = null; M.validating = false; M.targetErr = 'Enter a valid work order number.'; setBadge(M, 'err', 'Error'); renderDest(); renderChecks(); renderConfirm(); updateCTA(); return; }
+      if (sourceWo && sourceWo.number != null && n === sourceWo.number) {
+        M.target = null; M.validating = false; M.targetErr = 'The target must be different from the source work order (W-' + sourceWo.number + ').';
+        setBadge(M, 'err', 'Error'); renderDest(); renderChecks(); renderConfirm(); updateCTA(); return;
+      }
+      M.validating = true; M.targetErr = ''; M.manualStr = String(n);
+      setBadge(M, 'busy', 'Validating'); renderDest(); renderChecks(); renderConfirm(); updateCTA();
       pcGql('ProposalWO', Q_PROPOSAL_WO, { workOrderNumber: n }).then(function (d) {
-        // Same guard as setTarget: this request may resolve after the drawer that started
-        // it closed (or was replaced by a new one) - a stale response must update nothing,
-        // not even the status line, and must never reach into a (possibly null, possibly
-        // reassigned-to-another-drawer) pcState.
-        if (openEl !== overlay) return;
+        if (activeModal !== ov) return;
+        M.validating = false;
         var job = d && d.job;
-        if (!job || job.number == null || job.id == null) { verifyStatus.textContent = 'W-' + n + ' was not found.'; setTarget(null); return; }
-        verifyStatus.textContent = 'Target: W-' + job.number + (job.locationName ? ' - ' + job.locationName : '');
-        setTarget(job);
+        if (!job || job.number == null || job.id == null) { M.target = null; M.targetErr = 'Work order W-' + n + ' was not found.'; setBadge(M, 'err', 'Error'); renderDest(); updateCTA(); return; }
+        M.target = job; M.targetErr = '';
+        renderDest(); runDupCheck();
       }).catch(function (err) {
-        if (openEl !== overlay) return;   // drawer closed/superseded - nothing left to update
-        verifyStatus.textContent = 'Could not verify W-' + n + ' (' + ((err && err.message) || err) + ').';
-        setTarget(null);
+        if (activeModal !== ov) return;
+        M.validating = false; M.target = null;
+        M.targetErr = 'Could not check W-' + n + ' (' + ((err && err.message) || err) + '). Try again.';
+        setBadge(M, 'err', 'Error'); renderDest(); updateCTA();
       });
     }
 
-    confirmBtn.addEventListener('click', function () {
-      pcState.hasToken = !!authToken();   // re-check - the drawer may have sat open a while
-      if (!confirmReady(pcState)) { refreshConfirm(); return; }
-      runCopy(body, confirmBtn, cancelBtn, sourceProposalId, pcState.target);
-    });
+    // The real, verified pre-copy duplicate check: list the target WO's existing client proposals
+    // and surface a non-blocking REVIEW when one matches the source. Never auto-blocks.
+    function runDupCheck() {
+      if (!M.target) return;
+      M.dup = { state: 'checking', matches: [] };
+      setBadge(M, 'busy', 'Validating'); setStep(M, 1, 1);
+      renderChecks(); renderConfirm(); updateCTA();
+      pcGql('ListClientProposals', Q_LIST_CLIENT_PROPOSALS, { jobId: M.target.id, page: { skip: 0, take: 100 } }).then(function (d) {
+        if (activeModal !== ov) return;
+        var list = (d && d.listClientProposals && d.listClientProposals.items) || [];
+        var matches = dupFindMatches(source, list);
+        M.dup = { state: matches.length ? 'review' : 'safe', matches: matches };
+        setBadge(M, matches.length ? 'review' : 'good', matches.length ? 'Review suggested' : 'Ready to copy');
+        setStep(M, 2, 2);
+        renderChecks(); renderConfirm(); updateCTA();
+      }).catch(function (err) {
+        if (activeModal !== ov) return;
+        M.dup = { state: 'unknown', matches: [], err: (err && err.message) || String(err) };
+        setBadge(M, 'review', 'Check unavailable'); setStep(M, 1, 1);
+        renderChecks(); renderConfirm(); updateCTA();
+      });
+    }
 
-    refreshConfirm();
-  }
-
-  function runCopy(body, confirmBtn, cancelBtn, sourceProposalId, target) {
-    confirmBtn.disabled = true; cancelBtn.disabled = true;
-    confirmBtn.textContent = 'Copying…';
-    var progress = document.createElement('div');
-    progress.className = 'bwn-pc-warn';
-    progress.textContent = 'Copying proposal to W-' + target.number + '…';
-    body.appendChild(progress);
-    copyProposal(sourceProposalId, target.number, {}).then(function (r) {
-      if (r && r.ok) {
-        // Build the "open W-<n>" link with DOM APIs, never string-interpolation into innerHTML:
-        // target.number is Number()-coerced into the href and set as textContent, so it cannot
-        // inject regardless of source.
-        // UNVERIFIED: the exact Proposals-TAB deep-link shape (query/hash param). The bare
-        // WO route below is proven (onProposalPage's own match); landing on the Proposals
-        // tab specifically is not confirmed - the operator may need one extra click there.
-        var openLink = document.createElement('a');
-        openLink.href = '/work-orders/' + Number(target.number);
-        openLink.style.cssText = 'color:var(--bwn-ok-fg,#0d3d26);font-weight:600;';
-        openLink.textContent = 'open W-' + target.number;
-
-        var rb = r.readBack;
-        if (rb && rb.match === false) {
-          // The Draft WAS created, but the read-back of the new proposal did not match the source:
-          // a dropped line item, a changed subtotal, or a client PO the edit silently nulled - all
-          // on a client-facing money document. Report "created, but verify" with the specifics, NOT
-          // a green success, and log the full read-back so the drop is never silent.
-          var diffs = [];
-          if (rb.newItems !== rb.sourceItems) diffs.push('line items ' + rb.sourceItems + ' -> ' + rb.newItems);
-          if (rb.sourceSubtotal != null && rb.newSubtotal !== rb.sourceSubtotal) diffs.push('subtotal changed');
-          if (rb.sourcePO !== rb.newPO) diffs.push('client PO ' + (rb.sourcePO || 'none') + ' -> ' + (rb.newPO || 'none'));
-          console.warn('[BWN PROPOSAL COPY] read-back did NOT match the source on the new Draft', rb);
-          reportFail({ level: 'warn', tag: 'proposalCopy.readback.mismatch', feature: 'proposalCopy', ids: { proposal: sourceProposalId, wo: Number(target.number) }, code: 'readback-mismatch' });
-          pcToast('Copied to W-' + target.number + ', but the read-back did NOT match - verify it.');
-          progress.className = 'bwn-pc-warn';
-          progress.textContent = 'Created as a Draft, but VERIFY (' + (diffs.join('; ') || 'read-back differs') + ') - ';
-          progress.appendChild(openLink);
-          progress.appendChild(document.createTextNode(' and check its line items, total and client PO.'));
-          // confirmBtn stays disabled: the Draft exists, so re-running would create a duplicate.
-          cancelBtn.disabled = false;
-          confirmBtn.textContent = 'Created - verify';
-          // Deliberately no auto-close: leave the warning on screen until the operator dismisses it.
-        } else {
-          pcToast('Copied to W-' + target.number + ' as a new Draft proposal.');
-          progress.className = 'bwn-pc-ok';
-          progress.textContent = 'Done - ';
-          progress.appendChild(openLink);
-          progress.appendChild(document.createTextNode(' and check its Proposals tab.'));
-          confirmBtn.textContent = 'Copied';
-          setTimeout(closeDrawer, 3000);
-        }
-      } else {
-        confirmBtn.disabled = false; cancelBtn.disabled = false;
-        confirmBtn.textContent = 'Retry';
-        progress.className = 'bwn-pc-err';
-        progress.textContent = 'Copy failed at "' + ((r && r.stage) || 'unknown') + '": ' + ((r && r.error) || 'unknown error');
-        reportFail({ level: 'error', tag: 'proposalCopy.copy.fail', feature: 'proposalCopy', ids: { proposal: sourceProposalId, wo: Number(target.number) }, code: (r && r.stage) || 'unknown' });   // r.error (free text) stays in the drawer, never logged
+    function renderChecks() {
+      if (!M.target) { checksCard.style.display = 'none'; checksBd.innerHTML = ''; return; }
+      checksCard.style.display = ''; checksBd.innerHTML = '';
+      var d = M.dup;
+      if (d.state === 'checking') {
+        checksBd.innerHTML = '<div class="bcp-check busy">' + bcpIcon('search') + '<span>Checking for an existing proposal on W-' + escapeHtml(M.target.number) + '…</span></div>';
+      } else if (d.state === 'safe') {
+        checksBd.innerHTML = '<div class="bcp-check ok">' + bcpIcon('check') + '<span>No conflicting proposal found on the selected target work order.</span></div>';
+      } else if (d.state === 'unknown') {
+        var u = document.createElement('div'); u.className = 'bcp-check err'; u.innerHTML = bcpIcon('warning') + '<span>Duplicate check could not be completed. Creation is disabled until it succeeds.</span>';
+        checksBd.appendChild(u);
+        var retry = document.createElement('button'); retry.className = 'bcp-btn ghost'; retry.type = 'button'; retry.style.marginTop = '10px'; retry.innerHTML = bcpIcon('shield') + '<span>Retry duplicate check</span>';
+        retry.addEventListener('click', function () { runDupCheck(); });
+        checksBd.appendChild(retry);
+        if (d.err) { var td = document.createElement('details'); td.className = 'bcp-tech'; td.innerHTML = '<summary>Technical details</summary><pre></pre>'; td.querySelector('pre').textContent = d.err; checksBd.appendChild(td); }
+      } else if (d.state === 'review') {
+        var r = document.createElement('div'); r.className = 'bcp-check review'; r.innerHTML = bcpIcon('warning') + '<span>A similar proposal may already exist on this work order. Review before creating another draft.</span>';
+        checksBd.appendChild(r);
+        var evi = document.createElement('div'); evi.className = 'bcp-evi';
+        d.matches.slice(0, 6).forEach(function (p) {
+          var row = document.createElement('div'); row.className = 'bcp-evi-row';
+          var left = '#' + (p.number != null ? p.number : '?') + (p.description ? ' · ' + String(p.description).slice(0, 46) : '') + (p.status && p.status.name ? ' · ' + p.status.name : '');
+          row.innerHTML = '<span class="n"></span><span>' + escapeHtml(fmtMoney(p.subtotal)) + '</span>';
+          row.querySelector('.n').textContent = left;
+          evi.appendChild(row);
+        });
+        checksBd.appendChild(evi);
       }
-    }).catch(function (err) {
-      confirmBtn.disabled = false; cancelBtn.disabled = false;
-      confirmBtn.textContent = 'Retry';
-      progress.className = 'bwn-pc-err';
-      progress.textContent = 'Copy failed: ' + ((err && err.message) || err);
-      reportFail({ level: 'error', tag: 'proposalCopy.copy.fail', feature: 'proposalCopy', ids: { proposal: sourceProposalId, wo: Number(target.number) }, code: 'exception' });   // err.message (free text) stays in the drawer, never logged
-    });
+    }
+
+    function canCreate() {
+      if (M.busyCreate) return false;
+      if (!confirmReady({ hasToken: !!authToken(), source: source, target: M.target })) return false;
+      if (sourceWo && sourceWo.number != null && M.target && M.target.number === sourceWo.number) return false;
+      return M.dup.state === 'safe' || M.dup.state === 'review';
+    }
+
+    function renderConfirm() {
+      if (!canCreate()) { confirmWrap.style.display = 'none'; confirmWrap.innerHTML = ''; return; }
+      confirmWrap.style.display = ''; confirmWrap.innerHTML = '';
+      var c = document.createElement('div'); c.className = 'bcp-confirm';
+      var n = items.length;
+      c.innerHTML =
+        '<div><strong>You are about to create a draft.</strong> A draft proposal with ' + n + ' line item' + (n === 1 ? '' : 's') + ' totaling ' + escapeHtml(fmtMoney(source.subtotal)) + ' will be created on WO W-' + escapeHtml(M.target.number) + '.</div>' +
+        '<div class="sub">Source: Proposal #' + escapeHtml(source.number != null ? source.number : pid) + '  →  Target: W-' + escapeHtml(M.target.number) + '. The source proposal will not be changed. The new proposal must be reviewed and submitted through the normal proposal workflow.</div>';
+      confirmWrap.appendChild(c);
+    }
+
+    // Footer primary CTA reflects the real blocking reason at every moment.
+    function updateCTA() {
+      var label, icon, disabled = true, action = null;
+      if (M.busyCreate) { label = 'Creating draft…'; icon = 'lock'; }
+      else if (!M.target && M.manualStr) { label = 'Check work order'; icon = 'search'; disabled = M.validating; action = function () { if (freeTimer) clearTimeout(freeTimer); verifyTarget(M.manualStr); }; }
+      else if (!M.target) { label = 'Select a target'; icon = 'target'; }
+      else if (M.dup.state === 'checking') { label = 'Checking…'; icon = 'shield'; }
+      else if (canCreate()) { label = 'Create draft proposal'; icon = 'copy'; disabled = false; action = runCreate; }
+      else { label = 'Create draft proposal'; icon = 'lock'; }   // dup unknown / same-WO / not ready
+      primary.disabled = disabled;
+      primary.innerHTML = bcpIcon(icon) + '<span></span>';
+      primary.querySelector('span').textContent = label;
+      primary.onclick = (disabled || !action) ? null : action;
+      resetBtn.style.display = (M.target || M.manualStr) ? '' : 'none';
+    }
+
+    function runCreate() {
+      if (M.busyCreate || !canCreate()) return;
+      M.busyCreate = true; modalBusy = true;
+      setBadge(M, 'busy', 'Creating draft'); setStep(M, 2, 2);
+      cancelBtn.disabled = true; resetBtn.disabled = true; updateCTA();
+      var tnum = M.target.number;
+      copyProposal(pid, tnum, {}).then(function (r) {
+        M.busyCreate = false; modalBusy = false; cancelBtn.disabled = false; resetBtn.disabled = false;
+        if (activeModal !== ov) return;
+        if (r && r.ok) renderSuccess(r, tnum);
+        else renderCreateError((r && r.stage) || 'unknown', (r && r.error) || 'Unknown error', tnum);
+      }).catch(function (err) {
+        M.busyCreate = false; modalBusy = false; cancelBtn.disabled = false; resetBtn.disabled = false;
+        if (activeModal !== ov) return;
+        renderCreateError('exception', (err && err.message) || String(err), tnum);
+      });
+    }
+
+    // Terminal success panel. Distinguishes a clean copy from a created-but-read-back-mismatch (the
+    // engine's honesty guard) - the latter is amber, not green.
+    function renderSuccess(r, tnum) {
+      var rb = r.readBack || {}, mismatch = rb.match === false;
+      var diffs = [];
+      if (mismatch) {
+        if (rb.newItems !== rb.sourceItems) diffs.push('line items ' + rb.sourceItems + ' → ' + rb.newItems);
+        if (rb.sourceSubtotal != null && rb.newSubtotal !== rb.sourceSubtotal) diffs.push('subtotal changed');
+        if (rb.sourcePO !== rb.newPO) diffs.push('client PO ' + (rb.sourcePO || 'none') + ' → ' + (rb.newPO || 'none'));
+        console.warn('[BWN PROPOSAL COPY] read-back did NOT match the source on the new Draft', rb);
+        reportFail({ level: 'warn', tag: 'proposalCopy.readback.mismatch', feature: 'proposalCopy', ids: { proposal: pid, wo: Number(tnum) }, code: 'readback-mismatch' });
+      }
+      pcToast(mismatch ? ('Copied to W-' + tnum + ', but the read-back did not match – verify it.') : ('Copied to W-' + tnum + ' as a new Draft proposal.'));
+      setBadge(M, mismatch ? 'review' : 'good', mismatch ? 'Created – verify' : 'Created'); setStep(M, -1, 3);
+      var loc = M.target ? [M.target.clientName, M.target.locationName].filter(Boolean).join(' · ') : '';
+      M.body.innerHTML = '';
+      var card = document.createElement('div'); card.className = 'bcp-card';
+      card.innerHTML = '<div class="bcp-card-hd">' + bcpIcon(mismatch ? 'warning' : 'check') + '<div class="bcp-card-t">' + (mismatch ? 'Draft created – please verify' : 'Draft proposal created') + '</div></div>';
+      var bd = document.createElement('div'); bd.className = 'bcp-card-bd';
+      var meta = document.createElement('div'); meta.className = 'bcp-meta';
+      meta.innerHTML =
+        (r.newProposalId != null ? '<div><strong>New draft id:</strong> #' + escapeHtml(r.newProposalId) + '</div>' : '') +
+        '<div><strong>Target WO:</strong> W-' + escapeHtml(tnum) + (loc ? ' · ' + escapeHtml(loc) : '') + '</div>' +
+        '<div><strong>Lines copied:</strong> ' + escapeHtml(rb.newItems != null ? rb.newItems : items.length) + '</div>' +
+        '<div><strong>Total copied:</strong> ' + escapeHtml(fmtMoney(source.subtotal)) + '</div>' +
+        (rb.newPO ? '<div><strong>Client PO:</strong> ' + escapeHtml(rb.newPO) + '</div>' : '');
+      bd.appendChild(meta);
+      var note = document.createElement('div');
+      if (mismatch) { note.className = 'bcp-note warn'; note.innerHTML = bcpIcon('warning') + '<span></span>'; note.querySelector('span').textContent = 'The draft was created, but the read-back did not match the source (' + (diffs.join('; ') || 'read-back differs') + '). Open the target work order and check its line items, total and client PO.'; }
+      else { note.className = 'bcp-note ok'; note.innerHTML = bcpIcon('check') + '<span>The draft is on the target work order’s Proposals tab. Review and submit it through the normal proposal workflow.</span>'; }
+      bd.appendChild(note);
+      card.appendChild(bd); M.body.appendChild(card);
+      // footer: primary = open the target WO (verified route); secondaries = copy details / another / close
+      M.ft.innerHTML = '';
+      var copyBtn = document.createElement('button'); copyBtn.className = 'bcp-btn ghost'; copyBtn.type = 'button'; copyBtn.innerHTML = bcpIcon('copy') + '<span>Copy details</span>';
+      copyBtn.addEventListener('click', function () {
+        var lines = ['Copied Proposal #' + (source.number != null ? source.number : pid) + ' to W-' + tnum, (r.newProposalId != null ? 'New draft id: ' + r.newProposalId : ''), 'Lines: ' + (rb.newItems != null ? rb.newItems : items.length), 'Total: ' + fmtMoney(source.subtotal)].filter(Boolean).join('\n');
+        try { (navigator.clipboard && navigator.clipboard.writeText ? navigator.clipboard.writeText(lines) : Promise.reject()).then(function () { pcToast('Details copied to clipboard.'); }, function () { pcToast('Could not copy – details are shown above.'); }); } catch (e) { pcToast('Could not copy – details are shown above.'); }
+      });
+      var another = document.createElement('button'); another.className = 'bcp-btn ghost'; another.type = 'button'; another.textContent = 'Copy another';
+      another.addEventListener('click', function () { closeModal(true); setTimeout(function () { openModal(pid); }, 30); });
+      var closeB = document.createElement('button'); closeB.className = 'bcp-btn ghost'; closeB.type = 'button'; closeB.textContent = 'Close';
+      closeB.addEventListener('click', function () { closeModal(); });
+      var sp = document.createElement('div'); sp.className = 'bcp-ft-spacer';
+      M.ft.appendChild(copyBtn); M.ft.appendChild(another); M.ft.appendChild(closeB); M.ft.appendChild(sp);
+      var open = document.createElement('a'); open.className = 'bcp-btn primary'; open.href = '/work-orders/' + Number(tnum); open.target = '_blank'; open.rel = 'noopener';
+      open.innerHTML = bcpIcon('external') + '<span>Open target work order</span>';
+      M.ft.appendChild(open);
+    }
+
+    function renderCreateError(stage, msg, tnum) {
+      setBadge(M, 'err', 'Error');
+      reportFail({ level: 'error', tag: 'proposalCopy.copy.fail', feature: 'proposalCopy', ids: { proposal: pid, wo: Number(tnum) }, code: stage });   // free-text msg stays in the drawer, never logged
+      confirmWrap.style.display = ''; confirmWrap.innerHTML = '';
+      var card = document.createElement('div'); card.className = 'bcp-card';
+      card.innerHTML = '<div class="bcp-card-hd">' + bcpIcon('warning') + '<div class="bcp-card-t">Copy failed</div></div>';
+      var bd = document.createElement('div'); bd.className = 'bcp-card-bd';
+      var note = document.createElement('div'); note.className = 'bcp-note err'; note.innerHTML = bcpIcon('warning') + '<span></span>';
+      note.querySelector('span').textContent = 'The draft was not created (failed at: ' + stage + '). Your target selection is preserved – you can retry.';
+      bd.appendChild(note);
+      var td = document.createElement('details'); td.className = 'bcp-tech'; td.innerHTML = '<summary>Technical details</summary><pre></pre>'; td.querySelector('pre').textContent = String(msg);
+      bd.appendChild(td); card.appendChild(bd); confirmWrap.appendChild(card);
+      updateCTA();
+      primary.innerHTML = bcpIcon('copy') + '<span>Retry create</span>'; primary.disabled = false; primary.onclick = runCreate;
+    }
+
+    // initial paint + load the same-location open WOs for the selector
+    renderDest(); renderChecks(); renderConfirm(); updateCTA();
+    if (sourceWo && sourceWo.locationId != null) {
+      pcGql('PagedWorkOrders', Q_LOCATION_OPEN_WOS, { page: { skip: 0, take: 100 }, sortBy: [{ columnName: 'formattedJobNumber', direction: 'ASC' }], locationId: sourceWo.locationId, phase: 'Open' }).then(function (d) {
+        if (activeModal !== ov) return;
+        var list = (d && d.listWorkOrdersPaginated && d.listWorkOrdersPaginated.items) || [];
+        openWos = pickerFilter(list, sourceWo.locationId, sourceWo.number);
+        if (!M.target) renderDest();
+      }).catch(function () { if (activeModal !== ov) return; M.woLoadErr = true; if (!M.target) renderDest(); });
+    }
   }
 
   // ---- lifecycle: inject our item whenever the actions menu opens -----------
