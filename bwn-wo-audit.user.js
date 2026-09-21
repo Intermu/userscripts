@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         BWN WO Audit (Broadway National)
 // @namespace    broadwaynational.bwn
-// @version      0.12.0
+// @version      0.13.0
 // @downloadURL  https://raw.githubusercontent.com/Intermu/userscripts/main/bwn-wo-audit.user.js
 // @updateURL    https://raw.githubusercontent.com/Intermu/userscripts/main/bwn-wo-audit.user.js
 // @description  Batch WO-audit tool. Upload a WO audit .xlsx; for each work order this reads its two most recent notes DIRECTLY from Umbrava's GraphQL API in-page (using your live Umbrava session - the same read the BWN Ops Suite AI drafts use), then asks the broadway-internal-ops SWA summarize route (x-bwn-key gated, Anthropic key server-side) to write a status note - for jobs aged over 30 days a dated "Over 30 - trade - event timeline - ECD" chain built from the WO's FULL note history (with a PAST/needs-ECD flag when the committed date has lapsed), otherwise a 1-3 sentence client-ready status note. Fills the audit's notes column and downloads the workbook, preserving every other cell and formula. It also reads each WO's live header (status, phase, priority, GP, DNE/NTE, PO/vendor, schedule) in the same call and writes a deterministic Audit Flags column (OVERDUE, NEG/LOW GP, NTE>DNE, NO VENDOR, UNSCHEDULED, STALE) computed with no AI - so the exception audit survives an AI outage. Runs entirely in the app.umbrava.com page so it inherits your Umbrava auth - no MCP, no pasted keys, nothing sensitive in this script. This replaces the old standalone WO_Audit_Automation.html SWA tool, whose server-side MCP path could not authenticate to Umbrava. After a run drafts its notes, the coordinator can post each drafted note as an INTERNAL Umbrava note onto its aged (>30d) work order - one explicit click per note (human-gated, idempotent), routed through the governed bwnGqlOp write path with its permission gate and audit trail.
@@ -19,7 +19,7 @@
 (function () {
   'use strict';
 
-  var VER = '0.12.0';
+  var VER = '0.13.0';
   var FONT = "-apple-system,BlinkMacSystemFont,'Segoe UI','Helvetica Neue',Arial,sans-serif";
 
   // Suite drawer exit, per the contract in Core's ensureStyle. Core's stylesheet owns the fade;
@@ -92,11 +92,9 @@
   var SWA_BASE = 'https://green-stone-0717dab0f.7.azurestaticapps.net';
   var GREEN = '#0d3d26';
   var MS_DAY = 86400000;
-  var MODELS = [
-    { id: 'claude-sonnet-5', label: 'Sonnet 5 (default)' },
-    { id: 'claude-opus-4-8', label: 'Opus 4.8 (best)' },
-    { id: 'claude-haiku-4-5', label: 'Haiku 4.5 (cheapest)' },
-  ];
+  // Model is chosen SERVER-SIDE: api/ai's pickModel reads BWN_AI_MODEL (else its own default).
+  // A client dropdown of model ids drifts every Anthropic release and forced a @version bump +
+  // reinstall to fix a stale label; the server env is the one place that changes with no redeploy.
   var XLSX_MIME = 'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet';
   console.info('[BWN WO AUDIT] v' + VER + ' - in-page GraphQL header+notes read -> deterministic Audit Flags + bwnAI /api/ai status note -> filled .xlsx download; can then post each drafted note as an INTERNAL note onto its aged (>30d) work order, one click per note (governed bwnGqlOp write path); registers into the shared dock (bwn:dock:*)');
 
@@ -1856,8 +1854,38 @@
   }
   function getKey() { return GM_getValue('ingest_key', ''); }
 
+  // Scoped once under #bwn-woaudit-ov so it can't leak to Core's sheet or the other suite drawers.
+  // Only styles this tool's own body controls - the drawer chrome (.bwn-drawer*) stays Core's.
+  function injectStyle() {
+    if (document.getElementById('bwn-woaudit-css')) return;
+    var st = document.createElement('style');
+    st.id = 'bwn-woaudit-css';
+    st.textContent =
+      '#bwn-woaudit-ov .bwn-drawer-body{font-family:' + FONT + ';color:#1f2a24}' +
+      '#bwn-woaudit-ov .wa-step{display:block;font-weight:700;font-size:11px;letter-spacing:.05em;text-transform:uppercase;color:' + GREEN + ';margin:0 0 8px}' +
+      '#bwn-woaudit-ov .wa-lbl{display:block;font-weight:600;font-size:11px;letter-spacing:.03em;text-transform:uppercase;color:#5b6b62;margin:0 0 5px}' +
+      '#bwn-woaudit-ov input[type=file]{width:100%;box-sizing:border-box;font-size:12.5px;color:#5b6b62;margin-bottom:6px}' +
+      '#bwn-woaudit-ov input[type=file]::file-selector-button{margin-right:10px;padding:7px 14px;border:1px solid #cfe0d6;border-radius:8px;background:#eef4f0;color:' + GREEN + ';font:600 12.5px ' + FONT + ';cursor:pointer;transition:background .12s}' +
+      '#bwn-woaudit-ov input[type=file]::file-selector-button:hover{background:#e0ece5}' +
+      '#bwn-woaudit-ov select,#bwn-woaudit-ov input[type=number]{padding:7px 9px;border:1px solid #cfe0d6;border-radius:8px;background:#fff;font:13px ' + FONT + ';color:#1f2a24}' +
+      '#bwn-woaudit-ov select:focus,#bwn-woaudit-ov input:focus{outline:2px solid rgba(13,61,38,.22);border-color:' + GREEN + '}' +
+      '#bwn-woaudit-ov .wa-fields{display:flex;gap:16px;margin:14px 0;flex-wrap:wrap}' +
+      '#bwn-woaudit-ov .wa-actions{display:flex;flex-wrap:wrap;gap:10px;align-items:center;margin:14px 0}' +
+      '#bwn-woaudit-ov .wa-btn{border:0;border-radius:8px;padding:9px 16px;font:600 13px ' + FONT + ';color:#fff;cursor:pointer;transition:filter .12s}' +
+      '#bwn-woaudit-ov .wa-btn:hover:not(:disabled){filter:brightness(1.1)}' +
+      '#bwn-woaudit-ov .wa-btn:disabled{opacity:.5;cursor:default}' +
+      '#bwn-woaudit-ov .wa-btn-primary{background:' + GREEN + ';padding:9px 20px}' +
+      '#bwn-woaudit-ov .wa-btn-cancel{background:#6b1d1d}' +
+      '#bwn-woaudit-ov .wa-btn-retry{background:#8a4b00}' +
+      '#bwn-woaudit-ov .wa-btn-dl{background:#1a5f3e}' +
+      '#bwn-woaudit-ov .wa-hint{font-size:12px;color:#5b6b62;margin:8px 0;white-space:pre-line;line-height:1.5}' +
+      '#bwn-woaudit-ov #bwn-woaudit-log{font:12px ui-monospace,Consolas,monospace;background:#f6f8f7;border:1px solid #e0e6e2;border-radius:8px;padding:10px;margin-top:4px;max-height:240px;overflow:auto;white-space:pre-wrap;color:#2a3830}';
+    (document.head || document.documentElement).appendChild(st);
+  }
+
   function buildModal() {
     if (document.getElementById('bwn-woaudit-ov')) return;
+    injectStyle();
     // Suite drawer: slides out from the dock rail, styled by Core's page-wide sheet.
     var ov = document.createElement('aside');
     ov.id = 'bwn-woaudit-ov'; ov.className = 'bwn-drawer';
@@ -1876,23 +1904,22 @@
       // coordinator clicks Download, the browser takes focus, and the file is already on disk.
       // role=status so it is announced rather than only drawn.
       '<div id="bwn-woaudit-warn" role="status" aria-live="polite" style="display:none;background:#fff4e5;border:1px solid #ffcf99;color:#8a4b00;padding:8px 10px;border-radius:8px;margin-bottom:12px;font-size:12.5px;font-weight:600"></div>' +
-      '<label style="display:block;font-weight:600;margin-bottom:6px">1. Audit workbook (.xlsx)</label>' +
-      '<input type="file" id="bwn-woaudit-file" accept=".xlsx,.xls" style="margin-bottom:6px">' +
-      '<div id="bwn-woaudit-sheetwrap" style="display:none;margin:8px 0"><label style="font-weight:600;margin-right:8px">Sheet</label><select id="bwn-woaudit-sheet"></select></div>' +
-      '<div id="bwn-woaudit-mapinfo" style="font-size:12.5px;color:#444;margin:8px 0;white-space:pre-line"></div>' +
-      '<div id="bwn-woaudit-notecolwrap" style="display:none;margin:8px 0"><label style="font-weight:600;margin-right:8px">Write notes to column</label><select id="bwn-woaudit-notecol"></select></div>' +
-      '<div style="display:flex;gap:16px;margin:12px 0;flex-wrap:wrap">' +
-      '<div><label style="display:block;font-weight:600;margin-bottom:4px">Model</label><select id="bwn-woaudit-model"></select></div>' +
-      '<div><label style="display:block;font-weight:600;margin-bottom:4px">Concurrency</label><input id="bwn-woaudit-conc" type="number" min="1" max="6" value="3" style="width:64px"></div>' +
+      '<label class="wa-step">1. Audit workbook (.xlsx)</label>' +
+      '<input type="file" id="bwn-woaudit-file" accept=".xlsx,.xls">' +
+      '<div id="bwn-woaudit-sheetwrap" style="display:none;margin:8px 0"><label class="wa-lbl">Sheet</label><select id="bwn-woaudit-sheet"></select></div>' +
+      '<div id="bwn-woaudit-mapinfo" class="wa-hint"></div>' +
+      '<div id="bwn-woaudit-notecolwrap" style="display:none;margin:8px 0"><label class="wa-lbl">Write notes to column</label><select id="bwn-woaudit-notecol"></select></div>' +
+      '<div class="wa-fields">' +
+      '<div><label class="wa-lbl">Concurrency</label><input id="bwn-woaudit-conc" type="number" min="1" max="6" value="3" style="width:64px"></div>' +
       '</div>' +
-      '<div style="display:flex;flex-wrap:wrap;gap:10px;align-items:center;margin:12px 0">' +
-      '<button id="bwn-woaudit-start" style="background:' + GREEN + ';color:#fff;border:0;padding:9px 18px;border-radius:8px;font-weight:600;cursor:pointer">Start Audit</button>' +
-      '<button id="bwn-woaudit-cancel" style="display:none;background:#6b1d1d;color:#fff;border:0;padding:9px 14px;border-radius:8px;font-weight:600;cursor:pointer">Cancel</button>' +
-      '<button id="bwn-woaudit-retry" style="display:none;background:#8a4b00;color:#fff;border:0;padding:9px 14px;border-radius:8px;font-weight:600;cursor:pointer">Retry Unfinished</button>' +
-      '<button id="bwn-woaudit-dl" style="display:none;background:#1a5f3e;color:#fff;border:0;padding:9px 14px;border-radius:8px;font-weight:600;cursor:pointer">Download .xlsx</button>' +
+      '<div class="wa-actions">' +
+      '<button id="bwn-woaudit-start" class="wa-btn wa-btn-primary">Start Audit</button>' +
+      '<button id="bwn-woaudit-cancel" class="wa-btn wa-btn-cancel" style="display:none">Cancel</button>' +
+      '<button id="bwn-woaudit-retry" class="wa-btn wa-btn-retry" style="display:none">Retry Unfinished</button>' +
+      '<button id="bwn-woaudit-dl" class="wa-btn wa-btn-dl" style="display:none">Download .xlsx</button>' +
       '</div>' +
       '<div id="bwn-woaudit-prog" style="font-weight:600;margin:6px 0"></div>' +
-      '<div id="bwn-woaudit-log" style="font:12px ui-monospace,Consolas,monospace;background:#f6f8f7;border:1px solid #e0e6e2;border-radius:8px;padding:10px;max-height:240px;overflow:auto;white-space:pre-wrap"></div>' +
+      '<div id="bwn-woaudit-log" style="display:none"></div>' +
       // Post-step section: populated by renderPostSection() when a run finishes. One Post button per
       // drafted note, human-gated - there is NO bulk "post all".
       '<div id="bwn-woaudit-post"></div>' +
@@ -1911,14 +1938,11 @@
     ov.addEventListener('click', function (e) { if (e.target === ov) tryClose(); });
     $('bwn-woaudit-x').onclick = tryClose;
 
-    var msel = $('bwn-woaudit-model');
-    MODELS.forEach(function (m) { var o = document.createElement('option'); o.value = m.id; o.textContent = m.label; msel.appendChild(o); });
-
     var kw = $('bwn-woaudit-keywarn');
     if (!getKey()) { kw.style.display = 'block'; kw.textContent = 'SWA ingest key not set. Open the Tampermonkey menu -> "BWN WO Audit: Set SWA ingest key" (same key as the rest of the BWN Ops Suite), then reopen this.'; }
 
     var log = $('bwn-woaudit-log');
-    function logln(s) { log.textContent += (log.textContent ? '\n' : '') + s; log.scrollTop = log.scrollHeight; }
+    function logln(s) { if (log.style.display === 'none') log.style.display = 'block'; log.textContent += (log.textContent ? '\n' : '') + s; log.scrollTop = log.scrollHeight; }
     // The persistent half of a warning. Null-safe for the same reason the button writes are: the
     // drawer can be gone or rebuilt while a run is in flight.
     function setWarn(msg) {
@@ -2009,7 +2033,7 @@
       var key = getKey();
       if (!key) { kw.style.display = 'block'; kw.textContent = 'Set the SWA ingest key first (Tampermonkey menu).'; return; }
       if (!authToken()) { logln('! Not signed into Umbrava (no usable token). Reload the tab and retry.'); return; }
-      var model = $('bwn-woaudit-model').value;
+      var model = '';   // empty -> api/ai picks the model server-side (BWN_AI_MODEL, else its default)
       var conc = Math.max(1, Math.min(6, parseInt($('bwn-woaudit-conc').value, 10) || 3));
       var ws = session.wb.Sheets[session.sheet];
       // Resolve the write-back column from the picker (detection is only the default) - but never
@@ -2046,7 +2070,7 @@
       _running = true; _cancelled = false;
       setWarn('');   // stale from the previous pass; recomputed when this one finishes
       if (!retryOnly) { log.textContent = ''; session.results = new Array(session.rows.length); }
-      logln((retryOnly ? 'Retrying ' : 'Auditing ') + targets.length + ' work orders with ' + model + ' (concurrency ' + conc + ')...');
+      logln((retryOnly ? 'Retrying ' : 'Auditing ') + targets.length + ' work orders (concurrency ' + conc + ')...');
       var prog = $('bwn-woaudit-prog');
       // Seed it: onProgress only fires when a row SETTLES, and a throttled row can now sit in
       // backoff for over a minute. A blank progress area plus a silent log reads as a hang.
