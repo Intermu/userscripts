@@ -162,6 +162,27 @@ jobs:
       - name: WO Audit evidence gate + key normalization + status coverage (0.13.0)
         run: node scripts/test-wo-audit-evidence.js
 
+      # WO Audit 0.17.0: the Operations Action List engine (deriveAction) + the sheet builder. Slices
+      # the pure BWN WO-AUDIT ACTIONS block and pins the deterministic manager layer that sits on top
+      # of deriveState - one action bucket per phase, the P0/P1/P2/Monitor priority model (safety and
+      # P1-Critical gates included), internal owner vs external escalation, LABEL-only action-due,
+      # short pipe risk flags, rule IDs, data gaps, the actionable-only + sorted sheet build, and the
+      # run-date helpers. Negative controls throughout: a bare P1 is NOT safety, a future-dated visit
+      # is Monitor (not a verification miss), a valid owner is never rewritten - the rules that would
+      # otherwise fire unconditionally and inflate the list.
+      - name: WO Audit operations action list engine (0.17.0)
+        run: node scripts/test-wo-audit-actions.js
+
+      # WO Audit 0.17.0 Commit 2: the Dashboard + Audit Rules sheet builders and the workbook
+      # header-alias mapping. Slices the pure BWN WO-AUDIT DASHBOARD block (deterministic counts,
+      # owner/FM/bucket/priority rollups sorted count-desc, the manager-review top-20 sort+cap, the
+      # 11-row rule catalog and the interpretation statement) and the BWN WO-AUDIT MAP block driven
+      # with a stubbed XLSX (every operational alias resolves, an absent field records -1, and the
+      # "Last Note Date" trap is never mistaken for the note-content column). Negative controls on the
+      # rollup key, the top-20 cap and the note-column trap.
+      - name: WO Audit dashboard + rules + column mapping (0.17.0)
+        run: node scripts/test-wo-audit-dashboard.js
+
       # bwn-wo-extract (Operations Assist): the thin, read-only caller for the deployed
       # /api/extract-work-order endpoint. Byte-sliced + fake-env harness pinning the bounded
       # allowlist payload, the NTE-semantic exclusion of client-DNE, the refusal gate (route /

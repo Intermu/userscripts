@@ -190,7 +190,7 @@ function section5() {
 function section6() {
   console.log('\n6. source assertions for closure-bound guards (weaker than execution)');
   A.ok('note column is guarded on noteAppended, not retryOnly (QA-5c)',
-    /if \(!session\.map\.noteAppended\) \{/.test(TEXT));
+    /if \(wantNote && !session\.map\.noteAppended\) \{/.test(TEXT));
   A.ok('describe() refuses to rebuild mid-run (QA-3a)',
     /function describe\(\)[\s\S]{0,900}?if \(!loaded \|\| _running\) return;/.test(TEXT));
   A.ok('describe() hides Retry and Download on rebuild (QA-4c)',
