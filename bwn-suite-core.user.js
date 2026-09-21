@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         BWN Suite - Core (Broadway National)
 // @namespace    broadwaynational.bwn
-// @version      1.87.0
+// @version      1.87.1
 // @downloadURL  https://raw.githubusercontent.com/Intermu/userscripts/main/bwn-suite-core.user.js
 // @updateURL    https://raw.githubusercontent.com/Intermu/userscripts/main/bwn-suite-core.user.js
 // @description  Runs several Umbrava helpers for BWN coordinators, in the browser with no privileged grants. Includes: PO Approval + ETA Builder; WO Assist (GP/ETA, a stall watchdog, DNE calculator, and a next-action playbook); Email Leak Guard (checks recipients against vendor names, PO amounts, and client budget references before an outbound email sends); WO List Heat (a triage overlay + My Day strip on the work-order list, with an optional same-origin Umbrava API scan for deterministic full-board coverage); and the BWN Launcher (opens the Azure Static Web App tools with the current WO's context). Modules share state through sessionStorage/localStorage. The only network calls are same-origin Umbrava GraphQL requests (app.umbrava.com/api/graphql, the app's own session): List Heat's full-board scan and WO Assist's work-order / trip / clock-in / document / purchase-order reads, plus ONE write - BWN Views saves the column layout through Umbrava's own putUserPreference, the same preference the column chooser writes; everything else is offline. Toggle modules in BWN_MODULES below.
@@ -5757,6 +5757,13 @@
         // note - an ETA is a future promise, so bare M/D must look forward, not back.
         // API notes carry an exact epoch (tsAbs); scraped ones only a rendered string.
         var when = (notes[i].tsAbs != null) ? notes[i].tsAbs : parseNoteDate(notes[i].ts);
+        // No anchor, no yearless promise. When a note carries no resolvable timestamp
+        // (a pinned/removed note renders "Pinned" not a date, so tsAbs is null AND the
+        // ts text won't parse), parseBodyDate falls back to anchoring on TODAY and
+        // forward-projects a bare M/D into the next year - "ECD 4/26" became 4/26/2027
+        // (user-reported, off a removed pinned note). A promise you can't date can't be
+        // resolved; drop it and let the PO/trip signals or the 2nd-Friday fallback stand.
+        if (when == null) continue;
         var dm = parseBodyDate(b, when);
         if (dm === null || dm < today) continue;   // forward-looking ETAs only - a blown promise isn't a completion date
         // The note written LAST is the promise that stands. Ranking by furthest-future

@@ -346,6 +346,16 @@ var t6 = Promise.resolve().then(function () {
   var h6 = build({ notes: [note('eta 1-5 days, but complete by 8/20', '2026-08-04T09:00:00Z', 5)], notesSrc: 'api' });
   A.eq('a real date still wins when a range sits beside it',
     ymd(+h6.api.proposeECD(state()).date), '2026-8-20');
+
+  // ---- An undateable note must not forward-project into next year ----------------------
+  // User-reported off a REMOVED pinned note: "ECD 4/26" logged as 4/26/2027. A pinned note
+  // renders "Pinned" not a timestamp, so tsAbs is null AND parseNoteDate(ts) fails -> when is
+  // null -> parseBodyDate anchored the bare 4/26 on TODAY (2026-08-05) and bumped April, already
+  // past, to April 2027. A promise you can't date can't be resolved; fall back, don't invent.
+  var u1 = build({ notes: [{ id: '9', label: '', body: 'ECD 4/26', ts: 'Pinned', tsAbs: null }], notesSrc: 'view' });
+  A.eq('an undateable note does not invent a next-year ECD (falls back to 2nd Friday)',
+    ymd(+u1.api.proposeECD(state()).date), '2026-8-14');
+  A.eq('and it is not offered as a noted ETA at all', u1.api.latestNotedEta(state()), null);
 });
 
 // ---- Mutations: revert one piece each, assert the harness reddens ----------------------
@@ -417,6 +427,16 @@ var t7 = Promise.all([t2, t3, t4, t5, t6]).then(function () {
   });
   A.ok('M8 without the hyphen strip "1-5" becomes January 5 of the NEXT year',
     ymd(+m8.api.proposeECD(state()).date) === '2027-1-5', ymd(+m8.api.proposeECD(state()).date));
+
+  // M9: drop the undateable-note guard -> the removed-pinned-note 2027 proposal comes back.
+  // Control for the fix above: without it, "ECD 4/26" on a timestamp-less note forward-projects
+  // off today (2026-08-05) into next April.
+  var m9 = build({
+    notes: [{ id: '9', label: '', body: 'ECD 4/26', ts: 'Pinned', tsAbs: null }], notesSrc: 'view',
+    src: mutate(SOURCE, '        if (when == null) continue;\n        var dm = parseBodyDate(b, when);', '        var dm = parseBodyDate(b, when);')
+  });
+  A.ok('M9 without the undateable guard an undated "ECD 4/26" invents 2027',
+    ymd(+m9.api.proposeECD(state()).date) === '2027-4-26', ymd(+m9.api.proposeECD(state()).date));
 
   // M4: drop the nav guard - WO A's history gets hung off WO B.
   var m4 = build({
@@ -577,7 +597,7 @@ var t8 = t7b.then(function () {
     });
   });
 
-  console.log('\n(auto-warm x auto-pop gate x proposal x write echo, real source, 8 mutations. Nothing here proves');
+  console.log('\n(auto-warm x auto-pop gate x proposal x write echo, real source, 9 mutations. Nothing here proves');
   console.log(' the popup renders, that Umbrava answers in a real tab, or that the proposed date is');
   console.log(' the one the coordinator wanted - the live test on a WO with a noted ETA covers that.)');
   A.finish();
