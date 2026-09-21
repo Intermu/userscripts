@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         BWN WO Audit (Broadway National)
 // @namespace    broadwaynational.bwn
-// @version      0.14.0
+// @version      0.15.0
 // @downloadURL  https://raw.githubusercontent.com/Intermu/userscripts/main/bwn-wo-audit.user.js
 // @updateURL    https://raw.githubusercontent.com/Intermu/userscripts/main/bwn-wo-audit.user.js
 // @description  Batch WO-audit tool. Upload a WO audit .xlsx; for each work order this reads its two most recent notes DIRECTLY from Umbrava's GraphQL API in-page (using your live Umbrava session - the same read the BWN Ops Suite AI drafts use), then asks the broadway-internal-ops SWA summarize route (x-bwn-key gated, Anthropic key server-side) to write a status note - for jobs aged over 30 days a dated "Over 30 - trade - event timeline - ECD" chain built from the WO's FULL note history (with a PAST/needs-ECD flag when the committed date has lapsed), otherwise a 1-3 sentence client-ready status note. Fills the audit's notes column and downloads the workbook, preserving every other cell and formula. It also reads each WO's live header (status, phase, priority, GP, DNE/NTE, PO/vendor, schedule) in the same call and writes a deterministic Audit Flags column (OVERDUE, NEG/LOW GP, NTE>DNE, NO VENDOR, UNSCHEDULED, STALE) computed with no AI - so the exception audit survives an AI outage. Runs entirely in the app.umbrava.com page so it inherits your Umbrava auth - no MCP, no pasted keys, nothing sensitive in this script. This replaces the old standalone WO_Audit_Automation.html SWA tool, whose server-side MCP path could not authenticate to Umbrava. After a run drafts its notes, the coordinator can post each drafted note as an INTERNAL Umbrava note onto its aged (>30d) work order - one explicit click per note (human-gated, idempotent), routed through the governed bwnGqlOp write path with its permission gate and audit trail.
@@ -19,7 +19,7 @@
 (function () {
   'use strict';
 
-  var VER = '0.14.0';
+  var VER = '0.15.0';
   var FONT = "-apple-system,BlinkMacSystemFont,'Segoe UI','Helvetica Neue',Arial,sans-serif";
   // Inline SVG icons (no external image/font). 18px, stroke=currentColor so they take card color.
   function _svg(p, o) { return '<svg class="woa-i" viewBox="0 0 24 24" width="18" height="18" fill="none" stroke="currentColor" stroke-width="1.9" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"' + (o || '') + '>' + p + '</svg>'; }
@@ -2437,8 +2437,25 @@
       P + '.woa-disc-b{padding:11px 13px;font-size:12px;color:#4a5852;line-height:1.55}',
       P + '.woa-disc-b ul{margin:0;padding-left:18px}',
       P + '.woa-disc-b li{margin:3px 0}',
-      // ---- post section (existing renderPostSection output lives here) ----
+      // ---- run diagnostics + post section (renderDiagnostics / renderPostSection) ----
       P + '#bwn-woaudit-post{margin-top:4px}',
+      P + '.woa-sect{margin-top:16px;border-top:1px solid #e3e9e5;padding-top:14px}',
+      P + '.woa-sect-hd{display:flex;align-items:center;gap:7px;font-weight:700;font-size:13px;color:' + G + ';margin:0 0 4px}',
+      P + '.woa-sect-hd .woa-i{width:16px;height:16px}',
+      P + '.woa-sect-sub{font-size:12px;color:#5f6f68;margin:0 0 10px;line-height:1.45}',
+      P + '.woa-diag-copy{margin-top:2px}',
+      P + '.woa-pcard{border:1px solid #e3e9e5;border-radius:10px;padding:11px;margin-bottom:9px;background:#fff}',
+      P + '.woa-pcard-hd{display:flex;justify-content:space-between;align-items:center;gap:8px;margin-bottom:7px}',
+      P + '.woa-pcard-t{font-weight:700;font-size:12.5px;color:#243530}',
+      P + '.woa-pstatus{font-size:11.5px;color:#5f6f68;text-align:right}',
+      P + '.woa-pstatus.is-ok{color:' + ACC + ';font-weight:700}',
+      P + '.woa-pstatus.is-block{color:' + AMBER + '}',
+      P + '.woa-pstatus.is-fail{color:' + RED + '}',
+      P + '.woa-pfacts{font-size:11.5px;color:#2f4a39;background:#f2f9f5;border:1px solid #cfe6d9;border-radius:8px;padding:6px 8px;margin-bottom:7px;line-height:1.5}',
+      P + '.woa-pmeta{font-size:11.5px;color:#5f6f68;margin-bottom:7px;line-height:1.5;white-space:pre-line}',
+      P + '.woa-pnote{width:100%;box-sizing:border-box;min-height:58px;font:12px ui-monospace,Consolas,monospace;border:1px solid #cfdbd4;border-radius:8px;padding:7px;resize:vertical;background:#f7faf8;color:#243530}',
+      P + '.woa-btn-sm{padding:7px 14px;font-size:12px;margin-top:8px}',
+      // hide legacy nodes we keep in the DOM for the engine but no longer show inline
       // hide legacy nodes we keep in the DOM for the engine but no longer show inline
       P + '#bwn-woaudit-mapinfo{display:none}',
       P + '#bwn-woaudit-conc{display:none}',
@@ -3245,28 +3262,30 @@
       }
       if (!cov.unmapped.length && !reviews.length) return;
       var wrap = document.createElement('div');
-      wrap.style.cssText = 'margin-top:14px;border-top:1px solid #e0e6e2;padding-top:12px';
+      wrap.className = 'woa-sect';
       var h = document.createElement('div');
-      h.style.cssText = 'font-weight:600;margin-bottom:6px;color:' + GREEN;
-      h.textContent = 'Run diagnostics';
+      h.className = 'woa-sect-hd';
+      h.innerHTML = ICON.activity + '<span>Run diagnostics</span>';
       wrap.appendChild(h);
       var lines = [];
       if (cov.unmapped.length) {
         var box = document.createElement('div');
-        box.style.cssText = 'font-size:12px;color:#8a4b00;background:#fff4e5;border:1px solid #ffcf99;border-radius:6px;padding:7px 9px;margin-bottom:8px;line-height:1.5';
-        box.textContent = 'Umbrava status names this build does not map (' + cov.unmapped.length + '): ' +
+        box.className = 'woa-banner is-warn';
+        box.style.marginBottom = '8px';
+        box.innerHTML = ICON.warn + '<span>' + esc('Umbrava status names this build does not map (' + cov.unmapped.length + '): ' +
           cov.unmapped.map(function (o) { return '"' + o.status + '" x' + o.count; }).join(', ') +
-          '. Those rows printed the status verbatim at low confidence rather than being mapped to a guessed stage. Nothing was changed automatically.';
+          '. Those rows printed the status verbatim at low confidence rather than being mapped to a guessed stage. Nothing was changed automatically.') + '</span>';
         wrap.appendChild(box);
         lines.push('UNMAPPED STATUSES (' + cov.unmapped.length + ' of ' + cov.observed.length + ' seen):');
         cov.unmapped.forEach(function (o) { lines.push('  ' + o.status + '\tx' + o.count); });
       }
       if (reviews.length) {
         var rb = document.createElement('div');
-        rb.style.cssText = 'font-size:12px;color:#444;background:#f6f8f7;border:1px solid #e0e6e2;border-radius:6px;padding:7px 9px;margin-bottom:8px;line-height:1.5';
-        rb.textContent = reviews.length + ' row' + (reviews.length === 1 ? '' : 's') + ' need review: ' +
+        rb.className = 'woa-banner is-info';
+        rb.style.marginBottom = '8px';
+        rb.innerHTML = ICON.info + '<span>' + esc(reviews.length + ' row' + (reviews.length === 1 ? '' : 's') + ' need review: ' +
           reviews.slice(0, 12).map(function (r) { return 'WO ' + r.key; }).join(', ') +
-          (reviews.length > 12 ? ', ...' : '') + '. Reasons are in the copy below and on each card.';
+          (reviews.length > 12 ? ', ...' : '') + '. Reasons are in the copy below and on each card.') + '</span>';
         wrap.appendChild(rb);
         lines.push('', 'REVIEW REQUIRED (' + reviews.length + '):');
         reviews.forEach(function (r) {
@@ -3276,8 +3295,8 @@
       }
       var btn = document.createElement('button');
       btn.type = 'button';
-      btn.textContent = 'Copy diagnostics';
-      btn.style.cssText = 'background:#fff;color:' + GREEN + ';border:1px solid ' + GREEN + ';padding:6px 12px;border-radius:8px;font-weight:600;cursor:pointer';
+      btn.innerHTML = ICON.copy + '<span>Copy diagnostics</span>';
+      btn.className = 'woa-btn woa-btn-ghost woa-btn-sm woa-diag-copy';
       var payload = ['WO Audit ' + VER + ' run diagnostics', 'run: ' + (session.results[0] && session.results[0].correlationId ? String(session.results[0].correlationId).split(':')[0] : '(n/a)'), ''].concat(lines).join('\n');
       btn.onclick = function () {
         // Clipboard API is not available on every surface this drawer opens on, so fall back to a
@@ -3334,40 +3353,41 @@
       }
       if (!rows.length) return;
       var wrap = document.createElement('div');
-      wrap.style.cssText = 'margin-top:14px;border-top:1px solid #e0e6e2;padding-top:12px';
+      wrap.className = 'woa-sect';
       var h = document.createElement('div');
-      h.style.cssText = 'font-weight:600;margin-bottom:4px;color:' + GREEN;
-      h.textContent = 'Post drafted notes to work orders';
+      h.className = 'woa-sect-hd';
+      h.innerHTML = ICON.file + '<span>Post drafted notes to work orders</span>';
       wrap.appendChild(h);
       var sub = document.createElement('div');
-      sub.style.cssText = 'font-size:12px;color:#555;margin-bottom:10px';
+      sub.className = 'woa-sect-sub';
       sub.textContent = 'Posts the drafted note as an INTERNAL note on the work order. One click per note - jobs aged over 30 days only.';
       wrap.appendChild(sub);
       // If there is no days column, every row is eligible by construction - surface that once.
       if (session.map.days === -1) {
         var notice = document.createElement('div');
-        notice.style.cssText = 'font-size:12px;color:#8a4b00;background:#fff4e5;border:1px solid #ffcf99;border-radius:6px;padding:6px 8px;margin-bottom:10px';
-        notice.textContent = 'No days/aged column detected - treating every row as aged >30d (this export is over-30 by construction).';
+        notice.className = 'woa-banner is-warn';
+        notice.style.marginBottom = '10px';
+        notice.innerHTML = ICON.warn + '<span>No days/aged column detected - treating every row as aged &gt;30d (this export is over-30 by construction).</span>';
         wrap.appendChild(notice);
       }
       rows.forEach(function (r) {
         var card = document.createElement('div');
-        card.style.cssText = 'border:1px solid #e0e6e2;border-radius:8px;padding:10px;margin-bottom:8px';
+        card.className = 'woa-pcard';
         var head = document.createElement('div');
-        head.style.cssText = 'display:flex;justify-content:space-between;align-items:center;gap:8px;margin-bottom:6px';
+        head.className = 'woa-pcard-hd';
         var label = document.createElement('div');
-        label.style.cssText = 'font-weight:600';
+        label.className = 'woa-pcard-t';
         label.textContent = 'WO ' + r.key + '  -  ' + (r.ageDays == null ? 'age n/a' : (r.ageDays + 'd'));
         head.appendChild(label);
         var status = document.createElement('span');
-        status.style.cssText = 'font-size:12px;color:#555';
+        status.className = 'woa-pstatus';
         head.appendChild(status);
         card.appendChild(head);
         // The derived reading, shown BEFORE the post button: an operator should be able to see the
         // stage, the blocker and who owns it without reading the whole note back out of the box.
         if (r.facts) {
           var fx = document.createElement('div');
-          fx.style.cssText = 'font-size:11.5px;color:#41613f;background:#f2f7f3;border:1px solid #dbe7dd;border-radius:6px;padding:5px 7px;margin-bottom:6px;line-height:1.45';
+          fx.className = 'woa-pfacts';
           var bits = [r.facts.currentStage];
           if (r.facts.primaryBlocker && r.facts.confidence !== 'low') {
             bits.push(r.facts.primaryBlocker + (r.facts.blockerOwner && r.facts.blockerOwner !== 'Unknown' ? ' (' + r.facts.blockerOwner + ')' : ''));
@@ -3380,7 +3400,7 @@
         // deterministic exception signals (NOT narrative - they never enter the note), so they are
         // shown as their own row rather than folded into the derived reading above.
         var meta = document.createElement('div');
-        meta.style.cssText = 'font-size:11.5px;color:#555;margin-bottom:6px;line-height:1.45';
+        meta.className = 'woa-pmeta';
         var metaBits = [
           'note: ' + (r.noteMode === 'ai' ? 'AI-drafted' : r.noteMode === 'deterministic_fallback' ? 'deterministic fallback' : r.noteMode === 'retained' ? 'RETAINED (workbook note kept)' : String(r.noteMode || '-')),
           (r.changed ? 'workbook cell CHANGED' : 'workbook cell unchanged'),
@@ -3392,20 +3412,22 @@
         card.appendChild(meta);
         if (r.reviewRequired && (r.reviewReasons || []).length) {
           var rv = document.createElement('div');
-          rv.style.cssText = 'font-size:11.5px;color:#6b1d1d;background:#fdf1f1;border:1px solid #f0cccc;border-radius:6px;padding:5px 7px;margin-bottom:6px;line-height:1.45;white-space:pre-line';
-          rv.textContent = 'Review required:\n- ' + r.reviewReasons.join('\n- ');
+          rv.className = 'woa-banner is-err';
+          rv.style.marginBottom = '6px';
+          rv.innerHTML = ICON.warn + '<span style="white-space:pre-line">' + esc('Review required:\n- ' + r.reviewReasons.join('\n- ')) + '</span>';
           card.appendChild(rv);
         }
         if (r.degraded) {
           var dg = document.createElement('div');
-          dg.style.cssText = 'font-size:11.5px;color:#8a4b00;background:#fff4e5;border:1px solid #ffcf99;border-radius:6px;padding:5px 7px;margin-bottom:6px';
-          dg.textContent = 'Deterministic note (no AI phrasing): ' + r.degraded;
+          dg.className = 'woa-banner is-warn';
+          dg.style.marginBottom = '6px';
+          dg.innerHTML = ICON.warn + '<span>' + esc('Deterministic note (no AI phrasing): ' + r.degraded) + '</span>';
           card.appendChild(dg);
         }
         var ta = document.createElement('textarea');
         ta.readOnly = true;
         ta.value = r.note;
-        ta.style.cssText = 'width:100%;box-sizing:border-box;min-height:56px;font:12px ' + FONT + ';border:1px solid #e0e6e2;border-radius:6px;padding:6px;resize:vertical;background:#fafbfa';
+        ta.className = 'woa-pnote';
         card.appendChild(ta);
         // ONE ordered answer to "can this be posted, and if not why not", so the operator reads the
         // reason on the card instead of discovering it from a failed click. Display only: bwnGqlOp
@@ -3415,24 +3437,25 @@
         r.postIneligibleReason = block;
         r.postEligible = !block && !r.posted;
         if (r.posted) {
-          status.textContent = 'posted ✓';
+          status.className = 'woa-pstatus is-ok'; status.textContent = 'posted ✓';
         } else if (block) {
-          status.textContent = 'cannot post - ' + block;
+          status.className = 'woa-pstatus is-block'; status.textContent = 'cannot post - ' + block;
         } else {
           var btn = document.createElement('button');
-          btn.textContent = 'Post';
-          btn.style.cssText = 'margin-top:8px;background:' + GREEN + ';color:#fff;border:0;padding:7px 14px;border-radius:8px;font-weight:600;cursor:pointer';
+          btn.type = 'button';
+          btn.innerHTML = ICON.upload + '<span>Post</span>';
+          btn.className = 'woa-btn woa-btn-primary woa-btn-sm';
           btn.onclick = function () {
             btn.disabled = true;
-            status.textContent = 'posting...';
+            status.className = 'woa-pstatus'; status.textContent = 'posting…';
             postAuditNote(r.key, r.note).then(function () {
               r.posted = true;
-              status.textContent = 'posted ✓';
+              status.className = 'woa-pstatus is-ok'; status.textContent = 'posted ✓';
               try { btn.remove(); } catch (e) { }
               logln('  posted WO-audit note on WO ' + r.key);
             }, function (e) {
               var msg = (e && e.message) || String(e);
-              status.textContent = 'failed: ' + msg;
+              status.className = 'woa-pstatus is-fail'; status.textContent = 'failed: ' + msg;
               btn.disabled = false;   // re-enable so the coordinator can retry this one note
               logln('  ! post failed for WO ' + r.key + ': ' + msg);
             });
