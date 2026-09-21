@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         BWN WO Audit (Broadway National)
 // @namespace    broadwaynational.bwn
-// @version      0.12.0
+// @version      0.13.0
 // @downloadURL  https://raw.githubusercontent.com/Intermu/userscripts/main/bwn-wo-audit.user.js
 // @updateURL    https://raw.githubusercontent.com/Intermu/userscripts/main/bwn-wo-audit.user.js
 // @description  Batch WO-audit tool. Upload a WO audit .xlsx; for each work order this reads its two most recent notes DIRECTLY from Umbrava's GraphQL API in-page (using your live Umbrava session - the same read the BWN Ops Suite AI drafts use), then asks the broadway-internal-ops SWA summarize route (x-bwn-key gated, Anthropic key server-side) to write a status note - for jobs aged over 30 days a dated "Over 30 - trade - event timeline - ECD" chain built from the WO's FULL note history (with a PAST/needs-ECD flag when the committed date has lapsed), otherwise a 1-3 sentence client-ready status note. Fills the audit's notes column and downloads the workbook, preserving every other cell and formula. It also reads each WO's live header (status, phase, priority, GP, DNE/NTE, PO/vendor, schedule) in the same call and writes a deterministic Audit Flags column (OVERDUE, NEG/LOW GP, NTE>DNE, NO VENDOR, UNSCHEDULED, STALE) computed with no AI - so the exception audit survives an AI outage. Runs entirely in the app.umbrava.com page so it inherits your Umbrava auth - no MCP, no pasted keys, nothing sensitive in this script. This replaces the old standalone WO_Audit_Automation.html SWA tool, whose server-side MCP path could not authenticate to Umbrava. After a run drafts its notes, the coordinator can post each drafted note as an INTERNAL Umbrava note onto its aged (>30d) work order - one explicit click per note (human-gated, idempotent), routed through the governed bwnGqlOp write path with its permission gate and audit trail.
@@ -19,8 +19,27 @@
 (function () {
   'use strict';
 
-  var VER = '0.12.0';
+  var VER = '0.13.0';
   var FONT = "-apple-system,BlinkMacSystemFont,'Segoe UI','Helvetica Neue',Arial,sans-serif";
+  // Inline SVG icons (no external image/font). 18px, stroke=currentColor so they take card color.
+  function _svg(p, o) { return '<svg class="woa-i" viewBox="0 0 24 24" width="18" height="18" fill="none" stroke="currentColor" stroke-width="1.9" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"' + (o || '') + '>' + p + '</svg>'; }
+  var ICON = {
+    upload: _svg('<path d="M12 16V4M7 9l5-5 5 5"/><path d="M4 17v2a1 1 0 0 0 1 1h14a1 1 0 0 0 1-1v-2"/>'),
+    file: _svg('<path d="M14 3H7a1 1 0 0 0-1 1v16a1 1 0 0 0 1 1h10a1 1 0 0 0 1-1V7z"/><path d="M14 3v4h4"/>'),
+    settings: _svg('<circle cx="12" cy="12" r="3"/><path d="M12 2v3M12 19v3M2 12h3M19 12h3M4.9 4.9l2.1 2.1M16.9 16.9l2.1 2.1M19.1 4.9l-2.1 2.1M7.1 16.9l-2.1 2.1"/>'),
+    info: _svg('<circle cx="12" cy="12" r="9"/><path d="M12 11v5M12 8h.01"/>'),
+    check: _svg('<path d="M20 6L9 17l-5-5"/>'),
+    warn: _svg('<path d="M12 3l9 16H3z"/><path d="M12 10v4M12 17h.01"/>'),
+    activity: _svg('<path d="M22 12h-4l-3 8-6-16-3 8H2"/>'),
+    download: _svg('<path d="M12 3v12M8 11l4 4 4-4"/><path d="M4 17v2a1 1 0 0 0 1 1h14a1 1 0 0 0 1-1v-2"/>'),
+    close: _svg('<path d="M18 6L6 18M6 6l12 12"/>'),
+    stop: _svg('<rect x="6" y="6" width="12" height="12" rx="1.5"/>'),
+    play: _svg('<path d="M7 5l12 7-12 7z"/>'),
+    pause: _svg('<path d="M9 5v14M15 5v14"/>'),
+    copy: _svg('<rect x="9" y="9" width="11" height="11" rx="2"/><path d="M5 15V5a2 2 0 0 1 2-2h10"/>'),
+    trash: _svg('<path d="M4 7h16M9 7V5a1 1 0 0 1 1-1h4a1 1 0 0 1 1 1v2M6 7l1 13a1 1 0 0 0 1 1h8a1 1 0 0 0 1-1l1-13"/>'),
+    reset: _svg('<path d="M3 12a9 9 0 1 0 3-6.7L3 8"/><path d="M3 3v5h5"/>')
+  };
 
   // Suite drawer exit, per the contract in Core's ensureStyle. Core's stylesheet owns the fade;
   // sandboxes cannot share the helper, so these five lines are duplicated in every drawer module.
@@ -92,11 +111,9 @@
   var SWA_BASE = 'https://green-stone-0717dab0f.7.azurestaticapps.net';
   var GREEN = '#0d3d26';
   var MS_DAY = 86400000;
-  var MODELS = [
-    { id: 'claude-sonnet-5', label: 'Sonnet 5 (default)' },
-    { id: 'claude-opus-4-8', label: 'Opus 4.8 (best)' },
-    { id: 'claude-haiku-4-5', label: 'Haiku 4.5 (cheapest)' },
-  ];
+  // Model is chosen SERVER-SIDE: api/ai's pickModel reads BWN_AI_MODEL (else its own default).
+  // A client dropdown of model ids drifts every Anthropic release and forced a @version bump +
+  // reinstall to fix a stale label; the server env is the one place that changes with no redeploy.
   var XLSX_MIME = 'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet';
   console.info('[BWN WO AUDIT] v' + VER + ' - in-page GraphQL header+notes read -> deterministic Audit Flags + bwnAI /api/ai status note -> filled .xlsx download; can then post each drafted note as an INTERNAL note onto its aged (>30d) work order, one click per note (governed bwnGqlOp write path); registers into the shared dock (bwn:dock:*)');
 
@@ -311,6 +328,54 @@
     return f;
   }
   // ===== BWN AUDIT FLAGS END ====================================================================
+
+  // ===== BWN AUDIT CHECKS START (pure; sliced by scripts/test-wo-audit-checks.js) ==============
+  // Redesign-added, deliberately OUTSIDE the FLAGS block above so computeFlags stays byte-stable
+  // for test-wo-audit-flags.js. Both functions are pure and add NO fetch, NO AI, and NO cost - the
+  // cancellation scan runs over the notes already read in-page; the gate just filters computeFlags
+  // output by the operator's enabled checks.
+  //
+  // Cancellation / no-service language: emits a single 'CANCEL?' review prompt when a recent note
+  // reads like a cancellation, no-access, or no-service visit. It NEVER asserts the WO was
+  // cancelled - it flags a human-review candidate. Only the newest few notes are scanned; an older
+  // cancel is usually already resolved by a later note.
+  var WOA_CANCEL_RE = /\b(cancel(?:led|ling|lation|ed)?|no[\s-]?access|no[\s-]?show|unable to (?:access|complete|service|enter)|could not (?:access|complete|gain access)|site (?:closed|not ready|inaccessible)|customer (?:refused|declined|not ready)|rescheduled? indefinitely|do not (?:service|dispatch))\b/i;
+  function cancelScan(notes) {
+    if (!notes || !notes.length) return false;
+    for (var i = 0; i < Math.min(4, notes.length); i++) {
+      var n = notes[i] || {};
+      var body = _stripHtml(n.content || n.contentHtml || '');
+      if (WOA_CANCEL_RE.test(body)) return true;
+    }
+    return false;
+  }
+  // Map one computeFlags() string to the audit-check category that gates it. An unrecognized flag
+  // returns null and is ALWAYS kept - an unknown-category bug must never silently drop a real flag.
+  function flagCatKey(flag) {
+    if (/^OVERDUE|^STALE/.test(flag)) return 'aged';
+    if (/^NO NOTES/.test(flag)) return 'notes';
+    if (/^(NEG GP|LOW GP|NTE>DNE)/.test(flag)) return 'pricing';
+    if (/^NO VENDOR/.test(flag)) return 'vendor';
+    if (/^UNSCHEDULED/.test(flag)) return 'scheduling';
+    return null;
+  }
+  // The six operator-facing checks. 'repeat' (repeat-dispatch detection) has no data source yet -
+  // trip history is not fetched - so it is disabled in the UI and never appears here.
+  var WOA_CHECKS = ['aged', 'notes', 'pricing', 'vendor', 'scheduling', 'cancel'];
+  function woaDefaultChecks() {
+    var c = {}; for (var i = 0; i < WOA_CHECKS.length; i++) c[WOA_CHECKS[i]] = true; c.repeat = false; return c;
+  }
+  // Filter deterministic header flags by the enabled categories, then append 'CANCEL?' when the
+  // cancel check is on and a note trips the scan. A MISSING cfg key defaults to enabled, so a
+  // partial/empty cfg reproduces today's full flag output (the safe default).
+  function applyChecks(headerFlags, notes, cfg) {
+    cfg = cfg || {};
+    var on = function (k) { return cfg[k] !== false; };
+    var out = (headerFlags || []).filter(function (fl) { var c = flagCatKey(fl); return c === null || on(c); });
+    if (on('cancel') && cancelScan(notes)) out.push('CANCEL?');
+    return out;
+  }
+  // ===== BWN AUDIT CHECKS END ==================================================================
 
   // ---- BWN-OPS: audited GraphQL write path for the note-posting step -----------
   // Routes the posted status note through bwnGqlOp (the paste-identical BWN-OPS-WRAP below,
@@ -1856,116 +1921,515 @@
   }
   function getKey() { return GM_getValue('ingest_key', ''); }
 
+  // Scoped once under #bwn-woaudit-ov so it can't leak to Core's sheet or the other suite drawers.
+  // Only styles this tool's own body controls - the drawer chrome (.bwn-drawer*) stays Core's.
+  function injectStyle() {
+    if (document.getElementById('bwn-woaudit-css')) return;
+    var st = document.createElement('style');
+    st.id = 'bwn-woaudit-css';
+    var G = GREEN, ACC = '#1a7a4c', AMBER = '#b7791f', RED = '#b42318', BLUE = '#175cd3';
+    var P = '#bwn-woaudit-ov ';
+    st.textContent = [
+      // ---- shell: widen the drawer for this tool; off-white body behind white cards ----
+      P + '.bwn-drawer-body,' + P + '{box-sizing:border-box}',
+      P + '*,' + P + '*::before,' + P + '*::after{box-sizing:border-box}',
+      '#bwn-woaudit-ov.bwn-drawer{display:flex;flex-direction:column;width:min(880px,96vw);max-width:96vw;left:auto;right:0;background:#eef2f0;font-family:' + FONT + ';color:#243530;font-size:13px;line-height:1.5}',
+      P + '.woa-box{display:flex;flex-direction:column;flex:1;min-height:0}',
+      P + '.woa-i{flex:0 0 auto;vertical-align:middle}',
+      // ---- header ----
+      P + '.woa-hd{background:linear-gradient(160deg,' + G + ' 0%,#0a3220 100%);color:#eaf3ee;padding:16px 20px 14px;display:flex;align-items:flex-start;gap:12px}',
+      P + '.woa-hd-txt{flex:1;min-width:0}',
+      P + '.woa-eyebrow{font-size:10.5px;font-weight:700;letter-spacing:.14em;text-transform:uppercase;color:#8fc9ac;margin:0 0 3px}',
+      P + '.woa-title{font-size:19px;font-weight:700;letter-spacing:-.01em;margin:0;color:#fff}',
+      P + '.woa-sub{font-size:12.5px;color:#b7d3c5;margin:3px 0 0}',
+      P + '.woa-x{flex:0 0 auto;background:rgba(255,255,255,.12);border:0;color:#eaf3ee;width:30px;height:30px;border-radius:8px;cursor:pointer;display:flex;align-items:center;justify-content:center;transition:background .12s}',
+      P + '.woa-x:hover{background:rgba(255,255,255,.24)}',
+      P + '.woa-pill{flex:0 0 auto;font-size:11px;font-weight:700;padding:4px 10px;border-radius:999px;display:inline-flex;align-items:center;gap:6px;background:rgba(255,255,255,.14);color:#eaf3ee;white-space:nowrap}',
+      P + '.woa-pill::before{content:"";width:7px;height:7px;border-radius:50%;background:currentColor}',
+      P + '.woa-pill.is-ready{color:#bfe3d0}',
+      P + '.woa-pill.is-proc{color:#ffe08a}',
+      P + '.woa-pill.is-done{color:#7be0a6}',
+      P + '.woa-pill.is-warn{color:#ffc4a3}',
+      // ---- step indicator ----
+      P + '.woa-steps{display:flex;gap:4px;padding:12px 20px;background:#dfe7e2;border-bottom:1px solid #cdd9d2;overflow-x:auto}',
+      P + '.woa-step{flex:1 1 0;min-width:92px;display:flex;align-items:center;gap:8px;font-size:11.5px;color:#6b7c74;font-weight:600}',
+      P + '.woa-step-n{flex:0 0 auto;width:20px;height:20px;border-radius:50%;background:#c2cec7;color:#fff;display:flex;align-items:center;justify-content:center;font-size:11px;font-weight:700}',
+      P + '.woa-step.is-active{color:' + G + '}',
+      P + '.woa-step.is-active .woa-step-n{background:' + G + '}',
+      P + '.woa-step.is-done{color:' + ACC + '}',
+      P + '.woa-step.is-done .woa-step-n{background:' + ACC + '}',
+      // ---- layout ----
+      P + '.woa-scroll{flex:1;min-height:0;overflow:auto;padding:16px 20px 20px}',
+      P + '.woa-grid{display:grid;grid-template-columns:1fr;gap:16px}',
+      '@media (min-width:760px){' + P + '.woa-grid{grid-template-columns:1.35fr 1fr}}',
+      P + '.woa-col{display:flex;flex-direction:column;gap:16px;min-width:0}',
+      // ---- cards ----
+      P + '.woa-card{background:#fff;border:1px solid #e3e9e5;border-radius:12px;box-shadow:0 1px 2px rgba(16,40,30,.04);overflow:hidden}',
+      P + '.woa-card-hd{display:flex;align-items:center;gap:8px;padding:11px 14px;border-bottom:1px solid #eef2f0;color:' + G + ';font-weight:700;font-size:12.5px}',
+      P + '.woa-card-hd .woa-count{margin-left:auto;font-weight:600;font-size:11px;color:#6b7c74}',
+      P + '.woa-card-b{padding:14px}',
+      // ---- drop zone ----
+      P + '.woa-drop{border:2px dashed #cfdbd4;border-radius:10px;background:#f7faf8;padding:24px 16px;text-align:center;cursor:pointer;transition:border-color .12s,background .12s}',
+      P + '.woa-drop:hover,' + P + '.woa-drop:focus-visible{border-color:' + ACC + ';background:#eef6f1;outline:none}',
+      P + '.woa-drop.is-drag{border-color:' + ACC + ';background:#e6f2ec}',
+      P + '.woa-drop-ic{color:' + ACC + ';margin-bottom:6px}',
+      P + '.woa-drop-ic svg{width:30px;height:30px}',
+      P + '.woa-drop-t{font-weight:700;font-size:13.5px;color:#243530}',
+      P + '.woa-drop-s{font-size:12px;color:#6b7c74;margin-top:2px}',
+      P + '.woa-browse{color:' + ACC + ';font-weight:700;text-decoration:underline}',
+      P + '.woa-drop-x{font-size:11px;color:#8a988f;margin-top:8px}',
+      // ---- file card (selected state) ----
+      P + '.woa-file{display:flex;flex-direction:column;gap:12px}',
+      P + '.woa-file-row{display:flex;align-items:center;gap:10px}',
+      P + '.woa-file-ic{flex:0 0 auto;width:38px;height:38px;border-radius:9px;background:#e8f2ec;color:' + ACC + ';display:flex;align-items:center;justify-content:center}',
+      P + '.woa-file-name{font-weight:700;font-size:13px;word-break:break-all}',
+      P + '.woa-file-size{font-size:11.5px;color:#6b7c74}',
+      P + '.woa-meta{display:grid;grid-template-columns:1fr 1fr;gap:8px 12px}',
+      P + '.woa-meta-k{font-size:10.5px;text-transform:uppercase;letter-spacing:.04em;color:#8a988f;font-weight:700}',
+      P + '.woa-meta-v{font-size:12.5px;color:#243530;font-weight:600}',
+      P + '.woa-meta-v.is-miss{color:' + RED + '}',
+      P + '.woa-file-acts{display:flex;gap:14px}',
+      // ---- banners ----
+      P + '.woa-banner{display:flex;gap:9px;align-items:flex-start;padding:10px 12px;border-radius:9px;font-size:12px;line-height:1.45;border:1px solid}',
+      P + '.woa-banner .woa-i{margin-top:1px}',
+      P + '.woa-banner.is-info{background:#eef4fb;border-color:#c7dbf5;color:#1a3f74}',
+      P + '.woa-banner.is-warn{background:#fdf6ea;border-color:#f0dcae;color:#7a5410}',
+      P + '.woa-banner.is-err{background:#fdeceb;border-color:#f3c9c5;color:#8f231c}',
+      P + '.woa-banner.is-ok{background:#ecf6f0;border-color:#bfe3cf;color:#155c38}',
+      // ---- fields ----
+      P + '.woa-field{margin-bottom:14px}',
+      P + '.woa-field:last-child{margin-bottom:0}',
+      P + '.woa-lbl{display:block;font-weight:700;font-size:12px;color:#243530;margin:0 0 4px}',
+      P + '.woa-help{font-size:11.5px;color:#6b7c74;margin:0 0 7px;line-height:1.45}',
+      P + '.woa-select{width:100%;padding:8px 10px;border:1px solid #cfdbd4;border-radius:8px;background:#fff;font:13px ' + FONT + ';color:#243530}',
+      P + '.woa-select:focus,' + P + 'input:focus-visible,' + P + '.woa-seg-btn:focus-visible{outline:2px solid rgba(26,122,76,.4);outline-offset:1px;border-color:' + ACC + '}',
+      // ---- radios / ack ----
+      P + '.woa-radio{display:flex;gap:9px;align-items:flex-start;padding:9px 10px;border:1px solid #e3e9e5;border-radius:9px;margin-bottom:7px;cursor:pointer}',
+      P + '.woa-radio.is-on{border-color:' + ACC + ';background:#f2f9f5}',
+      P + '.woa-radio input{margin-top:2px}',
+      P + '.woa-radio-t{font-weight:600;font-size:12.5px}',
+      P + '.woa-radio-s{font-size:11.5px;color:#6b7c74}',
+      P + '.woa-ack{display:none;gap:8px;align-items:flex-start;margin-top:2px;padding:9px 10px;border-radius:8px;background:#fdf6ea;border:1px solid #f0dcae;color:#7a5410;font-size:12px}',
+      P + '.woa-ack.is-show{display:flex}',
+      // ---- check toggles ----
+      P + '.woa-check{display:flex;gap:10px;align-items:flex-start;padding:9px 2px}',
+      P + '.woa-check+' + '.woa-check{border-top:1px solid #f0f3f1}',
+      P + '.woa-check-txt{flex:1;min-width:0}',
+      P + '.woa-check-t{font-weight:600;font-size:12.5px;display:flex;align-items:center;gap:7px}',
+      P + '.woa-check-s{font-size:11.5px;color:#6b7c74;margin-top:1px}',
+      P + '.woa-badge{font-size:9.5px;font-weight:700;letter-spacing:.04em;text-transform:uppercase;padding:2px 6px;border-radius:5px;background:#eef2f0;color:#8a988f}',
+      // switch
+      P + '.woa-sw{flex:0 0 auto;position:relative;width:38px;height:22px;margin-top:1px}',
+      P + '.woa-sw input{position:absolute;opacity:0;width:100%;height:100%;margin:0;cursor:pointer}',
+      P + '.woa-sw-t{position:absolute;inset:0;background:#c8d2cc;border-radius:999px;transition:background .14s}',
+      P + '.woa-sw-t::after{content:"";position:absolute;top:2px;left:2px;width:18px;height:18px;background:#fff;border-radius:50%;transition:transform .14s;box-shadow:0 1px 2px rgba(0,0,0,.2)}',
+      P + '.woa-sw input:checked+.woa-sw-t{background:' + ACC + '}',
+      P + '.woa-sw input:checked+.woa-sw-t::after{transform:translateX(16px)}',
+      P + '.woa-sw input:disabled+.woa-sw-t{opacity:.45}',
+      P + '.woa-sw input:focus-visible+.woa-sw-t{outline:2px solid rgba(26,122,76,.5);outline-offset:2px}',
+      // ---- speed segmented ----
+      P + '.woa-seg{display:flex;gap:0;border:1px solid #cfdbd4;border-radius:9px;overflow:hidden}',
+      P + '.woa-seg-btn{flex:1;border:0;border-right:1px solid #cfdbd4;background:#fff;padding:8px 6px;font:600 12px ' + FONT + ';color:#5f6f68;cursor:pointer;transition:background .12s}',
+      P + '.woa-seg-btn:last-child{border-right:0}',
+      P + '.woa-seg-btn.is-on{background:' + G + ';color:#fff}',
+      P + '.woa-speed-note{font-size:11.5px;color:#6b7c74;margin-top:7px}',
+      P + '.woa-adv{display:flex;align-items:center;gap:8px;margin-top:9px;font-size:12px;color:#5f6f68}',
+      P + '.woa-adv input{width:56px;padding:5px 7px;border:1px solid #cfdbd4;border-radius:7px;font:13px ' + FONT + '}',
+      // ---- progress ----
+      P + '.woa-progress{display:none}',
+      P + '.woa-progress.is-show{display:block}',
+      P + '.woa-prog-top{display:flex;align-items:baseline;gap:8px}',
+      P + '.woa-prog-num{font-size:26px;font-weight:800;letter-spacing:-.02em;color:' + G + ';font-variant-numeric:tabular-nums}',
+      P + '.woa-prog-pct{font-size:13px;font-weight:700;color:#6b7c74;margin-left:auto}',
+      P + '.woa-bar{height:8px;border-radius:999px;background:#e6ece9;overflow:hidden;margin:8px 0 2px}',
+      P + '.woa-bar-fill{height:100%;width:0;background:linear-gradient(90deg,' + ACC + ',' + G + ');border-radius:999px;transition:width .3s ease}',
+      P + '.woa-cur{font-size:11.5px;color:#6b7c74;margin-top:6px;min-height:16px;white-space:nowrap;overflow:hidden;text-overflow:ellipsis;font-variant-numeric:tabular-nums}',
+      P + '.woa-eta{font-size:11.5px;color:#8a988f;margin-top:2px}',
+      P + '.woa-counters{display:grid;grid-template-columns:repeat(4,1fr);gap:8px;margin-top:12px}',
+      P + '.woa-counter{text-align:center;padding:8px 4px;border-radius:9px;background:#f4f7f5;border:1px solid #eef2f0}',
+      P + '.woa-counter b{display:block;font-size:17px;font-weight:800;font-variant-numeric:tabular-nums}',
+      P + '.woa-counter span{font-size:10px;text-transform:uppercase;letter-spacing:.03em;color:#8a988f;font-weight:700}',
+      P + '.woa-counter.c-ok b{color:' + ACC + '}',
+      P + '.woa-counter.c-flag b{color:' + AMBER + '}',
+      P + '.woa-counter.c-skip b{color:#6b7c74}',
+      P + '.woa-counter.c-err b{color:' + RED + '}',
+      P + '.woa-run-ctrls{display:none;gap:8px;margin-top:12px}',
+      P + '.woa-run-ctrls.is-show{display:flex}',
+      // ---- live log ----
+      P + '.woa-log-hd{display:flex;align-items:center;gap:6px}',
+      P + '.woa-log-acts{margin-left:auto;display:flex;gap:4px}',
+      P + '.woa-logbtn{border:1px solid #e3e9e5;background:#fff;border-radius:7px;padding:3px 8px;font:600 10.5px ' + FONT + ';color:#5f6f68;cursor:pointer;display:inline-flex;align-items:center;gap:4px}',
+      P + '.woa-logbtn:hover{background:#f4f7f5}',
+      P + '.woa-logbtn.is-on{background:' + G + ';color:#fff;border-color:' + G + '}',
+      P + '.woa-logbtn .woa-i{width:12px;height:12px}',
+      P + '#bwn-woaudit-log{font:11.5px ui-monospace,Consolas,monospace;background:#0f1c16;color:#c7dccf;border-radius:9px;padding:10px 11px;height:200px;overflow:auto;white-space:pre-wrap;word-break:break-word;margin:0}',
+      P + '#bwn-woaudit-log .l-err{color:#ff9f8f}',
+      P + '#bwn-woaudit-log .l-warn{color:#ffd27a}',
+      P + '#bwn-woaudit-log .l-ok{color:#8fe0ac}',
+      P + '#bwn-woaudit-log .l-ts{color:#5c7166}',
+      P + '#bwn-woaudit-log .l-wait{color:#9fb3a8}',
+      P + '.woa-log-empty{font:11.5px ui-monospace,Consolas,monospace;color:#8a988f;padding:14px 2px;text-align:center}',
+      // ---- actions ----
+      P + '.woa-actions{display:flex;flex-wrap:wrap;gap:10px;align-items:center;margin-top:16px;padding-top:14px;border-top:1px solid #e3e9e5}',
+      P + '.woa-btn{display:inline-flex;align-items:center;gap:7px;border:1px solid transparent;border-radius:9px;padding:10px 18px;font:700 13px ' + FONT + ';cursor:pointer;transition:filter .12s,background .12s}',
+      P + '.woa-btn .woa-i{width:16px;height:16px}',
+      P + '.woa-btn:disabled{opacity:.5;cursor:not-allowed}',
+      P + '.woa-btn-primary{background:' + G + ';color:#fff}',
+      P + '.woa-btn-primary:hover:not(:disabled){filter:brightness(1.12)}',
+      P + '.woa-btn-primary.is-complete{background:' + ACC + '}',
+      P + '.woa-btn-dl{background:' + ACC + ';color:#fff}',
+      P + '.woa-btn-dl:hover:not(:disabled){filter:brightness(1.1)}',
+      P + '.woa-btn-ghost{background:#fff;border-color:#cfdbd4;color:#5f6f68}',
+      P + '.woa-btn-ghost:hover:not(:disabled){background:#f4f7f5}',
+      P + '.woa-btn-cancel{background:#fff;border-color:#e6c3bf;color:' + RED + '}',
+      P + '.woa-btn-cancel:hover:not(:disabled){background:#fdeceb}',
+      P + '.woa-btn-retry{background:#fff;border-color:#f0dcae;color:' + AMBER + '}',
+      P + '.woa-btn-retry:hover:not(:disabled){background:#fdf6ea}',
+      P + '.woa-spacer{flex:1}',
+      // ---- disclosure / fine print ----
+      P + '.woa-disc{margin-top:12px;border:1px solid #e3e9e5;border-radius:9px;background:#fff;overflow:hidden}',
+      P + '.woa-disc>summary{cursor:pointer;padding:10px 12px;font-weight:600;font-size:12px;color:' + G + ';list-style:none;display:flex;align-items:center;gap:7px}',
+      P + '.woa-disc>summary::-webkit-details-marker{display:none}',
+      P + '.woa-disc[open]>summary{border-bottom:1px solid #eef2f0}',
+      P + '.woa-disc-b{padding:11px 13px;font-size:12px;color:#4a5852;line-height:1.55}',
+      P + '.woa-disc-b ul{margin:0;padding-left:18px}',
+      P + '.woa-disc-b li{margin:3px 0}',
+      // ---- post section (existing renderPostSection output lives here) ----
+      P + '#bwn-woaudit-post{margin-top:4px}',
+      // hide legacy nodes we keep in the DOM for the engine but no longer show inline
+      P + '#bwn-woaudit-mapinfo{display:none}',
+      P + '#bwn-woaudit-conc{display:none}',
+      P + '#bwn-woaudit-file{position:absolute;width:1px;height:1px;opacity:0;pointer-events:none}',
+      // No CSS keyframe animations in this module (the progress bar uses a width transition only);
+      // this still honours reduced motion by dropping the transitions.
+      '@media (prefers-reduced-motion:reduce){#bwn-woaudit-ov *{transition:none!important}}'
+    ].join('');
+    (document.head || document.documentElement).appendChild(st);
+  }
+
   function buildModal() {
     if (document.getElementById('bwn-woaudit-ov')) return;
+    injectStyle();
     // Suite drawer: slides out from the dock rail, styled by Core's page-wide sheet.
     var ov = document.createElement('aside');
     ov.id = 'bwn-woaudit-ov'; ov.className = 'bwn-drawer';
     ov.setAttribute('role', 'dialog'); ov.setAttribute('aria-label', 'WO Audit');
     try { document.dispatchEvent(new CustomEvent('bwn:evt', { detail: { id: 'bwn:drawer:open', key: DOCK_KEY } })); } catch (e) { }
     var box = document.createElement('div');
-    box.style.cssText = 'display:flex;flex-direction:column;flex:1;min-height:0;';
+    box.className = 'woa-box';
+    // Small markup builders (run once, at build time).
+    var step = function (n, label, id, cls) { return '<div class="woa-step ' + cls + '" id="' + id + '"><span class="woa-step-n">' + n + '</span><span class="woa-step-t">' + label + '</span></div>'; };
+    var card = function (title, icon, countId, body) { return '<section class="woa-card"><div class="woa-card-hd">' + icon + '<span>' + title + '</span>' + (countId ? '<span class="woa-count" id="' + countId + '"></span>' : '') + '</div><div class="woa-card-b">' + body + '</div></section>'; };
+    var radio = function (id, name, val, t, s, on) { return '<label class="woa-radio' + (on ? ' is-on' : '') + '" id="' + id + '-l"><input type="radio" name="' + name + '" value="' + val + '" id="' + id + '"' + (on ? ' checked' : '') + '><span><span class="woa-radio-t">' + t + '</span><span class="woa-radio-s">' + s + '</span></span></label>'; };
+    var chk = function (key, t, s, on, soon) { return '<div class="woa-check"><div class="woa-check-txt"><div class="woa-check-t">' + t + (soon ? ' <span class="woa-badge">Coming soon</span>' : '') + '</div><div class="woa-check-s">' + s + '</div></div><label class="woa-sw"><input type="checkbox" id="woa-chk-' + key + '"' + (on ? ' checked' : '') + (soon ? ' disabled' : '') + ' aria-label="' + t + '"><span class="woa-sw-t"></span></label></div>'; };
+    var counter = function (id, label, cls) { return '<div class="woa-counter ' + cls + '"><b id="' + id + '">0</b><span>' + label + '</span></div>'; };
+
     box.innerHTML =
-      '<div class="bwn-drawer-hd"><div><div class="t">WO Audit</div><div class="s">batch status notes from an audit .xlsx</div></div>' +
-      '<button type="button" id="bwn-woaudit-x" class="bwn-drawer-x" title="Close" aria-label="Close">&times;</button></div>' +
-      '<div class="bwn-drawer-body">' +
-      '<div id="bwn-woaudit-keywarn" style="display:none;background:#fff4e5;border:1px solid #ffcf99;color:#8a4b00;padding:8px 10px;border-radius:8px;margin-bottom:12px;font-size:12.5px"></div>' +
-      // Completeness gets its OWN banner rather than sharing the ingest-key one: they fire in
-      // different situations and would clobber each other. It persists outside the 240px log,
-      // where the same sentence is one 12px monospace line among forty that look identical - the
-      // coordinator clicks Download, the browser takes focus, and the file is already on disk.
-      // role=status so it is announced rather than only drawn.
-      '<div id="bwn-woaudit-warn" role="status" aria-live="polite" style="display:none;background:#fff4e5;border:1px solid #ffcf99;color:#8a4b00;padding:8px 10px;border-radius:8px;margin-bottom:12px;font-size:12.5px;font-weight:600"></div>' +
-      '<label style="display:block;font-weight:600;margin-bottom:6px">1. Audit workbook (.xlsx)</label>' +
-      '<input type="file" id="bwn-woaudit-file" accept=".xlsx,.xls" style="margin-bottom:6px">' +
-      '<div id="bwn-woaudit-sheetwrap" style="display:none;margin:8px 0"><label style="font-weight:600;margin-right:8px">Sheet</label><select id="bwn-woaudit-sheet"></select></div>' +
-      '<div id="bwn-woaudit-mapinfo" style="font-size:12.5px;color:#444;margin:8px 0;white-space:pre-line"></div>' +
-      '<div id="bwn-woaudit-notecolwrap" style="display:none;margin:8px 0"><label style="font-weight:600;margin-right:8px">Write notes to column</label><select id="bwn-woaudit-notecol"></select></div>' +
-      '<div style="display:flex;gap:16px;margin:12px 0;flex-wrap:wrap">' +
-      '<div><label style="display:block;font-weight:600;margin-bottom:4px">Model</label><select id="bwn-woaudit-model"></select></div>' +
-      '<div><label style="display:block;font-weight:600;margin-bottom:4px">Concurrency</label><input id="bwn-woaudit-conc" type="number" min="1" max="6" value="3" style="width:64px"></div>' +
-      '</div>' +
-      '<div style="display:flex;flex-wrap:wrap;gap:10px;align-items:center;margin:12px 0">' +
-      '<button id="bwn-woaudit-start" style="background:' + GREEN + ';color:#fff;border:0;padding:9px 18px;border-radius:8px;font-weight:600;cursor:pointer">Start Audit</button>' +
-      '<button id="bwn-woaudit-cancel" style="display:none;background:#6b1d1d;color:#fff;border:0;padding:9px 14px;border-radius:8px;font-weight:600;cursor:pointer">Cancel</button>' +
-      '<button id="bwn-woaudit-retry" style="display:none;background:#8a4b00;color:#fff;border:0;padding:9px 14px;border-radius:8px;font-weight:600;cursor:pointer">Retry Unfinished</button>' +
-      '<button id="bwn-woaudit-dl" style="display:none;background:#1a5f3e;color:#fff;border:0;padding:9px 14px;border-radius:8px;font-weight:600;cursor:pointer">Download .xlsx</button>' +
-      '</div>' +
-      '<div id="bwn-woaudit-prog" style="font-weight:600;margin:6px 0"></div>' +
-      '<div id="bwn-woaudit-log" style="font:12px ui-monospace,Consolas,monospace;background:#f6f8f7;border:1px solid #e0e6e2;border-radius:8px;padding:10px;max-height:240px;overflow:auto;white-space:pre-wrap"></div>' +
-      // Post-step section: populated by renderPostSection() when a run finishes. One Post button per
-      // drafted note, human-gated - there is NO bulk "post all".
-      '<div id="bwn-woaudit-post"></div>' +
+      '<header class="woa-hd">' +
+        '<div class="woa-hd-txt">' +
+          '<div class="woa-eyebrow">Work Order Operations</div>' +
+          '<h2 class="woa-title" id="bwn-woaudit-ttl">WO Audit</h2>' +
+          '<p class="woa-sub">Audit work-order history and generate structured audit flags.</p>' +
+        '</div>' +
+        '<span class="woa-pill is-ready" id="woa-pill" role="status" aria-live="polite">Ready</span>' +
+        '<button type="button" id="bwn-woaudit-x" class="woa-x" title="Close (Esc)" aria-label="Close">' + ICON.close + '</button>' +
+      '</header>' +
+      '<nav class="woa-steps" aria-label="Workflow progress">' +
+        step(1, 'Upload workbook', 'woa-st-1', 'is-active') +
+        step(2, 'Configure audit', 'woa-st-2', '') +
+        step(3, 'Run audit', 'woa-st-3', '') +
+        step(4, 'Download results', 'woa-st-4', '') +
+      '</nav>' +
+      '<div class="woa-scroll">' +
+        // ingest-key + completeness banners (ids preserved for the engine)
+        '<div id="bwn-woaudit-keywarn" class="woa-banner is-warn" style="display:none">' + ICON.warn + '<span></span></div>' +
+        '<div id="bwn-woaudit-warn" class="woa-banner is-warn" role="status" aria-live="polite" style="display:none">' + ICON.warn + '<span></span></div>' +
+        '<div class="woa-grid">' +
+          '<div class="woa-col">' +
+            card('1 &middot; Workbook', ICON.file, 'bwn-woaudit-wbcount',
+              '<div id="woa-drop" class="woa-drop" role="button" tabindex="0" aria-label="Upload audit workbook, Excel XLSX only">' +
+                '<div class="woa-drop-ic">' + ICON.upload + '</div>' +
+                '<div class="woa-drop-t">Drop your audit workbook here</div>' +
+                '<div class="woa-drop-s">or <span class="woa-browse">browse files</span></div>' +
+                '<div class="woa-drop-x">Excel .xlsx / .xls &middot; your original file is never modified</div>' +
+              '</div>' +
+              '<div id="woa-filecard" class="woa-file" style="display:none"></div>' +
+              '<input type="file" id="bwn-woaudit-file" accept=".xlsx,.xls" tabindex="-1" aria-hidden="true">' +
+              '<div id="bwn-woaudit-sheetwrap" class="woa-field" style="display:none;margin-top:12px"><label class="woa-lbl" for="bwn-woaudit-sheet">Worksheet</label><select id="bwn-woaudit-sheet" class="woa-select"></select></div>' +
+              '<div id="woa-fidelity" class="woa-banner is-info" style="display:none;margin-top:12px">' + ICON.info + '<span>The exported workbook preserves cell values and formulas where supported. Some Excel-specific presentation features, such as charts, conditional formatting, or validation rules, may not be retained.</span></div>'
+            ) +
+            card('2 &middot; Audit configuration', ICON.settings, null,
+              '<div class="woa-field"><label class="woa-lbl" for="bwn-woaudit-notecol">Write status notes to</label><div class="woa-help">The column that receives each work order\'s status note. Detected automatically &mdash; change it if the guess is wrong.</div><select id="bwn-woaudit-notecol" class="woa-select"></select></div>' +
+              '<div class="woa-field" id="woa-outwrap"><label class="woa-lbl">Audit flags output</label>' +
+                radio('woa-out-new', 'flagsMode', 'new', 'Create a new "Audit Flags" column', 'Leaves any existing audit column untouched.', true) +
+                radio('woa-out-reuse', 'flagsMode', 'reuse', 'Reuse the detected audit column', 'Replaces the values already in that column.', false) +
+                '<div id="woa-ack" class="woa-ack">' + ICON.warn + '<label><input type="checkbox" id="woa-ack-cb"> I understand this overwrites existing audit values in that column.</label></div>' +
+              '</div>' +
+              '<div class="woa-field"><label class="woa-lbl">Audit checks</label><div class="woa-help">Deterministic exception flags written to the Audit Flags column &mdash; no AI, no extra cost.</div>' +
+                chk('aged', 'Aged &amp; overdue work orders', 'Flags OVERDUE and STALE (no recent note).', true, false) +
+                chk('notes', 'Missing service notes', 'Flags work orders with no notes on file.', true, false) +
+                chk('pricing', 'Pricing &amp; margin exceptions', 'Flags negative/low GP and NTE over DNE.', true, false) +
+                chk('vendor', 'Missing vendor / PO', 'Flags work orders with no active purchase order.', true, false) +
+                chk('scheduling', 'Unscheduled work', 'Flags open work orders with no return-visit date.', true, false) +
+                chk('cancel', 'Cancellation / no-service language', 'Scans recent notes for cancel, no-access or no-show wording.', true, false) +
+                chk('repeat', 'Repeat dispatches', 'Needs trip history, which this tool does not read yet.', false, true) +
+              '</div>' +
+              '<div class="woa-field"><label class="woa-lbl">Processing speed</label>' +
+                '<div class="woa-seg" role="group" aria-label="Processing speed">' +
+                  '<button type="button" class="woa-seg-btn" data-conc="1" id="woa-sp-1">Low</button>' +
+                  '<button type="button" class="woa-seg-btn is-on" data-conc="3" id="woa-sp-3">Balanced</button>' +
+                  '<button type="button" class="woa-seg-btn" data-conc="6" id="woa-sp-6">Fast</button>' +
+                '</div>' +
+                '<div class="woa-speed-note" id="woa-speed-note">Balanced processes 3 work orders at a time.</div>' +
+                '<div class="woa-adv"><label for="bwn-woaudit-conc-adv">Advanced</label><input id="bwn-woaudit-conc-adv" type="number" min="1" max="6" value="3" aria-label="Work orders at a time, 1 to 6"><span>at a time (1&ndash;6)</span></div>' +
+                '<input id="bwn-woaudit-conc" type="number" min="1" max="6" value="3" tabindex="-1" aria-hidden="true">' +
+              '</div>'
+            ) +
+          '</div>' +
+          '<div class="woa-col">' +
+            card('Progress', ICON.activity, null,
+              '<div id="woa-empty-prog" class="woa-log-empty">The audit has not run yet.</div>' +
+              '<div id="bwn-woaudit-prog" class="woa-progress">' +
+                '<div class="woa-prog-top"><span class="woa-prog-num" id="woa-prog-num">0 / 0</span><span class="woa-prog-pct" id="woa-prog-pct">0%</span></div>' +
+                '<div class="woa-bar" id="woa-bar"><div class="woa-bar-fill" id="woa-bar-fill"></div></div>' +
+                '<div class="woa-cur" id="woa-cur"></div>' +
+                '<div class="woa-eta" id="woa-eta"></div>' +
+                '<div class="woa-counters">' +
+                  counter('woa-c-ok', 'Audited', 'c-ok') +
+                  counter('woa-c-flag', 'Flagged', 'c-flag') +
+                  counter('woa-c-skip', 'Skipped', 'c-skip') +
+                  counter('woa-c-err', 'Errors', 'c-err') +
+                '</div>' +
+                '<div class="woa-run-ctrls" id="woa-run-ctrls">' +
+                  '<button type="button" id="woa-pause" class="woa-btn woa-btn-ghost" style="flex:1;justify-content:center">' + ICON.pause + '<span>Pause</span></button>' +
+                  '<button id="bwn-woaudit-cancel" class="woa-btn woa-btn-cancel" style="flex:1;justify-content:center">' + ICON.stop + '<span>Cancel</span></button>' +
+                '</div>' +
+              '</div>'
+            ) +
+            '<section class="woa-card"><div class="woa-card-hd woa-log-hd">' + ICON.activity + '<span>Live activity</span>' +
+              '<div class="woa-log-acts">' +
+                '<button type="button" class="woa-logbtn is-on" id="woa-log-auto" title="Toggle auto-scroll" aria-pressed="true">Autoscroll</button>' +
+                '<button type="button" class="woa-logbtn" id="woa-log-copy" title="Copy log to clipboard">' + ICON.copy + 'Copy</button>' +
+                '<button type="button" class="woa-logbtn" id="woa-log-clear" title="Clear the display (audit data is kept)">' + ICON.trash + 'Clear</button>' +
+              '</div></div>' +
+              '<div class="woa-card-b" style="padding:10px">' +
+                '<div id="woa-log-empty" class="woa-log-empty">Activity will stream here during the audit.</div>' +
+                '<div id="bwn-woaudit-log" role="log" aria-live="polite" style="display:none"></div>' +
+              '</div></section>' +
+          '</div>' +
+        '</div>' +
+        '<div class="woa-actions">' +
+          '<button id="bwn-woaudit-start" class="woa-btn woa-btn-primary">' + ICON.play + '<span>Start audit</span></button>' +
+          '<button id="bwn-woaudit-retry" class="woa-btn woa-btn-retry" style="display:none">' + ICON.reset + '<span>Retry unfinished</span></button>' +
+          '<button type="button" id="woa-reset" class="woa-btn woa-btn-ghost">' + ICON.reset + '<span>Reset</span></button>' +
+          '<span class="woa-spacer"></span>' +
+          '<button id="bwn-woaudit-dl" class="woa-btn woa-btn-dl" disabled>' + ICON.download + '<span>Download audited workbook</span></button>' +
+        '</div>' +
+        '<details class="woa-disc"><summary>' + ICON.info + 'What will change?</summary><div class="woa-disc-b"><ul>' +
+          '<li>Notes are read live from Umbrava for each work order; the status note is written to the column selected above.</li>' +
+          '<li>Audit flags are written to the Audit Flags column according to the output mode you chose.</li>' +
+          '<li>Your original workbook is never modified in the browser &mdash; the tool produces a separate downloadable copy.</li>' +
+          '<li>The export preserves cell values and formulas where supported; some Excel presentation features (charts, conditional formatting, validation) may not be retained.</li>' +
+        '</ul></div></details>' +
+        '<div id="bwn-woaudit-post"></div>' +
+        '<div id="bwn-woaudit-mapinfo"></div>' +
       '</div>';
     ov.appendChild(box);
     document.body.appendChild(ov);
     bwnFocusTrap(ov);
 
     var $ = function (id) { return document.getElementById(id); };
-    // Dismissal is refused while a run is in flight - a stray backdrop click during a long
-    // backoff would otherwise orphan the workbook in memory with no route to Download.
+
+    // ---- status pill + step indicator ---------------------------------------
+    var PILL = { ready: ['is-ready', 'Ready'], proc: ['is-proc', 'Processing'], done: ['is-done', 'Complete'], warn: ['is-warn', 'Needs attention'] };
+    function setStatus(state) {
+      var p = $('woa-pill'); if (!p) return;
+      var s = PILL[state] || PILL.ready;
+      p.className = 'woa-pill ' + s[0]; p.textContent = s[1];
+    }
+    // Mark steps 1..n: below `active` = done, `active` = active, above = pending.
+    function setStep(active) {
+      for (var n = 1; n <= 4; n++) {
+        var el = $('woa-st-' + n); if (!el) continue;
+        el.className = 'woa-step' + (n < active ? ' is-done' : (n === active ? ' is-active' : ''));
+      }
+    }
+
+    // ---- close (backdrop click, X, Escape); refused mid-run without confirm --
     function tryClose() {
-      if (_running) { logln('  (still running - press Cancel first if you want to stop)'); return; }
+      if (_running) {
+        var stop = false;
+        try { stop = window.confirm('An audit is still running.\n\nClosing stops it and discards the in-progress workbook (the notes written so far are lost). To keep them, press Cancel instead, let the in-flight rows finish, then Download.\n\nClose and discard anyway?'); } catch (e) { stop = false; }
+        if (!stop) return;
+        _cancelled = true;
+      }
       drawerDismiss(ov);
     }
     ov.addEventListener('click', function (e) { if (e.target === ov) tryClose(); });
+    ov.addEventListener('keydown', function (e) { if (e.key === 'Escape') { e.stopPropagation(); tryClose(); } });
     $('bwn-woaudit-x').onclick = tryClose;
 
-    var msel = $('bwn-woaudit-model');
-    MODELS.forEach(function (m) { var o = document.createElement('option'); o.value = m.id; o.textContent = m.label; msel.appendChild(o); });
-
+    // ---- ingest-key banner (icon + span markup, so set the span not the node) -
     var kw = $('bwn-woaudit-keywarn');
-    if (!getKey()) { kw.style.display = 'block'; kw.textContent = 'SWA ingest key not set. Open the Tampermonkey menu -> "BWN WO Audit: Set SWA ingest key" (same key as the rest of the BWN Ops Suite), then reopen this.'; }
+    function setKeyWarn(msg) {
+      var sp = kw.querySelector('span'); if (sp) sp.textContent = msg || '';
+      kw.style.display = msg ? 'flex' : 'none';
+    }
+    if (!getKey()) setKeyWarn('SWA ingest key not set. Open the Tampermonkey menu → "BWN WO Audit: Set SWA ingest key" (same key as the rest of the BWN Ops Suite), then reopen this.');
 
-    var log = $('bwn-woaudit-log');
-    function logln(s) { log.textContent += (log.textContent ? '\n' : '') + s; log.scrollTop = log.scrollHeight; }
-    // The persistent half of a warning. Null-safe for the same reason the button writes are: the
-    // drawer can be gone or rebuilt while a run is in flight.
+    // ---- live log: timestamps, severity color, auto-scroll gate --------------
+    var log = $('bwn-woaudit-log'), logEmpty = $('woa-log-empty'), _autoscroll = true;
+    // Canonical attribute-safe escaper (pinned suite-wide by scripts/test-esc-canonical.js): the
+    // workbook filename and note text are rendered into innerHTML, including quoted attributes.
+    function esc(s) { return String(s == null ? '' : s).replace(/[&<>"']/g, function (c) { return { '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;' }[c]; }); }
+    function logln(s) {
+      if (!log) return;
+      if (logEmpty) logEmpty.style.display = 'none';
+      if (log.style.display === 'none') log.style.display = 'block';
+      var sev = /^\s*!/.test(s) ? 'l-err' : /^\s*\./.test(s) ? 'l-wait' : /\bfailed\b|\berror\b/i.test(s) ? 'l-warn' : /\bDone\b|written|\bComplete\b/.test(s) ? 'l-ok' : '';
+      var ts = new Date().toTimeString().slice(0, 8);
+      var line = document.createElement('div');
+      line.innerHTML = '<span class="l-ts">' + ts + '</span> <span class="' + sev + '">' + esc(s) + '</span>';
+      log.appendChild(line);
+      if (_autoscroll) log.scrollTop = log.scrollHeight;
+    }
+    $('woa-log-auto').onclick = function () {
+      _autoscroll = !_autoscroll;
+      this.classList.toggle('is-on', _autoscroll);
+      this.setAttribute('aria-pressed', String(_autoscroll));
+      if (_autoscroll) log.scrollTop = log.scrollHeight;
+    };
+    $('woa-log-copy').onclick = function () {
+      var txt = log.textContent || '';
+      try { navigator.clipboard.writeText(txt).then(function () { toast('Activity log copied.'); }, function () { toast('Copy blocked by the browser.'); }); }
+      catch (e) { toast('Copy not available.'); }
+    };
+    // Clears only the DISPLAY. session.results is the audit's real state and is untouched.
+    $('woa-log-clear').onclick = function () {
+      log.innerHTML = ''; log.style.display = 'none';
+      if (logEmpty) logEmpty.style.display = '';
+    };
+
+    // ---- completeness banner (persists outside the log) ----------------------
     function setWarn(msg) {
       var w = $('bwn-woaudit-warn'); if (!w) return;
-      w.textContent = msg || '';
-      w.style.display = msg ? 'block' : 'none';
+      var sp = w.querySelector('span'); if (sp) sp.textContent = msg || '';
+      w.className = 'woa-banner ' + (msg ? 'is-warn' : 'is-warn');
+      w.style.display = msg ? 'flex' : 'none';
     }
 
-    var loaded = null;   // { wb, name }
-    $('bwn-woaudit-file').onchange = function (e) {
-      var f = e.target.files && e.target.files[0];
+    // ---- concurrency: hidden #bwn-woaudit-conc stays the source of truth -----
+    var SPEED_NOTE = { 1: 'Low processes 1 work order at a time \u2014 gentlest on the AI service.', 3: 'Balanced processes 3 work orders at a time.', 6: 'Fast processes 6 work orders at a time \u2014 large batches may hit AI rate limits.' };
+    function setConc(n, fromAdv) {
+      n = Math.max(1, Math.min(6, parseInt(n, 10) || 3));
+      $('bwn-woaudit-conc').value = n;
+      if (!fromAdv) $('bwn-woaudit-conc-adv').value = n;
+      ['1', '3', '6'].forEach(function (v) { var b = $('woa-sp-' + v); if (b) b.classList.toggle('is-on', String(n) === v); });
+      var note = SPEED_NOTE[n] || ('Custom \u2014 ' + n + ' work orders at a time.' + (n > 3 ? ' Higher speed can hit AI rate limits or throttle inconsistently.' : ''));
+      $('woa-speed-note').textContent = note;
+    }
+    ['1', '3', '6'].forEach(function (v) { $('woa-sp-' + v).onclick = function () { setConc(v); }; });
+    $('bwn-woaudit-conc-adv').oninput = function () { setConc(this.value, true); };
+
+    // ---- output mode (radios) + overwrite acknowledgement --------------------
+    function syncOutMode() {
+      var reuse = $('woa-out-reuse').checked;
+      $('woa-out-new-l').classList.toggle('is-on', !reuse);
+      $('woa-out-reuse-l').classList.toggle('is-on', reuse);
+      $('woa-ack').classList.toggle('is-show', reuse);
+      if (!reuse) $('woa-ack-cb').checked = false;
+    }
+    $('woa-out-new').onchange = syncOutMode;
+    $('woa-out-reuse').onchange = syncOutMode;
+
+    // ---- audit-check switches sync the step indicator / nothing else here ----
+    var loaded = null;   // { wb, name, file }
+
+    // ---- file handling: validation, drag-drop, browse, sheet picker ----------
+    function fmtSize(b) { return b < 1024 ? b + ' B' : b < 1048576 ? (b / 1024).toFixed(1) + ' KB' : (b / 1048576).toFixed(1) + ' MB'; }
+    function readFile(f) {
       if (!f) return;
-      // Belt and braces with the disabled attribute set in runAudit: a file picked mid-run would
-      // replace `loaded` and orphan every note already written into the workbook in memory.
       if (_running) { logln('! A run is in progress - finish or cancel it before loading another workbook.'); return; }
+      if (!/\.(xlsx|xls)$/i.test(f.name || '')) {
+        showFidelity(false);
+        showError('That file is not an Excel workbook. Upload an .xlsx (or .xls) audit file.');
+        return;
+      }
       var fr = new FileReader();
       fr.onload = function () {
         try {
           if (typeof XLSX === 'undefined') throw new Error('spreadsheet library not loaded - reload the page');
           var wb = XLSX.read(new Uint8Array(fr.result), { type: 'array', cellFormula: true, cellStyles: true });
-          loaded = { wb: wb, name: (f.name || 'wo-audit.xlsx').replace(/\.(xlsx|xls)$/i, '') };
+          loaded = { wb: wb, name: (f.name || 'wo-audit.xlsx').replace(/\.(xlsx|xls)$/i, ''), file: f };
           var sw = $('bwn-woaudit-sheetwrap'), ss = $('bwn-woaudit-sheet');
           ss.innerHTML = '';
           wb.SheetNames.forEach(function (nm) { var o = document.createElement('option'); o.value = nm; o.textContent = nm; ss.appendChild(o); });
           sw.style.display = wb.SheetNames.length > 1 ? 'block' : 'none';
           ss.onchange = describe;
           describe();
-        } catch (err) { $('bwn-woaudit-mapinfo').textContent = 'Could not read workbook: ' + ((err && err.message) || err); }
+        } catch (err) { showError('Could not read that workbook: ' + ((err && err.message) || err) + '. It may be corrupt or password-protected.'); }
       };
+      fr.onerror = function () { showError('The browser could not read that file. Try again.'); };
       fr.readAsArrayBuffer(f);
-    };
+    }
+    function showError(msg) {
+      var d = $('woa-drop');
+      d.style.display = 'block'; $('woa-filecard').style.display = 'none';
+      // reuse the fidelity banner slot as an inline error under the drop zone
+      var fb = $('woa-fidelity');
+      fb.className = 'woa-banner is-err'; fb.style.display = 'flex';
+      fb.querySelector('span').textContent = msg;
+      setStatus('warn'); setStep(1);
+    }
+    function showFidelity(show) {
+      var fb = $('woa-fidelity');
+      fb.className = 'woa-banner is-info';
+      fb.querySelector('span').textContent = 'The exported workbook preserves cell values and formulas where supported. Some Excel-specific presentation features, such as charts, conditional formatting, or validation rules, may not be retained.';
+      fb.style.display = show ? 'flex' : 'none';
+    }
+    $('bwn-woaudit-file').onchange = function (e) { readFile(e.target.files && e.target.files[0]); };
+    (function wireDrop() {
+      var d = $('woa-drop'), fi = $('bwn-woaudit-file');
+      d.onclick = function () { if (!_running) fi.click(); };
+      d.onkeydown = function (e) { if (e.key === 'Enter' || e.key === ' ') { e.preventDefault(); if (!_running) fi.click(); } };
+      ['dragenter', 'dragover'].forEach(function (ev) { d.addEventListener(ev, function (e) { e.preventDefault(); e.stopPropagation(); if (!_running) d.classList.add('is-drag'); }); });
+      ['dragleave', 'dragend'].forEach(function (ev) { d.addEventListener(ev, function (e) { e.preventDefault(); d.classList.remove('is-drag'); }); });
+      d.addEventListener('drop', function (e) {
+        e.preventDefault(); e.stopPropagation(); d.classList.remove('is-drag');
+        var f = e.dataTransfer && e.dataTransfer.files && e.dataTransfer.files[0];
+        if (f) readFile(f);
+      });
+    })();
+
+    function renderFileCard(map, count) {
+      var f = loaded.file || {};
+      var miss = function (v, real) { return real ? '<span class="woa-meta-v">' + esc(v) + '</span>' : '<span class="woa-meta-v is-miss">' + esc(v) + '</span>'; };
+      var noteName = map.noteName != null ? map.noteName : 'will append "Audit Notes"';
+      var flagName = map.flagName != null ? map.flagName : 'will append "Audit Flags"';
+      $('woa-filecard').innerHTML =
+        '<div class="woa-file-row"><div class="woa-file-ic">' + ICON.file + '</div>' +
+          '<div style="min-width:0"><div class="woa-file-name">' + esc(f.name || (loaded.name + '.xlsx')) + '</div>' +
+          '<div class="woa-file-size">' + (f.size ? fmtSize(f.size) : '') + (loaded.wb.SheetNames.length > 1 ? ' &middot; ' + loaded.wb.SheetNames.length + ' sheets' : '') + '</div></div></div>' +
+        '<div class="woa-meta">' +
+          '<div><div class="woa-meta-k">Work orders</div>' + miss(String(count), count > 0) + '</div>' +
+          '<div><div class="woa-meta-k">WO # column</div>' + miss(map.keyName != null ? map.keyName : 'not found', map.key > -1) + '</div>' +
+          '<div><div class="woa-meta-k">Notes column</div>' + miss(noteName, true) + '</div>' +
+          '<div><div class="woa-meta-k">Audit flags column</div>' + miss(flagName, true) + '</div>' +
+        '</div>' +
+        '<div class="woa-file-acts"><span class="woa-browse" id="woa-replace">Replace file</span><span class="woa-browse" id="woa-remove" style="color:#b42318;text-decoration-color:#b42318">Remove</span></div>';
+      $('woa-replace').onclick = function () { if (!_running) $('bwn-woaudit-file').click(); };
+      $('woa-remove').onclick = function () { if (!_running) resetAll(); };
+      $('woa-drop').style.display = 'none';
+      $('woa-filecard').style.display = 'flex';
+    }
 
     function currentSheet() { return loaded ? ($('bwn-woaudit-sheet').value || loaded.wb.SheetNames[0]) : null; }
     function describe() {
-      if (!loaded) return;
-      // Never rebuild `session` mid-run. A run now spans minutes of backoff, and swapping the
-      // session under in-flight workers makes `session.rows.indexOf(row)` return -1, so their
-      // notes are written to `results[-1]` where auditTally's index loop can never see them -
-      // the rows report as "never audited" while their notes went into the OLD sheet.
-      if (_running) return;
-      // Results on screen belong to the session being replaced. Leaving Retry visible lets a
-      // stale press audit the NEW workbook into whatever column was detected for it, overwriting
-      // the client's existing Notes text; leaving Download visible offers the previous workbook.
+      if (!loaded || _running) return;
       var rb0 = $('bwn-woaudit-retry'); if (rb0) rb0.style.display = 'none';
-      var db0 = $('bwn-woaudit-dl'); if (db0) db0.style.display = 'none';
-      setWarn('');   // the previous session's completeness state does not describe this workbook
-      var ph0 = $('bwn-woaudit-post'); if (ph0) ph0.innerHTML = '';   // stale post cards belong to the old workbook
+      var db0 = $('bwn-woaudit-dl'); if (db0) { db0.disabled = true; }
+      setWarn('');
+      var ph0 = $('bwn-woaudit-post'); if (ph0) ph0.innerHTML = '';
       var ws = loaded.wb.Sheets[currentSheet()];
       var map = mapSheet(ws);
       var hdr = (map.aoa[map.headerRow] || []).map(function (x) { return String(x == null ? '' : x); });
@@ -1974,83 +2438,184 @@
         var key = cellStr(map.aoa, r, map.key);
         if (key) dataRows.push({ rowIdx: r, key: key });
       }
-      // Write-back column picker: every header + an append option, defaulting to the detection.
-      // Header-detection is a hint only; the operator confirms so a wrong guess is never silent.
+      // notes-column picker (detection is a hint; operator confirms)
       var ncsel = $('bwn-woaudit-notecol');
       ncsel.innerHTML = '';
-      hdr.forEach(function (h, i) { var o = document.createElement('option'); o.value = String(i); o.textContent = (h || ('(col ' + (i + 1) + ')')) + (i === map.note ? '  <-- detected' : ''); ncsel.appendChild(o); });
-      var appendOpt = document.createElement('option'); appendOpt.value = 'append'; appendOpt.textContent = '+ append new "Audit Notes" column'; ncsel.appendChild(appendOpt);
+      hdr.forEach(function (h, i) { var o = document.createElement('option'); o.value = String(i); o.textContent = (h || ('(col ' + (i + 1) + ')')) + (i === map.note ? '  \u2014 detected' : ''); ncsel.appendChild(o); });
+      var appendOpt = document.createElement('option'); appendOpt.value = 'append'; appendOpt.textContent = '+ append a new "Audit Notes" column'; ncsel.appendChild(appendOpt);
       ncsel.value = (map.note > -1) ? String(map.note) : 'append';
-      $('bwn-woaudit-notecolwrap').style.display = 'block';
-      var info = [
-        'WO # column: ' + (map.keyName != null ? '"' + map.keyName + '"' : 'NOT FOUND (cannot run)'),
-        'Work orders detected: ' + dataRows.length,
-        'Audit Flags column: ' + (map.flagName != null ? '"' + map.flagName + '"' : 'will append "Audit Flags"'),
-      ].join('\n');
-      $('bwn-woaudit-mapinfo').textContent = info;
-      $('bwn-woaudit-start').disabled = !(map.key > -1 && dataRows.length);
+      // output mode: "reuse" is only meaningful when a flags column already exists
+      var hasFlags = map.flag > -1;
+      var reuseIn = $('woa-out-reuse'), reuseL = $('woa-out-reuse-l');
+      reuseIn.disabled = !hasFlags;
+      reuseL.style.opacity = hasFlags ? '1' : '.5';
+      reuseL.querySelector('.woa-radio-s').textContent = hasFlags ? ('Replaces the values in the detected "' + map.flagName + '" column.') : 'No existing audit column was detected in this workbook.';
+      if (!hasFlags) { $('woa-out-new').checked = true; }
+      syncOutMode();
+      // legacy hidden text node kept for parity/debugging
+      $('bwn-woaudit-mapinfo').textContent = 'WO # column: ' + (map.keyName != null ? map.keyName : 'NOT FOUND') + ' | WOs: ' + dataRows.length + ' | flags: ' + (map.flagName != null ? map.flagName : 'append');
+      var wc = $('bwn-woaudit-wbcount'); if (wc) wc.textContent = dataRows.length + ' WO' + (dataRows.length === 1 ? '' : 's');
+      renderFileCard(map, dataRows.length);
+      showFidelity(true);
+      var ok = map.key > -1 && dataRows.length > 0;
+      $('bwn-woaudit-start').disabled = !ok;
+      if (!ok) {
+        showError(map.key === -1 ? 'No "WO #" column found in this workbook. The audit needs a work-order-number column (WO #, Work Order #, or Source Job #).' : 'No work-order rows were found under the detected header.');
+      } else {
+        setStatus('ready'); setStep(2);
+      }
       session = { wb: loaded.wb, sheet: currentSheet(), map: map, rows: dataRows, results: [], name: loaded.name };
     }
 
-    $('bwn-woaudit-start').onclick = function () { runAudit(false); };
+    // ---- reset: back to the empty state, keep config defaults ----------------
+    function resetAll() {
+      if (_running) return;
+      loaded = null; session = null;
+      $('bwn-woaudit-file').value = '';
+      $('woa-filecard').style.display = 'none'; $('woa-filecard').innerHTML = '';
+      $('woa-drop').style.display = 'block';
+      $('bwn-woaudit-sheetwrap').style.display = 'none';
+      showFidelity(false);
+      $('bwn-woaudit-post').innerHTML = '';
+      setWarn('');
+      $('bwn-woaudit-start').disabled = true;
+      $('bwn-woaudit-start').classList.remove('is-complete');
+      $('bwn-woaudit-start').innerHTML = ICON.play + '<span>Start audit</span>';
+      $('bwn-woaudit-retry').style.display = 'none';
+      var dl = $('bwn-woaudit-dl'); dl.disabled = true; dl.classList.remove('woa-btn-primary');
+      $('bwn-woaudit-prog').classList.remove('is-show');
+      $('woa-empty-prog').style.display = '';
+      log.innerHTML = ''; log.style.display = 'none';
+      if (logEmpty) logEmpty.style.display = '';
+      setStatus('ready'); setStep(1);
+    }
+    $('woa-reset').onclick = resetAll;
+
+    // ---- pause gate: parks NEW rows between fetches; in-flight rows finish ----
+    var _paused = false, _pauseWaiters = [];
+    function waitIfPaused() { return _paused ? new Promise(function (res) { _pauseWaiters.push(res); }) : Promise.resolve(); }
+    function releasePause() { var w = _pauseWaiters; _pauseWaiters = []; w.forEach(function (f) { f(); }); }
+    function setPaused(p) {
+      _paused = p;
+      var b = $('woa-pause'); if (b) b.innerHTML = (p ? ICON.play + '<span>Resume</span>' : ICON.pause + '<span>Pause</span>');
+      if (!p) releasePause();
+      if (p) { logln('Paused - in-flight work orders finish; no new ones start until you resume.'); setStatus('warn'); }
+      else { logln('Resumed.'); setStatus('proc'); }
+    }
+    $('woa-pause').onclick = function () { if (_running) setPaused(!_paused); };
+
+    // ---- progress card ------------------------------------------------------
+    var _runStart = 0, _flagged = 0, _lastCur = '';
+    function fmtEta(ms) {
+      if (!isFinite(ms) || ms < 0) return '';
+      var s = Math.round(ms / 1000);
+      if (s < 60) return '~' + s + 's remaining';
+      var m = Math.floor(s / 60); return '~' + m + 'm ' + (s % 60) + 's remaining';
+    }
+    function updateProgress(done, total, curKey) {
+      var pc = total ? Math.round(done / total * 100) : 0;
+      $('woa-prog-num').textContent = done + ' / ' + total;
+      $('woa-prog-pct').textContent = pc + '%';
+      $('woa-bar-fill').style.width = pc + '%';
+      if (curKey != null) _lastCur = curKey;
+      $('woa-cur').textContent = (done >= total && total) ? 'All work orders processed.' : (_running && _lastCur ? 'Processing WO ' + _lastCur + '…' : '');
+      // honest ETA: only once a few rows have timed, only while running
+      var eta = '';
+      if (_runStart && done >= 3 && done < total) { var per = (Date.now() - _runStart) / done; eta = fmtEta(per * (total - done)); }
+      $('woa-eta').textContent = eta;
+      // live counters from what actually settled
+      var ok = 0, err = 0;
+      if (session) { for (var i = 0; i < session.rows.length; i++) { var r = session.results[i]; if (!r) continue; if (r.error) err++; else ok++; } }
+      $('woa-c-ok').textContent = ok;
+      $('woa-c-flag').textContent = _flagged;
+      $('woa-c-skip').textContent = Math.max(0, total - ok - err);
+      $('woa-c-err').textContent = err;
+    }
+
+    // ---- primary actions ----------------------------------------------------
+    $('bwn-woaudit-start').onclick = function () { if (!this.classList.contains('is-complete')) runAudit(false); };
     $('bwn-woaudit-retry').onclick = function () { runAudit(true); };
     $('bwn-woaudit-dl').onclick = function () { downloadResult(); };
-    // Stops handing out new rows; in-flight rows finish so their notes are kept and Download
-    // still appears. Without this the only exit from a long backoff is reloading the tab.
+    // Cancel: confirm, then stop handing out new rows; in-flight rows finish and Download stays.
     $('bwn-woaudit-cancel').onclick = function () {
       if (!_running || _cancelled) return;
+      var go = false;
+      try { go = window.confirm('Cancel the audit?\n\nWork orders already in progress will finish and their notes are kept. Rows not yet started will be skipped.\n\nYou can still download the partial workbook, or press Retry Unfinished to complete it later.'); } catch (e) { go = true; }
+      if (!go) return;
       _cancelled = true;
+      if (_paused) setPaused(false);   // release parked rows so they can settle and the run can end
       logln('Cancelling - letting the rows already in flight finish...');
       this.disabled = true;
     };
 
+    // The config inputs locked while a run is in flight (values are preserved, not reset).
+    var CONFIG_IDS = ['bwn-woaudit-file', 'bwn-woaudit-sheet', 'bwn-woaudit-notecol', 'woa-out-new', 'woa-out-reuse', 'woa-ack-cb', 'woa-sp-1', 'woa-sp-3', 'woa-sp-6', 'bwn-woaudit-conc-adv', 'woa-reset', 'woa-chk-aged', 'woa-chk-notes', 'woa-chk-pricing', 'woa-chk-vendor', 'woa-chk-scheduling', 'woa-chk-cancel'];
+    function lockConfig(dis) { CONFIG_IDS.forEach(function (id) { var el = $(id); if (el) el.disabled = dis; }); }
+
     function runAudit(retryOnly) {
       if (!session) return;
+      if (_running) return;   // guard against a double Start / duplicate run
       var key = getKey();
-      if (!key) { kw.style.display = 'block'; kw.textContent = 'Set the SWA ingest key first (Tampermonkey menu).'; return; }
-      if (!authToken()) { logln('! Not signed into Umbrava (no usable token). Reload the tab and retry.'); return; }
-      var model = $('bwn-woaudit-model').value;
+      if (!key) { setKeyWarn('Set the SWA ingest key first: Tampermonkey menu → "BWN WO Audit: Set SWA ingest key".'); setStatus('warn'); return; }
+      if (!authToken()) { logln('! Not signed into Umbrava (no usable token). Reload the tab and retry.'); setStatus('warn'); return; }
+      var model = '';   // empty -> api/ai picks the model server-side (BWN_AI_MODEL, else its default)
       var conc = Math.max(1, Math.min(6, parseInt($('bwn-woaudit-conc').value, 10) || 3));
+      // Audit configuration read once, at run start (locked for the run's duration).
+      var cfg = {
+        checks: {
+          aged: $('woa-chk-aged').checked, notes: $('woa-chk-notes').checked,
+          pricing: $('woa-chk-pricing').checked, vendor: $('woa-chk-vendor').checked,
+          scheduling: $('woa-chk-scheduling').checked, cancel: $('woa-chk-cancel').checked
+        },
+        flagsMode: $('woa-out-reuse').checked ? 'reuse' : 'new'
+      };
+      if (cfg.flagsMode === 'reuse' && !$('woa-ack-cb').checked) {
+        $('woa-ack').classList.add('is-show'); $('woa-ack-cb').focus();
+        logln('! "Reuse the detected audit column" overwrites existing values - tick the acknowledgement, or choose "Create a new column".');
+        setStatus('warn'); return;
+      }
       var ws = session.wb.Sheets[session.sheet];
-      // Resolve the write-back column from the picker (detection is only the default) - but never
-      // again once a column has been APPENDED. Both branches force `note = -1` first, which
-      // defeats ensureNoteCol's own `if (map.note > -1) return` guard, so re-resolving appends a
-      // SECOND "Audit Notes" column and splits one audit across two half-blank columns in the
-      // client's workbook. The picker still governs the first resolution, and a run against an
-      // EXISTING column stays re-resolvable because nothing was appended.
+      // Resolve the write-back NOTES column from the picker (detection is only the default) - but
+      // never again once a column has been APPENDED (defeating ensureNoteCol's guard would append a
+      // SECOND "Audit Notes" column and split one audit across two half-blank columns).
       if (!session.map.noteAppended) {
         var pick = $('bwn-woaudit-notecol').value;
         if (pick === 'append') { session.map.note = -1; ensureNoteCol(ws, session.map); }
         else { session.map.note = parseInt(pick, 10); if (isNaN(session.map.note)) { session.map.note = -1; ensureNoteCol(ws, session.map); } }
       }
+      // Flags column, per the chosen output mode. "new" forces a fresh appended column (leaving any
+      // detected one untouched); "reuse" writes into the detected column. flagAppended guards a
+      // retry from appending a second column.
+      if (cfg.flagsMode === 'new') {
+        if (!session.map.flagAppended) { session.map.flag = -1; ensureFlagCol(ws, session.map); }
+      } else {
+        if (session.map.flag === -1 && !session.map.flagAppended) ensureFlagCol(ws, session.map);
+      }
 
-      // Flags column: detect-or-append once (no picker - flags are new output, low clobber risk).
-      // Guard on flagAppended so a resume/retry does not append a second "Audit Flags" column.
-      if (session.map.flag === -1 && !session.map.flagAppended) ensureFlagCol(ws, session.map);
-
-      // Resume, not just retry: rows a cancel skipped owe a note exactly as much as errored rows
-      // do, and matching `.error` alone left them permanently unfinishable.
+      // Resume, not just retry: rows a cancel skipped owe a note exactly as much as errored rows do.
       var targets = retryOnly
         ? pendingRows(session.rows, session.results)
         : session.rows.slice();
       if (retryOnly && !targets.length) { logln('Nothing left to finish - every row has a note.'); return; }
 
-      $('bwn-woaudit-start').disabled = true; $('bwn-woaudit-retry').style.display = 'none'; $('bwn-woaudit-dl').style.display = 'none';
+      // Lock config (values preserved) + switch the UI into the processing state.
+      lockConfig(true);
+      $('bwn-woaudit-start').disabled = true;
+      $('bwn-woaudit-retry').style.display = 'none';
+      var dl0 = $('bwn-woaudit-dl'); dl0.disabled = true; dl0.classList.remove('woa-btn-primary');
       var ph = $('bwn-woaudit-post'); if (ph) ph.innerHTML = '';   // rebuilt when the run finishes
-      // Lock the inputs that can replace `session` under in-flight workers. describe() also
-      // refuses while running; this stops the interaction reaching it at all.
-      $('bwn-woaudit-file').disabled = true;
-      var shSel = $('bwn-woaudit-sheet'); if (shSel) shSel.disabled = true;
-      $('bwn-woaudit-cancel').style.display = 'inline-block';
+      $('woa-empty-prog').style.display = 'none';
+      $('bwn-woaudit-prog').classList.add('is-show');
+      $('woa-run-ctrls').classList.add('is-show');
       $('bwn-woaudit-cancel').disabled = false;
+      if (_paused) setPaused(false);
       _running = true; _cancelled = false;
-      setWarn('');   // stale from the previous pass; recomputed when this one finishes
-      if (!retryOnly) { log.textContent = ''; session.results = new Array(session.rows.length); }
-      logln((retryOnly ? 'Retrying ' : 'Auditing ') + targets.length + ' work orders with ' + model + ' (concurrency ' + conc + ')...');
-      var prog = $('bwn-woaudit-prog');
-      // Seed it: onProgress only fires when a row SETTLES, and a throttled row can now sit in
-      // backoff for over a minute. A blank progress area plus a silent log reads as a hang.
-      prog.textContent = 'Progress: 0 / ' + targets.length;
+      _runStart = Date.now(); _flagged = 0; _lastCur = '';
+      setStatus('proc'); setStep(3);
+      setWarn('');
+      if (!retryOnly) { log.innerHTML = ''; log.style.display = 'none'; session.results = new Array(session.rows.length); }
+      logln((retryOnly ? 'Retrying ' : 'Auditing ') + targets.length + ' work orders (' + conc + ' at a time)...');
+      updateProgress(0, targets.length, null);
 
       runPool(targets, function (row) {
         var origIdx = session.rows.indexOf(row);
@@ -2062,14 +2627,22 @@
             ', waiting ' + Math.round(ms / 1000) + 's' +
             (throttled ? (hadHeader ? ' (server retry-after)' : ' (no retry-after header)') : ''));
         };
-        return woFetch(row.key)
+        // Park here (not mid-fetch) when paused: the worker holds before starting a new row, so
+        // in-flight rows still finish and the workbook is never left half-written.
+        return waitIfPaused().then(function () {
+          if (!_cancelled) { _lastCur = row.key; var c = $('woa-cur'); if (c) c.textContent = 'Processing WO ' + row.key + '…'; }
+          return woFetch(row.key);
+        })
           .then(function (data) {
             var h = data.header;
             // Deterministic flags first, written straight to the sheet - they need no AI, so they
             // survive even if the summarize below fails (credits/throttle). A header miss -> [].
+            // applyChecks gates the flags by the operator's enabled checks and appends the
+            // cancellation review flag; an empty/partial cfg reproduces the full flag set.
             if (session.map.flag > -1) {
-              var flags = computeFlags(h, data.notes, Date.now());
+              var flags = applyChecks(computeFlags(h, data.notes, Date.now()), data.notes, cfg.checks);
               ws[XLSX.utils.encode_cell({ c: session.map.flag, r: row.rowIdx })] = { t: 's', v: flags.join(', ') };
+              if (flags.length) _flagged++;
             }
             var woFacts = {
               raw: row.key,
@@ -2139,13 +2712,14 @@
             logln('  ! WO ' + row.key + ': ' + session.results[origIdx].error);
             throw e;   // marks the pool slot as errored too
           });
-      }, conc, function (done, total) { prog.textContent = 'Progress: ' + done + ' / ' + total; },
+      }, conc, function (done, total) { updateProgress(done, total, null); },
         function () { return _cancelled; })
         .then(function () {
-          _running = false;
-          var fi = $('bwn-woaudit-file'); if (fi) fi.disabled = false;
-          var sh = $('bwn-woaudit-sheet'); if (sh) sh.disabled = false;
+          _running = false; _paused = false; releasePause();
+          lockConfig(false);
+          $('woa-run-ctrls').classList.remove('is-show');
           var tal = auditTally(session.results, session.rows.length);
+          updateProgress(tal.ok + tal.errs, session.rows.length, null);
           logln((_cancelled ? 'Cancelled. ' : 'Done. ') + tal.ok + ' written, ' + tal.errs + ' failed' +
             (tal.skipped ? ', ' + tal.skipped + ' never audited' : '') + '.');
           // Guidance belongs HERE, once, not appended to every failing row: mid-run a reader
@@ -2194,11 +2768,22 @@
           }
           // Null-safe: the drawer can be gone if it was dismissed before the guard existed, or
           // rebuilt mid-run. Losing the buttons must not kill the results.
-          var sb = $('bwn-woaudit-start'); if (sb) sb.disabled = false;
-          var cb = $('bwn-woaudit-cancel'); if (cb) cb.style.display = 'none';
-          var db = $('bwn-woaudit-dl'); if (db) db.style.display = 'inline-block';
-          // Degraded rows are in pendingRows, so the button that re-drafts them has to be REACHABLE.
-          if (tal.errs || tal.skipped || degraded) { var rb = $('bwn-woaudit-retry'); if (rb) rb.style.display = 'inline-block'; }
+          var incomplete = tal.errs + tal.skipped;
+          var sb = $('bwn-woaudit-start');
+          var db = $('bwn-woaudit-dl');
+          var rb = $('bwn-woaudit-retry');
+          // Download becomes available now that an output workbook exists; on a clean finish it is
+          // promoted to the primary next action and Start becomes a non-actionable completion marker.
+          if (db) { db.disabled = false; if (!incomplete && !degraded) db.classList.add('woa-btn-primary'); }
+          if (incomplete || degraded) {
+            if (sb) { sb.disabled = false; sb.classList.remove('is-complete'); sb.innerHTML = ICON.play + '<span>Start audit</span>'; }
+            if (rb) rb.style.display = '';   // degraded rows are in pendingRows - Retry must be reachable
+            setStatus('warn'); setStep(3);
+          } else {
+            if (sb) { sb.disabled = true; sb.classList.add('is-complete'); sb.innerHTML = ICON.check + '<span>Audit complete</span>'; }
+            if (rb) rb.style.display = 'none';
+            setStatus('done'); setStep(4);
+          }
           // Persist the completeness state outside the scrolling log, where it survives the
           // coordinator being pulled away between finishing a run and pressing Download.
           setWarn(tal.errs + tal.skipped

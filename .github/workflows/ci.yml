@@ -119,6 +119,13 @@ jobs:
       - name: WO Audit deterministic flags harness
         run: node scripts/test-wo-audit-flags.js
 
+      # WO Audit 0.13.0 redesign: the operator-facing audit checks - the deterministic cancellation/
+      # no-service note scan, the flag->category map, and applyChecks gating (incl. the safe
+      # "missing key = enabled" default, per-category mutation controls, and the guarantee that an
+      # unrecognized flag is never silently dropped). Pure; negative controls throughout.
+      - name: WO Audit checks harness (0.13.0)
+        run: node scripts/test-wo-audit-checks.js
+
       # WO Audit 0.10.0: the note-POST helpers - eligibility (aged >30d, strict), the
       # WorkOrderNoteInput shape + fixed flags, the idempotency marker detect + embed. Each case
       # carries a negative control.

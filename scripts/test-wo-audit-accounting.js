@@ -192,20 +192,24 @@ function section6() {
   A.ok('note column is guarded on noteAppended, not retryOnly (QA-5c)',
     /if \(!session\.map\.noteAppended\) \{/.test(TEXT));
   A.ok('describe() refuses to rebuild mid-run (QA-3a)',
-    /function describe\(\)[\s\S]{0,900}?if \(_running\) return;/.test(TEXT));
+    /function describe\(\)[\s\S]{0,900}?if \(!loaded \|\| _running\) return;/.test(TEXT));
   A.ok('describe() hides Retry and Download on rebuild (QA-4c)',
     /bwn-woaudit-retry'\); if \(rb0\) rb0\.style\.display = 'none'/.test(TEXT));
+  // 0.13.0: the file input (and every other config control) is disabled via lockConfig(true) at run
+  // start; the same list is re-enabled with lockConfig(false) when the run settles. Assert the input
+  // is in that locked set AND that lockConfig actually flips `disabled`.
   A.ok('file input is disabled during a run (QA-3a)',
-    /\$\('bwn-woaudit-file'\)\.disabled = true;/.test(TEXT));
+    /CONFIG_IDS = \[[^\]]*'bwn-woaudit-file'/.test(TEXT) && /lockConfig\(true\)/.test(TEXT) &&
+    /function lockConfig\(dis\)[\s\S]{0,140}?el\.disabled = dis/.test(TEXT));
   A.ok('retry targets come from pendingRows, not an .error filter',
     /\? pendingRows\(session\.rows, session\.results\)/.test(TEXT));
   A.ok('retry button gate covers skipped rows',
-    /if \(tal\.errs \|\| tal\.skipped \|\| degraded\) \{ var rb =/.test(TEXT));
+    /var incomplete = tal\.errs \+ tal\.skipped;/.test(TEXT));
   // 0.12.0: a degraded row wrote a deterministic note, so it never reaches tal.errs. Without it in
   // this gate a total AI outage reads "Done. N written, 0 failed." with the Retry button HIDDEN -
   // the exact silent-success the run-accounting layer exists to prevent.
   A.ok('retry button gate also covers DEGRADED rows (AI fallback)',
-    /\|\| degraded\) \{ var rb =/.test(TEXT));
+    /if \(incomplete \|\| degraded\) \{/.test(TEXT) && /rb\.style\.display = ''/.test(TEXT));
   A.ok('the causes ladder reads degraded rows too, so the credits diagnosis still fires',
     /rr\.error \|\| rr\.degraded/.test(TEXT));
   A.ok('a degraded run says so in the log',
@@ -214,16 +218,16 @@ function section6() {
   A.ok('all-failed guidance is derived from observed causes (UAT-1a)',
     /allThrottle/.test(TEXT) && /Nothing is misconfigured/.test(TEXT));
   A.ok('button row wraps (UX-6)', /display:flex;flex-wrap:wrap;gap:10px;align-items:center/.test(TEXT));
-  A.ok('button label covers skipped rows too', />Retry Unfinished</.test(TEXT));
+  A.ok('button label covers skipped rows too', />Retry unfinished</.test(TEXT));
   A.ok('no stale "Retry Errors" label remains', !/>Retry Errors</.test(TEXT));
 
   // Phase 4: the incomplete-workbook path (UX-2, UAT-3a).
   A.ok('a dedicated persistent warning banner exists', /id="bwn-woaudit-warn"/.test(TEXT));
-  A.ok('...announced, not just drawn', /id="bwn-woaudit-warn" role="status" aria-live="polite"/.test(TEXT));
+  A.ok('...announced, not just drawn', /id="bwn-woaudit-warn"[^>]*role="status"[^>]*aria-live="polite"/.test(TEXT));
   A.ok('...and it is NOT the ingest-key banner', /id="bwn-woaudit-keywarn"/.test(TEXT) && /setWarn\(/.test(TEXT));
-  A.ok('the banner is cleared when a run starts', /_running = true; _cancelled = false;\n\s*setWarn\(''\)/.test(TEXT));
+  A.ok('the banner is cleared when a run starts', /_running = true; _cancelled = false;[\s\S]{0,200}?setWarn\(''\)/.test(TEXT));
   A.ok('the banner is cleared when describe() rebuilds the session',
-    /db0\.style\.display = 'none';\n\s*setWarn\(''\)/.test(TEXT));
+    /if \(db0\) \{ db0\.disabled = true; \}\s*setWarn\(''\)/.test(TEXT));
   A.ok('a partial download is gated behind an acknowledgement', /window\.confirm\(/.test(TEXT));
   A.ok('...that cannot trap the workbook if confirm is broken',
     /catch \(e\) \{ proceed = true; \}/.test(TEXT));
