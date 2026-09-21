@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         BWN WO Audit (Broadway National)
 // @namespace    broadwaynational.bwn
-// @version      0.15.0
+// @version      0.16.0
 // @downloadURL  https://raw.githubusercontent.com/Intermu/userscripts/main/bwn-wo-audit.user.js
 // @updateURL    https://raw.githubusercontent.com/Intermu/userscripts/main/bwn-wo-audit.user.js
 // @description  Batch WO-audit tool. Upload a WO audit .xlsx; for each work order this reads its two most recent notes DIRECTLY from Umbrava's GraphQL API in-page (using your live Umbrava session - the same read the BWN Ops Suite AI drafts use), then asks the broadway-internal-ops SWA summarize route (x-bwn-key gated, Anthropic key server-side) to write a status note - for jobs aged over 30 days a dated "Over 30 - trade - event timeline - ECD" chain built from the WO's FULL note history (with a PAST/needs-ECD flag when the committed date has lapsed), otherwise a 1-3 sentence client-ready status note. Fills the audit's notes column and downloads the workbook, preserving every other cell and formula. It also reads each WO's live header (status, phase, priority, GP, DNE/NTE, PO/vendor, schedule) in the same call and writes a deterministic Audit Flags column (OVERDUE, NEG/LOW GP, NTE>DNE, NO VENDOR, UNSCHEDULED, STALE) computed with no AI - so the exception audit survives an AI outage. Runs entirely in the app.umbrava.com page so it inherits your Umbrava auth - no MCP, no pasted keys, nothing sensitive in this script. This replaces the old standalone WO_Audit_Automation.html SWA tool, whose server-side MCP path could not authenticate to Umbrava. After a run drafts its notes, the coordinator can post each drafted note as an INTERNAL Umbrava note onto its aged (>30d) work order - one explicit click per note (human-gated, idempotent), routed through the governed bwnGqlOp write path with its permission gate and audit trail.
@@ -19,7 +19,7 @@
 (function () {
   'use strict';
 
-  var VER = '0.15.0';
+  var VER = '0.16.0';
   var FONT = "-apple-system,BlinkMacSystemFont,'Segoe UI','Helvetica Neue',Arial,sans-serif";
   // Inline SVG icons (no external image/font). 18px, stroke=currentColor so they take card color.
   function _svg(p, o) { return '<svg class="woa-i" viewBox="0 0 24 24" width="18" height="18" fill="none" stroke="currentColor" stroke-width="1.9" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"' + (o || '') + '>' + p + '</svg>'; }
@@ -357,22 +357,58 @@
     if (/^(NEG GP|LOW GP|NTE>DNE)/.test(flag)) return 'pricing';
     if (/^NO VENDOR/.test(flag)) return 'vendor';
     if (/^UNSCHEDULED/.test(flag)) return 'scheduling';
+    if (/^CLIENT UPDATE|^NO CLIENT NOTE/.test(flag)) return 'clientUpdate';
     return null;
   }
-  // The six operator-facing checks. 'repeat' (repeat-dispatch detection) has no data source yet -
-  // trip history is not fetched - so it is disabled in the UI and never appears here.
-  var WOA_CHECKS = ['aged', 'notes', 'pricing', 'vendor', 'scheduling', 'cancel'];
+  // Client-update overdue check. A note is client-facing when its numeric `type` maps to a
+  // bwn:noteTypes NAME containing "client" - the same "Client" note type the suite's Client Update
+  // draft and the Next-Actions "client update due" cadence key on. The set is resolved live from
+  // Core's cache; when Core is not loaded (or the node harness has no localStorage) the set is null
+  // and the check NO-OPS rather than guessing a type id.
+  function clientTypeIdSet(typeMap) {
+    var out = null;
+    if (typeMap) { for (var id in typeMap) { if (/client/i.test(String(typeMap[id]))) { if (!out) out = {}; out[String(id)] = 1; } } }
+    return out;
+  }
+  // '' when the client has been updated within the threshold (or the set is unknown); else a flag.
+  // `nowMs` injected (harness clock). Default threshold 2 days. A WO with NO client-typed note is
+  // flagged NO CLIENT NOTE only once it has ANY activity older than the threshold, so a brand-new WO
+  // is not flagged for an update it does not yet owe (and NO NOTES already covers a note-less WO).
+  function clientUpdateFlag(notes, clientSet, thresholdDays, nowMs) {
+    if (!notes || !notes.length || !clientSet) return '';
+    var thr = (typeof thresholdDays === 'number' && isFinite(thresholdDays) && thresholdDays >= 0) ? thresholdDays : 2;
+    var newestClient = null, newestAny = null;
+    for (var i = 0; i < notes.length; i++) {
+      var n = notes[i] || {}; var d = _date(n.createdDate); if (!d) continue; var t = +d;
+      if (newestAny === null || t > newestAny) newestAny = t;
+      if (clientSet[String(n.type)] && (newestClient === null || t > newestClient)) newestClient = t;
+    }
+    if (newestClient !== null) {
+      var ca = Math.floor((nowMs - newestClient) / MS_DAY);
+      return ca > thr ? ('CLIENT UPDATE ' + ca + 'd') : '';
+    }
+    if (newestAny !== null && Math.floor((nowMs - newestAny) / MS_DAY) > thr) return 'NO CLIENT NOTE';
+    return '';
+  }
+  // The operator-facing checks. 'repeat' (repeat-dispatch detection) has no data source yet - trip
+  // history is not fetched - so it is disabled in the UI and never appears here.
+  var WOA_CHECKS = ['aged', 'notes', 'pricing', 'vendor', 'scheduling', 'cancel', 'clientUpdate'];
   function woaDefaultChecks() {
     var c = {}; for (var i = 0; i < WOA_CHECKS.length; i++) c[WOA_CHECKS[i]] = true; c.repeat = false; return c;
   }
-  // Filter deterministic header flags by the enabled categories, then append 'CANCEL?' when the
-  // cancel check is on and a note trips the scan. A MISSING cfg key defaults to enabled, so a
-  // partial/empty cfg reproduces today's full flag output (the safe default).
-  function applyChecks(headerFlags, notes, cfg) {
+  // Filter deterministic header flags by the enabled categories, then append the note-scan flags:
+  // 'CANCEL?' (cancel check) and the client-update flag (clientUpdate check, needs ctx.clientSet +
+  // ctx.clientDays + ctx.nowMs from the run). A MISSING cfg key defaults to enabled, so a
+  // partial/empty cfg reproduces the full flag output (the safe default).
+  function applyChecks(headerFlags, notes, cfg, ctx) {
     cfg = cfg || {};
     var on = function (k) { return cfg[k] !== false; };
     var out = (headerFlags || []).filter(function (fl) { var c = flagCatKey(fl); return c === null || on(c); });
     if (on('cancel') && cancelScan(notes)) out.push('CANCEL?');
+    if (on('clientUpdate') && ctx && ctx.clientSet) {
+      var cf = clientUpdateFlag(notes, ctx.clientSet, ctx.clientDays, ctx.nowMs);
+      if (cf) out.push(cf);
+    }
     return out;
   }
   // ===== BWN AUDIT CHECKS END ==================================================================
@@ -641,6 +677,8 @@
   // script posts. Mirrors low-gp's lgTypeId; never hardcode past the floor, never infer by position.
   var WOA_TYPE_FLOOR = { internal: 13 };
   function noteTypesRaw() { try { return localStorage.getItem('bwn:noteTypes'); } catch (e) { return null; } }
+  // The {id:name} note-type map from Core's cache, or null. Feeds clientTypeIdSet (client-update check).
+  function bwnNoteTypeMap() { try { var c = JSON.parse(noteTypesRaw() || 'null'); return (c && c.map) || null; } catch (e) { return null; } }
   function noteTypeId(name) {
     var want = String(name == null ? '' : name).toLowerCase();
     try {
@@ -2276,7 +2314,10 @@
       // ---- shell: widen the drawer for this tool; off-white body behind white cards ----
       P + '.bwn-drawer-body,' + P + '{box-sizing:border-box}',
       P + '*,' + P + '*::before,' + P + '*::after{box-sizing:border-box}',
-      '#bwn-woaudit-ov.bwn-drawer{display:flex;flex-direction:column;width:min(880px,96vw);max-width:96vw;left:auto;right:0;background:#eef2f0;font-family:' + FONT + ';color:#243530;font-size:13px;line-height:1.5}',
+      // Geometry stays Core\'s: left-anchored off the dock rail, sliding in from the left with the
+      // bwn-drawer-in keyframe (the redesign briefly forced it to the right; reverted). Only WIDEN it
+      // past Core\'s 420px so the two-column layout can engage - Core\'s left + max-width + transform hold.
+      '#bwn-woaudit-ov.bwn-drawer{width:min(820px,86vw);background:#eef2f0;color:#243530;font-size:13px;line-height:1.5}',
       P + '.woa-box{display:flex;flex-direction:column;flex:1;min-height:0}',
       P + '.woa-i{flex:0 0 auto;vertical-align:middle}',
       // ---- header ----
@@ -2378,6 +2419,7 @@
       P + '.woa-speed-note{font-size:11.5px;color:#6b7c74;margin-top:7px}',
       P + '.woa-adv{display:flex;align-items:center;gap:8px;margin-top:9px;font-size:12px;color:#5f6f68}',
       P + '.woa-adv input{width:56px;padding:5px 7px;border:1px solid #cfdbd4;border-radius:7px;font:13px ' + FONT + '}',
+      P + '.woa-days{width:42px;padding:2px 5px;margin:0 2px;border:1px solid #cfdbd4;border-radius:6px;font:12px ' + FONT + ';text-align:center;vertical-align:baseline}',
       // ---- progress ----
       P + '.woa-progress{display:none}',
       P + '.woa-progress.is-show{display:block}',
@@ -2532,6 +2574,9 @@
                 chk('vendor', 'Missing vendor / PO', 'Flags work orders with no active purchase order.', true, false) +
                 chk('scheduling', 'Unscheduled work', 'Flags open work orders with no return-visit date.', true, false) +
                 chk('cancel', 'Cancellation / no-service language', 'Scans recent notes for cancel, no-access or no-show wording.', true, false) +
+                '<div class="woa-check"><div class="woa-check-txt"><div class="woa-check-t">Client update overdue</div>' +
+                  '<div class="woa-check-s">Flags a work order whose last client-facing note is older than <input id="woa-chk-clientDays" class="woa-days" type="number" min="0" max="90" value="2" aria-label="Client-update threshold in days"> day(s). Uses the suite\'s "Client" note type.</div></div>' +
+                  '<label class="woa-sw"><input type="checkbox" id="woa-chk-clientUpdate" checked aria-label="Client update overdue"><span class="woa-sw-t"></span></label></div>' +
                 chk('repeat', 'Repeat dispatches', 'Needs trip history, which this tool does not read yet.', false, true) +
               '</div>' +
               '<div class="woa-field"><label class="woa-lbl">Processing speed</label>' +
@@ -2913,7 +2958,7 @@
     };
 
     // The config inputs locked while a run is in flight (values are preserved, not reset).
-    var CONFIG_IDS = ['bwn-woaudit-file', 'bwn-woaudit-sheet', 'bwn-woaudit-notecol', 'woa-out-new', 'woa-out-reuse', 'woa-ack-cb', 'woa-sp-1', 'woa-sp-3', 'woa-sp-6', 'bwn-woaudit-conc-adv', 'woa-reset', 'woa-chk-aged', 'woa-chk-notes', 'woa-chk-pricing', 'woa-chk-vendor', 'woa-chk-scheduling', 'woa-chk-cancel'];
+    var CONFIG_IDS = ['bwn-woaudit-file', 'bwn-woaudit-sheet', 'bwn-woaudit-notecol', 'woa-out-new', 'woa-out-reuse', 'woa-ack-cb', 'woa-sp-1', 'woa-sp-3', 'woa-sp-6', 'bwn-woaudit-conc-adv', 'woa-reset', 'woa-chk-aged', 'woa-chk-notes', 'woa-chk-pricing', 'woa-chk-vendor', 'woa-chk-scheduling', 'woa-chk-cancel', 'woa-chk-clientUpdate', 'woa-chk-clientDays'];
     function lockConfig(dis) { CONFIG_IDS.forEach(function (id) { var el = $(id); if (el) el.disabled = dis; }); }
 
     function runAudit(retryOnly) {
@@ -2929,10 +2974,19 @@
         checks: {
           aged: $('woa-chk-aged').checked, notes: $('woa-chk-notes').checked,
           pricing: $('woa-chk-pricing').checked, vendor: $('woa-chk-vendor').checked,
-          scheduling: $('woa-chk-scheduling').checked, cancel: $('woa-chk-cancel').checked
+          scheduling: $('woa-chk-scheduling').checked, cancel: $('woa-chk-cancel').checked,
+          clientUpdate: $('woa-chk-clientUpdate').checked
         },
         flagsMode: $('woa-out-reuse').checked ? 'reuse' : 'new'
       };
+      // Client-update context: the set of note-type ids that count as a client-facing update
+      // (resolved live from Core's bwn:noteTypes; null when Core is not loaded -> the check no-ops),
+      // and the operator-set day threshold from the modal (default 2, honours bwn:config.audit).
+      var clientDays = Math.max(0, Math.min(90, parseInt($('woa-chk-clientDays').value, 10) || auditCfg('clientUpdateDays', 2)));
+      var clientCtx = { clientSet: clientTypeIdSet(bwnNoteTypeMap()), clientDays: clientDays };
+      if (cfg.checks.clientUpdate && !clientCtx.clientSet) {
+        logln('  (client-update check skipped: no "Client" note type found in Core\'s cache - open the suite so bwn:noteTypes loads)');
+      }
       if (cfg.flagsMode === 'reuse' && !$('woa-ack-cb').checked) {
         $('woa-ack').classList.add('is-show'); $('woa-ack-cb').focus();
         logln('! "Reuse the detected audit column" overwrites existing values - tick the acknowledgement, or choose "Create a new column".');
@@ -3013,7 +3067,7 @@
             // the cancellation review flag; an empty/partial cfg reproduces the full flag set.
             // Computed unconditionally so the structured row result can carry `flags` even when no
             // flags column is written.
-            var flags = applyChecks(computeFlags(h, data.notes, Date.now()), data.notes, cfg.checks);
+            var flags = applyChecks(computeFlags(h, data.notes, Date.now()), data.notes, cfg.checks, { clientSet: clientCtx.clientSet, clientDays: clientCtx.clientDays, nowMs: Date.now() });
             if (session.map.flag > -1) {
               ws[XLSX.utils.encode_cell({ c: session.map.flag, r: row.rowIdx })] = { t: 's', v: flags.join(', ') };
               if (flags.length) _flagged++;
