@@ -105,7 +105,7 @@ var LEDGER = {
   'bwn-low-gp.user.js':           { status: 'NONE' },
   'bwn-notes.user.js':            { status: 'NONE' },
   'bwn-proposal-actions.user.js': { status: 'NONE' },
-  'bwn-proposal-copy.user.js':    { status: 'CANONICAL' },
+  'bwn-proposal-copy.user.js':    { status: 'NONE' },
   'bwn-suite-ai.user.js':         { status: 'NONE' },
   'bwn-suite-core.user.js':       { status: 'VARIANT', reason: 'Core owns drawerDismiss(node, fader) (fader + DRAWER_EXIT_MS superset) and a deeper-nested bulk drawerDismiss(el); folded separately, gated by test-drawer-motion.js' },
   'bwn-temp-vendor.user.js':      { status: 'NONE' },
@@ -150,9 +150,9 @@ onDisk.slice().sort().forEach(function (f) {
 // sequence the canonical MUST preserve (.bwn-closing + the 170ms delay).
 // =============================================================================================
 console.log('\n-- 3. aggregate counts + one canonical SHA + exit contract --');
-A.ok('CANONICAL count is 7', ledgerWith('CANONICAL').length === 7, 'got ' + ledgerWith('CANONICAL').length);
+A.ok('CANONICAL count is 6', ledgerWith('CANONICAL').length === 6, 'got ' + ledgerWith('CANONICAL').length);
 A.ok('VARIANT count is 1', ledgerWith('VARIANT').length === 1, 'got ' + ledgerWith('VARIANT').length);
-A.ok('NONE count is 14', ledgerWith('NONE').length === 14, 'got ' + ledgerWith('NONE').length);
+A.ok('NONE count is 15', ledgerWith('NONE').length === 15, 'got ' + ledgerWith('NONE').length);
 var shas = {};
 ledgerWith('CANONICAL').forEach(function (f) { shas[sha(sliceAllEl(SRC[f])[0])] = true; });
 A.ok('all CANONICAL adopters share ONE drawerDismiss SHA', Object.keys(shas).length === 1, 'distinct: ' + Object.keys(shas).join(','));

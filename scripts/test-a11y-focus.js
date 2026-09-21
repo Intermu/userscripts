@@ -239,7 +239,7 @@ var OPEN_CALL = {
   'bwn-wo-assist.user.js': 'bwnFocusTrap(back);',
   'bwn-wo-audit.user.js': 'bwnFocusTrap(ov);',
   'bwn-ask.user.js': 'bwnFocusTrap(panelEl);',
-  'bwn-proposal-copy.user.js': 'bwnFocusTrap(overlay);'
+  'bwn-proposal-copy.user.js': 'bwnFocusTrap(modal);'
 };
 FAMILY.forEach(function (f) {
   var src = read(f);

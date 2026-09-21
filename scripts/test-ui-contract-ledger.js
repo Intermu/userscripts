@@ -122,11 +122,13 @@ var LEDGER = {
   // Own #bwn-pa-card overlay/menu + own paToast (the same private-toast pattern as proposal-copy,
   // NOT the shared function toast()); no drawer, animation, or rail. NONE of the four SHARED primitives.
   'bwn-proposal-actions.user.js': { drawer: 'NA',     toast: 'NA',        rmotion: 'NA',  rail: 'NA'  },
-  // 0.3.0 UI overhaul: adopted Core's shared .bwn-drawer chrome + the byte-identical drawerDismiss
-  // exit (drawer=HAS). Toast stays its own private pcToast (NOT the shared function toast()), and it
-  // does not itself declare an animation: rule or read --bwn-dock-shift (both live in Core's sheet),
-  // so toast/rmotion/rail stay NA - same shape as wo-audit's row apart from that private toast.
-  'bwn-proposal-copy.user.js': { drawer: 'HAS',       toast: 'NA',        rmotion: 'NA',  rail: 'NA'  },
+  // 0.4.0 workflow-modal redesign: Copy Proposal is now a SELF-CONTAINED wide centered modal with
+  // its own `.bcp-*` sheet - it left the shared `.bwn-drawer` (0.3.0), so it carries NONE of the four
+  // shared primitives again. No `.className='bwn-drawer'` and no `function drawerDismiss(` (own
+  // bcpRemove close) -> drawer NA. Own private pcToast -> toast NA. Transitions only, no `animation:`
+  // property -> rmotion NA. Does not read `--bwn-dock-shift` -> rail NA. It KEEPS bwnFocusTrap, so it
+  // stays in the focus-trap FAMILY in test-a11y-focus.js (that is a separate contract from these four).
+  'bwn-proposal-copy.user.js': { drawer: 'NA',        toast: 'NA',        rmotion: 'NA',  rail: 'NA'  },
   'bwn-suite-ai.user.js':      { drawer: 'NA',        toast: 'DIVERGENT', rmotion: 'HAS', rail: 'HAS' },
   'bwn-suite-core.user.js':    { drawer: 'HAS',       toast: 'DIVERGENT', rmotion: 'HAS', rail: 'HAS' },
   // Own inline panel inside the PO dialog (#bwn-tv-panel) + own body-modal fallback; closes by plain
