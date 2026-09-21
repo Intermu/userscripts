@@ -1923,7 +1923,11 @@
     // Scheduled/on-site with a FUTURE visit and no other exception is not yet a verification miss.
     if ((phase === 'scheduled' || phase === 'onsite' || phase === 'inprogress') && !visitPast && !stale && !overdueEcd) bk = null;
     if (!bk) {
-      if (overdueEcd) bk = 'OVERDUE_ECD';
+      // F1: a terminal (Invoiced/Closed/Paid) work order must NOT be pulled into an actionable
+      // Overdue-ECD/Stale bucket just because a stale ECD lingers - the ECD is no longer the control
+      // point once the job is closed. It stays MONITOR. Real closeout work lives in the costreview /
+      // confirmcomplete phases, which map to a bucket ABOVE this fallback and are unaffected.
+      if (overdueEcd && phase !== 'terminal') bk = 'OVERDUE_ECD';
       else if (stale && phase !== 'terminal') bk = 'STALE';
       else if (severeDq) bk = 'DATA_QUALITY';
       else bk = 'MONITOR';
@@ -1934,11 +1938,15 @@
     var actionable = bk !== 'MONITOR';
 
     // ---- priority ----------------------------------------------------------------------------
+    // F1: non-actionable (Monitor) status wins FIRST, before any critical/overdue urgency - so a
+    // terminal WO with a lapsed ECD (or a critical priority) can never be promoted to P0/P1 while
+    // its bucket is Monitor. Safety already forced an actionable bucket above, so it is never
+    // stranded here. For an actionable row the outcome is identical to before.
     var noSchedule = bk === 'VENDOR_SCHEDULING' || unscheduled || noVendor;
     var pk;
-    if (safety && actionable) pk = 'P0';
-    else if (critical && (overdueEcd || noSchedule || stale || safety)) pk = 'P0';
-    else if (!actionable) pk = 'MON';
+    if (!actionable) pk = 'MON';
+    else if (safety) pk = 'P0';
+    else if (critical && (overdueEcd || noSchedule || stale)) pk = 'P0';
     else if (overdueEcd || ecdDueSoon || critical) pk = 'P1';
     else pk = 'P2';
 
@@ -1981,8 +1989,13 @@
     if (!h) conf = 'Review Needed';
 
     // ---- manager review ----------------------------------------------------------------------
+    // F2: the generic "more than one risk flag" trigger is removed - common flags (OVERDUE ECD +
+    // a bucket flag + CLIENT UPDATE OVERDUE) coexist on most rows and flooded the queue. Manager
+    // Review is now a narrow, targeted escalation set. F3B: a Monitor item is never a manager-review
+    // escalation, so any contradiction flag on a Monitor row does not leak a hidden [MANAGER REVIEW].
     var manager = pk === 'P0' || ownerInvalid || (pk !== 'MON' && overdueDays > 7) ||
-      risk.length > 1 || safety || contradiction || conf === 'Review Needed';
+      safety || contradiction || conf === 'Review Needed';
+    if (pk === 'MON') manager = false;
 
     // ---- action due (LABEL only) -------------------------------------------------------------
     var due;
@@ -2005,10 +2018,17 @@
     var escalateTo = actUniq(esc).join(' + ');
 
     // ---- primary issue -----------------------------------------------------------------------
+    // F3A: the Completion-Verification template asserts the visit "has passed". When the row is
+    // actionable only because the ECD lapsed but the visit is still in the FUTURE, that wording is
+    // false - state the scheduled future visit instead. Uses ONLY the caller-established onsite date
+    // (ctx.nextOnsiteMd); no new parser and no date inferred from note prose.
     var tpl = ACT_TEMPLATE[bk] || ACT_TEMPLATE.MONITOR;
     var stageBit = f.currentStage || '';
+    var futureVisit = bk === 'COMPLETION' && !!ctx.hasFutureOnsite && !visitPast;
+    var completionFutureText = 'visit is scheduled for ' + (ctx.nextOnsiteMd || 'an upcoming date') + '; confirm vendor attendance and document the outcome after the visit.';
     var issue;
     if (bk === 'DATA_QUALITY') issue = tpl.issue + (dqReasons.length ? ' (' + dqReasons.join('; ') + ')' : '');
+    else if (futureVisit) issue = (stageBit && stageBit !== 'Status unclear') ? (stageBit + ' – ' + completionFutureText) : completionFutureText;
     else if (stageBit && f.primaryBlocker && (f.confidence !== 'low' || f.blockerCertain)) issue = stageBit + ' – ' + f.primaryBlocker;
     else if (stageBit && stageBit !== 'Status unclear') issue = stageBit + ' – ' + tpl.issue;
     else issue = tpl.issue;

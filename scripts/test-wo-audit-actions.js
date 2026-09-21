@@ -184,4 +184,49 @@ var ms = +new Date(2026, 8, 7, 9, 30, 0);   // 2026-09-07 local
 A.eq('actRunDate zero-pads', T.actRunDate(ms), '2026-09-07');
 A.eq('actSheetDate dotted', T.actSheetDate(ms), '2026.09.07');
 
+// ---- F1: terminal + lapsed ECD stays Monitor; closeout stays actionable ----------------------
+// A terminal (Invoiced/Closed/Paid) WO with only a lapsed ECD must not be promoted to an
+// actionable Overdue-ECD item, even at critical priority.
+var f1 = act({ facts: F({ phase: 'terminal', currentStage: 'Closed', primaryBlocker: null, terminal: true, ecdExpired: true }), header: H({ statusName: 'Invoiced', remainingDays: -30 }), priorityLabel: 'P1 Critical', priorityCategory: 'Critical' });
+A.eq('F1 terminal+lapsed ECD -> Monitor priority', f1.priorityKey, 'MON');
+A.eq('F1 terminal+lapsed ECD -> Monitor bucket', f1.bucket, 'Monitor');
+A.eq('F1 terminal+lapsed ECD -> excluded', f1.include, false);
+A.eq('F1 terminal+lapsed ECD -> no manager review', f1.managerReview, 'NO');
+A.ok('F1 terminal+lapsed ECD -> not the Overdue ECD bucket', f1.bucketKey !== 'OVERDUE_ECD', f1.bucket);
+// NEGATIVE control: the SAME overdue+critical on a NON-terminal phase (onhold) stays actionable.
+var f1neg = act({ facts: F({ phase: 'onhold', currentStage: 'On hold', primaryBlocker: 'work order on hold', ecdExpired: true }), header: H({ statusName: 'On Hold', remainingDays: -30 }), priorityLabel: 'P1 Critical', priorityCategory: 'Critical' });
+A.eq('F1 control: onhold+overdue+critical stays P0', f1neg.priorityKey, 'P0');
+A.eq('F1 control: onhold+overdue -> Overdue ECD bucket', f1neg.bucket, 'Overdue ECD');
+// Closeout / cost-review is NOT terminal and must remain actionable despite completed field work.
+var f1clo = act({ facts: F({ phase: 'costreview', currentStage: 'Work complete - final cost review pending', primaryBlocker: 'final vendor cost not confirmed' }), header: H({ statusName: 'Clocked Out: Complete' }) });
+A.eq('F1 closeout stays its bucket', f1clo.bucket, 'Closeout / Cost Review');
+A.ok('F1 closeout stays actionable', f1clo.priorityKey !== 'MON' && f1clo.include === true, f1clo.priorityKey);
+
+// ---- F2: a multi-risk actionable row ALONE no longer triggers Manager Review -----------------
+var f2 = act({ facts: F({ phase: 'materials', currentStage: 'Materials pending', primaryBlocker: 'parts on backorder', staleDays: 20 }), flags: ['STALE 20d', 'CLIENT UPDATE 9d'], header: H({ statusName: 'Material Ordered', remainingDays: 5 }) });
+A.ok('F2 the row really has >1 risk flag', f2.riskList.length > 1, f2.riskFlags);
+A.eq('F2 multi-risk alone -> Manager Review NO', f2.managerReview, 'NO');
+A.ok('F2 risk flags remain intact', f2.riskList.indexOf('MATERIALS PENDING') !== -1 && f2.riskList.indexOf('STALE UPDATE') !== -1, f2.riskFlags);
+// Each retained targeted trigger still fires (declared earlier in this file):
+A.eq('F2 retained trigger: P0 -> YES', r1b.managerReview, 'YES');
+A.eq('F2 retained trigger: contradiction -> YES', r5b.managerReview, 'YES');
+A.eq('F2 retained trigger: invalid owner -> YES', r9.managerReview, 'YES');
+A.eq('F2 retained trigger: >7d overdue -> YES', r7.managerReview, 'YES');
+A.eq('F2 retained trigger: safety -> YES', r8.managerReview, 'YES');
+A.eq('F2 retained trigger: Review Needed -> YES', r10.managerReview, 'YES');
+
+// ---- F3A: Completion Verification wording reflects a FUTURE vs PAST visit ---------------------
+var f3future = act({ facts: F({ phase: 'scheduled', currentStage: 'Scheduled', primaryBlocker: null, ecdExpired: true }), header: H({ statusName: 'Scheduled', remainingDays: -2, nextOnsiteDate: '2099-01-01' }), hasFutureOnsite: true, visitPast: false, nextOnsiteMd: '9/23' });
+A.eq('F3A future visit stays Completion Verification', f3future.bucket, 'Completion Verification');
+A.ok('F3A future visit issue says scheduled for the date', /scheduled for 9\/23/.test(f3future.primaryIssue), f3future.primaryIssue);
+A.ok('F3A future visit issue does NOT say passed', !/passed/i.test(f3future.primaryIssue), f3future.primaryIssue);
+// PAST visit (r5b) keeps the completion-miss wording.
+A.ok('F3A past visit issue still says passed', /passed/i.test(r5b.primaryIssue), r5b.primaryIssue);
+
+// ---- F3B: a Monitor record never carries Manager Review or the [MANAGER REVIEW] prefix --------
+var f3mon = act({ facts: F({ phase: 'scheduled', currentStage: 'Scheduled', primaryBlocker: null }), header: H({ statusName: 'Scheduled', nextOnsiteDate: null, remainingDays: 5 }), hasFutureOnsite: false, visitPast: false });
+A.eq('F3B scheduled/no-onsite/fresh -> Monitor', f3mon.priorityKey, 'MON');
+A.eq('F3B Monitor -> Manager Review NO', f3mon.managerReview, 'NO');
+A.ok('F3B Monitor -> no [MANAGER REVIEW] prefix', !/^\[MANAGER REVIEW\]/.test(f3mon.primaryIssue), f3mon.primaryIssue);
+
 A.finish();
