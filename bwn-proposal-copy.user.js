@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         BWN Proposal Copy (Broadway National)
 // @namespace    broadwaynational.bwn
-// @version      0.2.0
+// @version      0.3.0
 // @downloadURL  https://raw.githubusercontent.com/Intermu/userscripts/main/bwn-proposal-copy.user.js
 // @updateURL    https://raw.githubusercontent.com/Intermu/userscripts/main/bwn-proposal-copy.user.js
 // @description  Copy a client proposal from an aged-out work order onto a chosen replacement WO as an un-submitted Draft, in one confirmed action. Replays Umbrava's own createDraftProposal + editProposal mutations (line items copied verbatim); never submits, deletes, or retries. Manager-gated visibility. @grant none.
@@ -15,9 +15,76 @@
 (function () {
   'use strict';
 
-  var VER = '0.2.0';   // keep in step with @version
+  var VER = '0.3.0';   // keep in step with @version
   var DRY_RUN = false; // when true, the two WRITE mutations are logged, not sent
+  var FONT = "-apple-system,BlinkMacSystemFont,'Segoe UI','Helvetica Neue',Arial,sans-serif";
+  var GREEN = '#0d3d26';
   console.info('[BWN PROPOSAL COPY] v' + VER + ' - copy client proposal to another WO as a Draft (createDraftProposal + editProposal replay)');
+
+  // --- bwnFocusTrap: shared a11y focus manager for the BWN drawer-modal family (RM-B3 / ACC1) ---
+  // Sandboxes can't share a runtime object across the @grant boundary (see Core's BWN block), so
+  // each drawer-modal carries this BYTE-IDENTICAL copy; scripts/test-a11y-focus.js asserts the
+  // copies stay identical (drift guard) and runs the behaviour. On open it records the
+  // previously-focused element and, if focus is not already inside, moves it to the first
+  // focusable. It traps Tab / Shift-Tab within the modal's focusables. It self-releases when the
+  // modal gains .bwn-closing (the drawer exit contract) or leaves the DOM, restoring focus to the
+  // opener. Idempotent; returns release and also stashes it on el._bwnFocusRelease. Call it AFTER
+  // the modal is in the DOM and BEFORE the module's own initial .focus(), so the recorded element
+  // is the real opener, not an inner field.
+  function bwnFocusTrap(modalEl) {
+    if (!modalEl || !modalEl.addEventListener) return function () { };
+    var SEL = 'a[href],area[href],input:not([disabled]),select:not([disabled]),textarea:not([disabled]),button:not([disabled]),[tabindex]:not([tabindex="-1"]),[contenteditable="true"],[contenteditable=""]';
+    var prev = document.activeElement;
+    var released = false, mo = null, pmo = null;
+    function visible(el) { return el.offsetWidth > 0 || el.offsetHeight > 0 || (el.getClientRects && el.getClientRects().length > 0); }
+    function focusables() { return [].slice.call(modalEl.querySelectorAll(SEL)).filter(visible); }
+    function onKey(e) {
+      if (e.key !== 'Tab') return;
+      var f = focusables();
+      if (!f.length) { e.preventDefault(); return; }
+      var first = f[0], last = f[f.length - 1], a = document.activeElement;
+      if (e.shiftKey) { if (a === first || !modalEl.contains(a)) { e.preventDefault(); last.focus(); } }
+      else if (a === last || !modalEl.contains(a)) { e.preventDefault(); first.focus(); }
+    }
+    function release() {
+      if (released) return; released = true;
+      try { modalEl.removeEventListener('keydown', onKey, true); } catch (e) { }
+      try { if (mo) mo.disconnect(); } catch (e) { }
+      try { if (pmo) pmo.disconnect(); } catch (e) { }
+      if (modalEl._bwnFocusRelease === release) modalEl._bwnFocusRelease = null;
+      try { if (prev && prev.focus && prev.isConnected !== false) prev.focus(); } catch (e) { }
+    }
+    modalEl.addEventListener('keydown', onKey, true);
+    modalEl._bwnFocusRelease = release;
+    try {
+      mo = new MutationObserver(function () { if (modalEl.classList && modalEl.classList.contains('bwn-closing')) release(); });
+      mo.observe(modalEl, { attributes: true, attributeFilter: ['class'] });
+      if (modalEl.parentNode) {
+        pmo = new MutationObserver(function (recs) {
+          for (var i = 0; i < recs.length; i++) {
+            var rm = recs[i].removedNodes || [];
+            for (var j = 0; j < rm.length; j++) { if (rm[j] === modalEl) { release(); return; } }
+          }
+        });
+        pmo.observe(modalEl.parentNode, { childList: true });
+      }
+    } catch (e) { }
+    if (!modalEl.contains(document.activeElement)) {
+      var f0 = focusables();
+      if (f0.length) { try { f0[0].focus(); } catch (e) { } }
+      else { try { if (!modalEl.hasAttribute('tabindex')) modalEl.setAttribute('tabindex', '-1'); modalEl.focus(); } catch (e) { } }
+    }
+    return release;
+  }
+
+  function drawerDismiss(el) {
+    var reduce = false;
+    try { reduce = !!(window.matchMedia && window.matchMedia('(prefers-reduced-motion: reduce)').matches); } catch (e) { }
+    if (reduce) { el.remove(); return; }
+    el.removeAttribute('id'); el.setAttribute('aria-hidden', 'true');   // id freed now: a reopen builds a fresh node
+    el.classList.add('bwn-closing');
+    setTimeout(function () { try { el.remove(); } catch (e) { } }, 170);
+  }
 
   // RM-B2 error-reporter adoption: leave a bounded, PII-FREE bwn:errlog breadcrumb via Core's
   // window.bwnReport (both @grant none, shared page window) when the errorReporter flag is ON, so a
@@ -597,14 +664,18 @@
   // ===== ui =================================================================
   // Actions-menu item injection, drawer, target picker, confirm card + progress.
   //
-  // DESIGN NOTE (no live WO snapshot was available while building this - see
-  // task-5-report.md): the drawer is a fully SELF-CONTAINED overlay (own inline
-  // stylesheet, own DOM, no dependency on Core's .bwn-drawer CSS actually being
-  // present on the page) - the same "no-host fallback" shape bwn-drop-upload's
-  // note box and bwn-suite-ai's job-view overlay use, so it renders identically
-  // whether or not bwn-suite-core happens to be installed. It still PARTICIPATES
-  // in the suite's one-panel-at-a-time bus contract (bwn:drawer:open) so it
-  // doesn't stack with a real Core drawer when Core IS present.
+  // DESIGN NOTE (0.3.0 UI overhaul - matches WO Audit's polished chrome): the drawer is now a
+  // suite-standard dock-rail panel (`<aside class="bwn-drawer">`) styled by Core's page-wide
+  // stylesheet - the same shared chrome bwn-wo-audit / bwn-dispatch / bwn-inventory ride: gradient
+  // header (.bwn-drawer-hd/.t/.s), .bwn-drawer-x close, .bwn-drawer-body, .bwn-drawer-ft footer,
+  // .bwn-ops-btn buttons, full light/dark via Core's CSS variables, the shared drawerDismiss exit
+  // fade and the bwnFocusTrap a11y trap. This is safe to depend on Core even though this script is
+  // @grant none: the drawer can ONLY open when gated() is true, and gated() needs the rank Core
+  // publishes to bwn:role:last - Core absent => no rank => the menu item never injects => the
+  // drawer never opens, so there is no Core-absent code path that would render it unstyled. The
+  // small #bwn-pc-style sheet below now carries ONLY the bits Core has no primitive for (the
+  // line-item summary table, the pick inputs, the warn/err/ok result banners), tokenized to Core's
+  // vars so they theme too. It still announces bwn:drawer:open so a real Core drawer yields the slot.
   //
   // Selectors that touch the Proposals section FAIL SAFE: if the expected row/menu/anchor is not
   // found, the injector adds nothing rather than guessing (see the actions-menu block below).
@@ -759,8 +830,8 @@
   function pcToast(msg) {
     var el = document.createElement('div');
     el.style.cssText = 'position:fixed;bottom:24px;left:50%;transform:translateX(-50%);z-index:2147483001;' +
-      'background:#1b2a4a;color:#fff;padding:10px 18px;border-radius:8px;' +
-      'font:500 13px -apple-system,BlinkMacSystemFont,"Segoe UI",Arial,sans-serif;box-shadow:0 6px 24px rgba(0,0,0,.3);';
+      'background:' + GREEN + ';color:#fff;padding:10px 18px;border-radius:8px;' +
+      'font:500 13px ' + FONT + ';box-shadow:0 6px 24px rgba(0,0,0,.3);';
     el.textContent = 'BWN Proposal Copy: ' + msg;
     document.body.appendChild(el);
     setTimeout(function () { el.remove(); }, 5000);
@@ -770,44 +841,38 @@
   var DRAWER_KEY = 'proposal-copy';
   var openEl = null;
   var pcState = null;   // { hasToken, source, sourceWo, target }
+  // Only the bits Core's shared sheet has no primitive for: the line-item summary table, the pick
+  // inputs, and the three result banners. Everything else (drawer frame, header gradient, close
+  // button, footer, buttons) is Core's. Tokenized to Core's CSS vars so all of it themes in dark
+  // mode; falls back to light hexes when a var is somehow absent.
   function ensurePcStyle() {
     if (document.getElementById('bwn-pc-style')) return;
     var st = document.createElement('style');
     st.id = 'bwn-pc-style';
     st.textContent =
-      '#bwn-pc-overlay{position:fixed;inset:0;z-index:2147483000;display:flex;align-items:center;justify-content:center;' +
-      'background:rgba(9,30,66,.45);font-family:-apple-system,BlinkMacSystemFont,"Segoe UI","Helvetica Neue",Arial,sans-serif;}' +
-      '#bwn-pc-card{width:480px;max-width:92vw;max-height:86vh;overflow:auto;background:#fff;border-radius:12px;' +
-      'box-shadow:0 20px 60px rgba(0,0,0,.35);display:flex;flex-direction:column;color:#12241b;}' +
-      '#bwn-pc-hd{padding:14px 18px;border-radius:12px 12px 0 0;background:linear-gradient(135deg,#1a5f3e,#0d3d26);color:#fff;display:flex;align-items:flex-start;gap:10px;}' +
-      '#bwn-pc-hd .t{font:600 15px inherit;}' +
-      '#bwn-pc-hd .s{font:500 11px ui-monospace,"Segoe UI Mono","SF Mono",monospace;color:rgba(255,255,255,.75);margin-top:2px;}' +
-      '#bwn-pc-x{margin-left:auto;flex:none;background:rgba(255,255,255,.14);border:none;border-radius:6px;color:#fff;width:26px;height:26px;cursor:pointer;font-size:16px;line-height:1;}' +
-      '#bwn-pc-body{padding:14px 18px;flex:1;}' +
-      '#bwn-pc-ft{padding:12px 18px;border-top:1px solid #e2e8e5;display:flex;gap:8px;justify-content:flex-end;}' +
-      '.bwn-pc-btn{padding:8px 14px;border-radius:8px;border:1px solid #c6d2cc;background:#f4f7f5;color:#12241b;cursor:pointer;font:500 13px inherit;}' +
-      '.bwn-pc-btn.primary{background:#1a5f3e;border-color:#1a5f3e;color:#fff;}' +
-      '.bwn-pc-btn:disabled{opacity:.55;cursor:default;}' +
-      '.bwn-pc-table{width:100%;border-collapse:collapse;font-size:12px;margin-top:8px;}' +
-      '.bwn-pc-table th,.bwn-pc-table td{border-bottom:1px solid #e2e8e5;padding:5px 6px;text-align:left;}' +
-      '.bwn-pc-warn{background:#fdf4e3;border:1px solid #f0dcb4;color:#8a5a00;border-radius:6px;padding:7px 9px;font-size:12px;margin-top:8px;}' +
-      '.bwn-pc-err{background:#fef0ee;border:1px solid #f7c9c9;color:#8b1a1a;border-radius:6px;padding:8px 10px;font-size:12.5px;margin-top:8px;}' +
-      '.bwn-pc-ok{background:#eef8f1;border:1px solid #bfe3cc;color:#0d3d26;border-radius:6px;padding:8px 10px;font-size:12.5px;margin-top:8px;}' +
-      '@media (prefers-reduced-motion:reduce){#bwn-pc-overlay,#bwn-pc-card{transition:none;}}';
+      '.bwn-pc-sum{font-size:13px;line-height:1.6;color:var(--bwn-text,#1f2a24);}' +
+      '.bwn-pc-sum strong{color:var(--bwn-text-strong,#0d3d26);}' +
+      '.bwn-pc-table{width:100%;border-collapse:collapse;font-size:12px;margin-top:8px;color:var(--bwn-text,#1f2a24);}' +
+      '.bwn-pc-table th,.bwn-pc-table td{border-bottom:1px solid var(--bwn-border,#dde6e1);padding:5px 6px;text-align:left;}' +
+      '.bwn-pc-table th{color:var(--bwn-text-muted,#5a6b62);font-weight:600;}' +
+      '.bwn-pc-pick{margin-top:14px;border-top:1px solid var(--bwn-border,#dde6e1);padding-top:12px;}' +
+      '.bwn-pc-pick label,.bwn-pc-pick .lbl{font-weight:600;font-size:12.5px;color:var(--bwn-text,#1f2a24);}' +
+      '.bwn-pc-field{width:100%;box-sizing:border-box;padding:7px 9px;border:1px solid var(--bwn-border,#c6d2cc);border-radius:7px;' +
+      'font:400 13px ' + FONT + ';background:var(--bwn-surface,#fff);color:var(--bwn-text,#1f2a24);outline:none;}' +
+      '.bwn-pc-field:focus{border-color:var(--bwn-accent,#2ECC71);box-shadow:0 0 0 3px rgba(46,204,113,.15);}' +
+      '.bwn-pc-hint{font-size:11.5px;color:var(--bwn-text-muted,#5b6b8c);}' +
+      '.bwn-drawer .bwn-ops-btn:disabled{opacity:.5;cursor:default;}' +
+      '.bwn-pc-warn{background:var(--bwn-warn-bg,#fff4e8);border:1px solid var(--bwn-warn-fg,#f0dcb4);color:var(--bwn-warn-fg,#8a5a00);border-radius:8px;padding:8px 10px;font-size:12.5px;margin-top:8px;}' +
+      '.bwn-pc-err{background:var(--bwn-bad-bg,#fdecea);border:1px solid var(--bwn-bad,#f7c9c9);color:var(--bwn-bad-fg,#8b1a1a);border-radius:8px;padding:8px 10px;font-size:12.5px;margin-top:8px;}' +
+      '.bwn-pc-ok{background:var(--bwn-ok-bg,#e8f3ed);border:1px solid var(--bwn-accent,#bfe3cc);color:var(--bwn-ok-fg,#0d3d26);border-radius:8px;padding:8px 10px;font-size:12.5px;margin-top:8px;}';
     document.head.appendChild(st);
   }
-  // Self-contained overlay close - a plain remove, NOT the suite's shared .bwn-closing
-  // drawer-exit animation (this is the no-host-fallback overlay per the DESIGN NOTE, so it
-  // deliberately does not carry the shared drawer primitive). Named to avoid colliding with
-  // the shared `drawerDismiss` the UI-contract ledger detects (harness would then require the
-  // full shared exit contract this overlay intentionally does not implement).
-  function pcRemoveDrawer(el) {
-    try { el.remove(); } catch (e) { }
-  }
+  // Shared suite exit: the .bwn-closing fade Core's stylesheet owns, via the byte-identical
+  // drawerDismiss above. bwnFocusTrap self-releases when .bwn-closing lands, restoring focus.
   function closeDrawer() {
     if (!openEl) return;
     document.removeEventListener('keydown', onKeyClose);
-    pcRemoveDrawer(openEl);
+    drawerDismiss(openEl);
     openEl = null; pcState = null;
   }
   function onKeyClose(e) { if (e.key === 'Escape') closeDrawer(); }
@@ -833,30 +898,29 @@
     ensurePcStyle();
     try { document.dispatchEvent(new CustomEvent('bwn:evt', { detail: { id: 'bwn:drawer:open', key: DRAWER_KEY } })); } catch (e) { }
 
-    var overlay = document.createElement('div');
-    overlay.id = 'bwn-pc-overlay';
-    var card = document.createElement('div');
-    card.id = 'bwn-pc-card';
-    card.setAttribute('role', 'dialog');
-    card.setAttribute('aria-label', 'Copy proposal to another work order');
-    overlay.appendChild(card);
+    // Suite drawer: slides out from the dock rail, styled by Core's page-wide sheet (same chrome as
+    // WO Audit / Dispatch). The <aside> IS the panel - no page-covering backdrop.
+    var overlay = document.createElement('aside');
+    overlay.id = 'bwn-pc-overlay'; overlay.className = 'bwn-drawer';
+    overlay.setAttribute('role', 'dialog');
+    overlay.setAttribute('aria-label', 'Copy proposal to another work order');
 
     var hd = document.createElement('div');
+    hd.className = 'bwn-drawer-hd';
     hd.innerHTML = '<div><div class="t">Copy proposal to another WO</div><div class="s">loading source proposal…</div></div>';
-    hd.id = 'bwn-pc-hd';
     var x = document.createElement('button');
-    x.id = 'bwn-pc-x'; x.type = 'button'; x.textContent = '×'; x.setAttribute('aria-label', 'Close');
+    x.className = 'bwn-drawer-x'; x.type = 'button'; x.textContent = '×'; x.setAttribute('aria-label', 'Close');
     x.addEventListener('click', closeDrawer);
     hd.appendChild(x);
-    card.appendChild(hd);
+    overlay.appendChild(hd);
 
-    var body = document.createElement('div'); body.id = 'bwn-pc-body'; body.textContent = 'Loading…';
-    card.appendChild(body);
-    var ft = document.createElement('div'); ft.id = 'bwn-pc-ft';
-    card.appendChild(ft);
+    var body = document.createElement('div'); body.className = 'bwn-drawer-body'; body.textContent = 'Loading…';
+    overlay.appendChild(body);
+    var ft = document.createElement('div'); ft.className = 'bwn-drawer-ft';
+    overlay.appendChild(ft);
 
     document.body.appendChild(overlay);
-    overlay.addEventListener('click', function (e) { if (e.target === overlay) closeDrawer(); });
+    bwnFocusTrap(overlay);
     document.addEventListener('keydown', onKeyClose);
     openEl = overlay;
 
@@ -886,12 +950,11 @@
     body.innerHTML = '';
 
     var summary = document.createElement('div');
+    summary.className = 'bwn-pc-sum';
     summary.innerHTML =
-      '<div style="font-size:13px;line-height:1.6;">' +
       '<div><strong>Type:</strong> ' + escapeHtml(source.type && source.type.name) + '</div>' +
       '<div><strong>Description:</strong> ' + escapeHtml(source.description || '-') + '</div>' +
-      '<div><strong>Total:</strong> ' + fmtMoney(source.subtotal) + '</div>' +
-      '</div>';
+      '<div><strong>Total:</strong> ' + fmtMoney(source.subtotal) + '</div>';
     body.appendChild(summary);
 
     var items = source.proposalLineItems || [];
@@ -910,33 +973,33 @@
 
     // ---- target picker ------------------------------------------------------
     var pickWrap = document.createElement('div');
-    pickWrap.style.cssText = 'margin-top:14px;border-top:1px solid #e2e8e5;padding-top:12px;';
-    pickWrap.innerHTML = '<div style="font-weight:600;font-size:12.5px;margin-bottom:6px;">Copy to</div>';
+    pickWrap.className = 'bwn-pc-pick';
+    pickWrap.innerHTML = '<div class="lbl" style="margin-bottom:6px;">Copy to</div>';
     body.appendChild(pickWrap);
 
     var sel = document.createElement('select');
-    sel.style.cssText = 'width:100%;box-sizing:border-box;padding:7px 9px;border:1px solid #c6d2cc;border-radius:7px;font:400 13px inherit;margin-bottom:8px;';
+    sel.className = 'bwn-pc-field'; sel.style.marginBottom = '8px';
     sel.innerHTML = '<option value="">Loading open work orders…</option>';
     pickWrap.appendChild(sel);
 
     var freeWrap = document.createElement('div');
     freeWrap.style.cssText = 'display:flex;gap:8px;align-items:center;margin-bottom:4px;';
-    var freeLbl = document.createElement('span'); freeLbl.textContent = 'or WO #:'; freeLbl.style.cssText = 'font-size:12px;color:#5b6b8c;';
+    var freeLbl = document.createElement('span'); freeLbl.textContent = 'or WO #:'; freeLbl.className = 'bwn-pc-hint';
     var freeInput = document.createElement('input'); freeInput.type = 'text'; freeInput.placeholder = 'e.g. 8002';
-    freeInput.style.cssText = 'flex:1;padding:6px 9px;border:1px solid #c6d2cc;border-radius:7px;font:400 13px inherit;';
+    freeInput.className = 'bwn-pc-field'; freeInput.style.flex = '1';
     freeWrap.appendChild(freeLbl); freeWrap.appendChild(freeInput);
     pickWrap.appendChild(freeWrap);
 
     var warnEl = document.createElement('div'); pickWrap.appendChild(warnEl);
     var verifyStatus = document.createElement('div');
-    verifyStatus.style.cssText = 'font-size:11.5px;color:#5b6b8c;margin-top:4px;';
+    verifyStatus.className = 'bwn-pc-hint'; verifyStatus.style.marginTop = '4px';
     pickWrap.appendChild(verifyStatus);
 
     var cancelBtn = document.createElement('button');
-    cancelBtn.type = 'button'; cancelBtn.className = 'bwn-pc-btn'; cancelBtn.textContent = 'Cancel';
+    cancelBtn.type = 'button'; cancelBtn.className = 'bwn-ops-btn ghost'; cancelBtn.textContent = 'Cancel';
     cancelBtn.addEventListener('click', closeDrawer);
     var confirmBtn = document.createElement('button');
-    confirmBtn.type = 'button'; confirmBtn.className = 'bwn-pc-btn primary'; confirmBtn.textContent = 'Copy proposal';
+    confirmBtn.type = 'button'; confirmBtn.className = 'bwn-ops-btn primary'; confirmBtn.textContent = 'Copy proposal';
     confirmBtn.disabled = true;
     ft.appendChild(cancelBtn); ft.appendChild(confirmBtn);
 
@@ -1051,7 +1114,7 @@
         // tab specifically is not confirmed - the operator may need one extra click there.
         var openLink = document.createElement('a');
         openLink.href = '/work-orders/' + Number(target.number);
-        openLink.style.cssText = 'color:#0d3d26;font-weight:600;';
+        openLink.style.cssText = 'color:var(--bwn-ok-fg,#0d3d26);font-weight:600;';
         openLink.textContent = 'open W-' + target.number;
 
         var rb = r.readBack;
