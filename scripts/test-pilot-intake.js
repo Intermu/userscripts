@@ -92,6 +92,25 @@ A.eq('  skips a lone salutation',
   api.genericBodyScope('Hi team,\r\nThe canopy light is out.\r\njdoe@example.com'),
   'The canopy light is out.');
 A.eq('  empty body -> empty (extractWo then falls back to the subject)', api.genericBodyScope(''), '');
+A.eq('  no WO# in this email -> Source Job # stays blank (no false positive)', wo.sourceJob, '');
+
+// --- Source Job # from the client WO number (0.9.30) ---------------------------------------------
+// Regression for the reported failure: a real PFJ subject carries BOTH a "WO#" and a "PO_" and only
+// the PO prefilled - extractWo never mapped the WO number to Source Job #. Grounded on the dropped
+// .msg "Store_ 692-Travel Center - WO# 02210875 - PO_ 170101445136 - Dryer just broke...".
+var SUBJECT_WO = 'Store: 692-Travel Center - WO# 02210875 - PO: 170101445136 - Dryer just broke showing error code 66';
+var BODY_WO = [
+  'Dryer just broke showing error code 66', '',
+  'Asset Information:',
+  'Asset Name: WASHER DRYER COMBO - RIGHT',
+  'Model: LTGE5ASP115TW01',
+  'Serial#:', 'Parts Warranty End Date:', 'Labor Warranty End Date:'
+].join('\r\n');
+console.log('\n# the client WO number maps to Source Job # (was blank on the Pilot/generic path)');
+var woJob = api.extractWo(SUBJECT_WO, BODY_WO, SENDER);
+A.eq('  Source Job # = the client WO number, leading zero kept', woJob.sourceJob, '02210875');
+A.eq('  Source PO # = the 12-digit PO, not confused with the WO#', woJob.po, '170101445136');
+A.eq('  Location = PFJ 0692 (store 692)', woJob.location, 'PFJ 0692');
 
 // --- Second real format: the ASSET/LABELED Pilot email (0.9.17) ---------------------------------
 // Grounded on Mike's dropped .msg "Pilot Store: 114 ... PO 170101999002 ... P2 - Normal (24 hrs)".
