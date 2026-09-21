@@ -374,6 +374,15 @@ jobs:
       - name: AI coordinator-read harness (assignedTo + user(id:) two-step)
         run: node scripts/test-ai-coordinator-read.js
 
+      # Client Update client-safety pipeline (CLIENT_MODE, v1.48): the deterministic spine
+      # that decides what a client may see - structured appointment beats a note-inferred
+      # date, a target ECD is never rendered as a confirmed appointment, prohibited internal
+      # content (vendors, rates, NTE, approvals, call activity, sourcing difficulty) is caught
+      # before display without over-sanitizing legitimate technical language, and the fallback
+      # is always safe and invents nothing. Three mutation controls each turn it red.
+      - name: Client Update client-safety pipeline harness
+        run: node scripts/test-client-pipeline.js
+
       # next-actions-overhaul: the priority clock, intake gate and tiered escalation were
       # all shipped in WO Assist 2.68 but had no dedicated harness for their decision
       # logic. These slice the real engine blocks and pin the math, so a drift fails CI
