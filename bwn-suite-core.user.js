@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         BWN Suite - Core (Broadway National)
 // @namespace    broadwaynational.bwn
-// @version      1.87.2
+// @version      1.88.0
 // @downloadURL  https://raw.githubusercontent.com/Intermu/userscripts/main/bwn-suite-core.user.js
 // @updateURL    https://raw.githubusercontent.com/Intermu/userscripts/main/bwn-suite-core.user.js
 // @description  Runs several Umbrava helpers for BWN coordinators, in the browser with no privileged grants. Includes: PO Approval + ETA Builder; WO Assist (GP/ETA, a stall watchdog, DNE calculator, and a next-action playbook); Email Leak Guard (checks recipients against vendor names, PO amounts, and client budget references before an outbound email sends); WO List Heat (a triage overlay + My Day strip on the work-order list, with an optional same-origin Umbrava API scan for deterministic full-board coverage); and the BWN Launcher (opens the Azure Static Web App tools with the current WO's context). Modules share state through sessionStorage/localStorage. The only network calls are same-origin Umbrava GraphQL requests (app.umbrava.com/api/graphql, the app's own session): List Heat's full-board scan and WO Assist's work-order / trip / clock-in / document / purchase-order reads, plus ONE write - BWN Views saves the column layout through Umbrava's own putUserPreference, the same preference the column chooser writes; everything else is offline. Toggle modules in BWN_MODULES below.
@@ -113,7 +113,7 @@
   try { localStorage.setItem('bwn:status:core', JSON.stringify({ ver: BWN_VER, ts: Date.now() })); } catch (e) { /* best-effort */ }
 
   console.info('[BWN SUITE CORE] v' + BWN_VER + ' |',
-    'Shared Core 7 \u00b7 DOM Handles 1.0 \u00b7 PO Approval 1.13 \u00b7 WO Assist 2.74 \u00b7 Leak Guard 2.0 \u00b7 List Heat 3.28 \u00b7 Launcher 2.0 \u00b7 Views 3.1 \u00b7 Palette 1.1 \u00b7 Visit 1.2 \u00b7 Reminders 1.1 \u00b7 Timeline 1.1 \u00b7 TripCal 1.4 \u00b7 Bulk Ops 1.0 \u00b7 Connector 1.2 \u00b7 Governance 1.0 |',
+    'Shared Core 7 \u00b7 DOM Handles 1.0 \u00b7 PO Approval 1.13 \u00b7 WO Assist 2.75 \u00b7 Leak Guard 2.0 \u00b7 List Heat 3.28 \u00b7 Launcher 2.0 \u00b7 Views 3.1 \u00b7 Palette 1.1 \u00b7 Visit 1.2 \u00b7 Reminders 1.1 \u00b7 Timeline 1.1 \u00b7 TripCal 1.4 \u00b7 Bulk Ops 1.0 \u00b7 Connector 1.2 \u00b7 Governance 1.0 |',
     'enabled:', Object.keys(BWN_MODULES).filter(function (k) { return BWN_MODULES[k]; }).join(', '));
 
   // ===== BWN SHARED CORE v7 - KEEP IN SYNC across both suite scripts =====
@@ -1407,6 +1407,9 @@
   // Stays null if the WO Assist module is disabled by config, and every consumer must
   // null-guard - the audit then simply shows no next step instead of a wrong one.
   var bwnActsEngine = null;
+  // Coordinator Action Queue layer (classification + partitioning + ranking), published
+  // from the WO Assist module the same way bwnActsEngine is - null until that module loads.
+  var bwnCoordQueue = null;
 
   // ---- File-level same-origin GraphQL (shared by WO Assist reads + List Heat) --
   // @grant none: a plain SAME-ORIGIN POST to /api/graphql carries the app's Auth0
@@ -2294,7 +2297,7 @@
   });
 
   // ==========================================================================
-  // MODULE: WO Assist: GP + ETA Watchdog + Playbook v2.74 (Connector 1.2)
+  // MODULE: WO Assist: GP + ETA Watchdog + Playbook v2.75 (Connector 1.2)
   // ==========================================================================
   bwnBoot('woAssist', BWN_MODULES.woAssist, function () {
     'use strict';
@@ -2324,7 +2327,7 @@
     var PANEL_ID = 'bwn-gp-panel';
     var GREEN = BWN.GREEN;
 
-    console.info('[BWN GP] WO Assist v2.74 loaded on', location.href);
+    console.info('[BWN GP] WO Assist v2.75 loaded on', location.href);
 
     // ---- Parsing helpers (shared via BWN core) -----------------------------
     var parseMoney = BWN.parseMoney;
@@ -3580,7 +3583,39 @@
         '.bwn-actc-n.anchor{background:var(--bwn-surface-3);color:var(--bwn-text-faint);}' +
         '.bwn-actc-s{font:500 10px ui-monospace,"Segoe UI Mono","SF Mono",monospace;color:var(--bwn-text-faint);margin-left:auto;}' +
         '.bwn-actc-x{color:var(--bwn-text-faint);font-size:11px;}' +
-        '.bwn-actc-body{padding:2px 12px 9px;}';
+        '.bwn-actc-body{padding:2px 12px 9px;}' +
+        // ---- Coordinator Action Queue -----------------------------------------
+        '.bwn-cq-donow{margin:4px 0 6px;padding:8px 10px 4px;border:1px solid var(--bwn-border);border-left:3px solid var(--bwn-green);border-radius:9px;background:var(--bwn-tint);}' +
+        '.bwn-cq-donow-hd{display:flex;align-items:center;gap:9px;margin-bottom:2px;}' +
+        '.bwn-cq-donow-t{font:600 10px ui-monospace,"Segoe UI Mono","SF Mono",monospace;letter-spacing:.1em;color:var(--bwn-green-dk);}' +
+        '.bwn-cq-donow-n{font:500 10px ui-monospace,"Segoe UI Mono","SF Mono",monospace;color:#fff;background:var(--bwn-warn);border-radius:999px;padding:2px 9px;}' +
+        '.bwn-cq-donow .bwn-act-row:last-child{border-bottom:none;}' +
+        '.bwn-cq-card{align-items:flex-start;}' +
+        '.bwn-cq-reason{font-size:12.5px;color:var(--bwn-text);line-height:1.4;margin-top:3px;}' +
+        '.bwn-cq-done{font:500 11px ui-monospace,"Segoe UI Mono","SF Mono",monospace;color:var(--bwn-text-faint);margin-top:4px;}' +
+        '.bwn-cq-zero{font-size:12.5px;color:var(--bwn-text);padding:4px 2px 2px;}' +
+        '.bwn-cq-zero-sub{font:500 11px ui-monospace,"Segoe UI Mono","SF Mono",monospace;color:var(--bwn-text-faint);padding:2px 2px 4px;}' +
+        '.bwn-cq-badges{display:inline-flex;flex-wrap:wrap;gap:4px;margin-top:3px;}' +
+        '.bwn-cq-badge{font:600 9px ui-monospace,"Segoe UI Mono","SF Mono",monospace;letter-spacing:.04em;padding:1px 6px;border-radius:999px;white-space:nowrap;background:var(--bwn-surface-3);color:var(--bwn-text-faint);}' +
+        '.bwn-cq-badge.u-critical{background:var(--bwn-bad);color:#fff;}' +
+        '.bwn-cq-badge.u-due{background:var(--bwn-warn);color:#fff;}' +
+        '.bwn-cq-badge.u-upcoming{background:var(--bwn-accent);color:var(--bwn-green-dk);}' +
+        '.bwn-cq-badge.own{background:var(--bwn-surface-3);color:var(--bwn-text-muted);}' +
+        '.bwn-cq-badge.sched,.bwn-cq-badge.blk{background:var(--bwn-surface-2);color:var(--bwn-text-faint);border:1px solid var(--bwn-border);}' +
+        '.bwn-cq-badge.fric{background:transparent;color:var(--bwn-green);border:1px solid var(--bwn-green);}' +
+        '.bwn-cq-dbg{font:500 10px ui-monospace,"Segoe UI Mono","SF Mono",monospace;color:var(--bwn-text-faint);margin-top:4px;padding:3px 6px;border-radius:5px;background:var(--bwn-surface-2);word-break:break-all;}' +
+        '.bwn-cq-sec{margin-top:6px;}' +
+        '.bwn-cq-sec-hd{display:flex;align-items:center;gap:8px;width:100%;box-sizing:border-box;padding:6px 8px;border:none;border-radius:7px;background:var(--bwn-surface-2);color:var(--bwn-text-muted);cursor:pointer;text-align:left;font:500 11px ui-monospace,"Segoe UI Mono","SF Mono",monospace;}' +
+        '.bwn-cq-sec-hd:hover{background:var(--bwn-surface-3);}' +
+        '.bwn-cq-sec-hd:focus-visible{outline:2px solid var(--bwn-accent);outline-offset:1px;}' +
+        '.bwn-cq-sec-x{color:var(--bwn-text-faint);width:10px;}' +
+        '.bwn-cq-sec-t{color:var(--bwn-text);}' +
+        '.bwn-cq-sec-n{background:var(--bwn-surface-3);color:var(--bwn-text-faint);border-radius:999px;padding:1px 8px;}' +
+        '.bwn-cq-sec-crit{margin-left:auto;color:var(--bwn-bad);font-weight:600;}' +
+        '.bwn-cq-sec-body{padding:2px 4px 2px;}' +
+        '.bwn-cq-compact{display:flex;gap:9px;align-items:flex-start;padding:7px 2px;border-bottom:1px solid var(--bwn-surface-3);}' +
+        '.bwn-cq-compact:last-child{border-bottom:none;}' +
+        '.bwn-cq-compact .bwn-act-main{flex:1;min-width:0;}';
       document.head.appendChild(st);
     }
 
@@ -4439,6 +4474,342 @@
     // localStorage side effect (stagePlanPush) that must not fire 200 times per scan.
     bwnActsEngine = computeNextActions;
 
+    // ==== COORD-QUEUE BEGIN =====================================================
+    // Coordinator Action Queue: a PURE classification + partition + ranking layer over
+    // the acts computeNextActions produced. It never regenerates, drops, or reorders the
+    // lifecycle output - it ENRICHES each action with coordinator-facing properties
+    // (ownership / readiness / urgency / friction / reason / doneWhen / coordinatorScore)
+    // and sorts them into a "DO NOW" set vs. collapsed sections. Same purity contract as
+    // computeNextActions: no DOM, no storage, no network, no side effects - deterministic
+    // given (acts, state, C, now). The render layer feeds it the engine output plus
+    // state.waits (the waiting/revisit records the IMPURE layer loaded from localStorage,
+    // like state.docs) and a `now`.
+    //
+    // Timing is NOT re-invented: urgency reads the SAME shared clock the engine uses
+    // (bwnThresholdsFor + ESCALATE_DAYS + bwnPrioMult). Unknown source data stays
+    // conservative - a failed/absent read never manufactures coordinator ownership,
+    // readiness, or urgency (mirrors the docs===null contract).
+    var COORD_CFG = {
+      // coordinatorScore tuning - initial values, centralized so nothing scatters. A
+      // ready+due coordinator action must outrank a more-severe-looking waiting one, and a
+      // low-friction bonus must never outweigh criticality / readiness / ownership.
+      score: {
+        ownCoordinator: 30, readyReady: 25,
+        urg: { critical: 50, due: 30, upcoming: 10, 'not-due': -35 },
+        fric: { 'one-click': 8, assisted: 5, manual: 0, external: 0 },
+        waiting: -40, blocked: -25, notCoordinator: -30
+      },
+      urgencyRank: { critical: 3, due: 2, upcoming: 1, 'not-due': 0, informational: -1 },
+      doNowMax: 3,
+      // How far past the status "bad" clock reads as critical (mirrors the engine's own
+      // stale720 = overRatio>=3 and the escalate overLimit = 2x tests).
+      criticalOverRatio: 3
+    };
+    // Per-key-prefix metadata: intrinsic actor + whether it is a coordinator-actionable
+    // INTERNAL step. Chase steps (actor vendor/client) flip to coordinator ownership only
+    // once their follow-up window has arrived (see coordOwnership). Unlisted -> a
+    // conservative coordinator/internal default.
+    var COORD_META = {
+      noshow: { actor: 'vendor', internal: false }, stall: { actor: 'vendor', internal: false },
+      eta: { actor: 'vendor', internal: false }, ecdrisk: { actor: 'vendor', internal: false },
+      poacc: { actor: 'vendor', internal: false }, pomat: { actor: 'vendor', internal: false },
+      poconf: { actor: 'vendor', internal: false },
+      pocost: { actor: 'coordinator', internal: true }, docs: { actor: 'coordinator', internal: true },
+      docsverify: { actor: 'coordinator', internal: true }, advance: { actor: 'coordinator', internal: true },
+      intake: { actor: 'coordinator', internal: true }, ecd: { actor: 'coordinator', internal: true },
+      dne: { actor: 'coordinator', internal: true }, unbilled: { actor: 'coordinator', internal: true },
+      note: { actor: 'coordinator', internal: true }, clientcad: { actor: 'coordinator', internal: true },
+      task: { actor: 'coordinator', internal: true }, authored: { actor: 'coordinator', internal: true },
+      escalate: { actor: 'escalate', internal: false }, anchor: { actor: 'system', internal: false }
+    };
+    // WO status phase -> intrinsic actor for the generic phase chase.
+    var COORD_PHASE_ACTOR = {
+      schedule: 'coordinator', intake: 'coordinator', 'proposal-approved': 'coordinator',
+      onhold: 'coordinator', recall: 'coordinator', workcomplete: 'coordinator',
+      billing: 'coordinator', invoiced: 'coordinator',
+      proposal: 'vendor', materials: 'vendor', scheduled: 'vendor', onsite: 'vendor',
+      inprogress: 'vendor', accept: 'vendor', confirmcomplete: 'vendor',
+      'proposal-sent': 'client', client: 'client', 'materials-client': 'client'
+    };
+    function coordPrefix(a) { return (a && a.key ? String(a.key) : '').split(':')[0]; }
+    function coordPhase(a) { return (a && a.key || '').indexOf('phase:') === 0 ? (a.key.split(':')[1] || '') : null; }
+
+    // Static friction capability, from the action's SHAPE only (pure - never touches the
+    // DOM; the render layer still gates the real button on live dock/selectors). one-click
+    // = a proven in-page nav target or a tool-drawer mapping (open/focus/reveal, no write);
+    // assisted = a prefilled note/copy the coordinator reviews then saves; external = it is
+    // on another party; manual = a human task with no in-app affordance.
+    var COORD_NAV_KEYS = { pomat: 1, poacc: 1, poconf: 1, pocost: 1, ecd: 1 };
+    function coordToolable(a) {
+      var k = a.key || '';
+      if (k.indexOf('phase:schedule') === 0 || k.indexOf('phase:intake') === 0) return true;
+      return coordPrefix(a) === 'escalate';
+    }
+    function coordNavable(a) {
+      var p = coordPrefix(a);
+      if (COORD_NAV_KEYS[p]) return true;
+      if (p === 'intake' && /\bNTE\b/.test(a.why || '')) return true;
+      return false;
+    }
+    // ---- Urgency: from the SAME shared clock the engine uses -------------------
+    function coordStatusRatio(state, C) {
+      if (!state || state.hrs == null) return null;
+      var th = bwnThresholdsFor(state.status, state.priority, C);
+      if (!(th.bad > 0)) return null;
+      return { over: state.hrs / th.bad, warn: state.hrs / (th.warn || th.bad) };
+    }
+    function coordUrgency(a, state, C, now) {
+      var p = coordPrefix(a);
+      if (a.anchor) return 'informational';
+      if (p === 'ecdrisk' || p === 'escalate') return 'critical';
+      if (p === 'noshow' || p === 'stall') {
+        var escDays = Math.max(2, Math.round(ESCALATE_DAYS * bwnPrioMult(state.priority)));
+        var days = (p === 'stall' && state.stall) ? state.stall.days
+          : (state.noShow ? Math.max(1, Math.round((now - state.noShow.ms) / 86400000)) : 0);
+        return days > escDays ? 'critical' : 'due';
+      }
+      if (p === 'task') return /overdue/i.test((a.label || '') + ' ' + (a.why || '')) ? 'critical' : 'due';
+      if (p === 'authored') return /overdue/i.test(a.label || '') ? 'critical' : 'due';
+      if (p === 'docsverify') return 'upcoming';
+      if (p === 'ecd') return a.key === 'ecd:none' ? 'upcoming' : 'due';
+      if (p === 'pomat' || p === 'poacc' || p === 'phase') {
+        var r = coordStatusRatio(state, C);
+        if (!r) return p === 'phase' ? 'not-due' : 'due';
+        return r.over >= COORD_CFG.criticalOverRatio ? 'critical' : r.over >= 1 ? 'due' : r.warn >= 1 ? 'upcoming' : 'not-due';
+      }
+      // docs / advance / intake / pocost / poconf / eta / unbilled / note / clientcad / dne
+      // are actionable gates the engine only emits when already actionable -> due.
+      return 'due';
+    }
+    function coordScheduled(a, state, now) {
+      return coordWaitValidPure(state && state.waits && state.waits[a.key], a, state, now);
+    }
+    function coordOwnership(a, state, C, now, urgency) {
+      var p = coordPrefix(a);
+      if (a.anchor) return 'system';
+      if (p === 'escalate') {
+        // The escalation TIER owner: supervisor / management keep their ownership (the
+        // decision moves up, out of the coordinator's hands); a director reader owns the
+        // call themselves, so it reads as a coordinator decision.
+        return a.owner === 'management' ? 'management' : a.owner === 'supervisor' ? 'supervisor' : 'coordinator';
+      }
+      var meta = COORD_META[p] || { actor: 'coordinator', internal: true };
+      var actor = meta.actor, internal = meta.internal;
+      if (p === 'phase') { actor = COORD_PHASE_ACTOR[coordPhase(a)] || 'coordinator'; internal = (actor === 'coordinator'); }
+      if (internal) return 'coordinator';
+      // Chase class: the coordinator owns the follow-up only once it is due/critical; before
+      // that the ball is genuinely in the other party's court (do not nag a fresh dispatch).
+      return (urgency === 'due' || urgency === 'critical') ? 'coordinator' : actor;
+    }
+    function coordReadiness(a, state, C, now, urgency, ownership) {
+      if (a.anchor) return 'informational';
+      if (coordScheduled(a, state, now)) return 'scheduled';
+      if (a.blocked) return 'blocked';   // explicit engine hint (none emitted today; keeps the partition honest + future-proof)
+      if (ownership !== 'coordinator') return 'waiting';
+      return 'ready';
+    }
+    function coordFriction(a, state, C, now, readiness) {
+      if (a.anchor) return 'manual';
+      if (readiness === 'waiting' || readiness === 'scheduled') return 'external';
+      if (coordNavable(a) || coordToolable(a)) return 'one-click';
+      if (a.text || a.openEcd) return 'assisted';
+      return 'manual';
+    }
+    // ---- Plain-language reason + doneWhen (no rule jargon in Coordinator UI) ----
+    var COORD_REASON = {
+      noshow: 'A scheduled visit passed with no completion on file.',
+      stall: 'The vendor has gone quiet past the scheduled visit and chasing has not moved it.',
+      eta: 'An approved PO has no scheduled date on record.',
+      ecdrisk: 'The completion date is within 24 hours and no visit is confirmed.',
+      poacc: 'A vendor has not accepted the PO, so nobody is committed to the work.',
+      pomat: 'Work is waiting on materials and there is no delivery ETA on file.',
+      poconf: 'A vendor marked the work complete and the completion package needs collecting.',
+      pocost: 'A PO is done but its final cost is not locked before billing.',
+      docs: 'The work reads done but no completion documents are attached.',
+      docsverify: 'Documents are on file but a required closeout type was not matched.',
+      advance: 'Everything needed to close this WO is on file - it just needs to be marked Work Complete.',
+      intake: 'The WO is missing fields it needs before it can be dispatched.',
+      ecd: 'The expected completion date is missing or already past.',
+      dne: 'Gross profit is under target - the cost side needs a decision.',
+      unbilled: 'The work is complete but the WO has not moved to invoicing.',
+      note: 'This WO has gone quiet - no recent notes.',
+      clientcad: 'The client is overdue a proactive status update for this job priority.',
+      task: 'An Umbrava task on this WO is open or overdue.',
+      escalate: 'This is past what routine chasing fixes - ownership needs to move up.',
+      authored: 'A step written for this job by hand.'
+    };
+    var COORD_DONEWHEN = {
+      noshow: 'The vendor confirms the visit was completed with docs, or commits to a new date.',
+      stall: 'The vendor confirms an ETA, or the job is reassigned.',
+      eta: 'The vendor gives a scheduled date you can log.',
+      ecdrisk: 'A tech is confirmed on site for today, or a real completion date is set.',
+      poacc: 'The vendor accepts the PO with a date, or declines so it can be reassigned.',
+      pomat: 'You have the supplier, delivery date, tracking, and the return-visit date.',
+      poconf: 'The completion documents are attached and the PO is confirmed.',
+      pocost: 'The final cost on the PO is confirmed so the WO can move to billing.',
+      docs: 'The completion package is attached and reviewed.',
+      docsverify: 'The required closeout documents are confirmed attached.',
+      advance: 'The work order is advanced to Work Complete.',
+      intake: 'Every required field is filled so the WO can be dispatched.',
+      ecd: 'A realistic completion date is set and the client has been told.',
+      dne: 'The cost is reduced, the DNE is increased with client approval, or the write-down is accepted.',
+      unbilled: 'The client invoice is created and submitted.',
+      note: 'A status note is posted describing the current state.',
+      clientcad: 'A client-facing update is posted.',
+      task: 'The task is completed in Umbrava.',
+      escalate: 'The named tier has the job and the handoff is recorded as a WO note.',
+      authored: 'The written step is done and logged, or unchecked if it no longer applies.'
+    };
+    var COORD_PHASE_REASON = {
+      schedule: 'No vendor is scheduled yet - the WO needs coverage.',
+      intake: 'The WO is not yet assigned or scoped.',
+      proposal: 'A vendor proposal is needed to move the WO forward.',
+      'proposal-sent': 'The proposal is with the client and awaiting approval.',
+      'proposal-approved': 'The proposal is approved - send it to the client and issue the vendor PO.',
+      materials: 'The job is waiting on materials.',
+      'materials-client': 'The job is waiting on client-supplied materials.',
+      scheduled: 'A visit is booked and needs confirming.',
+      onsite: 'A tech is on site - progress and an ETA are needed.',
+      inprogress: 'Work is in progress and needs a status.',
+      recall: 'Completed work was rejected or reopened - a return visit is needed.',
+      client: 'The WO is on hold pending client direction.',
+      onhold: 'The WO is on hold - the blocker needs review.',
+      accept: 'The WO is pending vendor acceptance.',
+      confirmcomplete: 'The vendor marked complete - the completion package is needed.'
+    };
+    var COORD_PHASE_DONEWHEN = {
+      schedule: 'A vendor is scheduled with a date.',
+      intake: 'The WO is assigned or scoped and moving.',
+      proposal: 'A vendor proposal is received.',
+      'proposal-sent': 'The client approves, declines, or requests a revision.',
+      'proposal-approved': 'The client signs off and the vendor PO is issued.',
+      materials: 'Materials are confirmed with a delivery date.',
+      'materials-client': 'The client confirms the materials delivery date.',
+      scheduled: 'The vendor confirms the tech and arrival window.',
+      onsite: 'The vendor sends progress and an ETA to completion.',
+      inprogress: 'The vendor confirms the current stage and next step.',
+      recall: 'A return visit is scheduled.',
+      client: 'The client gives direction on how to proceed.',
+      onhold: 'The hold is released or confirmed with a new date.',
+      accept: 'The vendor accepts with a date, or declines so it can be reassigned.',
+      confirmcomplete: 'The completion documents are attached.'
+    };
+    function coordReason(a, state) {
+      if (a.anchor) return a.why || 'For reference only.';
+      if (coordPrefix(a) === 'phase') return COORD_PHASE_REASON[coordPhase(a)] || 'The work order status needs to move forward.';
+      var p = a.authored ? 'authored' : coordPrefix(a);
+      return COORD_REASON[p] || (a.why ? String(a.why).split(' · ')[0] : 'Needs a coordinator decision.');
+    }
+    function coordDoneWhen(a, state) {
+      if (a.anchor) return 'The WO status becomes Work Complete, Invoiced, or Paid.';
+      if (coordPrefix(a) === 'phase') return COORD_PHASE_DONEWHEN[coordPhase(a)] || 'The status advances to the next state.';
+      var p = a.authored ? 'authored' : coordPrefix(a);
+      return COORD_DONEWHEN[p] || 'The situation is resolved and logged as a WO note.';
+    }
+    function coordScore(c) {
+      var S = COORD_CFG.score, s = Number(c.baseScore || 0);
+      if (c.ownership === 'coordinator') s += S.ownCoordinator;
+      if (c.readiness === 'ready') s += S.readyReady;
+      s += (S.urg[c.urgency] != null ? S.urg[c.urgency] : 0);
+      s += (S.fric[c.friction] != null ? S.fric[c.friction] : 0);
+      if (c.readiness === 'waiting') s += S.waiting;
+      if (c.readiness === 'blocked') s += S.blocked;
+      if (c.ownership !== 'coordinator') s += S.notCoordinator;
+      return s;
+    }
+    function classifyCoordinatorAction(a, state, C, now) {
+      now = now || Date.now();
+      var urgency = coordUrgency(a, state, C, now);
+      var ownership = coordOwnership(a, state, C, now, urgency);
+      var readiness = coordReadiness(a, state, C, now, urgency, ownership);
+      var friction = coordFriction(a, state, C, now, readiness);
+      var baseScore = 0; try { baseScore = scoreAct(a, state); } catch (e) { baseScore = 0; }
+      var c = {};
+      for (var k in a) if (Object.prototype.hasOwnProperty.call(a, k)) c[k] = a[k];
+      c.ownership = ownership; c.readiness = readiness; c.urgency = urgency; c.friction = friction;
+      c.reason = coordReason(a, state); c.doneWhen = coordDoneWhen(a, state);
+      c.baseScore = baseScore;
+      c.coordinatorScore = coordScore(c);
+      return c;
+    }
+    function needsCoordinatorAttention(c) {
+      return c.ownership === 'coordinator' && c.readiness === 'ready' && c.urgency !== 'not-due';
+    }
+    function coordTieBreak(x, y) {
+      if (y.coordinatorScore !== x.coordinatorScore) return y.coordinatorScore - x.coordinatorScore;
+      var rx = COORD_CFG.urgencyRank[x.urgency] || 0, ry = COORD_CFG.urgencyRank[y.urgency] || 0;
+      if (ry !== rx) return ry - rx;
+      if ((y.baseScore || 0) !== (x.baseScore || 0)) return (y.baseScore || 0) - (x.baseScore || 0);
+      return String(x.key) < String(y.key) ? -1 : String(x.key) > String(y.key) ? 1 : 0;
+    }
+    function buildCoordinatorQueue(acts, state, C, now) {
+      now = now || Date.now();
+      var classified = (acts || []).map(function (a) { return classifyCoordinatorAction(a, state, C, now); });
+      var doNow = [], blocked = [], waiting = [], upcoming = [];
+      classified.forEach(function (c) {
+        // Deterministic precedence, exactly one collapsed bucket per item:
+        // DO NOW > Blocked > Waiting-on-others > Upcoming. Informational (the anchor) is
+        // reference-only: it lives in Full lifecycle, never in an action bucket.
+        if (c.readiness === 'informational') return;
+        if (needsCoordinatorAttention(c)) doNow.push(c);
+        else if (c.readiness === 'blocked') blocked.push(c);
+        else if (c.readiness === 'waiting' || c.readiness === 'scheduled' ||
+          c.ownership === 'vendor' || c.ownership === 'client' ||
+          c.ownership === 'supervisor' || c.ownership === 'management') waiting.push(c);
+        else upcoming.push(c);   // coordinator-owned but upcoming / not-due
+      });
+      doNow.sort(coordTieBreak);
+      // The DO NOW cap keeps the coordinator's immediate list to three, but the 4th+
+      // attention-needed actions are STILL attention-needed - they get their OWN bucket
+      // ("More requiring attention"). They are NEVER folded into Upcoming, which is
+      // future / not-due work only: labelling a due/ready action "Upcoming" is the exact
+      // defect this split fixes.
+      var moreAttention = doNow.slice(COORD_CFG.doNowMax);
+      doNow = doNow.slice(0, COORD_CFG.doNowMax);
+      [moreAttention, blocked, waiting, upcoming].forEach(function (g) { g.sort(coordTieBreak); });
+      function crit(g) { return g.some(function (c) { return c.urgency === 'critical'; }); }
+      return {
+        doNow: doNow, moreAttention: moreAttention, blocked: blocked, waiting: waiting, upcoming: upcoming,
+        fullLifecycle: classified,
+        counts: { doNow: doNow.length, moreAttention: moreAttention.length, blocked: blocked.length, waiting: waiting.length, upcoming: upcoming.length, full: classified.length },
+        critical: { blocked: crit(blocked), waiting: crit(waiting), moreAttention: crit(moreAttention) }
+      };
+    }
+    // ---- Waiting / revisit foundation (Phase C data model) ---------------------
+    // A coordinator can mark a DO-NOW item "waiting on <party> until <revisitAt>". The
+    // record is versioned and keyed by the STABLE (woId, actionKey) pair. It suppresses the
+    // item (readiness 'scheduled') ONLY while VALID: well-formed, not past revisitAt, and
+    // the state it was taken against is unchanged (fingerprint match). A wait NEVER marks
+    // the lifecycle requirement complete - an expired or invalidated wait simply drops and
+    // the action re-enters normal evaluation. A missing/invalid revisitAt or fingerprint
+    // does NOT suppress (fail-open to visible - never silently hide real work).
+    var COORD_WAIT_V = 1;
+    function coordFingerprintPure(a, state) {
+      // Minimal STABLE source fields whose change should cancel a wait. No timestamps, no
+      // DOM, no volatile display text - only what would make the action meaningfully
+      // different work.
+      var parts = [String((state && state.status) || '').toLowerCase(), coordPrefix(a)];
+      var pos = (state && state.pos) || [];
+      parts.push(pos.map(function (p) { return String(p.sid) + '=' + (p.done ? 'd' : '') + (p.poStatus || '') + (p.schedDate ? 's' : ''); }).sort().join(','));
+      parts.push((state && state.docs && state.docs.count != null) ? 'docs' + state.docs.count : 'docs?');
+      parts.push((state && state.due && state.due.raw) ? 'ecd' + state.due.raw : 'ecd?');
+      var str = parts.join('|'), h = 0;
+      for (var i = 0; i < str.length; i++) h = (h * 31 + str.charCodeAt(i)) | 0;
+      return (h >>> 0).toString(36);
+    }
+    function coordWaitValidPure(rec, a, state, now) {
+      if (!rec || rec.v !== COORD_WAIT_V || rec.disposition !== 'waiting') return false;
+      if (!rec.actionKey || rec.actionKey !== a.key) return false;
+      if (!rec.revisitAt || !rec.stateFingerprint) return false;   // malformed -> do not suppress
+      var due = Date.parse(rec.revisitAt);
+      if (isNaN(due) || now >= due) return false;                  // past revisit -> re-enter normal evaluation
+      if (rec.stateFingerprint !== coordFingerprintPure(a, state)) return false;   // state changed -> invalidate
+      return true;
+    }
+    // Published for the audit / cross-module consumers, same shape as bwnActsEngine.
+    bwnCoordQueue = buildCoordinatorQueue;
+    // ==== COORD-QUEUE END =======================================================
+
     // ---- Action Checklist (inline card above Purchase Orders) -----------------
     // The playbook as a WORKING surface: a card embedded in the WO page directly
     // above the Purchase Orders section. Each row: a checkbox, the chase text
@@ -4484,6 +4855,44 @@
       } catch (e) { return {}; }
     }
     function actsSave(d) { try { localStorage.setItem(actsKey(), JSON.stringify(d)); } catch (e) { /* best-effort */ } }
+
+    // ---- Waiting/revisit store (IMPURE adapter; the pure layer only reads state.waits) ---
+    // Isolated, versioned, defensively parsed. Keyed PER WO so different work orders keep
+    // distinct records. The pure coordWaitValidPure / coordFingerprintPure decide
+    // suppression; this layer only persists and hands back a { actionKey: record } map.
+    function coordWaitsKey() { var id = currentWOId(); return 'bwn:coordwaits:' + (id || location.pathname); }
+    function coordWaitsLoad() {
+      try {
+        var raw = JSON.parse(localStorage.getItem(coordWaitsKey()) || 'null');
+        if (!raw || raw.v !== COORD_WAIT_V || !raw.items || typeof raw.items !== 'object') return {};
+        var out = {};
+        Object.keys(raw.items).forEach(function (k) {
+          var r = raw.items[k];
+          if (r && r.v === COORD_WAIT_V && r.disposition === 'waiting' && r.actionKey === k) out[k] = r;
+        });
+        return out;
+      } catch (e) { return {}; }   // malformed storage -> empty (fail-open to visible)
+    }
+    function coordWaitsSave(map) {
+      try { localStorage.setItem(coordWaitsKey(), JSON.stringify({ v: COORD_WAIT_V, items: map || {} })); } catch (e) { /* best-effort */ }
+    }
+    function coordWaitSet(a, state, waitingOn, revisitAt) {
+      var map = coordWaitsLoad();
+      map[a.key] = {
+        v: COORD_WAIT_V, actionKey: a.key, disposition: 'waiting',
+        waitingOn: waitingOn || 'vendor', revisitAt: revisitAt,
+        stateFingerprint: coordFingerprintPure(a, state), createdAt: new Date().toISOString()
+      };
+      coordWaitsSave(map);
+    }
+    function coordWaitClear(key) { var map = coordWaitsLoad(); if (map[key]) { delete map[key]; coordWaitsSave(map); } }
+    // Maintainer debug: a per-browser toggle that reveals the classification internals on
+    // each row. Off for normal coordinators, so no rule jargon leaks into the normal UI.
+    function coordDebugOn() { try { return localStorage.getItem('bwn:coordq:debug') === '1'; } catch (e) { return false; } }
+    // Collapsed-section preference (same localStorage convention as bwn:acts:collapsed).
+    // Sections default COLLAPSED.
+    function coordSecOpen(name) { try { return localStorage.getItem('bwn:coordq:sec:' + name) === '1'; } catch (e) { return false; } }
+    function coordSecToggle(name) { try { localStorage.setItem('bwn:coordq:sec:' + name, coordSecOpen(name) ? '' : '1'); } catch (e) { } }
     // ONE-TIME per-WO store migration for the PO act re-key (render index -> stable sid,
     // 2026-08-02). Old keys look like 'pomat:2:ACME' - a BARE-DIGITS middle, which the new
     // form never produces (the poKeyOf ladder yields 'ln001' / 'v<guid>' / 'ix2', plus a
@@ -5411,6 +5820,302 @@
     }
     var actHelpOpen = {};   // key -> 1 while its help block is expanded (render state only)
 
+    // ---- Coordinator Action Queue render helpers (DOM / prompt layer) ----------
+    var COORD_URG_LABEL = { critical: 'Critical', due: 'Due', upcoming: 'Upcoming', 'not-due': 'Not due', informational: '' };
+    var COORD_OWNER_LABEL = { vendor: 'Vendor', client: 'Client', supervisor: 'Supervisor', management: 'Management', system: '' };
+    function coordBadges(a) {
+      var out = [];
+      if (a.urgency && a.urgency !== 'not-due' && a.urgency !== 'informational') out.push({ t: COORD_URG_LABEL[a.urgency], c: 'u-' + a.urgency });
+      if (a.readiness === 'scheduled') out.push({ t: 'Snoozed', c: 'sched' });
+      else if (a.readiness === 'blocked') out.push({ t: 'Blocked', c: 'blk' });
+      if (a.ownership && a.ownership !== 'coordinator' && a.ownership !== 'system') out.push({ t: 'On ' + (COORD_OWNER_LABEL[a.ownership] || a.ownership), c: 'own' });
+      if (a.friction === 'one-click') out.push({ t: 'One-click', c: 'fric' });
+      else if (a.friction === 'assisted') out.push({ t: 'Assisted', c: 'fric' });
+      return out;
+    }
+    function coordBadgeEls(a) {
+      var wrap = document.createElement('span'); wrap.className = 'bwn-cq-badges';
+      coordBadges(a).forEach(function (b) { var s = document.createElement('span'); s.className = 'bwn-cq-badge ' + b.c; s.textContent = b.t; wrap.appendChild(s); });
+      return wrap;
+    }
+    function coordDebugEl(a) {
+      var d = document.createElement('div'); d.className = 'bwn-cq-dbg';
+      d.textContent = a.key + ' · base ' + a.baseScore + ' · coord ' + a.coordinatorScore + ' · ' + a.ownership + '/' + a.readiness + '/' + a.urgency + '/' + a.friction;
+      return d;
+    }
+    // Mark-waiting flow: waiting party + revisit horizon via prompts (the script's existing
+    // dialog idiom), no WO/PO/note/status side effects. Returns true if a wait was set.
+    var COORD_WAIT_PARTIES = ['vendor', 'client', 'technician', 'management', 'supervisor'];
+    function coordMarkWaiting(a, state) {
+      var dflt = (a.ownership && COORD_WAIT_PARTIES.indexOf(a.ownership) !== -1) ? a.ownership : 'vendor';
+      var party = prompt('Mark "' + a.label + '" as waiting on whom?\n(' + COORD_WAIT_PARTIES.join(' / ') + ')', dflt);
+      if (party === null) return false;
+      party = party.trim().toLowerCase();
+      if (COORD_WAIT_PARTIES.indexOf(party) === -1) party = 'vendor';
+      var daysS = prompt('Revisit in how many days? It resumes automatically then - or sooner if the WO data changes.\n\nThis does NOT change the WO status, notes, or POs.', '2');
+      if (daysS === null) return false;
+      var days = parseInt(daysS, 10); if (!(days > 0)) days = 2;
+      coordWaitSet(a, state, party, new Date(Date.now() + days * 86400000).toISOString());
+      return true;
+    }
+
+    // Full interactive action row. `a` is a CLASSIFIED action (engine fields + coordinator
+    // ownership/readiness/urgency/friction/reason/doneWhen). Every existing behavior -
+    // checkbox + critical-dismiss + nav + help + tool launch + Chase + Actioned + Set ECD +
+    // guided-write - is preserved. opts.card = the prominent DO-NOW card (plain-language
+    // reason/doneWhen + badges + a Mark-waiting quick-assist); otherwise the compact
+    // Full-lifecycle row (keeps the original technical `why`). Anchors render as the
+    // uncheckable completion gate. Returns the row node.
+    function buildActRow(a, state, store, escSt, opts) {
+      opts = opts || {};
+      if (a.anchor) {
+        var ra = document.createElement('div'); ra.className = 'bwn-act-row bwn-act-anchor';
+        var mka = document.createElement('div'); mka.className = 'bwn-act-anchor-mk'; mka.textContent = '⚑';
+        var maa = document.createElement('div'); maa.className = 'bwn-act-main';
+        var lba = document.createElement('div'); lba.className = 'bwn-act-lbl'; lba.textContent = a.label;
+        var wya = document.createElement('div'); wya.className = 'bwn-act-why'; wya.textContent = a.why;
+        maa.appendChild(lba); maa.appendChild(wya);
+        ra.appendChild(mka); ra.appendChild(maa);
+        return ra;
+      }
+      var rec = store[a.key];
+      var isDone = !!(rec && rec.done);
+      var r = document.createElement('div'); r.className = 'bwn-act-row' + (opts.card ? ' bwn-cq-card' : '') + (a.nudge && !isDone ? ' nudge' : '');
+      var cb = document.createElement('input'); cb.type = 'checkbox'; cb.checked = isDone;
+      cb.setAttribute('aria-label', a.label);
+      cb.title = isDone ? 'Uncheck to reopen' : 'Mark done without posting a note';
+      cb.addEventListener('change', function () {
+        if (cb.checked) { actsMarkDone(a, ''); renderActsInline(state); return; }
+        var rec2 = actsLoad()[a.key];
+        if (rec2 && rec2.done && rec2.auto) { actsMarkUndone(a, '', true); renderActsInline(state); return; }
+        if (rec2 && rec2.done && !rec2.note && rec2.ts && Date.now() - rec2.ts < 120000) { actsMarkUndone(a, '', true); renderActsInline(state); return; }
+        if (actIsCritical(a)) {
+          var why2 = prompt('"' + a.label + '" is a critical step.\nWhy is it being dismissed? (required - this becomes the WO note)', '');
+          if (why2 === null || !why2.trim()) { cb.checked = true; return; }   // not dismissed
+          actsMarkUndone(a, why2.trim());
+          var disNote = 'Dismissed step: ' + a.label + ' - ' + why2.trim();
+          try { navigator.clipboard.writeText(disNote).catch(function () { }); } catch (e2) { }
+          renderActsInline(state);
+          insertWONote(disNote, function () { /* posted manually by the coordinator */ });
+          return;
+        }
+        actsMarkUndone(a, '');
+        renderActsInline(state);
+      });
+      var main = document.createElement('div'); main.className = 'bwn-act-main';
+      var lbl = document.createElement('div'); lbl.className = 'bwn-act-lbl' + (isDone ? ' done' : '');
+      lbl.textContent = a.label;
+      var nav = actNav(a);
+      if (nav) {
+        lbl.className += ' nav';
+        lbl.setAttribute('role', 'button'); lbl.tabIndex = 0;
+        lbl.title = 'Show this on the page';
+        lbl.addEventListener('click', function () { actNavGo(nav); });
+        lbl.addEventListener('keydown', function (ev) { if (ev.key === 'Enter' || ev.key === ' ') { ev.preventDefault(); actNavGo(nav); } });
+      }
+      var helpTxt = actHelp(a);
+      if (helpTxt) {
+        var ht = document.createElement('button');
+        ht.type = 'button'; ht.className = 'bwn-act-help-t'; ht.textContent = '?';
+        ht.title = 'What this step means, where to do it, and what done looks like';
+        ht.setAttribute('aria-expanded', actHelpOpen[a.key] ? 'true' : 'false');
+        ht.addEventListener('click', function (ev) {
+          ev.stopPropagation();   // the label may itself be a nav control
+          if (actHelpOpen[a.key]) delete actHelpOpen[a.key]; else actHelpOpen[a.key] = 1;
+          renderActsInline(state);
+        });
+        lbl.appendChild(ht);
+      }
+      main.appendChild(lbl);
+      // Classification badges (urgency / non-coordinator owner / friction) on every row.
+      main.appendChild(coordBadgeEls(a));
+      if (opts.card) {
+        // DO-NOW: plain-language WHY (no rule jargon), then a "Done when" line. The
+        // technical `why` moves into the "?" help / debug so it is not lost.
+        var rsn = document.createElement('div'); rsn.className = 'bwn-cq-reason'; rsn.textContent = a.reason || a.why;
+        main.appendChild(rsn);
+      } else {
+        var why = document.createElement('div'); why.className = 'bwn-act-why'; why.textContent = a.why;
+        main.appendChild(why);
+      }
+      if (helpTxt && actHelpOpen[a.key]) {
+        var hbx = document.createElement('div'); hbx.className = 'bwn-act-help';
+        for (var hi = 0; hi < ACT_HELP_PFX.length; hi++) {
+          var hln = document.createElement('div');
+          hln.textContent = ACT_HELP_PFX[hi] + helpTxt[hi];
+          hbx.appendChild(hln);
+        }
+        main.appendChild(hbx);
+      }
+      if (!isDone && rec && rec.dismissed && rec.reason) {
+        var dis = document.createElement('div'); dis.className = 'bwn-act-dis';
+        var dd = new Date(rec.dismissed);
+        dis.textContent = '✗ dismissed ' + (dd.getMonth() + 1) + '/' + dd.getDate() + ': ' + rec.reason;
+        main.appendChild(dis);
+      }
+      if (isDone && rec.note) {
+        var lg = document.createElement('div'); lg.className = 'bwn-act-log';
+        var d = new Date(rec.ts || Date.now());
+        lg.textContent = '✓ ' + (d.getMonth() + 1) + '/' + d.getDate() + ' - ' + rec.note;
+        main.appendChild(lg);
+      }
+      if (opts.card && !isDone) {
+        var dw = document.createElement('div'); dw.className = 'bwn-cq-done'; dw.textContent = 'Done when: ' + a.doneWhen;
+        main.appendChild(dw);
+      }
+      if (coordDebugOn()) main.appendChild(coordDebugEl(a));
+      var btns = document.createElement('div'); btns.className = 'bwn-act-btns';
+      // Tool launch - rendered only while the owning dock registrant is live (never a dead
+      // control). Same bwn:dock:open the rail emits.
+      var tool = actTool(a);
+      if (tool && !isDone) {
+        tool.docks.forEach(function (dk) {
+          if (!waDockAlive(dk)) return;
+          var tb = document.createElement('button');
+          tb.type = 'button'; tb.className = 'bwn-wa-btn ghost'; tb.textContent = waEscToolLabel(dk, escSt);
+          tb.style.cssText = 'padding:3px 9px;font-size:10px;';
+          tb.title = (dk === 'assist' && escSt)
+            ? 'An escalation is already open on this work order - view, acknowledge or resolve it'
+            : 'Open the ' + (ACT_TOOL_LABEL[dk] || 'tool').replace(/…$/, '') + ' drawer for this work order';
+          tb.addEventListener('click', function () {
+            try { document.dispatchEvent(new CustomEvent('bwn:evt', { detail: { id: 'bwn:dock:open', key: dk } })); } catch (e) { }
+          });
+          btns.appendChild(tb);
+        });
+      }
+      if (a.text) {
+        var cp = document.createElement('button');
+        cp.type = 'button'; cp.className = 'bwn-wa-btn ghost'; cp.textContent = 'Chase';
+        cp.style.cssText = 'padding:3px 9px;font-size:10px;';
+        cp.title = a.text;
+        cp.addEventListener('click', function () {
+          navigator.clipboard.writeText(a.text).then(function () {
+            cp.textContent = 'Copied ✓';
+            setTimeout(function () { cp.textContent = 'Chase'; }, 1500);
+          }, function () { prompt('Copy manually:', a.text); });
+        });
+        btns.appendChild(cp);
+      }
+      var ab = document.createElement('button');
+      ab.type = 'button'; ab.className = 'bwn-wa-btn primary'; ab.textContent = isDone ? 'Re-log' : 'Actioned…';
+      ab.style.cssText = 'padding:3px 9px;font-size:10px;';
+      ab.title = 'Log what you did - prefills a WO note for you to review and post';
+      ab.addEventListener('click', function () {
+        var typed = prompt('What did you do? (one line - becomes the WO note)\n\n' + a.label, '');
+        if (typed === null) return;
+        var noteText = a.label + (typed.trim() ? ' - ' + typed.trim() : '');
+        actsMarkDone(a, typed.trim());
+        renderActsInline(state);
+        try { navigator.clipboard.writeText(noteText).catch(function () { }); } catch (e) { }
+        var actNoteType = (a.openEcd || /^ecd/.test(a.key || '')) ? 'Internal'
+          : /^clientcad/.test(a.key || '') ? 'Client' : undefined;
+        insertWONote(noteText, function () { /* posted manually by the coordinator */ }, actNoteType);
+      });
+      btns.appendChild(ab);
+      if (a.openEcd) {
+        var eb = document.createElement('button');
+        eb.type = 'button'; eb.className = 'bwn-wa-btn ghost'; eb.textContent = 'Set ECD…';
+        eb.style.cssText = 'padding:3px 9px;font-size:10px;';
+        eb.title = 'Propose + set the expected completion date, and draft the client note';
+        eb.addEventListener('click', function () { ecdHelperOpen(state); });
+        btns.appendChild(eb);
+      }
+      // Mark-waiting quick assist (DO-NOW cards only): a non-writing snooze that suppresses
+      // the item until a revisit time, cleared automatically if the WO data changes. It
+      // NEVER touches WO status, notes, or POs.
+      if (opts.card && !isDone) {
+        var mw = document.createElement('button');
+        mw.type = 'button'; mw.className = 'bwn-wa-btn ghost'; mw.textContent = 'Mark waiting';
+        mw.style.cssText = 'padding:3px 9px;font-size:10px;';
+        mw.title = 'Snooze this until a revisit date (waiting on another party). Does not change the WO.';
+        mw.addEventListener('click', function () { if (coordMarkWaiting(a, state)) renderActsInline(state); });
+        btns.appendChild(mw);
+      }
+      if (BWN_MODULES.woAssistWrites) {
+        (function (act) {
+          if (bwnCan('Task.AddNew')) {
+            var tkb = document.createElement('button');
+            tkb.type = 'button'; tkb.className = 'bwn-wa-btn ghost'; tkb.textContent = 'Create task…';
+            tkb.style.cssText = 'padding:3px 9px;font-size:10px;';
+            tkb.title = 'Create a follow-up task on this work order (assigned to the coordinator)';
+            tkb.addEventListener('click', function () { taskHelperOpen(state, act); });
+            btns.appendChild(tkb);
+          }
+          if (bwnCan('WorkOrderField.Status') && (act.key === 'advance:workcomplete' || act.key.indexOf('phase:') === 0)) {
+            var csb = document.createElement('button');
+            csb.type = 'button'; csb.className = 'bwn-wa-btn ghost'; csb.textContent = 'Change status…';
+            csb.style.cssText = 'padding:3px 9px;font-size:10px;';
+            csb.title = 'Change this work order’s status (guided, logged, typed confirm)';
+            csb.addEventListener('click', function () { statusHelperOpen(state, act); });
+            btns.appendChild(csb);
+          }
+        })(a);
+      }
+      r.appendChild(cb); r.appendChild(main); r.appendChild(btns);
+      return r;
+    }
+
+    // Compact read-only summary row for the collapsed Waiting / Upcoming / Blocked sections
+    // (the full interactive controls live in Full lifecycle). Shows the label, badges, and
+    // plain-language reason; a Chase copy where one exists; and a Resume control on a snoozed
+    // (scheduled) item so a wait can be cleared early.
+    function buildCompactRow(a, state) {
+      var r = document.createElement('div'); r.className = 'bwn-cq-compact';
+      var main = document.createElement('div'); main.className = 'bwn-act-main';
+      var lbl = document.createElement('div'); lbl.className = 'bwn-act-lbl';
+      lbl.textContent = (a.urgency === 'critical' ? '⚠ ' : '') + a.label;
+      main.appendChild(lbl);
+      main.appendChild(coordBadgeEls(a));
+      var rsn = document.createElement('div'); rsn.className = 'bwn-act-why'; rsn.textContent = a.reason || a.why;
+      main.appendChild(rsn);
+      if (coordDebugOn()) main.appendChild(coordDebugEl(a));
+      r.appendChild(main);
+      var btns = document.createElement('div'); btns.className = 'bwn-act-btns';
+      if (a.readiness === 'scheduled') {
+        var rb = document.createElement('button');
+        rb.type = 'button'; rb.className = 'bwn-wa-btn ghost'; rb.textContent = 'Resume';
+        rb.style.cssText = 'padding:3px 9px;font-size:10px;';
+        rb.title = 'Clear the wait and re-evaluate this item now';
+        rb.addEventListener('click', function () { coordWaitClear(a.key); renderActsInline(state); });
+        btns.appendChild(rb);
+      }
+      if (a.text) {
+        var cp = document.createElement('button');
+        cp.type = 'button'; cp.className = 'bwn-wa-btn ghost'; cp.textContent = 'Chase';
+        cp.style.cssText = 'padding:3px 9px;font-size:10px;';
+        cp.title = a.text;
+        cp.addEventListener('click', function () {
+          navigator.clipboard.writeText(a.text).then(function () { cp.textContent = 'Copied ✓'; setTimeout(function () { cp.textContent = 'Chase'; }, 1500); }, function () { prompt('Copy manually:', a.text); });
+        });
+        btns.appendChild(cp);
+      }
+      r.appendChild(btns);
+      return r;
+    }
+
+    // A collapsible section: a semantic <button aria-expanded> header with title + count
+    // (+ a critical marker), and the rendered items when open. Sections default collapsed.
+    function buildCoordSection(name, title, items, critical, render, state) {
+      var sec = document.createElement('div'); sec.className = 'bwn-cq-sec';
+      var open = coordSecOpen(name);
+      var hd = document.createElement('button');
+      hd.type = 'button'; hd.className = 'bwn-cq-sec-hd';
+      hd.setAttribute('aria-expanded', open ? 'true' : 'false');
+      var cx = document.createElement('span'); cx.className = 'bwn-cq-sec-x'; cx.textContent = open ? '▾' : '▸';
+      var tt = document.createElement('span'); tt.className = 'bwn-cq-sec-t'; tt.textContent = title;
+      var ct = document.createElement('span'); ct.className = 'bwn-cq-sec-n'; ct.textContent = String(items.length);
+      hd.appendChild(cx); hd.appendChild(tt); hd.appendChild(ct);
+      if (critical) { var cm = document.createElement('span'); cm.className = 'bwn-cq-sec-crit'; cm.textContent = '🚩 needs attention'; hd.appendChild(cm); }
+      hd.addEventListener('click', function () { coordSecToggle(name); renderActsInline(state); });
+      sec.appendChild(hd);
+      if (open) {
+        var bd = document.createElement('div'); bd.className = 'bwn-cq-sec-body';
+        items.forEach(function (a) { bd.appendChild(render(a)); });
+        sec.appendChild(bd);
+      }
+      return sec;
+    }
+
     function renderActsInline(state) {
       var card = document.getElementById(ACT_CARD_ID);
       var acts = nextActions(state);
@@ -5426,31 +6131,40 @@
       }
       autoDetectActioned(acts, state);
       var store = actsLoad();
-      // Open steps first (already worst-first from nextActions), done steps sink to the
-      // bottom - a stable partition, so the urgency order is preserved within each group.
-      acts = acts.filter(function (a) { return !(store[a.key] && store[a.key].done); }).concat(acts.filter(function (a) { return store[a.key] && store[a.key].done; }));
-      var open = acts.filter(function (a) { return !(store[a.key] && store[a.key].done); }).length;
-      // "Real" open = open steps excluding the completion anchor. The anchor is never
-      // "done", so it keeps `open` ≥ 1 on any non-terminal WO; realOpen tells us whether
-      // there is actual work left vs. just the "advance the status" gate.
-      var realOpen = acts.filter(function (a) { return !a.anchor && !(store[a.key] && store[a.key].done); }).length;
+      // Feed the waiting/revisit records to the PURE queue layer (the engine and classifier
+      // never touch storage - this is the one read, in the impure render).
+      state.waits = coordWaitsLoad();
+      var C = state.cfg || bwnConfig();
+      var now = Date.now();
+      function isDone(a) { return !!(store[a.key] && store[a.key].done); }
+      // Buckets are built from the OPEN (not-done) actions; done items are shown struck in
+      // Full lifecycle only. classifyCoordinatorAction is pure and done-agnostic.
+      var liveActs = acts.filter(function (a) { return !isDone(a); });
+      var q = buildCoordinatorQueue(liveActs, state, C, now);
+      var doneClassified = acts.filter(isDone).map(function (a) { return classifyCoordinatorAction(a, state, C, now); });
+      var fullList = q.fullLifecycle.concat(doneClassified);
+      // Escalation severity handoff fires per classified item regardless of section, so a
+      // supervisor/management escalation parked in Waiting still posts its severity.
+      fullList.forEach(function (c) { try { armAssistDue(c, isDone(c)); } catch (e) { } });
       var collapsed = false;
       try { collapsed = localStorage.getItem('bwn:acts:collapsed') === '1'; } catch (e) { }
-      // Live escalation state (render-layer only; see waEscState). Part of the signature
-      // so the strip appears, flips and clears the moment the assist script publishes.
       var escSt = null;
       try { escSt = waEscState(); } catch (e) { }
-      // Signature gate: rebuild only when content or placement actually changed, so
-      // the steady-state refresh loop never re-renders the card under the cursor.
-      var sig = JSON.stringify([collapsed, escSt ? escSt.status + '|' + escSt.id + '|' + (escSt.ackAt || '') : '', acts.map(function (a) {
-        var r = store[a.key];
-        // Phase 2 additions to the signature: a tool button appearing when its registrant
-        // comes online (or vanishing when it drops) and a help block toggling are both
-        // real content changes - without them the gate would hold a stale card.
-        var tl = actTool(a);
-        return a.key + '|' + a.label + '|' + (r && r.done ? 1 : 0) + '|' + ((r && r.note) || '') + '|' + (a.nudge || 0) + '|' + ((r && r.reason) || '') +
-          '|' + (tl ? tl.docks.filter(waDockAlive).join(',') : '') + '|' + (actHelpOpen[a.key] ? 1 : 0);
-      })]);
+      var secState = { more: coordSecOpen('more'), blocked: coordSecOpen('blocked'), waiting: coordSecOpen('waiting'), upcoming: coordSecOpen('upcoming'), full: coordSecOpen('full') };
+      var dbg = coordDebugOn();
+      // Signature gate: rebuild only when content, classification, section state, or
+      // placement actually changed, so the steady-state refresh loop never re-renders under
+      // the cursor.
+      var doNowKeys = q.doNow.map(function (c) { return c.key; }).join(',');
+      var moreKeys = q.moreAttention.map(function (c) { return c.key; }).join(',');
+      var sig = JSON.stringify([collapsed, dbg, secState, doNowKeys, moreKeys,
+        escSt ? escSt.status + '|' + escSt.id + '|' + (escSt.ackAt || '') : '',
+        fullList.map(function (c) {
+          var r = store[c.key]; var tl = actTool(c);
+          return c.key + '|' + c.label + '|' + (r && r.done ? 1 : 0) + '|' + ((r && r.note) || '') + '|' + (c.nudge || 0) + '|' + ((r && r.reason) || '') +
+            '|' + c.ownership + '|' + c.readiness + '|' + c.urgency + '|' + c.friction + '|' + c.coordinatorScore +
+            '|' + (tl ? tl.docks.filter(waDockAlive).join(',') : '') + '|' + (actHelpOpen[c.key] ? 1 : 0);
+        })]);
       if (card && card.isConnected && card.nextElementSibling === row && card.dataset.sig === sig) return;
       if (card) card.remove();
       card = document.createElement('div');
@@ -5460,25 +6174,18 @@
 
       var hd = document.createElement('div'); hd.className = 'bwn-actc-hd';
       hd.setAttribute('role', 'button'); hd.tabIndex = 0;
-      hd.title = collapsed ? 'Expand the checklist' : 'Collapse to one line';
+      hd.title = collapsed ? 'Expand the action queue' : 'Collapse to one line';
       var ht = document.createElement('span'); ht.className = 'bwn-actc-t'; ht.textContent = 'NEXT ACTIONS';
-      var hc = document.createElement('span'); hc.className = 'bwn-actc-n' + (realOpen ? '' : (open ? ' anchor' : ' ok'));
-      // realOpen===0 but the anchor keeps open≥1: no actionable steps remain, but the WO
-      // is NOT complete (that's only terminal, which shows no card). Phase-neutral wording -
-      // the anchor row carries the "not complete until Work Complete/Invoiced/Paid" message,
-      // so this must NOT imply the job is ready to close (it can be mid-lifecycle).
-      hc.textContent = realOpen ? realOpen + ' open' : (open ? 'no open steps' : 'all done ✓');
+      var dn = q.counts.doNow;
+      var more = q.counts.moreAttention;
+      var totalAttn = dn + more;
+      var hc = document.createElement('span'); hc.className = 'bwn-actc-n' + (totalAttn ? '' : ' ok');
+      hc.textContent = totalAttn ? totalAttn + ' need' + (totalAttn === 1 ? 's' : '') + ' attention' : 'nothing needs attention';
+      var otherCount = q.counts.blocked + q.counts.waiting + q.counts.upcoming;
       var hs = document.createElement('span'); hs.className = 'bwn-actc-s';
-      // Phase 1: the card is a MERGE now, so claiming one source for the whole list would
-      // mislabel live generated steps as plan items - the exact confusion the merge exists
-      // to fix. A single source is stated only when every step came from the plan; a mixed
-      // card counts each side, and per-row `why` tags carry the individual sources.
-      var nAuth = 0, nGen = 0;
-      acts.forEach(function (a) { if (a.authored) nAuth++; else if (!a.anchor) nGen++; });
-      var planSrcLbl = acts.some(function (a) { return a.authored && String(a.planRef || '').indexOf('dash') === 0; })
-        ? 'the dashboard case file' : 'your Next Actions Required note';
-      hs.textContent = !nAuth ? 'chase → do it → log it as a WO note'
-        : (nGen ? nAuth + ' from ' + planSrcLbl + ' · ' + nGen + ' from the playbook' : 'from ' + planSrcLbl);
+      // Overflow beyond the DO NOW three is still attention-needed - say so, never "below"/"upcoming".
+      hs.textContent = more ? (more + ' more requiring attention')
+        : (otherCount ? otherCount + ' more below' : 'everything else is healthy');
       var hx = document.createElement('span'); hx.className = 'bwn-actc-x'; hx.textContent = collapsed ? '▸' : '▾';
       hd.appendChild(ht); hd.appendChild(hc); hd.appendChild(hs); hd.appendChild(hx);
       function toggleCollapse() {
@@ -5489,9 +6196,6 @@
       hd.addEventListener('keydown', function (e) { if (e.key === 'Enter' || e.key === ' ') { e.preventDefault(); toggleCollapse(); } });
       card.appendChild(hd);
 
-      // The round-trip strip: "Escalated - awaiting mgmt" while the queue holds an
-      // ACTIVE item for this WO. Deliberately outside the collapsed gate - an open
-      // escalation is exactly what a one-line glance is for.
       if (escSt) {
         var esb = document.createElement('div');
         esb.className = 'bwn-act-esc';
@@ -5502,200 +6206,39 @@
 
       if (!collapsed) {
         var body = document.createElement('div'); body.className = 'bwn-actc-body';
-        acts.forEach(function (a) {
-          if (a.anchor) {
-            // Uncheckable completion gate - a flag + label, no checkbox/buttons. It sits
-            // at the bottom of the open group and can only clear by the status advancing.
-            var ra = document.createElement('div'); ra.className = 'bwn-act-row bwn-act-anchor';
-            var mka = document.createElement('div'); mka.className = 'bwn-act-anchor-mk'; mka.textContent = '⚑';
-            var maa = document.createElement('div'); maa.className = 'bwn-act-main';
-            var lba = document.createElement('div'); lba.className = 'bwn-act-lbl'; lba.textContent = a.label;
-            var wya = document.createElement('div'); wya.className = 'bwn-act-why'; wya.textContent = a.why;
-            maa.appendChild(lba); maa.appendChild(wya);
-            ra.appendChild(mka); ra.appendChild(maa); body.appendChild(ra);
-            return;
+
+        // ---- DO NOW: the coordinator's up-to-3 attention queue, expanded by default ----
+        var dnWrap = document.createElement('div'); dnWrap.className = 'bwn-cq-donow';
+        var dnHd = document.createElement('div'); dnHd.className = 'bwn-cq-donow-hd';
+        var dnT = document.createElement('span'); dnT.className = 'bwn-cq-donow-t'; dnT.textContent = 'DO NOW';
+        var dnN = document.createElement('span'); dnN.className = 'bwn-cq-donow-n';
+        dnN.textContent = dn ? dn + ' action' + (dn === 1 ? '' : 's') + ' require' + (dn === 1 ? 's' : '') + ' attention' : 'clear';
+        dnHd.appendChild(dnT); dnHd.appendChild(dnN); dnWrap.appendChild(dnHd);
+        if (q.doNow.length) {
+          q.doNow.forEach(function (c) { dnWrap.appendChild(buildActRow(c, state, store, escSt, { card: true })); });
+        } else {
+          var zero = document.createElement('div'); zero.className = 'bwn-cq-zero';
+          zero.textContent = 'No Coordinator actions require attention right now.';
+          dnWrap.appendChild(zero);
+          if (otherCount) {
+            var zsub = document.createElement('div'); zsub.className = 'bwn-cq-zero-sub';
+            zsub.textContent = 'Everything else is healthy, scheduled, blocked, or waiting on someone else - ' + otherCount + ' item' + (otherCount === 1 ? '' : 's') + ' below.';
+            dnWrap.appendChild(zsub);
           }
-          var rec = store[a.key];
-          var isDone = !!(rec && rec.done);
-          var r = document.createElement('div'); r.className = 'bwn-act-row' + (a.nudge && !isDone ? ' nudge' : '');
-          var cb = document.createElement('input'); cb.type = 'checkbox'; cb.checked = isDone;
-          cb.setAttribute('aria-label', a.label);
-          cb.title = isDone ? 'Uncheck to reopen' : 'Mark done without posting a note';
-          cb.addEventListener('change', function () {
-            if (cb.checked) { actsMarkDone(a, ''); renderActsInline(state); return; }
-            // Unchecking: three cases.
-            //  1. Correcting a wrong AUTO-check → frictionless (never punish fixing the machine).
-            //  2. Dismissing a CRITICAL step → a reason is REQUIRED; it becomes a WO note
-            //     (manual save = Umbrava attribution) and rides to the activity log.
-            //     Empty/cancelled reason = NOT dismissed - the box stays checked.
-            //  3. Anything else → plain reopen, counted in the usage stats.
-            var rec2 = actsLoad()[a.key];
-            if (rec2 && rec2.done && rec2.auto) { actsMarkUndone(a, '', true); renderActsInline(state); return; }
-            // Undo grace: a bare manual check (no note typed) unchecked within 2 minutes
-            // is a misclick correction, not a dismissal - frictionless and NOT a skip.
-            // Without this, Cancel leaves a live critical step falsely "done" and the only
-            // exit fabricates a dismissal + a skip stat for fixing a fat-finger (review).
-            if (rec2 && rec2.done && !rec2.note && rec2.ts && Date.now() - rec2.ts < 120000) { actsMarkUndone(a, '', true); renderActsInline(state); return; }
-            if (actIsCritical(a)) {
-              var why2 = prompt('"' + a.label + '" is a critical step.\nWhy is it being dismissed? (required - this becomes the WO note)', '');
-              if (why2 === null || !why2.trim()) { cb.checked = true; return; }   // not dismissed
-              actsMarkUndone(a, why2.trim());
-              var disNote = 'Dismissed step: ' + a.label + ' - ' + why2.trim();
-              try { navigator.clipboard.writeText(disNote).catch(function () { }); } catch (e2) { }
-              renderActsInline(state);
-              insertWONote(disNote, function () { /* posted manually by the coordinator */ });
-              return;
-            }
-            actsMarkUndone(a, '');
-            renderActsInline(state);
-          });
-          var main = document.createElement('div'); main.className = 'bwn-act-main';
-          var lbl = document.createElement('div'); lbl.className = 'bwn-act-lbl' + (isDone ? ' done' : '');
-          lbl.textContent = a.label;
-          // Phase 2 navigation: the label walks the page to the thing the step is about,
-          // but only where a proven target exists (actNav). Elsewhere it stays plain text.
-          var nav = actNav(a);
-          if (nav) {
-            lbl.className += ' nav';
-            lbl.setAttribute('role', 'button'); lbl.tabIndex = 0;
-            lbl.title = 'Show this on the page';
-            lbl.addEventListener('click', function () { actNavGo(nav); });
-            lbl.addEventListener('keydown', function (ev) { if (ev.key === 'Enter' || ev.key === ' ') { ev.preventDefault(); actNavGo(nav); } });
-          }
-          // Phase 2 training layer: "?" opens three static lines explaining the step.
-          var helpTxt = actHelp(a);
-          if (helpTxt) {
-            var ht = document.createElement('button');
-            ht.type = 'button'; ht.className = 'bwn-act-help-t'; ht.textContent = '?';
-            ht.title = 'What this step means, where to do it, and what done looks like';
-            ht.setAttribute('aria-expanded', actHelpOpen[a.key] ? 'true' : 'false');
-            ht.addEventListener('click', function (ev) {
-              ev.stopPropagation();   // the label may itself be a nav control
-              if (actHelpOpen[a.key]) delete actHelpOpen[a.key]; else actHelpOpen[a.key] = 1;
-              renderActsInline(state);
-            });
-            lbl.appendChild(ht);
-          }
-          var why = document.createElement('div'); why.className = 'bwn-act-why'; why.textContent = a.why;
-          main.appendChild(lbl); main.appendChild(why);
-          if (helpTxt && actHelpOpen[a.key]) {
-            var hbx = document.createElement('div'); hbx.className = 'bwn-act-help';
-            for (var hi = 0; hi < ACT_HELP_PFX.length; hi++) {
-              var hln = document.createElement('div');
-              hln.textContent = ACT_HELP_PFX[hi] + helpTxt[hi];
-              hbx.appendChild(hln);
-            }
-            main.appendChild(hbx);
-          }
-          // A dismissed-with-reason step stays OPEN and shows its logged reason - the
-          // dismissal is visible and reversible, never a silent deletion.
-          if (!isDone && rec && rec.dismissed && rec.reason) {
-            var dis = document.createElement('div'); dis.className = 'bwn-act-dis';
-            var dd = new Date(rec.dismissed);
-            dis.textContent = '✗ dismissed ' + (dd.getMonth() + 1) + '/' + dd.getDate() + ': ' + rec.reason;
-            main.appendChild(dis);
-          }
-          if (isDone && rec.note) {
-            var lg = document.createElement('div'); lg.className = 'bwn-act-log';
-            var d = new Date(rec.ts || Date.now());
-            lg.textContent = '✓ ' + (d.getMonth() + 1) + '/' + d.getDate() + ' - ' + rec.note;
-            main.appendChild(lg);
-          }
-          var btns = document.createElement('div'); btns.className = 'bwn-act-btns';
-          armAssistDue(a, isDone);
-          // Phase 2 tool launch - rendered only while the owning dock registrant is live,
-          // so this is never a dead control. The click is the same bwn:dock:open the rail
-          // itself emits, so the tool opens exactly as if launched from the dock. A step
-          // can map to more than one tool (recruit = Dispatch OR Email RFP); each button
-          // gates on its OWN registrant, so only installed-and-live tools render.
-          var tool = actTool(a);
-          if (tool && !isDone) {
-            tool.docks.forEach(function (dk) {
-              if (!waDockAlive(dk)) return;
-              var tb = document.createElement('button');
-              tb.type = 'button'; tb.className = 'bwn-wa-btn ghost'; tb.textContent = waEscToolLabel(dk, escSt);
-              tb.style.cssText = 'padding:3px 9px;font-size:10px;';
-              tb.title = (dk === 'assist' && escSt)
-                ? 'An escalation is already open on this work order - view, acknowledge or resolve it'
-                : 'Open the ' + (ACT_TOOL_LABEL[dk] || 'tool').replace(/…$/, '') + ' drawer for this work order';
-              tb.addEventListener('click', function () {
-                try { document.dispatchEvent(new CustomEvent('bwn:evt', { detail: { id: 'bwn:dock:open', key: dk } })); } catch (e) { }
-              });
-              btns.appendChild(tb);
-            });
-          }
-          if (a.text) {
-            var cp = document.createElement('button');
-            cp.type = 'button'; cp.className = 'bwn-wa-btn ghost'; cp.textContent = 'Chase';
-            cp.style.cssText = 'padding:3px 9px;font-size:10px;';
-            cp.title = a.text;
-            cp.addEventListener('click', function () {
-              navigator.clipboard.writeText(a.text).then(function () {
-                cp.textContent = 'Copied ✓';
-                setTimeout(function () { cp.textContent = 'Chase'; }, 1500);
-              }, function () { prompt('Copy manually:', a.text); });
-            });
-            btns.appendChild(cp);
-          }
-          var ab = document.createElement('button');
-          ab.type = 'button'; ab.className = 'bwn-wa-btn primary'; ab.textContent = isDone ? 'Re-log' : 'Actioned…';
-          ab.style.cssText = 'padding:3px 9px;font-size:10px;';
-          ab.title = 'Log what you did - prefills a WO note for you to review and post';
-          ab.addEventListener('click', function () {
-            var typed = prompt('What did you do? (one line - becomes the WO note)\n\n' + a.label, '');
-            if (typed === null) return;
-            var noteText = a.label + (typed.trim() ? ' - ' + typed.trim() : '');
-            actsMarkDone(a, typed.trim());
-            renderActsInline(state);
-            // Silent clipboard backup first: some rich editors re-render from their own
-            // state and swallow programmatic text - paste is then the instant recovery.
-            try { navigator.clipboard.writeText(noteText).catch(function () { }); } catch (e) { }
-            // ECD-related actions log an internal audit note - default the type to Internal.
-            // The client-cadence step IS a client-facing update - default it to Client so the
-            // posted note both reads correctly AND resets lastClientNoteDays (self-converges).
-            var actNoteType = (a.openEcd || /^ecd/.test(a.key || '')) ? 'Internal'
-              : /^clientcad/.test(a.key || '') ? 'Client' : undefined;
-            insertWONote(noteText, function () { /* posted manually by the coordinator */ }, actNoteType);
-          });
-          btns.appendChild(ab);
-          if (a.openEcd) {
-            var eb = document.createElement('button');
-            eb.type = 'button'; eb.className = 'bwn-wa-btn ghost'; eb.textContent = 'Set ECD…';
-            eb.style.cssText = 'padding:3px 9px;font-size:10px;';
-            eb.title = 'Propose + set the expected completion date, and draft the client note';
-            eb.addEventListener('click', function () { ecdHelperOpen(state); });
-            btns.appendChild(eb);
-          }
-          // Guided-WRITE buttons - gated by BWN_MODULES.woAssistWrites (shipping default OFF).
-          // The flag hides the UI; the mutations still pass feature:'woAssist' to bwnGqlOp, so
-          // Core's kill switch + audit gate governs the write even if a button ever leaked in.
-          if (BWN_MODULES.woAssistWrites) {
-            // "Create task…" - on every non-anchor act row (spin a follow-up off any next action).
-            (function (act) {
-              // Third gate, and the per-USER one: Umbrava's own checkboxes. bwnCan fails OPEN on
-              // anything it cannot decide, so these render exactly as before for an undecoded user.
-              if (bwnCan('Task.AddNew')) {
-                var tkb = document.createElement('button');
-                tkb.type = 'button'; tkb.className = 'bwn-wa-btn ghost'; tkb.textContent = 'Create task…';
-                tkb.style.cssText = 'padding:3px 9px;font-size:10px;';
-                tkb.title = 'Create a follow-up task on this work order (assigned to the coordinator)';
-                tkb.addEventListener('click', function () { taskHelperOpen(state, act); });
-                btns.appendChild(tkb);
-              }
-              // "Change status…" - only on the advance-to-complete gate + the phase-chase rows.
-              if (bwnCan('WorkOrderField.Status') && (act.key === 'advance:workcomplete' || act.key.indexOf('phase:') === 0)) {
-                var csb = document.createElement('button');
-                csb.type = 'button'; csb.className = 'bwn-wa-btn ghost'; csb.textContent = 'Change status…';
-                csb.style.cssText = 'padding:3px 9px;font-size:10px;';
-                csb.title = 'Change this work order’s status (guided, logged, typed confirm)';
-                csb.addEventListener('click', function () { statusHelperOpen(state, act); });
-                btns.appendChild(csb);
-              }
-            })(a);
-          }
-          r.appendChild(cb); r.appendChild(main); r.appendChild(btns);
-          body.appendChild(r);
-        });
+        }
+        body.appendChild(dnWrap);
+
+        // ---- Collapsed secondary sections (deterministic precedence order) ----
+        // More requiring attention: the DO NOW overflow. SAME classification and SAME
+        // interactive cards as DO NOW (never called Upcoming) - just collapsed by default.
+        if (q.moreAttention.length) body.appendChild(buildCoordSection('more', 'More requiring attention', q.moreAttention, q.critical.moreAttention, function (a) { return buildActRow(a, state, store, escSt, { card: true }); }, state));
+        if (q.blocked.length) body.appendChild(buildCoordSection('blocked', 'Blocked', q.blocked, q.critical.blocked, function (a) { return buildCompactRow(a, state); }, state));
+        if (q.waiting.length) body.appendChild(buildCoordSection('waiting', 'Waiting on others', q.waiting, q.critical.waiting, function (a) { return buildCompactRow(a, state); }, state));
+        if (q.upcoming.length) body.appendChild(buildCoordSection('upcoming', 'Upcoming', q.upcoming, false, function (a) { return buildCompactRow(a, state); }, state));
+        // Full lifecycle: the complete generated list (open + done + anchor), fully
+        // interactive - the power-user / debugging reference surface. Never styled like DO NOW.
+        body.appendChild(buildCoordSection('full', 'Full lifecycle', fullList, false, function (a) { return buildActRow(a, state, store, escSt, { card: false }); }, state));
+
         var meta = document.createElement('div'); meta.className = 'bwn-wa-meta';
         meta.textContent = 'Auto-updates with the WO - steps clear when the job state resolves them or a note logs them; the posted note is the real record.';
         body.appendChild(meta);
