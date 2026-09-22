@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         BWN Suite - Core (Broadway National)
 // @namespace    broadwaynational.bwn
-// @version      1.88.0
+// @version      1.89.0
 // @downloadURL  https://raw.githubusercontent.com/Intermu/userscripts/main/bwn-suite-core.user.js
 // @updateURL    https://raw.githubusercontent.com/Intermu/userscripts/main/bwn-suite-core.user.js
 // @description  Runs several Umbrava helpers for BWN coordinators, in the browser with no privileged grants. Includes: PO Approval + ETA Builder; WO Assist (GP/ETA, a stall watchdog, DNE calculator, and a next-action playbook); Email Leak Guard (checks recipients against vendor names, PO amounts, and client budget references before an outbound email sends); WO List Heat (a triage overlay + My Day strip on the work-order list, with an optional same-origin Umbrava API scan for deterministic full-board coverage); and the BWN Launcher (opens the Azure Static Web App tools with the current WO's context). Modules share state through sessionStorage/localStorage. The only network calls are same-origin Umbrava GraphQL requests (app.umbrava.com/api/graphql, the app's own session): List Heat's full-board scan and WO Assist's work-order / trip / clock-in / document / purchase-order reads, plus ONE write - BWN Views saves the column layout through Umbrava's own putUserPreference, the same preference the column chooser writes; everything else is offline. Toggle modules in BWN_MODULES below.
@@ -113,7 +113,7 @@
   try { localStorage.setItem('bwn:status:core', JSON.stringify({ ver: BWN_VER, ts: Date.now() })); } catch (e) { /* best-effort */ }
 
   console.info('[BWN SUITE CORE] v' + BWN_VER + ' |',
-    'Shared Core 7 \u00b7 DOM Handles 1.0 \u00b7 PO Approval 1.13 \u00b7 WO Assist 2.75 \u00b7 Leak Guard 2.0 \u00b7 List Heat 3.28 \u00b7 Launcher 2.0 \u00b7 Views 3.1 \u00b7 Palette 1.1 \u00b7 Visit 1.2 \u00b7 Reminders 1.1 \u00b7 Timeline 1.1 \u00b7 TripCal 1.4 \u00b7 Bulk Ops 1.0 \u00b7 Connector 1.2 \u00b7 Governance 1.0 |',
+    'Shared Core 7 \u00b7 DOM Handles 1.0 \u00b7 PO Approval 1.13 \u00b7 WO Assist 2.76 \u00b7 Leak Guard 2.0 \u00b7 List Heat 3.28 \u00b7 Launcher 2.0 \u00b7 Views 3.1 \u00b7 Palette 1.1 \u00b7 Visit 1.2 \u00b7 Reminders 1.1 \u00b7 Timeline 1.1 \u00b7 TripCal 1.4 \u00b7 Bulk Ops 1.0 \u00b7 Connector 1.2 \u00b7 Governance 1.0 |',
     'enabled:', Object.keys(BWN_MODULES).filter(function (k) { return BWN_MODULES[k]; }).join(', '));
 
   // ===== BWN SHARED CORE v7 - KEEP IN SYNC across both suite scripts =====
@@ -2297,7 +2297,7 @@
   });
 
   // ==========================================================================
-  // MODULE: WO Assist: GP + ETA Watchdog + Playbook v2.75 (Connector 1.2)
+  // MODULE: WO Assist: GP + ETA Watchdog + Playbook v2.76 (Connector 1.2)
   // ==========================================================================
   bwnBoot('woAssist', BWN_MODULES.woAssist, function () {
     'use strict';
@@ -2327,7 +2327,7 @@
     var PANEL_ID = 'bwn-gp-panel';
     var GREEN = BWN.GREEN;
 
-    console.info('[BWN GP] WO Assist v2.75 loaded on', location.href);
+    console.info('[BWN GP] WO Assist v2.76 loaded on', location.href);
 
     // ---- Parsing helpers (shared via BWN core) -----------------------------
     var parseMoney = BWN.parseMoney;
@@ -3561,9 +3561,6 @@
         '.bwn-act-row.nudge{box-shadow:inset 3px 0 0 var(--bwn-bad);padding-left:8px;}' +
         '.bwn-act-dis{font:500 11px ui-monospace,"Segoe UI Mono","SF Mono",monospace;color:var(--bwn-warn);margin-top:3px;}' +
         '.bwn-act-btns{display:flex;flex-direction:column;gap:4px;flex:none;align-items:stretch;}' +
-        '.bwn-act-lbl.nav{cursor:pointer;}' +
-        '.bwn-act-lbl.nav:hover{text-decoration:underline;text-underline-offset:2px;}' +
-        '.bwn-act-lbl.nav:focus-visible{outline:2px solid var(--bwn-accent);outline-offset:2px;border-radius:4px;}' +
         '.bwn-act-help-t{display:inline-block;margin-left:6px;padding:0;width:15px;height:15px;line-height:14px;vertical-align:1px;border:1px solid var(--bwn-border);border-radius:999px;background:var(--bwn-surface-2);color:var(--bwn-text-faint);font:600 10px ui-monospace,"Segoe UI Mono","SF Mono",monospace;cursor:pointer;flex:none;}' +
         '.bwn-act-help-t:hover{color:var(--bwn-green);border-color:var(--bwn-green);}' +
         '.bwn-act-help{margin-top:5px;padding:7px 9px;border-left:2px solid var(--bwn-green);border-radius:0 6px 6px 0;background:var(--bwn-surface-2);font-size:11.5px;line-height:1.45;color:var(--bwn-text-strong);}' +
@@ -3575,20 +3572,30 @@
         '.bwn-act-esc{padding:7px 12px;font:500 11.5px ui-monospace,"Segoe UI Mono","SF Mono",monospace;background:var(--bwn-warn-bg);color:var(--bwn-warn-fg);border-top:1px solid var(--bwn-border-2);line-height:1.4;}' +
         '.bwn-act-esc:last-child{border-radius:0 0 9px 9px;}' +
         '.bwn-actc{display:block;width:100%;align-self:stretch;box-sizing:border-box;margin:6px 0 14px;border:1px solid var(--bwn-border);border-left:3px solid var(--bwn-green);border-radius:10px;background:var(--bwn-surface);font-family:-apple-system,BlinkMacSystemFont,"Segoe UI","Helvetica Neue",Arial,sans-serif;box-shadow:0 1px 4px rgba(13,38,26,.06);}' +
-        '.bwn-actc-hd{display:flex;align-items:center;gap:10px;padding:8px 12px;cursor:pointer;user-select:none;}' +
-        '.bwn-actc-hd:focus-visible{outline:2px solid var(--bwn-accent);outline-offset:-2px;}' +
+        // Card header is a real <button aria-expanded> (was a div role=button). Focus rings in this
+        // card use --bwn-text-strong, not the accent: #2ECC71 on the white host panel is ~1.9:1 and
+        // fails the 3:1 indicator floor; text-strong is ~12:1 light and re-maps for dark.
+        '.bwn-actc-hd{display:flex;align-items:center;gap:10px;width:100%;box-sizing:border-box;padding:8px 12px;border:none;border-radius:9px;background:none;color:inherit;font:inherit;text-align:left;cursor:pointer;user-select:none;}' +
+        '.bwn-actc-hd:focus-visible{outline:2px solid var(--bwn-text-strong);outline-offset:-2px;}' +
         '.bwn-actc-t{font:500 10px ui-monospace,"Segoe UI Mono","SF Mono",monospace;color:var(--bwn-green);letter-spacing:.08em;}' +
-        '.bwn-actc-n{font:500 10px ui-monospace,"Segoe UI Mono","SF Mono",monospace;color:#fff;background:var(--bwn-warn);border-radius:999px;padding:2px 9px;white-space:nowrap;}' +
-        '.bwn-actc-n.ok{background:var(--bwn-accent);color:var(--bwn-green-dk);}' +
+        // Counts use the warn / ok TRIADS: white on --bwn-warn was ~2.9:1 at 10px (fails AA).
+        '.bwn-actc-n{font:600 10px ui-monospace,"Segoe UI Mono","SF Mono",monospace;color:var(--bwn-warn-fg);background:var(--bwn-warn-bg);border:1px solid var(--bwn-warn);border-radius:999px;padding:2px 9px;white-space:nowrap;}' +
+        '.bwn-actc-n.ok{background:var(--bwn-ok-bg);color:var(--bwn-ok-fg);border-color:var(--bwn-green);}' +
+        '.bwn-actc-n.bad{background:var(--bwn-bad-bg);color:var(--bwn-bad-fg);border-color:var(--bwn-bad);}' +
         '.bwn-actc-n.anchor{background:var(--bwn-surface-3);color:var(--bwn-text-faint);}' +
-        '.bwn-actc-s{font:500 10px ui-monospace,"Segoe UI Mono","SF Mono",monospace;color:var(--bwn-text-faint);margin-left:auto;}' +
+        '.bwn-actc-s{flex:1 1 80px;min-width:0;text-align:right;font:500 10px ui-monospace,"Segoe UI Mono","SF Mono",monospace;color:var(--bwn-text-faint);margin-left:auto;}' +
         '.bwn-actc-x{color:var(--bwn-text-faint);font-size:11px;}' +
         '.bwn-actc-body{padding:2px 12px 9px;}' +
         // ---- Coordinator Action Queue -----------------------------------------
-        '.bwn-cq-donow{margin:4px 0 6px;padding:8px 10px 4px;border:1px solid var(--bwn-border);border-left:3px solid var(--bwn-green);border-radius:9px;background:var(--bwn-tint);}' +
+        // Semantic colour (BWN ODS): DO NOW with work in it is AMBER (action needed) on a quiet
+        // surface; green only when it is genuinely clear. It used to sit on the green tint, which
+        // read "all good" while listing due work.
+        '.bwn-cq-donow{margin:4px 0 6px;padding:8px 10px 4px;border:1px solid var(--bwn-border);border-left:3px solid var(--bwn-warn);border-radius:9px;background:var(--bwn-surface);}' +
+        '.bwn-cq-donow.is-clear{border-left-color:var(--bwn-green);background:var(--bwn-ok-bg);}' +
         '.bwn-cq-donow-hd{display:flex;align-items:center;gap:9px;margin-bottom:2px;}' +
-        '.bwn-cq-donow-t{font:600 10px ui-monospace,"Segoe UI Mono","SF Mono",monospace;letter-spacing:.1em;color:var(--bwn-green-dk);}' +
-        '.bwn-cq-donow-n{font:500 10px ui-monospace,"Segoe UI Mono","SF Mono",monospace;color:#fff;background:var(--bwn-warn);border-radius:999px;padding:2px 9px;}' +
+        '.bwn-cq-donow-t{font:600 10px ui-monospace,"Segoe UI Mono","SF Mono",monospace;letter-spacing:.1em;color:var(--bwn-text-strong);}' +
+        '.bwn-cq-donow-n{font:600 10px ui-monospace,"Segoe UI Mono","SF Mono",monospace;color:var(--bwn-warn-fg);background:var(--bwn-warn-bg);border:1px solid var(--bwn-warn);border-radius:999px;padding:2px 9px;}' +
+        '.bwn-cq-donow.is-clear .bwn-cq-donow-n{color:var(--bwn-ok-fg);background:var(--bwn-ok-bg);border-color:var(--bwn-green);}' +
         '.bwn-cq-donow .bwn-act-row:last-child{border-bottom:none;}' +
         '.bwn-cq-card{align-items:flex-start;}' +
         '.bwn-cq-reason{font-size:12.5px;color:var(--bwn-text);line-height:1.4;margin-top:3px;}' +
@@ -3596,26 +3603,66 @@
         '.bwn-cq-zero{font-size:12.5px;color:var(--bwn-text);padding:4px 2px 2px;}' +
         '.bwn-cq-zero-sub{font:500 11px ui-monospace,"Segoe UI Mono","SF Mono",monospace;color:var(--bwn-text-faint);padding:2px 2px 4px;}' +
         '.bwn-cq-badges{display:inline-flex;flex-wrap:wrap;gap:4px;margin-top:3px;}' +
-        '.bwn-cq-badge{font:600 9px ui-monospace,"Segoe UI Mono","SF Mono",monospace;letter-spacing:.04em;padding:1px 6px;border-radius:999px;white-space:nowrap;background:var(--bwn-surface-3);color:var(--bwn-text-faint);}' +
+        // Badges: red = critical, amber = due, everything else (upcoming / owner / snoozed /
+        // one-click) is neutral gray. Green is reserved for a confirmed state, so "Upcoming" and
+        // "One-click" no longer wear it. Every badge is text, never a colour-only dot.
+        '.bwn-cq-badge{font:600 10px ui-monospace,"Segoe UI Mono","SF Mono",monospace;letter-spacing:.03em;padding:1px 6px;border-radius:999px;white-space:nowrap;background:var(--bwn-surface-3);color:var(--bwn-text-muted);border:1px solid transparent;}' +
         '.bwn-cq-badge.u-critical{background:var(--bwn-bad);color:#fff;}' +
-        '.bwn-cq-badge.u-due{background:var(--bwn-warn);color:#fff;}' +
-        '.bwn-cq-badge.u-upcoming{background:var(--bwn-accent);color:var(--bwn-green-dk);}' +
-        '.bwn-cq-badge.own{background:var(--bwn-surface-3);color:var(--bwn-text-muted);}' +
-        '.bwn-cq-badge.sched,.bwn-cq-badge.blk{background:var(--bwn-surface-2);color:var(--bwn-text-faint);border:1px solid var(--bwn-border);}' +
-        '.bwn-cq-badge.fric{background:transparent;color:var(--bwn-green);border:1px solid var(--bwn-green);}' +
+        '.bwn-cq-badge.u-due{background:var(--bwn-warn-bg);color:var(--bwn-warn-fg);border-color:var(--bwn-warn);}' +
+        '.bwn-cq-badge.sched,.bwn-cq-badge.blk{background:var(--bwn-surface-2);border-color:var(--bwn-border);}' +
+        '.bwn-cq-badge.fric{background:transparent;border-color:var(--bwn-border);}' +
         '.bwn-cq-dbg{font:500 10px ui-monospace,"Segoe UI Mono","SF Mono",monospace;color:var(--bwn-text-faint);margin-top:4px;padding:3px 6px;border-radius:5px;background:var(--bwn-surface-2);word-break:break-all;}' +
         '.bwn-cq-sec{margin-top:6px;}' +
         '.bwn-cq-sec-hd{display:flex;align-items:center;gap:8px;width:100%;box-sizing:border-box;padding:6px 8px;border:none;border-radius:7px;background:var(--bwn-surface-2);color:var(--bwn-text-muted);cursor:pointer;text-align:left;font:500 11px ui-monospace,"Segoe UI Mono","SF Mono",monospace;}' +
         '.bwn-cq-sec-hd:hover{background:var(--bwn-surface-3);}' +
-        '.bwn-cq-sec-hd:focus-visible{outline:2px solid var(--bwn-accent);outline-offset:1px;}' +
+        '.bwn-cq-sec-hd{min-height:32px;}' +
+        '.bwn-cq-sec-hd:focus-visible{outline:2px solid var(--bwn-text-strong);outline-offset:1px;}' +
         '.bwn-cq-sec-x{color:var(--bwn-text-faint);width:10px;}' +
         '.bwn-cq-sec-t{color:var(--bwn-text);}' +
-        '.bwn-cq-sec-n{background:var(--bwn-surface-3);color:var(--bwn-text-faint);border-radius:999px;padding:1px 8px;}' +
-        '.bwn-cq-sec-crit{margin-left:auto;color:var(--bwn-bad);font-weight:600;}' +
+        '.bwn-cq-sec-n{background:var(--bwn-surface-3);color:var(--bwn-text-muted);border-radius:999px;padding:1px 8px;}' +
+        '.bwn-cq-sec-hd .bwn-cq-badge{margin-left:auto;}' +
         '.bwn-cq-sec-body{padding:2px 4px 2px;}' +
-        '.bwn-cq-compact{display:flex;gap:9px;align-items:flex-start;padding:7px 2px;border-bottom:1px solid var(--bwn-surface-3);}' +
+        '.bwn-cq-compact{display:flex;flex-wrap:wrap;gap:6px 9px;align-items:flex-start;padding:7px 2px;border-bottom:1px solid var(--bwn-surface-3);}' +
         '.bwn-cq-compact:last-child{border-bottom:none;}' +
-        '.bwn-cq-compact .bwn-act-main{flex:1;min-width:0;}';
+        '.bwn-cq-compact .bwn-act-main{flex:1;min-width:0;}' +
+        '.bwn-cq-snz{font-size:11.5px;color:var(--bwn-text-muted);margin-top:3px;}' +
+        '.bwn-cq-warn{margin:4px 0 6px;padding:8px 10px;border:1px solid var(--bwn-warn);border-left-width:3px;border-radius:7px;background:var(--bwn-warn-bg);color:var(--bwn-warn-fg);font-size:12.5px;line-height:1.4;}' +
+        // Row controls, scoped to this card so no other .bwn-wa-btn surface changes. Buttons wrap
+        // onto their own line under the text (the Notes panel is narrow; the old right-hand
+        // column squeezed the reason text) and meet the 32px dense-target floor. All are
+        // secondary weight; the ONE primary is Actioned on the top DO NOW card (.bwn-cq-primary),
+        // so the eye finds a single intended action. Flat fill - no gradient.
+        '.bwn-actc .bwn-act-row{flex-wrap:wrap;}' +
+        '.bwn-actc .bwn-act-btns{flex:1 1 100%;flex-direction:row;flex-wrap:wrap;align-items:center;gap:6px;padding-left:28px;}' +
+        '.bwn-actc .bwn-cq-compact .bwn-act-btns{padding-left:0;}' +
+        '.bwn-actc .bwn-act-btns:empty{display:none;}' +
+        '.bwn-actc .bwn-wa-btn{min-height:32px;padding:5px 11px;border:1px solid var(--bwn-border);border-radius:7px;background:var(--bwn-surface);color:var(--bwn-text);font-size:12px;line-height:1.2;}' +
+        '.bwn-actc .bwn-wa-btn:hover{background:var(--bwn-surface-2);border-color:var(--bwn-text-faint);filter:none;}' +
+        '.bwn-actc .bwn-wa-btn:focus-visible{outline:2px solid var(--bwn-text-strong);outline-offset:2px;}' +
+        '.bwn-actc .bwn-wa-btn[aria-expanded="true"]{background:var(--bwn-surface-3);border-color:var(--bwn-text-muted);}' +
+        '.bwn-actc .bwn-wa-btn.bwn-cq-primary{background:var(--bwn-green);border-color:var(--bwn-green);color:#fff;}' +
+        '.bwn-actc .bwn-wa-btn.bwn-cq-primary:hover{background:var(--bwn-green-dk);}' +
+        '.bwn-actc .bwn-wa-btn.bwn-cq-tert{border-color:transparent;background:transparent;color:var(--bwn-text-muted);}' +
+        // 32px checkbox target: the label wrapper carries the hit area; the box stays 15px.
+        '.bwn-cq-cbw{flex:none;display:inline-flex;align-items:center;justify-content:center;width:32px;height:32px;margin:-8px -8px -8px -9px;border-radius:6px;cursor:pointer;}' +
+        '.bwn-cq-cbw input[type=checkbox]{margin:0;}' +
+        '.bwn-cq-cbw:focus-within{outline:2px solid var(--bwn-text-strong);outline-offset:-4px;}' +
+        // Step label that scrolls to its field: a real <button> (was a div role=button that ALSO
+        // contained the "?" button - nested interactive controls). Dotted underline = it goes somewhere.
+        '.bwn-cq-nav{margin:0;padding:0;border:0;background:none;color:inherit;font:inherit;line-height:inherit;text-align:left;cursor:pointer;text-decoration:underline dotted;text-underline-offset:3px;}' +
+        '.bwn-cq-nav:hover{text-decoration-style:solid;}' +
+        '.bwn-cq-nav:focus-visible{outline:2px solid var(--bwn-text-strong);outline-offset:2px;border-radius:3px;}' +
+        // "?" help toggle: 15px glyph, ~33px hit area via an invisible ::after.
+        '.bwn-actc .bwn-act-help-t{position:relative;}' +
+        '.bwn-actc .bwn-act-help-t::after{content:"";position:absolute;inset:-9px;}' +
+        '.bwn-actc .bwn-act-help-t:focus-visible{outline:2px solid var(--bwn-text-strong);outline-offset:2px;}' +
+        // Inline Mark-waiting form (replaces two prompt() dialogs that silently coerced bad input).
+        '.bwn-cq-wait{flex:1 1 100%;display:flex;flex-wrap:wrap;align-items:flex-end;gap:8px 12px;margin:2px 0 2px 28px;padding:8px 10px;border:1px solid var(--bwn-border);border-radius:7px;background:var(--bwn-surface-2);color:var(--bwn-text);}' +
+        '.bwn-cq-wait label{display:flex;flex-direction:column;gap:3px;font-size:11.5px;font-weight:600;color:var(--bwn-text-muted);}' +
+        '.bwn-cq-wait select{min-height:32px;padding:4px 6px;border:1px solid var(--bwn-border);border-radius:6px;background:var(--bwn-surface);color:var(--bwn-text);font:13px -apple-system,BlinkMacSystemFont,"Segoe UI","Helvetica Neue",Arial,sans-serif;}' +
+        '.bwn-cq-wait select:focus-visible{outline:2px solid var(--bwn-text-strong);outline-offset:1px;}' +
+        '.bwn-cq-wait-note{flex:1 1 100%;margin:0;font-size:11.5px;line-height:1.4;color:var(--bwn-text-muted);}' +
+        '.bwn-cq-wait-acts{display:flex;gap:6px;}';
       document.head.appendChild(st);
     }
 
@@ -5778,7 +5825,7 @@
     }
     function actNavGo(nav) {
       var el = actNavTarget(nav);
-      if (!el) return;   // best-effort by contract: a missing target is a silent no-op
+      if (!el) return false;   // best-effort by contract: no navigation; the caller says so (never a silent dead click)
       try { el.scrollIntoView({ behavior: 'smooth', block: 'center' }); } catch (e) { try { el.scrollIntoView(); } catch (e2) { } }
       // Outline-only highlight (no layout shift), self-clearing - we are decorating
       // Umbrava's own element, so it must leave no trace.
@@ -5787,6 +5834,7 @@
         flash.classList.add('bwn-act-flash');
         setTimeout(function () { try { flash.classList.remove('bwn-act-flash'); } catch (e3) { } }, 1600);
       } catch (e4) { }
+      return true;
     }
 
     // TRAINING LAYER. Three static lines per step type - what it means, where in Umbrava
@@ -5843,20 +5891,84 @@
       d.textContent = a.key + ' · base ' + a.baseScore + ' · coord ' + a.coordinatorScore + ' · ' + a.ownership + '/' + a.readiness + '/' + a.urgency + '/' + a.friction;
       return d;
     }
-    // Mark-waiting flow: waiting party + revisit horizon via prompts (the script's existing
-    // dialog idiom), no WO/PO/note/status side effects. Returns true if a wait was set.
+    // Rebuild-safe focus + announcements. renderActsInline tears the card down and rebuilds it
+    // on every change, which destroyed the focused control - a keyboard user lost their place on
+    // every toggle. Each focusable control carries a stable data-bwn-fk (section-scoped, since
+    // one action can render in DO NOW and in Full lifecycle); the render puts focus back on the
+    // same key, or on coordFocusNext when an action moved its own row (Mark waiting / Resume /
+    // done), falling back to the card header.
+    var coordFocusNext = null;
+    function coordFk(el, key) { el.setAttribute('data-bwn-fk', key); return el; }
+    // ONE persistent polite live region, outside the card, so a rebuild cannot swallow a message.
+    function coordAnnounce(msg) {
+      var lr = document.getElementById('bwn-cq-live');
+      if (!lr) {
+        lr = document.createElement('div'); lr.id = 'bwn-cq-live';
+        lr.setAttribute('role', 'status'); lr.setAttribute('aria-live', 'polite');
+        lr.style.cssText = 'position:absolute;width:1px;height:1px;margin:-1px;overflow:hidden;clip:rect(0 0 0 0);white-space:nowrap;border:0;padding:0;';
+        document.body.appendChild(lr);
+      }
+      lr.textContent = '';
+      setTimeout(function () { lr.textContent = msg; }, 60);   // clear-then-set so a repeat message re-announces
+    }
+    function coordFmtDay(ms) { var d = new Date(ms); return ['Sun', 'Mon', 'Tue', 'Wed', 'Thu', 'Fri', 'Sat'][d.getDay()] + ' ' + (d.getMonth() + 1) + '/' + d.getDate(); }
+    function coordBtn(label, cls, fk, title) {
+      var b = document.createElement('button');
+      b.type = 'button'; b.className = 'bwn-wa-btn ' + cls; b.textContent = label;
+      if (title) b.title = title;
+      return coordFk(b, fk);
+    }
+    function coordCopy(btn, text, idle) {
+      navigator.clipboard.writeText(text).then(function () {
+        btn.textContent = 'Copied ✓'; coordAnnounce('Chase text copied to the clipboard.');
+        setTimeout(function () { btn.textContent = idle; }, 1500);
+      }, function () { prompt('Copy manually:', text); });
+    }
+
+    // Mark waiting: an INLINE form (party + revisit horizon) under the row - no modal, no
+    // prompt(). The old two-prompt flow silently turned a typo into "vendor" and a bad day count
+    // into 2; native <select>s make an invalid value impossible instead. No WO/PO/note/status
+    // side effects: it writes only the bwn:coordwaits:* record, exactly as before.
     var COORD_WAIT_PARTIES = ['vendor', 'client', 'technician', 'management', 'supervisor'];
-    function coordMarkWaiting(a, state) {
-      var dflt = (a.ownership && COORD_WAIT_PARTIES.indexOf(a.ownership) !== -1) ? a.ownership : 'vendor';
-      var party = prompt('Mark "' + a.label + '" as waiting on whom?\n(' + COORD_WAIT_PARTIES.join(' / ') + ')', dflt);
-      if (party === null) return false;
-      party = party.trim().toLowerCase();
-      if (COORD_WAIT_PARTIES.indexOf(party) === -1) party = 'vendor';
-      var daysS = prompt('Revisit in how many days? It resumes automatically then - or sooner if the WO data changes.\n\nThis does NOT change the WO status, notes, or POs.', '2');
-      if (daysS === null) return false;
-      var days = parseInt(daysS, 10); if (!(days > 0)) days = 2;
-      coordWaitSet(a, state, party, new Date(Date.now() + days * 86400000).toISOString());
-      return true;
+    var COORD_WAIT_DAYS = [1, 2, 3, 5, 7, 14];
+    var coordWaitForm = {};   // action key -> { party, days } while its form is open (render state only)
+    function coordWaitFormId(a) { return 'bwn-cq-wait-' + String(a.key).replace(/[^\w-]/g, '_'); }
+    function coordWaitFormOpen(a) {
+      coordWaitForm[a.key] = { party: (a.ownership && COORD_WAIT_PARTIES.indexOf(a.ownership) !== -1) ? a.ownership : 'vendor', days: 2 };
+    }
+    function buildWaitForm(a, state, sec) {
+      var f = coordWaitForm[a.key];
+      var box = document.createElement('div'); box.className = 'bwn-cq-wait'; box.id = coordWaitFormId(a);
+      box.setAttribute('role', 'group'); box.setAttribute('aria-label', 'Mark waiting: ' + a.label);
+      function sel(text, fk, options, value, onChange) {
+        var lb = document.createElement('label'); lb.textContent = text;
+        var s = coordFk(document.createElement('select'), fk);
+        options.forEach(function (o) { var op = document.createElement('option'); op.value = String(o.v); op.textContent = o.t; if (String(o.v) === String(value)) op.selected = true; s.appendChild(op); });
+        s.addEventListener('change', function () { onChange(s.value); });
+        lb.appendChild(s); box.appendChild(lb);
+      }
+      sel('Waiting on', sec + ':wparty:' + a.key, COORD_WAIT_PARTIES.map(function (p) { return { v: p, t: p.charAt(0).toUpperCase() + p.slice(1) }; }), f.party, function (v) { f.party = v; });
+      var now = Date.now();
+      sel('Check back', sec + ':wdays:' + a.key, COORD_WAIT_DAYS.map(function (d) { return { v: d, t: 'In ' + d + ' day' + (d === 1 ? '' : 's') + ' (' + coordFmtDay(now + d * 86400000) + ')' }; }), f.days, function (v) { f.days = parseInt(v, 10); });
+      var acts = document.createElement('div'); acts.className = 'bwn-cq-wait-acts';
+      var save = coordBtn('Snooze', '', sec + ':wsave:' + a.key);
+      var cancel = coordBtn('Cancel', 'bwn-cq-tert', sec + ':wcancel:' + a.key);
+      function close() { delete coordWaitForm[a.key]; coordFocusNext = sec + ':mw:' + a.key; renderActsInline(state); }
+      save.addEventListener('click', function () {
+        var until = Date.now() + f.days * 86400000;
+        coordWaitSet(a, state, f.party, new Date(until).toISOString());
+        delete coordWaitForm[a.key];
+        coordFocusNext = 'sec:waiting';
+        coordAnnounce('Snoozed "' + a.label + '" until ' + coordFmtDay(until) + ', waiting on ' + f.party + '. It is listed under Waiting on others.');
+        renderActsInline(state);
+      });
+      cancel.addEventListener('click', close);
+      box.addEventListener('keydown', function (ev) { if (ev.key === 'Escape') { ev.preventDefault(); ev.stopPropagation(); close(); } });
+      acts.appendChild(save); acts.appendChild(cancel); box.appendChild(acts);
+      var note = document.createElement('p'); note.className = 'bwn-cq-wait-note';
+      note.textContent = 'Hides this step until then. It comes back sooner if the WO data changes. Does not change the WO status, notes, or POs.';
+      box.appendChild(note);
+      return box;
     }
 
     // Full interactive action row. `a` is a CLASSIFIED action (engine fields + coordinator
@@ -5866,8 +5978,10 @@
     // reason/doneWhen + badges + a Mark-waiting quick-assist); otherwise the compact
     // Full-lifecycle row (keeps the original technical `why`). Anchors render as the
     // uncheckable completion gate. Returns the row node.
+    // opts.sec scopes the focus keys (see coordFk); opts.primary marks the ONE primary button.
     function buildActRow(a, state, store, escSt, opts) {
       opts = opts || {};
+      var fk = (opts.sec || 'full') + ':';
       if (a.anchor) {
         var ra = document.createElement('div'); ra.className = 'bwn-act-row bwn-act-anchor';
         var mka = document.createElement('div'); mka.className = 'bwn-act-anchor-mk'; mka.textContent = '⚑';
@@ -5881,11 +5995,11 @@
       var rec = store[a.key];
       var isDone = !!(rec && rec.done);
       var r = document.createElement('div'); r.className = 'bwn-act-row' + (opts.card ? ' bwn-cq-card' : '') + (a.nudge && !isDone ? ' nudge' : '');
-      var cb = document.createElement('input'); cb.type = 'checkbox'; cb.checked = isDone;
-      cb.setAttribute('aria-label', a.label);
+      var cb = coordFk(document.createElement('input'), fk + 'cb:' + a.key); cb.type = 'checkbox'; cb.checked = isDone;
+      cb.setAttribute('aria-label', (isDone ? 'Done: ' : 'Mark done: ') + a.label);
       cb.title = isDone ? 'Uncheck to reopen' : 'Mark done without posting a note';
       cb.addEventListener('change', function () {
-        if (cb.checked) { actsMarkDone(a, ''); renderActsInline(state); return; }
+        if (cb.checked) { actsMarkDone(a, ''); coordAnnounce('Marked done: ' + a.label + '. It moves to Full lifecycle.'); renderActsInline(state); return; }
         var rec2 = actsLoad()[a.key];
         if (rec2 && rec2.done && rec2.auto) { actsMarkUndone(a, '', true); renderActsInline(state); return; }
         if (rec2 && rec2.done && !rec2.note && rec2.ts && Date.now() - rec2.ts < 120000) { actsMarkUndone(a, '', true); renderActsInline(state); return; }
@@ -5904,20 +6018,25 @@
       });
       var main = document.createElement('div'); main.className = 'bwn-act-main';
       var lbl = document.createElement('div'); lbl.className = 'bwn-act-lbl' + (isDone ? ' done' : '');
-      lbl.textContent = a.label;
       var nav = actNav(a);
       if (nav) {
-        lbl.className += ' nav';
-        lbl.setAttribute('role', 'button'); lbl.tabIndex = 0;
-        lbl.title = 'Show this on the page';
-        lbl.addEventListener('click', function () { actNavGo(nav); });
-        lbl.addEventListener('keydown', function (ev) { if (ev.key === 'Enter' || ev.key === ' ') { ev.preventDefault(); actNavGo(nav); } });
+        // A real button for the label text; the "?" stays a SIBLING (no nested controls).
+        var nb = coordFk(document.createElement('button'), fk + 'nav:' + a.key);
+        nb.type = 'button'; nb.className = 'bwn-cq-nav'; nb.textContent = a.label;
+        nb.title = 'Show this on the page';
+        nb.addEventListener('click', function () {
+          if (!actNavGo(nav)) coordAnnounce('That field is not on this view right now - scroll the work order to find it.');
+        });
+        lbl.appendChild(nb);
+      } else {
+        lbl.appendChild(document.createTextNode(a.label));
       }
       var helpTxt = actHelp(a);
       if (helpTxt) {
-        var ht = document.createElement('button');
+        var ht = coordFk(document.createElement('button'), fk + 'help:' + a.key);
         ht.type = 'button'; ht.className = 'bwn-act-help-t'; ht.textContent = '?';
         ht.title = 'What this step means, where to do it, and what done looks like';
+        ht.setAttribute('aria-label', 'Explain this step: ' + a.label);
         ht.setAttribute('aria-expanded', actHelpOpen[a.key] ? 'true' : 'false');
         ht.addEventListener('click', function (ev) {
           ev.stopPropagation();   // the label may itself be a nav control
@@ -5971,9 +6090,7 @@
       if (tool && !isDone) {
         tool.docks.forEach(function (dk) {
           if (!waDockAlive(dk)) return;
-          var tb = document.createElement('button');
-          tb.type = 'button'; tb.className = 'bwn-wa-btn ghost'; tb.textContent = waEscToolLabel(dk, escSt);
-          tb.style.cssText = 'padding:3px 9px;font-size:10px;';
+          var tb = coordBtn(waEscToolLabel(dk, escSt), 'ghost', fk + 'tool:' + dk + ':' + a.key);
           tb.title = (dk === 'assist' && escSt)
             ? 'An escalation is already open on this work order - view, acknowledge or resolve it'
             : 'Open the ' + (ACT_TOOL_LABEL[dk] || 'tool').replace(/…$/, '') + ' drawer for this work order';
@@ -5984,22 +6101,13 @@
         });
       }
       if (a.text) {
-        var cp = document.createElement('button');
-        cp.type = 'button'; cp.className = 'bwn-wa-btn ghost'; cp.textContent = 'Chase';
-        cp.style.cssText = 'padding:3px 9px;font-size:10px;';
-        cp.title = a.text;
-        cp.addEventListener('click', function () {
-          navigator.clipboard.writeText(a.text).then(function () {
-            cp.textContent = 'Copied ✓';
-            setTimeout(function () { cp.textContent = 'Chase'; }, 1500);
-          }, function () { prompt('Copy manually:', a.text); });
-        });
+        var cp = coordBtn('Chase', 'ghost', fk + 'chase:' + a.key, a.text);
+        cp.setAttribute('aria-label', 'Copy chase text: ' + a.label);
+        cp.addEventListener('click', function () { coordCopy(cp, a.text, 'Chase'); });
         btns.appendChild(cp);
       }
-      var ab = document.createElement('button');
-      ab.type = 'button'; ab.className = 'bwn-wa-btn primary'; ab.textContent = isDone ? 'Re-log' : 'Actioned…';
-      ab.style.cssText = 'padding:3px 9px;font-size:10px;';
-      ab.title = 'Log what you did - prefills a WO note for you to review and post';
+      var ab = coordBtn(isDone ? 'Re-log' : 'Actioned…', 'primary' + (opts.primary && !isDone ? ' bwn-cq-primary' : ''), fk + 'act:' + a.key,
+        'Log what you did - prefills a WO note for you to review and post');
       ab.addEventListener('click', function () {
         var typed = prompt('What did you do? (one line - becomes the WO note)\n\n' + a.label, '');
         if (typed === null) return;
@@ -6013,45 +6121,42 @@
       });
       btns.appendChild(ab);
       if (a.openEcd) {
-        var eb = document.createElement('button');
-        eb.type = 'button'; eb.className = 'bwn-wa-btn ghost'; eb.textContent = 'Set ECD…';
-        eb.style.cssText = 'padding:3px 9px;font-size:10px;';
-        eb.title = 'Propose + set the expected completion date, and draft the client note';
+        var eb = coordBtn('Set ECD…', 'ghost', fk + 'ecd:' + a.key, 'Propose + set the expected completion date, and draft the client note');
         eb.addEventListener('click', function () { ecdHelperOpen(state); });
         btns.appendChild(eb);
       }
       // Mark-waiting quick assist (DO-NOW cards only): a non-writing snooze that suppresses
       // the item until a revisit time, cleared automatically if the WO data changes. It
-      // NEVER touches WO status, notes, or POs.
+      // NEVER touches WO status, notes, or POs. Opens the inline form below the row.
+      var waitOpen = !!(opts.card && !isDone && coordWaitForm[a.key]);
       if (opts.card && !isDone) {
-        var mw = document.createElement('button');
-        mw.type = 'button'; mw.className = 'bwn-wa-btn ghost'; mw.textContent = 'Mark waiting';
-        mw.style.cssText = 'padding:3px 9px;font-size:10px;';
-        mw.title = 'Snooze this until a revisit date (waiting on another party). Does not change the WO.';
-        mw.addEventListener('click', function () { if (coordMarkWaiting(a, state)) renderActsInline(state); });
+        var mw = coordBtn('Mark waiting', 'ghost', fk + 'mw:' + a.key, 'Snooze this until a check-back date (waiting on another party). Does not change the WO.');
+        mw.setAttribute('aria-expanded', waitOpen ? 'true' : 'false');
+        mw.setAttribute('aria-controls', coordWaitFormId(a));
+        mw.addEventListener('click', function () {
+          if (coordWaitForm[a.key]) { delete coordWaitForm[a.key]; coordFocusNext = fk + 'mw:' + a.key; }
+          else { coordWaitFormOpen(a); coordFocusNext = fk + 'wparty:' + a.key; }
+          renderActsInline(state);
+        });
         btns.appendChild(mw);
       }
       if (BWN_MODULES.woAssistWrites) {
         (function (act) {
           if (bwnCan('Task.AddNew')) {
-            var tkb = document.createElement('button');
-            tkb.type = 'button'; tkb.className = 'bwn-wa-btn ghost'; tkb.textContent = 'Create task…';
-            tkb.style.cssText = 'padding:3px 9px;font-size:10px;';
-            tkb.title = 'Create a follow-up task on this work order (assigned to the coordinator)';
+            var tkb = coordBtn('Create task…', 'ghost', fk + 'task:' + act.key, 'Create a follow-up task on this work order (assigned to the coordinator)');
             tkb.addEventListener('click', function () { taskHelperOpen(state, act); });
             btns.appendChild(tkb);
           }
           if (bwnCan('WorkOrderField.Status') && (act.key === 'advance:workcomplete' || act.key.indexOf('phase:') === 0)) {
-            var csb = document.createElement('button');
-            csb.type = 'button'; csb.className = 'bwn-wa-btn ghost'; csb.textContent = 'Change status…';
-            csb.style.cssText = 'padding:3px 9px;font-size:10px;';
-            csb.title = 'Change this work order’s status (guided, logged, typed confirm)';
+            var csb = coordBtn('Change status…', 'ghost', fk + 'status:' + act.key, 'Change this work order’s status (guided, logged, typed confirm)');
             csb.addEventListener('click', function () { statusHelperOpen(state, act); });
             btns.appendChild(csb);
           }
         })(a);
       }
-      r.appendChild(cb); r.appendChild(main); r.appendChild(btns);
+      var cbw = document.createElement('label'); cbw.className = 'bwn-cq-cbw'; cbw.appendChild(cb);
+      r.appendChild(cbw); r.appendChild(main); r.appendChild(btns);
+      if (waitOpen) r.appendChild(buildWaitForm(a, state, opts.sec || 'full'));
       return r;
     }
 
@@ -6059,34 +6164,41 @@
     // (the full interactive controls live in Full lifecycle). Shows the label, badges, and
     // plain-language reason; a Chase copy where one exists; and a Resume control on a snoozed
     // (scheduled) item so a wait can be cleared early.
-    function buildCompactRow(a, state) {
+    function buildCompactRow(a, state, sec) {
+      var fk = sec + ':';
       var r = document.createElement('div'); r.className = 'bwn-cq-compact';
       var main = document.createElement('div'); main.className = 'bwn-act-main';
       var lbl = document.createElement('div'); lbl.className = 'bwn-act-lbl';
-      lbl.textContent = (a.urgency === 'critical' ? '⚠ ' : '') + a.label;
+      lbl.textContent = a.label;   // "Critical" rides the badge row (text), not a ⚠ glyph
       main.appendChild(lbl);
       main.appendChild(coordBadgeEls(a));
       var rsn = document.createElement('div'); rsn.className = 'bwn-act-why'; rsn.textContent = a.reason || a.why;
       main.appendChild(rsn);
+      // A snoozed item says WHEN it comes back and on whom - the badge alone left that invisible.
+      var wrec = a.readiness === 'scheduled' && state.waits && state.waits[a.key];
+      if (wrec) {
+        var snz = document.createElement('div'); snz.className = 'bwn-cq-snz';
+        snz.textContent = 'Snoozed until ' + coordFmtDay(Date.parse(wrec.revisitAt)) + ' · waiting on ' + (wrec.waitingOn || 'vendor') + ' · returns sooner if the WO changes';
+        main.appendChild(snz);
+      }
       if (coordDebugOn()) main.appendChild(coordDebugEl(a));
       r.appendChild(main);
       var btns = document.createElement('div'); btns.className = 'bwn-act-btns';
       if (a.readiness === 'scheduled') {
-        var rb = document.createElement('button');
-        rb.type = 'button'; rb.className = 'bwn-wa-btn ghost'; rb.textContent = 'Resume';
-        rb.style.cssText = 'padding:3px 9px;font-size:10px;';
-        rb.title = 'Clear the wait and re-evaluate this item now';
-        rb.addEventListener('click', function () { coordWaitClear(a.key); renderActsInline(state); });
+        var rb = coordBtn('Resume', 'ghost', fk + 'resume:' + a.key, 'Clear the wait and re-evaluate this item now');
+        rb.setAttribute('aria-label', 'Resume: ' + a.label);
+        rb.addEventListener('click', function () {
+          coordWaitClear(a.key);
+          coordFocusNext = 'sec:' + sec;
+          coordAnnounce('Resumed: ' + a.label + '. It is back in the queue.');
+          renderActsInline(state);
+        });
         btns.appendChild(rb);
       }
       if (a.text) {
-        var cp = document.createElement('button');
-        cp.type = 'button'; cp.className = 'bwn-wa-btn ghost'; cp.textContent = 'Chase';
-        cp.style.cssText = 'padding:3px 9px;font-size:10px;';
-        cp.title = a.text;
-        cp.addEventListener('click', function () {
-          navigator.clipboard.writeText(a.text).then(function () { cp.textContent = 'Copied ✓'; setTimeout(function () { cp.textContent = 'Chase'; }, 1500); }, function () { prompt('Copy manually:', a.text); });
-        });
+        var cp = coordBtn('Chase', 'ghost', fk + 'chase:' + a.key, a.text);
+        cp.setAttribute('aria-label', 'Copy chase text: ' + a.label);
+        cp.addEventListener('click', function () { coordCopy(cp, a.text, 'Chase'); });
         btns.appendChild(cp);
       }
       r.appendChild(btns);
@@ -6098,18 +6210,20 @@
     function buildCoordSection(name, title, items, critical, render, state) {
       var sec = document.createElement('div'); sec.className = 'bwn-cq-sec';
       var open = coordSecOpen(name);
-      var hd = document.createElement('button');
+      var bodyId = 'bwn-cq-sec-' + name;
+      var hd = coordFk(document.createElement('button'), 'sec:' + name);
       hd.type = 'button'; hd.className = 'bwn-cq-sec-hd';
       hd.setAttribute('aria-expanded', open ? 'true' : 'false');
-      var cx = document.createElement('span'); cx.className = 'bwn-cq-sec-x'; cx.textContent = open ? '▾' : '▸';
+      hd.setAttribute('aria-controls', bodyId);
+      var cx = document.createElement('span'); cx.className = 'bwn-cq-sec-x'; cx.textContent = open ? '▾' : '▸'; cx.setAttribute('aria-hidden', 'true');
       var tt = document.createElement('span'); tt.className = 'bwn-cq-sec-t'; tt.textContent = title;
       var ct = document.createElement('span'); ct.className = 'bwn-cq-sec-n'; ct.textContent = String(items.length);
       hd.appendChild(cx); hd.appendChild(tt); hd.appendChild(ct);
-      if (critical) { var cm = document.createElement('span'); cm.className = 'bwn-cq-sec-crit'; cm.textContent = '🚩 needs attention'; hd.appendChild(cm); }
+      if (critical) { var cm = document.createElement('span'); cm.className = 'bwn-cq-badge u-critical'; cm.textContent = 'Has critical'; hd.appendChild(cm); }
       hd.addEventListener('click', function () { coordSecToggle(name); renderActsInline(state); });
       sec.appendChild(hd);
       if (open) {
-        var bd = document.createElement('div'); bd.className = 'bwn-cq-sec-body';
+        var bd = document.createElement('div'); bd.className = 'bwn-cq-sec-body'; bd.id = bodyId;
         items.forEach(function (a) { bd.appendChild(render(a)); });
         sec.appendChild(bd);
       }
@@ -6120,7 +6234,7 @@
       var card = document.getElementById(ACT_CARD_ID);
       var acts = nextActions(state);
       var row = actsAnchorBlock();
-      if (!acts.length || !row) { if (card) card.remove(); return; }
+      if (!acts.length || !row) { if (card) card.remove(); coordFocusNext = null; return; }
       ensureWAStyle();
       // PO-key store migration runs BEFORE anything reads or writes the store this
       // page-load (autoDetectActioned loads it next line-ish) - see actsMigratePO.
@@ -6140,8 +6254,17 @@
       // Buckets are built from the OPEN (not-done) actions; done items are shown struck in
       // Full lifecycle only. classifyCoordinatorAction is pure and done-agnostic.
       var liveActs = acts.filter(function (a) { return !isDone(a); });
-      var q = buildCoordinatorQueue(liveActs, state, C, now);
-      var doneClassified = acts.filter(isDone).map(function (a) { return classifyCoordinatorAction(a, state, C, now); });
+      // ERROR STATE: if the (pure, tested) queue layer ever throws on odd live data, degrade
+      // honestly to the plain engine list under a warning - never a blank card, and never a
+      // green "nothing needs attention" that is really "we could not tell".
+      var q, qErr = false;
+      try { q = buildCoordinatorQueue(liveActs, state, C, now); } catch (eq) {
+        qErr = true;
+        try { console.warn('[BWN GP] Coordinator Action Queue could not classify this WO; showing the unsorted list', eq); } catch (e) { }
+        q = { doNow: [], moreAttention: [], blocked: [], waiting: [], upcoming: [], fullLifecycle: liveActs,
+          counts: { doNow: 0, moreAttention: 0, blocked: 0, waiting: 0, upcoming: 0, full: liveActs.length }, critical: {} };
+      }
+      var doneClassified = acts.filter(isDone).map(function (a) { try { return classifyCoordinatorAction(a, state, C, now); } catch (e) { return a; } });
       var fullList = q.fullLifecycle.concat(doneClassified);
       // Escalation severity handoff fires per classified item regardless of section, so a
       // supervisor/management escalation parked in Waiting still posts its severity.
@@ -6157,43 +6280,51 @@
       // the cursor.
       var doNowKeys = q.doNow.map(function (c) { return c.key; }).join(',');
       var moreKeys = q.moreAttention.map(function (c) { return c.key; }).join(',');
-      var sig = JSON.stringify([collapsed, dbg, secState, doNowKeys, moreKeys,
+      var sig = JSON.stringify([collapsed, dbg, secState, doNowKeys, moreKeys, qErr,
         escSt ? escSt.status + '|' + escSt.id + '|' + (escSt.ackAt || '') : '',
         fullList.map(function (c) {
           var r = store[c.key]; var tl = actTool(c);
+          var w = state.waits && state.waits[c.key];
           return c.key + '|' + c.label + '|' + (r && r.done ? 1 : 0) + '|' + ((r && r.note) || '') + '|' + (c.nudge || 0) + '|' + ((r && r.reason) || '') +
             '|' + c.ownership + '|' + c.readiness + '|' + c.urgency + '|' + c.friction + '|' + c.coordinatorScore +
-            '|' + (tl ? tl.docks.filter(waDockAlive).join(',') : '') + '|' + (actHelpOpen[c.key] ? 1 : 0);
+            '|' + (tl ? tl.docks.filter(waDockAlive).join(',') : '') + '|' + (actHelpOpen[c.key] ? 1 : 0) +
+            '|' + (coordWaitForm[c.key] ? 1 : 0) + '|' + (w ? w.revisitAt + w.waitingOn : '');
         })]);
-      if (card && card.isConnected && card.nextElementSibling === row && card.dataset.sig === sig) return;
+      if (card && card.isConnected && card.nextElementSibling === row && card.dataset.sig === sig) { coordFocusNext = null; return; }
+      // Remember which control had focus so the rebuild does not drop a keyboard user to <body>.
+      var fkWas = null;
+      if (card && document.activeElement && card.contains(document.activeElement)) {
+        var fEl = document.activeElement.closest('[data-bwn-fk]');
+        fkWas = fEl ? fEl.getAttribute('data-bwn-fk') : 'hd';
+      }
       if (card) card.remove();
       card = document.createElement('div');
       card.id = ACT_CARD_ID;
       card.className = 'bwn-actc';
       card.dataset.sig = sig;
 
-      var hd = document.createElement('div'); hd.className = 'bwn-actc-hd';
-      hd.setAttribute('role', 'button'); hd.tabIndex = 0;
+      var hd = coordFk(document.createElement('button'), 'hd'); hd.type = 'button'; hd.className = 'bwn-actc-hd';
+      hd.setAttribute('aria-expanded', collapsed ? 'false' : 'true');
+      if (!collapsed) hd.setAttribute('aria-controls', 'bwn-act-card-body');
       hd.title = collapsed ? 'Expand the action queue' : 'Collapse to one line';
       var ht = document.createElement('span'); ht.className = 'bwn-actc-t'; ht.textContent = 'NEXT ACTIONS';
       var dn = q.counts.doNow;
       var more = q.counts.moreAttention;
       var totalAttn = dn + more;
-      var hc = document.createElement('span'); hc.className = 'bwn-actc-n' + (totalAttn ? '' : ' ok');
-      hc.textContent = totalAttn ? totalAttn + ' need' + (totalAttn === 1 ? 's' : '') + ' attention' : 'nothing needs attention';
+      var hc = document.createElement('span'); hc.className = 'bwn-actc-n' + (qErr ? ' bad' : totalAttn ? '' : ' ok');
+      hc.textContent = qErr ? 'queue unavailable' : totalAttn ? totalAttn + ' need' + (totalAttn === 1 ? 's' : '') + ' attention' : 'nothing needs attention';
       var otherCount = q.counts.blocked + q.counts.waiting + q.counts.upcoming;
       var hs = document.createElement('span'); hs.className = 'bwn-actc-s';
       // Overflow beyond the DO NOW three is still attention-needed - say so, never "below"/"upcoming".
-      hs.textContent = more ? (more + ' more requiring attention')
+      hs.textContent = qErr ? liveActs.length + ' open step' + (liveActs.length === 1 ? '' : 's') + ', unsorted'
+        : more ? (more + ' more requiring attention')
         : (otherCount ? otherCount + ' more below' : 'everything else is healthy');
-      var hx = document.createElement('span'); hx.className = 'bwn-actc-x'; hx.textContent = collapsed ? '▸' : '▾';
+      var hx = document.createElement('span'); hx.className = 'bwn-actc-x'; hx.textContent = collapsed ? '▸' : '▾'; hx.setAttribute('aria-hidden', 'true');
       hd.appendChild(ht); hd.appendChild(hc); hd.appendChild(hs); hd.appendChild(hx);
-      function toggleCollapse() {
+      hd.addEventListener('click', function () {
         try { localStorage.setItem('bwn:acts:collapsed', collapsed ? '' : '1'); } catch (e) { }
         renderActsInline(state);
-      }
-      hd.addEventListener('click', toggleCollapse);
-      hd.addEventListener('keydown', function (e) { if (e.key === 'Enter' || e.key === ' ') { e.preventDefault(); toggleCollapse(); } });
+      });
       card.appendChild(hd);
 
       if (escSt) {
@@ -6204,18 +6335,25 @@
         card.appendChild(esb);
       }
 
-      if (!collapsed) {
-        var body = document.createElement('div'); body.className = 'bwn-actc-body';
+      if (!collapsed && qErr) {
+        var ebody = document.createElement('div'); ebody.className = 'bwn-actc-body'; ebody.id = 'bwn-act-card-body';
+        var warn = document.createElement('div'); warn.className = 'bwn-cq-warn'; warn.setAttribute('role', 'status');
+        warn.textContent = 'Could not sort this work order’s steps into a priority queue. Every open step is listed below, unsorted - the checkboxes, Chase, and Actioned still work. Reload the page to retry.';
+        ebody.appendChild(warn);
+        fullList.forEach(function (a) { ebody.appendChild(buildActRow(a, state, store, escSt, { card: false, sec: 'full' })); });
+        card.appendChild(ebody);
+      } else if (!collapsed) {
+        var body = document.createElement('div'); body.className = 'bwn-actc-body'; body.id = 'bwn-act-card-body';
 
         // ---- DO NOW: the coordinator's up-to-3 attention queue, expanded by default ----
-        var dnWrap = document.createElement('div'); dnWrap.className = 'bwn-cq-donow';
+        var dnWrap = document.createElement('div'); dnWrap.className = 'bwn-cq-donow' + (dn ? '' : ' is-clear');
         var dnHd = document.createElement('div'); dnHd.className = 'bwn-cq-donow-hd';
         var dnT = document.createElement('span'); dnT.className = 'bwn-cq-donow-t'; dnT.textContent = 'DO NOW';
         var dnN = document.createElement('span'); dnN.className = 'bwn-cq-donow-n';
         dnN.textContent = dn ? dn + ' action' + (dn === 1 ? '' : 's') + ' require' + (dn === 1 ? 's' : '') + ' attention' : 'clear';
         dnHd.appendChild(dnT); dnHd.appendChild(dnN); dnWrap.appendChild(dnHd);
         if (q.doNow.length) {
-          q.doNow.forEach(function (c) { dnWrap.appendChild(buildActRow(c, state, store, escSt, { card: true })); });
+          q.doNow.forEach(function (c, i) { dnWrap.appendChild(buildActRow(c, state, store, escSt, { card: true, sec: 'donow', primary: i === 0 })); });
         } else {
           var zero = document.createElement('div'); zero.className = 'bwn-cq-zero';
           zero.textContent = 'No Coordinator actions require attention right now.';
@@ -6231,13 +6369,13 @@
         // ---- Collapsed secondary sections (deterministic precedence order) ----
         // More requiring attention: the DO NOW overflow. SAME classification and SAME
         // interactive cards as DO NOW (never called Upcoming) - just collapsed by default.
-        if (q.moreAttention.length) body.appendChild(buildCoordSection('more', 'More requiring attention', q.moreAttention, q.critical.moreAttention, function (a) { return buildActRow(a, state, store, escSt, { card: true }); }, state));
-        if (q.blocked.length) body.appendChild(buildCoordSection('blocked', 'Blocked', q.blocked, q.critical.blocked, function (a) { return buildCompactRow(a, state); }, state));
-        if (q.waiting.length) body.appendChild(buildCoordSection('waiting', 'Waiting on others', q.waiting, q.critical.waiting, function (a) { return buildCompactRow(a, state); }, state));
-        if (q.upcoming.length) body.appendChild(buildCoordSection('upcoming', 'Upcoming', q.upcoming, false, function (a) { return buildCompactRow(a, state); }, state));
+        if (q.moreAttention.length) body.appendChild(buildCoordSection('more', 'More requiring attention', q.moreAttention, q.critical.moreAttention, function (a) { return buildActRow(a, state, store, escSt, { card: true, sec: 'more' }); }, state));
+        if (q.blocked.length) body.appendChild(buildCoordSection('blocked', 'Blocked', q.blocked, q.critical.blocked, function (a) { return buildCompactRow(a, state, 'blocked'); }, state));
+        if (q.waiting.length) body.appendChild(buildCoordSection('waiting', 'Waiting on others', q.waiting, q.critical.waiting, function (a) { return buildCompactRow(a, state, 'waiting'); }, state));
+        if (q.upcoming.length) body.appendChild(buildCoordSection('upcoming', 'Upcoming', q.upcoming, false, function (a) { return buildCompactRow(a, state, 'upcoming'); }, state));
         // Full lifecycle: the complete generated list (open + done + anchor), fully
         // interactive - the power-user / debugging reference surface. Never styled like DO NOW.
-        body.appendChild(buildCoordSection('full', 'Full lifecycle', fullList, false, function (a) { return buildActRow(a, state, store, escSt, { card: false }); }, state));
+        body.appendChild(buildCoordSection('full', 'Full lifecycle', fullList, false, function (a) { return buildActRow(a, state, store, escSt, { card: false, sec: 'full' }); }, state));
 
         var meta = document.createElement('div'); meta.className = 'bwn-wa-meta';
         meta.textContent = 'Auto-updates with the WO - steps clear when the job state resolves them or a note logs them; the posted note is the real record.';
@@ -6246,6 +6384,13 @@
       }
 
       row.parentNode.insertBefore(card, row);
+      // Put focus back where it was (or where the action said it should go), else the header.
+      var fkGo = coordFocusNext || fkWas; coordFocusNext = null;
+      if (fkGo) {
+        var fTo = null, fAll = card.querySelectorAll('[data-bwn-fk]');
+        for (var fi = 0; fi < fAll.length && !fTo; fi++) if (fAll[fi].getAttribute('data-bwn-fk') === fkGo) fTo = fAll[fi];
+        try { (fTo || hd).focus({ preventScroll: true }); } catch (e) { }
+      }
     }
 
     // ---- ECD helper: propose + set the expected-completion date ---------------

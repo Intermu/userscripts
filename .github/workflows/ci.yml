@@ -443,6 +443,13 @@ jobs:
       - name: Coordinator Action Queue waiting/revisit harness (WO Assist 2.75)
         run: node scripts/test-coord-waits.js
 
+      #  - render (WO Assist 2.76, BWN ODS pass): pins the render-layer contracts - semantic colour
+      #    (no white-on-amber, no green on Upcoming/One-click), real <button> header / nav label,
+      #    no prompt() in Mark waiting, honest error fallback, focus restore across rebuilds - each
+      #    probe with a negative control that reintroduces the old defect.
+      - name: Coordinator Action Queue render-contract harness (WO Assist 2.76)
+        run: node scripts/test-coord-render.js
+
       # UI-contract completeness ledger: names every bwn-*.user.js and forces each into a classified
       # row per shared UI contract (drawer exit / toast motion / reduced-motion / rail anchor), tied
       # to test-drawer-motion.js so neither harness can quietly omit a script. Green == the recorded
