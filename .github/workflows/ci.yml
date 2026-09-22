@@ -266,6 +266,18 @@ jobs:
       - name: dispatch GraphQL error-envelope harness (three envelopes, not just errors[0].message)
         run: node scripts/test-dispatch-gql-errors.js
 
+      # bwn-dispatch 0.13.0: DISPATCH_API is the authoritative inventory of every network op the
+      # feature can run (direct reads + the two best-effort fallbacks + the WO write + the SWA notify
+      # POST), as metadata that never copies a selector. Slices DISPATCH_API and gqlErrText+gql from
+      # the shipped bytes and pins: the metadata contract on every entry; the UNREGISTERED-OP GUARD
+      # (every named GraphQL constant in source has an entry, so a new op cannot enter the dispatch
+      # path unregistered); the notify POST registered with its timeout sourced from the registry;
+      # the confirm->notify fail-closed ordering + stage timings; and gql() naming empty-body /
+      # non-JSON HTTP failures by status instead of a parser error. Two synthetic controls prove the
+      # guard and the empty-body handling can go red.
+      - name: dispatch API inventory + gql diagnostics harness (DISPATCH_API + empty-body 400)
+        run: node scripts/test-dispatch-api.js
+
       # temp-vendor 0.3.0: the vendor activate/deactivate writes routed through bwnGqlOp. Slices the
       # real write block (real bwnGqlOp runs, not a stub) and pins: activate resolves the reason id by
       # NAME then fires activateVendor with an audit entry (high-risk, confirmed:true from its panel);
