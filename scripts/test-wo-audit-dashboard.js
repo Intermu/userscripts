@@ -93,6 +93,32 @@ A.ok('dashboard has the top-20 section', flat.indexOf('TOP 20 MANAGER REVIEW') !
 var totRow = daoa.filter(function (r) { return r[0] === 'Total work orders reviewed'; })[0];
 A.eq('total value is in column B', totRow[1], 4);
 
+// ---- 4b. Work-queue posture sections (0.18.0) -----------------------------------------------
+// Rows carrying the queue-model fields drive the new counts; legacy rows (no fields) read as 0.
+var qrows = [
+  R({ queueKey: 'IMMEDIATE', queuePriorityKey: 'P0', operationalRiskScore: 80, actionabilityScore: 90, contradictions: [{ code: 'ONSITE_NO_SAMEDAY_OUTCOME', severity: 'high' }], ageDays: 12 }),
+  R({ queueKey: 'EXECUTE', queuePriorityKey: 'P1', operationalRiskScore: 40, actionabilityScore: 75, ageDays: 45 }),
+  R({ queueKey: 'FOLLOWUP', queuePriorityKey: 'P1', ageDays: 70 }),
+  R({ queueKey: 'BLOCKED', queuePriorityKey: 'P3', validWaitingState: true, ageDays: 100 }),
+  R({ queueKey: 'UNDEFINED', queuePriorityKey: 'P2', actionUndefinedReasons: ['Owner Undefined', 'Due Date Undefined'], ageDays: 95 })
+];
+var qc = D.dashboardCounts(qrows, 5);
+A.eq('today total = immediate+execute+followup', qc.todayTotal, 3);
+A.eq('byQueue immediate', qc.byQueue.IMMEDIATE, 1);
+A.eq('action undefined count', qc.actionUndefined, 1);
+A.eq('valid blocked count', qc.validBlocked, 1);
+A.eq('high risk count (>=60)', qc.highRisk, 1);
+A.eq('contradictions high severity', qc.contraBySev.high, 1);
+A.eq('aging 90+ bucket', qc.aging['90+'], 2);
+A.ok('undef reasons rolled up', qc.undefReasons.length === 2, JSON.stringify(qc.undefReasons));
+var qdaoa = D.buildDashboardAoa(qrows, { sheetTitle: 'WO Audit Dashboard - 2026.09.21', runStamp: '', sourceSheet: 'Sheet1', mode: 'operations', includeMonitor: false, total: 5 });
+var qflat = qdaoa.map(function (r) { return String(r[0] == null ? '' : r[0]); });
+A.ok('dashboard has WORK QUEUE POSTURE', qflat.indexOf('WORK QUEUE POSTURE') !== -1);
+A.ok('dashboard has TODAY total row', qflat.some(function (x) { return x.indexOf('TODAY (Immediate') === 0; }));
+A.ok('dashboard has ACTION UNDEFINED section', qflat.some(function (x) { return x.indexOf('ACTION UNDEFINED') === 0; }));
+A.ok('dashboard has CONTRADICTIONS BY SEVERITY', qflat.indexOf('CONTRADICTIONS BY SEVERITY') !== -1);
+A.ok('dashboard has AGING insight', qflat.some(function (x) { return x.indexOf('AGING') === 0; }));
+
 // ---- 5. Audit Rules sheet aoa ----------------------------------------------------------------
 var raoa = D.buildAuditRulesAoa({ sheetTitle: 'Audit Rules - 2026.09.21', runStamp: '2026-09-21 10:00', mode: 'hybrid', includeMonitor: true, checks: 'aged, notes', clientDays: 2, sourceSheet: 'Sheet1', woCol: 'WO #', noteCol: 'Notes' });
 var rflat = raoa.map(function (r) { return String(r[0] == null ? '' : r[0]); });
@@ -104,6 +130,13 @@ A.ok('rules sheet has the run configuration', rflat.indexOf('RUN CONFIGURATION')
 A.ok('run config records the mode', raoa.some(function (r) { return r[0] === 'Output mode' && r[1] === 'hybrid'; }));
 A.ok('run config records include-monitor', raoa.some(function (r) { return r[0] === 'Include Monitor items' && r[1] === 'yes'; }));
 A.ok('run config records the WO column', raoa.some(function (r) { return r[0] === 'WO # column' && r[1] === 'WO #'; }));
+// 0.18.0 work-queue methodology block (text rows; RULE_CATALOG itself stays 11).
+A.ok('rules sheet documents the work-queue model', rflat.indexOf('WORK-QUEUE MODEL (0.18.0)') !== -1);
+A.ok('rules sheet states the queue classification order', raoa.some(function (r) { return String(r[0]).indexOf('Queue classification order') === 0; }));
+A.ok('rules sheet states the priority decision order', raoa.some(function (r) { return String(r[0]).indexOf('Priority decision order') === 0; }));
+A.ok('rules sheet documents the daily-rank formula with live weights', raoa.some(function (r) { return String(r[0]) === 'Daily Rank formula' && /1\*Actionability/.test(String(r[1])); }));
+A.ok('rules sheet lists the valid-waiting requirements', raoa.some(function (r) { return String(r[0]).indexOf('Valid waiting state requires') === 0; }));
+A.ok('rules sheet documents source-data limitations', raoa.some(function (r) { return String(r[0]) === 'Source-data limitations'; }));
 
 // ---- 6. mapSheet header-alias detection (stubbed XLSX) ---------------------------------------
 var HEADER = ['WO #', 'Status', 'Location', 'City', 'State', 'Days', 'Assigned To', 'FM', 'Priority', 'Trades', 'Vendors', 'Scope Of Work', 'Expected Completion Date', 'Next Onsite Date', 'Last Note Date', 'Status hrs.', 'Source PO', 'Total Vendor NTE', 'Type', 'Notes', 'Audit Flags'];

@@ -420,7 +420,7 @@ A.ok('the unmapped-status diagnostic is rendered and copyable',
 A.ok('a degraded row is still surfaced to the operator',
   /fell back to the deterministic audit note/.test(TEXT));
 A.ok('a retained row is surfaced too', /KEPT the workbook..s existing note/.test(TEXT));
-A.ok('the version was bumped (an unbumped push reaches nobody)', /@version\s+0\.17\.0/.test(TEXT));
+A.ok('the version was bumped (an unbumped push reaches nobody)', /@version\s+0\.18\.0/.test(TEXT));
 
 // ---------------------------------------------------------------------------------------------
 console.log('\n17. Quoted-email furniture never reaches a client-facing note (D3)');
