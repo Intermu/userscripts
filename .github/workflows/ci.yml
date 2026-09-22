@@ -173,6 +173,18 @@ jobs:
       - name: WO Audit operations action list engine (0.17.0)
         run: node scripts/test-wo-audit-actions.js
 
+      # WO Audit 0.18.0: the operational WORK-QUEUE model layered on the action engine. Slices the
+      # pure BWN WO-AUDIT ACTIONS block and drives deriveAction end to end plus the model functions
+      # (isOnsiteDateExpected / isEcdExpected / evaluateWaitingState / evaluateContradictions /
+      # calculateOperationalRisk / calculateActionability / classifyActionQueue) and the queue-grouped
+      # sheet builder. Covers all 13 spec scenarios - onsite-blocked P0, valid client-approval wait,
+      # overdue external commitment, future visit not P0-by-age, closeout-evidence-missing,
+      # meaningful-update-missing, proposed-no-decision-date, scheduled-no-visit, pending-schedule-
+      # no-vendor, action-undefined triage, no-false-unscheduled, no-false-ECD, and valid-waiting
+      # rank suppression - each with a negative control.
+      - name: WO Audit operational work queue (0.18.0)
+        run: node scripts/test-wo-audit-queue.js
+
       # WO Audit 0.17.0 Commit 2: the Dashboard + Audit Rules sheet builders and the workbook
       # header-alias mapping. Slices the pure BWN WO-AUDIT DASHBOARD block (deterministic counts,
       # owner/FM/bucket/priority rollups sorted count-desc, the manager-review top-20 sort+cap, the

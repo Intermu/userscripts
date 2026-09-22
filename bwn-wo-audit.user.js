@@ -1,10 +1,10 @@
 // ==UserScript==
 // @name         BWN WO Audit (Broadway National)
 // @namespace    broadwaynational.bwn
-// @version      0.17.0
+// @version      0.18.0
 // @downloadURL  https://raw.githubusercontent.com/Intermu/userscripts/main/bwn-wo-audit.user.js
 // @updateURL    https://raw.githubusercontent.com/Intermu/userscripts/main/bwn-wo-audit.user.js
-// @description  Batch WO-audit tool. Upload a WO audit .xlsx; for each work order this reads its two most recent notes DIRECTLY from Umbrava's GraphQL API in-page (using your live Umbrava session - the same read the BWN Ops Suite AI drafts use), then asks the broadway-internal-ops SWA summarize route (x-bwn-key gated, Anthropic key server-side) to write a status note - for jobs aged over 30 days a dated "Over 30 - trade - event timeline - ECD" chain built from the WO's FULL note history (with a PAST/needs-ECD flag when the committed date has lapsed), otherwise a 1-3 sentence client-ready status note. Fills the audit's notes column and downloads the workbook, preserving every other cell and formula. It also reads each WO's live header (status, phase, priority, GP, DNE/NTE, PO/vendor, schedule) in the same call and writes a deterministic Audit Flags column (OVERDUE, NEG/LOW GP, NTE>DNE, NO VENDOR, UNSCHEDULED, STALE) computed with no AI - so the exception audit survives an AI outage. Runs entirely in the app.umbrava.com page so it inherits your Umbrava auth - no MCP, no pasted keys, nothing sensitive in this script. This replaces the old standalone WO_Audit_Automation.html SWA tool, whose server-side MCP path could not authenticate to Umbrava. After a run drafts its notes, the coordinator can post each drafted note as an INTERNAL Umbrava note onto its aged (>30d) work order - one explicit click per note (human-gated, idempotent), routed through the governed bwnGqlOp write path with its permission gate and audit trail. 0.17.0 adds an Operations Action List layer on top of the existing deterministic pipeline: three output modes (Detailed WO Audit / Operations Action List / Hybrid, default), a rules-based action engine that turns each WO into a prioritized (P0/P1/P2/Monitor) manager action with bucket, internal owner, external escalation, an operational-target due label, short risk flags, evidence and rule IDs, 16 structured audit columns appended to the source sheet, and a separate "WO Action List - YYYY.MM.DD" worksheet of the actionable rows - all deterministic, no AI opinions, source data never overwritten.
+// @description  Batch WO-audit tool. Upload a WO audit .xlsx; for each work order this reads its two most recent notes DIRECTLY from Umbrava's GraphQL API in-page (using your live Umbrava session - the same read the BWN Ops Suite AI drafts use), then asks the broadway-internal-ops SWA summarize route (x-bwn-key gated, Anthropic key server-side) to write a status note - for jobs aged over 30 days a dated "Over 30 - trade - event timeline - ECD" chain built from the WO's FULL note history (with a PAST/needs-ECD flag when the committed date has lapsed), otherwise a 1-3 sentence client-ready status note. Fills the audit's notes column and downloads the workbook, preserving every other cell and formula. It also reads each WO's live header (status, phase, priority, GP, DNE/NTE, PO/vendor, schedule) in the same call and writes a deterministic Audit Flags column (OVERDUE, NEG/LOW GP, NTE>DNE, NO VENDOR, UNSCHEDULED, STALE) computed with no AI - so the exception audit survives an AI outage. Runs entirely in the app.umbrava.com page so it inherits your Umbrava auth - no MCP, no pasted keys, nothing sensitive in this script. This replaces the old standalone WO_Audit_Automation.html SWA tool, whose server-side MCP path could not authenticate to Umbrava. After a run drafts its notes, the coordinator can post each drafted note as an INTERNAL Umbrava note onto its aged (>30d) work order - one explicit click per note (human-gated, idempotent), routed through the governed bwnGqlOp write path with its permission gate and audit trail. 0.17.0 adds an Operations Action List layer on top of the existing deterministic pipeline: three output modes (Detailed WO Audit / Operations Action List / Hybrid, default), a rules-based action engine that turns each WO into a prioritized (P0/P1/P2/Monitor) manager action with bucket, internal owner, external escalation, an operational-target due label, short risk flags, evidence and rule IDs, 16 structured audit columns appended to the source sheet, and a separate "WO Action List - YYYY.MM.DD" worksheet of the actionable rows - all deterministic, no AI opinions, source data never overwritten. 0.18.0 redesigns the Action List into an operational WORK QUEUE: two separate scores (Operational Risk vs Actionability), six queues (Immediate Intervention / Execute Today / Follow Up Today / Upcoming Watch / Blocked-Waiting / Closeout-Billing) plus an Action Undefined / Needs Triage exception, an explainable P0-P3 priority, a transparent Daily Rank (actionability first, risk second, age last), a valid-waiting-state test, meaningful-update / ECD / onsite-expected gating, and structured contradiction detection. The Action List worksheet is now grouped by queue with per-section counts; a flat filterable "Action Diagnostics" sheet carries the score components and evidence; the legacy audit/bucket columns and Dashboard/Rules sheets are preserved as the management layer.
 // @match        https://app.umbrava.com/*
 // @run-at       document-idle
 // @noframes
@@ -19,7 +19,7 @@
 (function () {
   'use strict';
 
-  var VER = '0.17.0';
+  var VER = '0.18.0';
   var FONT = "-apple-system,BlinkMacSystemFont,'Segoe UI','Helvetica Neue',Arial,sans-serif";
   // Inline SVG icons (no external image/font). 18px, stroke=currentColor so they take card color.
   function _svg(p, o) { return '<svg class="woa-i" viewBox="0 0 24 24" width="18" height="18" fill="none" stroke="currentColor" stroke-width="1.9" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"' + (o || '') + '>' + p + '</svg>'; }
@@ -115,7 +115,7 @@
   // A client dropdown of model ids drifts every Anthropic release and forced a @version bump +
   // reinstall to fix a stale label; the server env is the one place that changes with no redeploy.
   var XLSX_MIME = 'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet';
-  console.info('[BWN WO AUDIT] v' + VER + ' - in-page GraphQL header+notes read -> deterministic Audit Flags + bwnAI /api/ai status note -> filled .xlsx download; can then post each drafted note as an INTERNAL note onto its aged (>30d) work order, one click per note (governed bwnGqlOp write path); registers into the shared dock (bwn:dock:*)');
+  console.info('[BWN WO AUDIT] v' + VER + ' - in-page GraphQL header+notes read -> deterministic Audit Flags + bwnAI /api/ai status note -> filled .xlsx download; can then post each drafted note as an INTERNAL note onto its aged (>30d) work order, one click per note (governed bwnGqlOp write path); registers into the shared dock (bwn:dock:*); 0.18.0 adds the operational work-queue Action List (two scores, six queues, P0-P3, daily rank, contradictions)');
 
   // ====================================================================
   // Auth: the live Umbrava Auth0 bearer, read straight from the page (same
@@ -1827,6 +1827,54 @@
   var ACT_PRIORITY = { P0: 'P0 – Immediate', P1: 'P1 – Today', P2: 'P2 – This Week', MON: 'Monitor' };
   var ACT_PRIORITY_RANK = { P0: 0, P1: 1, P2: 2, MON: 3 };
   var ACT_DUE_RANK = { 'Today': 0, 'Next business day': 1, 'Next 2 business days': 2, 'This week': 3, 'Monitor / no action due': 4 };
+
+  // ==============================================================================================
+  // WORK-QUEUE MODEL (0.18.0). A deterministic layer ON TOP OF the legacy bucket/priority audit
+  // above - it never rewrites those fields (the audit/exception layer stays available for
+  // management), it ADDS an operational work-queue view that answers, per WO: what to do today,
+  // why it matters today, who owes the next move, and what result removes it from the list.
+  //
+  // Two SEPARATE scores drive it, never one black box:
+  //   operationalRiskScore  - how exposed the WO is if it is not managed (0-100)
+  //   actionabilityScore    - whether Broadway can take a concrete step TODAY (0-100)
+  // The daily rank ranks ACTIONABILITY first, operational risk second, urgency/age last; a valid
+  // documented waiting state subtracts hard so a properly-parked WO stops crowding today's queue.
+  // ==============================================================================================
+  var ACT_QUEUE = {
+    IMMEDIATE: 'Immediate Intervention', EXECUTE: 'Execute Today', FOLLOWUP: 'Follow Up Today',
+    CLOSEOUT: 'Closeout / Billing Readiness', WATCH: 'Upcoming Watch', BLOCKED: 'Blocked / Waiting',
+    UNDEFINED: 'Action Undefined / Needs Triage'
+  };
+  // Spec classification order: the FIRST matching queue wins (Closeout before Execute so completed
+  // field work is triaged as closeout, not re-dispatched).
+  var ACT_QUEUE_ORDER = ['IMMEDIATE', 'CLOSEOUT', 'EXECUTE', 'FOLLOWUP', 'WATCH', 'BLOCKED', 'UNDEFINED'];
+  // Worksheet reading order: today-work + triage first and prominent, Blocked/Waiting quiet and last.
+  var ACT_QUEUE_DISPLAY = ['IMMEDIATE', 'EXECUTE', 'FOLLOWUP', 'UNDEFINED', 'WATCH', 'CLOSEOUT', 'BLOCKED'];
+  var ACT_QUEUE_DISPLAY_RANK = (function () { var m = {}; ACT_QUEUE_DISPLAY.forEach(function (k, i) { m[ACT_QUEUE[k]] = i; }); return m; })();
+  // The new P0-P3 scheme (P3 = the old Monitor tier). Kept distinct from ACT_PRIORITY so the legacy
+  // audit columns are unchanged while the queue view uses the spec's decision order.
+  var QUEUE_PRIORITY = { P0: 'P0 – Intervene Now', P1: 'P1 – Complete Today', P2: 'P2 – Follow Up / Prepare', P3: 'P3 – Monitor' };
+  var QUEUE_PRIORITY_RANK = { P0: 0, P1: 1, P2: 2, P3: 3 };
+
+  // Central config: every weight, window, threshold and status set lives here, not scattered through
+  // the classifier. Weights are applied to 0-100 sub-scores; actionability is the largest contributor.
+  var ACT_CFG = {
+    weights: { actionability: 1.0, operationalRisk: 0.6, dueUrgency: 0.4, scheduleProximity: 0.2, escalationRisk: 0.25, dataQuality: 0.15, validWaiting: 0.9 },
+    watchDays: 3,            // a confirmed visit / delivery this many business-ish days out = Upcoming Watch
+    ecdRiskWindowDays: 3,    // ECD inside this window (not yet overdue) = a P2 preparation signal
+    overdueManagerDays: 7,   // ECD overdue beyond this escalates
+    p0RankFloor: 1000,       // Immediate Intervention pins above every numeric rank
+    // A physical visit is the next required step - so a blank Next Onsite Date is a real gap.
+    onsiteExpectedPhases: { schedule: 1, scheduled: 1, onsite: 1, inprogress: 1, recall: 1 },
+    // A credible completion forecast is possible - so a blank ECD is a real gap.
+    ecdExpectedPhases: { scheduled: 1, onsite: 1, inprogress: 1, materials: 1, 'materials-client': 1, 'proposal-approved': 1, confirmcomplete: 1, costreview: 1, recall: 1, client: 1 },
+    // Phase -> the external party Broadway is legitimately waiting on (the recognized waiting-on party).
+    waitingParty: { 'proposal-sent': 'Client', client: 'Client', 'materials-client': 'Client', materials: 'Vendor / Supplier', accept: 'Vendor', 'proposal-approved': 'PO / Finance Owner', onhold: 'Internal review' }
+  };
+  // A next-step Broadway itself owns (vs one that waits on an outside party). Used by actionability
+  // and by Execute-Today classification. These are the deriveState owner labels for internal work.
+  var ACT_INTERNAL_OWNERS = { Coordinator: 1, 'PO/Approval': 1, 'Scheduling/Access': 1 };
+
   // Bucket -> the spec rule ID it corresponds to (for the Audit Rule IDs column + the Audit Rules sheet).
   var ACT_RULE = {
     VENDOR_SCHEDULING: 'VENDOR_SCHEDULING', CLIENT_APPROVAL: 'CLIENT_APPROVAL', PO_RELEASE: 'PO_RELEASE',
@@ -1866,6 +1914,304 @@
   function actHasFlag(flags, re) { for (var i = 0; i < (flags || []).length; i++) { if (re.test(flags[i])) return true; } return false; }
   // A usable internal owner: has a letter, and is not an ERRORNAME placeholder or an "unassigned" token.
   function actValidOwner(s) { s = String(s == null ? '' : s).trim(); return !!s && /[a-z]/i.test(s) && !/errorname|error\s*name|\?\?\?|^unassigned|^unknown$|^n\/?a$|^tbd$/i.test(s); }
+
+  // ---- WORK-QUEUE MODEL functions (pure; every input is a normalized signals object S) ----------
+  function actClamp(n) { n = Math.round(Number(n) || 0); return n < 0 ? 0 : n > 100 ? 100 : n; }
+  // Is a physical on-site visit the next required step for this phase? Only then is a blank Next
+  // Onsite Date a real "Schedule Required but Missing" gap - never merely because the field is blank.
+  function isOnsiteDateExpected(phase) { return !!ACT_CFG.onsiteExpectedPhases[phase]; }
+  // Does this phase support a credible completion forecast? Only then is a blank ECD a real gap; in
+  // early/undefined-scope phases a decision or follow-up date is the right control instead.
+  function isEcdExpected(phase) { return !!ACT_CFG.ecdExpectedPhases[phase]; }
+
+  // A blocked state is VALID only with all four: a recognized waiting-on party, a meaningful reason,
+  // a future expected response/follow-up date, and a defined owner to follow up. Returns what is
+  // present and, crucially, what is MISSING (an invalid waiting state is a triage exception, not a
+  // silent park).
+  function evaluateWaitingState(S) {
+    var party = ACT_CFG.waitingParty[S.phase] || '';
+    var reason = S.primaryBlocker || '';
+    var respDate = S.expectedResponseDate || '';
+    var ownerOk = !!S.ownerValid;
+    var missing = [];
+    if (!party) missing.push('Waiting Party Undefined');
+    if (!reason) missing.push('Meaningful Update Missing');
+    if (!respDate) missing.push('Follow-Up Date Missing');
+    if (!ownerOk) missing.push('Owner Undefined');
+    // A live exception (overdue/stale/safety/passed visit) means Broadway CAN act now, so the wait
+    // is not currently valid however well documented.
+    var liveException = S.safety || S.overdueEcd || S.visitPast || S.stale || S.sameDayVisit;
+    var valid = !!party && !!reason && !!respDate && ownerOk && !liveException;
+    return { valid: valid, party: party, reason: reason, expectedResponseDate: respDate, owner: ownerOk, missing: missing, liveException: !!liveException };
+  }
+
+  // Structured contradictions. Each is emitted ONLY when the fields it needs are actually present in
+  // the parsed data (no false exception from a missing column). Codes are machine-readable; severity
+  // drives the dashboard rollup and can lift priority.
+  function evaluateContradictions(S) {
+    var out = [];
+    function add(code, label, sev, why, action) { out.push({ code: code, label: label, severity: sev, why: why, action: action || '' }); }
+    var onsiteKnown = S.hasNextOnsiteField;           // we read Next Onsite (live or column)
+    if (S.phase === 'scheduled' && onsiteKnown && !S.hasFutureOnsite)
+      add('SCHEDULED_NO_FUTURE_VISIT', 'Scheduled with no future visit date', 'high', 'Status is Scheduled but no upcoming on-site date is on file.', 'Confirm and record the on-site date, or correct the status.');
+    if ((S.terminal || S.phase === 'confirmcomplete' || S.phase === 'costreview') && S.remainingScopeNoted)
+      add('COMPLETE_REMAINING_SCOPE', 'Complete status with remaining scope noted', 'high', 'The status reads complete but the latest meaningful note describes outstanding work.', 'Reconcile scope; reopen or document the remaining work.');
+    if ((S.phase === 'materials' || S.phase === 'materials-client') && (S.visitPast || S.ecdExpired))
+      add('MATERIAL_DATE_EXPIRED', 'Material pending with an expired date', 'medium', 'Materials are pending but the delivery/on-site date has already passed.', 'Confirm the current delivery date and reschedule the return visit.');
+    if (S.phase === 'client' && (!ACT_CFG.waitingParty[S.phase] || !S.expectedResponseDate))
+      add('AWAITING_3P_NO_DATE', 'Awaiting third party with no follow-up date', 'medium', 'The work order is awaiting a party with no documented response date on file.', 'Record the responsible party and the expected response date.');
+    if (S.phase === 'proposal-sent' && !S.expectedResponseDate)
+      add('PROPOSED_NO_DECISION_DATE', 'Proposed with no decision date', 'low', 'A proposal is out for approval with no decision-due date on file.', 'Confirm and record the client decision-due date. (Proposal amount / submission date are not exposed to this tool.)');
+    if (S.phase === 'onsite' && S.hasMeaningfulUpdate === false)
+      add('ONSITE_NO_SAMEDAY_OUTCOME', 'On-site with no documented outcome', 'high', 'Status is On-Site but no meaningful outcome note is on file.', 'Obtain the technician outcome and document completed vs remaining scope.');
+    else if (S.phase === 'onsite' && S.meaningfulUpdateDays != null && S.meaningfulUpdateDays > 0)
+      add('ONSITE_NO_SAMEDAY_OUTCOME', 'On-site with no same-day outcome', 'high', 'Status is On-Site but the latest meaningful note predates today.', 'Obtain the same-day technician outcome and next step.');
+    if (S.phase === 'schedule' && S.noVendor)
+      add('PENDING_SCHEDULE_NO_VENDOR', 'Pending schedule with no vendor', 'medium', 'The work order needs scheduling but no vendor is assigned.', 'Assign a vendor, then confirm the on-site date.');
+    if (S.phase === 'client' && !S.ownerValid)
+      add('CLIENT_ACTION_NO_OWNER', 'Client action required with no owner', 'medium', 'Client action is required but no internal decision owner is recorded.', 'Assign an internal owner to drive the client decision.');
+    if ((S.phase === 'confirmcomplete' || S.phase === 'costreview') && S.hasCompletionEvidence === false)
+      add('COMPLETE_NO_CLOSEOUT_EVIDENCE', 'Complete with no closeout evidence', 'medium', 'The job is in closeout but no completion evidence note is on file.', 'Collect the completion evidence (photos / sign-off / invoice) before closing.');
+    if (S.ecdKnownFuture && S.visitPast && S.hasCompletionEvidence === false)
+      add('FUTURE_ECD_PRIOR_VISIT_PASSED', 'Future ECD but a prior visit passed with no result', 'medium', 'A visit date has passed with no outcome, yet the ECD is set in the future.', 'Confirm what happened at the visit before relying on the ECD.');
+    if (ACT_CFG.waitingParty[S.phase] && !S.expectedResponseDate && S.phase !== 'proposal-sent' && S.phase !== 'client')
+      add('WAITING_NO_RESPONSE_DATE', 'Waiting status with no response date', 'low', 'The work order is in a waiting phase with no expected response date recorded.', 'Record the expected response / follow-up date and the owner.');
+    if (S.terminal && (S.hasFutureOnsite || (S.primaryBlocker && S.primaryBlocker.length)))
+      add('CLOSED_WITH_OPEN_SIGNAL', 'Closed status with an open signal', 'high', 'The status reads closed but a future visit or an unresolved blocker is still on file.', 'Reconcile: reopen the work order or clear the stray schedule/blocker.');
+    return out;
+  }
+
+  // Operational risk: how exposed the WO is if not managed (0-100). Age is a LIMITED modifier only.
+  function calculateOperationalRisk(S) {
+    var pts = 0, why = [];
+    function add(p, r) { pts += p; why.push(r); }
+    if (S.safety) add(35, 'safety / property-damage exposure');
+    if (S.critical) add(22, 'critical source priority');
+    if (S.overdueEcd) { add(18 + Math.min(12, (S.overdueDays || 0)), 'ECD overdue' + (S.overdueDays ? ' ' + S.overdueDays + 'd' : '')); }
+    if (S.pricing) add(14, 'financial exposure (margin / NTE)');
+    if (S.visitPast && !S.hasCompletionEvidence) add(16, 'scheduled visit passed with no credible outcome');
+    if (S.phase === 'recall') add(14, 'return trip / failed completion');
+    if (S.remainingScopeNoted && S.terminal) add(15, 'completion claimed but scope not reconciled');
+    if (S.clientOverdue) add(12, 'client-commitment / update exposure');
+    if (S.severeContradiction) add(15, 'major data contradiction blocks safe handling');
+    if (S.stale) add(Math.min(10, 4 + Math.floor((S.staleDays || 0) / 7)), 'stale ' + (S.staleDays || 0) + 'd (age modifier)');
+    return { score: actClamp(pts), reasons: why };
+  }
+
+  // Actionability: can Broadway take a concrete, useful step TODAY (0-100)? A valid waiting state
+  // caps it low so a well-parked WO cannot crowd the daily queue. Note age alone never counts.
+  function calculateActionability(S) {
+    if (S.validWaitingState) return { score: actClamp(8), reasons: ['valid documented waiting state - no step due today'] };
+    var pts = 0, why = [];
+    function add(p, r) { pts += p; why.push(r); }
+    var internal = !!ACT_INTERNAL_OWNERS[S.nextActionOwner];
+    if (internal) add(40, 'Broadway controls the next step');
+    if (S.nextActionSpecific) add(18, 'a specific next action is identified');
+    if (S.ownerValid) add(14, 'a responsible owner is known');
+    if (S.overdueEcd || S.dueToday) add(24, 'a due date is today or overdue');
+    if (S.confidence === 'high' || S.confidence === 'medium') add(12, 'the needed information is available');
+    if (S.awaitingBroadwayDecision) add(30, 'a party is awaiting a Broadway decision');
+    if (S.onsiteNow || S.sameDayVisit) add(34, 'a technician is on site or a same-day visit is at risk');
+    if (S.externalCommitmentDue) add(20, 'an external follow-up commitment is due today or overdue');
+    return { score: actClamp(pts), reasons: why };
+  }
+
+  // First matching queue wins (ACT_QUEUE_ORDER). All matches are recorded for diagnostics.
+  function classifyActionQueue(S) {
+    var matched = {}, reasons = {};
+    function m(key, why) { if (!matched[key]) { matched[key] = true; reasons[key] = []; } reasons[key].push(why); }
+
+    // IMMEDIATE INTERVENTION (P0-worthy, live exposure)
+    if (S.safety) m('IMMEDIATE', 'safety / property-damage exposure');
+    if ((S.phase === 'onsite' || S.phase === 'inprogress') && (S.primaryBlocker || !S.hasSameDayOutcome)) m('IMMEDIATE', 'technician on site and blocked or with no documented outcome');
+    if (S.visitPast && !S.hasCompletionEvidence && (S.critical || S.overdueEcd)) m('IMMEDIATE', 'a visit occurred with no outcome on an urgent work order');
+    if (S.critical && (S.overdueEcd || S.noVendor || S.unscheduled)) m('IMMEDIATE', 'critical service blocked (overdue / no vendor / unscheduled)');
+    if (S.sameDayVisit && (S.overdueEcd || S.stale || S.primaryBlocker)) m('IMMEDIATE', 'same-day visit at risk');
+    if (S.phase === 'recall' && (S.critical || S.overdueEcd)) m('IMMEDIATE', 'failed visit needs an urgent decision');
+    if (S.critical && (S.noVendor || !S.ownerValid)) m('IMMEDIATE', 'critical work order with no owner or vendor');
+
+    // CLOSEOUT / BILLING READINESS
+    if (S.phase === 'confirmcomplete' || S.phase === 'costreview') m('CLOSEOUT', 'operational work complete; verification / cost review outstanding');
+    if ((S.terminal || S.phase === 'confirmcomplete' || S.phase === 'costreview') && S.remainingScopeNoted) m('CLOSEOUT', 'completion status conflicts with remaining scope in the latest note');
+    if (S.hasCompletionEvidence && !S.terminal && (S.phase === 'confirmcomplete' || S.phase === 'costreview')) m('CLOSEOUT', 'completed but not yet closed');
+
+    // EXECUTE TODAY (Broadway owns the next step)
+    var internal = !!ACT_INTERNAL_OWNERS[S.nextActionOwner];
+    if (S.overdueEcd && internal) m('EXECUTE', 'reset the ECD with a defensible date');
+    if (S.phase === 'intake' || S.phase === 'proposal' || S.phase === 'proposal-approved' || S.phase === 'onhold') m('EXECUTE', 'a coordinator-owned step is ready to take');
+    if (S.noVendor || (S.unscheduled && isOnsiteDateExpected(S.phase))) m('EXECUTE', 'assign a vendor / set the schedule');
+    if (S.pricing) m('EXECUTE', 'review the margin / adjust the PO');
+    if (S.visitPast && !S.hasCompletionEvidence && !matched.IMMEDIATE) m('EXECUTE', 'chase the completion report and update status');
+    if (internal && S.nextActionSpecific && (S.dueToday || S.overdueEcd)) m('EXECUTE', 'a specific Broadway action is due today');
+
+    // FOLLOW UP TODAY (an external party owes an update and a real date is due/overdue)
+    var externalPhase = { 'proposal-sent': 1, client: 1, materials: 1, 'materials-client': 1, accept: 1 }[S.phase];
+    if (externalPhase && (S.expectedResponseOverdue || S.clientOverdue || (S.overdueEcd && !internal))) m('FOLLOWUP', 'a documented external commitment is due today or overdue');
+
+    // UPCOMING WATCH (no action today, monitor soon)
+    if (S.hasFutureOnsite && S.onsiteDaysAway != null && S.onsiteDaysAway <= ACT_CFG.watchDays) m('WATCH', 'a confirmed visit is within the watch window');
+    if (S.ecdKnownFuture && S.ecdDaysAway != null && S.ecdDaysAway <= ACT_CFG.ecdRiskWindowDays && S.primaryBlocker) m('WATCH', 'ECD approaching with an unresolved scope');
+    if ((S.phase === 'materials' || S.phase === 'materials-client') && S.hasFutureOnsite) m('WATCH', 'material delivery / return visit approaching');
+    if (S.hasFutureOnsite && (S.critical || S.pricing)) m('WATCH', 'confirmed future visit with elevated risk');
+
+    // BLOCKED / WAITING (valid, documented waiting state)
+    if (S.validWaitingState) m('BLOCKED', 'valid documented waiting state: ' + (S.waitingParty || 'third party') + (S.expectedResponseDate ? ' by ' + S.expectedResponseDate : ''));
+
+    // pick first in spec order
+    for (var i = 0; i < ACT_QUEUE_ORDER.length; i++) {
+      var k = ACT_QUEUE_ORDER[i];
+      if (matched[k]) return { key: k, queue: ACT_QUEUE[k], reasons: reasons[k], matched: matched, allReasons: reasons };
+    }
+    // Fallbacks - a clean terminal WO is monitor/excluded; a future-dated valid monitor is Blocked;
+    // otherwise there is no determinable action -> triage (never a fabricated "follow up").
+    if (S.terminal) return { key: 'MONITOR', queue: '', reasons: ['closed - no action'], monitor: true, matched: matched, allReasons: reasons };
+    if (S.ownerValid && S.nextActionSpecific && (S.ecdKnownFuture || S.hasFutureOnsite || S.expectedResponseDate)) {
+      m('BLOCKED', 'owner, next step and a future follow-up date are all valid');
+      return { key: 'BLOCKED', queue: ACT_QUEUE.BLOCKED, reasons: reasons.BLOCKED, matched: matched, allReasons: reasons };
+    }
+    if (S.hasFutureOnsite) { m('WATCH', 'a future visit is on file'); return { key: 'WATCH', queue: ACT_QUEUE.WATCH, reasons: reasons.WATCH, matched: matched, allReasons: reasons }; }
+    m('UNDEFINED', 'no usable owner, next action, or follow-up date could be determined');
+    return { key: 'UNDEFINED', queue: ACT_QUEUE.UNDEFINED, reasons: reasons.UNDEFINED, matched: matched, allReasons: reasons };
+  }
+
+  // Priority in the P0-P3 scheme, with explainable reasons.
+  function calculateQueuePriority(S, queueKey) {
+    var why = [];
+    if (queueKey === 'IMMEDIATE') { why.push('immediate operational exposure'); return { key: 'P0', label: QUEUE_PRIORITY.P0, reasons: why }; }
+    if (S.safety) { why.push('explicit safety language'); return { key: 'P0', label: QUEUE_PRIORITY.P0, reasons: why }; }
+    if (queueKey === 'EXECUTE') {
+      if (S.overdueEcd || S.dueToday || S.visitPast) { why.push('a Broadway-controlled action is due today or overdue'); return { key: 'P1', label: QUEUE_PRIORITY.P1, reasons: why }; }
+      why.push('a Broadway-controlled action can be prepared'); return { key: 'P2', label: QUEUE_PRIORITY.P2, reasons: why };
+    }
+    if (queueKey === 'CLOSEOUT') {
+      if (S.overdueEcd || S.stale || S.remainingScopeNoted) { why.push('closeout is aging or contradicts remaining scope'); return { key: 'P1', label: QUEUE_PRIORITY.P1, reasons: why }; }
+      why.push('closeout / billing readiness'); return { key: 'P2', label: QUEUE_PRIORITY.P2, reasons: why };
+    }
+    if (queueKey === 'FOLLOWUP') {
+      if (S.expectedResponseOverdue || S.clientOverdue || S.overdueEcd) { why.push('an external commitment is overdue'); return { key: 'P1', label: QUEUE_PRIORITY.P1, reasons: why }; }
+      why.push('an external commitment is due'); return { key: 'P2', label: QUEUE_PRIORITY.P2, reasons: why };
+    }
+    if (queueKey === 'UNDEFINED') {
+      if (S.operationalRiskScore >= 55) { why.push('undefined action on a high-risk work order'); return { key: 'P1', label: QUEUE_PRIORITY.P1, reasons: why }; }
+      why.push('needs triage to define owner / action / date'); return { key: 'P2', label: QUEUE_PRIORITY.P2, reasons: why };
+    }
+    if (queueKey === 'WATCH') {
+      if ((S.critical || S.pricing) && S.onsiteDaysAway != null && S.onsiteDaysAway <= ACT_CFG.watchDays) { why.push('near-term event with elevated risk'); return { key: 'P2', label: QUEUE_PRIORITY.P2, reasons: why }; }
+      why.push('future-dated, no exception due yet'); return { key: 'P3', label: QUEUE_PRIORITY.P3, reasons: why };
+    }
+    why.push('legitimately waiting with a valid future follow-up date');
+    return { key: 'P3', label: QUEUE_PRIORITY.P3, reasons: why };
+  }
+
+  // Daily rank: actionability first, risk second, urgency/age last; valid waiting subtracts hard.
+  // Every component is returned so the sheet can explain the number (never a black box).
+  function calculateDailyRank(S, queueKey) {
+    var w = ACT_CFG.weights;
+    var A = S.actionabilityScore, R = S.operationalRiskScore;
+    var U = S.overdueEcd ? 100 : S.dueToday ? 80 : (S.ecdDaysAway != null && S.ecdDaysAway <= ACT_CFG.ecdRiskWindowDays) ? 50 : 0;
+    var SP = S.sameDayVisit ? 100 : (S.visitPast && !S.hasCompletionEvidence) ? 80 : (S.onsiteDaysAway != null && S.onsiteDaysAway <= ACT_CFG.watchDays) ? 60 : 0;
+    var E = S.safety ? 100 : S.critical ? 70 : (S.overdueDays > ACT_CFG.overdueManagerDays) ? 60 : S.clientOverdue ? 40 : 0;
+    var DQ = S.severeContradiction ? 100 : (queueKey === 'UNDEFINED') ? 60 : S.contradictionCount ? 50 : S.dataGap ? 30 : 0;
+    var VW = S.validWaitingState ? 100 : 0;
+    var comps = { actionability: A, operationalRisk: R, dueUrgency: U, scheduleProximity: SP, escalationRisk: E, dataQuality: DQ, validWaiting: VW };
+    var rank = w.actionability * A + w.operationalRisk * R + w.dueUrgency * U + w.scheduleProximity * SP + w.escalationRisk * E + w.dataQuality * DQ - w.validWaiting * VW;
+    if (queueKey === 'IMMEDIATE') rank += ACT_CFG.p0RankFloor;   // pin above all numeric ranks
+    return { rank: Math.round(rank), components: comps };
+  }
+
+  // The concrete plan fields. Never fabricates: an unresolvable owner/action/date becomes an explicit
+  // Action-Undefined reason rather than a vague "follow up".
+  var ACT_DEF_OF_DONE = {
+    IMMEDIATE: 'Same-day outcome obtained, blocker resolved or escalated, and the work order updated.',
+    EXECUTE: 'The Broadway action is completed and its outcome recorded on the work order.',
+    FOLLOWUP: 'The external response is received (or re-committed with a date) and recorded on the work order.',
+    CLOSEOUT: 'Completion evidence, final cost, and billing readiness confirmed; the work order closed.',
+    WATCH: 'The scheduled event occurs as planned, or an exception is raised if it slips.',
+    BLOCKED: 'The awaited party responds by the follow-up date, or the date is re-confirmed.',
+    UNDEFINED: 'An owner, a specific next action, and a due / follow-up date are established on the work order.'
+  };
+  var ACT_BLOCKER_CAT = {
+    schedule: 'Scheduling / Vendor', scheduled: 'Scheduling / Vendor', accept: 'Scheduling / Vendor', recall: 'Scheduling / Vendor', intake: 'Dispatch',
+    proposal: 'Quote / Proposal', 'proposal-sent': 'Client Decision', 'proposal-approved': 'PO / Finance', client: 'Client Decision',
+    materials: 'Materials', 'materials-client': 'Materials', onsite: 'On-Site Execution', inprogress: 'On-Site Execution',
+    onhold: 'On Hold', confirmcomplete: 'Closeout', costreview: 'Closeout', terminal: 'None'
+  };
+  function buildActionPlan(S, queueKey) {
+    var reasons = [];
+    var owner = S.ownerValid ? S.owner : 'Owner Undefined';
+    if (!S.ownerValid) reasons.push('Owner Undefined');
+    var next = (S.nextAction && String(S.nextAction).trim()) || '';
+    if (!next) reasons.push('Next Action Undefined');
+    var waitingOn = ACT_CFG.waitingParty[S.phase] || '';
+    var respDate = S.expectedResponseDate || '';
+    // Only demand a date where the workflow actually needs one now.
+    var needDate = queueKey === 'FOLLOWUP' || queueKey === 'BLOCKED' || (waitingOn && !isEcdExpected(S.phase));
+    if (needDate && !respDate) reasons.push('Follow-Up Date Missing');
+    if (isEcdExpected(S.phase) && (!S.ecdText || S.ecdText === 'TBD') && !S.overdueEcd) reasons.push('Due Date Undefined');
+    if (isOnsiteDateExpected(S.phase) && !S.hasFutureOnsite && !S.visitPast) reasons.push('Schedule Required but Missing');
+    if (!S.hasMeaningfulUpdate) reasons.push('Meaningful Update Missing');
+    if (waitingOn === '' && (S.phase === 'client')) reasons.push('Waiting Party Undefined');
+    var dod = ACT_DEF_OF_DONE[queueKey] || ACT_DEF_OF_DONE.UNDEFINED;
+    var blockerCat = ACT_BLOCKER_CAT[S.phase] || 'Other';
+    if (S.safety) blockerCat = 'Safety';
+    // Escalation trigger: concrete, priority-aware, never invented past what the signals support.
+    var esc;
+    if (queueKey === 'IMMEDIATE') esc = 'Escalate to Operations Manager now if the blocker is not cleared today.';
+    else if (queueKey === 'FOLLOWUP') esc = 'Escalate to the ' + (waitingOn || 'responsible') + ' owner if no response by end of day.';
+    else if (queueKey === 'EXECUTE') esc = 'Escalate to Operations Manager if the action cannot be completed today.';
+    else if (queueKey === 'CLOSEOUT') esc = 'Escalate to Operations Manager if closeout lingers beyond this week.';
+    else if (queueKey === 'UNDEFINED') esc = 'Route to a coordinator/manager to define owner, action, and date.';
+    else esc = 'Re-confirm with the owner if the follow-up date passes with no response.';
+    return { owner: owner, nextAction: next, waitingOn: waitingOn, expectedResponseDate: respDate, definitionOfDone: dod, escalationTrigger: esc, blockerCategory: blockerCat, actionUndefinedReasons: reasons };
+  }
+
+  // Orchestrator: takes the normalized signals S, runs the model in dependency order, and returns
+  // the full derived-field set. Pure and self-contained so the harness can drive it directly.
+  function actQueueModel(S) {
+    S = S || {};
+    var waiting = evaluateWaitingState(S);
+    S.validWaitingState = waiting.valid; S.waitingParty = waiting.party;
+    var contradictions = evaluateContradictions(S);
+    S.contradictionCount = contradictions.length;
+    S.severeContradiction = contradictions.some(function (c) { return c.severity === 'high'; });
+    S.dataGap = (isEcdExpected(S.phase) && (!S.ecdText || S.ecdText === 'TBD') && !S.overdueEcd) || !S.ownerValid;
+    var risk = calculateOperationalRisk(S); S.operationalRiskScore = risk.score;
+    var act = calculateActionability(S); S.actionabilityScore = act.score;
+    var cls = classifyActionQueue(S);
+    var pr = calculateQueuePriority(S, cls.key);
+    var dr = calculateDailyRank(S, cls.key);
+    var plan = buildActionPlan(S, cls.key);
+    // Due label (never a fabricated calendar date - the tool has no business-day calendar).
+    var due;
+    if (cls.key === 'IMMEDIATE') due = 'Today – now';
+    else if (pr.key === 'P1') due = (cls.key === 'FOLLOWUP' && S.expectedResponseOverdue) ? 'Overdue' : 'Today';
+    else if (cls.key === 'CLOSEOUT') due = 'This week';
+    else if (cls.key === 'WATCH') due = (S.onsiteDaysAway != null) ? ('Within ' + S.onsiteDaysAway + ' day' + (S.onsiteDaysAway === 1 ? '' : 's')) : 'This week';
+    else if (cls.key === 'FOLLOWUP') due = S.expectedResponseOverdue ? 'Overdue' : 'Today';
+    else if (cls.key === 'UNDEFINED') due = 'Triage today';
+    else if (cls.key === 'BLOCKED') due = S.expectedResponseDate ? ('By ' + S.expectedResponseDate) : 'Monitor';
+    else due = 'Monitor';
+    var nextEvent = S.hasFutureOnsite && S.nextOnsiteMd ? ('Visit ' + S.nextOnsiteMd)
+      : S.ecdKnownFuture && S.ecdText && S.ecdText !== 'TBD' ? ('ECD ' + S.ecdText) : '';
+    var lastMu = S.lastMeaningfulUpdateMd
+      ? (S.lastMeaningfulUpdateMd + (S.meaningfulUpdateDays != null ? ' (' + S.meaningfulUpdateDays + 'd ago)' : '') + (S.meaningfulSummary ? ': ' + S.meaningfulSummary : ''))
+      : (S.hasMeaningfulUpdate ? '' : 'no meaningful update on file');
+    return {
+      actionQueue: cls.queue, queueKey: cls.key, queueMonitor: !!cls.monitor,
+      queueDisplayRank: (ACT_QUEUE_DISPLAY_RANK[cls.queue] == null ? 99 : ACT_QUEUE_DISPLAY_RANK[cls.queue]),
+      queuePriorityKey: pr.key, queuePriority: pr.label, queuePriorityRank: QUEUE_PRIORITY_RANK[pr.key],
+      operationalRiskScore: risk.score, operationalRiskReasons: risk.reasons,
+      actionabilityScore: act.score, actionabilityReasons: act.reasons,
+      dailyRank: dr.rank, rankComponents: dr.components,
+      nextAction: plan.nextAction, actionOwner: plan.owner, dueDateTime: due,
+      waitingOn: plan.waitingOn, expectedResponseDate: plan.expectedResponseDate,
+      definitionOfDone: plan.definitionOfDone, escalationTrigger: plan.escalationTrigger,
+      blockerCategory: plan.blockerCategory, validWaitingState: waiting.valid, waitingMissing: waiting.missing,
+      actionUndefinedReasons: plan.actionUndefinedReasons, contradictions: contradictions,
+      lastMeaningfulUpdate: lastMu, nextScheduledEvent: nextEvent,
+      priorityReasons: pr.reasons, queueReasons: cls.reasons || [], queueAllReasons: cls.allReasons || {}
+    };
+  }
 
   // deriveAction(ctx) -> the structured management record for one work order. ctx:
   //   facts            deriveState output (authoritative; never re-inferred here)
@@ -2066,13 +2412,66 @@
 
     var include = pk !== 'MON' || ctx.includeMonitor === true || safety;
 
+    // ---- WORK-QUEUE MODEL (0.18.0): additive - never touches the legacy fields above ------------
+    // Build the normalized signals from what deriveState + the flags + the caller's date facts
+    // already established (nothing new is inferred here). Date-formatted values arrive via ctx so the
+    // pure slice never needs fmtMD.
+    var external = { 'proposal-sent': 1, client: 1, materials: 1, 'materials-client': 1, accept: 1 }[phase];
+    var ecdKnownFuture = !!f.ecd;                                   // set only for a valid future header ECD
+    var onsiteNow = phase === 'onsite' || phase === 'inprogress';
+    var hasSameDayOutcome = ctx.meaningfulUpdateDays === 0;
+    var expectedResponseDate = (ctx.hasFutureOnsite && ctx.nextOnsiteMd) ? ctx.nextOnsiteMd
+      : (ecdKnownFuture && f.ecdText && f.ecdText !== 'TBD') ? f.ecdText
+        : (ctx.expectedResponseMd || '');
+    var expectedResponseOverdue = !!(external && (ctx.visitPast || clientUpd || overdueEcd));
+    var S = {
+      phase: phase, terminal: !!f.terminal, statusName: statusName,
+      owner: owner, ownerValid: !ownerInvalid,
+      safety: safety, critical: critical,
+      overdueEcd: overdueEcd, overdueDays: overdueDays, ecdExpired: !!f.ecdExpired,
+      ecdText: f.ecdText, ecdKnownFuture: ecdKnownFuture, ecdDaysAway: (typeof ctx.ecdDaysAway === 'number' ? ctx.ecdDaysAway : null),
+      dueToday: !!ctx.ecdDueSoon,
+      stale: stale, staleDays: (typeof f.staleDays === 'number' ? f.staleDays : null),
+      noteCount: f.noteCount, hasMeaningfulUpdate: (f.noteCount || 0) > 0,
+      meaningfulUpdateDays: (typeof ctx.meaningfulUpdateDays === 'number' ? ctx.meaningfulUpdateDays : (typeof f.staleDays === 'number' ? f.staleDays : null)),
+      lastMeaningfulUpdateMd: ctx.lastNoteMd || '', meaningfulSummary: (f.latestMeaningfulEvent ? String(f.latestMeaningfulEvent).slice(0, 80) : ''),
+      noVendor: noVendor, unscheduled: unscheduled, pricing: pricing, clientOverdue: clientUpd, cancel: cancel,
+      visitPast: !!ctx.visitPast, hasFutureOnsite: !!ctx.hasFutureOnsite, onsiteDaysAway: (typeof ctx.onsiteDaysAway === 'number' ? ctx.onsiteDaysAway : null),
+      nextOnsiteMd: ctx.nextOnsiteMd || '', hasNextOnsiteField: !!ctx.hasNextOnsiteField,
+      sameDayVisit: ctx.onsiteDaysAway === 0,
+      onsiteNow: onsiteNow, hasSameDayOutcome: hasSameDayOutcome,
+      awaitingBroadwayDecision: !!((onsiteNow && (f.primaryBlocker || !hasSameDayOutcome)) || (ctx.visitPast && !ctx.hasCompletionEvidence)),
+      externalCommitmentDue: !!(clientUpd || expectedResponseOverdue), expectedResponseOverdue: expectedResponseOverdue,
+      // GROUNDED next action only (never the legacy bucket-template fallback `next`), so an
+      // unmapped/triage WO with no evidenced action correctly reads as Next Action Undefined.
+      nextAction: f.nextAction, nextActionOwner: f.nextActionOwner, nextActionSpecific: !!(f.nextAction && (f.confidence !== 'low' || f.blockerCertain)),
+      blockerOwner: f.blockerOwner, primaryBlocker: f.primaryBlocker, confidence: f.confidence,
+      hasCompletionEvidence: (ctx.hasCompletionEvidence === undefined ? null : !!ctx.hasCompletionEvidence),
+      remainingScopeNoted: !!ctx.remainingScopeNoted,
+      severeDq: severeDq, expectedResponseDate: expectedResponseDate
+    };
+    var Q = actQueueModel(S);
+
     return {
       include: include, priorityKey: pk, priority: ACT_PRIORITY[pk], bucketKey: bk, bucket: ACT_BUCKET[bk],
       primaryIssue: issue, nextAction: next, owner: owner, escalateTo: escalateTo,
       actionDue: due, dueRank: (ACT_DUE_RANK[due] == null ? 9 : ACT_DUE_RANK[due]),
       riskFlags: risk.join(' | '), riskList: risk, evidence: evidence, recommendedStatus: tpl.rec,
       managerReview: manager ? 'YES' : 'NO', managerReviewBool: manager, confidence: conf,
-      ruleIds: rules.join(', '), ruleList: rules, dataGaps: dataGaps
+      ruleIds: rules.join(', '), ruleList: rules, dataGaps: dataGaps,
+      // ---- work-queue model fields (0.18.0) ----
+      actionQueue: Q.actionQueue, queueKey: Q.queueKey, queueMonitor: Q.queueMonitor, queueDisplayRank: Q.queueDisplayRank,
+      queuePriority: Q.queuePriority, queuePriorityKey: Q.queuePriorityKey, queuePriorityRank: Q.queuePriorityRank,
+      operationalRiskScore: Q.operationalRiskScore, operationalRiskReasons: Q.operationalRiskReasons,
+      actionabilityScore: Q.actionabilityScore, actionabilityReasons: Q.actionabilityReasons,
+      dailyRank: Q.dailyRank, rankComponents: Q.rankComponents,
+      queueNextAction: Q.nextAction, actionOwner: Q.actionOwner, dueDateTime: Q.dueDateTime,
+      waitingOn: Q.waitingOn, expectedResponseDate: Q.expectedResponseDate, definitionOfDone: Q.definitionOfDone,
+      escalationTrigger: Q.escalationTrigger, blockerCategory: Q.blockerCategory,
+      validWaitingState: Q.validWaitingState, waitingMissing: Q.waitingMissing,
+      actionUndefinedReasons: Q.actionUndefinedReasons, contradictions: Q.contradictions,
+      lastMeaningfulUpdate: Q.lastMeaningfulUpdate, nextScheduledEvent: Q.nextScheduledEvent,
+      priorityReasons: Q.priorityReasons, queueReasons: Q.queueReasons
     };
   }
   function actUniq(a) { var o = [], i; for (i = 0; i < a.length; i++) { if (o.indexOf(a[i]) === -1) o.push(a[i]); } return o; }
@@ -2116,6 +2515,72 @@
     }
     return aoa;
   }
+  // ---- QUEUE-GROUPED Action List (0.18.0) ------------------------------------------------------
+  // The primary operational worksheet: rows GROUPED under the six work queues (+ Action Undefined),
+  // each section self-labelled with its count. Today-work and triage sit first and prominent;
+  // Blocked/Waiting is quiet and last. The flat, filterable table lives on Action Diagnostics
+  // (buildActionListAoa) for power users - progressive disclosure across two sheets.
+  var QUEUE_SHEET_COLS = ['WO', 'Client / Location', 'Priority', 'Next Action', 'Action Owner', 'Due', 'Waiting On', 'Expected Response', 'Definition of Done', 'Blocker', 'Last Meaningful Update', 'Next Scheduled Event', 'Why in Queue', 'Why This Priority', 'Op Risk', 'Actionability', 'Daily Rank', 'Contradictions', 'Src Row'];
+  var QUEUE_SHEET_WIDTHS = [12, 26, 22, 52, 22, 16, 18, 16, 46, 18, 34, 18, 44, 40, 8, 12, 10, 34, 8];
+  // Queues that are ALWAYS shown (even at zero) so their absence is explicit; the rest appear only
+  // when populated.
+  var QUEUE_ALWAYS_SHOW = { IMMEDIATE: 1, EXECUTE: 1, FOLLOWUP: 1, UNDEFINED: 1 };
+  function queueIncluded(r, includeMonitor) {
+    if (!r) return false;
+    if (r.queueMonitor) return includeMonitor === true;    // clean terminal / nothing-to-do
+    return !!r.actionQueue;
+  }
+  // Within a queue: priority, then Daily Rank desc, then Op Risk desc, then age desc (age is the
+  // final tie-breaker only). Daily Rank already folds in due-urgency and schedule proximity.
+  function queueSort(a, b) {
+    var ra = QUEUE_PRIORITY_RANK[a.queuePriorityKey] == null ? 9 : QUEUE_PRIORITY_RANK[a.queuePriorityKey];
+    var rb = QUEUE_PRIORITY_RANK[b.queuePriorityKey] == null ? 9 : QUEUE_PRIORITY_RANK[b.queuePriorityKey];
+    if (ra !== rb) return ra - rb;
+    if ((b.dailyRank || 0) !== (a.dailyRank || 0)) return (b.dailyRank || 0) - (a.dailyRank || 0);
+    if ((b.operationalRiskScore || 0) !== (a.operationalRiskScore || 0)) return (b.operationalRiskScore || 0) - (a.operationalRiskScore || 0);
+    var aa = (typeof a.ageDays === 'number') ? a.ageDays : -1, ab = (typeof b.ageDays === 'number') ? b.ageDays : -1;
+    return ab - aa;
+  }
+  function queueRowCells(r) {
+    return [
+      r.wo, r.location, r.queuePriority, (r.queueNextAction || r.nextAction || ''), r.actionOwner, r.dueDateTime,
+      r.waitingOn || '', r.expectedResponseDate || '', r.definitionOfDone || '', r.blockerCategory || '',
+      r.lastMeaningfulUpdate || '', r.nextScheduledEvent || '',
+      (r.queueReasons && r.queueReasons.length ? r.queueReasons.join('; ') : ''),
+      (r.priorityReasons && r.priorityReasons.length ? r.priorityReasons.join('; ') : ''),
+      r.operationalRiskScore, r.actionabilityScore, r.dailyRank,
+      (r.contradictions && r.contradictions.length ? r.contradictions.map(function (c) { return c.code; }).join(', ') : ''),
+      r.sourceRow
+    ];
+  }
+  // Returns { aoa, counts } - counts is {queueKey: n} for the dashboard's Today totals.
+  function buildQueueListAoa(rows, includeMonitor) {
+    var inc = (rows || []).filter(function (r) { return queueIncluded(r, includeMonitor); });
+    var byQueue = {}, counts = {};
+    ACT_QUEUE_DISPLAY.forEach(function (k) { byQueue[k] = []; counts[k] = 0; });
+    for (var i = 0; i < inc.length; i++) {
+      var r = inc[i];
+      for (var k in ACT_QUEUE) { if (ACT_QUEUE[k] === r.actionQueue && byQueue[k]) { byQueue[k].push(r); counts[k]++; break; } }
+    }
+    var todayTotal = counts.IMMEDIATE + counts.EXECUTE + counts.FOLLOWUP;
+    var aoa = [];
+    aoa.push(['WO ACTION LIST — operational work queue']);
+    aoa.push(['Today (Immediate + Execute + Follow Up): ' + todayTotal + '   |   ' +
+      ACT_QUEUE_DISPLAY.map(function (k) { return ACT_QUEUE[k] + ': ' + counts[k]; }).join('   |   ')]);
+    aoa.push([]);
+    for (var d = 0; d < ACT_QUEUE_DISPLAY.length; d++) {
+      var key = ACT_QUEUE_DISPLAY[d], list = byQueue[key];
+      if (!list.length && !QUEUE_ALWAYS_SHOW[key]) continue;
+      list.sort(queueSort);
+      aoa.push(['▶ ' + ACT_QUEUE[key].toUpperCase() + '  (' + list.length + ')']);
+      aoa.push(QUEUE_SHEET_COLS.slice());
+      if (!list.length) aoa.push(['(none)']);
+      for (var j = 0; j < list.length; j++) aoa.push(queueRowCells(list[j]));
+      aoa.push([]);
+    }
+    return { aoa: aoa, counts: counts, todayTotal: todayTotal };
+  }
+
   // Run-date helpers. LOCAL date (the coordinator's day), zero-padded. nowMs injected for the harness.
   function actPad(n) { return (n < 10 ? '0' : '') + n; }
   function actRunDate(ms) { var d = new Date(typeof ms === 'number' ? ms : Date.now()); return d.getFullYear() + '-' + actPad(d.getMonth() + 1) + '-' + actPad(d.getDate()); }
@@ -2155,10 +2620,28 @@
     return mr.slice(0, 20);
   }
   // The full deterministic count set the run summary prints. rows = the actionRow objects.
+  // Queue keys in reading order + their labels (mirrors ACT_QUEUE; redeclared here so the DASHBOARD
+  // slice is self-contained for the harness).
+  var DASH_QUEUES = [
+    ['IMMEDIATE', 'Immediate Intervention'], ['EXECUTE', 'Execute Today'], ['FOLLOWUP', 'Follow Up Today'],
+    ['UNDEFINED', 'Action Undefined / Needs Triage'], ['WATCH', 'Upcoming Watch'],
+    ['CLOSEOUT', 'Closeout / Billing Readiness'], ['BLOCKED', 'Blocked / Waiting']
+  ];
   function dashboardCounts(rows, total) {
     rows = rows || [];
     var byBucket = {};
     DASH_BUCKETS.forEach(function (b) { byBucket[b] = dashCount(rows, function (r) { return r.bucket === b; }); });
+    // ---- work-queue aggregates (0.18.0). All guarded so legacy fixtures without the new fields
+    // still return zeros rather than throwing. ----
+    var byQueue = {};
+    DASH_QUEUES.forEach(function (q) { byQueue[q[0]] = dashCount(rows, function (r) { return r.queueKey === q[0]; }); });
+    var undefReasons = {}, contraBySev = { high: 0, medium: 0, low: 0 }, contraByCode = {}, aging = { '0-30': 0, '31-60': 0, '61-90': 0, '90+': 0 };
+    rows.forEach(function (r) {
+      (r.actionUndefinedReasons || []).forEach(function (x) { undefReasons[x] = (undefReasons[x] || 0) + 1; });
+      (r.contradictions || []).forEach(function (c) { if (c && c.severity && contraBySev[c.severity] != null) contraBySev[c.severity]++; if (c && c.code) contraByCode[c.code] = (contraByCode[c.code] || 0) + 1; });
+      var a = (typeof r.ageDays === 'number') ? r.ageDays : null;
+      if (a != null) aging[a <= 30 ? '0-30' : a <= 60 ? '31-60' : a <= 90 ? '61-90' : '90+']++;
+    });
     return {
       total: (typeof total === 'number') ? total : rows.length,
       actionable: dashCount(rows, function (r) { return r.priorityKey !== 'MON'; }),
@@ -2168,7 +2651,20 @@
       p2: dashCount(rows, function (r) { return r.priorityKey === 'P2'; }),
       overdueEcd: dashCount(rows, function (r) { return /OVERDUE ECD/.test(r.riskFlags || ''); }),
       managerReview: dashCount(rows, function (r) { return r.managerReviewBool; }),
-      byBucket: byBucket
+      byBucket: byBucket,
+      // work-queue model
+      byQueue: byQueue,
+      todayTotal: byQueue.IMMEDIATE + byQueue.EXECUTE + byQueue.FOLLOWUP,
+      qp0: dashCount(rows, function (r) { return r.queuePriorityKey === 'P0'; }),
+      qp1: dashCount(rows, function (r) { return r.queuePriorityKey === 'P1'; }),
+      qp2: dashCount(rows, function (r) { return r.queuePriorityKey === 'P2'; }),
+      qp3: dashCount(rows, function (r) { return r.queuePriorityKey === 'P3'; }),
+      actionUndefined: byQueue.UNDEFINED,
+      undefReasons: Object.keys(undefReasons).map(function (k) { return { key: k, count: undefReasons[k] }; }).sort(function (a, b) { return b.count - a.count || (a.key < b.key ? -1 : 1); }),
+      validBlocked: dashCount(rows, function (r) { return r.validWaitingState === true; }),
+      highRisk: dashCount(rows, function (r) { return (r.operationalRiskScore || 0) >= 60; }),
+      highActionability: dashCount(rows, function (r) { return (r.actionabilityScore || 0) >= 60; }),
+      contraBySev: contraBySev, contraByCode: contraByCode, aging: aging
     };
   }
   // The priority legend + interpretation, stated once so the sheet and the tests share them.
@@ -2202,6 +2698,31 @@
     out.push(['Manager Review', c.managerReview]);
     out.push(['— by action bucket —']);
     DASH_BUCKETS.forEach(function (b) { out.push([b, c.byBucket[b]]); });
+    out.push([]);
+    // ---- WORK QUEUE (0.18.0): the daily operational posture, kept distinct from audit totals ----
+    out.push(['WORK QUEUE POSTURE']);
+    out.push(['TODAY (Immediate + Execute + Follow Up)', c.todayTotal]);
+    DASH_QUEUES.forEach(function (q) { out.push([q[1], c.byQueue[q[0]]]); });
+    out.push(['— by queue priority —']);
+    out.push(['P0 – Intervene Now', c.qp0]);
+    out.push(['P1 – Complete Today', c.qp1]);
+    out.push(['P2 – Follow Up / Prepare', c.qp2]);
+    out.push(['P3 – Monitor', c.qp3]);
+    out.push(['Valid Blocked / Waiting', c.validBlocked]);
+    out.push(['High operational risk (>=60)', c.highRisk]);
+    out.push(['High actionability (>=60)', c.highActionability]);
+    out.push([]);
+    out.push(['ACTION UNDEFINED / NEEDS TRIAGE', c.actionUndefined]);
+    if (c.undefReasons && c.undefReasons.length) { out.push(['top missing-data reasons', 'count']); c.undefReasons.slice(0, 8).forEach(function (x) { out.push([x.key, x.count]); }); }
+    out.push([]);
+    out.push(['CONTRADICTIONS BY SEVERITY']);
+    out.push(['High', c.contraBySev.high]); out.push(['Medium', c.contraBySev.medium]); out.push(['Low', c.contraBySev.low]);
+    var codes = Object.keys(c.contraByCode);
+    if (codes.length) { out.push(['— by code —']); codes.sort().forEach(function (k) { out.push([k, c.contraByCode[k]]); }); }
+    out.push([]);
+    out.push(['AGING (management insight - age raises RISK but never alone creates a daily task)']);
+    out.push(['0-30 days', c.aging['0-30']]); out.push(['31-60 days', c.aging['31-60']]);
+    out.push(['61-90 days', c.aging['61-90']]); out.push(['90+ days', c.aging['90+']]);
     out.push([]);
     out.push(['BY AUDIT PRIORITY', 'count']);
     dashRollup(rows, function (r) { return r.priority; }).forEach(function (x) { out.push([x.key, x.count]); });
@@ -2256,6 +2777,22 @@
     out.push(['Source sheet', meta.sourceSheet || '']);
     out.push(['WO # column', meta.woCol || '']);
     out.push(['Notes column', meta.noteCol || '']);
+    // ---- WORK-QUEUE METHODOLOGY (0.18.0). Text rows only - the legacy RULE_CATALOG above is
+    // unchanged. Weights come from meta (live ACT_CFG) with a literal fallback so the sheet is
+    // truthful whether or not the caller passed them. ----
+    var w = meta.weights || { actionability: 1.0, operationalRisk: 0.6, dueUrgency: 0.4, scheduleProximity: 0.2, escalationRisk: 0.25, dataQuality: 0.15, validWaiting: 0.9 };
+    out.push([]);
+    out.push(['WORK-QUEUE MODEL (0.18.0)']);
+    out.push(['Queue classification order (first match wins)', 'Immediate Intervention > Closeout/Billing > Execute Today > Follow Up Today > Upcoming Watch > Blocked/Waiting > Action Undefined']);
+    out.push(['Priority decision order', 'P0 Intervene Now > P1 Complete Today > P2 Follow Up/Prepare > P3 Monitor. Source priority alone never makes P0.']);
+    out.push(['Two independent scores', 'Operational Risk = exposure if unmanaged (0-100). Actionability = a concrete Broadway step exists today (0-100). Shown separately, never merged into one number.']);
+    out.push(['Daily Rank formula', 'rank = ' + w.actionability + '*Actionability + ' + w.operationalRisk + '*OpRisk + ' + w.dueUrgency + '*DueUrgency + ' + w.scheduleProximity + '*ScheduleProximity + ' + w.escalationRisk + '*EscalationRisk + ' + w.dataQuality + '*DataQuality - ' + w.validWaiting + '*ValidWaiting. Immediate Intervention pins above all numeric ranks. Actionability is the largest normal contributor; age is only a limited risk modifier.']);
+    out.push(['Valid waiting state requires ALL of', 'a recognized waiting-on party, a meaningful reason, a future expected response/follow-up date, and a defined owner - and no live exception. Missing any element -> not validly blocked (flagged, not parked).']);
+    out.push(['Meaningful update', 'A note counts only with operational substance (outcome, blocker, party, date, next step, ETA, proposal/decision, completion, scope, materials, vendor confirmation). Bare "LVM / following up / emailed vendor / updated" do not reset the clock. Raw latest-note date is preserved separately.']);
+    out.push(['Onsite date expected when', 'phase is pending-schedule / scheduled / on-site / in-progress / recall. Only then is a blank Next Onsite a "Schedule Required but Missing" gap.']);
+    out.push(['ECD expected when', 'work is scheduled/in-progress, vendor+scope known, proposal approved / PO issued, materials ETA supports a forecast, go-back scope defined, or closeout. Early proposal / client-approval / undefined-scope phases need a decision or follow-up date instead - a blank ECD there is NOT penalized.']);
+    out.push(['Contradiction checks enabled', 'SCHEDULED_NO_FUTURE_VISIT, COMPLETE_REMAINING_SCOPE, MATERIAL_DATE_EXPIRED, AWAITING_3P_NO_DATE, PROPOSED_NO_DECISION_DATE, ONSITE_NO_SAMEDAY_OUTCOME, PENDING_SCHEDULE_NO_VENDOR, CLIENT_ACTION_NO_OWNER, COMPLETE_NO_CLOSEOUT_EVIDENCE, FUTURE_ECD_PRIOR_VISIT_PASSED, WAITING_NO_RESPONSE_DATE, CLOSED_WITH_OPEN_SIGNAL.']);
+    out.push(['Source-data limitations', 'Proposal AMOUNT and proposal SUBMISSION date are not exposed to this tool, so the "Proposed with no proposal amount/submission date" check is narrowed to a decision-date check. Repeat-dispatch history is not exposed, so repeat-visit risk is not detected. Due labels are operational targets, never invented calendar dates.']);
     return out;
   }
   // The count of the rule catalog's data columns, so the Audit Rules autofilter spans the table only.
@@ -3735,6 +4272,8 @@
         var onsiteMid = LOCAL_MID(h && h.nextOnsiteDate);
         var visitPast = !!(onsiteMid && onsiteMid < todayMid);
         var hasFutureOnsite = !!(onsiteMid && onsiteMid >= todayMid);
+        var onsiteDaysAway = onsiteMid ? Math.round((onsiteMid - todayMid) / MS_DAY) : null;
+        var ecdDaysAway = (ecdMid && !(ei && ei.past)) ? Math.round(du) : null;
         var wbPriority = cellStr(aoa, ri, map.priority), wbFm = cellStr(aoa, ri, map.fm);
         var wbAssigned = cellStr(aoa, ri, map.assigned), wbTrade = cellStr(aoa, ri, map.trade);
         var wbVendor = cellStr(aoa, ri, map.vendor), wbScope = cellStr(aoa, ri, map.scope);
@@ -3745,6 +4284,12 @@
         var noteBodies = (notes || []).slice(0, 4).map(function (n) { return String((n && n.content) || ''); }).join(' ');
         var nextOnsiteMd = fmtMD(h && h.nextOnsiteDate) || wbNextOnsite;
         var lastNoteMd = fmtMD(facts.latestMeaningfulEventDate) || wbLastNote;
+        // Completion / remaining-scope signals for the queue model + contradictions. Deterministic
+        // text scans over the same meaningful bodies the audit already read (never invents a fact).
+        var completionRe = /\b(work (is |was )?complete|completed on ?site|closed out|sign(ed)?[- ]off|photos? (attached|uploaded|submitted)|\bnoc\b|invoice (submitted|attached|created))\b/i;
+        var remainingRe = /\b(remaining (scope|work)|still (needs?|pending)|outstanding|not (yet )?complete|return trip|go[- ]?back|punch ?list|additional work|left to (do|complete))\b/i;
+        var hasCompletionEvidence = (notes || []).some(function (n) { return n && n.isCompletion; }) || completionRe.test(noteBodies);
+        var remainingScopeNoted = remainingRe.test(String(facts.latestMeaningfulEvent || '') + ' ' + noteBodies);
         var action = deriveAction({
           facts: facts, flags: flags, header: h,
           assignedTo: wbAssigned, fm: wbFm,
@@ -3755,6 +4300,9 @@
           ageExpected: map.days !== -1, statusHours: wbStatusHrs,
           nextOnsiteMd: nextOnsiteMd, lastNoteMd: lastNoteMd,
           ecdDueSoon: ecdDueSoon, visitPast: visitPast, hasFutureOnsite: hasFutureOnsite,
+          onsiteDaysAway: onsiteDaysAway, ecdDaysAway: ecdDaysAway, hasNextOnsiteField: !!(h && h.nextOnsiteDate) || !!wbNextOnsite,
+          hasCompletionEvidence: hasCompletionEvidence, remainingScopeNoted: remainingScopeNoted,
+          meaningfulUpdateDays: (typeof facts.staleDays === 'number') ? facts.staleDays : undefined,
           staleDays: auditCfg('staleDays', STALE_DAYS), includeMonitor: session.includeMonitor
         });
         var ecdDisplay = fmtMD(ecdRaw) || wbEcd || (facts.ecdText && facts.ecdText !== 'TBD' ? facts.ecdText : '');
@@ -3770,7 +4318,19 @@
           location: wbLocation || [cellStr(aoa, ri, map.city), cellStr(aoa, ri, map.state)].filter(Boolean).join(', '),
           fm: wbFm, assignedTo: wbAssigned, trade: liveTrade || wbTrade, vendor: wbVendor,
           ecd: ecdDisplay, nextOnsite: nextOnsiteMd, lastNoteDate: lastNoteMd,
-          ageDays: (typeof ageDays === 'number') ? ageDays : null, sourceRow: ri + 1
+          ageDays: (typeof ageDays === 'number') ? ageDays : null, sourceRow: ri + 1,
+          // ---- work-queue model fields (0.18.0) ----
+          actionQueue: action.actionQueue, queueKey: action.queueKey, queueMonitor: action.queueMonitor,
+          queuePriority: action.queuePriority, queuePriorityKey: action.queuePriorityKey,
+          dailyRank: action.dailyRank, rankComponents: action.rankComponents,
+          operationalRiskScore: action.operationalRiskScore, actionabilityScore: action.actionabilityScore,
+          queueNextAction: action.queueNextAction, actionOwner: action.actionOwner, dueDateTime: action.dueDateTime,
+          waitingOn: action.waitingOn, expectedResponseDate: action.expectedResponseDate,
+          definitionOfDone: action.definitionOfDone, escalationTrigger: action.escalationTrigger,
+          blockerCategory: action.blockerCategory, validWaitingState: action.validWaitingState,
+          actionUndefinedReasons: action.actionUndefinedReasons, contradictions: action.contradictions,
+          lastMeaningfulUpdate: action.lastMeaningfulUpdate, nextScheduledEvent: action.nextScheduledEvent,
+          priorityReasons: action.priorityReasons, queueReasons: action.queueReasons
         };
         return { action: action, actionRow: actionRow };
       }
@@ -4322,33 +4882,36 @@
             var rr = session.results[ai];
             if (rr && rr.actionRow) arows.push(rr.actionRow);
           }
-          var aoa = buildActionListAoa(arows, session.includeMonitor);
-          var alName = 'WO Action List - ' + actSheetDate(Date.now());
-          var alSheet = XLSX.utils.aoa_to_sheet(aoa);
-          alSheet['!cols'] = ACTION_SHEET_WIDTHS.map(function (w) { return { wch: w }; });
-          if (alSheet['!ref']) alSheet['!autofilter'] = { ref: alSheet['!ref'] };
-          if (session.wb.Sheets[alName]) {
-            delete session.wb.Sheets[alName];
-            var exi = session.wb.SheetNames.indexOf(alName);
-            if (exi > -1) session.wb.SheetNames.splice(exi, 1);
-          }
-          XLSX.utils.book_append_sheet(session.wb, alSheet, alName);
-          logln('Built "' + alName + '" with ' + Math.max(0, aoa.length - 1) + ' action row' + (aoa.length === 2 ? '' : 's') + '.');
-
-          // Dashboard + Audit Rules sheets (Commit 2), built from the SAME settled action rows.
           var sheetDate = actSheetDate(Date.now());
+          // PRIMARY: the queue-grouped operational work list. Sections are self-labelled with counts,
+          // so no autofilter (banner rows would break the range); the flat filterable table lives on
+          // Action Diagnostics below.
+          var qres = buildQueueListAoa(arows, session.includeMonitor);
+          var alName = 'WO Action List - ' + sheetDate;
+          appendAoaSheet(session.wb, alName, qres.aoa, QUEUE_SHEET_WIDTHS);
+          logln('Built "' + alName + '" - Today ' + qres.todayTotal + ' (Immediate ' + qres.counts.IMMEDIATE + ' / Execute ' + qres.counts.EXECUTE + ' / Follow Up ' + qres.counts.FOLLOWUP + ').');
+
+          // Action Diagnostics: the flat, filterable table of every actionable row (legacy audit
+          // columns + evidence) for power users who want to sort/filter the whole set.
+          var diagAoa = buildActionListAoa(arows, session.includeMonitor);
+          var diagName = 'Action Diagnostics - ' + sheetDate;
+          var diagSheet = appendAoaSheet(session.wb, diagName, diagAoa, ACTION_SHEET_WIDTHS);
+          if (diagSheet['!ref']) diagSheet['!autofilter'] = { ref: diagSheet['!ref'] };
+
+          // Dashboard + Audit Rules sheets, built from the SAME settled action rows.
           var runStamp = actRunDate(Date.now()) + ' ' + new Date().toTimeString().slice(0, 5);
           var dashName = 'WO Audit Dashboard - ' + sheetDate;
           var dashAoa = buildDashboardAoa(arows, {
             sheetTitle: dashName, runStamp: runStamp, sourceSheet: session.sheet,
-            mode: session.outputMode, includeMonitor: session.includeMonitor, total: session.rows.length
+            mode: session.outputMode, includeMonitor: session.includeMonitor, total: session.rows.length,
+            queueCounts: qres.counts, todayTotal: qres.todayTotal
           });
           appendAoaSheet(session.wb, dashName, dashAoa, [22, 60, 16, 26, 22, 60]);
           var rulesName = 'Audit Rules - ' + sheetDate;
           var rulesAoa = buildAuditRulesAoa({
             sheetTitle: rulesName, runStamp: runStamp, mode: session.outputMode, includeMonitor: session.includeMonitor,
             checks: session.checksLabel, clientDays: session.clientDays, sourceSheet: session.sheet,
-            woCol: session.woColName, noteCol: session.noteColName
+            woCol: session.woColName, noteCol: session.noteColName, weights: ACT_CFG.weights
           });
           var rulesSheet = appendAoaSheet(session.wb, rulesName, rulesAoa, [26, 52, 30, 30, 52, 40, 40, 44]);
           // Autofilter over the rule TABLE only (header row + the 11 rule rows), not the config block.
