@@ -135,7 +135,10 @@ A.ok('non-escalate keys and sev-less acts arm nothing', p.nonEscalateQuiet, JSON
 // Structural: the engine writes the field, the render loop makes the call, the assist
 // side still speaks the same contract.
 A.ok('engine escalate act carries sev: escSev', coreFull.indexOf('sev: escSev') !== -1, 'field missing from acts.push');
-A.ok('render loop calls armAssistDue(a, isDone)', coreFull.indexOf('armAssistDue(a, isDone);') !== -1, 'call site missing');
+// Coordinator Action Queue (1.88.0): armAssistDue is fired once per classified action from
+// the render loop, so a supervisor/management escalation parked in Waiting still posts its
+// severity. The call site moved from the per-row builder to the central fullList sweep.
+A.ok('render loop calls armAssistDue(c, isDone(c))', coreFull.indexOf('armAssistDue(c, isDone(c));') !== -1, 'call site missing');
 A.ok('wo-assist listens for bwn:assist:due', assistFull.indexOf("d.id === 'bwn:assist:due'") !== -1, 'listener missing');
 A.ok('wo-assist consumes d.escSev into _pendingSev', assistFull.indexOf('_pendingSev = d.escSev') !== -1, 'consumption missing');
 A.ok('wo-assist POSTs escSev', assistFull.indexOf('escSev: sev') !== -1, 'payload field missing');

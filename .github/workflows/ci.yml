@@ -423,6 +423,26 @@ jobs:
       - name: Next Actions closure auto-advance harness (WO Assist 2.69)
         run: node scripts/test-assist-advance-gate.js
 
+      # Coordinator Action Queue (WO Assist 2.75): a PURE classification + partition + ranking
+      # layer over the engine's output. Three harnesses slice the real COORD-QUEUE block and run
+      # it in a vm (nothing restates the logic), each with negative controls.
+      #  - classify: ownership / readiness / urgency (off the shared clock) / friction, plus the
+      #    plain-language reason/doneWhen and the conservative unknown-clock handling.
+      - name: Coordinator Action Queue classification harness (WO Assist 2.75)
+        run: node scripts/test-coord-classify.js
+
+      #  - queue: the DO-NOW attention gate, the 3-item cap with overflow, the section precedence
+      #    and counts, and the coordinatorScore ordering (ready+due beats a higher-base waiting item;
+      #    critical beats due; low friction is only a bounded tie-break).
+      - name: Coordinator Action Queue partition + ranking harness (WO Assist 2.75)
+        run: node scripts/test-coord-queue.js
+
+      #  - waits: the waiting/revisit foundation - a valid wait suppresses before revisitAt, expires
+      #    and re-enters after, invalidates on a state-fingerprint change, and NEVER suppresses on
+      #    malformed/unknown storage (fail-open to visible).
+      - name: Coordinator Action Queue waiting/revisit harness (WO Assist 2.75)
+        run: node scripts/test-coord-waits.js
+
       # UI-contract completeness ledger: names every bwn-*.user.js and forces each into a classified
       # row per shared UI contract (drawer exit / toast motion / reduced-motion / rail anchor), tied
       # to test-drawer-motion.js so neither harness can quietly omit a script. Green == the recorded
