@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         BWN Proposal Copy (Broadway National)
 // @namespace    broadwaynational.bwn
-// @version      0.4.0
+// @version      0.4.1
 // @downloadURL  https://raw.githubusercontent.com/Intermu/userscripts/main/bwn-proposal-copy.user.js
 // @updateURL    https://raw.githubusercontent.com/Intermu/userscripts/main/bwn-proposal-copy.user.js
 // @description  Copy a client proposal from an aged-out work order onto a chosen replacement WO as an un-submitted Draft, in one confirmed action. Replays Umbrava's own createDraftProposal + editProposal mutations (line items copied verbatim); never submits, deletes, or retries. Manager-gated visibility. @grant none.
@@ -15,7 +15,7 @@
 (function () {
   'use strict';
 
-  var VER = '0.4.0';   // keep in step with @version
+  var VER = '0.4.1';   // keep in step with @version
   var DRY_RUN = false; // when true, the two WRITE mutations are logged, not sent
   var FONT = "-apple-system,BlinkMacSystemFont,'Segoe UI','Helvetica Neue',Arial,sans-serif";
   var GREEN = '#0d3d26';
@@ -482,7 +482,7 @@
   // Shape verified from [[umbrava-graphql-operations]] (listClientProposals, introspected): keys off
   // jobId (== ProposalWO's job.id), jobType enum literal WorkOrder. Selects only what the dup panel
   // shows - number, description, type, state, status, subtotal - never line items or PII.
-  var Q_LIST_CLIENT_PROPOSALS = 'query ListClientProposals($jobId: Int, $page: PageInput!) { listClientProposals(jobId: $jobId, jobType: WorkOrder, page: $page) { rowCount items { id number description state type { id name } status { id name } subtotal { amount currency precision } } } }';
+  var Q_LIST_CLIENT_PROPOSALS = 'query ListClientProposals($jobId: Int, $page: PageInput!) { listClientProposals(jobId: $jobId, jobType: WorkOrder, page: $page, sortBy: [{ columnName: "id", direction: DESC }]) { rowCount items { id number description state type { id name } status { id name } subtotal { amount currency precision } } } }';
 
   // ===== copy engine ========================================================
   // (mapLineItem, buildCreateVars, buildEditVars, copyProposal land here in

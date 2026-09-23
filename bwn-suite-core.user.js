@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         BWN Suite - Core (Broadway National)
 // @namespace    broadwaynational.bwn
-// @version      1.89.0
+// @version      1.89.1
 // @downloadURL  https://raw.githubusercontent.com/Intermu/userscripts/main/bwn-suite-core.user.js
 // @updateURL    https://raw.githubusercontent.com/Intermu/userscripts/main/bwn-suite-core.user.js
 // @description  Runs several Umbrava helpers for BWN coordinators, in the browser with no privileged grants. Includes: PO Approval + ETA Builder; WO Assist (GP/ETA, a stall watchdog, DNE calculator, and a next-action playbook); Email Leak Guard (checks recipients against vendor names, PO amounts, and client budget references before an outbound email sends); WO List Heat (a triage overlay + My Day strip on the work-order list, with an optional same-origin Umbrava API scan for deterministic full-board coverage); and the BWN Launcher (opens the Azure Static Web App tools with the current WO's context). Modules share state through sessionStorage/localStorage. The only network calls are same-origin Umbrava GraphQL requests (app.umbrava.com/api/graphql, the app's own session): List Heat's full-board scan and WO Assist's work-order / trip / clock-in / document / purchase-order reads, plus ONE write - BWN Views saves the column layout through Umbrava's own putUserPreference, the same preference the column chooser writes; everything else is offline. Toggle modules in BWN_MODULES below.
@@ -2839,7 +2839,7 @@
     // Confident reads only: a failed/absent read leaves bwn:props absent (unknown), never a
     // guessed 0 - same unknown-vs-empty contract as the docs reader.
     var PROPS_DONE = Object.create(null);
-    var CLIENT_PROPS_Q = 'query WOClientProposals($jobId: Int!) { listClientProposals(jobId: $jobId, page: { skip: 0, take: 50 }) { rowCount items { id approvedDate rejectedDate canceledDate } } }';
+    var CLIENT_PROPS_Q = 'query WOClientProposals($jobId: Int!) { listClientProposals(jobId: $jobId, page: { skip: 0, take: 50 }, sortBy: [{ columnName: "id", direction: DESC }]) { rowCount items { id approvedDate rejectedDate canceledDate } } }';
     function fetchProposals(woNum, jobId) {
       if (!woNum || !jobId || PROPS_DONE[woNum]) return;
       PROPS_DONE[woNum] = 'pending';

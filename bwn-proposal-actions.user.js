@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         BWN Proposal Actions (Broadway National)
 // @namespace    broadwaynational.bwn
-// @version      0.6.1
+// @version      0.6.2
 // @downloadURL  https://raw.githubusercontent.com/Intermu/userscripts/main/bwn-proposal-actions.user.js
 // @updateURL    https://raw.githubusercontent.com/Intermu/userscripts/main/bwn-proposal-actions.user.js
 // @description  On a Client Proposal DETAILS page, a "Proposal Actions" dropdown runs the internal review workflow in one confirmed action: Approval / TSP Review / Kickback. Each posts a note to the Proposal + the Work Order, sets the WO status, completes open tasks, and files a new task (assigned to the WO coordinator, or Ronny Sharp for TSP). The posted note is an EDITABLE field seeded with the auto-generated text (Kickback's is drafted by the on-device browser AI) so the reviewer can add what they changed as coaching for the coordinator; a "changes since review opened" line (total + GP) is prepended automatically. Every write is shown in a confirm dialog first; nothing fires until Confirm. @grant none.
@@ -15,7 +15,7 @@
 (function () {
   'use strict';
 
-  var VER = '0.6.1';   // keep in step with @version
+  var VER = '0.6.2';   // keep in step with @version
   var DRY_RUN = false; // when true, every WRITE is console.logged instead of sent
   console.info('[BWN PROPOSAL ACTIONS] v' + VER + ' - Approval / TSP Review / Kickback workflow on the Client Proposal details page');
 
@@ -217,7 +217,7 @@
   }
 
   var Q_PROP = 'query PA_Prop($p: Int!){ proposal(id: $p){ total { amount currency precision } grossProfitPercent } }';
-  var Q_LIST = 'query PA_List($j: Int!){ listClientProposals(jobId: $j, page: { skip: 0, take: 50 }){ items { id total { amount currency precision } grossProfitPercent } } }';
+  var Q_LIST = 'query PA_List($j: Int!){ listClientProposals(jobId: $j, page: { skip: 0, take: 50 }, sortBy: [{ columnName: "id", direction: DESC }]){ items { id total { amount currency precision } grossProfitPercent } } }';
   function toGpNumber(raw) {
     if (raw == null || raw === '') return null;
     var v = (typeof raw === 'number') ? raw : parseFloat(raw);
