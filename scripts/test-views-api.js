@@ -410,6 +410,49 @@ async function runCases(apiSrc) {
   ok('and keeps the visible ones', titles.indexOf('Status') !== -1 && titles.indexOf('Priority') !== -1);
   eq('every mapped id resolves back to a title', Object.keys(A.NAME_MAP).length, Object.keys(A.TITLE_BY_ID).length);
 
+  // ---- Malformed / partial saved-layout input (characterization) ----------
+  // Pins CURRENT behavior only, not approved recovery policy. In particular the
+  // saveViews corrupt-config case below records today's data loss (other bwn:config
+  // keys are dropped); change it only with a separate product decision. Malformed
+  // saved `value` JSON is deliberately NOT characterized here - that path needs its
+  // own bug/product decision first.
+  var ALL_IDS = Object.keys(A.NAME_MAP).map(function (k) { return A.NAME_MAP[k]; });
+  var e9 = makeApi(apiSrc);
+  eq('loadViews: missing bwn:config -> []', e9.api.loadViews(), []);
+  e9.ls['bwn:config'] = '{not json';
+  eq('loadViews: corrupt JSON -> []', e9.api.loadViews(), []);
+  e9.ls['bwn:config'] = 'null';
+  eq('loadViews: literal null -> []', e9.api.loadViews(), []);
+  e9.ls['bwn:config'] = JSON.stringify({ views: {} });
+  eq('loadViews: non-array views -> []', e9.api.loadViews(), []);
+  var partialList = [{ id: 'p1', name: 'Partial', assignee: null, savedAt: 1 }];
+  e9.ls['bwn:config'] = JSON.stringify({ views: partialList });
+  eq('loadViews: a valid array passes through unchanged, partial entry included', e9.api.loadViews(), partialList);
+
+  var e10 = makeApi(apiSrc);
+  e10.ls['bwn:config'] = '{not json';
+  e10.api.saveViews(partialList);
+  eq('saveViews: corrupt config is replaced with {views} (current behavior)', JSON.parse(e10.ls['bwn:config']), { views: partialList });
+  e10.ls['bwn:config'] = 'null';
+  e10.api.saveViews(partialList);
+  eq('saveViews: a null config is treated as {}', JSON.parse(e10.ls['bwn:config']), { views: partialList });
+
+  var bare = A.buildColumnsValue({}, ['Status']);
+  eq('buildColumnsValue: missing hiddenColumnNames is treated as []', bare.hiddenColumnNames,
+    ALL_IDS.filter(function (id) { return id !== 'statusId'; }));
+  eq('buildColumnsValue: missing columnWidths defaults to []', bare.columnWidths, []);
+  eq('buildColumnsValue: missing columnSorting defaults to []', bare.columnSorting, []);
+  var dup = A.buildColumnsValue({ hiddenColumnNames: ['future.x', 'future.x', 'phase'] }, ['Status']);
+  function count(arr, id) { return arr.filter(function (x) { return x === id; }).length; }
+  eq('buildColumnsValue: a twice-listed unknown id comes out once', count(dup.hiddenColumnNames, 'future.x'), 1);
+  eq('buildColumnsValue: an already-hidden unwanted mapped id is not duplicated', count(dup.hiddenColumnNames, 'phase'), 1);
+  eq('buildColumnsValue: an empty want list hides every mapped id', A.buildColumnsValue({}, []).hiddenColumnNames, ALL_IDS);
+
+  var ALL_TITLES_MAP_ORDER = Object.keys(A.NAME_MAP);
+  eq('titlesFromValue: null -> every title in map order', A.titlesFromValue(null), ALL_TITLES_MAP_ORDER);
+  eq('titlesFromValue: {} -> every title in map order', A.titlesFromValue({}), ALL_TITLES_MAP_ORDER);
+  eq('titlesFromValue: unknown hidden ids are ignored', A.titlesFromValue({ hiddenColumnNames: ['future.x'] }), ALL_TITLES_MAP_ORDER);
+
   return out;
 }
 
@@ -515,6 +558,12 @@ function expectRed(label, results) {
     await runCases(mutate(S_API, 'sessionStorage.removeItem(PENDING_KEY);   // remove BEFORE applying - no retry loops', '')));
   failures += expectRed('unmapped titles silently dropped',
     await runCases(mutate(S_API, "if (!id) throw new Error('unmapped column title: ' + t);", 'if (!id) return;')));
+  failures += expectRed('loadViews lets a non-array views value through',
+    await runCases(mutate(S_API, 'if (c && Array.isArray(c.views)) return c.views;', 'if (c && c.views) return c.views;')));
+  failures += expectRed('unknown hidden ids no longer de-duplicated',
+    await runCases(mutate(S_API, 'if (allIds.indexOf(id) === -1 && hidden.indexOf(id) === -1) hidden.push(id);', 'if (allIds.indexOf(id) === -1) hidden.push(id);')));
+  failures += expectRed('missing columnWidths no longer defaulted to []',
+    await runCases(mutate(S_API, 'if (!out.columnWidths) out.columnWidths = [];', '')));
 
   // Lifecycle mutation controls - BEHAVIORAL, run through the vm, because the
   // review proved shape pins alone let the nearest-neighbor bug (deleting the
