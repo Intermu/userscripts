@@ -181,8 +181,12 @@
         .replace(/\s+/g, ' ')
         .replace(/<br\s*\/?>/gi, '\n')
         .replace(/(?:\s*<\/(?:p|div|tr|li|h[1-6]|table|blockquote)>)+/gi, '\n')
-        .replace(/<\/t[dh]>/gi, ' ').replace(/<[^>]+>/g, '')
-        .replace(/&nbsp;/gi, ' ').replace(/&quot;/gi, '"').replace(/&#39;|&apos;/gi, "'")
+        .replace(/<\/t[dh]>/gi, ' ');
+      // Strip tags to a fixed point: one pass can leave a tag rebuilt from nested input
+      // ("<<b>script>"). The text is plain text from here on - textToHtml escapes it again.
+      var prev;
+      do { prev = s; s = s.replace(/<[^<>]*>/g, ''); } while (s !== prev);
+      s = s.replace(/&nbsp;/gi, ' ').replace(/&quot;/gi, '"').replace(/&#39;|&apos;/gi, "'")
         .replace(/&#(\d+);/g, function (m, d) { return String.fromCharCode(+d); })
         .replace(/&#x([0-9a-f]+);/gi, function (m, h) { return String.fromCharCode(parseInt(h, 16)); })
         .replace(/&lt;/gi, '<').replace(/&gt;/gi, '>').replace(/&amp;/gi, '&')

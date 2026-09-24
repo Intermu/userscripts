@@ -281,6 +281,9 @@ var outlook = '<html><head><style>p.MsoNormal{margin:0}</style></head><body><!--
 A.eq('<br><br> and an empty paragraph keep their blank line; the signature stays single-spaced',
   hapi.cleanBody(outlook, true),
   "Hey Martin,\n\nHope all is well.\n\nKind Regards,\nMike Najarro\nOperations Manager\nPhone: 1.631.737.3140\nTom & Jerry's <shop>");
+A.ok('a tag rebuilt from nested input is stripped too (fixed-point strip)',
+  !/<\s*script/i.test(hapi.cleanBody('<<b>script>alert(1)<</b>/script><p>ok</p>', true)),
+  JSON.stringify(hapi.cleanBody('<<b>script>alert(1)<</b>/script><p>ok</p>', true)));
 A.eq('two empty paragraphs keep two blank lines', hapi.cleanBody('<p>a</p><p>&nbsp;</p><p>&nbsp;</p><p>b</p>', true), 'a\n\n\nb');
 
 A.finish();
