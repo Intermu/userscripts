@@ -343,6 +343,31 @@ whether Suite Settings clears any keys).
   Client Profile Intake, Daily Ops Agenda) have empty paths and do not render. Copy context / Copy WO
   link write the same fields to the clipboard only.
 
+#### PO Approval observer measurement (2026-09-24)
+
+A temporary, local-only DevTools shadow observer sampled the same `document.body` child-list/subtree
+mutation scope as PO Approval's observer. It measured only aggregate selector-gate timing and numeric
+counters; it did not modify Core, inspect dialog text or field values, persist data, or send data off
+device. This is an investigation sample, not a Core performance benchmark.
+
+Across a Send PO modal scenario, 10 in-app work-order navigations, and a non-PO note-dialog scenario:
+
+- Gate cost was at or below 11.2 ms/min.
+- Maximum measured gate time was at or below 0.4 ms per callback.
+- Peak observed callback rate was 24 callbacks/sec.
+- The non-PO dialog path (`findSubject`-equivalent) was exercised and scanned about two fields per
+  relevant callback.
+
+These results are well below the Phase 3 investigation heuristics of about 20 ms/min aggregate gate
+work and 2 ms maximum callback cost. From current evidence, no PO Approval observer lifecycle,
+filtering, early-exit, route re-arm, or disconnect change is warranted. Re-measure if the observer's
+gate or the pages it runs on change materially.
+
+Measurement limits: browser timer resolution was about 0.1 ms; the shadow observer adds small bounded
+overhead and can conservatively overstate cost. A stable idle board/list scenario was not
+independently sampled, though the navigation sample passed through list views and remained
+inexpensive.
+
 ### 5.2 `permGate`
 `BWN-PERM` (~1824-1960) decodes `me{permissions}` once per session and publishes `bwn:perm:last`, the
 `bwn:perm` event (counts only), and `window.__bwnPerm`. Core is the **only producer**; 10 scripts carry
@@ -485,7 +510,9 @@ Required order. Each step lands and is green before the next one starts.
 ## Open items (not verified)
 
 - Exact fallback UX for each dock tool when Core is absent.
-- Per-module observer/timer teardown on route change.
+- Per-module observer/timer teardown on route change. (PO Approval observer *cost* is measured and
+  closed, see 5.1; route-safe cleanup/re-arm stays open only for a future, independently justified
+  change.)
 - Reinjection behavior for modules without a once-only flag.
 - Exact op names the bulk engines pass indirectly (beyond the literal call sites in 5.4).
 - Purposes of the prefixes listed at the end of 3.5.
