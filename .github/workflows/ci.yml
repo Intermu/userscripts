@@ -351,6 +351,11 @@ jobs:
       - name: PO API harness (purchaseOrders reader + parity log)
         run: node scripts/test-po-api.js
 
+      # bwnVendorTokens / bwnVendorMatch - the distinctive-token vendor matcher Leak Guard and PO
+      # Approval share. Characterizes current rules on synthetic data; sliced by declaration, no markers.
+      - name: Leak Guard vendor-matcher harness (distinctive-token rules)
+        run: node scripts/test-leak-guard-matcher.js
+
       # bwnGqlRead() - the classified GraphQL read envelope (kind / status / codes, never rejects) that
       # the PO shadow reader's give-up warn uses to tell auth-empty from schema drift from a dead
       # network. Fixture-driven: 200 data, 200 partial, 200 errors-only, 400 JSON, tokenless 500 HTML,
