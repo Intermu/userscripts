@@ -356,6 +356,11 @@ jobs:
       - name: Leak Guard vendor-matcher harness (distinctive-token rules)
         run: node scripts/test-leak-guard-matcher.js
 
+      # PO Approval poll lifecycle - schedule() / stopPoll() single-timer guard, stop on modal gone or
+      # buttons mounted, and the page-lifetime document.body observer. Characterizes current behavior.
+      - name: PO Approval poll-lifecycle harness (single timer + page-lifetime observer)
+        run: node scripts/test-po-approval-poll-lifecycle.js
+
       # bwnGqlRead() - the classified GraphQL read envelope (kind / status / codes, never rejects) that
       # the PO shadow reader's give-up warn uses to tell auth-empty from schema drift from a dead
       # network. Fixture-driven: 200 data, 200 partial, 200 errors-only, 400 JSON, tokenless 500 HTML,
