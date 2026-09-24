@@ -104,6 +104,9 @@ jobs:
       - name: Launcher dock latent-fix harness
         run: node scripts/test-dock-latent-fixes.js
 
+      - name: Launcher dock duplicate-key harness
+        run: node scripts/test-dock-dup-key.js
+
       - name: W-9 TIN region harness
         run: node scripts/test-w9-tin-region.js
 
@@ -347,6 +350,11 @@ jobs:
       # workOrder{purchaseOrders}) drifting or regressing.
       - name: PO API harness (purchaseOrders reader + parity log)
         run: node scripts/test-po-api.js
+
+      # bwnVendorTokens / bwnVendorMatch - the distinctive-token vendor matcher Leak Guard and PO
+      # Approval share. Characterizes current rules on synthetic data; sliced by declaration, no markers.
+      - name: Leak Guard vendor-matcher harness (distinctive-token rules)
+        run: node scripts/test-leak-guard-matcher.js
 
       # bwnGqlRead() - the classified GraphQL read envelope (kind / status / codes, never rejects) that
       # the PO shadow reader's give-up warn uses to tell auth-empty from schema drift from a dead
