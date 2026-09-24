@@ -157,7 +157,7 @@ A.ok('base64 body decoded', /Unit down - please expedite\./.test(b.body), JSON.s
 // content in the body, so lead with "<Responder>: <reply text>". Slices the real lead cluster.
 var LEAD = slice('function smtpAddr(', '// ---- Note Type from the email', 'emailLead cluster');
 var lapi = { String: String };
-vm.runInNewContext(LEAD + '\n;this.emailLead=emailLead;this.isReplyEmail=isReplyEmail;this.isForward=isForward;', lapi);
+vm.runInNewContext(LEAD + '\n;this.emailLead=emailLead;this.isReplyEmail=isReplyEmail;this.isForward=isForward;this.tidyBody=tidyBody;', lapi);
 
 console.log('# emailLead - original (no RE:) leads with the subject');
 var orig = { subject: 'FF62336 WO# 1135344-00000006 EMERGENCY', fromName: 'Jo Woods', fromEmail: 'jwoods@caleres.com', body: 'Thanks,\n\n\nJo Woods\nSpecialist, Store Maintenance | CALERES' };
@@ -187,5 +187,103 @@ A.ok('forward lead does NOT echo "Sent FW:"', !/Sent FW:/i.test(fl), JSON.string
 A.ok('forward lead reads the forwarded content (sender + tracking prose)',
   /^Power Play Service: /.test(fl) && /Tracking information is below/.test(fl) && !/^\s*From:/m.test(fl),
   JSON.stringify(fl));
+
+// ---- Thread cut: the note carries ONLY the dragged email, never the prior thread -----------
+// Reported live: a dropped reply put the whole chain into the WO note. Two causes, both pinned:
+//   1. an internal Outlook reply header reads "From: Name" with NO address, and the cut used to
+//      require one;
+//   2. cleanBody stripped every <...> from a text/plain .eml body, erasing "<addr>" from the quoted
+//      From: line, so even an external reply never cut.
+console.log('# tidyBody - cuts the quoted thread in every common shape');
+var NEW = 'We will be onsite Thursday at 9am.\n\nThanks,\nLisa';
+function cutOk(label, quoted) {
+  var out = lapi.tidyBody(NEW + '\n\n' + quoted);
+  A.ok(label + ': keeps the new message', /onsite Thursday at 9am\.[\s\S]*Lisa$/.test(out), JSON.stringify(out));
+  A.ok(label + ': drops the prior thread', !/OLD-THREAD/.test(out), JSON.stringify(out));
+}
+cutOk('internal Outlook header, no address',
+  '________________________________\nFrom: Najarro, Mike\nSent: Tuesday, September 23, 2026 3:14 PM\nTo: Porzelt, Lisa\nSubject: RE: WO 1135344\n\nOLD-THREAD can you confirm the ETA?');
+cutOk('external Outlook header with address',
+  'From: Jo Woods <jwoods@caleres.com>\nSent: Tuesday, September 23, 2026 3:14 PM\nTo: ops@broadwaynational.com\nSubject: WO 1135344\n\nOLD-THREAD original request');
+cutOk('bold *From:* header (HTML->text)',
+  '*From:* Jo Woods\n*Sent:* Tuesday, September 23, 2026 3:14 PM\n*To:* Ops\n*Subject:* WO 1135344\n\nOLD-THREAD');
+cutOk('-----Original Message-----', '-----Original Message-----\nOLD-THREAD from Jo');
+cutOk('Gmail "On ... wrote:"', 'On Tue, Sep 23, 2026 at 3:14 PM Jo Woods <jwoods@caleres.com> wrote:\n> OLD-THREAD');
+cutOk('Gmail "On ... wrote:" wrapped', 'On Tue, Sep 23, 2026 at 3:14 PM Jo Woods <\njwoods@caleres.com> wrote:\n> OLD-THREAD');
+var prose = 'Parts ship from: the Dallas warehouse.\nFrom: our side, nothing is outstanding.\nThanks';
+A.eq('prose starting a line with "From:" does NOT cut', lapi.tidyBody(prose), prose);
+A.ok('keepThread=true still keeps the thread (forward summaries)',
+  /OLD-THREAD/.test(lapi.tidyBody(NEW + '\n\nFrom: Najarro, Mike\nSent: Tue\nTo: Lisa\n\nOLD-THREAD', true)));
+
+console.log('# parseEml - a text/plain reply keeps the quoted <address> so the cut can see it');
+var threaded = api.parseEml([
+  'From: Lisa Porzelt <lporzelt@broadwaynational.com>', 'Subject: RE: WO 1135344',
+  'Content-Type: text/plain; charset="us-ascii"', '',
+  'Crew is booked for Thursday.', '', 'From: Jo Woods <jwoods@caleres.com>',
+  'Sent: Tuesday, September 23, 2026 3:14 PM', 'Subject: WO 1135344', '', 'OLD-THREAD request'
+].join(CRLF));
+A.ok('plain body keeps <jwoods@caleres.com>', /<jwoods@caleres\.com>/.test(threaded.body), JSON.stringify(threaded.body));
+A.eq('...and tidyBody cuts at it', lapi.tidyBody(threaded.body), 'Crew is booked for Thursday.');
+var htmlOnly = api.parseEml([
+  'From: Lisa <l@x.com>', 'Subject: RE: x', 'Content-Type: text/html; charset="us-ascii"', '',
+  '<html><body><p>Crew is booked.</p><div><b>From:</b> Jo Woods<br><b>Sent:</b> Tue<br><b>To:</b> Ops<br><b>Subject:</b> x</div><p>OLD-THREAD</p></body></html>'
+].join(CRLF));
+A.eq('an HTML-only reply keeps its lines, so the cut still fires', lapi.tidyBody(htmlOnly.body), 'Crew is booked.');
+
+console.log('# buildNoteText - capped at Umbrava\'s 4,000-character note limit');
+var NOTE = slice('var NOTE_CAP = 4000;', '  var MUT_ADD_NOTE', 'note cap') + slice('function buildNoteText(', '// ---- Umbrava upload dialog plumbing', 'buildNoteText');
+var napi = { String: String };
+vm.runInNewContext('function shortDate(){return "9/24";}\n' + NOTE + '\n;this.buildNoteText=buildNoteText;this.NOTE_CAP=NOTE_CAP;', napi);
+A.eq('cap is 4000', napi.NOTE_CAP, 4000);
+var big = napi.buildNoteText([{ isEmail: true, noteBlock: new Array(5001).join('x') }]);
+A.eq('a long note is cut to exactly 4000 incl. the ellipsis', big.length, 4000);
+A.ok('...ending in the ellipsis', /…$/.test(big));
+var small = napi.buildNoteText([{ isEmail: true, noteBlock: 'short note' }]);
+A.eq('a short note is untouched', small, 'short note');
+
+// ---- .msg HTML body: the note keeps the spacing the sender saw ------------------------------
+// Outlook's plain-text body (PR_BODY) puts a blank line after EVERY paragraph, so a single-spaced
+// signature landed double-spaced. The .msg's HTML body (usually only inside PR_RTF_COMPRESSED) is
+// the real layout. The end-to-end check ran by hand on a live Outlook .msg; these pin the pieces.
+var RTF = slice('  function asciiStr(', "  // The message's OWN body", 'rtf readers');
+var rapi = { Uint8Array: Uint8Array, DataView: DataView, String: String, TextDecoder: TextDecoder };
+vm.runInNewContext(RTF + '\n;this.rtfDecompress=rtfDecompress;this.rtfToHtml=rtfToHtml;', rapi);
+var HT = slice('function cleanBody(', '// .msg = OLE2/CFB', 'cleanBody');
+var hapi = { String: String, parseInt: parseInt };
+vm.runInNewContext(HT + '\n;this.cleanBody=cleanBody;', hapi);
+
+console.log('# rtfDecompress - MS-OXRTFCP LZFu + MELA');
+function hdr16(raw, type) { var h = Buffer.alloc(16); h.writeUInt32LE(0, 0); h.writeUInt32LE(raw, 4); h.write(type, 8, 'latin1'); return h; }
+// Hand-built per the spec: one back-reference into the 207-byte preamble ("{\rtf1" = offset 0,
+// length 6), four literals, then the end marker (a reference whose offset is the write position,
+// 207 + 10 = 217). Flag bits, low first: ref, lit, lit, lit, lit, ref = 0x21.
+var lz = Buffer.concat([hdr16(10, 'LZFu'), Buffer.from([0x21, 0x00, 0x04]), Buffer.from(' hi}', 'latin1'), Buffer.from([0x0D, 0x90])]);
+A.eq('LZFu: dictionary reference + literals + end marker', rapi.rtfDecompress(new Uint8Array(lz)), String.raw`{\rtf1 hi}`);
+var mela = Buffer.concat([hdr16(5, 'MELA'), Buffer.from('{abc}', 'latin1')]);
+A.eq('MELA: stored uncompressed', rapi.rtfDecompress(new Uint8Array(mela)), '{abc}');
+A.eq('an unknown compression type reads as nothing (PR_BODY fallback)', rapi.rtfDecompress(new Uint8Array(hdr16(4, 'XXXX'))), '');
+
+console.log('# rtfToHtml - RTF-encapsulated HTML (fromhtml1) back to the original HTML');
+var enc = String.raw`{\rtf1\ansi\ansicpg1252\fromhtml1 \deff0{\fonttbl{\f0\fswiss Arial;}}` +
+  String.raw`{\*\htmltag19 <html>}{\*\htmltag64 <p class=MsoNormal>}\htmlrtf {\htmlrtf0 Hey Martin,` +
+  String.raw`{\*\htmltag116 <br>}\htmlrtf \line\htmlrtf0 Caf\'e9 \{ok\}{\*\htmltag72 </p>}\htmlrtf \par}\htmlrtf0 ` +
+  String.raw`{\*\htmltag64 <p>}\u8212?done{\*\htmltag72 </p>}{\*\mhtmltag1 <img src="cid:x">}}`;
+A.eq('markup + text come back; RTF-only runs and mhtmltag dropped', rapi.rtfToHtml(enc),
+  '<html><p class=MsoNormal>Hey Martin,<br>Café {ok}</p><p>—done</p>');
+A.eq('a native RTF body (no fromhtml1) reads as nothing', rapi.rtfToHtml(String.raw`{\rtf1\ansi hello\par}`), '');
+
+console.log('# cleanBody(html) - Outlook HTML keeps its real line spacing');
+var outlook = '<html><head><style>p.MsoNormal{margin:0}</style></head><body><!--[if gte mso 9]><xml>junk</xml><![endif]-->\r\n' +
+  '<div class=WordSection1><p class=MsoNormal>Hey Martin,<br>\r\n<br>\r\nHope all is well.<o:p></o:p></p>' +
+  '<p class=MsoNormal><o:p>&nbsp;</o:p></p><div><div><p class=MsoNormal><b>Kind Regards,</b></p>' +
+  '<p class=MsoNormal><b>Mike Najarro</b></p><p class=MsoNormal>Operations Manager</p></div></div>' +
+  '<table><tr><td>Phone:</td><td>1.631.737.3140</td></tr></table><p>Tom &amp; Jerry&#39;s &lt;shop&gt;</p></div></body></html>';
+A.eq('<br><br> and an empty paragraph keep their blank line; the signature stays single-spaced',
+  hapi.cleanBody(outlook, true),
+  "Hey Martin,\n\nHope all is well.\n\nKind Regards,\nMike Najarro\nOperations Manager\nPhone: 1.631.737.3140\nTom & Jerry's <shop>");
+A.ok('a tag rebuilt from nested input is stripped too (fixed-point strip)',
+  !/<\s*script/i.test(hapi.cleanBody('<<b>script>alert(1)<</b>/script><p>ok</p>', true)),
+  JSON.stringify(hapi.cleanBody('<<b>script>alert(1)<</b>/script><p>ok</p>', true)));
+A.eq('two empty paragraphs keep two blank lines', hapi.cleanBody('<p>a</p><p>&nbsp;</p><p>&nbsp;</p><p>b</p>', true), 'a\n\n\nb');
 
 A.finish();

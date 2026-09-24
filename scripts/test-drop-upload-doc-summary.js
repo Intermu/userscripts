@@ -32,7 +32,7 @@ function slice(startNeedle, endNeedle, what) {
 // isPlainText + summarizableDoc + readers + extractDocText + oneLineClip + busSummarize + summarizeDocText
 var DOC = slice('function isPlainText(f) {', '  // Build per file: {kind, name, size', 'doc-summary helpers');
 // buildNoteText (+ NOTE_CAP).
-var NOTE = slice('var NOTE_CAP = 6000;', '// ---- Umbrava upload dialog plumbing', 'buildNoteText');
+var NOTE = slice('var NOTE_CAP = 4000;', '  var MUT_ADD_NOTE', 'note cap') + slice('function buildNoteText(', '// ---- Umbrava upload dialog plumbing', 'buildNoteText');
 
 // --- minimal document bus: synchronous dispatch, add/remove listener ---
 function makeDoc() {
