@@ -78,6 +78,8 @@ var S_API = slice(coreFull, "    var PREF_APP = 'bn-web-spa';", '    function sl
 var S_APPLY = slice(coreFull, '    var applying = false;', '    // ---- Post-reload continuation', 'applyView');
 var S_DOCK = slice(coreFull, '    // ---- Dock UI (v2.0: left of the list', '    // ---- Views lifecycle ---', 'ensureDock');
 var S_LIFE = slice(coreFull, '    // ---- Views lifecycle ---', '    resumePending().catch', 'lifecycle');
+// The shared suite-config block (cfg/cfgSave), same markers as test-client-profile.js.
+var S_CFG = slice(coreFull, '    var CFG_DEFAULTS = {', '    // ---- Per-client status/closeout config layer (T10)', 'CFG_DEFAULTS + cfg + cfgSave');
 
 function mutate(src, from, to) {
   var i = src.indexOf(from);
@@ -137,6 +139,24 @@ function makeApi(apiSrc) {
     sandbox, { filename: 'views-api.js' });
   env.api = api;
   return env;
+}
+
+// Real cfg()/cfgSave in their own vm, backed by the SAME env.ls object makeApi's
+// localStorage reads - so Views and suite config share one fake store.
+function makeCfg(cfgSrc, env) {
+  var sandbox = {
+    JSON: JSON, Object: Object, isFinite: isFinite,
+    localStorage: {
+      getItem: function (k) { return (k in env.ls) ? env.ls[k] : null; },
+      setItem: function (k, v) { env.ls[k] = String(v); },
+      removeItem: function (k) { delete env.ls[k]; }
+    },
+    document: { dispatchEvent: function () { } },
+    CustomEvent: function () { }
+  };
+  vm.createContext(sandbox);
+  return vm.runInContext('(function () {\n' + cfgSrc + '\nreturn { CFG_DEFAULTS: CFG_DEFAULTS, cfg: cfg, cfgSave: cfgSave };\n})()',
+    sandbox, { filename: 'cfg.js' });
 }
 
 function tick() { return new Promise(function (r) { setTimeout(r, 0); }); }
@@ -223,7 +243,8 @@ var ALL_TITLES = ['Label', 'Phase', 'WO #', 'Tracking #', 'Status', 'Asset', 'Pr
   'Scheduled Date', 'Type', 'Source Job #', 'Source PO #', 'Total Vendor NTE'];
 
 // ---- The cases ----------------------------------------------------------------
-async function runCases(apiSrc) {
+async function runCases(apiSrc, cfgSrc) {
+  cfgSrc = cfgSrc || S_CFG;
   var out = [];
   function ok(name, cond, detail) { out.push({ name: name, ok: !!cond, detail: detail }); }
   function eq(name, got, want) {
@@ -453,6 +474,32 @@ async function runCases(apiSrc) {
   eq('titlesFromValue: {} -> every title in map order', A.titlesFromValue({}), ALL_TITLES_MAP_ORDER);
   eq('titlesFromValue: unknown hidden ids are ignored', A.titlesFromValue({ hiddenColumnNames: ['future.x'] }), ALL_TITLES_MAP_ORDER);
 
+  // ---- bwn:config stamp mismatch (characterization) -----------------------
+  // Pins CURRENT normal-use behavior; it does NOT endorse losing views. saveViews
+  // writes no `v` stamp, cfg() only accepts `v === 1`, and cfgSave rewrites the
+  // whole blob - so a view saved before any settings save is silently dropped by
+  // the next one. An empty store is also the post-"Reset to defaults" state. These
+  // cases exist so a future fix starts from the measured behavior; changing the
+  // policy needs its own approval.
+  var stampView = { id: 'v1', name: 'Mine', value: '{"hiddenColumnNames":["phase"]}', assignee: null, savedAt: 1 };
+  var e11 = makeApi(apiSrc), c11 = makeCfg(cfgSrc, e11);
+  e11.api.saveViews([stampView]);
+  var afterView = JSON.parse(e11.ls['bwn:config']);
+  eq('stamp: saveViews on an empty store writes views only, no v stamp', afterView, { views: [stampView] });
+  c11.cfgSave({ targetGP: 40 });
+  eq('stamp: a later cfgSave drops the unstamped views (current data loss)', e11.api.loadViews(), []);
+  var afterCfg = JSON.parse(e11.ls['bwn:config']);
+  eq('stamp: and rewrites the blob as defaults + the partial + v:1',
+    Object.keys(afterCfg).sort(), Object.keys(c11.CFG_DEFAULTS).concat('v').sort());
+  ok('stamp: the setting itself lands', afterCfg.targetGP === 40 && afterCfg.v === 1, JSON.stringify(afterCfg));
+
+  var e12 = makeApi(apiSrc), c12 = makeCfg(cfgSrc, e12);
+  c12.cfgSave({ targetGP: 35 });   // a settings save FIRST stamps v:1
+  e12.api.saveViews([stampView]);
+  c12.cfgSave({ targetGP: 40 });
+  eq('stamp control: with v:1 already stored, cfgSave keeps the views', e12.api.loadViews(), [stampView]);
+  ok('stamp control: and the setting lands too', c12.cfg().targetGP === 40 && JSON.parse(e12.ls['bwn:config']).v === 1);
+
   return out;
 }
 
@@ -564,6 +611,10 @@ function expectRed(label, results) {
     await runCases(mutate(S_API, 'if (allIds.indexOf(id) === -1 && hidden.indexOf(id) === -1) hidden.push(id);', 'if (allIds.indexOf(id) === -1) hidden.push(id);')));
   failures += expectRed('missing columnWidths no longer defaulted to []',
     await runCases(mutate(S_API, 'if (!out.columnWidths) out.columnWidths = [];', '')));
+  failures += expectRed('cfg() accepts an unstamped blob - the stamp-mismatch loss disappears',
+    await runCases(S_API, mutate(S_CFG, "if (d && typeof d === 'object' && d.v === 1) out = d;", "if (d && typeof d === 'object') out = d;")));
+  failures += expectRed('cfgSave stops stamping v:1 - the stamped control loses its views',
+    await runCases(S_API, mutate(S_CFG, 'cur.v = 1;', '')));
 
   // Lifecycle mutation controls - BEHAVIORAL, run through the vm, because the
   // review proved shape pins alone let the nearest-neighbor bug (deleting the
