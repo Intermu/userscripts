@@ -104,6 +104,9 @@ jobs:
       - name: Launcher dock latent-fix harness
         run: node scripts/test-dock-latent-fixes.js
 
+      - name: Launcher dock duplicate-key harness
+        run: node scripts/test-dock-dup-key.js
+
       - name: W-9 TIN region harness
         run: node scripts/test-w9-tin-region.js
 
