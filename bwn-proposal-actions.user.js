@@ -1,10 +1,10 @@
 // ==UserScript==
 // @name         BWN Proposal Actions (Broadway National)
 // @namespace    broadwaynational.bwn
-// @version      0.7.9
+// @version      0.7.11
 // @downloadURL  https://raw.githubusercontent.com/Intermu/userscripts/main/bwn-proposal-actions.user.js
 // @updateURL    https://raw.githubusercontent.com/Intermu/userscripts/main/bwn-proposal-actions.user.js
-// @description  On a Client Proposal DETAILS page, a "Proposal Actions" dropdown runs the internal review workflow in one confirmed action: Approval / TSP Review / Kickback. Each posts a note to the Proposal + the Work Order, sets the WO status, completes open tasks, and files a new task (assigned to the WO coordinator, or Ronny Sharp for TSP). The posted note is an EDITABLE field seeded with the auto-generated text (Kickback's is drafted by the on-device browser AI) so the reviewer can add what they changed as coaching for the coordinator; a "changes since review opened" line (total + GP) is prepended automatically. When the job has more than one client proposal, the trigger shows the option count, a read-only "Compare proposals" view lists every alternative side by side, and the confirm dialog names the job, the exact proposal being acted on and its siblings (with an explicit acknowledgement). Completed actions are kept as a browser-local history (never synced, never an Umbrava status) shown in Compare and as a non-blocking warning on a repeat. Every write is shown in a confirm dialog first; nothing fires until Confirm. @grant none.
+// @description  On a Client Proposal DETAILS page, a "Proposal Actions" dropdown runs the internal review workflow in one confirmed action: Approval / TSP Review / Kickback. Each posts a note to the Proposal + the Work Order, sets the WO status, completes open tasks, and files a new task (assigned to the WO coordinator, or Ronny Sharp for TSP). The posted note is an EDITABLE field seeded with the auto-generated text (Kickback's is drafted by the on-device browser AI) so the reviewer can add what they changed as coaching for the coordinator; a "changes since review opened" line (total + GP) is prepended automatically. When the job has more than one client proposal, the trigger shows the option count, a read-only "Compare proposals" view lists every alternative side by side, and the confirm dialog names the job, the exact proposal being acted on and its siblings (with an explicit acknowledgement). Completed actions are kept as a browser-local history (never synced, never an Umbrava status) shown in Compare and as a non-blocking warning on a repeat. Opening an action only reads (proposal, work order, tasks) to prepare the confirm dialog; every change is listed there first, and no proposal or work-order change is submitted until Confirm. @grant none.
 // @match        https://app.umbrava.com/*
 // @match        https://*.umbrava.com/*
 // @run-at       document-idle
@@ -15,7 +15,7 @@
 (function () {
   'use strict';
 
-  var VER = '0.7.9';   // keep in step with @version
+  var VER = '0.7.11';   // keep in step with @version
   var DRY_RUN = false; // when true, every WRITE is console.logged instead of sent
   console.info('[BWN PROPOSAL ACTIONS] v' + VER + ' - Approval / TSP Review / Kickback workflow on the Client Proposal details page');
 
@@ -1220,6 +1220,7 @@
       '<div style="height:12px;"></div>' +
       '<div style="font-size:12px;color:#5b6b62;margin:0 0 4px;">This will:</div>' +
       '<ul class="steps">' + stepsHtml + '</ul>' +
+      '<div id="bwn-pa-runstat" aria-live="polite"></div>' +
       '</div>' +
       '<div class="ft"><button class="btn cancel" id="bwn-pa-cancel">Cancel</button>' +
       '<button class="btn go" id="bwn-pa-go">Confirm</button></div>';
@@ -1237,7 +1238,7 @@
     // reviewer ticks that this is the proposal they mean.
     var ack = card.querySelector('#bwn-pa-ack');
     var ackStopped = card.querySelector('#bwn-pa-ack-stopped');
-    var ctl = paConfirmController(plan, { goBtn: goBtn, cancelBtn: cancelBtn, noteTa: noteTa, ack: ack, ackStopped: ackStopped, stepEls: stepEls, card: card }, close);
+    var ctl = paConfirmController(plan, { goBtn: goBtn, cancelBtn: cancelBtn, noteTa: noteTa, ack: ack, ackStopped: ackStopped, stepEls: stepEls, card: card, status: card.querySelector('#bwn-pa-runstat') }, close);
     _paActiveCtl = ctl;
     overlay._paClose = close;
     [ack, ackStopped].forEach(function (a) {
@@ -1268,6 +1269,15 @@
     if (note) { var lb = li.querySelector('.lb'); if (lb) lb.innerHTML = lb.innerHTML.replace(/ <em>.*<\/em>/, '') + ' <em>' + escapeHtml(note) + '</em>'; }
   }
 
+  // The runner's own step marks (li.className) are the one progress record: '' = before any run,
+  // 'wait' = not started, 'run' = running, 'ok' = completed (run() resolved: change made, or a re-check found it in place), 'err' = failed.
+  // Retry resumes at the first step that is not 'ok'; the status line reads the same marks.
+  function paFirstUnfinished(stepEls, n) {
+    var i = 0;
+    while (i < n && stepEls[i] && stepEls[i].className === 'ok') i++;
+    return i;
+  }
+
   // Sequential runner. noteText (the operator's final, edited note) is threaded to each step's run.
   function runSteps(steps, noteText, stepEls) {
     var skipped = 0;
@@ -1275,15 +1285,15 @@
     // previous run) is not re-run, so a Retry after a mid-sequence failure does NOT re-post a note,
     // re-create the task, or re-set the status that already succeeded. First run: nothing is 'ok', so
     // idx stays 0 and behaviour is unchanged.
-    var idx = 0;
-    while (idx < steps.length && stepEls[idx] && stepEls[idx].className === 'ok') idx++;
+    var idx = paFirstUnfinished(stepEls, steps.length);
+    for (var w = idx; w < steps.length; w++) mark(stepEls[w], 'wait', '•', 'not started');
     function next() {
       if (idx >= steps.length) return Promise.resolve({ ok: true, skipped: skipped });
       var s = steps[idx];
       var li = stepEls[idx];
-      if (li) { var ic = li.querySelector('.ic'); if (ic) ic.textContent = '…'; }
+      mark(li, 'run', '…', 'running');
       return Promise.resolve().then(function () { return s.run(noteText); }).then(function () {
-        mark(li, 'ok', '✓');
+        mark(li, 'ok', '✓', 'completed');
         idx++; return next();
       }, function (err) {
         var msg = (err && err.message) || String(err);
@@ -1292,11 +1302,62 @@
           mark(li, 'skip', '⚠', 'skipped - not yet captured');
           idx++; return next();
         }
-        mark(li, 'err', '✗', msg);
+        mark(li, 'err', '✗', 'failed: ' + msg);
         return { ok: false, failedLabel: s.label, error: msg };
       });
     }
     return next();
+  }
+
+  // The dialog's persistent run-status line, built from the runner's marks above (no second tracker).
+  // phase: 'ready' | 'running' | 'failed' | 'done'; res = runSteps' result for 'failed' / 'done'.
+  // A failed request is reported as uncertain: it may or may not have reached Umbrava.
+  function paRunStatusHtml(phase, steps, stepEls, res) {
+    var n = steps.length;
+    function lbl(i) { return 'step ' + (i + 1) + ' (' + steps[i].label + ')'; }
+    if (phase === 'ready') {
+      return '<div class="note runstat-msg">' + escapeHtml('No proposal or work-order changes are submitted until you press Confirm. Cancel closes this dialog without submitting any.') + '</div>';
+    }
+    if (phase === 'running') {
+      return '<div class="note runstat-msg">' + escapeHtml('Running: steps run one at a time, in the order listed. Cancel is unavailable until this run stops.') + '</div>';
+    }
+    if (phase === 'done') {
+      var sk = (res && res.skipped) || 0;
+      return '<div class="note runstat-msg">' + escapeHtml((sk
+        ? (n - sk) + ' of ' + n + ' steps completed; ' + sk + ' step(s) skipped (not yet captured, not sent).'
+        : 'All ' + n + ' steps completed.') + ' A completed step either made its change or found it already in place.') + '</div>';
+    }
+    var completed = [], failedAt = -1;
+    for (var i = 0; i < n; i++) {
+      var c = stepEls[i] && stepEls[i].className;
+      if (c === 'ok') completed.push(i);
+      // 'run' = an unexpected stop left this step's request in flight: just as uncertain as a failure
+      else if ((c === 'err' || c === 'run') && failedAt < 0) failedAt = i;
+    }
+    var resume = paFirstUnfinished(stepEls, n);
+    var err = res && res.error ? ' (error: ' + res.error + ')' : '';
+    var lines = [
+      failedAt >= 0
+        ? 'This run stopped at ' + lbl(failedAt) + ', ' + (failedAt + 1) + ' of ' + n + '.'
+        : 'This run stopped unexpectedly' + err + '.',
+      completed.length
+        // 'ok' only means the step's run() resolved: it made its change, or a re-check found the change
+        // already in place (status, WO note, open tasks re-check before writing). Say exactly that.
+        ? 'Completed: ' + completed.map(lbl).join('; ') + '. A completed step either made its change or found it already in place.'
+        : 'No step completed.'
+    ];
+    if (failedAt >= 0) lines.push('The failed request may or may not have reached Umbrava' + err + '.');
+    if (resume < n) lines.push('Retry resumes at step ' + (resume + 1) + ' and does not repeat completed steps.' +
+      (failedAt >= 0 ? ' It sends step ' + (failedAt + 1) + ' again, so if that request did reach Umbrava it may be repeated.' : ''));
+    // res.stopRecord = paStopOnResult's outcome: 'fail' means no stopped-attempt record exists, so a new
+    // dialog has nothing to warn from - do not promise that it will.
+    lines.push('Cancel is available now: it stops this dialog from attempting further steps; it does not undo completed steps. ' +
+      (res && res.stopRecord === 'fail'
+        ? 'This browser could not save a stopped-attempt record, so a new dialog for this action will not warn that it may repeat steps.'
+        : 'If you start this action again in a new dialog, that dialog warns that it may repeat steps.'));
+    // No role="alert": the region is already aria-live="polite", and an alert inside it is read twice.
+    return '<div class="warn runstat-msg"><b>' + escapeHtml(lines[0]) + '</b>' +
+      lines.slice(1).map(function (t) { return '<div>' + escapeHtml(t) + '</div>'; }).join('') + '</div>';
   }
 
   // Confirm-dialog run lifecycle: ONE run at a time, and no dismissal while it is in flight. The steps
@@ -1312,6 +1373,9 @@
     var acks = [els.ack, els.ackStopped].filter(Boolean);
     function allAcked() { return acks.every(function (a) { return a.checked; }); }
     function setAcksDisabled(v) { acks.forEach(function (a) { a.disabled = v; }); }
+    // The persistent in-dialog status line (els.status, optional): the runner's marks, in words.
+    function setStatus(phase, res) { if (els.status) els.status.innerHTML = paRunStatusHtml(phase, plan.steps, els.stepEls, res); }
+    setStatus('ready');
     function unlockForRetry() {
       state = 'idle';
       cancelBtn.disabled = false;
@@ -1344,12 +1408,14 @@
       // Disabling the focused Confirm drops focus to <body>, outside the focus trap; park it on the
       // card so Tab stays contained while every control is disabled.
       if (els.card) { try { els.card.setAttribute('tabindex', '-1'); els.card.focus(); } catch (e) { } }
+      setStatus('running');
       return runSteps(plan.steps, noteText, els.stepEls).then(function (res) {
         // Stopped-attempt record: written on a stop, resolved on a full completion (never on cancel).
         var sw = paStopOnResult(plan, res, els.stepEls, Date.now());
         var swNote = sw === 'fail' ? ' (The stopped-attempt record could not be ' + (res.ok ? 'cleared' : 'saved') + ' in this browser.)' : '';
         if (res.ok) {
           state = 'done';
+          setStatus('done', res);
           goBtn.textContent = res.skipped ? 'Done (some pending)' : 'Done';
           // After the writes, never before; a failed history write never changes the outcome.
           var h = paHistOnResult(plan, noteText, res, Date.now());
@@ -1359,6 +1425,7 @@
           setTimeout(closeFn, res.skipped ? 4500 : 2200);
         } else {
           unlockForRetry();
+          setStatus('failed', { ok: false, error: res.error, stopRecord: sw });   // persistent; the toast below is only a courtesy
           paToast('Stopped at "' + res.failedLabel + '": ' + res.error + swNote);
         }
         return res;
@@ -1366,6 +1433,8 @@
         // runSteps itself never rejects; this only keeps an unexpected throw from leaving the
         // dialog locked in 'running' with no way to close or retry.
         if (state === 'running') unlockForRetry();
+        // a throw after Done must not turn a completed run's status into a failure/Retry message
+        if (state !== 'done') setStatus('failed', { ok: false, error: String((err && err.message) || err) });
         paToast('Run stopped unexpectedly: ' + ((err && err.message) || err));
         return { ok: false, error: String((err && err.message) || err) };
       });

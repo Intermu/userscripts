@@ -994,6 +994,172 @@ var RICH = [
   A.ok('findAnchor mentions Submit only to refuse a row that holds it', (faSrc.match(/\bSubmit\b/g) || []).length === 1 && /return rowHasSubmit \? null : comp;/.test(faSrc));
   A.ok('injectDropdown never references Submit and inserts AFTER the anchor', !/Submit/.test(injSrc) && (injSrc.match(/\.nextSibling\)/g) || []).length === 2 && !/insertBefore\((dd|existing), (anchor|late)\)/.test(injSrc));
 
+  // ---- in-dialog progress + failure status (0.7.10) ----------------------------------------------
+  // Drives the REAL runSteps + controller + paRunStatusHtml. The step marks (li.className + its <em>
+  // note) are the runner's own record; the status line is rendered from those same marks.
+  function stepState(li) { var m = /<em>(.*)<\/em>/.exec(li.querySelector('.lb').innerHTML); return li.className + ':' + (m ? m[1] : ''); }
+  function mkProgDialog(bx, runs, opts) {
+    opts = opts || {};
+    var calls = runs.map(function () { return 0; }), order = [];
+    var plan = mkPlan(bx, 'tsp', 'pa-prog-' + Math.random().toString(36).slice(2, 7), []);
+    var labels = ['Set WO status → Pending Trade Specialist', 'Add note to Proposal #901 Notes tab', 'Add note to Work Order W-123 notes', 'Complete 1 open task(s)', 'Create task for Ronny Sharp: TSP Review'];
+    plan.steps = runs.map(function (fn, i) {
+      return { key: STEP_KEYS[i], label: labels[i], run: function () { calls[i]++; order.push(i); return fn(); } };
+    });
+    var d = { plan: plan, calls: calls, order: order, closed: 0, goBtn: el(), cancelBtn: el({ textContent: 'Cancel' }),
+      noteTa: el({ value: 'TSP Review - note' }), ack: null, ackStopped: null, status: { innerHTML: '' },
+      stepEls: runs.map(function () { return fakeLi(); }) };
+    d.ctl = bx.paConfirmController(plan, d, function () { d.closed++; });
+    return d;
+  }
+  // Visible text of the status HTML: drop everything between '<' and '>' with a plain character walk
+  // (no tag-stripping regex; CodeQL flags that pattern even in tests). Test strings contain no entities.
+  function statusText(d) {
+    var h = d.status.innerHTML, out = '', inTag = false;
+    for (var ci = 0; ci < h.length; ci++) {
+      var ch = h.charAt(ci);
+      if (ch === '<') { inTag = true; out += ' '; } else if (ch === '>') { inTag = false; } else if (!inTag) { out += ch; }
+    }
+    return out.replace(/\s+/g, ' ').trim();
+  }
+
+  // before the run
+  var sP0 = mkStore(), bP0 = hload(sP0);
+  var dP0 = mkProgDialog(bP0, [okStep, okStep, okStep]);
+  A.ok('ready: no proposal / work-order CHANGES until Confirm (the dialog\'s own reads are not "nothing sent")', statusText(dP0) === 'No proposal or work-order changes are submitted until you press Confirm. Cancel closes this dialog without submitting any.');
+  A.eq('ready: steps carry no progress marks yet', dP0.stepEls.map(stepState), [':', ':', ':']);
+
+  // while running: running / not started, and Cancel is NOT offered
+  var holdP = deferred();
+  var sP1 = mkStore(), bP1 = hload(sP1);
+  var dP1 = mkProgDialog(bP1, [function () { return holdP.p; }, okStep, okStep]);
+  var runP1 = dP1.ctl.go();
+  await flush();
+  A.eq('running: current step "running", later steps "not started"', dP1.stepEls.map(stepState), ['run:running', 'wait:not started', 'wait:not started']);
+  A.ok('running: Cancel is stated as unavailable, never as safe', /Cancel is unavailable until this run stops\./.test(statusText(dP1)) && !/Cancel is available/.test(statusText(dP1)));
+  holdP.resolve(true);
+  await runP1;
+  A.eq('success: every step "completed"', dP1.stepEls.map(stepState), ['ok:completed', 'ok:completed', 'ok:completed']);
+  A.ok('success: status says all steps completed (made-it-or-found-it, not "sent")', statusText(dP1) === 'All 3 steps completed. A completed step either made its change or found it already in place.');
+  A.eq('success: steps sent once each, in plan order', dP1.order, [0, 1, 2]);
+  A.eq('success: one completed-history record, no stopped record', [stored(sP1).length, stoppedRecs(sP1).length], [1, 0]);
+
+  // failure before any step completed
+  var sP2 = mkStore(), bP2 = hload(sP2);
+  var dP2 = mkProgDialog(bP2, [failN(1), okStep, okStep]);
+  var resP2 = await dP2.ctl.go();
+  var tP2 = statusText(dP2);
+  A.ok('first-step failure returns the unchanged runner result', resP2.ok === false && resP2.error === 'HTTP 500' && resP2.failedLabel === 'Set WO status → Pending Trade Specialist');
+  A.eq('first-step failure: failed step marked, later steps "not started"', dP2.stepEls.map(stepState), ['err:failed: HTTP 500', 'wait:not started', 'wait:not started']);
+  A.ok('names the failed step and its position', tP2.indexOf('This run stopped at step 1 (Set WO status → Pending Trade Specialist), 1 of 3.') === 0);
+  A.ok('says no step completed', tP2.indexOf('No step completed.') !== -1);
+  A.ok('failed request is uncertain: may or may not have reached Umbrava', tP2.indexOf('The failed request may or may not have reached Umbrava (error: HTTP 500).') !== -1);
+  A.ok('says where Retry resumes, and that it re-sends the uncertain failed step', tP2.indexOf('Retry resumes at step 1 and does not repeat completed steps. It sends step 1 again, so if that request did reach Umbrava it may be repeated.') !== -1);
+  A.ok('Cancel: available now, stops further steps, does NOT undo completed ones, points to the new-dialog warning', tP2.indexOf('Cancel is available now: it stops this dialog from attempting further steps; it does not undo completed steps. If you start this action again in a new dialog, that dialog warns that it may repeat steps.') !== -1);
+  A.ok('Cancel text makes no "safe" / "nothing sent" claim', !/safe|sends nothing|nothing more/i.test(tP2));
+  A.ok('failure message is persistent in the dialog, not only a toast', tP2.indexOf('This run stopped at') === 0 && bP2.toasts.some(function (t) { return /^Stopped at/.test(t); }));
+  A.ok('failure message carries no nested role (the aria-live="polite" region announces it once)', !/role=/.test(dP2.status.innerHTML));
+
+  // failure after completed steps, then Retry
+  var sP3 = mkStore(), bP3 = hload(sP3);
+  var dP3 = mkProgDialog(bP3, [okStep, okStep, failN(1)]);
+  await dP3.ctl.go();
+  var tP3 = statusText(dP3);
+  A.eq('later failure: completed / failed marks', dP3.stepEls.map(stepState), ['ok:completed', 'ok:completed', 'err:failed: HTTP 500']);
+  A.ok('lists exactly the steps the runner saw complete', tP3.indexOf('Completed: step 1 (Set WO status → Pending Trade Specialist); step 2 (Add note to Proposal #901 Notes tab). A completed step either made its change or found it already in place.') !== -1);
+  A.ok('completed steps are not described as successful requests or sent writes', !/requests? succeed|write was sent|writes? sent/i.test(tP3));
+  A.ok('completed list and failed step are distinct (failed step not listed as completed)', !/Completed[^.]*step 3/.test(tP3) && tP3.indexOf('This run stopped at step 3 (Add note to Work Order W-123 notes), 3 of 3.') === 0);
+  A.ok('never claims the failed request did or did not arrive', !/did not reach|didn't reach|was not sent|definitely|was saved|reached Umbrava\./i.test(tP3.replace('may or may not have reached Umbrava', '')));
+  A.ok('Retry resumes at the failed step', tP3.indexOf('Retry resumes at step 3 and does not repeat completed steps. It sends step 3 again, so if that request did reach Umbrava it may be repeated.') !== -1);
+  A.eq('stopped-attempt storage unchanged: done = the completed steps, failed = the failed one', [stoppedRecs(sP3)[0].done, stoppedRecs(sP3)[0].failed], [['status', 'proposalNote'], 'woNote']);
+  var retryP3 = dP3.ctl.go();
+  A.ok('Retry: status switches back to running (Cancel unavailable)', /Cancel is unavailable until this run stops\./.test(statusText(dP3)));
+  await retryP3;
+  A.eq('Retry re-sends only the failed step, in order', [dP3.calls, dP3.order], [[1, 1, 2], [0, 1, 2, 2]]);
+  A.eq('Retry: all steps completed', dP3.stepEls.map(stepState), ['ok:completed', 'ok:completed', 'ok:completed']);
+  A.ok('Retry: status replaced by the completion line (no stale failure text)', statusText(dP3) === 'All 3 steps completed. A completed step either made its change or found it already in place.');
+  A.eq('Retry: one history record, stopped record resolved', [stored(sP3).length, stoppedRecs(sP3).length], [1, 0]);
+
+  // done with a skipped (not-yet-captured) step: never "All N completed"
+  var sP5 = mkStore(), bP5 = hload(sP5);
+  var dP5 = mkProgDialog(bP5, [okStep, function () { return Promise.reject(new Error('NOT_PINNED: x')); }, okStep]);
+  var resP5 = await dP5.ctl.go();
+  A.ok('skip: runner result unchanged (ok, skipped 1)', resP5.ok === true && resP5.skipped === 1);
+  A.eq('skip: done text counts only completed steps and names the skip as not sent', statusText(dP5), '2 of 3 steps completed; 1 step(s) skipped (not yet captured, not sent). A completed step either made its change or found it already in place.');
+
+  // stopped-attempt record could NOT be saved: the status must not promise a new-dialog warning
+  var sP6 = mkStore(null, { throwSet: true }), bP6 = hload(sP6);
+  var dP6 = mkProgDialog(bP6, [okStep, failN(1)]);
+  var resP6 = await dP6.ctl.go();
+  var tP6 = statusText(dP6);
+  A.ok('record-save failure: runner result still unchanged', resP6.ok === false && resP6.error === 'HTTP 500' && !('stopRecord' in resP6));
+  A.ok('record-save failure: says a new dialog will NOT warn', tP6.indexOf('This browser could not save a stopped-attempt record, so a new dialog for this action will not warn that it may repeat steps.') !== -1 && tP6.indexOf('that dialog warns that it may repeat steps') === -1);
+  A.ok('record-save failure: Cancel still does not undo completed steps', tP6.indexOf('it does not undo completed steps.') !== -1);
+
+  // unexpected stop with a step left in flight ('run'): same uncertainty as a failure
+  var liRun = [fakeLi(), fakeLi()]; liRun[0].className = 'ok'; liRun[1].className = 'run';
+  var tRun = bP6.paRunStatusHtml('failed', [{ label: 'A' }, { label: 'B' }], liRun, { ok: false, error: 'boom' });
+  A.ok('unexpected stop mid-step: names the in-flight step and keeps it uncertain', tRun.indexOf('This run stopped at step 2 (B), 2 of 2.') !== -1 && tRun.indexOf('may or may not have reached Umbrava (error: boom).') !== -1);
+
+  // a throw AFTER Done (post-run bookkeeping) must not replace the completion text with Retry/Cancel text
+  var sP7 = mkStore(), bP7 = hload(sP7);
+  bP7.paHistOnResult = function () { throw new Error('late'); };
+  var dP7 = mkProgDialog(bP7, [okStep]);
+  await dP7.ctl.go();
+  A.ok('throw after Done: the late throw really reached the catch', bP7.toasts.some(function (t) { return /^Run stopped unexpectedly: late/.test(t); }));
+  A.ok('throw after Done: state stays done and the status keeps the completion line', dP7.ctl.state() === 'done' && /^All 1 steps completed\./.test(statusText(dP7)) && statusText(dP7).indexOf('Retry') === -1);
+
+  // a step completed through its already-done re-check: the REAL buildStatusStep finds the WO already
+  // at the target status and writes nothing - the runner still marks it completed, and the status line
+  // must not claim a write happened
+  var reWrites = 0, reReads = 0;
+  var bRe = load(READS + RUNNER + DISPLAY + sliceFn(full, 'function buildStatusStep(ctx, statusName)'), {}, {
+    localStorage: mkStore(), paToast: function () { }, woNumberFromUrl: function () { return 123; }, proposalIdFromUrl: function () { return 901; }, setTimeout: function () { },
+    readWO: function () { reReads++; return Promise.resolve({ statusName: 'Pending Trade Specialist' }); },
+    readStatusId: function () { return Promise.resolve(232); },
+    setStatus: function () { reWrites++; return Promise.resolve(true); }
+  });
+  var dRe = mkProgDialog(bRe, [okStep, failN(1)]);
+  var realStatus = bRe.buildStatusStep(dRe.plan.ctx, 'Pending Trade Specialist');
+  dRe.plan.steps[0] = { key: 'status', label: realStatus.label, run: function () { dRe.calls[0]++; dRe.order.push(0); return realStatus.run(); } };
+  await dRe.ctl.go();
+  var tRe = statusText(dRe);
+  A.eq('already-done re-check: the status step read the WO and wrote nothing', [reReads, reWrites], [1, 0]);
+  A.eq('already-done re-check: the runner still marks it completed', stepState(dRe.stepEls[0]), 'ok:completed');
+  A.ok('already-done re-check: listed as completed with the made-it-or-found-it wording, no write claimed', tRe.indexOf('Completed: step 1 (Set WO status → Pending Trade Specialist). A completed step either made its change or found it already in place.') !== -1 && !/requests? succeed|write was sent/i.test(tRe));
+  A.ok('...and the next step\'s failure stays uncertain', tRe.indexOf('The failed request may or may not have reached Umbrava (error: HTTP 500).') !== -1);
+  var reWrites2 = 0;
+  var bRe2 = load(READS + RUNNER + DISPLAY + sliceFn(full, 'function buildStatusStep(ctx, statusName)'), {}, {
+    localStorage: mkStore(), paToast: function () { }, woNumberFromUrl: function () { return 123; }, proposalIdFromUrl: function () { return 901; }, setTimeout: function () { },
+    readWO: function () { return Promise.resolve({ statusName: 'Proposal Review' }); },
+    readStatusId: function () { return Promise.resolve(232); },
+    setStatus: function () { reWrites2++; return Promise.resolve(true); }
+  });
+  var dRe2 = mkProgDialog(bRe2, [okStep]);
+  var realStatus2 = bRe2.buildStatusStep(dRe2.plan.ctx, 'Pending Trade Specialist');
+  dRe2.plan.steps[0] = { key: 'status', label: realStatus2.label, run: function () { return realStatus2.run(); } };
+  await dRe2.ctl.go();
+  A.ok('same step when the status differs: it writes once, and is marked completed the same way', reWrites2 === 1 && stepState(dRe2.stepEls[0]) === 'ok:completed');
+
+  // the current-dialog failure message stays distinct from the stopped-attempt warning
+  A.ok('failure message does not reuse the stopped-attempt wording', tP2.indexOf('Stopped attempt (this browser)') === -1 && tP3.indexOf('Stopped attempt (this browser)') === -1);
+  var sP4 = mkStore(), bP4 = hload(sP4);
+  await mkProgDialog(bP4, [okStep, failN(1)]).ctl.go();
+  var nextDialog = mkStopDialog(bP4, 'tsp', 901, [okStep], true);
+  var sumP4 = bP4.confirmSummaryHtml(nextDialog.plan);
+  A.ok('a NEW dialog still shows the stopped-attempt warning + its own acknowledgement, not the run-status text', /Stopped attempt \(this browser\)/.test(sumP4) && /id="bwn-pa-ack-stopped"/.test(sumP4) && sumP4.indexOf('Retry resumes') === -1 && sumP4.indexOf('This run stopped at') === -1);
+
+  // negative control: the resume point is shared; breaking it re-sends a completed step
+  var RUN_NORESUME = mutate(RUNNER, "while (i < n && stepEls[i] && stepEls[i].className === 'ok') i++;", '');
+  var bNR = load(READS + RUN_NORESUME + DISPLAY, {}, { localStorage: mkStore(), paToast: function () { }, woNumberFromUrl: function () { return 123; }, proposalIdFromUrl: function () { return 901; }, setTimeout: function () { } });
+  var dNR = mkProgDialog(bNR, [okStep, failN(1)]);
+  await dNR.ctl.go(); await dNR.ctl.go();
+  A.ok('CONTROL: without the shared resume point, Retry re-sends the completed step', dNR.calls[0] === 2);
+
+  // wiring: one status element, written only by the controller from the runner's marks
+  A.ok('dialog renders one polite live status element and passes it to the controller', (full.match(/id="bwn-pa-runstat"/g) || []).length === 1 && /status: card\.querySelector\('#bwn-pa-runstat'\)/.test(full));
+  A.ok('runSteps and the status line share one resume computation', /var idx = paFirstUnfinished\(stepEls, steps\.length\);/.test(full) && /var resume = paFirstUnfinished\(stepEls, n\);/.test(full) && !/while \(idx < steps\.length && stepEls\[idx\]/.test(full));
+
   // ---- source-level wiring -----------------------------------------------------------------
   A.eq('history is written from exactly one place (the Confirm success branch)', (full.match(/paHistOnResult\(plan, noteText, res, Date\.now\(\)\)/g) || []).length, 1);
   A.ok('history write sits inside the res.ok branch', /if \(res\.ok\) \{[^}]*paHistOnResult\(/.test(full));
