@@ -636,6 +636,15 @@ jobs:
       - name: "Proposal Actions live-resolve harness (RM-A3: status id + TSP assignee, fail-closed)"
         run: node scripts/test-pa-live-resolve.js
 
+      # Multiple proposals per job (bwn-proposal-actions 0.7.0): slices PA-SIBLINGS + readTotals and pins
+      # the sibling read (extended fields, fallback to the live-proven set, sortBy on both), canceled =
+      # not an option, the acknowledgement rule (several options / id missing / truncated / unreadable),
+      # and that readTotals never borrows a sibling's total. 0.7.1 adds the browser-local action history
+      # (one record per completed run via the real runSteps, dedup, retention, corrupt/blocked storage,
+      # Local record rendering, non-blocking confirm warning). Negative controls turn it red.
+      - name: Proposal Actions multi-proposal harness (sibling read, acknowledgement, no sibling total)
+        run: node scripts/test-pa-multi-proposal.js
+
       # Track C write-back DRAIN half (bwn-write-queue.user.js): the coordinator's-tab executor that
       # claims a queued command from /api/wo-write-queue, confirms it, and turns it into a real
       # patchWorkOrder / addEditJobNote write. Slices the exec block into a vm with an injected gql and

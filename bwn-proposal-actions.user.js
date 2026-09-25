@@ -1,10 +1,10 @@
 // ==UserScript==
 // @name         BWN Proposal Actions (Broadway National)
 // @namespace    broadwaynational.bwn
-// @version      0.6.2
+// @version      0.7.9
 // @downloadURL  https://raw.githubusercontent.com/Intermu/userscripts/main/bwn-proposal-actions.user.js
 // @updateURL    https://raw.githubusercontent.com/Intermu/userscripts/main/bwn-proposal-actions.user.js
-// @description  On a Client Proposal DETAILS page, a "Proposal Actions" dropdown runs the internal review workflow in one confirmed action: Approval / TSP Review / Kickback. Each posts a note to the Proposal + the Work Order, sets the WO status, completes open tasks, and files a new task (assigned to the WO coordinator, or Ronny Sharp for TSP). The posted note is an EDITABLE field seeded with the auto-generated text (Kickback's is drafted by the on-device browser AI) so the reviewer can add what they changed as coaching for the coordinator; a "changes since review opened" line (total + GP) is prepended automatically. Every write is shown in a confirm dialog first; nothing fires until Confirm. @grant none.
+// @description  On a Client Proposal DETAILS page, a "Proposal Actions" dropdown runs the internal review workflow in one confirmed action: Approval / TSP Review / Kickback. Each posts a note to the Proposal + the Work Order, sets the WO status, completes open tasks, and files a new task (assigned to the WO coordinator, or Ronny Sharp for TSP). The posted note is an EDITABLE field seeded with the auto-generated text (Kickback's is drafted by the on-device browser AI) so the reviewer can add what they changed as coaching for the coordinator; a "changes since review opened" line (total + GP) is prepended automatically. When the job has more than one client proposal, the trigger shows the option count, a read-only "Compare proposals" view lists every alternative side by side, and the confirm dialog names the job, the exact proposal being acted on and its siblings (with an explicit acknowledgement). Completed actions are kept as a browser-local history (never synced, never an Umbrava status) shown in Compare and as a non-blocking warning on a repeat. Every write is shown in a confirm dialog first; nothing fires until Confirm. @grant none.
 // @match        https://app.umbrava.com/*
 // @match        https://*.umbrava.com/*
 // @run-at       document-idle
@@ -15,7 +15,7 @@
 (function () {
   'use strict';
 
-  var VER = '0.6.2';   // keep in step with @version
+  var VER = '0.7.9';   // keep in step with @version
   var DRY_RUN = false; // when true, every WRITE is console.logged instead of sent
   console.info('[BWN PROPOSAL ACTIONS] v' + VER + ' - Approval / TSP Review / Kickback workflow on the Client Proposal details page');
 
@@ -235,12 +235,275 @@
     }).catch(function () {
       return paGql('PA_List', Q_LIST, { j: jobId }).then(function (d) {
         var items = (d && d.listClientProposals && d.listClientProposals.items) || [];
-        var it = items.filter(function (x) { return x.id === proposalId; })[0] || items[0];
-        if (!it || !it.total) throw new Error('could not read proposal total');
+        // Match by id ONLY. The old `|| items[0]` fell back to whichever proposal sorted first, so on a
+        // job with several alternatives the note could carry a SIBLING's total and GP.
+        var it = items.filter(function (x) { return x.id === proposalId; })[0];
+        if (!it || !it.total) throw new Error('could not read the total for proposal #' + proposalId);
         return { total: it.total, gpPct: toGpNumber(it.grossProfitPercent) };
       });
     });
   }
+
+  // ===== PA-SIBLINGS START (sliced by scripts/test-pa-multi-proposal.js; references injected paGql / money / toGpNumber) =====
+  // A job can carry several client proposals that are alternatives for the same work. The workflow
+  // always acts on the proposal in the URL; these helpers read its siblings so the reviewer can compare
+  // them and the confirm dialog names exactly which one is being acted on. The extended field list is
+  // the PagedClientProposals schema (vault umbrava-graphql-operations); if the server refuses it, the
+  // read falls back to the fields this suite already reads live (PA_List + Core's terminal dates) and
+  // every field it could not read shows as "not available" rather than a guess.
+  var PA_SIB_ARGS = 'jobId: $j, page: { skip: 0, take: 50 }, sortBy: [{ columnName: "id", direction: DESC }]';
+  var Q_SIBLINGS = 'query PA_Siblings($j: Int!){ listClientProposals(' + PA_SIB_ARGS + '){ rowCount items { id number description created submittedDate approvedDate rejectedDate canceledDate isSubmitted createdByMemberName status { name } type { name } total { amount currency precision } vendorCost { amount currency precision } grossProfitPercent } } }';
+  var Q_SIBLINGS_MIN = 'query PA_SiblingsMin($j: Int!){ listClientProposals(' + PA_SIB_ARGS + '){ rowCount items { id approvedDate rejectedDate canceledDate total { amount currency precision } grossProfitPercent } } }';
+  function proposalRow(it) {
+    it = it || {};
+    var derived = it.canceledDate ? 'Canceled' : it.rejectedDate ? 'Rejected' : it.approvedDate ? 'Approved'
+      : (it.isSubmitted === true || it.submittedDate) ? 'Submitted' : (it.isSubmitted === false ? 'Draft' : '');
+    return {
+      id: it.id,
+      // Umbrava's visible per-job proposal number (#1, #2...). Live-verified 2026-09-25 to equal the '#'
+      // column for W-397334 / W-395613. DISPLAY ONLY - every lookup, URL and write keys on id.
+      number: isPosInt(it.number) ? it.number : null,
+      title: it.description || '',
+      type: (it.type && it.type.name) || '',
+      status: (it.status && it.status.name) || derived,
+      canceled: !!it.canceledDate,
+      total: (it.total && it.total.amount != null) ? money(it.total) : '',
+      gpPct: toGpNumber(it.grossProfitPercent),
+      vendorCost: (it.vendorCost && it.vendorCost.amount != null) ? money(it.vendorCost) : '',
+      created: it.created || '',
+      submitted: it.submittedDate || '',
+      createdBy: it.createdByMemberName || ''
+    };
+  }
+  function readJobProposals(jobId) {
+    function shape(d, partial) {
+      var l = (d && d.listClientProposals) || {};
+      var rows = (l.items || []).map(proposalRow);
+      return { rows: rows, rowCount: (typeof l.rowCount === 'number') ? l.rowCount : rows.length, partial: partial };
+    }
+    return paGql('PA_Siblings', Q_SIBLINGS, { j: jobId }).then(function (d) { return shape(d, false); }, function () {
+      return paGql('PA_SiblingsMin', Q_SIBLINGS_MIN, { j: jobId }).then(function (d) { return shape(d, true); });
+    });
+  }
+  // Canceled proposals are history, not options: they are listed in Compare but not counted.
+  function liveOptions(rows) { return (rows || []).filter(function (r) { return !r.canceled; }); }
+  // What the confirm dialog needs to know about the proposal being acted on and its siblings.
+  // sib = readJobProposals() result, or null when that read failed. needsAck is true whenever the
+  // reviewer could be looking at the wrong alternative: several live options, the acted-on proposal
+  // missing from the list, or the list unreadable (fail toward the extra check, never away from it).
+  function siblingContext(sib, pid) {
+    if (!sib) return { known: false, selected: null, others: [], count: null, needsAck: true };
+    var selected = sib.rows.filter(function (r) { return r.id === pid; })[0] || null;
+    var others = sib.rows.filter(function (r) { return r.id !== pid; });
+    var count = liveOptions(sib.rows).length;
+    return { known: true, selected: selected, others: others, count: count,
+      needsAck: count > 1 || !selected || sib.rowCount > sib.rows.length };
+  }
+  // ===== PA-SIBLINGS END =====
+
+  // ===== PA-HISTORY START (sliced by scripts/test-pa-multi-proposal.js; references injected localStorage / escapeHtml) =====
+  // Browser-local record of Proposal Actions that COMPLETED here, so a reviewer can see which
+  // alternative on a job was already acted on. Umbrava keeps Approval / Kickback / TSP only as the
+  // job-level WO status, so it cannot say which proposal they were for. This is a safety aid, never a
+  // status: it is not synced, not sent anywhere, and never feeds an outgoing request. Same storage
+  // convention as the bwn:audit ring (localStorage, KEY / MAX / SCHEMA constants), under its own key.
+  var PA_HIST_KEY = 'bwn:pa:history', PA_HIST_SCHEMA = 1;
+  var PA_HIST_MAX = 300;                          // newest records kept, all jobs together
+  var PA_HIST_MAX_AGE_MS = 180 * 24 * 3600 * 1000; // records older than 180 days are pruned
+  var PA_HIST_NOTE_MAX = 1000;                    // chars of the posted note kept
+  var PA_HIST_KINDS = {
+    approval: { row: 'Marked good to submit', verb: 'marked good to submit (Approval)' },
+    kickback: { row: 'Kicked back', verb: 'kicked back' },
+    tsp: { row: 'Sent to TSP', verb: 'sent to TSP' }
+  };
+  function isPosInt(v) { return typeof v === 'number' && v > 0 && Math.floor(v) === v; }
+  // Stored data is untrusted: anything not exactly our v1 shape is dropped, not repaired.
+  // ponytail: a record from a NEWER schema is dropped too (and gone on the next write); add a
+  // pass-through for schema > PA_HIST_SCHEMA when a v2 actually ships.
+  function paHistValid(r) {
+    return !!r && typeof r === 'object' && r.schema === PA_HIST_SCHEMA && r.localOnly === true &&
+      typeof r.id === 'string' && isPosInt(r.n) && isPosInt(r.pid) && PA_HIST_KINDS.hasOwnProperty(r.kind) &&
+      typeof r.ts === 'string' && !isNaN(Date.parse(r.ts));
+  }
+  // -> { records, error }  error: '' | 'unavailable' | 'corrupt'. Never throws.
+  function paHistLoad() {
+    var raw;
+    try { raw = localStorage.getItem(PA_HIST_KEY); } catch (e) { return { records: [], error: 'unavailable' }; }
+    if (raw == null) return { records: [], error: '' };
+    try {
+      var a = JSON.parse(raw);
+      if (!Array.isArray(a)) return { records: [], error: 'corrupt' };
+      return { records: a.filter(paHistValid), error: '' };
+    } catch (e) { return { records: [], error: 'corrupt' }; }
+  }
+  function paHistPrune(records, nowMs) {
+    return records.filter(function (r) { return nowMs - Date.parse(r.ts) <= PA_HIST_MAX_AGE_MS; })
+      .sort(function (a, b) { return Date.parse(b.ts) - Date.parse(a.ts); })
+      .slice(0, PA_HIST_MAX);
+  }
+  // Newest first, for one job + proposal.
+  function paHistFor(records, n, pid) {
+    return records.filter(function (r) { return r.n === n && r.pid === pid; })
+      .sort(function (a, b) { return Date.parse(b.ts) - Date.parse(a.ts); });
+  }
+  // The one write. Only this key is touched. -> 'ok' | 'dup' | 'fail'. Never throws.
+  function paHistAppend(rec, nowMs) {
+    try {
+      if (!paHistValid(rec)) return 'fail';
+      var cur = paHistLoad();
+      if (cur.error === 'unavailable') return 'fail';
+      if (cur.records.some(function (r) { return r.id === rec.id; })) return 'dup';
+      localStorage.setItem(PA_HIST_KEY, JSON.stringify(paHistPrune(cur.records.concat([rec]), nowMs)));
+      return 'ok';
+    } catch (e) { return 'fail'; }   // quota, blocked storage
+  }
+  // Called with runSteps' result. Records ONLY a fully completed run: ok, nothing skipped. The id is
+  // the confirm dialog's run id, so a Retry inside the same dialog that finally succeeds writes one
+  // record, and a second completion callback for the same run is a 'dup'. A new dialog is a new run,
+  // so a legitimate repeat action is recorded separately.
+  // -> 'none' (not complete) | 'ok' | 'dup' | 'fail'
+  function paHistOnResult(plan, noteText, res, nowMs) {
+    var c = plan && plan.ctx;
+    if (!res || !res.ok || res.skipped || !c || !plan.runId || !PA_HIST_KINDS.hasOwnProperty(plan.kind)) return 'none';
+    var sel = null;
+    try { sel = siblingContext(c.siblings, c.pid).selected; } catch (e) { sel = null; }
+    try {
+      return paHistAppend({
+      schema: PA_HIST_SCHEMA, localOnly: true, id: plan.runId,
+      ts: new Date(nowMs).toISOString(), kind: plan.kind, n: c.n, pid: c.pid,
+      title: (sel && sel.title) || '',           // only the acted-on proposal's own row
+      total: c.total || '',                      // readTotals matched this pid (no sibling fallback)
+      gpPct: (typeof c.gpPct === 'number' && !isNaN(c.gpPct)) ? c.gpPct : null,
+      note: String(noteText || '').slice(0, PA_HIST_NOTE_MAX)
+      }, nowMs);
+    } catch (e) { return 'fail'; }
+  }
+  function paHistWhen(r) {
+    try {
+      return new Date(r.ts).toLocaleString('en-US', { month: 'short', day: 'numeric', year: 'numeric', hour: 'numeric', minute: '2-digit' });
+    } catch (e) { return String(r.ts); }
+  }
+  function paHistLine(r) { return 'Local record: ' + PA_HIST_KINDS[r.kind].row + ' · ' + paHistWhen(r); }
+  // Compare-view cell: newest record, plus a native disclosure with the rest.
+  function paHistCellHtml(recs) {
+    if (!recs || !recs.length) return '<span class="na">none in this browser</span>';
+    var html = escapeHtml(paHistLine(recs[0]));
+    if (recs.length > 1) {
+      html += '<details><summary>' + recs.length + ' local records</summary><ul>' + recs.map(function (r) {
+        return '<li>' + escapeHtml(paHistLine(r)) + (r.total ? ' · ' + escapeHtml(r.total) : '') + '</li>';
+      }).join('') + '</ul></details>';
+    }
+    return html;
+  }
+  // Confirm-dialog warning. Informational only: no checkbox, never gates Confirm.
+  function paHistWarnHtml(recs) {
+    if (!recs || !recs.length) return '';
+    var r = recs[0];
+    return '<div class="warn hist">' + escapeHtml('Local history shows this proposal was previously ' +
+      PA_HIST_KINDS[r.kind].verb + ' on ' + paHistWhen(r) + '. This is not an authoritative Umbrava status.') +
+      (recs.length > 1 ? ' <span class="na">(' + recs.length + ' local records)</span>' : '') + '</div>';
+  }
+  // ===== PA-HISTORY END =====
+
+  // ===== PA-STOPPED START (sliced by scripts/test-pa-multi-proposal.js via the reads slice; references injected localStorage / escapeHtml) =====
+  // Browser-local record of an action run that STOPPED partway (runSteps returned ok:false), so a NEW
+  // dialog for the same job + proposal + action can warn that starting over repeats the steps this
+  // browser saw complete. Separate from bwn:pa:history (completed actions only) and never an Umbrava
+  // status. What it can prove: a step listed as done had its own request resolve successfully here;
+  // the failed step's request may or may not have reached Umbrava; later steps were not attempted.
+  // Keyed by action too: Approval / TSP / Kickback set different statuses and file different tasks.
+  var PA_STOP_KEY = 'bwn:pa:stopped', PA_STOP_SCHEMA = 1;
+  var PA_STOP_MAX = 100;                           // newest records kept, all jobs together
+  var PA_STOP_MAX_AGE_MS = 30 * 24 * 3600 * 1000;  // older than 30 days: pruned
+  // Stored as keys, rendered from this fixed map: step labels are not stored (the create-task label
+  // carries the note's first line), and an unknown stored key is dropped, never rendered.
+  var PA_STOP_STEPS = {
+    status: 'WO status change', proposalNote: 'proposal note', woNote: 'WO note',
+    completeTasks: 'open-task completion', createTask: 'new task'
+  };
+  var PA_STOP_ACTIONS = { approval: 'Approval', tsp: 'TSP Review', kickback: 'Kickback' };   // as named in the menu
+  function paStopValid(r) {
+    return !!r && typeof r === 'object' && r.schema === PA_STOP_SCHEMA && r.localOnly === true &&
+      isPosInt(r.n) && isPosInt(r.pid) && PA_HIST_KINDS.hasOwnProperty(r.kind) &&
+      typeof r.ts === 'string' && !isNaN(Date.parse(r.ts)) && Array.isArray(r.done) &&
+      (r.failed === '' || PA_STOP_STEPS.hasOwnProperty(r.failed)) && isPosInt(r.attempts);
+  }
+  // -> { records, error }  error: '' | 'unavailable' | 'corrupt'. Never throws.
+  function paStopLoad() {
+    var raw;
+    try { raw = localStorage.getItem(PA_STOP_KEY); } catch (e) { return { records: [], error: 'unavailable' }; }
+    if (raw == null) return { records: [], error: '' };
+    try {
+      var a = JSON.parse(raw);
+      if (!Array.isArray(a)) return { records: [], error: 'corrupt' };
+      return { records: a.filter(paStopValid), error: '' };
+    } catch (e) { return { records: [], error: 'corrupt' }; }
+  }
+  function paStopFind(records, n, pid, kind) {
+    return records.filter(function (r) { return r.n === n && r.pid === pid && r.kind === kind; })[0] || null;
+  }
+  // Called with every runSteps result. ok:false -> record (merged with an earlier stop of the same
+  // action: done steps are unioned, attempts counted). ok with nothing skipped -> resolve (remove) the
+  // matching record. Only this key is touched. -> 'none' | 'recorded' | 'resolved' | 'fail'. Never throws.
+  function paStopOnResult(plan, res, stepEls, nowMs) {
+    try {
+      var c = plan && plan.ctx;
+      if (!c || !res || !PA_HIST_KINDS.hasOwnProperty(plan.kind)) return 'none';
+      var complete = res.ok && !res.skipped;
+      if (res.ok && !complete) return 'none';
+      var cur = paStopLoad();
+      if (cur.error === 'unavailable') return 'fail';
+      var prev = paStopFind(cur.records, c.n, c.pid, plan.kind);
+      var rest = cur.records.filter(function (r) { return r !== prev; });
+      var out;
+      if (complete) {
+        if (!prev) return 'none';
+        out = rest;
+      } else {
+        var done = [], failed = '';
+        (plan.steps || []).forEach(function (s, i) {
+          var cls = stepEls && stepEls[i] && stepEls[i].className;
+          if (!s || !PA_STOP_STEPS.hasOwnProperty(s.key)) return;
+          if (cls === 'ok') done.push(s.key);
+          else if (cls === 'err') failed = s.key;
+        });
+        (prev ? prev.done : []).forEach(function (k) { if (done.indexOf(k) === -1 && PA_STOP_STEPS.hasOwnProperty(k)) done.push(k); });
+        out = rest.concat([{
+          schema: PA_STOP_SCHEMA, localOnly: true, n: c.n, pid: c.pid, kind: plan.kind,
+          ts: new Date(nowMs).toISOString(), firstTs: prev ? prev.firstTs || prev.ts : new Date(nowMs).toISOString(),
+          attempts: (prev ? prev.attempts : 0) + 1, failed: failed, done: done
+        }]);
+      }
+      out = out.filter(function (r) { return nowMs - Date.parse(r.ts) <= PA_STOP_MAX_AGE_MS; })
+        .sort(function (a, b) { return Date.parse(b.ts) - Date.parse(a.ts); }).slice(0, PA_STOP_MAX);
+      localStorage.setItem(PA_STOP_KEY, JSON.stringify(out));
+      return complete ? 'resolved' : 'recorded';
+    } catch (e) { return 'fail'; }   // quota, blocked storage
+  }
+  // Inline warning for a NEW dialog. rec = the matching record or null; error = paStopLoad().error.
+  // -> { html, needsAck }. A record requires the explicit acknowledgement; an unreadable store only
+  // says so (it cannot prove there was, or was not, an earlier attempt) and does not block.
+  function paStopWarnHtml(rec, error, kind) {
+    if (error) {
+      return { needsAck: false, html: '<div class="warn stop">' + escapeHtml('Earlier stopped attempts could not be checked (' +
+        (error === 'corrupt' ? 'the local record is unreadable' : 'browser storage is unavailable') +
+        '). That does not mean no earlier attempt happened.') + '</div>' };
+    }
+    if (!rec) return { needsAck: false, html: '' };
+    var names = function (keys) { return keys.filter(function (k) { return PA_STOP_STEPS.hasOwnProperty(k); }).map(function (k) { return PA_STOP_STEPS[k]; }); };
+    var done = names(rec.done);
+    var action = PA_STOP_ACTIONS[kind] || 'this action';
+    var text = 'Stopped attempt (this browser): a previous ' + action + ' run on this proposal stopped on ' +
+      paHistWhen(rec) + (rec.attempts > 1 ? ' (' + rec.attempts + ' stopped attempts)' : '') + '. ' +
+      (done.length ? 'The local runner saw these steps complete: ' + done.join(', ') + '. '
+        : 'The local runner saw no step complete. ') +
+      (rec.failed ? 'It stopped at the ' + PA_STOP_STEPS[rec.failed] + '; that request may or may not have reached Umbrava. ' : '') +
+      'A new run starts again at the first step. The proposal note and the new task are not de-duplicated and may be posted again; ' +
+      'the WO status, WO note and open tasks are re-checked before writing.';
+    return { needsAck: true, html: '<div class="warn stop" role="alert">' + escapeHtml(text) +
+      '<label><input type="checkbox" id="bwn-pa-ack-stopped"> I understand this new run may repeat those steps</label></div>' };
+  }
+  // ===== PA-STOPPED END =====
 
   var Q_TASKS = 'query PA_Tasks($e: String!){ tasksByEntityTypeAndId(entityType: 1, entityId: $e, includeComplete: false){ tasks { id isComplete } } }';
   function readOpenTasks(n) {
@@ -761,7 +1024,28 @@
       '#bwn-pa-card .btn{padding:8px 16px;border-radius:8px;border:1px solid #1a5f3e;font:600 13px inherit;cursor:pointer;}' +
       '#bwn-pa-card .btn.go{background:#1a5f3e;color:#fff;}' +
       '#bwn-pa-card .btn.cancel{background:#fff;color:#0d3d26;}' +
-      '#bwn-pa-card .btn:disabled{opacity:.55;cursor:default;}';
+      '#bwn-pa-card .btn:disabled{opacity:.55;cursor:default;}' +
+      // The count chip is absolutely positioned so it adds NO width: the trigger sits in the proposal header
+      // row next to Umbrava's Submit, and a wider trigger pushed Submit out of view (live 2026-09-25, 950px).
+      '.bwn-pa-trigger{position:relative;}' +
+      '.bwn-pa-trigger .opts{position:absolute;top:-9px;right:-8px;padding:0 6px;border-radius:999px;background:#fef3c7;border:1px solid #f5d77a;color:#7a4b00;font-size:10px;line-height:14px;font-weight:700;white-space:nowrap;pointer-events:none;}' +
+      '#bwn-pa-card.wide{width:960px;}' +
+      '#bwn-pa-card .sum{display:grid;grid-template-columns:auto 1fr;gap:4px 12px;margin:0 0 12px;font-size:13px;}' +
+      '#bwn-pa-card .sum dt{color:#5b6b62;}#bwn-pa-card .sum dd{margin:0;font-weight:600;}' +
+      '#bwn-pa-card .warn{background:#fffbeb;border:1px solid #f5d77a;border-radius:8px;padding:9px 11px;margin:0 0 12px;font-size:12.5px;color:#5c3d00;}' +
+      '#bwn-pa-card .warn ul{margin:4px 0 6px 18px;padding:0;}' +
+      '#bwn-pa-card .na{color:#8a948f;font-style:italic;font-weight:400;}' +
+      '#bwn-pa-card .tbl{overflow-x:auto;}' +
+      '#bwn-pa-card table{border-collapse:collapse;width:100%;font-size:12.5px;}' +
+      '#bwn-pa-card th,#bwn-pa-card td{padding:7px 8px;border-bottom:1px solid #eef3f0;text-align:left;vertical-align:top;}' +
+      '#bwn-pa-card th{font-weight:600;color:#5b6b62;white-space:nowrap;}' +
+      '#bwn-pa-card td.num{text-align:right;white-space:nowrap;}' +
+      '#bwn-pa-card tr.sel td{background:#f0fdf4;}#bwn-pa-card tr.sel td:first-child{box-shadow:inset 3px 0 0 #1a5f3e;}' +
+      '#bwn-pa-card tr.cxl td{color:#8a948f;}' +
+      '#bwn-pa-card .chip{display:inline-block;padding:1px 7px;border-radius:999px;background:#1a5f3e;color:#fff;font-size:11px;font-weight:600;white-space:nowrap;}' +
+      '#bwn-pa-card .note{font-size:12px;color:#5b6b62;margin:10px 0 0;}' +
+      '#bwn-pa-card .warn.hist{background:#eff6ff;border-color:#bfdbfe;color:#1e3a5f;}' +
+      '#bwn-pa-card details summary{cursor:pointer;color:#1a5f3e;font-size:12px;}#bwn-pa-card details ul{margin:4px 0 0 16px;padding:0;}';
     document.head.appendChild(st);
   }
 
@@ -774,6 +1058,122 @@
     el.textContent = 'BWN Proposal Actions: ' + msg;
     document.body.appendChild(el);
     setTimeout(function () { el.remove(); }, 6000);
+  }
+
+  // ===== focus trap (paste-identical copy of the suite helper; drift-guarded by scripts/test-a11y-focus.js) =====
+  function bwnFocusTrap(modalEl) {
+    if (!modalEl || !modalEl.addEventListener) return function () { };
+    var SEL = 'a[href],area[href],input:not([disabled]),select:not([disabled]),textarea:not([disabled]),button:not([disabled]),[tabindex]:not([tabindex="-1"]),[contenteditable="true"],[contenteditable=""]';
+    var prev = document.activeElement;
+    var released = false, mo = null, pmo = null;
+    function visible(el) { return el.offsetWidth > 0 || el.offsetHeight > 0 || (el.getClientRects && el.getClientRects().length > 0); }
+    function focusables() { return [].slice.call(modalEl.querySelectorAll(SEL)).filter(visible); }
+    function onKey(e) {
+      if (e.key !== 'Tab') return;
+      var f = focusables();
+      if (!f.length) { e.preventDefault(); return; }
+      var first = f[0], last = f[f.length - 1], a = document.activeElement;
+      if (e.shiftKey) { if (a === first || !modalEl.contains(a)) { e.preventDefault(); last.focus(); } }
+      else if (a === last || !modalEl.contains(a)) { e.preventDefault(); first.focus(); }
+    }
+    function release() {
+      if (released) return; released = true;
+      try { modalEl.removeEventListener('keydown', onKey, true); } catch (e) { }
+      try { if (mo) mo.disconnect(); } catch (e) { }
+      try { if (pmo) pmo.disconnect(); } catch (e) { }
+      if (modalEl._bwnFocusRelease === release) modalEl._bwnFocusRelease = null;
+      try { if (prev && prev.focus && prev.isConnected !== false) prev.focus(); } catch (e) { }
+    }
+    modalEl.addEventListener('keydown', onKey, true);
+    modalEl._bwnFocusRelease = release;
+    try {
+      mo = new MutationObserver(function () { if (modalEl.classList && modalEl.classList.contains('bwn-closing')) release(); });
+      mo.observe(modalEl, { attributes: true, attributeFilter: ['class'] });
+      if (modalEl.parentNode) {
+        pmo = new MutationObserver(function (recs) {
+          for (var i = 0; i < recs.length; i++) {
+            var rm = recs[i].removedNodes || [];
+            for (var j = 0; j < rm.length; j++) { if (rm[j] === modalEl) { release(); return; } }
+          }
+        });
+        pmo.observe(modalEl.parentNode, { childList: true });
+      }
+    } catch (e) { }
+    if (!modalEl.contains(document.activeElement)) {
+      var f0 = focusables();
+      if (f0.length) { try { f0[0].focus(); } catch (e) { } }
+      else { try { if (!modalEl.hasAttribute('tabindex')) modalEl.setAttribute('tabindex', '-1'); modalEl.focus(); } catch (e) { } }
+    }
+    return release;
+  }
+
+  // ===== multi-proposal display helpers =====================================
+  function na(why) { return '<span class="na">' + escapeHtml(why || 'not available') + '</span>'; }
+  function orNa(v, why) { return v ? escapeHtml(v) : na(why); }
+  // Live listClientProposals dates are UTC with an offset and 7 fraction digits
+  // ("2026-09-22T17:57:32.5739342+00:00", verified 2026-09-25). Format in the reviewer's LOCAL zone:
+  // slicing the leading YYYY-MM-DD showed the UTC day, one day ahead for anything after 8 PM Eastern.
+  function fmtDate(s) {
+    if (!s) return '';
+    var t = Date.parse(String(s));
+    if (!isNaN(t)) return new Date(t).toLocaleDateString('en-US', { month: '2-digit', day: '2-digit', year: 'numeric' });
+    var m = /^(\d{4})-(\d{2})-(\d{2})/.exec(String(s));
+    return m ? m[2] + '/' + m[3] + '/' + m[1] : String(s);
+  }
+  function gpPctText(p) { return (typeof p === 'number' && !isNaN(p)) ? (p * 100).toFixed(1) + '%' : ''; }
+  // '#2 (ID 561841)' when the row carries a proven visible number, else '#561841' exactly as before.
+  // Never derived from row position or id order: no number on the row -> id only.
+  function propLabel(r, id) { return (r && isPosInt(r.number)) ? '#' + r.number + ' (ID ' + id + ')' : '#' + id; }
+  function proposalHref(n, id) { return '/work-orders/' + n + '/proposals/client-proposals/' + id + '/details'; }
+  // Local-history read problems are said once per page session, and only from user-opened views
+  // (Compare, confirm) - never from the 900ms inject loop.
+  var _paHistWarned = false;
+  function paHistNotice(error) {
+    if (!error || _paHistWarned) return;
+    _paHistWarned = true;
+    paToast(error === 'corrupt'
+      ? 'Local action history was unreadable and is ignored (it is replaced on the next completed action). Actions still work.'
+      : 'Local action history is unavailable in this browser. Actions still work.');
+  }
+  // A plan is bound to the WO + proposal it was gathered for; the page must still show that pair.
+  function stillOnPlanPage(plan) {
+    var c = plan && plan.ctx;
+    return !c || (woNumberFromUrl() === c.n && proposalIdFromUrl() === c.pid);
+  }
+  // The "what exactly am I about to do" block at the top of the confirm dialog.
+  function confirmSummaryHtml(plan) {
+    var c = plan && plan.ctx;
+    if (!c) return '';
+    var sc = siblingContext(c.siblings, c.pid);
+    var sel = sc.selected;
+    var titleBits = sel ? [sel.title, sel.type].filter(Boolean).join(' · ') : '';
+    var html = '<dl class="sum">' +
+      '<dt>Job</dt><dd>W-' + escapeHtml(c.n) + (c.wo && c.wo.statusName ? ' <span class="na">(WO status now: ' + escapeHtml(c.wo.statusName) + ')</span>' : '') + '</dd>' +
+      '<dt>Proposal</dt><dd>' + escapeHtml(propLabel(sel, c.pid)) + (titleBits ? ' - ' + escapeHtml(titleBits) : ' ' + na('title not available')) + '</dd>' +
+      '<dt>Vendor</dt><dd>' + na('not on the client proposal record') + (sel && sel.vendorCost ? ' <span class="na">(vendor cost ' + escapeHtml(sel.vendorCost) + ')</span>' : '') + '</dd>' +
+      '<dt>Amount</dt><dd>' + escapeHtml(c.total) + ' · ' + escapeHtml(c.gp) + (c.gpText !== 'unknown' ? ' (' + escapeHtml(c.gpText) + ')' : '') + '</dd>' +
+      '<dt>Action</dt><dd>' + escapeHtml(plan.action || plan.title) + '</dd>' +
+      '<dt>Routing</dt><dd>' + orNa(plan.routing) + '</dd>' +
+      '<dt>Comment</dt><dd>Required - the editable note below</dd>' +
+      '</dl>';
+    var hist = paHistLoad();
+    paHistNotice(hist.error);
+    html += paHistWarnHtml(paHistFor(hist.records, c.n, c.pid));   // informational; never gates Confirm
+    // A stopped earlier attempt of THIS action gates Confirm on its own acknowledgement (#bwn-pa-ack-stopped).
+    var stop = paStopLoad();
+    html += paStopWarnHtml(paStopFind(stop.records, c.n, c.pid, plan.kind), stop.error, plan.kind).html;
+    if (!sc.needsAck) return html;
+    var why;
+    if (!sc.known) why = 'The other proposals on this job could not be read, so this dialog cannot rule out a sibling option.';
+    else if (!sel) why = 'Proposal #' + c.pid + ' was not found in this job\'s proposal list.';
+    else why = 'This job has ' + sc.count + ' proposal options. Only ' + propLabel(sel, c.pid) + ' gets the proposal note; the WO status and tasks change for the whole job.';
+    var list = sc.others.map(function (r) {
+      return '<li>' + escapeHtml(propLabel(r, r.id)) + ' - ' + orNa(r.status, 'status n/a') + ' · ' + orNa(r.total, 'total n/a') +
+        (r.title ? ' · ' + escapeHtml(r.title) : '') + '</li>';
+    }).join('');
+    if (c.siblings && c.siblings.rowCount > c.siblings.rows.length) list += '<li>' + na('+' + (c.siblings.rowCount - c.siblings.rows.length) + ' more not shown') + '</li>';
+    return html + '<div class="warn">' + escapeHtml(why) + (list ? '<ul>' + list + '</ul>' : '') +
+      '<label><input type="checkbox" id="bwn-pa-ack"> I am acting on Proposal ' + escapeHtml(propLabel(sel, c.pid)) + '</label></div>';
   }
 
   // ===== confirm modal ======================================================
@@ -789,9 +1189,13 @@
     // (see the build*Step functions). Dropping them HERE keeps the three workflow definitions
     // readable and means the plan the operator confirms is exactly the plan that will run.
     if (plan && Array.isArray(plan.steps)) plan.steps = plan.steps.filter(Boolean);
+    // The reads between the menu click and here are async; if the reviewer moved to another proposal
+    // meanwhile, this plan belongs to a page they are no longer looking at. Refuse rather than open it.
+    if (!stillOnPlanPage(plan)) { paToast('You moved to a different proposal - nothing opened. Run Proposal Actions again on the proposal you want.'); return; }
+    if (!paTakeOverlaySlot()) return;   // a run is in flight in the dialog on screen: keep it, open nothing
+    // One id per opened dialog: the local-history identity of this run (Retry reuses it).
+    plan.runId = 'pa-' + Date.now().toString(36) + '-' + Math.random().toString(36).slice(2, 8);
     ensureStyle();
-    var prior = document.getElementById('bwn-pa-overlay');
-    if (prior) prior.remove();
 
     var overlay = document.createElement('div');
     overlay.id = 'bwn-pa-overlay';
@@ -810,7 +1214,7 @@
     card.innerHTML =
       '<div class="hd"><div class="t">' + escapeHtml(plan.title) + '</div>' +
       (plan.subtitle ? '<div class="s">' + escapeHtml(plan.subtitle) + '</div>' : '') + '</div>' +
-      '<div class="bd">' +
+      '<div class="bd">' + confirmSummaryHtml(plan) +
       '<div style="font-size:12px;color:#5b6b62;margin:0 0 4px;">Note that will be posted (editable) - add what you changed for the coordinator:</div>' +
       '<textarea id="bwn-pa-note"></textarea>' +
       '<div style="height:12px;"></div>' +
@@ -829,34 +1233,32 @@
     plan.steps.forEach(function (s, i) { stepEls[i] = card.querySelector('li[data-i="' + i + '"]'); });
 
     noteTa.value = plan.noteSeed || '';
-
-    function close() { try { overlay.remove(); } catch (e) { } document.removeEventListener('keydown', onKey); }
-    function onKey(e) { if (e.key === 'Escape') close(); }
-    document.addEventListener('keydown', onKey);
-    overlay.addEventListener('click', function (e) { if (e.target === overlay) close(); });
-    cancelBtn.addEventListener('click', close);
-
-    goBtn.addEventListener('click', function () {
-      var noteText = noteTa.value;
-      if (!noteText.trim()) {
-        paToast('Enter a note first.');
-        return;
-      }
-      goBtn.disabled = true; cancelBtn.disabled = true; noteTa.disabled = true;
-      runSteps(plan.steps, noteText, stepEls).then(function (res) {
-        if (res.ok) {
-          goBtn.textContent = res.skipped ? 'Done (some pending)' : 'Done';
-          paToast(res.skipped
-            ? 'Proven steps done. ' + res.skipped + ' step(s) skipped - awaiting mutation capture.'
-            : 'All steps complete.');
-          setTimeout(close, res.skipped ? 4500 : 2200);
-        } else {
-          cancelBtn.disabled = false;
-          goBtn.disabled = false; goBtn.textContent = 'Retry';
-          paToast('Stopped at "' + res.failedLabel + '": ' + res.error);
-        }
-      });
+    // Several alternatives on the job (or siblings unreadable): Confirm stays disabled until the
+    // reviewer ticks that this is the proposal they mean.
+    var ack = card.querySelector('#bwn-pa-ack');
+    var ackStopped = card.querySelector('#bwn-pa-ack-stopped');
+    var ctl = paConfirmController(plan, { goBtn: goBtn, cancelBtn: cancelBtn, noteTa: noteTa, ack: ack, ackStopped: ackStopped, stepEls: stepEls, card: card }, close);
+    _paActiveCtl = ctl;
+    overlay._paClose = close;
+    [ack, ackStopped].forEach(function (a) {
+      if (!a) return;
+      goBtn.disabled = true;
+      a.addEventListener('change', ctl.ackChanged);
     });
+    var releaseTrap = paArmTrap(overlay);
+
+    // Every dismissal path goes through ctl.requestClose, which refuses while a run is in flight.
+    function close() {
+      try { overlay.remove(); } catch (e) { }
+      document.removeEventListener('keydown', onKey);
+      if (_paActiveCtl === ctl) _paActiveCtl = null;
+      try { releaseTrap(); } catch (e) { }   // focus back to the Proposal Actions trigger
+    }
+    function onKey(e) { if (e.key === 'Escape') ctl.requestClose(); }
+    document.addEventListener('keydown', onKey);
+    overlay.addEventListener('click', function (e) { if (e.target === overlay) ctl.requestClose(); });
+    cancelBtn.addEventListener('click', ctl.requestClose);
+    goBtn.addEventListener('click', ctl.go);
   }
 
   function mark(li, cls, icon, note) {
@@ -895,6 +1297,113 @@
       });
     }
     return next();
+  }
+
+  // Confirm-dialog run lifecycle: ONE run at a time, and no dismissal while it is in flight. The steps
+  // are separate non-atomic writes, so a second overlapping run would re-send steps the first has not
+  // finished (duplicate proposal note / task), and hiding a running dialog would hide a partial
+  // failure. state: 'idle' (not started, or failed and retryable) -> 'running' -> 'done' | 'idle'.
+  // els = { goBtn, cancelBtn, noteTa, ack (or null), stepEls }; closeFn removes the dialog.
+  function paConfirmController(plan, els, closeFn) {
+    var state = 'idle';
+    var goBtn = els.goBtn, cancelBtn = els.cancelBtn, noteTa = els.noteTa;
+    // Every acknowledgement the dialog rendered must be ticked: the multi-option one and/or the
+    // stopped-attempt one. Either may be absent (null).
+    var acks = [els.ack, els.ackStopped].filter(Boolean);
+    function allAcked() { return acks.every(function (a) { return a.checked; }); }
+    function setAcksDisabled(v) { acks.forEach(function (a) { a.disabled = v; }); }
+    function unlockForRetry() {
+      state = 'idle';
+      cancelBtn.disabled = false;
+      goBtn.disabled = false; goBtn.textContent = 'Retry';
+      setAcksDisabled(false);
+    }
+    function requestClose() {
+      if (state === 'running') return false;
+      closeFn();
+      return true;
+    }
+    // Only an idle dialog lets the acknowledgement drive Confirm; mid-run or after Done it is inert.
+    function ackChanged() { if (state === 'idle' && acks.length) goBtn.disabled = !allAcked(); }
+    function go() {
+      if (state !== 'idle') return null;   // a run is in flight or already done
+      var noteText = noteTa.value;
+      if (!allAcked()) return null;
+      if (!stillOnPlanPage(plan)) {
+        paToast('This page now shows a different proposal - nothing sent.');
+        closeFn();
+        return null;
+      }
+      if (!noteText.trim()) {
+        paToast('Enter a note first.');
+        return null;
+      }
+      state = 'running';
+      goBtn.disabled = true; cancelBtn.disabled = true; noteTa.disabled = true;
+      setAcksDisabled(true);
+      // Disabling the focused Confirm drops focus to <body>, outside the focus trap; park it on the
+      // card so Tab stays contained while every control is disabled.
+      if (els.card) { try { els.card.setAttribute('tabindex', '-1'); els.card.focus(); } catch (e) { } }
+      return runSteps(plan.steps, noteText, els.stepEls).then(function (res) {
+        // Stopped-attempt record: written on a stop, resolved on a full completion (never on cancel).
+        var sw = paStopOnResult(plan, res, els.stepEls, Date.now());
+        var swNote = sw === 'fail' ? ' (The stopped-attempt record could not be ' + (res.ok ? 'cleared' : 'saved') + ' in this browser.)' : '';
+        if (res.ok) {
+          state = 'done';
+          goBtn.textContent = res.skipped ? 'Done (some pending)' : 'Done';
+          // After the writes, never before; a failed history write never changes the outcome.
+          var h = paHistOnResult(plan, noteText, res, Date.now());
+          paToast((res.skipped
+            ? 'Proven steps done. ' + res.skipped + ' step(s) skipped - awaiting mutation capture.'
+            : 'All steps complete.') + (h === 'fail' ? ' (Local action history could not be saved in this browser.)' : '') + swNote);
+          setTimeout(closeFn, res.skipped ? 4500 : 2200);
+        } else {
+          unlockForRetry();
+          paToast('Stopped at "' + res.failedLabel + '": ' + res.error + swNote);
+        }
+        return res;
+      }).then(null, function (err) {
+        // runSteps itself never rejects; this only keeps an unexpected throw from leaving the
+        // dialog locked in 'running' with no way to close or retry.
+        if (state === 'running') unlockForRetry();
+        paToast('Run stopped unexpectedly: ' + ((err && err.message) || err));
+        return { ok: false, error: String((err && err.message) || err) };
+      });
+    }
+    return { go: go, ackChanged: ackChanged, requestClose: requestClose, state: function () { return state; } };
+  }
+
+  // Active-run overlay guard. The confirmation on screen registers its controller here; every path
+  // that opens the menu, Compare, or another confirmation asks paRefuseWhileRunning() first, and the
+  // one place a prior overlay is removed for a new one (paTakeOverlaySlot) refuses while that run is
+  // in flight - so nothing can hide or replace a dialog whose writes are still going out.
+  var _paActiveCtl = null;
+  var _paBusyToastAt = 0;
+  var PA_BUSY_TOAST_MS = 4000;   // at most one "still running" notice per 4s of blocked attempts
+  function paRunBusy() { return !!(_paActiveCtl && _paActiveCtl.state() === 'running'); }
+  function paRefuseWhileRunning() {
+    if (!paRunBusy()) return false;
+    var now = Date.now();
+    if (now - _paBusyToastAt > PA_BUSY_TOAST_MS) {
+      _paBusyToastAt = now;
+      paToast('An action is still running on this proposal - wait for it to finish.');
+    }
+    return true;
+  }
+  // -> true when the slot is free (any prior overlay closed through its own close path).
+  function paTakeOverlaySlot() {
+    if (paRefuseWhileRunning()) return false;
+    var prior = document.getElementById('bwn-pa-overlay');
+    if (prior) { if (typeof prior._paClose === 'function') prior._paClose(); else prior.remove(); }
+    return true;
+  }
+  // Arm the suite focus trap on a confirmation overlay. The menu item that started the action is
+  // gone by the time the dialog opens, so the trigger is focused first: the trap records it as the
+  // opener and returns focus there on close.
+  function paArmTrap(overlay) {
+    var trig = document.querySelector('#bwn-pa-dropdown .bwn-pa-trigger');
+    if (trig && trig.focus) { try { trig.focus(); } catch (e) { } }
+    return bwnFocusTrap(overlay);
   }
 
   // ===== "what changed" delta (total + GP) ==================================
@@ -943,12 +1452,16 @@
     return readWO(n).then(function (wo) {
       return readTotals(wo.jobId, pid).then(function (tot) {
         return readOpenTasks(n).then(function (openTasks) {
-          return {
-            n: n, pid: pid, wo: wo,
-            total: money(tot.total), totalRaw: tot.total, gpPct: tot.gpPct, gp: gpLabel(tot.gpPct),
-            gpText: (tot.gpPct == null ? 'unknown' : (tot.gpPct * 100).toFixed(2) + '%'),
-            openTasks: openTasks
-          };
+          // Siblings are read fresh at action time (not from the badge cache) so the confirm dialog's
+          // list is current. A failed read is null, which the dialog treats as "cannot rule out".
+          return readJobProposals(wo.jobId).catch(function () { return null; }).then(function (siblings) {
+            return {
+              n: n, pid: pid, wo: wo,
+              total: money(tot.total), totalRaw: tot.total, gpPct: tot.gpPct, gp: gpLabel(tot.gpPct),
+              gpText: (tot.gpPct == null ? 'unknown' : (tot.gpPct * 100).toFixed(2) + '%'),
+              openTasks: openTasks, siblings: siblings
+            };
+          });
         });
       });
     });
@@ -956,7 +1469,7 @@
 
   function buildStatusStep(ctx, statusName) {
     return {
-      label: 'Set WO status → ' + statusName, pending: false,
+      key: 'status', label: 'Set WO status → ' + statusName, pending: false,
       run: function () {
         // Idempotent set (matches bwn-write-queue's set-verb skip): re-read the WO's current status
         // and skip the write when it is already at the target, so a Retry never resets the
@@ -976,12 +1489,12 @@
     // The resume-from-first-incomplete-step fix above stops a re-post in the normal case; a true
     // read-then-skip dedup (like the WO note below) needs a billing-notes read query pinned first.
     if (!bwnCan('WorkOrderProposal.AddNote')) return null;   // dropped from the plan by openConfirm
-    return { label: 'Add note to Proposal #' + ctx.pid + ' Notes tab', pending: false,
+    return { key: 'proposalNote', label: 'Add note to Proposal #' + ctx.pid + ' Notes tab', pending: false,
       run: function (noteText) { return addProposalNote(ctx.pid, noteText); } };
   }
   function buildWONoteStep(ctx) {
     if (!bwnCan('WorkOrderNote.AddNew')) return null;
-    return { label: 'Add note to Work Order W-' + ctx.n + ' notes', pending: false,
+    return { key: 'woNote', label: 'Add note to Work Order W-' + ctx.n + ' notes', pending: false,
       run: function (noteText) {
         // Idempotent (matches bwn-write-queue's note dedup, keyed on the note text via workOrderNotes):
         // skip the post when an identical, non-deleted note already exists, so a Retry does not
@@ -996,7 +1509,7 @@
   function buildCompleteStep(ctx) {
     if (!bwnCan('Task.Complete')) return null;
     var c = ctx.openTasks.length;
-    return { label: c ? ('Complete ' + c + ' open task(s)') : 'No open tasks to complete', pending: false,
+    return { key: 'completeTasks', label: c ? ('Complete ' + c + ' open task(s)') : 'No open tasks to complete', pending: false,
       run: function () {
         // Idempotent (skip the task write when already at the target state): re-read at execution
         // time and complete only the still-open tasks, so a Retry completes nothing already done.
@@ -1012,7 +1525,7 @@
     // on). It is the LAST step, so the resume fix means it only re-runs if it ITSELF failed; grounding
     // a read-then-skip here needs a task-identity field pinned first.
     // Label previews the seed's first line; the task actually posts the operator's final note text.
-    return { label: 'Create task for ' + assigneeName + ': ' + firstLine(seedText), pending: false,
+    return { key: 'createTask', label: 'Create task for ' + assigneeName + ': ' + firstLine(seedText), pending: false,
       run: function (noteText) { return createTask(ctx.n, assigneeGuid, noteText); } };
   }
 
@@ -1021,6 +1534,7 @@
   function startKickback() { startWorkflow('kickback'); }
 
   function startWorkflow(kind) {
+    if (paRefuseWhileRunning()) return;   // no reads, no new plan while a confirmation run is in flight
     paToast('Reading proposal…');
     gatherContext().then(function (ctx) {
       if (kind === 'approval') {
@@ -1029,6 +1543,8 @@
           openConfirm({
             title: 'Approve proposal - Internal Proposal Approved',
             subtitle: 'W-' + ctx.n + '  ·  Proposal #' + ctx.pid + '  ·  ' + ctx.total + '  ·  ' + ctx.gp,
+            ctx: ctx, kind: 'approval', action: 'Approval (good to submit)',
+            routing: 'WO status → Internal Proposal Approved; task → ' + name + ' (coordinator)',
             noteSeed: aSeed,
             steps: [
               buildStatusStep(ctx, 'Internal Proposal Approved'),
@@ -1048,6 +1564,8 @@
           openConfirm({
             title: 'Send to Trade Specialist - Pending Trade Specialist',
             subtitle: 'W-' + ctx.n + '  ·  Proposal #' + ctx.pid + '  ·  ' + ctx.total + '  ·  ' + ctx.gp,
+            ctx: ctx, kind: 'tsp', action: 'TSP Review',
+            routing: 'WO status → Pending Trade Specialist; task → ' + tsp.name + ' (Trade Specialist)',
             noteSeed: tSeed,
             steps: [
               buildStatusStep(ctx, 'Pending Trade Specialist'),
@@ -1068,6 +1586,8 @@
             openConfirm({
               title: 'Kick back proposal - Internal Proposal Rejected',
               subtitle: 'W-' + ctx.n + '  ·  Proposal #' + ctx.pid + '  ·  ' + ctx.total + '  ·  ' + ctx.gp,
+              ctx: ctx, kind: 'kickback', action: 'Kickback (correction / more info)',
+              routing: 'WO status → Internal Proposal Rejected; task → ' + name + ' (coordinator)',
               noteSeed: kSeed,
               steps: [
                 buildStatusStep(ctx, 'Internal Proposal Rejected'),
@@ -1085,12 +1605,106 @@
     });
   }
 
+  // ===== job-level proposal count (trigger badge) ===========================
+  // One sibling read per WO per page session, for the badge only. null = in flight or failed (no badge,
+  // no retry storm from the 900ms inject loop). Compare and the confirm dialog always re-read fresh.
+  var _paJob = {};   // WO# -> readJobProposals() result | null
+  function loadJobProposals(n) {
+    if (n == null || _paJob[n] !== undefined) return;
+    _paJob[n] = null;
+    readWO(n).then(function (wo) { return readJobProposals(wo.jobId); })
+      .then(function (r) { _paJob[n] = r; paintTrigger(); }, function () { /* stays null: no badge */ });
+  }
+  function optionCount() {
+    var r = _paJob[woNumberFromUrl()];
+    return r ? liveOptions(r.rows).length : 0;
+  }
+  function paintTrigger() {
+    var t = document.querySelector('#' + DROPDOWN_ID + ' .bwn-pa-trigger');
+    if (!t) return;
+    var c = optionCount();
+    var key = proposalIdFromUrl() + ':' + c;
+    if (t.getAttribute('data-k') === key) return;   // unchanged: no DOM write, so no observer echo
+    t.setAttribute('data-k', key);
+    t.innerHTML = 'Proposal Actions ▾' + (c > 1 ? '<span class="opts">' + c + ' options</span>' : '');
+    t.title = c > 1 ? 'This job has ' + c + ' proposal options. Actions apply only to #' + proposalIdFromUrl() + ' (this page).' : '';
+  }
+
+  // ===== compare view (read-only) ===========================================
+  // Every proposal on the job side by side. Selecting another proposal NAVIGATES to its own details
+  // page: the page URL stays the single source of "selected", so an action can never target a
+  // proposal other than the one the reviewer is looking at.
+  function openCompare() {
+    var n = woNumberFromUrl(), pid = proposalIdFromUrl();
+    if (n == null || pid == null) return;
+    if (paRefuseWhileRunning()) return;   // no read, no overlay while a confirmation run is in flight
+    paToast('Reading proposals on this job…');
+    readWO(n).then(function (wo) {
+      return readJobProposals(wo.jobId).then(function (sib) { renderCompare(n, pid, wo, sib); });
+    }).catch(function (err) { paToast('Could not read this job\'s proposals: ' + ((err && err.message) || err)); });
+  }
+  function renderCompare(n, pid, wo, sib) {
+    if (woNumberFromUrl() !== n || proposalIdFromUrl() !== pid) return;   // navigated away during the read
+    if (!paTakeOverlaySlot()) return;   // a confirmation run is in flight: keep that dialog, render nothing
+    ensureStyle();
+    var overlay = document.createElement('div');
+    overlay.id = 'bwn-pa-overlay';
+    var card = document.createElement('div');
+    card.id = 'bwn-pa-card';
+    card.className = 'wide';
+    card.setAttribute('role', 'dialog');
+    card.setAttribute('aria-modal', 'true');
+    card.setAttribute('aria-label', 'Compare proposals on W-' + n);
+    var live = liveOptions(sib.rows).length, cxl = sib.rows.length - live;
+    var hist = paHistLoad();
+    paHistNotice(hist.error);
+    var rows = sib.rows.map(function (r) {
+      var isSel = r.id === pid;
+      var pick = isSel ? '<span class="chip" aria-current="page">Selected (this page)</span>'
+        : '<a href="' + escapeHtml(proposalHref(n, r.id)) + '">Open to act on ' + escapeHtml(propLabel(r, r.id)) + '</a>';
+      return '<tr class="' + (isSel ? 'sel' : '') + (r.canceled ? ' cxl' : '') + '">' +
+        '<td>' + escapeHtml(propLabel(r, r.id)) + '</td>' +
+        '<td>' + orNa(r.title, 'no description') + (r.type ? '<div class="na">' + escapeHtml(r.type) + '</div>' : '') + '</td>' +
+        '<td class="num">' + orNa(r.total) + '</td>' +
+        '<td class="num">' + orNa(gpPctText(r.gpPct)) + '</td>' +
+        '<td class="num">' + orNa(r.vendorCost) + '</td>' +
+        '<td>' + orNa(r.status) + '</td>' +
+        '<td>' + orNa(fmtDate(r.created)) + (r.createdBy ? '<div class="na">' + escapeHtml(r.createdBy) + '</div>' : '') + '</td>' +
+        '<td>' + orNa(fmtDate(r.submitted), 'not submitted / n/a') + '</td>' +
+        '<td>' + paHistCellHtml(paHistFor(hist.records, n, r.id)) + '</td>' +
+        '<td>' + pick + '</td></tr>';
+    }).join('');
+    card.innerHTML =
+      '<div class="hd"><div class="t">Compare proposals - W-' + escapeHtml(n) + '</div>' +
+      '<div class="s">' + live + ' option(s)' + (cxl ? ' + ' + cxl + ' canceled' : '') + '  ·  WO status: ' + escapeHtml(wo.statusName || 'not available') + '</div></div>' +
+      '<div class="bd"><div class="tbl"><table><thead><tr>' +
+      '<th>Proposal</th><th>Description</th><th>Total</th><th>GP</th><th>Vendor cost</th><th>Status</th><th>Created</th><th>Submitted</th><th>Local action history</th><th>Selection</th>' +
+      '</tr></thead><tbody>' + rows + '</tbody></table></div>' +
+      (sib.rowCount > sib.rows.length ? '<div class="note">Showing the first ' + sib.rows.length + ' of ' + sib.rowCount + ' proposals.</div>' : '') +
+      (sib.partial ? '<div class="note">The extended proposal read was refused, so description, type, vendor cost, created and submitted dates are not available here.</div>' : '') +
+      '<div class="note">Approval / TSP Review / Kickback act only on the selected proposal. The WO status and tasks they change are job-wide. ' +
+      'Local action history lists only actions completed in THIS browser; it is not an Umbrava status and is not shared. ' +
+      'Vendor, trade and NTE are not on client proposal records. Approval / Kickback / TSP are job-level WO statuses, not stored per proposal.</div>' +
+      '</div><div class="ft"><button class="btn cancel" id="bwn-pa-cmp-close">Close</button></div>';
+    overlay.appendChild(card);
+    document.body.appendChild(overlay);
+    function close() { try { overlay.remove(); } catch (e) { } document.removeEventListener('keydown', onKey); }
+    overlay._paClose = close;
+    function onKey(e) { if (e.key === 'Escape') close(); }
+    document.addEventListener('keydown', onKey);
+    overlay.addEventListener('click', function (e) { if (e.target === overlay) close(); });
+    var closeBtn = card.querySelector('#bwn-pa-cmp-close');
+    closeBtn.addEventListener('click', close);
+    closeBtn.focus();
+  }
+
   // ===== dropdown UI ========================================================
   var DROPDOWN_ID = 'bwn-pa-dropdown';
   var openMenuEl = null;
   function closeMenu() { if (openMenuEl) { openMenuEl.remove(); openMenuEl = null; document.removeEventListener('click', onDocClick, true); } }
-  function onDocClick(e) { if (openMenuEl && !openMenuEl.contains(e.target) && !e.target.classList.contains('bwn-pa-trigger')) closeMenu(); }
+  function onDocClick(e) { if (openMenuEl && !openMenuEl.contains(e.target) && !(e.target.closest && e.target.closest('.bwn-pa-trigger'))) closeMenu(); }
   function buildMenu(trigger) {
+    if (paRefuseWhileRunning()) return;
     closeMenu();
     var menu = document.createElement('div');
     menu.className = 'bwn-pa-menu';
@@ -1100,6 +1714,8 @@
       { label: 'TSP Review', sub: 'Send to Ronny → Pending Trade Specialist', fn: startTsp },
       { label: 'Kickback', sub: 'AI reason → Internal Proposal Rejected', fn: startKickback }
     ];
+    var c = optionCount();
+    if (c > 1) items.unshift({ label: 'Compare proposals (' + c + ' options)', sub: 'Read-only - nothing is changed', fn: openCompare });
     items.forEach(function (it) {
       var b = document.createElement('button');
       b.type = 'button'; b.setAttribute('role', 'menuitem');
@@ -1119,6 +1735,7 @@
     var wrap = document.createElement('span');
     wrap.id = DROPDOWN_ID;
     wrap.style.display = 'inline-flex';
+    wrap.style.alignSelf = 'center';   // in a flex row: do not stretch to the row height (keeps the badge inside it)
     var trigger = document.createElement('button');
     trigger.type = 'button';
     trigger.className = 'bwn-pa-trigger';
@@ -1134,16 +1751,21 @@
   }
 
   // ===== injection lifecycle ================================================
+  // Returns the WHOLE Details/Notes tab component; the trigger is inserted as its next sibling, in the
+  // row that holds it. Live 2026-09-25 (878px): that row is a flex row with visible overflow and free
+  // space to the right of the tabs. Two placements were measured and rejected:
+  //  - beside Umbrava's Submit (<= 0.7.7): on a long title the trigger pushed Submit out of view;
+  //  - inside the tablist, before "Details" (0.7.8): the tab scroller clipped the options badge, the
+  //    selected-tab underline moved under our trigger, and a non-tab control sat among the tabs.
+  // null -> the caller's fixed fallback (never the tablist, never Submit's row).
   function findAnchor() {
-    // Prefer sitting next to the proposal's "Submit" button (top-right of the details header).
-    var btns = [].slice.call(document.querySelectorAll('button'));
-    var submit = btns.filter(function (b) { return /^\s*Submit\s*$/i.test(b.textContent || ''); })[0];
-    if (submit && submit.parentNode) return submit;
-    // Else the Details/Notes tab strip: a link/tab labelled "Details".
     var tab = [].slice.call(document.querySelectorAll('a,button,[role="tab"]'))
       .filter(function (el) { return /^\s*Details\s*$/i.test(el.textContent || ''); })[0];
-    if (tab && tab.parentNode) return tab;
-    return null;
+    var comp = tab && tab.closest ? tab.closest('.MuiTabs-root') : null;   // MUI's stable component class
+    if (!comp || !comp.parentNode) return null;
+    var rowHasSubmit = [].slice.call(comp.parentNode.querySelectorAll('button'))
+      .some(function (b) { return /^\s*Submit\s*$/i.test(b.textContent || ''); });
+    return rowHasSubmit ? null : comp;
   }
   function removeDropdown() { var d = document.getElementById(DROPDOWN_ID); if (d) { closeMenu(); d.remove(); } }
   function injectDropdown() {
@@ -1155,12 +1777,26 @@
       // Fails OPEN while the decode is unknown.
       if (!bwnCan('WorkOrderField.Status')) { removeDropdown(); return; }
       captureBaseline(proposalIdFromUrl());   // snapshot total+GP once, before the reviewer edits
+      loadJobProposals(woNumberFromUrl());    // sibling count for the badge, once per WO
       ensureStyle();
-      if (document.getElementById(DROPDOWN_ID)) return;   // presence-based guard (React wipes; we re-add)
+      var existing = document.getElementById(DROPDOWN_ID);
+      if (existing) {   // presence-based guard (React wipes; we re-add)
+        // Injected before the tab strip rendered -> it sits in the fixed fallback. Move that same node
+        // (listeners intact) into the tab row once the anchor exists, instead of floating over the page.
+        if (existing.style.position === 'fixed') {
+          var late = findAnchor();
+          if (late && late.parentNode) {
+            existing.style.position = ''; existing.style.top = ''; existing.style.right = ''; existing.style.zIndex = '';
+            late.parentNode.insertBefore(existing, late.nextSibling);   // after the tab component
+          }
+        }
+        paintTrigger();
+        return;
+      }
       var dd = buildDropdown();
       var anchor = findAnchor();
       if (anchor && anchor.parentNode) {
-        anchor.parentNode.insertBefore(dd, anchor);
+        anchor.parentNode.insertBefore(dd, anchor.nextSibling);   // sibling AFTER the whole tab component
       } else {
         // Fixed fallback so the control is always reachable even before the anchor is pinned.
         dd.style.position = 'fixed';
@@ -1169,6 +1805,7 @@
         dd.style.zIndex = '2147483000';
         document.body.appendChild(dd);
       }
+      paintTrigger();
     } catch (e) { /* never break the page */ }
   }
 
