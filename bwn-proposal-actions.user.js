@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         BWN Proposal Actions (Broadway National)
 // @namespace    broadwaynational.bwn
-// @version      0.7.11
+// @version      0.7.12
 // @downloadURL  https://raw.githubusercontent.com/Intermu/userscripts/main/bwn-proposal-actions.user.js
 // @updateURL    https://raw.githubusercontent.com/Intermu/userscripts/main/bwn-proposal-actions.user.js
 // @description  On a Client Proposal DETAILS page, a "Proposal Actions" dropdown runs the internal review workflow in one confirmed action: Approval / TSP Review / Kickback. Each posts a note to the Proposal + the Work Order, sets the WO status, completes open tasks, and files a new task (assigned to the WO coordinator, or Ronny Sharp for TSP). The posted note is an EDITABLE field seeded with the auto-generated text (Kickback's is drafted by the on-device browser AI) so the reviewer can add what they changed as coaching for the coordinator; a "changes since review opened" line (total + GP) is prepended automatically. When the job has more than one client proposal, the trigger shows the option count, a read-only "Compare proposals" view lists every alternative side by side, and the confirm dialog names the job, the exact proposal being acted on and its siblings (with an explicit acknowledgement). Completed actions are kept as a browser-local history (never synced, never an Umbrava status) shown in Compare and as a non-blocking warning on a repeat. Opening an action only reads (proposal, work order, tasks) to prepare the confirm dialog; every change is listed there first, and no proposal or work-order change is submitted until Confirm. @grant none.
@@ -15,7 +15,7 @@
 (function () {
   'use strict';
 
-  var VER = '0.7.11';   // keep in step with @version
+  var VER = '0.7.12';   // keep in step with @version
   var DRY_RUN = false; // when true, every WRITE is console.logged instead of sent
   console.info('[BWN PROPOSAL ACTIONS] v' + VER + ' - Approval / TSP Review / Kickback workflow on the Client Proposal details page');
 
@@ -933,6 +933,7 @@
   }
   // ===== PA-WRITES END ======================================================
 
+  // ===== PA-KICKBACK START (sliced by scripts/test-pa-kickback.js; references injected paGql / LanguageModel) =====
   // ===== on-device browser AI (copied from bwn-drop-upload) =================
   function langModel() {
     var g = (typeof self !== 'undefined') ? self : (typeof window !== 'undefined' ? window : null);
@@ -948,14 +949,16 @@
     } catch (e) { }
     return Promise.resolve(false);
   }
-  var _AI_SESSIONS = {};
+  // One NEW session per draft, never cached: an on-device session keeps its conversation history,
+  // so a reused session would carry one proposal's scope and prices into the next proposal's draft.
+  // ponytail: a fresh create() per draft pays the model start-up each time; clone() of a warm base
+  // session would avoid that if drafting feels slow.
   function aiSession(api, sys) {
-    var cached = _AI_SESSIONS[sys];
-    if (cached) return Promise.resolve(cached);
-    function keep(hasSystem) { return function (s) { try { s._bwnSystem = hasSystem; } catch (e) { } _AI_SESSIONS[sys] = s; return s; }; }
+    function tag(hasSystem) { return function (s) { try { s._bwnSystem = hasSystem; } catch (e) { } return s; }; }
     return Promise.resolve(api.create({ initialPrompts: [{ role: 'system', content: sys }], outputLanguage: 'en' }))
-      .then(keep(true), function () { return Promise.resolve(api.create({ outputLanguage: 'en' })).then(keep(false)); });
+      .then(tag(true), function () { return Promise.resolve(api.create({ outputLanguage: 'en' })).then(tag(false)); });
   }
+  function aiDispose(s) { try { if (s && typeof s.destroy === 'function') s.destroy(); } catch (e) { } }
   function onDevice(sys, content) {
     var api = langModel();
     if (!api || typeof api.create !== 'function') return Promise.resolve('');
@@ -963,31 +966,68 @@
       if (!ok) return '';
       return aiSession(api, sys).then(function (s) {
         var usedSystem = !!(s && s._bwnSystem !== false);
-        return s.prompt((usedSystem ? '' : sys + '\n\n') + content);
+        return Promise.resolve().then(function () { return s.prompt((usedSystem ? '' : sys + '\n\n') + content); })
+          .then(function (t) { aiDispose(s); return t; }, function (err) { aiDispose(s); throw err; });
       });
-    }).catch(function () { _AI_SESSIONS[sys] = null; return ''; });
+    }).catch(function () { return ''; });
   }
-  function draftKickbackReason(ctx) {
+  // pc = readProposalContext() result. A FAILED read is never shown to the AI: with no scope or lines
+  // to go on it could only guess (and "no scope" would read as a real finding), so no draft is made and
+  // the reviewer writes the reason. A SUCCESSFUL read says exactly what it found: an empty field is
+  // real data, a field the server did not return is "not reported".
+  function draftKickbackReason(pc, total, gpText) {
+    if (!pc || !pc.ok) return Promise.resolve('');
     var sys = 'You are an internal operations reviewer at a facilities-management company reviewing a client proposal before it is sent to the client. In 1 to 3 short, plain sentences, state specifically why this proposal is being kicked back to the coordinator instead of approved (e.g. margin too low or negative, pricing/scope issues, missing detail). Professional and direct. No greeting, no sign-off, no bullet points.';
-    var content = 'Scope of work:\n' + (ctx.scope || '(none)') +
-      '\n\nClient total: ' + ctx.total +
-      '\nGross profit: ' + ctx.gpText +
-      '\nLine items:\n' + (ctx.items || '(none)');
+    var scope = !pc.scopeReported ? '(not reported)' : (pc.scope.trim() ? pc.scope : '(empty - the proposal has no scope text)');
+    var items = !pc.itemsReported ? '(not reported)' : (pc.items ? pc.items : '(no line items on the proposal)');
+    var content = 'Scope of work:\n' + scope +
+      '\n\nClient total: ' + total +
+      '\nGross profit: ' + gpText +
+      '\nLine items:\n' + items;
     return onDevice(sys, content).then(function (t) { return (t || '').trim(); });
   }
 
-  // Scope + line-item context for the AI (best-effort; reuses the proposal details read).
+  // Scope + line-item context for the AI. -> { ok:true, scope, items, scopeReported, itemsReported }
+  // on a successful read, { ok:false } when the request failed or returned no proposal. Never throws.
   var Q_PROP_CTX = 'query PA_PropCtx($p: Int!){ proposal(id: $p){ scopeOfWork proposalLineItems { item quantity category } } }';
   function readProposalContext(proposalId) {
     return paGql('PA_PropCtx', Q_PROP_CTX, { p: proposalId }).then(function (d) {
       var pr = d && d.proposal;
-      var scope = (pr && pr.scopeOfWork) || '';
-      var items = ((pr && pr.proposalLineItems) || []).map(function (li) {
+      if (!pr) return { ok: false };
+      var scopeReported = pr.scopeOfWork != null;
+      var itemsReported = Array.isArray(pr.proposalLineItems);
+      var items = (itemsReported ? pr.proposalLineItems : []).map(function (li) {
         return '- ' + (li.item || 'item') + ' x' + (li.quantity == null ? '?' : li.quantity);
       }).join('\n');
-      return { scope: scope, items: items };
-    }).catch(function () { return { scope: '', items: '' }; });
+      return { ok: true, scope: scopeReported ? String(pr.scopeOfWork) : '', items: items, scopeReported: scopeReported, itemsReported: itemsReported };
+    }, function () { return { ok: false }; });
   }
+
+  // Kickback reason gate. The seed is built by this script, so every machine-written line has a known,
+  // fixed shape; the gate strips ONLY those and passes the note if any other line has a letter or digit.
+  // It never judges wording: whatever a reviewer (or the AI draft they can see and edit) wrote counts.
+  var PA_KB_PH_AI = '[AI draft unavailable - replace this line with the reason for the coordinator]';
+  var PA_KB_PH_READ = '[Proposal details could not be read - replace this line with the reason for the coordinator]';
+  function kickbackReasonSeed(pc, reason) {
+    if (reason) return reason;
+    return (pc && pc.ok) ? PA_KB_PH_AI : PA_KB_PH_READ;
+  }
+  function paIsMachineLine(ln) {
+    return ln === 'Summary' || ln === 'Total' ||
+      /^\$-?\d{1,3}(,\d{3})*\.\d{2}$/.test(ln) ||                  // money() output on a line of its own
+      /^Changes since review opened: .+\.$/.test(ln);             // deltaLine() output
+  }
+  // -> '' when the note carries a reason, else the message to show the reviewer.
+  function paKickbackReasonGap(noteText) {
+    var lines = String(noteText == null ? '' : noteText).split(/\r?\n/).map(function (l) { return l.trim(); });
+    var phHead = [PA_KB_PH_AI.slice(0, 22), PA_KB_PH_READ.slice(0, 22)];
+    if (lines.some(function (l) { return phHead.some(function (h) { return l.indexOf(h) !== -1; }); })) {
+      return 'Replace the placeholder line with the reason for the coordinator.';
+    }
+    var hasReason = lines.some(function (l) { return !paIsMachineLine(l) && /[\p{L}\p{N}]/u.test(l); });
+    return hasReason ? '' : 'Write the reason for the kickback first - the Summary / Total lines are not a reason.';
+  }
+  // ===== PA-KICKBACK END =====
 
   // ===== styles =============================================================
   function ensureStyle() {
@@ -1402,6 +1442,13 @@
         paToast('Enter a note first.');
         return null;
       }
+      // A kickback must tell the coordinator why: the Summary / Total block, the change-since-review
+      // line and the placeholder are not a reason. Approval and TSP are unaffected.
+      var kbGap = plan.kind === 'kickback' ? paKickbackReasonGap(noteText) : '';
+      if (kbGap) {
+        paToast(kbGap);
+        return null;
+      }
       state = 'running';
       goBtn.disabled = true; cancelBtn.disabled = true; noteTa.disabled = true;
       setAcksDisabled(true);
@@ -1647,11 +1694,13 @@
         });
       }
       // kickback: the on-device AI drafts the rejection reason; that becomes the editable seed, so
-      // the reviewer confirms/edits the WHOLE note (reason + summary) in one field.
+      // the reviewer confirms/edits the WHOLE note (reason + summary) in one field. No draft (AI
+      // unavailable, or the proposal details could not be read) seeds a placeholder the reviewer must
+      // replace - Confirm refuses until the note carries a reason (paKickbackReasonGap).
       return readProposalContext(ctx.pid).then(function (pc) {
-        return draftKickbackReason({ scope: pc.scope, items: pc.items, total: ctx.total, gpText: ctx.gpText }).then(function (reason) {
+        return draftKickbackReason(pc, ctx.total, ctx.gpText).then(function (reason) {
           return resolveUserName(ctx.wo.coordinator).then(function (name) {
-            var kSeed = seedWithDelta(ctx.pid, ctx.totalRaw, ctx.gpPct, kickbackNote(reason, ctx.total));
+            var kSeed = seedWithDelta(ctx.pid, ctx.totalRaw, ctx.gpPct, kickbackNote(kickbackReasonSeed(pc, reason), ctx.total));
             openConfirm({
               title: 'Kick back proposal - Internal Proposal Rejected',
               subtitle: 'W-' + ctx.n + '  ·  Proposal #' + ctx.pid + '  ·  ' + ctx.total + '  ·  ' + ctx.gp,

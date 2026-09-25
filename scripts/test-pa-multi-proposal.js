@@ -41,6 +41,7 @@ function mutate(src, from, to) {
 var MONEY = between('  function escapeHtml(s)', '  // ===== PA-GPLABEL START');   // escapeHtml + money
 var READS = between("  var Q_PROP = 'query PA_Prop", "  var Q_TASKS = ");   // toGpNumber + readTotals + PA-SIBLINGS + PA-HISTORY
 var RUNNER = between('  function mark(li, cls, icon, note)', '  // ===== "what changed" delta');   // runSteps + mark
+var KICKBACK = between('  // ===== PA-KICKBACK START', '  // ===== PA-KICKBACK END');   // reason gate (0.7.12)
 var DISPLAY = between('  // ===== multi-proposal display helpers', '  // ===== confirm modal');     // fmtDate, confirmSummaryHtml, ...
 
 // handlers: { opName: function (variables) -> data | throws }
@@ -433,6 +434,38 @@ var RICH = [
   var dn = mkDialog(hg, 'tsp', [okStep], false);
   dn.noteTa.value = '   ';
   A.ok('empty note still blocks Confirm with the same message', dn.ctl.go() === null && hg.toasts.indexOf('Enter a note first.') !== -1 && dn.ctl.state() === 'idle');
+
+  // kickback reason gate (0.7.12): Confirm refuses a kickback whose note carries no reason. The gate
+  // itself (what counts as a reason) is pinned in test-pa-kickback.js; this pins the wiring.
+  function kload(runnerSrc) {
+    var t = [];
+    var bx = load(READS + (runnerSrc || RUNNER) + DISPLAY + KICKBACK, {}, { localStorage: mkStore(), paToast: function (m) { t.push(m); }, woNumberFromUrl: function () { return 123; }, proposalIdFromUrl: function () { return 901; }, setTimeout: function () { } });
+    bx.toasts = t;
+    return bx;
+  }
+  var SUMMARY_ONLY = '\n\nSummary\nTotal\n$12,345.00';
+  var hk = kload();
+  var dk1 = mkDialog(hk, 'kickback', [okStep], false);
+  dk1.noteTa.value = SUMMARY_ONLY;
+  A.ok('kickback: Summary/Total only -> Confirm refused, nothing runs, reviewer told why',
+    dk1.ctl.go() === null && dk1.calls[0] === 0 && dk1.ctl.state() === 'idle' && hk.toasts.some(function (m) { return /Write the reason for the kickback first/.test(m); }));
+  var dk2 = mkDialog(hk, 'kickback', [okStep], false);
+  dk2.noteTa.value = 'Changes since review opened: lowered total $520.00, GP 39.4% -> 19.1%.\n\n' + hk.PA_KB_PH_READ + SUMMARY_ONLY;
+  A.ok('kickback: untouched placeholder -> Confirm refused with the replace-the-placeholder message',
+    dk2.ctl.go() === null && dk2.calls[0] === 0 && hk.toasts.some(function (m) { return /Replace the placeholder/.test(m); }));
+  var dk3 = mkDialog(hk, 'kickback', [okStep], false);
+  dk3.noteTa.value = 'Need photos of the mixing valve.' + SUMMARY_ONLY;
+  await dk3.ctl.go();
+  A.ok('kickback: a reviewer-written reason -> Confirm runs', dk3.calls[0] === 1 && dk3.ctl.state() === 'done');
+  var dk4 = mkDialog(hk, 'tsp', [okStep], false);
+  dk4.noteTa.value = SUMMARY_ONLY;
+  await dk4.ctl.go();
+  A.ok('TSP (and Approval) are not gated: a Summary-only note still runs', dk4.calls[0] === 1 && dk4.ctl.state() === 'done');
+  var hkN = kload(mutate(RUNNER, "var kbGap = plan.kind === 'kickback' ? paKickbackReasonGap(noteText) : '';", "var kbGap = '';"));
+  var dkN = mkDialog(hkN, 'kickback', [okStep], false);
+  dkN.noteTa.value = SUMMARY_ONLY;
+  await dkN.ctl.go();
+  A.ok('CONTROL: without the gate a Summary-only kickback goes out', dkN.calls[0] === 1);
 
   // negative controls: each guard is load-bearing
   var RUN_NOSF = mutate(RUNNER, "if (state !== 'idle') return null;   // a run is in flight or already done", '');
