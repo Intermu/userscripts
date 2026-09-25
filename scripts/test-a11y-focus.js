@@ -52,13 +52,13 @@ function sliceFn(src, decl) {
   throw new Error('unbalanced braces after ' + decl);
 }
 
-// The eight drawer-modal owners that carry the helper.
+// The drawer-modal owners that carry the helper (Proposal Actions' confirmation joined 2026-09-25).
 var FAMILY = ['bwn-cc-auth.user.js', 'bwn-cc-purchase.user.js', 'bwn-dispatch.user.js',
   'bwn-inventory.user.js', 'bwn-wo-assist.user.js', 'bwn-wo-audit.user.js', 'bwn-ask.user.js',
-  'bwn-proposal-copy.user.js'];
+  'bwn-proposal-copy.user.js', 'bwn-proposal-actions.user.js'];
 
 // ---- 1. drift guard: every copy is byte-identical -------------------------------------------
-console.log('\n-- bwnFocusTrap: one helper, eight identical copies --');
+console.log('\n-- bwnFocusTrap: one helper, ' + FAMILY.length + ' identical copies --');
 var canonical = sliceFn(read(FAMILY[0]), 'function bwnFocusTrap(');
 A.ok(FAMILY[0] + ' defines bwnFocusTrap', canonical.indexOf('function bwnFocusTrap(modalEl)') === 0);
 FAMILY.slice(1).forEach(function (f) {
@@ -239,7 +239,8 @@ var OPEN_CALL = {
   'bwn-wo-assist.user.js': 'bwnFocusTrap(back);',
   'bwn-wo-audit.user.js': 'bwnFocusTrap(ov);',
   'bwn-ask.user.js': 'bwnFocusTrap(panelEl);',
-  'bwn-proposal-copy.user.js': 'bwnFocusTrap(modal);'
+  'bwn-proposal-copy.user.js': 'bwnFocusTrap(modal);',
+  'bwn-proposal-actions.user.js': 'bwnFocusTrap(overlay);'
 };
 FAMILY.forEach(function (f) {
   var src = read(f);
