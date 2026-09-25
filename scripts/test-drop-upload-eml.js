@@ -286,4 +286,14 @@ A.ok('a tag rebuilt from nested input is stripped too (fixed-point strip)',
   JSON.stringify(hapi.cleanBody('<<b>script>alert(1)<</b>/script><p>ok</p>', true)));
 A.eq('two empty paragraphs keep two blank lines', hapi.cleanBody('<p>a</p><p>&nbsp;</p><p>&nbsp;</p><p>b</p>', true), 'a\n\n\nb');
 
+// ---- .msg: new Outlook signature logo is only marked by a body-cited Content-ID --------------
+// A real Pilot .msg carried its logo ("Outlook-vuspxaoz", svg) with NO hidden / ATT_MHTML_REF flag;
+// the only tell is <img src="cid:..."> inside the compressed RTF body. parseMsg decompresses it with
+// rtfDecompress - pinned here on the MS-OXRTFCP 3.1.1 spec sample (real encoder output).
+var SPEC = Uint8Array.from([0x2d,0,0,0,0x2b,0,0,0,0x4c,0x5a,0x46,0x75,0xf1,0xc5,0xc7,0xa7,0x03,0x00,0x0a,0x00,0x72,0x63,0x70,0x67,
+  0x31,0x32,0x35,0x42,0x32,0x0a,0xf3,0x20,0x68,0x65,0x6c,0x09,0x00,0x20,0x62,0x77,0x05,0xb0,0x6c,0x64,0x7d,0x0a,0x80,0x0f,0xa0]);
+var BS = String.fromCharCode(92);
+A.eq('LZFu spec sample decompresses', rapi.rtfDecompress(SPEC),
+  '{' + BS + 'rtf1' + BS + 'ansi' + BS + 'ansicpg1252' + BS + 'pard hello world}\r\n');
+
 A.finish();
