@@ -807,7 +807,7 @@ var RICH = [
     });
     Object.defineProperty(El.prototype, 'innerHTML', {
       get: function () { return this._html == null ? this._text : this._html; },
-      set: function (v) { this._html = String(v); this._text = String(v).replace(/<[^>]*>/g, ''); this.children = []; }
+      set: function (v) { this._html = String(v); this._text = ''; this.children = []; }   // text of HTML-set nodes is not read by these tests
     });
     El.prototype.setAttribute = function (k, v) { this.attrs[k] = String(v); if (k === 'id') this.id = String(v); };
     El.prototype.getAttribute = function (k) { return this.attrs.hasOwnProperty(k) ? this.attrs[k] : null; };
