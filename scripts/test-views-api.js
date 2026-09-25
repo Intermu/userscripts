@@ -450,13 +450,15 @@ async function runCases(apiSrc, cfgSrc) {
   e9.ls['bwn:config'] = JSON.stringify({ views: partialList });
   eq('loadViews: a valid array passes through unchanged, partial entry included', e9.api.loadViews(), partialList);
 
+  // Key-order-insensitive view of a stored blob (top level only).
+  function canon(o) { var s = {}; Object.keys(o).sort().forEach(function (k) { s[k] = o[k]; }); return s; }
   var e10 = makeApi(apiSrc);
   e10.ls['bwn:config'] = '{not json';
   e10.api.saveViews(partialList);
-  eq('saveViews: corrupt config is replaced with {views} (current behavior)', JSON.parse(e10.ls['bwn:config']), { views: partialList });
+  eq('saveViews: corrupt config is replaced with {views, v:1} (other keys still lost)', canon(JSON.parse(e10.ls['bwn:config'])), { v: 1, views: partialList });
   e10.ls['bwn:config'] = 'null';
   e10.api.saveViews(partialList);
-  eq('saveViews: a null config is treated as {}', JSON.parse(e10.ls['bwn:config']), { views: partialList });
+  eq('saveViews: a null config is treated as {} and stamped', canon(JSON.parse(e10.ls['bwn:config'])), { v: 1, views: partialList });
 
   var bare = A.buildColumnsValue({}, ['Status']);
   eq('buildColumnsValue: missing hiddenColumnNames is treated as []', bare.hiddenColumnNames,
@@ -474,31 +476,46 @@ async function runCases(apiSrc, cfgSrc) {
   eq('titlesFromValue: {} -> every title in map order', A.titlesFromValue({}), ALL_TITLES_MAP_ORDER);
   eq('titlesFromValue: unknown hidden ids are ignored', A.titlesFromValue({ hiddenColumnNames: ['future.x'] }), ALL_TITLES_MAP_ORDER);
 
-  // ---- bwn:config stamp mismatch (characterization) -----------------------
-  // Pins CURRENT normal-use behavior; it does NOT endorse losing views. saveViews
-  // writes no `v` stamp, cfg() only accepts `v === 1`, and cfgSave rewrites the
-  // whole blob - so a view saved before any settings save is silently dropped by
-  // the next one. An empty store is also the post-"Reset to defaults" state. These
-  // cases exist so a future fix starts from the measured behavior; changing the
-  // policy needs its own approval.
+  // ---- bwn:config stamp (approved intended behavior) -----------------------
+  // cfg() only accepts `v === 1` and cfgSave rewrites the whole blob, so an
+  // unstamped blob written by saveViews lost every view on the next settings save.
+  // Approved policy: saveViews stamps `v: 1` itself; the global cfg() gate stays
+  // exactly as it is (case D). Corrupt JSON, malformed saved `value` JSON, Reset to
+  // defaults, and AI-helper parity remain separate decisions.
   var stampView = { id: 'v1', name: 'Mine', value: '{"hiddenColumnNames":["phase"]}', assignee: null, savedAt: 1 };
+  // A: empty store (also the post-"Reset to defaults" state).
   var e11 = makeApi(apiSrc), c11 = makeCfg(cfgSrc, e11);
   e11.api.saveViews([stampView]);
-  var afterView = JSON.parse(e11.ls['bwn:config']);
-  eq('stamp: saveViews on an empty store writes views only, no v stamp', afterView, { views: [stampView] });
+  eq('stamp A: saveViews on an empty store writes {views, v:1}', canon(JSON.parse(e11.ls['bwn:config'])), { v: 1, views: [stampView] });
   c11.cfgSave({ targetGP: 40 });
-  eq('stamp: a later cfgSave drops the unstamped views (current data loss)', e11.api.loadViews(), []);
+  eq('stamp A: a later cfgSave keeps the views', e11.api.loadViews(), [stampView]);
   var afterCfg = JSON.parse(e11.ls['bwn:config']);
-  eq('stamp: and rewrites the blob as defaults + the partial + v:1',
-    Object.keys(afterCfg).sort(), Object.keys(c11.CFG_DEFAULTS).concat('v').sort());
-  ok('stamp: the setting itself lands', afterCfg.targetGP === 40 && afterCfg.v === 1, JSON.stringify(afterCfg));
+  ok('stamp A: the setting lands and v stays 1', afterCfg.targetGP === 40 && afterCfg.v === 1, JSON.stringify(afterCfg));
 
+  // B: stamped control - a settings save FIRST stamps v:1.
   var e12 = makeApi(apiSrc), c12 = makeCfg(cfgSrc, e12);
-  c12.cfgSave({ targetGP: 35 });   // a settings save FIRST stamps v:1
+  c12.cfgSave({ targetGP: 35 });
+  eq('stamp B: cfgSave on an empty store writes v:1', JSON.parse(e12.ls['bwn:config']).v, 1);
   e12.api.saveViews([stampView]);
   c12.cfgSave({ targetGP: 40 });
-  eq('stamp control: with v:1 already stored, cfgSave keeps the views', e12.api.loadViews(), [stampView]);
-  ok('stamp control: and the setting lands too', c12.cfg().targetGP === 40 && JSON.parse(e12.ls['bwn:config']).v === 1);
+  eq('stamp B: with v:1 already stored, cfgSave keeps the views', e12.api.loadViews(), [stampView]);
+  ok('stamp B: and the setting lands too', c12.cfg().targetGP === 40 && JSON.parse(e12.ls['bwn:config']).v === 1);
+
+  // C: an unstamped plain object with an unrelated key - saveViews stamps and keeps it.
+  var e13 = makeApi(apiSrc), c13 = makeCfg(cfgSrc, e13);
+  e13.ls['bwn:config'] = JSON.stringify({ foo: 1 });
+  e13.api.saveViews([stampView]);
+  eq('stamp C: saveViews stamps an unstamped object and keeps its keys', canon(JSON.parse(e13.ls['bwn:config'])), { foo: 1, v: 1, views: [stampView] });
+  c13.cfgSave({ targetGP: 40 });
+  var afterC = JSON.parse(e13.ls['bwn:config']);
+  ok('stamp C: foo and the view survive the next cfgSave', afterC.foo === 1 && JSON.stringify(afterC.views) === JSON.stringify([stampView]) &&
+    afterC.v === 1 && afterC.targetGP === 40, JSON.stringify(afterC));
+
+  // D: the global gate is unchanged - cfg() still ignores an unstamped blob.
+  var e14 = makeApi(apiSrc), c14 = makeCfg(cfgSrc, e14);
+  e14.ls['bwn:config'] = JSON.stringify({ foo: 1 });
+  eq('stamp D: cfg() on an unstamped blob returns defaults only (foo dropped, no v)',
+    Object.keys(c14.cfg()).sort(), Object.keys(c14.CFG_DEFAULTS).sort());
 
   return out;
 }
@@ -611,9 +628,13 @@ function expectRed(label, results) {
     await runCases(mutate(S_API, 'if (allIds.indexOf(id) === -1 && hidden.indexOf(id) === -1) hidden.push(id);', 'if (allIds.indexOf(id) === -1) hidden.push(id);')));
   failures += expectRed('missing columnWidths no longer defaulted to []',
     await runCases(mutate(S_API, 'if (!out.columnWidths) out.columnWidths = [];', '')));
-  failures += expectRed('cfg() accepts an unstamped blob - the stamp-mismatch loss disappears',
+  // Stamp controls: the Views writer stamp (cases A/C), the global cfg() gate (case D),
+  // and cfgSave's own stamp (case B).
+  failures += expectRed('saveViews stops stamping v:1 - an empty-store view is lost again (cases A/C)',
+    await runCases(mutate(S_API, '      c.v = 1;', '')));
+  failures += expectRed('cfg() accepts an unstamped blob - the global stamp gate is relaxed (case D)',
     await runCases(S_API, mutate(S_CFG, "if (d && typeof d === 'object' && d.v === 1) out = d;", "if (d && typeof d === 'object') out = d;")));
-  failures += expectRed('cfgSave stops stamping v:1 - the stamped control loses its views',
+  failures += expectRed('cfgSave stops stamping v:1 (case B direct assertion)',
     await runCases(S_API, mutate(S_CFG, 'cur.v = 1;', '')));
 
   // Lifecycle mutation controls - BEHAVIORAL, run through the vm, because the
