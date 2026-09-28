@@ -645,6 +645,14 @@ jobs:
       - name: Proposal Actions multi-proposal harness (sibling read, acknowledgement, no sibling total)
         run: node scripts/test-pa-multi-proposal.js
 
+      # Kickback reliability (bwn-proposal-actions 0.7.12): slices PA-KICKBACK and pins one isolated,
+      # disposed AI session per draft, a failed proposal-context read never shown to the AI as an empty
+      # proposal (while a real empty scope / no lines is), and the reason gate (Summary / Total block,
+      # change-since-review line and placeholders are not a reason; any other wording is). The Confirm
+      # wiring is pinned in test-pa-multi-proposal.js. Negative controls turn it red.
+      - name: Proposal Actions kickback reliability harness (isolated AI session, context read, reason gate)
+        run: node scripts/test-pa-kickback.js
+
       # Track C write-back DRAIN half (bwn-write-queue.user.js): the coordinator's-tab executor that
       # claims a queued command from /api/wo-write-queue, confirms it, and turns it into a real
       # patchWorkOrder / addEditJobNote write. Slices the exec block into a vm with an injected gql and
