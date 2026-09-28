@@ -132,13 +132,21 @@ var LONG = 'This invoice from Acme HVAC bills 1200 dollars for a compressor repl
   var note2 = ctx.buildNoteText([{ name: 'site.jpg', kind: 'Photo', size: '2.1 MB', noteLine: '• site.jpg - Photo, 2.1 MB' }]);
   A.ok('no trailing summary line', note2.indexOf('• site.jpg - Photo, 2.1 MB') !== -1 && note2.split('\n').length === 2, note2);
 
-  console.log('\n# single email + attachment: the attachment summary shows in the attachment list');
+  console.log('\n# email + attachment: the note is the email only, no attachment list');
   var note3 = ctx.buildNoteText([
     { name: 'msg.msg', isEmail: true, noteBlock: 'From: a\nSubject: s\n\nbody' },
     { name: 'quote.pdf', kind: 'PDF', size: '80 KB', fromEmail: 'msg.msg', summaryLine: 'Quote for 2 RTUs, $6k.' }
   ]);
-  A.ok('email block kept', note3.indexOf('From: a') !== -1, note3);
-  A.ok('attachment listed with its summary', /• quote\.pdf - PDF, 80 KB\n    Quote for 2 RTUs, \$6k\./.test(note3), note3);
+  A.eq('note is exactly the email block', note3, 'From: a\nSubject: s\n\nbody');
+
+  console.log('\n# two emails + photos: both email blocks, no manifest, no photo lines');
+  var note4 = ctx.buildNoteText([
+    { name: 'a.msg', isEmail: true, noteBlock: 'Sum A\n\nFrom: a' },
+    { name: 'p.jpeg', kind: 'Photo', size: '425 KB', noteLine: '• p.jpeg - Photo, 425 KB', fromEmail: 'a.msg' },
+    { name: 'b.msg', isEmail: true, noteBlock: 'Sum B\n\nFrom: b' },
+    { name: 'loose.jpeg', kind: 'Photo', size: '1.2 MB', noteLine: '• loose.jpeg - Photo, 1.2 MB' }
+  ]);
+  A.eq('emails only, blank line between', note4, 'Sum A\n\nFrom: a\n\nSum B\n\nFrom: b');
 
   console.log('\n# looksLikeVendorProposal: an estimate/quote/proposal PDF text -> Vendor Proposal label');
   var estimate = 'ESTIMATE\nHeritage Electrical Services, LLC\nEstimate no.: 2392\nEstimate details\n' +
