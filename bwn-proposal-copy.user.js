@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         BWN Proposal Copy (Broadway National)
 // @namespace    broadwaynational.bwn
-// @version      0.4.1
+// @version      0.5.0
 // @downloadURL  https://raw.githubusercontent.com/Intermu/userscripts/main/bwn-proposal-copy.user.js
 // @updateURL    https://raw.githubusercontent.com/Intermu/userscripts/main/bwn-proposal-copy.user.js
 // @description  Copy a client proposal from an aged-out work order onto a chosen replacement WO as an un-submitted Draft, in one confirmed action. Replays Umbrava's own createDraftProposal + editProposal mutations (line items copied verbatim); never submits, deletes, or retries. Manager-gated visibility. @grant none.
@@ -15,7 +15,7 @@
 (function () {
   'use strict';
 
-  var VER = '0.4.1';   // keep in step with @version
+  var VER = '0.5.0';   // keep in step with @version
   var DRY_RUN = false; // when true, the two WRITE mutations are logged, not sent
   var FONT = "-apple-system,BlinkMacSystemFont,'Segoe UI','Helvetica Neue',Arial,sans-serif";
   var GREEN = '#0d3d26';
@@ -951,12 +951,20 @@
       '.bcp-note.warn{background:#fff4e5;color:#8a5a00;}',
       '.bcp-note.err{background:#fdecea;color:#8b1a1a;}',
       '.bcp-note.ok{background:#e8f3ed;color:#0d3d26;}',
-      '.bcp-scroll{max-height:250px;overflow:auto;border:1px solid #eef2ef;border-radius:8px;}',
+      '.bcp-scroll{max-height:320px;overflow:auto;border:1px solid #eef2ef;border-radius:8px;}',
       '.bcp-tbl{width:100%;border-collapse:collapse;font:400 12px ' + FONT + ';}',
       '.bcp-tbl th{position:sticky;top:0;background:#f3f6f4;color:#5a6b62;font-weight:600;text-align:left;padding:7px 10px;border-bottom:1px solid #e3e9e5;z-index:1;}',
       '.bcp-tbl td{padding:7px 10px;border-bottom:1px solid #f0f3f1;vertical-align:top;}',
       '.bcp-tbl tr:last-child td{border-bottom:none;}',
       '.bcp-tbl .num{text-align:right;white-space:nowrap;font-variant-numeric:tabular-nums;}',
+      '.bcp-tbl th{white-space:nowrap;}',
+      '.bcp-tbl tr.grp th{top:0;height:28px;padding-top:0;padding-bottom:0;border-left:1px solid #e3e9e5;}',
+      '.bcp-tbl tr.cols th{top:28px;}',
+      '.bcp-tbl td.item{min-width:150px;}',
+      '.bcp-tbl .b{font-weight:600;}',
+      '.bcp-tbl tfoot td{position:sticky;bottom:0;background:#f3f6f4;border-top:1px solid #e3e9e5;padding:7px 10px;}',
+      '.bcp-tbl td{white-space:nowrap;}',
+      '.bcp-tbl td.item{white-space:normal;}',
       '.bcp-tbl .zero{color:#8a5a00;font-weight:600;}',
       '.bcp-linkbtn{background:none;border:none;color:#15794a;font:600 12px ' + FONT + ';cursor:pointer;padding:0;text-decoration:underline;}',
       '.bcp-linkbtn:focus-visible{outline:2px solid #15794a;outline-offset:2px;}',
@@ -1167,9 +1175,19 @@
     // source.subtotal (markup/tax/freight live at the proposal level), which we never recompute -
     // extended is shown per row for scanability and blanks to "-" when the quantity is not numeric.
     function qtyOf(li) { var v = (li.chargeQuantity != null ? li.chargeQuantity : li.quantity); var n = Number(v); return isFinite(n) ? n : null; }
-    function extMoney(li) {
-      var q = qtyOf(li); if (q == null || !li.unitCharge || li.unitCharge.amount == null) return null;
-      return { amount: Number(li.unitCharge.amount) * q, currency: li.unitCharge.currency, precision: li.unitCharge.precision };
+    // Per-line figures mirror Umbrava's full-proposal grid. Money fields are minor units + precision;
+    // subtotal / tax / total are DISPLAY ONLY (round-half-up to cents per row, like the grid) - the
+    // authoritative value stays source.subtotal, which we never recompute.
+    function dollars(m) { return (m && m.amount != null) ? Number(m.amount) / Math.pow(10, m.precision != null ? m.precision : 2) : null; }
+    function r2(n) { return Math.round(n * 100) / 100; }
+    function money(n) { return n == null ? '-' : (n < 0 ? '-$' : '$') + Math.abs(n).toFixed(2).replace(/\B(?=(\d{3})+\.)/g, ','); }
+    function num(v) { var n = Number(v); return (v == null || v === '' || !isFinite(n)) ? '-' : String(n); }
+    function lineCalc(li) {
+      var cq = Number(li.quantity), uc = dollars(li.unitCost), q = qtyOf(li), up = dollars(li.unitCharge);
+      var costTot = (uc != null && isFinite(cq)) ? r2(uc * cq) : null;
+      var sub = (up != null && q != null) ? r2(up * q) : null;
+      var tax = (sub != null && li.isTaxable) ? r2(sub * Number(li.taxRate || 0) / 100) : (sub != null ? 0 : null);
+      return { uc: uc, up: up, costTot: costTot, sub: sub, tax: tax, tot: sub != null ? r2(sub + tax) : null };
     }
     var anyZeroQty = items.some(function (li) { return qtyOf(li) === 0; });
     var qtySum = 0, qtyKnown = true;
@@ -1217,17 +1235,40 @@
       var shown = showAll ? items : items.slice(0, 5);
       var scroll = document.createElement('div'); scroll.className = 'bcp-scroll';
       var t = document.createElement('table'); t.className = 'bcp-tbl';
-      t.innerHTML = '<thead><tr><th>Description</th><th class="num">Qty</th><th class="num">Unit charge</th><th class="num">Extended</th></tr></thead>';
+      t.innerHTML = '<thead><tr class="grp"><th colspan="5">Details</th><th colspan="3">Cost</th><th colspan="4">Charge</th><th colspan="3">Tax</th><th></th></tr>' +
+        '<tr class="cols"><th>Private</th><th>Category</th><th>Item</th><th class="num">Trip #</th><th>UOM</th>' +
+        '<th class="num">Qty</th><th class="num">Unit Cost</th><th class="num">Total Cost</th>' +
+        '<th class="num">Qty</th><th class="num">Mark Up %</th><th class="num">Unit Charge</th><th class="num">Subtotal</th>' +
+        '<th>Taxable</th><th class="num">Tax %</th><th class="num">Tax Amount</th><th class="num">Total Charge</th></tr></thead>';
       var tb = document.createElement('tbody');
       shown.forEach(function (li) {
-        var q = qtyOf(li), ext = extMoney(li), tr = document.createElement('tr');
+        var q = qtyOf(li), c = lineCalc(li), tr = document.createElement('tr');
         tr.innerHTML =
-          '<td>' + escapeHtml(li.description || li.item || '-') + '</td>' +
+          '<td>' + (li.isPrivate ? 'Private' : 'Visible') + '</td>' +
+          '<td>' + escapeHtml(li.category || '-') + '</td>' +
+          '<td class="item">' + escapeHtml(li.description || li.item || '-') + '</td>' +
+          '<td class="num">' + escapeHtml(num(li.tripLabel)) + '</td>' +
+          '<td>' + escapeHtml(li.unitOfMeasurement || '--') + '</td>' +
+          '<td class="num">' + escapeHtml(num(li.quantity)) + '</td>' +
+          '<td class="num">' + money(c.uc) + '</td>' +
+          '<td class="num b">' + money(c.costTot) + '</td>' +
           '<td class="' + (q === 0 ? 'num zero' : 'num') + '">' + escapeHtml(q == null ? '-' : String(q)) + '</td>' +
-          '<td class="num">' + escapeHtml(fmtMoney(li.unitCharge)) + '</td>' +
-          '<td class="num">' + (ext ? escapeHtml(fmtMoney(ext)) : '-') + '</td>';
+          '<td class="num">' + (li.useMarkUpPercent === false || li.markUpPercent == null ? '-' : escapeHtml(String(li.markUpPercent)) + '%') + '</td>' +
+          '<td class="num">' + money(c.up) + '</td>' +
+          '<td class="num b">' + money(c.sub) + '</td>' +
+          '<td>' + (li.isTaxable ? 'Yes' : 'No') + '</td>' +
+          '<td class="num">' + (li.isTaxable && li.taxRate != null ? escapeHtml(String(li.taxRate)) + '%' : '-') + '</td>' +
+          '<td class="num">' + money(c.tax) + '</td>' +
+          '<td class="num b">' + money(c.tot) + '</td>';
         tb.appendChild(tr);
       });
+      // Footer totals over ALL items (not just the collapsed preview), like the full-proposal grid.
+      var tot = { costTot: 0, sub: 0, tax: 0, tot: 0 };
+      items.forEach(function (li) { var c = lineCalc(li); ['costTot', 'sub', 'tax', 'tot'].forEach(function (k) { tot[k] += c[k] || 0; }); });
+      var tf = document.createElement('tfoot');
+      tf.innerHTML = '<tr><td colspan="7"></td><td class="num b">' + money(r2(tot.costTot)) + '</td><td colspan="3"></td><td class="num b">' + money(r2(tot.sub)) +
+        '</td><td colspan="2"></td><td class="num b">' + money(r2(tot.tax)) + '</td><td class="num b">' + money(r2(tot.tot)) + '</td></tr>';
+      t.appendChild(tf);
       t.appendChild(tb); scroll.appendChild(t); liBd.appendChild(scroll);
       if (!showAll) {
         var more = document.createElement('button'); more.className = 'bcp-linkbtn'; more.type = 'button'; more.style.marginTop = '9px';
