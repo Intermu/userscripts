@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         BWN Proposal Copy (Broadway National)
 // @namespace    broadwaynational.bwn
-// @version      0.5.0
+// @version      0.5.1
 // @downloadURL  https://raw.githubusercontent.com/Intermu/userscripts/main/bwn-proposal-copy.user.js
 // @updateURL    https://raw.githubusercontent.com/Intermu/userscripts/main/bwn-proposal-copy.user.js
 // @description  Copy a client proposal from an aged-out work order onto a chosen replacement WO as an un-submitted Draft, in one confirmed action. Replays Umbrava's own createDraftProposal + editProposal mutations (line items copied verbatim); never submits, deletes, or retries. Manager-gated visibility. @grant none.
@@ -15,7 +15,7 @@
 (function () {
   'use strict';
 
-  var VER = '0.5.0';   // keep in step with @version
+  var VER = '0.5.1';   // keep in step with @version
   var DRY_RUN = false; // when true, the two WRITE mutations are logged, not sent
   var FONT = "-apple-system,BlinkMacSystemFont,'Segoe UI','Helvetica Neue',Arial,sans-serif";
   var GREEN = '#0d3d26';
@@ -904,7 +904,7 @@
       '.bcp-ov{position:fixed;inset:0;z-index:2147483000;display:flex;align-items:center;justify-content:center;padding:24px;box-sizing:border-box;background:rgba(9,24,18,.5);opacity:0;transition:opacity .16s ease;font-family:' + FONT + ';}',
       '.bcp-ov.bcp-in{opacity:1;}',
       '.bcp-ov.bcp-closing{opacity:0;}',
-      '.bcp-modal{width:760px;max-width:100%;max-height:88vh;display:flex;flex-direction:column;background:#f4f6f5;border-radius:12px;overflow:hidden;box-shadow:0 18px 60px rgba(0,0,0,.35);transform:translateY(8px);opacity:0;transition:transform .18s cubic-bezier(.23,1,.32,1),opacity .18s ease;color:#1f2a24;box-sizing:border-box;}',
+      '.bcp-modal{width:1180px;max-width:100%;max-height:88vh;display:flex;flex-direction:column;background:#f4f6f5;border-radius:12px;overflow:hidden;box-shadow:0 18px 60px rgba(0,0,0,.35);transform:translateY(8px);opacity:0;transition:transform .18s cubic-bezier(.23,1,.32,1),opacity .18s ease;color:#1f2a24;box-sizing:border-box;}',
       '.bcp-ov.bcp-in .bcp-modal{transform:none;opacity:1;}',
       '.bcp-hd{background:#0d3d26;color:#fff;padding:16px 20px;display:flex;align-items:flex-start;gap:14px;}',
       '.bcp-hd-main{flex:1;min-width:0;}',
@@ -929,7 +929,7 @@
       '.bcp-step-l{font:600 12px ' + FONT + ';white-space:nowrap;}',
       '.bcp-step-bar{flex:1;height:1.5px;background:rgba(255,255,255,.25);margin:0 12px;min-width:14px;}',
       '.bcp-body{flex:1;overflow:auto;padding:16px 20px;display:flex;flex-direction:column;gap:16px;}',
-      '.bcp-card{background:#fff;border:1px solid #e3e9e5;border-radius:10px;box-shadow:0 1px 2px rgba(16,40,28,.05);overflow:hidden;}',
+      '.bcp-card{flex:none;background:#fff;border:1px solid #e3e9e5;border-radius:10px;box-shadow:0 1px 2px rgba(16,40,28,.05);overflow:hidden;}',
       '.bcp-card.accent{border-color:#cfe6d8;box-shadow:0 1px 2px rgba(16,40,28,.05),0 0 0 1px rgba(21,121,74,.08);}',
       '.bcp-card-hd{display:flex;align-items:center;gap:9px;padding:11px 14px;border-bottom:1px solid #eef2ef;}',
       '.bcp-card-hd .bcp-ic{color:#15794a;flex:none;}',
@@ -1181,12 +1181,14 @@
     function dollars(m) { return (m && m.amount != null) ? Number(m.amount) / Math.pow(10, m.precision != null ? m.precision : 2) : null; }
     function r2(n) { return Math.round(n * 100) / 100; }
     function money(n) { return n == null ? '-' : (n < 0 ? '-$' : '$') + Math.abs(n).toFixed(2).replace(/\B(?=(\d{3})+\.)/g, ','); }
+    // Rates arrive as FRACTIONS (live 2026-09-28: taxRate 0.059 renders 5.9% in Umbrava's grid).
+    function pct(v) { var n = Number(v); return (v == null || v === '' || !isFinite(n)) ? '-' : String(r2(n * 100)) + '%'; }
     function num(v) { var n = Number(v); return (v == null || v === '' || !isFinite(n)) ? '-' : String(n); }
     function lineCalc(li) {
       var cq = Number(li.quantity), uc = dollars(li.unitCost), q = qtyOf(li), up = dollars(li.unitCharge);
       var costTot = (uc != null && isFinite(cq)) ? r2(uc * cq) : null;
       var sub = (up != null && q != null) ? r2(up * q) : null;
-      var tax = (sub != null && li.isTaxable) ? r2(sub * Number(li.taxRate || 0) / 100) : (sub != null ? 0 : null);
+      var tax = (sub != null && li.isTaxable) ? r2(sub * Number(li.taxRate || 0)) : (sub != null ? 0 : null);
       return { uc: uc, up: up, costTot: costTot, sub: sub, tax: tax, tot: sub != null ? r2(sub + tax) : null };
     }
     var anyZeroQty = items.some(function (li) { return qtyOf(li) === 0; });
@@ -1253,11 +1255,11 @@
           '<td class="num">' + money(c.uc) + '</td>' +
           '<td class="num b">' + money(c.costTot) + '</td>' +
           '<td class="' + (q === 0 ? 'num zero' : 'num') + '">' + escapeHtml(q == null ? '-' : String(q)) + '</td>' +
-          '<td class="num">' + (li.useMarkUpPercent === false || li.markUpPercent == null ? '-' : escapeHtml(String(li.markUpPercent)) + '%') + '</td>' +
+          '<td class="num">' + escapeHtml(pct(li.markUpPercent)) + '</td>' +
           '<td class="num">' + money(c.up) + '</td>' +
           '<td class="num b">' + money(c.sub) + '</td>' +
           '<td>' + (li.isTaxable ? 'Yes' : 'No') + '</td>' +
-          '<td class="num">' + (li.isTaxable && li.taxRate != null ? escapeHtml(String(li.taxRate)) + '%' : '-') + '</td>' +
+          '<td class="num">' + escapeHtml(pct(li.taxRate)) + '</td>' +
           '<td class="num">' + money(c.tax) + '</td>' +
           '<td class="num b">' + money(c.tot) + '</td>';
         tb.appendChild(tr);
