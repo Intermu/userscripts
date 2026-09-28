@@ -4,7 +4,7 @@
 // @version      1.32.0
 // @downloadURL  https://raw.githubusercontent.com/Intermu/userscripts/main/bwn-drop-upload.user.js
 // @updateURL    https://raw.githubusercontent.com/Intermu/userscripts/main/bwn-drop-upload.user.js
-// @description  Drop files anywhere on an Umbrava work order to upload them. Opens the Documents tab and upload dialog, hands over the files, and builds each file's description from its contents. Emails are parsed locally (.msg via an OLE/MAPI reader, .eml via RFC822) into an Outlook-style block - From/Sent/To/Cc/Subject and the body - that becomes the WO note, led by a one-line summary from Chrome's on-device built-in AI (zero cost, zero egress, nothing leaves the browser), falling back to local WO-field extraction (store, city/state, priority, PO, NTE, problem, requester) when the on-device model is unavailable. That same summary fills each file's Description. The WO note's Type is chosen from the email's parties: inbound is typed by the sender (client -> Client, else Vendor); outbound from Broadway is typed by the recipients (a client recipient -> Client, any vendor recipient -> Vendor, all-internal -> Internal). Umbrava's Description field is a TipTap/ProseMirror rich-text editor. It rejects synthetic paste, beforeinput, insertHTML and raw innerHTML, but honours execCommand('insertText') plus a synthetic Enter keydown - so the note is filled line by line (Enter between lines to keep paragraphs), paced ~12ms/line so ProseMirror's async commit doesn't drop lines (measured live 2026-08-10). The text is also placed on your clipboard as a backup, and if every fill method fails a "Copy the WO note" button appears (its click supplies the gesture for a reliable copy, then Ctrl+V). A console diagnostic reports which editor was found and which fill method stuck. When WO Intake hands off a just-created WO's request email, each uploaded file's Label (document type) is set to "Work Order Request" and the note Type is forced to Client (a WO Intake handoff is a client's request, even when the sender is a broker like Fairmarkit that reads as a Vendor domain). Fairmarkit / bulk-email footer boilerplate (the Fairmarkit company block: tagline + Boston address + FAQ/Privacy/Terms/Unsubscribe, and the -----!{...}!----- machine tail) plus ALL tracking URLs (safelinks/awstrack/logo) are stripped from the note body, keeping content through the suppliers@ email. A Fairmarkit RFQ body is also condensed to one line per entry - single-spaced, with each line-item rejoined to its QTY and each Details label (Buyer/Close date/RFQ ID/Shipping address) rejoined to its value. Files upload via Umbrava's own API (initializeJobDocument -> Azure blob PUT -> bulkAddWorkOrderDocuments, captured live 2026-08-12), Label set by id, so the brittle upload-dialog combobox is bypassed; the dialog remains the automatic fallback if the API is unavailable. A manual drop does NOT auto-upload: the review box gives EACH queued file its own "Document type" picker plus one Upload button, so the coordinator confirms the type per file before it is committed (there is no update-label mutation, so the label must be right at upload time). Each picker is auto-set: a photo files as Photo, an email as correspondence by party (Client -> Client Correspondence, Vendor -> Vendor Correspondence, Internal -> Internal), everything else as the WO-request default; the email rows stay in sync as the note Type is changed until overridden, and for an unknown external party the on-device classifier upgrades an email row Vendor -> Supplier Correspondence when it reads as a parts supplier. Any row can be changed individually. After Upload the button reports Uploaded (or a dialog fallback on failure). The file Description is still filled automatically from the file's contents / the email summary. Only the WO Intake handoff still uploads automatically, and it labels per file: the request email itself is the "Work Order Request", while any image attachment is filed as a "Photo". The email note is shown in a centered BWN review box (editable; the Type picker offers a curated set of the note types a drop is actually filed under, defaulted to the party-derived Client/Vendor/Internal) and posted via addEditJobNote ONLY when you click Post - it is never auto-posted, and posts under your own Umbrava session for correct attribution. A dropped email is a CONTAINER, so its real attachments (the PDF, the site photos) are extracted and uploaded as documents of their own (the note carries only the email(s) and their summary, never a list of the uploaded files) - the sender's signature graphics are left behind, identified by their MAPI hidden / MHTML-reference marks (.msg) or by being disposed inline with a cited Content-ID (.eml) rather than by size or filename; an attached image is filed as a "Photo" while the email keeps the document type you picked. Ticking "This client email needs a response" now also posts an Action note that @-mentions the work order's assignee (the notify rides the TipTap mention span the SPA itself sends), then prompts them every 15 minutes until they log a Client note on that WO; after 5 unanswered prompts it posts an Escalation note @-mentioning their supervisor and manager. Who that is is READ FROM UMBRAVA, not configured anywhere: Company > Users shows each person's Teams, and the ops behind that page (user(id){parentTeams{parentTeam}} then users(teamId:){role{name}}) give the assignee's team and its members, from which whoever ranks supervisor or manager is told. A team may carry both or only one; the assignee is excluded, so a manager's own unanswered work does not escalate to themselves. Role-to-rank mirrors the SWA's own ladder so the two cannot disagree. Nothing to set up and no name is written down - fix the team in Umbrava and the escalation follows. The prompt ladder is local (localStorage + a ticker + a browser notification, falling back to an in-page toast), so it runs while an Umbrava tab is open; the Action note and the escalation are work-order notes, so the record of the chase survives a closed browser. Network calls are same-origin to app.umbrava.com's own /api/graphql (the app's Auth0 bearer, no @connect/GM) plus the SAS-authorized blob PUT the SPA itself makes - nothing goes to any third party. The review box lists every queued file (name, size, type icon) so it is clear what will be uploaded; each still-held file has a × to remove it before Upload (there is no delete-document mutation, so removal is pre-upload only), and a second drop of a file already in the queue (same name + size) is skipped with a count, so dragging the same thing twice does not upload it twice. @grant none.
+// @description  Drop files anywhere on an Umbrava work order to upload them. Opens the Documents tab and upload dialog, hands over the files, and builds each file's description from its contents. Emails are parsed locally (.msg via an OLE/MAPI reader, .eml via RFC822) into an Outlook-style block - From/Sent/To/Cc/Subject and the body - that becomes the WO note, led by a one-line summary from Chrome's on-device built-in AI (zero cost, zero egress, nothing leaves the browser), falling back to local WO-field extraction (store, city/state, priority, PO, NTE, problem, requester) when the on-device model is unavailable. That same summary fills each file's Description. The WO note's Type is chosen from the email's parties: inbound is typed by the sender (client -> Client, else Vendor); outbound from Broadway is typed by the recipients (a client recipient -> Client, any vendor recipient -> Vendor, all-internal -> Internal). Umbrava's Description field is a TipTap/ProseMirror rich-text editor. It rejects synthetic paste, beforeinput, insertHTML and raw innerHTML, but honours execCommand('insertText') plus a synthetic Enter keydown - so the note is filled line by line (Enter between lines to keep paragraphs), paced ~12ms/line so ProseMirror's async commit doesn't drop lines (measured live 2026-08-10). The text is also placed on your clipboard as a backup, and if every fill method fails a "Copy the WO note" button appears (its click supplies the gesture for a reliable copy, then Ctrl+V). A console diagnostic reports which editor was found and which fill method stuck. When WO Intake hands off a just-created WO's request email, each uploaded file's Label (document type) is set to "Work Order Request" and the note Type is forced to Client (a WO Intake handoff is a client's request, even when the sender is a broker like Fairmarkit that reads as a Vendor domain). Fairmarkit / bulk-email footer boilerplate (the Fairmarkit company block: tagline + Boston address + FAQ/Privacy/Terms/Unsubscribe, and the -----!{...}!----- machine tail) plus ALL tracking URLs (safelinks/awstrack/logo) are stripped from the note body, keeping content through the suppliers@ email. A Fairmarkit RFQ body is also condensed to one line per entry - single-spaced, with each line-item rejoined to its QTY and each Details label (Buyer/Close date/RFQ ID/Shipping address) rejoined to its value. Files upload via Umbrava's own API (initializeJobDocument -> Azure blob PUT -> bulkAddWorkOrderDocuments, captured live 2026-08-12), Label set by id, so the brittle upload-dialog combobox is bypassed; the dialog remains the automatic fallback if the API is unavailable. A manual drop does NOT auto-upload: the review box gives EACH queued file its own "Document type" picker plus one Upload button, so the coordinator confirms the type per file before it is committed (there is no update-label mutation, so the label must be right at upload time). Each picker is auto-set: a photo files as Photo, an email as correspondence by party (Client -> Client Correspondence, Vendor -> Vendor Correspondence, Internal -> Internal), everything else as the WO-request default; the email rows stay in sync as the note Type is changed until overridden, and for an unknown external party the on-device classifier upgrades an email row Vendor -> Supplier Correspondence when it reads as a parts supplier. Any row can be changed individually. After Upload the button reports Uploaded (or a dialog fallback on failure). The file Description is still filled automatically from the file's contents / the email summary. Only the WO Intake handoff still uploads automatically, and it labels per file: the request email itself is the "Work Order Request", while any image attachment is filed as a "Photo". The email note is shown in a centered BWN review box (editable; the Type picker offers a curated set of the note types a drop is actually filed under, defaulted to the party-derived Client/Vendor/Internal) and posted via addEditJobNote ONLY when you click Post - it is never auto-posted, and posts under your own Umbrava session for correct attribution. A dropped email is a CONTAINER, so its real attachments (the PDF, the site photos) are extracted and uploaded as documents of their own (the note carries only the email(s) and their summary, never a list of the uploaded files; a drop with no email has no note at all - the box is just the file list, per-file types and Upload) - the sender's signature graphics are left behind, identified by their MAPI hidden / MHTML-reference marks (.msg) or by being disposed inline with a cited Content-ID (.eml) rather than by size or filename; an attached image is filed as a "Photo" while the email keeps the document type you picked. Ticking "This client email needs a response" now also posts an Action note that @-mentions the work order's assignee (the notify rides the TipTap mention span the SPA itself sends), then prompts them every 15 minutes until they log a Client note on that WO; after 5 unanswered prompts it posts an Escalation note @-mentioning their supervisor and manager. Who that is is READ FROM UMBRAVA, not configured anywhere: Company > Users shows each person's Teams, and the ops behind that page (user(id){parentTeams{parentTeam}} then users(teamId:){role{name}}) give the assignee's team and its members, from which whoever ranks supervisor or manager is told. A team may carry both or only one; the assignee is excluded, so a manager's own unanswered work does not escalate to themselves. Role-to-rank mirrors the SWA's own ladder so the two cannot disagree. Nothing to set up and no name is written down - fix the team in Umbrava and the escalation follows. The prompt ladder is local (localStorage + a ticker + a browser notification, falling back to an in-page toast), so it runs while an Umbrava tab is open; the Action note and the escalation are work-order notes, so the record of the chase survives a closed browser. Network calls are same-origin to app.umbrava.com's own /api/graphql (the app's Auth0 bearer, no @connect/GM) plus the SAS-authorized blob PUT the SPA itself makes - nothing goes to any third party. The review box lists every queued file (name, size, type icon) so it is clear what will be uploaded; each still-held file has a × to remove it before Upload (there is no delete-document mutation, so removal is pre-upload only), and a second drop of a file already in the queue (same name + size) is skipped with a count, so dragging the same thing twice does not upload it twice. @grant none.
 // @match        https://app.umbrava.com/*
 // @match        https://*.umbrava.com/*
 // @run-at       document-idle
@@ -1958,14 +1958,9 @@
     if (emailBlocks.length) {
       return capNote(emailBlocks.map(function (d) { return d.noteBlock; }).join('\n\n'));
     }
-    // No email at all → the file list is the only content there is to note.
-    var out = ['Uploaded to Documents (' + shortDate() + '):'];
-    files.forEach(function (d) {
-      if (d.isEmail && d.noteBlock) { out.push(''); out.push('- ' + d.name + ' -'); out.push(d.noteBlock); }
-      else out.push(d.noteLine + (d.summaryLine ? '\n    ' + d.summaryLine : ''));
-    });
-    var text = out.join('\n');
-    return capNote(text);
+    // No email → no note (Mike, 9/28). The review box still shows the files + their type pickers
+    // + Upload as the confirmation; showNoteReview drops the note section when this is empty.
+    return '';
   }
 
   // ---- Umbrava upload dialog plumbing --------------------------------------
@@ -2952,9 +2947,11 @@
     clearNoteBox();
     clearRespChip();
     if (!pending || !woNumberFromUrl()) return null;
-    // The review box's only outcome is a work-order note. An operator who may upload documents but
-    // not post notes gets the upload without the note step, rather than a box that cannot land.
-    if (!bwnCan('WorkOrderNote.AddNew')) return null;
+    // No email in the drop → no note: the box is just the upload confirmation (files, per-file type,
+    // Upload). With an email, an operator who may upload documents but not post notes gets the upload
+    // without the note step, rather than a box that cannot land.
+    var noteless = !(pending.files || []).some(function (f) { return f && f.isEmail; });
+    if (!noteless && !bwnCan('WorkOrderNote.AddNew')) return null;
     var woNum = woNumberFromUrl();
     var canRespond = !!inboundClientEmail(pending.files);
     var box = document.createElement('div');
@@ -2977,7 +2974,7 @@
     htext.style.cssText = 'flex:1 1 auto;min-width:0;';
     var h = document.createElement('div');
     h.style.cssText = 'font-weight:700;font-size:14px;color:#183a2a;letter-spacing:.1px;';
-    h.textContent = 'Upload note for W-' + woNum;
+    h.textContent = (noteless ? 'Upload to W-' : 'Upload note for W-') + woNum;
     var status = document.createElement('div');
     status.style.cssText = 'color:#5b6b8c;font-size:11.5px;margin-top:1px;';
     htext.appendChild(h); htext.appendChild(status);
@@ -3091,6 +3088,20 @@
       body.appendChild(upRow);
       status.textContent = nUp + ' file' + (nUp > 1 ? 's' : '') + ' ready - each is auto-typed; adjust any, then Upload.';
     }
+    if (noteless) {
+      // Upload confirmation only: a Close button in place of the note section. Closing before Upload
+      // leaves nothing uploaded (the batch is held until the Upload click).
+      var crow = document.createElement('div');
+      crow.style.cssText = 'display:flex;justify-content:flex-end;';
+      var closeBtn = document.createElement('button');
+      closeBtn.textContent = 'Close'; closeBtn.type = 'button';
+      closeBtn.style.cssText = 'padding:6px 12px;border:1px solid #c6d2cc;background:#f4f7f5;border-radius:7px;cursor:pointer;font:inherit;';
+      closeBtn.addEventListener('click', clearNoteBox);
+      crow.appendChild(closeBtn);
+      body.appendChild(crow);
+      box.__noteless = true;
+      return mountBox();
+    }
     var ta = document.createElement('textarea');
     ta.style.cssText = 'width:100%;height:168px;box-sizing:border-box;resize:vertical;border:1px solid #c6d2cc;border-radius:9px;padding:9px 10px;font:inherit;line-height:1.5;color:#12241b;background:#fcfdfc;';
     ta.maxLength = NOTE_CAP;
@@ -3170,13 +3181,16 @@
       });
     });
 
-    document.body.appendChild(box);
-    unblockFromModal(box);
-    box.__status = status;
-    noteBox = box;
-    noteBoxTimer = setTimeout(clearNoteBox, PENDING_TTL);
-    if (pending) pending.__box = true;   // tells the legacy Upload-click handler the box owns the note
-    return box;
+    return mountBox();
+    function mountBox() {
+      document.body.appendChild(box);
+      unblockFromModal(box);
+      box.__status = status;
+      noteBox = box;
+      noteBoxTimer = setTimeout(clearNoteBox, PENDING_TTL);
+      if (pending) pending.__box = true;   // tells the legacy Upload-click handler the box owns the note
+      return box;
+    }
   }
 
   // Run the API upload for a drop, update the review box, and fall back to the DOM dialog on any
@@ -3202,7 +3216,7 @@
       });
     }).then(function (ids) {
       var n = (ids && ids.length) || rawFiles.length;
-      noteBoxStatus('Uploaded ' + n + ' file' + (n > 1 ? 's' : '') + ' ✓  - review the note, then Post.');
+      noteBoxStatus('Uploaded ' + n + ' file' + (n > 1 ? 's' : '') + ' ✓' + (noteBox && noteBox.__noteless ? '' : '  - review the note, then Post.'));
       var okBtn = noteBox && noteBox.__upBtn;
       if (okBtn) { okBtn.textContent = 'Uploaded ' + n + ' ✓'; okBtn.style.background = '#8aa99a'; okBtn.style.cursor = 'default'; okBtn.disabled = true; }
       toast('Uploaded ' + rawFiles.length + ' file' + (rawFiles.length > 1 ? 's' : '') + ' to W-' + woNum + '.');
@@ -3213,7 +3227,7 @@
       // Name the actual failing step in the box (not a generic "API unavailable"): this path never
       // passed a live dry-run, so the reason IS the diagnostic. The note box stays editable and the
       // Post button still works even while the Umbrava dialog is open (see the unblock() in showNoteReview).
-      noteBoxStatus('Upload API failed (' + reason + ') - finish the Upload dialog; the note is still here to edit and Post.');
+      noteBoxStatus('Upload API failed (' + reason + ') - finish the Upload dialog' + (noteBox && noteBox.__noteless ? '.' : '; the note is still here to edit and Post.'));
       var failBtn = noteBox && noteBox.__upBtn;
       if (failBtn) { failBtn.textContent = 'Upload failed - use dialog'; failBtn.style.background = '#a23'; failBtn.style.cursor = 'default'; failBtn.disabled = true; }
       handleDrop(dt, described, ctx, { docLabel: resolvedLabel });
@@ -3278,7 +3292,7 @@
     pending = null;
     clearRespChip();
     // Let the dialog close and the upload kick off before touching the notes pane.
-    setTimeout(function () { insertNote(note, originTab, noteType); }, 1400);
+    if (note) setTimeout(function () { insertNote(note, originTab, noteType); }, 1400);   // no email = no note
     // Fire the track alongside the note rather than after it: the note is a human-review
     // draft that may sit unsaved for minutes, and the queue item should not wait on that.
     if (track) requestTrack(track.file, track.woId);

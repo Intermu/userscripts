@@ -121,16 +121,12 @@ var LONG = 'This invoice from Acme HVAC bills 1200 dollars for a compressor repl
   A.eq('short text yields empty', s4, '');
   detach3();
 
-  console.log('\n# buildNoteText: the summary rides UNDER the document line');
+  console.log('\n# buildNoteText: no email in the drop -> no note (the box is just the upload confirmation)');
   var note = ctx.buildNoteText([
-    { name: 'inv.pdf', kind: 'PDF', size: '120 KB', noteLine: '• inv.pdf - PDF, 120 KB', summaryLine: 'Acme HVAC invoice, $1200.' }
+    { name: 'inv.pdf', kind: 'PDF', size: '120 KB', noteLine: '• inv.pdf - PDF, 120 KB', summaryLine: 'Acme HVAC invoice, $1200.' },
+    { name: 'site.jpg', kind: 'Photo', size: '2.1 MB', noteLine: '• site.jpg - Photo, 2.1 MB' }
   ]);
-  A.ok('doc file line present', note.indexOf('• inv.pdf - PDF, 120 KB') !== -1, note);
-  A.ok('summary indented under it', /• inv\.pdf - PDF, 120 KB\n    Acme HVAC invoice, \$1200\./.test(note), note);
-
-  console.log('\n# a doc with no summary is unchanged (photo / scan / model absent)');
-  var note2 = ctx.buildNoteText([{ name: 'site.jpg', kind: 'Photo', size: '2.1 MB', noteLine: '• site.jpg - Photo, 2.1 MB' }]);
-  A.ok('no trailing summary line', note2.indexOf('• site.jpg - Photo, 2.1 MB') !== -1 && note2.split('\n').length === 2, note2);
+  A.eq('docs-only drop builds an empty note', note, '');
 
   console.log('\n# email + attachment: the note is the email only, no attachment list');
   var note3 = ctx.buildNoteText([
