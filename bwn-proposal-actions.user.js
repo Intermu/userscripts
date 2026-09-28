@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         BWN Proposal Actions (Broadway National)
 // @namespace    broadwaynational.bwn
-// @version      0.7.11
+// @version      0.7.12
 // @downloadURL  https://raw.githubusercontent.com/Intermu/userscripts/main/bwn-proposal-actions.user.js
 // @updateURL    https://raw.githubusercontent.com/Intermu/userscripts/main/bwn-proposal-actions.user.js
 // @description  On a Client Proposal DETAILS page, a "Proposal Actions" dropdown runs the internal review workflow in one confirmed action: Approval / TSP Review / Kickback. Each posts a note to the Proposal + the Work Order, sets the WO status, completes open tasks, and files a new task (assigned to the WO coordinator, or Ronny Sharp for TSP). The posted note is an EDITABLE field seeded with the auto-generated text (Kickback's is drafted by the on-device browser AI) so the reviewer can add what they changed as coaching for the coordinator; a "changes since review opened" line (total + GP) is prepended automatically. When the job has more than one client proposal, the trigger shows the option count, a read-only "Compare proposals" view lists every alternative side by side, and the confirm dialog names the job, the exact proposal being acted on and its siblings (with an explicit acknowledgement). Completed actions are kept as a browser-local history (never synced, never an Umbrava status) shown in Compare and as a non-blocking warning on a repeat. Opening an action only reads (proposal, work order, tasks) to prepare the confirm dialog; every change is listed there first, and no proposal or work-order change is submitted until Confirm. @grant none.
@@ -15,7 +15,7 @@
 (function () {
   'use strict';
 
-  var VER = '0.7.11';   // keep in step with @version
+  var VER = '0.7.12';   // keep in step with @version
   var DRY_RUN = false; // when true, every WRITE is console.logged instead of sent
   console.info('[BWN PROPOSAL ACTIONS] v' + VER + ' - Approval / TSP Review / Kickback workflow on the Client Proposal details page');
 
@@ -1001,30 +1001,30 @@
       '.bwn-pa-menu{position:fixed;z-index:2147483000;min-width:200px;background:#fff;border:1px solid #d5e6dd;border-radius:10px;' +
       'box-shadow:0 12px 34px rgba(9,30,66,.22);padding:6px;font-family:-apple-system,BlinkMacSystemFont,"Segoe UI",Arial,sans-serif;}' +
       '.bwn-pa-menu button{display:block;width:100%;text-align:left;padding:9px 12px;border:0;background:transparent;border-radius:7px;' +
-      'font:500 13px inherit;color:#12241b;cursor:pointer;}' +
+      'font-family:inherit;font-weight:500;font-size:13px;color:#12241b;cursor:pointer;}' +
       '.bwn-pa-menu button:hover{background:#f0fdf4;}' +
       '.bwn-pa-menu .sub{display:block;font-size:11px;color:#5b6b62;margin-top:1px;}' +
       '#bwn-pa-overlay{position:fixed;inset:0;z-index:2147483001;display:flex;align-items:center;justify-content:center;' +
       'background:rgba(9,30,66,.45);font-family:-apple-system,BlinkMacSystemFont,"Segoe UI",Arial,sans-serif;}' +
-      '#bwn-pa-card{width:520px;max-width:94vw;max-height:88vh;overflow:auto;background:#fff;border-radius:12px;' +
+      '#bwn-pa-card{position:relative;width:520px;max-width:calc(100vw - 24px);max-height:calc(100vh - 24px);overflow:hidden;font-size:14px;background:#fff;border-radius:12px;' +
       'box-shadow:0 20px 60px rgba(0,0,0,.35);display:flex;flex-direction:column;color:#12241b;}' +
-      '#bwn-pa-card .hd{padding:14px 18px;border-radius:12px 12px 0 0;background:linear-gradient(135deg,#1a5f3e,#0d3d26);color:#fff;}' +
-      '#bwn-pa-card .hd .t{font:600 15px inherit;}' +
-      '#bwn-pa-card .hd .s{font:400 12px inherit;opacity:.9;margin-top:2px;}' +
-      '#bwn-pa-card .bd{padding:16px 18px;}' +
+      '#bwn-pa-card .hd{flex:0 0 auto;padding:14px 18px;border-radius:12px 12px 0 0;background:linear-gradient(135deg,#1a5f3e,#0d3d26);color:#fff;}' +
+      '#bwn-pa-card .hd .t{font-weight:600;font-size:15px;}' +
+      '#bwn-pa-card .hd .s{font-weight:400;font-size:12px;opacity:.9;margin-top:2px;}' +
+      '#bwn-pa-card .bd{flex:1 1 auto;min-height:0;overflow:auto;padding:16px 18px;overflow-wrap:anywhere;}' +
       '#bwn-pa-card .steps{list-style:none;margin:0 0 12px;padding:0;}' +
       '#bwn-pa-card .steps li{padding:7px 0;border-bottom:1px solid #eef3f0;font-size:13px;display:flex;gap:8px;align-items:flex-start;}' +
-      '#bwn-pa-card .steps li .ic{flex:0 0 16px;text-align:center;}' +
+      '#bwn-pa-card .steps li .ic{flex:0 0 16px;text-align:center;}#bwn-pa-card .steps li .lb{min-width:0;}' +
       '#bwn-pa-card .pending{color:#8a6d3b;}' +
       '#bwn-pa-card .ok{color:#166534;}' +
       '#bwn-pa-card .err{color:#b42318;}' +
       '#bwn-pa-card .skip{color:#8a6d3b;}' +
       '#bwn-pa-card textarea{width:100%;min-height:120px;box-sizing:border-box;border:1px solid #cddbd3;border-radius:8px;padding:9px 11px;font:inherit;font-size:13px;resize:vertical;white-space:pre-wrap;}' +
-      '#bwn-pa-card .ft{display:flex;justify-content:flex-end;gap:10px;padding:12px 18px;border-top:1px solid #eef3f0;}' +
-      '#bwn-pa-card .btn{padding:8px 16px;border-radius:8px;border:1px solid #1a5f3e;font:600 13px inherit;cursor:pointer;}' +
+      '#bwn-pa-card .ft{flex:0 0 auto;flex-wrap:wrap;align-items:center;display:flex;justify-content:flex-end;gap:10px;padding:12px 18px;border-top:1px solid #eef3f0;}' +
+      '#bwn-pa-card .btn{padding:8px 16px;border-radius:8px;border:1px solid #1a5f3e;font-family:inherit;font-weight:600;font-size:13px;cursor:pointer;}' +
       '#bwn-pa-card .btn.go{background:#1a5f3e;color:#fff;}' +
       '#bwn-pa-card .btn.cancel{background:#fff;color:#0d3d26;}' +
-      '#bwn-pa-card .btn:disabled{opacity:.55;cursor:default;}' +
+      '#bwn-pa-card .btn:disabled{opacity:.55;cursor:default;}#bwn-pa-card .ft .hint{flex:1 1 100%;font-size:12px;color:#5b6b62;}#bwn-pa-card .btn:focus-visible,#bwn-pa-card textarea:focus-visible,#bwn-pa-card a:focus-visible,#bwn-pa-card input:focus-visible,.bwn-pa-menu button:focus-visible,.bwn-pa-trigger:focus-visible{outline:2px solid #1a5f3e;outline-offset:2px;}.bwn-pa-menu button:focus-visible{background:#f0fdf4;}' +
       // The count chip is absolutely positioned so it adds NO width: the trigger sits in the proposal header
       // row next to Umbrava's Submit, and a wider trigger pushed Submit out of view (live 2026-09-25, 950px).
       '.bwn-pa-trigger{position:relative;}' +
@@ -1038,7 +1038,7 @@
       '#bwn-pa-card .tbl{overflow-x:auto;}' +
       '#bwn-pa-card table{border-collapse:collapse;width:100%;font-size:12.5px;}' +
       '#bwn-pa-card th,#bwn-pa-card td{padding:7px 8px;border-bottom:1px solid #eef3f0;text-align:left;vertical-align:top;}' +
-      '#bwn-pa-card th{font-weight:600;color:#5b6b62;white-space:nowrap;}' +
+      '#bwn-pa-card th{font-weight:600;color:#5b6b62;white-space:nowrap;}#bwn-pa-card .tbl td{overflow-wrap:normal;}' +
       '#bwn-pa-card td.num{text-align:right;white-space:nowrap;}' +
       '#bwn-pa-card tr.sel td{background:#f0fdf4;}#bwn-pa-card tr.sel td:first-child{box-shadow:inset 3px 0 0 #1a5f3e;}' +
       '#bwn-pa-card tr.cxl td{color:#8a948f;}' +
@@ -1050,14 +1050,40 @@
   }
 
   // ===== toast (copied pattern from bwn-proposal-copy) ======================
+  // One toast at a time (a new one replaces the last instead of stacking in the same spot), announced
+  // politely to screen readers.
+  var _paToastEl = null;
+  // With a Proposal Actions dialog open, the toast is a bar INSIDE the card, pinned under the title over
+  // the top of the scrolling body: it covers neither the title nor the footer buttons, and sits inside the aria-modal
+  // dialog where screen readers still hear it. Otherwise it floats bottom-centre over the page as before.
+  function paPlaceToast(el) {
+    var look = 'background:#1b2a4a;color:#fff;font:500 13px -apple-system,BlinkMacSystemFont,"Segoe UI",Arial,sans-serif;box-sizing:border-box;';
+    var card = document.getElementById && document.getElementById('bwn-pa-card');
+    var hd = card && card.querySelector('.hd');
+    if (card) {
+      // Pinned just under the title as an overlay bar: no reflow, so a status line the body has just
+      // scrolled into view stays in view.
+      el.style.cssText = look + 'position:absolute;left:0;right:0;z-index:1;padding:8px 18px;box-shadow:0 4px 12px rgba(0,0,0,.18);' +
+        'top:' + (hd && hd.offsetHeight ? hd.offsetHeight : 0) + 'px;';
+      card.insertBefore(el, hd ? hd.nextSibling : card.firstChild);
+    } else {
+      el.style.cssText = look + 'position:fixed;bottom:24px;left:0;right:0;margin:0 auto;width:fit-content;z-index:2147483002;' +
+        'padding:10px 18px;border-radius:8px;box-shadow:0 6px 24px rgba(0,0,0,.3);max-width:min(560px,calc(100vw - 32px));';
+      document.body.appendChild(el);
+    }
+  }
+  // A dialog just opened: pull a still-showing floating toast into it, so it does not sit over the footer.
+  function paAdoptToast() {
+    if (_paToastEl && _paToastEl.parentNode === document.body) { try { paPlaceToast(_paToastEl); } catch (e) { } }
+  }
   function paToast(msg) {
-    var el = document.createElement('div');
-    el.style.cssText = 'position:fixed;bottom:24px;left:50%;transform:translateX(-50%);z-index:2147483002;' +
-      'background:#1b2a4a;color:#fff;padding:10px 18px;border-radius:8px;' +
-      'font:500 13px -apple-system,BlinkMacSystemFont,"Segoe UI",Arial,sans-serif;box-shadow:0 6px 24px rgba(0,0,0,.3);max-width:70vw;';
-    el.textContent = 'BWN Proposal Actions: ' + msg;
-    document.body.appendChild(el);
-    setTimeout(function () { el.remove(); }, 6000);
+    if (_paToastEl) { try { _paToastEl.remove(); } catch (e) { } }
+    var el = _paToastEl = document.createElement('div');
+    el.setAttribute('role', 'status');
+    el.className = 'bwn-pa-toast';
+    paPlaceToast(el);
+    el.textContent = 'BWN Proposal Actions: ' + msg;   // after insertion, so the status region announces it
+    setTimeout(function () { el.remove(); if (_paToastEl === el) _paToastEl = null; }, 6000);
   }
 
   // ===== focus trap (paste-identical copy of the suite helper; drift-guarded by scripts/test-a11y-focus.js) =====
@@ -1189,6 +1215,12 @@
     // (see the build*Step functions). Dropping them HERE keeps the three workflow definitions
     // readable and means the plan the operator confirms is exactly the plan that will run.
     if (plan && Array.isArray(plan.steps)) plan.steps = plan.steps.filter(Boolean);
+    // Nothing left to run: say why instead of opening a dialog that would report "All 0 steps completed".
+    if (!plan || !Array.isArray(plan.steps) || !plan.steps.length) {
+      paToast((plan && plan.action ? plan.action : 'This action') + ' was not opened: your Umbrava permissions do not allow any of its steps ' +
+        '(WO status, proposal note, WO note, task completion, new task). Nothing was sent. Ask an Umbrava admin to check your role.');
+      return;
+    }
     // The reads between the menu click and here are async; if the reviewer moved to another proposal
     // meanwhile, this plan belongs to a page they are no longer looking at. Refuse rather than open it.
     if (!stillOnPlanPage(plan)) { paToast('You moved to a different proposal - nothing opened. Run Proposal Actions again on the proposal you want.'); return; }
@@ -1203,30 +1235,33 @@
     card.id = 'bwn-pa-card';
     card.setAttribute('role', 'dialog');
     card.setAttribute('aria-modal', 'true');
+    card.setAttribute('aria-labelledby', 'bwn-pa-title');
 
     var stepEls = [];
     var stepsHtml = plan.steps.map(function (s, i) {
       return '<li data-i="' + i + '" class="' + (s.pending ? 'pending' : '') + '">' +
-        '<span class="ic">' + (s.pending ? '⚠' : '•') + '</span>' +
+        '<span class="ic" aria-hidden="true">' + (s.pending ? '⚠' : '•') + '</span>' +
         '<span class="lb">' + escapeHtml(s.label) + (s.pending ? ' <em>(pending capture)</em>' : '') + '</span></li>';
     }).join('');
 
     card.innerHTML =
-      '<div class="hd"><div class="t">' + escapeHtml(plan.title) + '</div>' +
+      '<div class="hd"><div class="t" id="bwn-pa-title">' + escapeHtml(plan.title) + '</div>' +
       (plan.subtitle ? '<div class="s">' + escapeHtml(plan.subtitle) + '</div>' : '') + '</div>' +
       '<div class="bd">' + confirmSummaryHtml(plan) +
-      '<div style="font-size:12px;color:#5b6b62;margin:0 0 4px;">Note that will be posted (editable) - add what you changed for the coordinator:</div>' +
+      '<label for="bwn-pa-note" style="display:block;font-size:12px;color:#5b6b62;margin:0 0 4px;">Note that will be posted (editable) - add what you changed for the coordinator:</label>' +
       '<textarea id="bwn-pa-note"></textarea>' +
       '<div style="height:12px;"></div>' +
       '<div style="font-size:12px;color:#5b6b62;margin:0 0 4px;">This will:</div>' +
       '<ul class="steps">' + stepsHtml + '</ul>' +
       '<div id="bwn-pa-runstat" aria-live="polite"></div>' +
       '</div>' +
-      '<div class="ft"><button class="btn cancel" id="bwn-pa-cancel">Cancel</button>' +
-      '<button class="btn go" id="bwn-pa-go">Confirm</button></div>';
+      '<div class="ft"><span class="hint" id="bwn-pa-go-hint" hidden></span>' +
+      '<button type="button" class="btn cancel" id="bwn-pa-cancel">Cancel</button>' +
+      '<button type="button" class="btn go" id="bwn-pa-go" aria-describedby="bwn-pa-go-hint">Confirm</button></div>';
 
     overlay.appendChild(card);
     document.body.appendChild(overlay);
+    paAdoptToast();
 
     var cancelBtn = card.querySelector('#bwn-pa-cancel');
     var goBtn = card.querySelector('#bwn-pa-go');
@@ -1241,25 +1276,61 @@
     var ctl = paConfirmController(plan, { goBtn: goBtn, cancelBtn: cancelBtn, noteTa: noteTa, ack: ack, ackStopped: ackStopped, stepEls: stepEls, card: card, status: card.querySelector('#bwn-pa-runstat') }, close);
     _paActiveCtl = ctl;
     overlay._paClose = close;
+    // Says WHY Confirm is greyed out, only while an unticked acknowledgement is the reason.
+    var goHint = card.querySelector('#bwn-pa-go-hint');
+    function syncGoHint() {
+      if (!goHint) return;
+      goHint.hidden = !(ctl.state() === 'idle' && goBtn.disabled);
+      goHint.textContent = goHint.hidden ? '' : 'Tick the acknowledgement above to enable Confirm.';
+    }
     [ack, ackStopped].forEach(function (a) {
       if (!a) return;
       goBtn.disabled = true;
       a.addEventListener('change', ctl.ackChanged);
+      a.addEventListener('change', syncGoHint);
     });
+    syncGoHint();
     var releaseTrap = paArmTrap(overlay);
 
-    // Every dismissal path goes through ctl.requestClose, which refuses while a run is in flight.
+    // Every dismissal path goes through ctl.requestClose, which refuses while a run is in flight
+    // (Escape / Cancel via requestDismiss below, the backdrop via pristine()).
     function close() {
       try { overlay.remove(); } catch (e) { }
       document.removeEventListener('keydown', onKey);
       if (_paActiveCtl === ctl) _paActiveCtl = null;
       try { releaseTrap(); } catch (e) { }   // focus back to the Proposal Actions trigger
     }
-    function onKey(e) { if (e.key === 'Escape') ctl.requestClose(); }
+    // Escape / Cancel: an edited, not-yet-posted note is only discarded after the reviewer says so.
+    // Unchanged note, a finished run (the note was posted) or a running dialog: exactly the old path.
+    // Declining keeps the dialog and the edit, with focus back in the note (or on Cancel once a run has
+    // locked the note). After a stopped run some steps may already have posted the note, so that case
+    // gets its own wording instead of "not posted".
+    function requestDismiss() {
+      if (ctl.state() === 'idle' && noteTa.value !== (plan.noteSeed || '')) {
+        var ran = stepEls.some(function (li) { return li && (li.className === 'ok' || li.className === 'err'); });
+        var ok;
+        try {
+          ok = window.confirm(ran
+            ? 'Close this dialog and discard the edited note?\n\nSteps already completed stay done; closing does not undo them. The edited text is not kept for another attempt. OK closes; Cancel keeps the dialog open.'
+            : 'Discard your edits to the note?\n\nThe edited note has not been posted. OK closes this dialog and discards your edits; Cancel keeps the dialog open with them.');
+        } catch (e) { ok = false; }
+        if (!ok) { try { (noteTa.disabled ? cancelBtn : noteTa).focus(); } catch (e) { } return false; }
+      }
+      return ctl.requestClose();
+    }
+    function onKey(e) { if (e.key === 'Escape') requestDismiss(); }
     document.addEventListener('keydown', onKey);
-    overlay.addEventListener('click', function (e) { if (e.target === overlay) ctl.requestClose(); });
-    cancelBtn.addEventListener('click', ctl.requestClose);
+    // A stray backdrop click must not discard work: it closes only a pristine dialog (note as seeded,
+    // no run attempted). Once the note is edited or a run has shown results, only Cancel / Close /
+    // Escape close it.
+    function pristine() {
+      return noteTa.value === (plan.noteSeed || '') &&
+        !stepEls.some(function (li) { return li && li.className && li.className !== 'pending'; });
+    }
+    overlay.addEventListener('click', function (e) { if (e.target === overlay && pristine()) ctl.requestClose(); });
+    cancelBtn.addEventListener('click', requestDismiss);
     goBtn.addEventListener('click', ctl.go);
+    goBtn.addEventListener('click', syncGoHint);   // a run started: the "tick the box" hint no longer applies
   }
 
   function mark(li, cls, icon, note) {
@@ -1299,7 +1370,7 @@
         var msg = (err && err.message) || String(err);
         if (/^NOT_PINNED/.test(msg)) {
           skipped++;
-          mark(li, 'skip', '⚠', 'skipped - not yet captured');
+          mark(li, 'skip', '⚠', 'skipped - not supported yet');
           idx++; return next();
         }
         mark(li, 'err', '✗', 'failed: ' + msg);
@@ -1324,7 +1395,7 @@
     if (phase === 'done') {
       var sk = (res && res.skipped) || 0;
       return '<div class="note runstat-msg">' + escapeHtml((sk
-        ? (n - sk) + ' of ' + n + ' steps completed; ' + sk + ' step(s) skipped (not yet captured, not sent).'
+        ? (n - sk) + ' of ' + n + ' steps completed; ' + sk + ' step(s) skipped (not supported yet, not sent).'
         : 'All ' + n + ' steps completed.') + ' A completed step either made its change or found it already in place.') + '</div>';
     }
     var completed = [], failedAt = -1;
@@ -1374,7 +1445,12 @@
     function allAcked() { return acks.every(function (a) { return a.checked; }); }
     function setAcksDisabled(v) { acks.forEach(function (a) { a.disabled = v; }); }
     // The persistent in-dialog status line (els.status, optional): the runner's marks, in words.
-    function setStatus(phase, res) { if (els.status) els.status.innerHTML = paRunStatusHtml(phase, plan.steps, els.stepEls, res); }
+    function setStatus(phase, res) {
+      if (!els.status) return;
+      els.status.innerHTML = paRunStatusHtml(phase, plan.steps, els.stepEls, res);
+      // The dialog body scrolls; a stop / finish message below a long note must not stay out of view.
+      if (phase !== 'ready' && els.status.scrollIntoView) { try { els.status.scrollIntoView({ block: 'nearest' }); } catch (e) { } }
+    }
     setStatus('ready');
     function unlockForRetry() {
       state = 'idle';
@@ -1394,8 +1470,8 @@
       var noteText = noteTa.value;
       if (!allAcked()) return null;
       if (!stillOnPlanPage(plan)) {
+        closeFn();   // first, so the toast below floats on the page instead of vanishing with the card
         paToast('This page now shows a different proposal - nothing sent.');
-        closeFn();
         return null;
       }
       if (!noteText.trim()) {
@@ -1416,13 +1492,17 @@
         if (res.ok) {
           state = 'done';
           setStatus('done', res);
-          goBtn.textContent = res.skipped ? 'Done (some pending)' : 'Done';
+          goBtn.textContent = res.skipped ? 'Done (some skipped)' : 'Done';
           // After the writes, never before; a failed history write never changes the outcome.
           var h = paHistOnResult(plan, noteText, res, Date.now());
           paToast((res.skipped
-            ? 'Proven steps done. ' + res.skipped + ' step(s) skipped - awaiting mutation capture.'
+            ? 'Supported steps done. ' + res.skipped + ' step(s) skipped - not supported yet.'
             : 'All steps complete.') + (h === 'fail' ? ' (Local action history could not be saved in this browser.)' : '') + swNote);
-          setTimeout(closeFn, res.skipped ? 4500 : 2200);
+          // No auto-close: the result stays until the reviewer closes it. Cancel becomes Close and takes
+          // focus (Confirm stays disabled as "Done"); closing returns focus to the Proposal Actions trigger.
+          cancelBtn.textContent = 'Close';
+          cancelBtn.disabled = false;
+          if (cancelBtn.focus) { try { cancelBtn.focus(); } catch (e) { } }
         } else {
           unlockForRetry();
           setStatus('failed', { ok: false, error: res.error, stopRecord: sw });   // persistent; the toast below is only a courtesy
@@ -1629,7 +1709,7 @@
         var tSeed = seedWithDelta(ctx.pid, ctx.totalRaw, ctx.gpPct, tspNote(ctx.gp, ctx.total));
         // RM-A3: resolve the TSP assignee LIVE and fail closed - never file a task on a stale RONNY_GUID.
         return resolveTspAssignee().then(function (tsp) {
-          if (!tsp) { paToast('TSP assignee "' + TSP_ASSIGNEE_NAME + '" could not be verified live - nothing sent. (Set bwn:modules.paLegacyFallback=true to override.)'); return; }
+          if (!tsp) { paToast('TSP assignee "' + TSP_ASSIGNEE_NAME + '" could not be verified live - nothing sent. Ask a suite admin to check the TSP assignee.'); console.info('[BWN PROPOSAL ACTIONS] TSP assignee unresolved; bwn:modules.paLegacyFallback=true reinstates the built-in fallback.'); return; }
           openConfirm({
             title: 'Send to Trade Specialist - Pending Trade Specialist',
             subtitle: 'W-' + ctx.n + '  ·  Proposal #' + ctx.pid + '  ·  ' + ctx.total + '  ·  ' + ctx.gp,
@@ -1697,6 +1777,8 @@
     t.setAttribute('data-k', key);
     t.innerHTML = 'Proposal Actions ▾' + (c > 1 ? '<span class="opts">' + c + ' options</span>' : '');
     t.title = c > 1 ? 'This job has ' + c + ' proposal options. Actions apply only to #' + proposalIdFromUrl() + ' (this page).' : '';
+    // The tooltip is mouse-only; the accessible name carries the same explanation (and drops the arrow glyph).
+    t.setAttribute('aria-label', 'Proposal Actions' + (c > 1 ? '. ' + t.title : ''));
   }
 
   // ===== compare view (read-only) ===========================================
@@ -1757,7 +1839,14 @@
       '</div><div class="ft"><button class="btn cancel" id="bwn-pa-cmp-close">Close</button></div>';
     overlay.appendChild(card);
     document.body.appendChild(overlay);
-    function close() { try { overlay.remove(); } catch (e) { } document.removeEventListener('keydown', onKey); }
+    paAdoptToast();
+    // Same trap as the confirm dialog: Tab stays inside, and closing returns focus to the trigger.
+    var releaseTrap = paArmTrap(overlay);
+    function close() {
+      try { overlay.remove(); } catch (e) { }
+      document.removeEventListener('keydown', onKey);
+      try { releaseTrap(); } catch (e) { }
+    }
     overlay._paClose = close;
     function onKey(e) { if (e.key === 'Escape') close(); }
     document.addEventListener('keydown', onKey);
@@ -1770,8 +1859,36 @@
   // ===== dropdown UI ========================================================
   var DROPDOWN_ID = 'bwn-pa-dropdown';
   var openMenuEl = null;
-  function closeMenu() { if (openMenuEl) { openMenuEl.remove(); openMenuEl = null; document.removeEventListener('click', onDocClick, true); } }
+  var menuTrigger = null;   // the trigger that opened the menu: aria-expanded + where focus returns
+  function closeMenu(focusTrigger) {
+    if (openMenuEl) {
+      openMenuEl.remove(); openMenuEl = null;
+      document.removeEventListener('click', onDocClick, true);
+      document.removeEventListener('keydown', onMenuKey, true);
+    }
+    if (menuTrigger) {
+      try { menuTrigger.setAttribute('aria-expanded', 'false'); if (focusTrigger) menuTrigger.focus(); } catch (e) { }
+      menuTrigger = null;
+    }
+  }
   function onDocClick(e) { if (openMenuEl && !openMenuEl.contains(e.target) && !(e.target.closest && e.target.closest('.bwn-pa-trigger'))) closeMenu(); }
+  // Menu-button keyboard pattern: arrows / Home / End move between items, Escape closes and returns
+  // focus to the trigger, Tab closes and lets focus move on from the trigger.
+  function onMenuKey(e) {
+    if (!openMenuEl) return;
+    var items = [].slice.call(openMenuEl.querySelectorAll('[role="menuitem"]'));
+    var n = items.length, i = items.indexOf(document.activeElement), to = -1;
+    if (e.key === 'Escape') { e.preventDefault(); e.stopPropagation(); closeMenu(true); return; }
+    if (e.key === 'Tab') { closeMenu(true); return; }
+    if (!n) return;
+    if (e.key === 'ArrowDown') to = i < 0 ? 0 : (i + 1) % n;
+    else if (e.key === 'ArrowUp') to = i < 0 ? n - 1 : (i - 1 + n) % n;
+    else if (e.key === 'Home') to = 0;
+    else if (e.key === 'End') to = n - 1;
+    if (to < 0) return;
+    e.preventDefault();
+    items[to].focus();
+  }
   function buildMenu(trigger) {
     if (paRefuseWhileRunning()) return;
     closeMenu();
@@ -1789,16 +1906,22 @@
       var b = document.createElement('button');
       b.type = 'button'; b.setAttribute('role', 'menuitem');
       b.innerHTML = escapeHtml(it.label) + '<span class="sub">' + escapeHtml(it.sub) + '</span>';
-      b.addEventListener('click', function () { closeMenu(); it.fn(); });
+      b.addEventListener('click', function () { closeMenu(true); it.fn(); });
       menu.appendChild(b);
     });
     document.body.appendChild(menu);
     var r = trigger.getBoundingClientRect();
-    menu.style.top = Math.round(r.bottom + 4) + 'px';
-    menu.style.left = Math.round(Math.min(r.left, window.innerWidth - menu.offsetWidth - 8)) + 'px';
+    var top = r.bottom + 4, h = menu.offsetHeight;
+    if (top + h > window.innerHeight - 8 && r.top - h - 4 >= 8) top = r.top - h - 4;   // no room below: open upward
+    menu.style.top = Math.round(top) + 'px';
+    menu.style.left = Math.round(Math.max(8, Math.min(r.left, window.innerWidth - menu.offsetWidth - 8))) + 'px';
     openMenuEl = menu;
+    menuTrigger = trigger;
+    try { trigger.setAttribute('aria-expanded', 'true'); } catch (e) { }
     setTimeout(function () { document.addEventListener('click', onDocClick, true); }, 0);
-    document.addEventListener('keydown', function esc(e) { if (e.key === 'Escape') { closeMenu(); document.removeEventListener('keydown', esc); } });
+    document.addEventListener('keydown', onMenuKey, true);   // removed by closeMenu, however the menu closes
+    var first = menu.querySelector('[role="menuitem"]');
+    if (first) { try { first.focus(); } catch (e) { } }
   }
   function buildDropdown() {
     var wrap = document.createElement('span');
@@ -1809,6 +1932,7 @@
     trigger.type = 'button';
     trigger.className = 'bwn-pa-trigger';
     trigger.setAttribute('aria-haspopup', 'menu');
+    trigger.setAttribute('aria-expanded', 'false');
     trigger.textContent = 'Proposal Actions ▾';
     trigger.addEventListener('click', function (e) {
       e.preventDefault(); e.stopPropagation();

@@ -411,7 +411,8 @@ var RICH = [
   A.ok('after Done a further Confirm is ignored', dl.ctl.go() === null);
   await flush();
   A.eq('after Done nothing is re-sent and no second record is written', [dl.calls, stored(sL).length], [[1, 2, 1], 1]);
-  A.ok('auto-close after success is still scheduled', hl.timers.some(function (t) { return t.ms === 2200; }));
+  A.ok('no auto-close after success: the result stays until the reviewer closes it', dl.closed === 0 && !hl.timers.some(function (t) { return t.ms === 2200 || t.ms === 4500; }));
+  A.ok('Done state: Cancel becomes an enabled Close button; Confirm stays disabled as Done', dl.cancelBtn.textContent === 'Close' && dl.cancelBtn.disabled === false && dl.goBtn.disabled === true);
   A.ok('a finished dialog closes normally', dl.ctl.requestClose() === true && dl.closed === 1);
 
   // single-proposal dialog (no acknowledgement) keeps the same guard
@@ -459,9 +460,9 @@ var RICH = [
   holdN3.resolve(true);
 
   // wiring: every dismissal path and Confirm route through the controller
-  A.ok('Escape routes through requestClose', /function onKey\(e\) \{ if \(e\.key === 'Escape'\) ctl\.requestClose\(\); \}/.test(full));
-  A.ok('backdrop routes through requestClose', /if \(e\.target === overlay\) ctl\.requestClose\(\);/.test(full));
-  A.ok('Cancel routes through requestClose', /cancelBtn\.addEventListener\('click', ctl\.requestClose\);/.test(full));
+  A.ok('Escape routes through requestDismiss (which ends in requestClose)', /function onKey\(e\) \{ if \(e\.key === 'Escape'\) requestDismiss\(\); \}/.test(full) && /return ctl\.requestClose\(\);\n\s*\}/.test(sliceFn(full, 'function requestDismiss()') + '\n'));
+  A.ok('backdrop routes through requestClose, and only for a pristine dialog', /if \(e\.target === overlay && pristine\(\)\) ctl\.requestClose\(\);/.test(full));
+  A.ok('Cancel routes through requestDismiss (which ends in requestClose)', /cancelBtn\.addEventListener\('click', requestDismiss\);/.test(full) && !/cancelBtn\.addEventListener\('click', ctl\.requestClose\);/.test(full));
   A.ok('Confirm routes through the controller', /goBtn\.addEventListener\('click', ctl\.go\);/.test(full));
   A.ok('both acknowledgement checkboxes route their change through the controller', /\[ack, ackStopped\]\.forEach\(function \(a\) \{\n      if \(!a\) return;\n      goBtn\.disabled = true;\n      a\.addEventListener\('change', ctl\.ackChanged\);/.test(full));
   var confirmBody = full.slice(full.indexOf('  function openConfirm(plan) {'), full.indexOf('  function mark(li, cls, icon, note)'));
@@ -1085,7 +1086,7 @@ var RICH = [
   var dP5 = mkProgDialog(bP5, [okStep, function () { return Promise.reject(new Error('NOT_PINNED: x')); }, okStep]);
   var resP5 = await dP5.ctl.go();
   A.ok('skip: runner result unchanged (ok, skipped 1)', resP5.ok === true && resP5.skipped === 1);
-  A.eq('skip: done text counts only completed steps and names the skip as not sent', statusText(dP5), '2 of 3 steps completed; 1 step(s) skipped (not yet captured, not sent). A completed step either made its change or found it already in place.');
+  A.eq('skip: done text counts only completed steps and names the skip as not sent', statusText(dP5), '2 of 3 steps completed; 1 step(s) skipped (not supported yet, not sent). A completed step either made its change or found it already in place.');
 
   // stopped-attempt record could NOT be saved: the status must not promise a new-dialog warning
   var sP6 = mkStore(null, { throwSet: true }), bP6 = hload(sP6);
@@ -1178,6 +1179,142 @@ var RICH = [
   A.ok('count chip is position:absolute (no layout width)', /position:absolute/.test(optsRule));
   A.ok('trigger is the chip\'s positioning context', /'\.bwn-pa-trigger\{position:relative;\}'/.test(full));
   A.ok('the page id is not in the trigger label (tooltip only), keeping the trigger narrow', !/class="opts">#'/.test(full));
+
+  // ---- UI polish (0.7.12) --------------------------------------------------------------------
+  // Menu keyboard: drives the REAL closeMenu / onMenuKey against a fake document.
+  var mdoc = { activeElement: null, listeners: [], removed: [],
+    addEventListener: function (t, f, c) { this.listeners.push([t, f, c]); },
+    removeEventListener: function (t, f, c) { this.removed.push([t, f && f.name, c]); } };
+  function mItem(name) { var it = { name: name, focus: function () { mdoc.activeElement = it; } }; return it; }
+  var mItems = [mItem('approval'), mItem('tsp'), mItem('kickback')];
+  var mTrig = { attrs: {}, focused: 0, setAttribute: function (k, v) { this.attrs[k] = v; }, focus: function () { this.focused++; mdoc.activeElement = mTrig; } };
+  var bm = load('var openMenuEl = null; var menuTrigger = null;\n' + sliceFn(full, 'function closeMenu(focusTrigger)') + '\n' +
+    sliceFn(full, 'function onDocClick(e)') + '\n' + sliceFn(full, 'function onMenuKey(e)') +
+    '\nfunction __open(m, t) { openMenuEl = m; menuTrigger = t; t.setAttribute("aria-expanded", "true"); }', {}, { document: mdoc });
+  function openFake() {
+    var m = { removed: 0, querySelectorAll: function () { return mItems; }, remove: function () { this.removed++; }, contains: function () { return false; } };
+    bm.__open(m, mTrig); mItems[0].focus(); return m;
+  }
+  function menuKey(k) { var e = { key: k, prevented: false, stopped: false, preventDefault: function () { this.prevented = true; }, stopPropagation: function () { this.stopped = true; } }; bm.onMenuKey(e); return e; }
+  openFake();
+  var eDown = menuKey('ArrowDown');
+  A.ok('menu: ArrowDown moves to the next item (and prevents page scroll)', mdoc.activeElement === mItems[1] && eDown.prevented);
+  menuKey('ArrowDown'); menuKey('ArrowDown');
+  A.ok('menu: ArrowDown wraps from the last item to the first', mdoc.activeElement === mItems[0]);
+  menuKey('ArrowUp');
+  A.ok('menu: ArrowUp wraps from the first item to the last', mdoc.activeElement === mItems[2]);
+  menuKey('Home'); var homeAt = mdoc.activeElement; menuKey('End');
+  A.ok('menu: Home / End jump to the first / last item', homeAt === mItems[0] && mdoc.activeElement === mItems[2]);
+  var eOther = menuKey('a');
+  A.ok('menu: other keys are left alone', !eOther.prevented && mdoc.activeElement === mItems[2]);
+  var focusedBefore = mTrig.focused, removedBefore = mdoc.removed.length;
+  var eEsc = menuKey('Escape');
+  A.ok('menu: Escape closes, returns focus to the trigger and stops the page seeing it', eEsc.prevented && eEsc.stopped && mTrig.focused === focusedBefore + 1 && mTrig.attrs['aria-expanded'] === 'false');
+  A.ok('menu: closing removes the keydown listener (no leak per open)', mdoc.removed.slice(removedBefore).some(function (r) { return r[0] === 'keydown' && r[1] === 'onMenuKey' && r[2] === true; }));
+  A.ok('menu: a key after close does nothing', !menuKey('ArrowDown').prevented);
+  openFake();
+  var eTab = menuKey('Tab');
+  A.ok('menu: Tab closes and returns focus to the trigger without blocking the Tab move', !eTab.prevented && mdoc.activeElement === mTrig && mTrig.attrs['aria-expanded'] === 'false');
+  openFake(); removedBefore = mdoc.removed.length;
+  bm.onDocClick({ target: { closest: function () { return null; } } });
+  A.ok('menu: an outside click closes it and ALSO removes the keydown listener', mdoc.removed.slice(removedBefore).some(function (r) { return r[1] === 'onMenuKey'; }) && mTrig.attrs['aria-expanded'] === 'false');
+  var bmSrc = sliceFn(full, 'function buildMenu(trigger)');
+  A.ok('menu: opening focuses the first item, marks the trigger expanded and uses the removable listener', /first\.focus\(\)/.test(bmSrc) && /setAttribute\('aria-expanded', 'true'\)/.test(bmSrc) && /addEventListener\('keydown', onMenuKey, true\)/.test(bmSrc) && !/function esc\(e\)/.test(bmSrc));
+  A.ok('menu: choosing an item returns focus to the trigger before the action starts', /closeMenu\(true\); it\.fn\(\);/.test(bmSrc));
+  A.ok('trigger starts collapsed and carries an accessible name with the options explanation', /trigger\.setAttribute\('aria-expanded', 'false'\);/.test(full) && /t\.setAttribute\('aria-label', 'Proposal Actions' \+ \(c > 1 \? '\. ' \+ t\.title : ''\)\);/.test(full));
+
+  // Toast: one at a time, announced as a status.
+  var tBody = { kids: [], appendChild: function (el) { this.kids.push(el); el.parentNode = tBody; } };
+  var tCard = null;
+  var tHd = { nextSibling: 'BODY_DIV' };
+  function tEl() { var el = { attrs: {}, style: {}, textContent: '', gone: false, parentNode: null, setAttribute: function (k, v) { this.attrs[k] = v; }, remove: function () { this.gone = true; } }; return el; }
+  function mkCard() { return { inserted: [], querySelector: function (s) { return s === '.hd' ? tHd : null; }, insertBefore: function (el, ref) { this.inserted.push([el, ref]); el.parentNode = this; } }; }
+  var bt = load('var _paToastEl = null;\n' + sliceFn(full, 'function paPlaceToast(el)') + '\n' + sliceFn(full, 'function paAdoptToast()') + '\n' + sliceFn(full, 'function paToast(msg)'), {},
+    { document: { body: tBody, createElement: tEl, getElementById: function (id) { return id === 'bwn-pa-card' ? tCard : null; } }, setTimeout: function () { } });
+  bt.paToast('first'); bt.paToast('second');
+  A.ok('toast: a new toast replaces the previous one instead of stacking', tBody.kids.length === 2 && tBody.kids[0].gone === true && tBody.kids[1].gone === false && tBody.kids[1].textContent === 'BWN Proposal Actions: second');
+  A.ok('toast (no dialog open): role=status, floating bottom-centre over the page as before', tBody.kids[1].attrs.role === 'status' && /position:fixed;bottom:24px/.test(tBody.kids[1].style.cssText));
+  tCard = mkCard();
+  bt.paAdoptToast();
+  A.ok('toast: a dialog opening adopts the still-showing floating toast into the card, right after the title', tCard.inserted.length === 1 && tCard.inserted[0][0] === tBody.kids[1] && tCard.inserted[0][1] === 'BODY_DIV' && !/position:fixed/.test(tBody.kids[1].style.cssText));
+  bt.paAdoptToast();
+  A.ok('toast: adopting twice does not move it again', tCard.inserted.length === 1);
+  bt.paToast('inside');
+  var tIn = tCard.inserted[1] && tCard.inserted[1][0];
+  A.ok('toast (dialog open): goes INSIDE the card between title and body - covers neither the title nor the footer', !!tIn && tCard.inserted[1][1] === 'BODY_DIV' && !/position:fixed/.test(tIn.style.cssText) && tIn.attrs.role === 'status' && tIn.textContent === 'BWN Proposal Actions: inside');
+  tCard = null;
+  A.ok('the stale-page refusal closes the dialog BEFORE toasting, so the message is not removed with the card', /closeFn\(\);[^\n]*\n\s*paToast\('This page now shows a different proposal - nothing sent\.'\);/.test(full));
+  A.ok('both dialogs adopt a showing toast when they open', (full.match(/document\.body\.appendChild\(overlay\);\n\s*paAdoptToast\(\);/g) || []).length === 2);
+
+  // F2: the backdrop closes only a pristine dialog (the REAL pristine(), with its closure inputs injected)
+  function bdPristine(noteVal, seed, classes) {
+    return load(sliceFn(full, 'function pristine()'), {}, { noteTa: { value: noteVal }, plan: { noteSeed: seed }, stepEls: classes.map(function (c) { return { className: c }; }) }).pristine();
+  }
+  A.ok('backdrop: unedited, never-run dialog is pristine (backdrop still closes it)', bdPristine('seed', 'seed', ['', 'pending']) === true);
+  A.ok('backdrop: an EDITED note is not pristine (backdrop ignored, edit kept)', bdPristine('seed + my edit', 'seed', ['', '']) === false);
+  A.ok('backdrop: after a run (done / failed marks) it is not pristine (result kept)', bdPristine('seed', 'seed', ['ok', 'err']) === false && bdPristine('seed', 'seed', ['ok', 'ok']) === false);
+
+  // Escape / Cancel discard guard: the REAL requestDismiss with its closure inputs injected.
+  function dismissBox(noteVal, seed, state, answer, marks, noteLocked) {
+    var r = { asked: [], closes: 0, focused: 0, cancelFocused: 0 };
+    var box = load(sliceFn(full, 'function requestDismiss()'), {}, {
+      noteTa: { value: noteVal, disabled: !!noteLocked, focus: function () { r.focused++; } }, plan: { noteSeed: seed },
+      stepEls: (marks || ['', '']).map(function (c) { return { className: c }; }),
+      cancelBtn: { focus: function () { r.cancelFocused++; } },
+      ctl: { state: function () { return state; }, requestClose: function () { r.closes++; return state !== 'running'; } },
+      window: { confirm: function (m) { r.asked.push(m); if (answer === 'throw') throw new Error('blocked'); return answer; } }
+    });
+    r.ret = box.requestDismiss();
+    return r;
+  }
+  var dU = dismissBox('seed', 'seed', 'idle', true);
+  A.ok('discard guard: unchanged note closes as before, with no question', dU.asked.length === 0 && dU.closes === 1 && dU.ret === true);
+  var dY = dismissBox('seed + my edit', 'seed', 'idle', true);
+  A.ok('discard guard: edited note asks first; OK closes and discards', dY.asked.length === 1 && /^Discard your edits to the note\?/.test(dY.asked[0]) && dY.closes === 1 && dY.ret === true);
+  var dNo = dismissBox('seed + my edit', 'seed', 'idle', false);
+  A.ok('discard guard: edited note, Cancel in the question keeps the dialog (no close) and puts focus back in the note', dNo.asked.length === 1 && dNo.closes === 0 && dNo.ret === false && dNo.focused === 1);
+  var dT = dismissBox('seed + my edit', 'seed', 'idle', 'throw');
+  A.ok('discard guard: if the browser blocks the question, the edit is KEPT (never a silent discard)', dT.closes === 0 && dT.ret === false);
+  var dD = dismissBox('seed + my edit', 'seed', 'done', false);
+  A.ok('discard guard: after Done (the note was posted) Close closes without asking', dD.asked.length === 0 && dD.closes === 1);
+  var dR = dismissBox('seed + my edit', 'seed', 'running', true);
+  A.ok('discard guard: while running it never asks, and the running-dialog refusal still applies', dR.asked.length === 0 && dR.ret === false);
+  var dE = dismissBox('', null, 'idle', false);
+  A.ok('discard guard: an empty seed with an empty note counts as unchanged', dE.asked.length === 0 && dE.closes === 1);
+  A.ok('discard guard: before any run the question says the note has not been posted', /has not been posted/.test(dY.asked[0]));
+  var dSt = dismissBox('seed + my edit', 'seed', 'idle', false, ['ok', 'err'], true);
+  A.ok('discard guard after a stopped run: asks with wording that does NOT claim "not posted" and says completed steps stay done', dSt.asked.length === 1 && !/not been posted/.test(dSt.asked[0]) && /Steps already completed stay done; closing does not undo them\./.test(dSt.asked[0]));
+  A.ok('discard guard after a stopped run: declining keeps the dialog; the note is locked, so focus goes to Cancel', dSt.closes === 0 && dSt.ret === false && dSt.focused === 0 && dSt.cancelFocused === 1);
+  var dFy = dismissBox('seed + my edit', 'seed', 'idle', true, ['ok', 'err'], true);
+  A.ok('discard guard after a stopped run: OK closes', dFy.closes === 1 && dFy.ret === true);
+
+  // F4: a plan whose permission filter left zero steps never opens a dialog
+  var eb4 = eload();
+  var r4 = attempt(function () { eb4.openConfirm({ action: 'Approval (good to submit)', steps: [null, null, null], ctx: { n: 123, pid: 901 } }); });
+  A.ok('zero runnable steps: no dialog is built', r4 === 'returned' && eb4.c.built === 0);
+  A.ok('zero runnable steps: a specific explanation instead of "All 0 steps completed"', eb4.c.toasts.some(function (t) { return /^Approval \(good to submit\) was not opened: your Umbrava permissions do not allow any of its steps .*Nothing was sent\./.test(t); }));
+  var r4b = attempt(function () { eb4.openConfirm(mkPlan(eb4, 'approval', 'pa-one', [okStep])); });
+  A.ok('...while a plan with a runnable step still proceeds to build the dialog', r4b === 'DOM_BUILD');
+
+  // Status line scrolls into view once it changes (the dialog body scrolls).
+  var sP8 = mkStore(), bP8 = hload(sP8);
+  var dP8 = mkProgDialog(bP8, [okStep, failN(1)]);
+  var scrolls = 0; dP8.status.scrollIntoView = function (o) { scrolls++; A.ok('status scroll uses block:nearest', o && o.block === 'nearest'); };
+  await dP8.ctl.go();
+  A.ok('failure status is scrolled into view', scrolls >= 1 && statusText(dP8).indexOf('This run stopped at') === 0);
+  var dP9 = mkProgDialog(bP8, [okStep]); var scrolls9 = 0; dP9.status.scrollIntoView = function () { scrolls9++; };
+  A.ok('ready status (dialog just opened) does not scroll the body', scrolls9 === 0);
+
+  // Dialog / CSS source wiring
+  A.ok('no invalid "font: <weight> <size> inherit" shorthand remains (the browser drops the whole declaration)', !/font:\s*\d{3}\s+[\d.]+px\s+inherit/.test(full));
+  A.ok('confirm dialog is named by its title', /card\.setAttribute\('aria-labelledby', 'bwn-pa-title'\);/.test(full) && /<div class="t" id="bwn-pa-title">/.test(full));
+  A.ok('the note textarea has a real <label for>', /<label for="bwn-pa-note"/.test(full));
+  A.ok('step icons are hidden from screen readers (the state text carries the meaning)', /<span class="ic" aria-hidden="true">/.test(full));
+  A.ok('Confirm is described by a hint that shows only while an acknowledgement disables it', /aria-describedby="bwn-pa-go-hint"/.test(full) && /goHint\.hidden = !\(ctl\.state\(\) === 'idle' && goBtn\.disabled\);/.test(full) && /a\.addEventListener\('change', syncGoHint\);/.test(full));
+  A.ok('card keeps header and footer on screen: body scrolls, card does not', /#bwn-pa-card\{[^}]*overflow:hidden;/.test(full) && /#bwn-pa-card \.bd\{flex:1 1 auto;min-height:0;overflow:auto;/.test(full));
+  var cmpSrc = sliceFn(full, 'function renderCompare(n, pid, wo, sib)');
+  A.ok('Compare traps focus and releases it (focus back to the trigger) on close', /var releaseTrap = paArmTrap\(overlay\);/.test(cmpSrc) && /releaseTrap\(\);/.test(cmpSrc));
+  A.ok('user-facing text no longer says "pending capture" / "mutation capture" or shows the flag name in a toast', !/Done \(some pending\)|awaiting mutation capture|not yet captured/.test(full) && !/paToast\([^)]*paLegacyFallback/.test(full));
 
   A.finish();
 })().catch(function (e) { console.error(e); process.exit(1); });
