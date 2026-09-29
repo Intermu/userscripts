@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         BWN Suite - Low GP Note (Broadway National)
 // @namespace    broadwaynational.bwn
-// @version      0.5.1
+// @version      0.5.2
 // @description  A "Low GP" button beside the global "Search Work Orders" box. Enter a WO#, Tracking#, Source PO#, or Source Job#; it finds the work order, shows a CONFIRM step (WO / client / location / assignee / both note bodies, plus a warn-only notice if the WO already has an active Billing "Low GP" note), then posts TWO notes via Umbrava's own API: a Billing-type note reading "Low GP", and a second note that @-mentions the WO's assignee ("@Name Low GP note added"). The @-mention is the real TipTap mention span the SPA sends (captured live 2026-08-17); actionNoteEmails stays null - the span alone notifies. The mention is skipped when the WO has no assignee user GUID. Same-origin /api/graphql with the app's Auth0 bearer, @grant none, zero egress. Nothing posts until you click Confirm.
 // @match        https://app.umbrava.com/*
 // @run-at       document-idle
@@ -425,7 +425,7 @@
     while (j < n) { var c = q.charAt(j); if ((c >= 'A' && c <= 'Z') || (c >= 'a' && c <= 'z') || (c >= '0' && c <= '9') || c === '_') j++; else break; }
     return lgGql(q.slice(i, j) || null, query, variables);
   };
-  var BWN_VER = '0.5.1';
+  var BWN_VER = '0.5.2';
 
   // Reader for the server-computed ESC rank (grant-none-safe; mirrors bwnEscRank / bwn-ask). Live
   // bus event trusted directly; the bwn:role:last slot is the cross-refresh fallback (ok + fresh).
@@ -757,7 +757,7 @@
     '.bwn-lg-dl{display:grid;grid-template-columns:auto 1fr;gap:2px 10px;margin:0 0 10px;}',
     '.bwn-lg-dl dt{font-weight:600;color:var(--bwn-text-muted,#64748b);}',
     '.bwn-lg-dl dd{margin:0;}',
-    '.bwn-lg-dupslot{min-height:calc(6em + 28px);}',
+    '.bwn-lg-p.bwn-lg-dup,.bwn-lg-box.bwn-lg-dup{margin:10px 0 0;}',   // two classes: must beat the .bwn-lg-box / .bwn-lg-p margins
     '.bwn-lg-box{margin:0 0 10px;padding:8px 10px;border:1px solid;border-radius:8px;}',
     '.bwn-lg-warn{background:var(--bwn-warn-bg,#fff8e6);border-color:#f0d87a;color:var(--bwn-warn-fg,#7d5a00);}',
     '.bwn-lg-bad{background:var(--bwn-bad-bg,#fef0ee);border-color:#f7c9c9;color:var(--bwn-bad-fg,#8b1a1a);}',
@@ -1061,7 +1061,7 @@
     'no-assignee': 'this WO has no assignee with a user ID, so nobody can be @-mentioned.'
   };
   function lgViewConfirm(b) {
-    var r = st.row, gate = lgNote2Gate(r, lgTenant()), label = r.assigneeName || 'assignee';
+    var r = st.row, gate = lgNote2Gate(r), label = r.assigneeName || 'assignee';
     st.total = gate.send ? 2 : 1;
     lgTitle(b, 'Confirm Low GP note');
     var desc = lgEl('div', null, null, { id: 'bwn-lg-desc' });
@@ -1073,24 +1073,18 @@
     if (r.tracking) lgDt(dl, 'Tracking #', r.tracking);
     lgDt(dl, 'Assignee', r.hasAssignee ? label : 'None');
     desc.appendChild(dl);
+    // Order: what posts (note 1, then note 2 or why it is skipped), then the consequence box directly
+    // above the buttons it describes.
     desc.appendChild(lgEl('p', 'bwn-lg-p', 'Note 1 - Billing: "' + NOTE1_CONTENT + '"'));
     if (gate.send) desc.appendChild(lgEl('p', 'bwn-lg-p', 'Note 2 - Internal: "' + lgPingContent(label, PING_MESSAGE) + '" (@-mentions ' + label + ')'));
     else desc.appendChild(lgBox('warn', '⚠', 'Warning:', 'Note 2 will be skipped - ' + LG_SKIP_WHY[gate.reason] + ' Nobody will be notified.'));
     desc.appendChild(lgBox('warn', '⚠', "Can't be undone:", gate.send
       ? 'Posts 2 notes to WO #' + r.number + ". Notes can't be unposted; the @-mention notification can't be recalled."
       : 'Posts 1 note to WO #' + r.number + ". Notes can't be unposted."));
-    // The duplicate result lands in a slot whose height is reserved up front (4 lines at 13px/1.5 -
-    // the 3-line 'found' / 'unknown' box at 340px plus narrow-width headroom), so the Cancel /
-    // Confirm row below never moves when the answer arrives. Kept ABOVE the buttons so the amber
-    // caution sits at the decision point.
-    var slot = lgEl('div', 'bwn-lg-dupslot');
-    var dup = lgEl('p', 'bwn-lg-p bwn-lg-muted', 'Checking for an existing Low GP note…', { id: 'bwn-lg-dup' });
-    slot.appendChild(dup);
-    desc.appendChild(slot);
     b.appendChild(desc);
     var actions = lgEl('div', 'bwn-lg-actions');
     var cancel = lgBtn('Cancel', 'ghost', function (e) { if (e && e.detail > 1) return; lgCancelConfirm(); });
-    var apply = lgBtn(gate.send ? 'Confirm - post 2 notes' : 'Confirm - post 1 note', 'primary', lgDoApply);
+    var apply = lgBtn(gate.send ? 'Post 2 notes' : 'Post 1 note', 'primary', lgDoApply);
     apply.id = 'bwn-lg-apply';
     // Arm ONLY on an activation that starts on this button after this view rendered (ctl.go reset it).
     apply.addEventListener('pointerdown', function (e) { if (e.button === 0) ctl.arm(); });
@@ -1099,6 +1093,10 @@
     actions.appendChild(cancel);
     actions.appendChild(apply);
     b.appendChild(actions);
+    // The duplicate answer lands BELOW the button row: whatever height it grows to, Cancel / Post
+    // never move under the pointer (the R3 guarantee), and no space is reserved while it is pending.
+    var dup = lgEl('p', 'bwn-lg-p bwn-lg-muted bwn-lg-dup', 'Checking for an existing Low GP note…', { id: 'bwn-lg-dup' });
+    b.appendChild(dup);
     lgStartDupCheck(dup, r.number);
     lgAnnounce('Review before posting. Nothing has been posted yet.');
     return cancel;                          // focus lands on Cancel, never on Confirm
@@ -1108,16 +1106,16 @@
     if (res.status === 'found') {
       var when = lgFmtNoteDate(res.note && res.note.createdDate);
       var t = 'This WO already has a Billing "Low GP" note' + (when ? ' (posted ' + when + ')' : '') + '. Confirming adds another one.';
-      el.className = 'bwn-lg-box bwn-lg-warn';
+      el.className = 'bwn-lg-box bwn-lg-warn bwn-lg-dup';
       el.appendChild(lgEl('span', null, '⚠ ', { 'aria-hidden': 'true' }));
       el.appendChild(lgEl('strong', null, 'Warning: '));
       el.appendChild(document.createTextNode(t));
       lgAnnounce('Warning: ' + t);
     } else if (res.status === 'none') {
-      el.className = 'bwn-lg-p bwn-lg-muted';
+      el.className = 'bwn-lg-p bwn-lg-muted bwn-lg-dup';
       el.textContent = 'No existing Low GP note found on this WO.';
     } else {
-      el.className = 'bwn-lg-box bwn-lg-warn';
+      el.className = 'bwn-lg-box bwn-lg-warn bwn-lg-dup';
       el.appendChild(lgEl('span', null, '⚠ ', { 'aria-hidden': 'true' }));
       el.appendChild(lgEl('strong', null, 'Warning: '));
       el.appendChild(document.createTextNode("Couldn't check for an existing Low GP note. You can still post."));

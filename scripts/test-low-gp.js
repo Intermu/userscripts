@@ -356,10 +356,23 @@ console.log('\n-- DOM wiring guards (static: each pins a UI-side guard the pure 
   A.ok('(t) ... and the expanded-phase callback', find.indexOf('if (!ctl.isCurrent(tok)) return;\n        st.lookupPhase = ph;') !== -1);
   A.ok('(b) lgDoApply returns on the posting lock before anything else', /^  function lgDoApply\(e\) \{\n    if \(ctl\.isPosting\(\)\) return;/.test(apply));
   A.ok('(b) ... and takes the lock before the write call', apply.indexOf('ctl.beginPosting()') < apply.indexOf('lgApply('));
-  A.ok('(R3) the duplicate answer lands in a height-reserved slot ABOVE the button row',
-    conf.indexOf("lgEl('div', 'bwn-lg-dupslot')") !== -1 && conf.indexOf('desc.appendChild(slot)') !== -1 &&
-    conf.indexOf('desc.appendChild(slot)') < conf.indexOf('b.appendChild(actions)') &&
-    /'\.bwn-lg-dupslot\{min-height:calc\(6em \+ 28px\);\}'/.test(FULL));
+  // 0.5.2: the answer moved BELOW the buttons, so it can never shift them and no empty gap is reserved.
+  A.ok('(R3) the duplicate answer lands BELOW the button row, so Cancel / Post never move',
+    conf.indexOf('b.appendChild(dup)') !== -1 && conf.indexOf('b.appendChild(actions)') !== -1 &&
+    conf.indexOf('b.appendChild(actions)') < conf.indexOf('b.appendChild(dup)') &&
+    conf.indexOf('lgStartDupCheck(dup') > conf.indexOf('b.appendChild(dup)'));
+  A.ok('(0.5.2) no reserved-height duplicate slot remains (it left an empty gap above the buttons)',
+    FULL.indexOf('bwn-lg-dupslot') === -1 && FULL.indexOf('6em + 28px') === -1);
+  A.ok('(0.5.2) the duplicate spacing rule out-ranks the .bwn-lg-box / .bwn-lg-p margins (two-class selectors)',
+    FULL.indexOf("'.bwn-lg-p.bwn-lg-dup,.bwn-lg-box.bwn-lg-dup{margin:10px 0 0;}'") !== -1);
+  A.ok('(0.5.2) the filled duplicate answer keeps its spacing class in every state',
+    (fnBody('  function lgFillDup(el, res) {').match(/className = '[^']*bwn-lg-dup'/g) || []).length === 3);
+  A.ok('(0.5.2) the primary button reads "Post N note(s)" (the old label wrapped to two lines)',
+    conf.indexOf("gate.send ? 'Post 2 notes' : 'Post 1 note'") !== -1 && FULL.indexOf('Confirm - post') === -1);
+  A.ok('(0.5.2) the "Can\'t be undone" box sits directly above the buttons, after the note lines',
+    conf.indexOf('Note 1 - Billing') < conf.indexOf("Can't be undone:") &&
+    conf.indexOf("Can't be undone:") < conf.indexOf('b.appendChild(desc)') &&
+    conf.indexOf('b.appendChild(desc)') < conf.indexOf('b.appendChild(actions)'));
   var rend = fnBody('  function render() {');
   A.ok('(m1) a non-modal render only moves focus when it is already ours or nowhere', /var ours = !a \|\| a === document\.body \|\| p\.contains\(a\) \|\| \(lb && lb\.contains\(a\)\);/.test(rend));
   A.ok('(N1) a modal view (confirm / posting) always takes focus; the ours-rule gates only non-modal views',
