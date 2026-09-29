@@ -109,7 +109,9 @@ function makeEnv(opts, engSrc) {
     BWN_VER: '0.0.0-test', BWN_MODULES: opts.modules || { bulkTask: true }, bwnGql: gql
   };
   vm.createContext(sandbox);
-  var api = vm.runInContext('(function () {\n' + S_OPS + '\n' + (engSrc || S_ENG) + '\n' +
+  // 'use strict' like Core's IIFE: sloppy mode silently swallows writes that throw in the real page
+  // (a smoke run caught btParse assigning a property onto a string that this harness had missed).
+  var api = vm.runInContext('(function () {\n"use strict";\n' + S_OPS + '\n' + (engSrc || S_ENG) + '\n' +
     'return { btParse: btParse, btMissing: btMissing, btSameProtected: btSameProtected, btPayload: btPayload, btStamp: btStamp,\n' +
     '  btConfirmArmed: btConfirmArmed, btReadWO: btReadWO, btRowsFor: btRowsFor, btExecRow: btExecRow,\n' +
     '  btRunSequential: btRunSequential, btSummary: btSummary, audit: bwnAuditAll, BT_MAX_WOS: BT_MAX_WOS };\n})()',
@@ -140,6 +142,8 @@ function previewRow(env, wo) { return env.api.btReadWO(wo).then(function (res) {
   A.eq('parse: a PO-style or multi-number token is ambiguous', p.ambiguous, ['W-397888-001', '12/34']);
   A.eq('parse: garbage and zero are invalid', p.invalid, ['abc', '0']);
   A.eq('parse: empty input', e.api.btParse('').unique, []);
+  A.eq('parse: the original token is kept per WO (first occurrence)', [p.raw[397888], p.raw[399174], p.raw[393951]], ['397888', 'W-399174', 'w393951']);
+  A.eq('parse: a single bare WO number (the smoke-run input)', e.api.btParse('393951').unique, [393951]);
 
   // ---- 2. preview classification (reads only) ---------------------------------------------------
   var env2 = makeEnv({
@@ -274,7 +278,7 @@ function previewRow(env, wo) { return env.api.btReadWO(wo).then(function (res) {
       localStorage: { getItem: function (k) { return (k in ls) ? ls[k] : null; }, setItem: function (k, v) { ls[k] = String(v); }, removeItem: function (k) { delete ls[k]; } },
       BWN_VER: 't', BWN_MODULES: { bulkTask: true }, bwnGql: wrapped };
     vm.createContext(sb);
-    return vm.runInContext('(function(){' + S_OPS + '\n' + S_ENG + '\nreturn { btReadWO: btReadWO, btRowsFor: btRowsFor, btRunSequential: btRunSequential };})()', sb);
+    return vm.runInContext('(function(){"use strict";' + S_OPS + '\n' + S_ENG + '\nreturn { btReadWO: btReadWO, btRowsFor: btRowsFor, btRunSequential: btRunSequential };})()', sb);
   })();
   var bp = [];
   for (var w of [397888, 399174, 393951]) bp = bp.concat(envP2.btRowsFor(w, await envP2.btReadWO(w), TARGET));
