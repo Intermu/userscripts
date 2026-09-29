@@ -361,6 +361,11 @@ jobs:
       - name: PO Approval poll-lifecycle harness (single timer + page-lifetime observer)
         run: node scripts/test-po-approval-poll-lifecycle.js
 
+      # PO Approval v1.14 - the NTE comes from the PO row whose "..." menu opened the Send PO modal
+      # (10-minute window, same-vendor check), before recipient matching. Negative controls included.
+      - name: PO Approval clicked-row NTE harness
+        run: node scripts/test-po-approval-clicked-row.js
+
       # bwnGqlRead() - the classified GraphQL read envelope (kind / status / codes, never rejects) that
       # the PO shadow reader's give-up warn uses to tell auth-empty from schema drift from a dead
       # network. Fixture-driven: 200 data, 200 partial, 200 errors-only, 400 JSON, tokenless 500 HTML,

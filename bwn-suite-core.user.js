@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         BWN Suite - Core (Broadway National)
 // @namespace    broadwaynational.bwn
-// @version      1.89.4
+// @version      1.89.5
 // @downloadURL  https://raw.githubusercontent.com/Intermu/userscripts/main/bwn-suite-core.user.js
 // @updateURL    https://raw.githubusercontent.com/Intermu/userscripts/main/bwn-suite-core.user.js
 // @description  Runs several Umbrava helpers for BWN coordinators, in the browser with no privileged grants. Includes: PO Approval + ETA Builder; WO Assist (GP/ETA, a stall watchdog, DNE calculator, and a next-action playbook); Email Leak Guard (checks recipients against vendor names, PO amounts, and client budget references before an outbound email sends); WO List Heat (a triage overlay + My Day strip on the work-order list, with an optional same-origin Umbrava API scan for deterministic full-board coverage); and the BWN Launcher (opens the Azure Static Web App tools with the current WO's context). Modules share state through sessionStorage/localStorage. The only network calls are same-origin Umbrava GraphQL requests (app.umbrava.com/api/graphql, the app's own session): List Heat's full-board scan and WO Assist's work-order / trip / clock-in / document / purchase-order reads, plus ONE write - BWN Views saves the column layout through Umbrava's own putUserPreference, the same preference the column chooser writes; everything else is offline. Toggle modules in BWN_MODULES below.
@@ -113,7 +113,7 @@
   try { localStorage.setItem('bwn:status:core', JSON.stringify({ ver: BWN_VER, ts: Date.now() })); } catch (e) { /* best-effort */ }
 
   console.info('[BWN SUITE CORE] v' + BWN_VER + ' |',
-    'Shared Core 7 \u00b7 DOM Handles 1.0 \u00b7 PO Approval 1.13 \u00b7 WO Assist 2.76 \u00b7 Leak Guard 2.1 \u00b7 List Heat 3.28 \u00b7 Launcher 2.0 \u00b7 Views 3.1 \u00b7 Palette 1.1 \u00b7 Visit 1.2 \u00b7 Reminders 1.1 \u00b7 Timeline 1.1 \u00b7 TripCal 1.4 \u00b7 Bulk Ops 1.0 \u00b7 Connector 1.2 \u00b7 Governance 1.0 |',
+    'Shared Core 7 \u00b7 DOM Handles 1.0 \u00b7 PO Approval 1.14 \u00b7 WO Assist 2.76 \u00b7 Leak Guard 2.1 \u00b7 List Heat 3.28 \u00b7 Launcher 2.0 \u00b7 Views 3.1 \u00b7 Palette 1.1 \u00b7 Visit 1.2 \u00b7 Reminders 1.1 \u00b7 Timeline 1.1 \u00b7 TripCal 1.4 \u00b7 Bulk Ops 1.0 \u00b7 Connector 1.2 \u00b7 Governance 1.0 |',
     'enabled:', Object.keys(BWN_MODULES).filter(function (k) { return BWN_MODULES[k]; }).join(', '));
 
   // ===== BWN SHARED CORE v7 - KEEP IN SYNC across both suite scripts =====
@@ -2013,7 +2013,7 @@
 
 
   // ==========================================================================
-  // MODULE: PO Approval + ETA Builder v1.12
+  // MODULE: PO Approval + ETA Builder v1.14
   // ==========================================================================
   bwnBoot('poApproval', BWN_MODULES.poApproval, function () {
     'use strict';
@@ -2084,7 +2084,55 @@
       return to ? (to.textContent || '') : '';
     }
 
+    // Prefer the dedicated vendor-name element; fall back to the row's text.
+    // Measured 2026-09-03: Umbrava now renders the vendor as `purchase-order-vendor-link`
+    // on every PO row and `-name` did not appear once, so without the link fallback this
+    // silently degraded to the WHOLE row text - which carries amounts and dates and makes
+    // the vendor match noisier exactly where it guards an outbound mail.
+    function rowVendor(row) {
+      var vEl = row.querySelector('[data-testid="purchase-order-vendor-name"]') ||
+                row.querySelector('[data-testid="purchase-order-vendor-link"]');
+      return (vEl ? vEl.textContent : row.textContent) || '';
+    }
+    // v1.10: same amount semantics as WO Assist/Leak Guard - every $ figure in
+    // the row, cents optional, largest wins. The old cents-required first-match
+    // regex made "$4,500" invisible and could pick a smaller line item.
+    // v1.12: zero amounts dropped - a drafted "$0.00" PO row must never win and
+    // put "a not-to-exceed of $0.00" in the vendor's approval email.
+    function rowAmounts(row) {
+      var amts = [];
+      var re = /\$\s*([\d,]+(?:\.\d{1,2})?)/g, m;
+      while ((m = re.exec(row.textContent || '')) !== null) {
+        var a9 = parseFloat(m[1].replace(/,/g, ''));
+        if (a9 > 0) amts.push(a9);
+      }
+      return amts;
+    }
+
+    // v1.14: the Send Purchase Order modal is opened from ONE PO row's "..." menu
+    // (purchase-order-popper-menu, inside that row's POAccordion). Remember which row,
+    // so its amount is used directly instead of guessing the row from the recipients.
+    // Keyed by testid + vendor text: POAccordion-<n> is a render index, so a row whose
+    // vendor changed under the same index is not trusted. Recipient matching stays as
+    // the fallback (modal opened some other way, or the click is older than 10 min).
+    var lastPoMenu = null;
+    document.addEventListener('click', function (e) {
+      var btn = e.target && e.target.closest && e.target.closest('[data-testid="purchase-order-popper-menu"]');
+      var row = btn && btn.closest('[data-testid^="POAccordion-"]');
+      if (row) lastPoMenu = { tid: row.getAttribute('data-testid'), vendor: rowVendor(row), t: Date.now() };
+    }, true);
+    function clickedRowNTE() {
+      if (!lastPoMenu || Date.now() - lastPoMenu.t > 10 * 60000) return null;
+      var row = document.querySelector('[data-testid="' + lastPoMenu.tid + '"]');
+      if (!row || rowVendor(row) !== lastPoMenu.vendor) return null;
+      var amts = rowAmounts(row);
+      return amts.length ? fmtMoney(Math.max.apply(null, amts)) : null;
+    }
+
     function findNTE(modal) {
+      var clicked = clickedRowNTE();
+      if (clicked) { console.info('[BWN PO] NTE from the PO row whose menu opened this modal:', clicked); return clicked; }
+
       var recRaw = recipientsRaw(modal);
       var recipients = alphaOnly(recRaw);
       if (!recipients) return null;
@@ -2093,26 +2141,8 @@
       var best = null, bestScore = 0;
       for (var i = 0; i < rows.length; i++) {
         var row = rows[i];
-        // Prefer the dedicated vendor-name element; fall back to the row's text.
-        // Measured 2026-09-03: Umbrava now renders the vendor as `purchase-order-vendor-link`
-        // on every PO row and `-name` did not appear once, so without the link fallback this
-        // silently degraded to the WHOLE row text - which carries amounts and dates and makes
-        // the vendor match noisier exactly where it guards an outbound mail. vendorOf() below
-        // already had this fallback; this call site did not.
-        var vEl = row.querySelector('[data-testid="purchase-order-vendor-name"]') ||
-                  row.querySelector('[data-testid="purchase-order-vendor-link"]');
-        var vendorRaw = (vEl ? vEl.textContent : row.textContent) || '';
-        // v1.10: same amount semantics as WO Assist/Leak Guard - every $ figure in
-        // the row, cents optional, largest wins. The old cents-required first-match
-        // regex made "$4,500" invisible and could pick a smaller line item.
-        // v1.12: zero amounts dropped - a drafted "$0.00" PO row must never win and
-        // put "a not-to-exceed of $0.00" in the vendor's approval email.
-        var amts = [];
-        var re = /\$\s*([\d,]+(?:\.\d{1,2})?)/g, m;
-        while ((m = re.exec(row.textContent || '')) !== null) {
-          var a9 = parseFloat(m[1].replace(/,/g, ''));
-          if (a9 > 0) amts.push(a9);
-        }
+        var vendorRaw = rowVendor(row);
+        var amts = rowAmounts(row);
         if (!amts.length) continue;
         // v1.12: tiered scoring - a distinctive-token hit (tier 1000) beats any
         // overlap; within a tier, LCS breaks ties so two token-hitting rows rank by
