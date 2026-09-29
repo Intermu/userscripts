@@ -727,6 +727,9 @@ jobs:
       - name: Per-client profile resolver harness (T10 defaults + empty-table inert safety)
         run: node scripts/test-client-profile.js
 
+      - name: WO Assist open-task attribution harness (read-only created-by / assigned-to strip)
+        run: node scripts/test-task-attribution.js
+
       - name: Next Actions ECD-risk composite rule harness (T8-A1, self-clearing)
         run: node scripts/test-ecdrisk.js
 

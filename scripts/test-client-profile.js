@@ -114,6 +114,16 @@ function runResolverCases(mutations) {
   ok('and that keys the SR seed (both source refs required)',
     api.bwnClientProfile({ hd: { client: 'Transform SR Brands LLC' } }).refFields.sourcePo === true, 'sr sourcePo');
 
+  // signoff clients: defaults kept + 'signoff' appended, enforce inherited, rows separate
+  var DEF_DOCS = api.CLIENT_DEFAULTS_SEED.closeout.docs;
+  [['Tesla', '20441'], ['CROCS, Inc.', '20386']].forEach(function (p) {
+    var pr = api.bwnClientProfile({ hd: { client: p[0] } });
+    ok(p[0] + ' carries its clientId', pr.clientId === p[1], JSON.stringify(pr));
+    eqJSON(p[0] + ' keeps all three default closeout docs and adds signoff', pr.closeout.docs, DEF_DOCS.concat(['signoff']));
+    ok(p[0] + ' inherits enforce from the defaults', pr.closeout.enforce === true, JSON.stringify(pr.closeout));
+  });
+  ok('Tesla and Crocs are separate seed rows', api.CLIENT_PROFILE_SEED.tesla !== api.CLIENT_PROFILE_SEED.crocsinc, 'same object');
+
   // SAFETY: an EMPTY clients table disables the seed entirely -> defaults, byte-identical engine
   api.cfgSave({ clients: {} });
   eqJSON('an EMPTY clients table makes a seeded client resolve to defaults (the safety guarantee)',
@@ -179,6 +189,13 @@ function runGateCases(mutations) {
   // an empty closeout.docs profile -> only the docs:none path (verbatim fallback)
   eq('empty closeout.docs never advises on present docs', gate('confirmcomplete', { count: 2, docs: [{ label: 'x' }] }, EMPTY).length, 0);
   eq('empty closeout.docs still blocks on a confident zero', gate('confirmcomplete', { count: 0, docs: [] }, EMPTY).length, 1);
+
+  // signoff profile: a package with the three defaults but no Signoff doc advises 'signoff' only
+  var SIGN = { closeout: { docs: ['signed ticket', 'sign-in/out', 'before/after photos', 'signoff'], enforce: true } };
+  var noSign = gate('costreview', { count: 3, docs: [{ label: 'signed ticket' }, { label: 'sign-in/out' }, { label: 'before/after photos' }] }, SIGN);
+  eq('a signoff client missing a Signoff doc gets one advisory', noSign.length, 1);
+  eq('naming only signoff', noSign[0] && noSign[0].key, 'docsverify:signoff');
+  eq('a Signoff-labelled doc satisfies it', gate('confirmcomplete', { count: 4, docs: [{ label: 'signed ticket' }, { label: 'sign-in/out' }, { label: 'before/after photos' }, { label: 'Signoff', displayFileName: 'x.pdf' }] }, SIGN).length, 0);
 
   // never outside the closing phases
   eq('the whole gate is silent outside confirm-complete / cost-review', gate('intake', { count: 0, docs: [] }, SEED).length, 0);

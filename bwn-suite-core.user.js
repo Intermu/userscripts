@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         BWN Suite - Core (Broadway National)
 // @namespace    broadwaynational.bwn
-// @version      1.89.5
+// @version      1.90.0
 // @downloadURL  https://raw.githubusercontent.com/Intermu/userscripts/main/bwn-suite-core.user.js
 // @updateURL    https://raw.githubusercontent.com/Intermu/userscripts/main/bwn-suite-core.user.js
 // @description  Runs several Umbrava helpers for BWN coordinators, in the browser with no privileged grants. Includes: PO Approval + ETA Builder; WO Assist (GP/ETA, a stall watchdog, DNE calculator, and a next-action playbook); Email Leak Guard (checks recipients against vendor names, PO amounts, and client budget references before an outbound email sends); WO List Heat (a triage overlay + My Day strip on the work-order list, with an optional same-origin Umbrava API scan for deterministic full-board coverage); and the BWN Launcher (opens the Azure Static Web App tools with the current WO's context). Modules share state through sessionStorage/localStorage. The only network calls are same-origin Umbrava GraphQL requests (app.umbrava.com/api/graphql, the app's own session): List Heat's full-board scan and WO Assist's work-order / trip / clock-in / document / purchase-order reads, plus ONE write - BWN Views saves the column layout through Umbrava's own putUserPreference, the same preference the column chooser writes; everything else is offline. Toggle modules in BWN_MODULES below.
@@ -236,7 +236,13 @@
       'cwamazon': { clientId: '20432', refFields: { sourceJob: true, sourcePo: false } },
       'jllamazon': { clientId: '20394', refFields: { sourceJob: true } },
       'caleresinc': { clientId: null },
-      'transformsrbrandsllc': { clientId: '23914', refFields: { sourceJob: true, sourcePo: true } }
+      'transformsrbrandsllc': { clientId: '23914', refFields: { sourceJob: true, sourcePo: true } },
+      // Signoff clients: billing is disputed without a signed approval tied to the WO. deepMerge
+      // replaces closeout.docs wholesale, so each row repeats the three defaults + 'signoff'
+      // (matches the drop-upload 'Signoff' document label). Advisory only, like every docs row.
+      // Separate rows on purpose - the two clients' rules may diverge.
+      'tesla': { clientId: '20441', closeout: { docs: ['signed ticket', 'sign-in/out', 'before/after photos', 'signoff'] } },
+      'crocsinc': { clientId: '20386', closeout: { docs: ['signed ticket', 'sign-in/out', 'before/after photos', 'signoff'] } }
     };
     // Shallow merge with ONE level of depth over the two nested config objects (closeout,
     // refFields) so a partial override (e.g. {refFields:{sourceJob:true}}) keeps its sibling
@@ -2778,7 +2784,7 @@
     // re-renders when it lands. Gives the exact priority label (the DOM read can
     // silently fall back to neutral) and the internal job id (the DOM can't).
     var WO_CACHE = Object.create(null);   // woNum -> wo | 'pending' | 'error'
-    var WORKORDER_Q = 'query WorkOrderHeader($n: Int!) { workOrder(workOrderNumber: $n) { id number statusName systemStatusName phase priority { label category } doNotExceed { amount currency precision } totalNTE { amount currency precision } grossProfitInfo { estimatedGrossProfitPercent trueGrossProfitPercent grossProfitPercentType } trades { id name } locationNumber locationName } }';
+    var WORKORDER_Q = 'query WorkOrderHeader($n: Int!) { workOrder(workOrderNumber: $n) { id number statusName systemStatusName phase priority { label category } doNotExceed { amount currency precision } totalNTE { amount currency precision } grossProfitInfo { estimatedGrossProfitPercent trueGrossProfitPercent grossProfitPercentType } trades { id name } locationNumber locationName clientId } }';
     function fetchWO(woNum) {
       if (!woNum) return;
       var c = WO_CACHE[woNum];
@@ -2898,19 +2904,58 @@
     // docs reader's !isArchived). Confident reads only -> bwn:tasks:<wo>; a failed read stays absent
     // (unknown), never a guessed 0.
     var TASKS_DONE = Object.create(null);
-    var OPEN_TASKS_Q = 'query WOOpenTasks($id: String!) { tasksByEntityTypeAndId(entityType: 1, entityId: $id, includeComplete: false) { tasks { id isComplete } } }';
+    // Also selects who created / is assigned each task, for the read-only "Open tasks" strip in
+    // the Next Actions card (fields live-verified on this exact query 2026-09-29, W-394868).
+    var OPEN_TASKS_Q = 'query WOOpenTasks($id: String!) { tasksByEntityTypeAndId(entityType: 1, entityId: $id, includeComplete: false) { tasks { id isComplete description assignedTo createdBy_UserProfileId createdDate } } }';
+    var TASK_ROWS = Object.create(null);   // woNum -> open task rows (raw user ids), confident reads only
+    var USER_NAMES = null;                 // user id -> "First Last", one read per page load
+    var USER_NAMES_Q = 'query WAUserNames { users(includeInactiveUsers: false, includeSystemUsers: false) { id firstName lastName } }';
+    function fetchUserNames() {
+      if (USER_NAMES) return;
+      USER_NAMES = {};   // claim first so concurrent refreshes don't re-read; a failed read leaves ids unresolved
+      bwnGql(USER_NAMES_Q, {}).then(function (d) {
+        ((d && d.users) || []).forEach(function (u) {
+          var n = u && ((u.firstName || '') + ' ' + (u.lastName || '')).replace(/\s+/g, ' ').trim();
+          if (u && u.id && n) USER_NAMES[u.id] = n;
+        });
+        try { refresh(); } catch (e) { }
+      }).catch(function () { });
+    }
     function fetchTasks(woNum) {
       if (!woNum || TASKS_DONE[woNum]) return;
       TASKS_DONE[woNum] = 'pending';
       bwnGql(OPEN_TASKS_Q, { id: String(woNum) }).then(function (d) {
         var r = d && d.tasksByEntityTypeAndId;
-        if (!r || !Array.isArray(r.tasks)) { TASKS_DONE[woNum] = 'error'; return; }   // schema drift = unknown, NEVER a guessed 0
-        var open = r.tasks.filter(function (t) { return t && !t.isComplete; }).length;
+        if (!r || !Array.isArray(r.tasks)) { TASKS_DONE[woNum] = 'error'; delete TASK_ROWS[woNum]; return; }   // schema drift = unknown, NEVER a guessed 0
+        var openRows = r.tasks.filter(function (t) { return t && !t.isComplete; });
+        var open = openRows.length;
         TASKS_DONE[woNum] = true;
+        TASK_ROWS[woNum] = openRows;
+        if (open) fetchUserNames();
         try { BWN.lsSetJSON('bwn:tasks:' + woNum, { open: open, ts: new Date().toISOString() }); } catch (e) { }
         try { refresh(); } catch (e) { }
-      }).catch(function () { TASKS_DONE[woNum] = 'error'; });
+      }).catch(function () { TASKS_DONE[woNum] = 'error'; delete TASK_ROWS[woNum]; });   // a failed re-read never leaves the old rows up
     }
+    // BWN-TASK-ATTR-START (pure; sliced by scripts/test-task-attribution.js)
+    // Display lines for the read-only "Open tasks" strip. Shows only what the task record says:
+    // its creator and assignee as recorded - never which task (or who) caused a billing issue.
+    // An id the name map can't resolve (inactive / system user, or the users read failed) and any
+    // absent field read "Not available", never a guess.
+    function taskAttrLines(rows, names) {
+      var NA = 'Not available';
+      function who(id) { return (id && names && names[id]) || NA; }
+      function day(iso) {
+        var m = /^(\d{4})-(\d{2})-(\d{2})/.exec(String(iso || ''));
+        return m ? (+m[2]) + '/' + (+m[3]) + '/' + m[1] : NA;
+      }
+      return (rows || []).map(function (t) {
+        var desc = String((t && t.description) || '').replace(/\s+/g, ' ').trim();
+        if (desc.length > 90) desc = desc.slice(0, 89) + '…';
+        return (desc || '(no description)') + ' · Created by: ' + who(t && t.createdBy_UserProfileId) +
+          ' · Assigned to: ' + who(t && t.assignedTo) + ' · Created: ' + day(t && t.createdDate);
+      });
+    }
+    // BWN-TASK-ATTR-END
 
     // ===== BWN-PO-API START v1 (API purchase-order read + parity log; sliced by scripts/test-po-api.js) =====
     // Root query field only - purchaseOrders(workOrderNumber). The nested workOrder { purchaseOrders }
@@ -3608,6 +3653,9 @@
         '.bwn-act-anchor-mk{flex:none;width:15px;text-align:center;color:var(--bwn-warn);margin-top:1px;font-size:13px;}' +
         '.bwn-act-esc{padding:7px 12px;font:500 11.5px ui-monospace,"Segoe UI Mono","SF Mono",monospace;background:var(--bwn-warn-bg);color:var(--bwn-warn-fg);border-top:1px solid var(--bwn-border-2);line-height:1.4;}' +
         '.bwn-act-esc:last-child{border-radius:0 0 9px 9px;}' +
+        '.bwn-act-tasks{padding:6px 12px;font-size:11.5px;line-height:1.45;color:var(--bwn-text-strong);background:var(--bwn-surface-2);border-top:1px solid var(--bwn-border-2);}' +
+        '.bwn-act-tasks:last-child{border-radius:0 0 9px 9px;}' +
+        '.bwn-act-tasks-t{font:500 10px ui-monospace,"Segoe UI Mono","SF Mono",monospace;color:var(--bwn-text-faint);letter-spacing:.08em;margin-bottom:2px;}' +
         '.bwn-actc{display:block;width:100%;align-self:stretch;box-sizing:border-box;margin:6px 0 14px;border:1px solid var(--bwn-border);border-left:3px solid var(--bwn-green);border-radius:10px;background:var(--bwn-surface);font-family:-apple-system,BlinkMacSystemFont,"Segoe UI","Helvetica Neue",Arial,sans-serif;box-shadow:0 1px 4px rgba(13,38,26,.06);}' +
         // Card header is a real <button aria-expanded> (was a div role=button). Focus rings in this
         // card use --bwn-text-strong, not the accent: #2ECC71 on the white host panel is ~1.9:1 and
@@ -6310,6 +6358,10 @@
       try { collapsed = localStorage.getItem('bwn:acts:collapsed') === '1'; } catch (e) { }
       var escSt = null;
       try { escSt = waEscState(); } catch (e) { }
+      // Read-only open-task attribution (TASK_ROWS / USER_NAMES, filled by fetchTasks). Never
+      // clocks in, completes, reassigns or opens a task to get it.
+      var taskLines = [];
+      try { var tRows = TASK_ROWS[currentWOId()]; if (tRows && tRows.length) taskLines = taskAttrLines(tRows, USER_NAMES); } catch (e) { }
       var secState = { more: coordSecOpen('more'), blocked: coordSecOpen('blocked'), waiting: coordSecOpen('waiting'), upcoming: coordSecOpen('upcoming'), full: coordSecOpen('full') };
       var dbg = coordDebugOn();
       // Signature gate: rebuild only when content, classification, section state, or
@@ -6317,7 +6369,7 @@
       // the cursor.
       var doNowKeys = q.doNow.map(function (c) { return c.key; }).join(',');
       var moreKeys = q.moreAttention.map(function (c) { return c.key; }).join(',');
-      var sig = JSON.stringify([collapsed, dbg, secState, doNowKeys, moreKeys, qErr,
+      var sig = JSON.stringify([collapsed, dbg, secState, doNowKeys, moreKeys, qErr, taskLines,
         escSt ? escSt.status + '|' + escSt.id + '|' + (escSt.ackAt || '') : '',
         fullList.map(function (c) {
           var r = store[c.key]; var tl = actTool(c);
@@ -6370,6 +6422,16 @@
         esb.textContent = '🚩 ' + waEscStripText(escSt);
         esb.title = 'Live from the assist queue' + (escSt.requester ? ' · requested by ' + escSt.requester : '') + (escSt.reason ? ' · ' + escSt.reason : '') + ' · acknowledge or resolve from the Escalate drawer or the dashboard';
         card.appendChild(esb);
+      }
+      if (taskLines.length) {
+        var tsb = document.createElement('div');
+        tsb.className = 'bwn-act-tasks';
+        var tst = document.createElement('div'); tst.className = 'bwn-act-tasks-t';
+        tst.textContent = 'OPEN TASKS (' + taskLines.length + ')';
+        tsb.appendChild(tst);
+        taskLines.forEach(function (ln) { var d = document.createElement('div'); d.textContent = ln; tsb.appendChild(d); });
+        tsb.title = 'Read-only, from the task records on this WO: who created each open task and who it is assigned to.';
+        card.appendChild(tsb);
       }
 
       if (!collapsed && qErr) {
@@ -7584,6 +7646,10 @@
           client: hd.client || '', addr: hd.addr || '',
           coordinator: hd.coordinator || '', sourceJob: hd.sourceJob || '', sourcePo: hd.sourcePo || '',
           status: st.status, hrs: st.hrs,
+          // Client tenant GUID from the WorkOrderHeader API read (never the header name text) -
+          // bwn-notes keys its client-scoped (Tesla/Crocs signoff) templates on this. Blank until
+          // the async read lands; the next refresh republishes it.
+          clientId: (st.woApi && st.woApi.clientId) || '',
           // bwn-wo-assist prefills its escalation POST from bus.priority / bus.trade - the
           // drawer read these keys from day one, but the publish never carried them, so the
           // first live escalation (W-371126, 2026-08-03) rendered '-' for both.
