@@ -14,7 +14,9 @@
 //   - fallbacks return { hit:true, token:null }: LCS >= 6 over the joined distinctive letters, the
 //     legacy full-name LCS >= 6 when the name has NO distinctive token, and a near-whole-name LCS
 //     (>= max(9, len-2)) when the distinctive letters are shorter than 6;
-//   - a generic trade word alone never produces a hit for a name that has a distinctive token.
+//   - a generic trade word alone never produces a hit for a name that has a distinctive token;
+//   - after the tokens, 3+ leading INITIALS of the name (all words, generic included) hit when they
+//     start a recipient word, longest prefix first; returns { hit:true, token:<initials> }.
 //
 // This documents behavior; it does not endorse it. Change the matcher on purpose, then update this
 // harness in the same change.
@@ -121,6 +123,12 @@ A.eq('fallback: all-generic name still matches its generic words (legacy)', M.ma
 A.eq('fallback: short distinctive letters need near-whole name (hit)', M.match('AB24 Electric', 'abelectric@x.test'), FALLBACK);
 A.eq('fallback: short distinctive letters need near-whole name (miss)', M.match('AB24 Electric', 'electric@x.test'), MISS);
 
+// initials: a vendor known by its acronym (W-390539: "The Neutral Zone Electrical ..." mailed at tnzelectric@)
+A.eq('initials: 3 leading initials start a recipient word', M.match('The Quiet Yard Electrical Services Inc', 'support@tqyelectric.test'), HIT('TQYE'));
+A.eq('initials: longest matching prefix wins', M.match('Blue Ridge Mountain Supply', 'brms@x.test'), HIT('BRMS'));
+A.eq('initials: must START a recipient word', M.match('The Quiet Yard Electrical', 'atqy@x.test'), MISS);
+A.eq('initials: 2 initials are not enough', M.match('Quiet Yard', 'qyard@x.test'), MISS);
+
 // ---- negative controls: each reverts one rule and must turn its probe red ----------------------
 function mutant(key, from, to) { return load(key, from, to); }
 var m1 = mutant('match', "key.indexOf('|' + alphaTok)", 'key.indexOf(alphaTok)');
@@ -130,6 +138,8 @@ A.ok('mutant: lower mid-word threshold to 5 -> Sable probe goes red', JSON.strin
 var m3 = mutant('words', "'ELECTRIC', ", '');
 A.ok('mutant: drop ELECTRIC from generic list -> trade-word probe goes red', JSON.stringify(m3.match('Jones Electric', 'smithelectric@x.test')) !== JSON.stringify(MISS));
 var m4 = mutant('tokens', 'w.length >= 4', 'w.length >= 3');
+var m5 = mutant('match', 'k >= 3; k--', 'k >= 2; k--');
+A.ok('mutant: allow 2 initials -> 2-initial probe goes red', JSON.stringify(m5.match('Quiet Yard', 'qyard@x.test')) !== JSON.stringify(MISS));
 A.ok('mutant: min token length 3 -> 3-letter probe goes red', JSON.stringify(m4.tokens('Abc Abcd')) !== JSON.stringify(['ABCD']));
 
 A.finish();

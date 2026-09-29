@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         BWN Suite - Core (Broadway National)
 // @namespace    broadwaynational.bwn
-// @version      1.89.3
+// @version      1.89.4
 // @downloadURL  https://raw.githubusercontent.com/Intermu/userscripts/main/bwn-suite-core.user.js
 // @updateURL    https://raw.githubusercontent.com/Intermu/userscripts/main/bwn-suite-core.user.js
 // @description  Runs several Umbrava helpers for BWN coordinators, in the browser with no privileged grants. Includes: PO Approval + ETA Builder; WO Assist (GP/ETA, a stall watchdog, DNE calculator, and a next-action playbook); Email Leak Guard (checks recipients against vendor names, PO amounts, and client budget references before an outbound email sends); WO List Heat (a triage overlay + My Day strip on the work-order list, with an optional same-origin Umbrava API scan for deterministic full-board coverage); and the BWN Launcher (opens the Azure Static Web App tools with the current WO's context). Modules share state through sessionStorage/localStorage. The only network calls are same-origin Umbrava GraphQL requests (app.umbrava.com/api/graphql, the app's own session): List Heat's full-board scan and WO Assist's work-order / trip / clock-in / document / purchase-order reads, plus ONE write - BWN Views saves the column layout through Umbrava's own putUserPreference, the same preference the column chooser writes; everything else is offline. Toggle modules in BWN_MODULES below.
@@ -1980,7 +1980,9 @@
   //    generic trade word (ELECTRIC = 8) can never clear the bar by itself;
   //  - names with no distinctive token keep the legacy full-name LCS >= 6;
   //  - names whose distinctive letters are too short to test ("AB24 Electric")
-  //    require nearly the WHOLE compressed name in the recipient.
+  //    require nearly the WHOLE compressed name in the recipient;
+  //  - a vendor known by its INITIALS matches when 3+ leading initials start a
+  //    recipient word ("The Neutral Zone Electrical ..." -> TNZ -> "tnzelectric@").
   function bwnVendorMatch(vendorName, recipientRaw) {
     if (!vendorName || !recipientRaw) return { hit: false, token: null };
     var key = '|' + String(recipientRaw).toUpperCase().split(/[^A-Z0-9]+/)
@@ -1992,6 +1994,11 @@
       if (alphaTok.length < 4) continue;
       if (key.indexOf('|' + alphaTok) !== -1) return { hit: true, token: toks[i] };
       if (alphaTok.length >= 6 && alpha.indexOf(alphaTok) !== -1) return { hit: true, token: toks[i] };
+    }
+    var initials = String(vendorName).toUpperCase().replace(/[^A-Z0-9 ]/g, ' ').split(/\s+/)
+      .map(function (w) { return w.charAt(0); }).join('').replace(/[^A-Z]/g, '');
+    for (var k = initials.length; k >= 3; k--) {
+      if (key.indexOf('|' + initials.slice(0, k)) !== -1) return { hit: true, token: initials.slice(0, k) };
     }
     var distinct = toks.map(function (t2) { return t2.replace(/[^A-Z]/g, ''); }).join('');
     if (distinct.length >= 6 && BWN.lcsLen(distinct, alpha) >= 6) return { hit: true, token: null };
