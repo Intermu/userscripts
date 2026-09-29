@@ -2940,8 +2940,8 @@
       bwnGql(OPEN_TASKS_Q, { id: String(woNum) }).then(function (d) {
         var r = d && d.tasksByEntityTypeAndId;
         if (!r || !Array.isArray(r.tasks)) { TASKS_DONE[woNum] = 'error'; delete TASK_ROWS[woNum]; return; }   // schema drift = unknown, NEVER a guessed 0
-        var openRows = r.tasks.filter(function (t) { return t && !t.isComplete; });
-        var open = openRows.length;
+        var open = r.tasks.filter(function (t) { return t && !t.isComplete; }).length;
+        var openRows = r.tasks.filter(function (t) { return t && !t.isComplete; });   // the same rows, for the attribution strip
         TASKS_DONE[woNum] = true;
         TASK_ROWS[woNum] = openRows;
         if (open) fetchUserNames();
