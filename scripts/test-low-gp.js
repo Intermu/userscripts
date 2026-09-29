@@ -258,13 +258,15 @@ console.log('\n-- (4) close / reopen / route change keep the posting session and
     onKey.indexOf('if (!inside && !(lb') < onKey.indexOf('e.preventDefault()'));
 })();
 
-console.log('\n-- (5) an invalid assignee or tenant GUID skips note 2 --');
-A.eq('valid assignee + tenant sends', api.lgNote2Gate({ assigneeId: UID }, TEN), { send: true, reason: '' });
-A.eq('no assignee GUID -> no-assignee', api.lgNote2Gate({ assigneeId: '' }, TEN), { send: false, reason: 'no-assignee' });
-A.eq('a non-GUID assignee -> no-assignee', api.lgNote2Gate({ assigneeId: 'Lisa' }, TEN), { send: false, reason: 'no-assignee' });
-A.eq('empty tenant -> tenant-unknown', api.lgNote2Gate({ assigneeId: UID }, ''), { send: false, reason: 'tenant-unknown' });
-A.eq('a JSON-quoted (unwrapped wrong) tenant -> tenant-unknown', api.lgNote2Gate({ assigneeId: UID }, '"' + TEN + '"'), { send: false, reason: 'tenant-unknown' });
-A.eq('no row -> no-assignee', api.lgNote2Gate(null, TEN), { send: false, reason: 'no-assignee' });
+console.log('\n-- (5) only an invalid assignee GUID skips note 2; the tenant is never gated --');
+A.eq('valid assignee sends', api.lgNote2Gate({ assigneeId: UID }), { send: true, reason: '' });
+A.eq('no assignee GUID -> no-assignee', api.lgNote2Gate({ assigneeId: '' }), { send: false, reason: 'no-assignee' });
+A.eq('a non-GUID assignee -> no-assignee', api.lgNote2Gate({ assigneeId: 'Lisa' }), { send: false, reason: 'no-assignee' });
+A.eq('no row -> no-assignee', api.lgNote2Gate(null), { send: false, reason: 'no-assignee' });
+// 0.5.1 regression pin: the SPA no longer stores localStorage.tenantId, 0.4.0 posted data-tenant=""
+// and the mention still notified; 0.5.0 gated on the tenant GUID and silently skipped every mention.
+A.ok('no tenant-unknown reason survives in the source', FULL.indexOf('tenant-unknown') === -1, 'tenant gate is back');
+A.ok('lgNote2Gate takes no tenant argument', /function lgNote2Gate\(row\)\s*\{/.test(FULL), 'gate signature changed');
 
 console.log('\n-- (6) duplicate classification: only an active Billing note that is exactly "Low GP" --');
 A.ok('exact active Billing "Low GP" matches', api.lgIsDupLowGp({ type: 3, content: 'Low GP', isDeleted: false }, 3) === true);
@@ -419,8 +421,8 @@ console.log('\n-- redesign mutation controls (each MUST make a guard above go re
   A.ok('M9: defaulting unknown failures to "refused" is observable', m.lgNote1Outcome(new SyntaxError('bad json')) === 'refused', 'default not observable');
 })();
 (function () {
-  var m = load([['if (!lgIsGuid(tenant)) return', 'if (false) return']]);
-  A.ok('M10: dropping the tenant GUID gate is observable', m.lgNote2Gate({ assigneeId: UID }, '').send === true, 'tenant gate not observable');
+  var m = load([["if (!row || !lgIsGuid(row.assigneeId)) return { send: false, reason: 'no-assignee' };", '']]);
+  A.ok('M10: dropping the assignee GUID gate is observable', m.lgNote2Gate({ assigneeId: '' }).send === true, 'assignee gate not observable');
 })();
 
 // ---- async: the injected two-note orchestrator (order, gate, no rollback, truthful outcome) ----
@@ -457,10 +459,12 @@ Promise.resolve().then(function () {
     A.eq('(5) no assignee GUID: one write, note2skipped no-assignee', [f.calls.length, r.note1, r.note2, r.note2skipped, r.note2skipReason], [1, true, false, true, 'no-assignee']);
   });
 }).then(function () {
-  var f = fakePost(['ok']);
-  return api.lgApplyWith(ROW, { post: f.post, typeId: typeIdFrom(api), tenant: 'not-a-guid' }).then(function (r) {
+  var f = fakePost(['ok', 'ok']);
+  return api.lgApplyWith(ROW, { post: f.post, typeId: typeIdFrom(api), tenant: '' }).then(function (r) {
     asyncRan++;
-    A.eq('(5) bad tenant GUID: one write, note2skipped tenant-unknown', [f.calls.length, r.note2skipped, r.note2skipReason], [1, true, 'tenant-unknown']);
+    A.eq('(5) no tenant in localStorage: BOTH notes still post (0.4.0 behavior)', [f.calls.length, r.note2, r.note2skipped], [2, true, false]);
+    A.ok('(5) the mention goes out with data-tenant="" exactly as 0.4.0 sent it',
+      f.calls[1].contentHtml.indexOf('data-id="' + UID + '"') !== -1 && f.calls[1].contentHtml.indexOf('data-tenant=""') !== -1, 'mention shape changed');
   });
 }).then(function () {
   var f = fakePost(['ok', new Error('mention refused')]);

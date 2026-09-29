@@ -1,8 +1,8 @@
 // ==UserScript==
 // @name         BWN Suite - Low GP Note (Broadway National)
 // @namespace    broadwaynational.bwn
-// @version      0.5.0
-// @description  A "Low GP" button beside the global "Search Work Orders" box. Enter a WO#, Tracking#, Source PO#, or Source Job#; it finds the work order, shows a CONFIRM step (WO / client / location / assignee / both note bodies, plus a warn-only notice if the WO already has an active Billing "Low GP" note), then posts TWO notes via Umbrava's own API: a Billing-type note reading "Low GP", and a second note that @-mentions the WO's assignee ("@Name Low GP note added"). The @-mention is the real TipTap mention span the SPA sends (captured live 2026-08-17); actionNoteEmails stays null - the span alone notifies. The mention is skipped when the assignee or tenant GUID is unknown. Same-origin /api/graphql with the app's Auth0 bearer, @grant none, zero egress. Nothing posts until you click Confirm.
+// @version      0.5.1
+// @description  A "Low GP" button beside the global "Search Work Orders" box. Enter a WO#, Tracking#, Source PO#, or Source Job#; it finds the work order, shows a CONFIRM step (WO / client / location / assignee / both note bodies, plus a warn-only notice if the WO already has an active Billing "Low GP" note), then posts TWO notes via Umbrava's own API: a Billing-type note reading "Low GP", and a second note that @-mentions the WO's assignee ("@Name Low GP note added"). The @-mention is the real TipTap mention span the SPA sends (captured live 2026-08-17); actionNoteEmails stays null - the span alone notifies. The mention is skipped when the WO has no assignee user GUID. Same-origin /api/graphql with the app's Auth0 bearer, @grant none, zero egress. Nothing posts until you click Confirm.
 // @match        https://app.umbrava.com/*
 // @run-at       document-idle
 // @grant        none
@@ -93,11 +93,12 @@
     return String(raw).replace(/^"|"$/g, '');
   }
 
-  // Note #2 gate: the mention needs BOTH a real assignee user GUID (data-id) and a real org tenant
-  // GUID (data-tenant). Either missing -> skip note #2 (note #1 still posts) and say why.
-  function lgNote2Gate(row, tenant) {
+  // Note #2 gate: the mention needs a real assignee user GUID (data-id) - that is what notifies.
+  // data-tenant is NOT gated: the SPA no longer stores localStorage.tenantId (checked live 2026-09-29),
+  // and 0.4.0 posted data-tenant="" for months with the @-mention still notifying. Gating on it (0.5.0)
+  // silently skipped every mention. Missing assignee -> skip note #2 (note #1 still posts) and say why.
+  function lgNote2Gate(row) {
     if (!row || !lgIsGuid(row.assigneeId)) return { send: false, reason: 'no-assignee' };
-    if (!lgIsGuid(tenant)) return { send: false, reason: 'tenant-unknown' };
     return { send: true, reason: '' };
   }
 
@@ -171,7 +172,7 @@
       var note1 = lgNoteInput(row.number, billingId, NOTE1_CONTENT, lgSimpleHtml(NOTE1_CONTENT));
       return deps.post(note1).then(function () {
         result.note1 = true;
-        var gate = lgNote2Gate(row, deps.tenant);
+        var gate = lgNote2Gate(row);
         if (!gate.send) { result.note2skipped = true; result.note2skipReason = gate.reason; return result; }
         try { if (deps.onStep) deps.onStep(2); } catch (e1) { /* progress text only */ }
         var label = row.assigneeName || 'assignee';
@@ -424,7 +425,7 @@
     while (j < n) { var c = q.charAt(j); if ((c >= 'A' && c <= 'Z') || (c >= 'a' && c <= 'z') || (c >= '0' && c <= '9') || c === '_') j++; else break; }
     return lgGql(q.slice(i, j) || null, query, variables);
   };
-  var BWN_VER = '0.5.0';
+  var BWN_VER = '0.5.1';
 
   // Reader for the server-computed ESC rank (grant-none-safe; mirrors bwnEscRank / bwn-ask). Live
   // bus event trusted directly; the bwn:role:last slot is the cross-refresh fallback (ok + fresh).
@@ -693,8 +694,8 @@
     });
   }
 
-  // Post note #1 (Billing "Low GP"), then note #2 (@assignee ping) if the WO has an assignee GUID AND
-  // the tenant GUID is known. Note #2 failing does NOT undo note #1 - the result carries per-note
+  // Post note #1 (Billing "Low GP"), then note #2 (@assignee ping) if the WO has an assignee GUID
+  // (the tenant rides along as-is, possibly ''). Note #2 failing does NOT undo note #1 - the result carries per-note
   // outcome so the UI can tell the truth. The order + gate live in the sliced lgApplyWith.
   function lgApply(row, tenant, onStep) {
     return lgApplyWith(row, {
@@ -1057,8 +1058,7 @@
   }
 
   var LG_SKIP_WHY = {
-    'no-assignee': 'this WO has no assignee with a user ID, so nobody can be @-mentioned.',
-    'tenant-unknown': "the org tenant ID couldn't be read, so the @-mention can't be built."
+    'no-assignee': 'this WO has no assignee with a user ID, so nobody can be @-mentioned.'
   };
   function lgViewConfirm(b) {
     var r = st.row, gate = lgNote2Gate(r, lgTenant()), label = r.assigneeName || 'assignee';
@@ -1149,8 +1149,7 @@
     return p;
   }
   var LG_SKIP_DONE = {
-    'no-assignee': 'No mention posted - this WO has no assignee with a user ID, so nobody was notified.',
-    'tenant-unknown': "No mention posted - the org tenant ID couldn't be read, so the @-mention was skipped. Nobody was notified."
+    'no-assignee': 'No mention posted - this WO has no assignee with a user ID, so nobody was notified.'
   };
   function lgViewDone(b) {
     var res = st.result, r = st.row, said = [];
@@ -1258,7 +1257,7 @@
     // The lock above is the guard; render() below replaces the confirm view (and its button) at once.
     lgAbortReads();                         // the duplicate read is moot now
     var row = st.row, tenant = lgTenant();
-    st.step = 1; st.total = lgNote2Gate(row, tenant).send ? 2 : 1; st.result = null; st.error = null;
+    st.step = 1; st.total = lgNote2Gate(row).send ? 2 : 1; st.result = null; st.error = null;
     render();
     lgApply(row, tenant, function (n) {
       if (!ctl.isCurrent(tok)) return;
