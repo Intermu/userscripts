@@ -62,7 +62,7 @@ function clone(x) { return JSON.parse(JSON.stringify(x)); }
 //         edit: 'apply'|'refuse'|'throw'|'applyAndThrow'|'corrupt'|'noop',
 //         failReadsAfterEdit: true, onRead: fn(wo, readNo, store) }
 function mkGql(opts) {
-  var store = clone(opts.store || {}), reads = 0;
+  var store = clone(opts.store || {}), wos = clone(opts.wos || {}), reads = 0;
   function gql(query, variables) {
     gql.calls.push({ q: query, v: clone(variables || {}) });
     if (/mutation EditTask/.test(query)) {
@@ -78,11 +78,21 @@ function mkGql(opts) {
       if (mode === 'applyAndThrow') return Promise.reject(new Error('Failed to fetch'));
       return Promise.resolve({ editTask: { success: true, message: '' } });
     }
+    if (/mutation PatchWorkOrder/.test(query)) {
+      gql.patches++;
+      var pd = variables.data, rec = wos[pd.workOrderNumber], pm = opts.patch || 'apply';
+      if (pm === 'throw') return Promise.reject(new Error('Failed to fetch'));
+      if (pm === 'refuse') return Promise.resolve({ patchWorkOrder: { success: false, message: 'nope' } });
+      if (rec && pm !== 'noop') { rec.assignedTo = pd.assignedTo.value; if (pm === 'statusToo') rec.statusId = 99; }
+      return Promise.resolve({ patchWorkOrder: { success: true, message: '' } });
+    }
     if (/query BTWorkOrder/.test(query)) {
       var n = variables.n;
       if ((opts.notFound || []).indexOf(n) !== -1) return Promise.reject(new Error('Cannot return null for non-nullable field Query.workOrder.'));
       if ((opts.woReadFail || []).indexOf(n) !== -1) return Promise.reject(new Error('Not authorized'));
-      return Promise.resolve({ workOrder: { number: (opts.ambiguous || []).indexOf(n) !== -1 ? n + 1 : n } });
+      if (opts.failWoReadsAfterPatch && gql.patches > 0) return Promise.reject(new Error('Failed to fetch'));
+      var w = wos[n] || { assignedTo: null, statusId: 1 };
+      return Promise.resolve({ workOrder: { number: (opts.ambiguous || []).indexOf(n) !== -1 ? n + 1 : n, assignedTo: w.assignedTo, statusId: w.statusId } });
     }
     if (/query BTOpenTasks/.test(query)) {
       reads++;
@@ -95,7 +105,7 @@ function mkGql(opts) {
     }
     return Promise.resolve({});
   }
-  gql.calls = []; gql.edits = 0; gql.store = store;
+  gql.calls = []; gql.edits = 0; gql.patches = 0; gql.store = store; gql.wos = wos;
   return gql;
 }
 function makeEnv(opts, engSrc) {
@@ -129,7 +139,10 @@ function previewRow(env, wo) { return env.api.btReadWO(wo).then(function (res) {
     /editTask: \{ kind: 'write', perm: 'Task\.EditTask', target: 'task', risk: 'high', idempotent: false, retry: 'none',/.test(coreFull));
   A.ok('the only EditTask call-site is the engine, with feature:bulkTask', (coreFull.match(/bwnGqlOp\('editTask'/g) || []).length === 1 && /feature: 'bulkTask', confirmed: true/.test(S_ENG));
   A.ok('the mutation document is the captured EditTask(data: EditTaskInput!)', /mutation EditTask\(\$data: EditTaskInput!\) \{ editTask\(data: \$data\)/.test(S_ENG));
-  A.ok('no task-create / complete / status write anywhere in the engine', !/addTask|completeTask|completeAllTasks|patchWorkOrder|flagTask/.test(S_ENG));
+  A.ok('no task-create / complete / flag write anywhere in the engine', !/addTask|completeTask|completeAllTasks|flagTask/.test(S_ENG));
+  A.ok('the one patchWorkOrder call-site pins the payload to exactly { workOrderNumber, assignedTo }',
+    (S_ENG.match(/bwnGqlOp\('patchWorkOrder'/g) || []).length === 1 && /Object\.keys\(d\)\.join\(','\) !== 'workOrderNumber,assignedTo'\) return 'only assignedTo may be sent';/.test(S_ENG));
+  A.ok('the picker reads people AND teams (searchMembers BOTH), not the users-only directory', /searchMembers\(searchType: BOTH/.test(S_ENG) && !/users\(includeInactiveUsers/.test(coreFull.slice(coreFull.indexOf('MODULE: Bulk Task Reassign'))));
   A.ok('drawer mount is idempotent (returns if already open)', /if \(document\.getElementById\('bwn-bt-drawer'\)\) return;   \/\/ idempotent mount/.test(coreFull));
   A.ok('dock row is policy-gated at rank 4 + Task.EditTask', /BWN_DOCK_POLICY\['bulk-task'\]\s+= \{ minRank: 4, perms: \['Task\.EditTask'\] \}/.test(coreFull));
 
@@ -291,6 +304,65 @@ function previewRow(env, wo) { return env.api.btReadWO(wo).then(function (res) {
   A.eq('summary: counts', [sum.inputCount, sum.uniqueCount, sum.invalidCount, sum.attempted, sum.verified, sum.skippedAtRun], [3, 2, 1, 1, 1, 1]);
   A.ok('summary: carries no task description or metadata', JSON.stringify(sum).indexOf('Please review') === -1 && JSON.stringify(sum).indexOf('vendorName') === -1);
 
+  // ---- WO Assigned To rows (withWO) ----------------------------------------------------------------
+  var TEAM = 'a87ed136-0000-0000-0000-00000000team';
+  var envW = makeEnv({ store: { '398436': [], '397888': [T()] }, wos: { 398436: { assignedTo: TEAM, statusId: -1 }, 397888: { assignedTo: TARGET, statusId: 3 } } });
+  var rw1 = envW.api.btRowsFor(398436, await envW.api.btReadWO(398436), TARGET, true);
+  A.eq('withWO: a WO with NO open task still gets a Reassign WO row (the automation-PM case)', rw1.map(function (r) { return r.kind + ':' + r.action; }), ['wo:Reassign']);
+  A.eq('withWO: current / proposed owner carried', [rw1[0].cur, rw1[0].to], [TEAM, TARGET]);
+  A.eq('withWO off: the same WO is "No open task"', envW.api.btRowsFor(398436, await envW.api.btReadWO(398436), TARGET)[0].reason, 'No open task');
+  var rw2 = envW.api.btRowsFor(397888, await envW.api.btReadWO(397888), TARGET, true);
+  A.eq('withWO: WO already owned by the target is skipped, its task still planned', rw2.map(function (r) { return r.kind + ':' + r.action; }), ['wo:Skip', 'task:Reassign']);
+  A.eq('withWO: the skip reason', rw2[0].reason, 'Work order already assigned to target');
+  var rOnly = envW.api.btRowsFor(397888, await envW.api.btReadWO(397888), OTHER, 'only');
+  A.eq("mode 'only': just the WO row, the WO's tasks are NOT planned", rOnly.map(function (r) { return r.kind + ':' + r.action; }), ['wo:Reassign']);
+  var rTeam = envW.api.btRowsFor(398436, await envW.api.btReadWO(398436), TARGET, true, true);
+  A.eq('team WO owner (live-proven 2026-09-29): a WO row targeting a TEAM plans', rTeam[0].action, 'Reassign');
+  var envG = makeEnv({ store: { '398436': [] }, wos: { 398436: { assignedTo: OTHER, statusId: -1 } } }, mutate(S_ENG, 'var BT_TEAM_WO_VERIFIED = true;', 'var BT_TEAM_WO_VERIFIED = false;'));
+  var rG = envG.api.btRowsFor(398436, await envG.api.btReadWO(398436), TARGET, true, true);
+  A.eq('team gate: re-closing the constant skips team WO rows again', [rG[0].action, rG[0].reason], ['Skip', 'A team as work-order owner is not yet verified live - set it by hand']);
+  A.eq('team gate: a closed gate never blocks a PERSON target', envG.api.btRowsFor(398436, await envG.api.btReadWO(398436), TARGET, true, false)[0].action, 'Reassign');
+  var rTeamT = envW.api.btRowsFor(397888, await envW.api.btReadWO(397888), TEAM, true, true);
+  A.eq('team target: both the WO row and the task row plan', rTeamT.map(function (r) { return r.kind + ':' + r.action; }), ['wo:Reassign', 'task:Reassign']);
+  A.ok('team gate is open only because it was proven live (dated comment beside it)', /proven live 2026-09-29[\s\S]{0,300}var BT_TEAM_WO_VERIFIED = true;/.test(S_ENG));
+  A.ok('target picker excludes technicians', /function targets\(\) \{ return members\.filter\(function \(m\) \{ return !m\.tech; \}\); \}/.test(coreFull) && /fillMemberSelect\(\$\('bwn-bt-user'\), targets\(\)/.test(coreFull));
+  var sA = envW.api.btStamp([398436], TARGET, rw1, true);
+  A.ok("stamp: switching to 'only' moves it", sA !== envW.api.btStamp([398436], TARGET, rw1, 'only'));
+  A.ok('stamp: toggling withWO moves it', sA !== envW.api.btStamp([398436], TARGET, rw1, false));
+  var wr = await envW.api.btExecRow(rw1[0], TARGET);
+  A.eq('WO row: clean write is Verified', [wr.result, wr.before, wr.after], ['Verified', TEAM, TARGET]);
+  var pcall = envW.gql.calls.filter(function (c) { return /mutation PatchWorkOrder/.test(c.q); });
+  A.eq('WO row: exactly one patchWorkOrder, carrying only workOrderNumber + assignedTo', pcall.map(function (c) { return c.v.data; }), [{ workOrderNumber: 398436, assignedTo: { shouldInclude: true, value: TARGET } }]);
+  A.eq('WO row: no EditTask sent for a WO row', envW.gql.edits, 0);
+  A.ok('WO row: result keyed per WO', wr.key === 'wo:398436' && wr.kind === 'wo');
+  async function woRun(opts, mut) {
+    var en = makeEnv(Object.assign({ store: { '398436': [] }, wos: { 398436: { assignedTo: TEAM, statusId: -1 } } }, opts));
+    var r = en.api.btRowsFor(398436, await en.api.btReadWO(398436), TARGET, true)[0];
+    if (mut) mut(en.gql.wos);
+    return { out: await en.api.btExecRow(r, TARGET), env: en };
+  }
+  var wc = await woRun({}, function (w) { w[398436].assignedTo = OTHER; });
+  A.eq('WO row: owner changed since preview -> skipped, no write', [wc.out.result, wc.out.reason, wc.env.gql.patches], ['Skipped', 'Changed since preview (assignedTo)', 0]);
+  var ws = await woRun({}, function (w) { w[398436].statusId = 5; });
+  A.eq('WO row: status changed since preview -> skipped, no write', [ws.out.reason, ws.env.gql.patches], ['Changed since preview (status)', 0]);
+  var wst = await woRun({ patch: 'statusToo' });
+  A.eq('WO row: a write that also moved the status is Verification failed', [wst.out.result, wst.out.reason], ['Verification failed', 'Work order status changed']);
+  var wno = await woRun({ patch: 'noop' });
+  A.eq('WO row: success but owner unchanged -> Verification failed', wno.out.result, 'Verification failed');
+  var wrf = await woRun({ patch: 'refuse' });
+  A.eq('WO row: refused -> Mutation failed, one attempt, fixed reason', [wrf.out.result, wrf.env.gql.patches, wrf.out.reason], ['Mutation failed', 1, 'Refused by Umbrava']);
+  var wrb = await woRun({ failWoReadsAfterPatch: true });
+  A.eq('WO row: failed read-back -> Verification unavailable', wrb.out.result, 'Verification unavailable');
+  var woff = await woRun({ modules: { bulkTask: false } });
+  A.eq('WO row: flag off -> nothing sent', [woff.env.gql.patches, woff.out.result], [0, 'Mutation failed']);
+  // mixed batch: WO row then its task, sequential, summary keyed per row
+  var envM = makeEnv({ store: { '397888': [T()] }, wos: { 397888: { assignedTo: TEAM, statusId: 3 } } });
+  var mrows = envM.api.btRowsFor(397888, await envM.api.btReadWO(397888), TARGET, true);
+  var mres = await envM.api.btRunSequential(mrows.filter(function (r) { return r.action === 'Reassign'; }), TARGET, null, null);
+  A.eq('mixed: WO + task both Verified, one write each', [mres.map(function (r) { return r.kind + ':' + r.result; }), envM.gql.patches, envM.gql.edits], [['wo:Verified', 'task:Verified'], 1, 1]);
+  var msum = envM.api.btSummary('bt-m', envM.api.btParse('397888'), mrows, mres);
+  A.eq('mixed: summary rows matched per key', msum.rows.map(function (r) { return r.kind + ':' + r.result; }), ['wo:Verified', 'task:Verified']);
+
   // ---- 7. flag off: the wrapper refuses, nothing is sent ------------------------------------------
   var off = await runOne({ store: { '397888': [T()] }, modules: { bulkTask: false } });
   A.eq('flag off: no EditTask sent', off.edits, 0);
@@ -320,6 +392,18 @@ function previewRow(env, wo) { return env.api.btReadWO(wo).then(function (res) {
     function (s) { return withEng(s).api.btPayload(T(), TARGET).data.targetStartDate === '2026-09-28T23:45:00.000Z'; });
   await caught('accepting a short task page as complete', "if (typeof r.total === 'number' && r.total > r.tasks.length) return", 'if (false) return',
     async function (s) { var en = withEng(s, { store: { '400003': [T({ id: 'x', entityId: '400003' })] }, shortPage: [400003] }); var rr = await previewRow(en, 400003); return rr[0].action === 'Skip'; });
+
+  await caught('letting the WO patch carry more than assignedTo', "if (Object.keys(d).join(',') !== 'workOrderNumber,assignedTo') return 'only assignedTo may be sent';", '',
+    async function (s) {
+      var en = withEng(mutate(s, "var vars = { data: { workOrderNumber: row.wo, assignedTo: cond(targetId) } };", "var vars = { data: { workOrderNumber: row.wo, assignedTo: cond(targetId), statusId: cond(1) } };"), { store: { '398436': [] }, wos: { 398436: { assignedTo: OTHER, statusId: -1 } } });
+      var r = en.api.btRowsFor(398436, await en.api.btReadWO(398436), TARGET, true)[0]; await en.api.btExecRow(r, TARGET); return en.gql.patches === 0;
+    });
+  await caught('dropping the team WO-owner gate check (with the gate closed)', "else if (targetIsTeam && !BT_TEAM_WO_VERIFIED) wr.reason = 'A team as work-order owner is not yet verified live - set it by hand';", '',
+    async function (s) { var en = withEng(mutate(s, 'var BT_TEAM_WO_VERIFIED = true;', 'var BT_TEAM_WO_VERIFIED = false;'), { store: { '398436': [] }, wos: { 398436: { assignedTo: OTHER, statusId: -1 } } }); return en.api.btRowsFor(398436, await en.api.btReadWO(398436), TARGET, true, true)[0].action === 'Skip'; });
+  await caught('dropping the Conditional-wrapper check (with a bare assignee payload)', "if (!d.assignedTo || Object.keys(d.assignedTo).join(',') !== 'shouldInclude,value' || d.assignedTo.shouldInclude !== true) return 'bad assignee wrapper';", '',
+    async function (s) { s = mutate(s, "var vars = { data: { workOrderNumber: row.wo, assignedTo: cond(targetId) } };", "var vars = { data: { workOrderNumber: row.wo, assignedTo: { value: targetId } } };"); var en = withEng(s, { store: { '398436': [] }, wos: { 398436: { assignedTo: OTHER, statusId: -1 } } }); var r = en.api.btRowsFor(398436, await en.api.btReadWO(398436), TARGET, true)[0]; await en.api.btExecRow(r, TARGET); return en.gql.patches === 0; });
+  await caught('dropping the WO status read-back check', "if (post.statusId !== fresh.statusId) return out('Verification failed', 'Work order status changed', post.assignedTo);", '',
+    async function (s) { var en = withEng(s, { store: { '398436': [] }, wos: { 398436: { assignedTo: OTHER, statusId: -1 } }, patch: 'statusToo' }); var r = en.api.btRowsFor(398436, await en.api.btReadWO(398436), TARGET, true)[0]; return (await en.api.btExecRow(r, TARGET)).result !== 'Verified'; });
 
   A.finish();
 })().catch(function (err) { console.error(err); process.exit(1); });

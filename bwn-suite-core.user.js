@@ -57,8 +57,9 @@
                          // still passes a dry-run + a typed confirm, and every write routes through
                          // bwnGqlOp feature:'bulkSource' (its per-feature kill switch + audit ring)
                          // via the proven patchWorkOrder. Flip back to false to kill the module.
-    bulkTask: false,     // SHIPPING DEFAULT OFF: Bulk Task Reassign - paste WO#s, pick one user, move
-                         // every EXISTING open task on them to that user (never creates a task). The
+    bulkTask: false,     // SHIPPING DEFAULT OFF: Bulk Task Reassign - paste WO#s (or tick them from a
+                         // current assignee's open WOs), pick one person or team, move every EXISTING
+                         // open task on them and/or the WO's own Assigned To (never creates a task). The
                          // whole module - dock entry, drawer, every read and write - mounts only when
                          // this is on. Each run needs a read-only preview + a typed APPLY n; each
                          // write re-reads the task, sends it back unchanged but for assignedTo
@@ -18541,10 +18542,14 @@
   });
 
   // ==========================================================================
-  // MODULE: Bulk Task Reassign v1.0  (reassign EXISTING open WO tasks from pasted WO#s, flag OFF)
+  // MODULE: Bulk Task Reassign v1.1  (reassign EXISTING open WO tasks + optionally the WO's own Assigned To, flag OFF)
   // ==========================================================================
-  // Coordinator pastes work-order numbers, picks ONE target user, previews every open task on those
-  // WOs (reads only), types "APPLY <n>", and the run moves each previewed task to the target user.
+  // Coordinator pastes work-order numbers - or loads a current assignee's open WOs (a person or a
+  // team) and ticks the ones to move, e.g. the PMs an automation dropped on a team - picks ONE target
+  // person or team, previews every open task on those WOs (reads only), types "APPLY <n>", and the
+  // run moves each previewed task to the target. With "Also set each work order's Assigned To" the
+  // WO's own owner is moved too (single-field patchWorkOrder, same verify-by-read-back rule), so a
+  // WO with no tasks at all still moves.
   // It NEVER creates a task and never touches description / date / metadata / category / priority /
   // flag / completion - EditTask is a FULL REPLACE (live capture 2026-09-29, see
   // wiki/umbrava-graphql-operations.md "editTask"), so every write re-reads the task first, refuses
@@ -18560,12 +18565,27 @@
     // ===== BULK-TASK-ENGINE START v1 (pure, DOM-FREE; sliced + driven by scripts/test-bulk-task.js
     //        against a stubbed transport. Closes over ONLY bwnGql + bwnGqlOp from the enclosing
     //        scope.) =====
-    var BT_WO_Q = 'query BTWorkOrder($n: Int!) { workOrder(workOrderNumber: $n) { number } }';
+    var BT_WO_Q = 'query BTWorkOrder($n: Int!) { workOrder(workOrderNumber: $n) { number assignedTo statusId } }';
+    // The WO's own Assigned To: the same single-field patchWorkOrder assign Dispatch and the write
+    // queue already use ({ workOrderNumber, assignedTo: ConditionalIDInput }), nothing else sent.
+    var BT_WO_PATCH_M = 'mutation PatchWorkOrder($data: PatchWorkOrderInput!) { patchWorkOrder(data: $data) { success message } }';
+    // Assignable members = people AND teams (live-verified 2026-09-29: 263 items, memberType User|Team;
+    // the `users` directory has no teams, which is why Team T was missing from the first picker).
+    var BT_MEMBERS_Q = 'query BTMembers { searchMembers(searchType: BOTH, take: 500) { rowCount items { id displayName memberType isInactive isTechnician } } }';
+    // A TEAM as a work order's own Assigned To: proven live 2026-09-29 (smoke through this tool:
+    // W-393951 WO -> Team T and back via patchWorkOrder, read-back verified, status unchanged).
+    // Tasks -> team was proven by the EditTask capture the same day. Set false to skip team WO rows
+    // again if Umbrava ever changes that behaviour.
+    var BT_TEAM_WO_VERIFIED = true;
+    // A member's open work orders, for the "load by current assignee" picker (read-only; same
+    // listWorkOrdersPaginated + required page/sortBy the Heat seed uses, filtered by assignedTo).
+    var BT_LIST_Q = 'query BTAssignedWOs($page: PageInput!, $sortBy: [SortInput!]!, $assignedTo: [ID], $phase: SystemPhaseValue) { listWorkOrdersPaginated(page: $page, sortBy: $sortBy, assignedTo: $assignedTo, phase: $phase) { rowCount items { number trackingNumber clientName locationName workOrderTypeName statusName scopeOfWork assignedTo } } }';
+    function cond(v) { return { shouldInclude: true, value: v }; }   // Conditional*Input wrapper (copied from BULK-SOURCE-ENGINE)
+    function btKey(r) { return r.kind === 'wo' ? 'wo:' + r.wo : (r.taskId || 'wo:' + r.wo); }
     // includeComplete:false -> `total` is the OPEN count (live-verified 2026-09-29), so a page that
     // came back short of it is detected instead of silently missing tasks.
     var BT_TASKS_Q = 'query BTOpenTasks($id: String!) { tasksByEntityTypeAndId(entityType: 1, entityId: $id, includeComplete: false, take: 100) { total tasks { id entityId entityType description targetStartDate assignedTo metadata categoryId isComplete flag priorityStatus } } }';
     var BT_EDIT_M = 'mutation EditTask($data: EditTaskInput!) { editTask(data: $data) { success message } }';
-    var BT_USERS_Q = 'query BTUsers { users(includeInactiveUsers: false, includeSystemUsers: false) { id firstName lastName isInactive isTechnician } }';
     var BT_MAX_WOS = 50;   // per-run cap on unique WO#s. Over the cap the preview is REFUSED, never truncated.
     // The exact message Umbrava returns for a WO number that does not exist (live-verified).
     var BT_NOT_FOUND_RE = /Cannot return null for non-nullable field Query\.workOrder/;
@@ -18574,7 +18594,7 @@
     // the local log or the screen (same rule as the bwn:audit ring).
     function btErrCategory(e) {
       var m = String((e && e.message) || e);
-      if (e && e.bwnPermissionDenied) return 'Not permitted (Task.EditTask)';
+      if (e && e.bwnPermissionDenied) return 'Not permitted (' + [].concat(e.bwnPermissionDenied).join(' + ') + ')';
       if (/feature "bulkTask" is disabled/.test(m)) return 'Feature disabled - not sent';
       if (/validation failed/.test(m)) return 'Blocked by pre-send check - not sent';
       if (/high-risk|confirm/i.test(m)) return 'Confirmation gate refused - not sent';
@@ -18648,10 +18668,11 @@
     }
     // What the preview/run binds to: the WO list, the target, and every Reassign row's task id plus
     // its protected snapshot. Any change -> a different stamp -> the typed confirm no longer arms.
-    function btStamp(unique, targetId, rows) {
+    function btStamp(unique, targetId, rows, withWO) {
       return JSON.stringify({
-        wos: unique.slice().sort(function (a, b) { return a - b; }), target: targetId || '',
+        wos: unique.slice().sort(function (a, b) { return a - b; }), target: targetId || '', withWO: withWO || false,
         rows: (rows || []).filter(function (r) { return r.action === 'Reassign'; }).map(function (r) {
+          if (r.kind === 'wo') { var w = r.woSnap || {}; return [r.wo, 'wo', w.assignedTo || null, w.statusId]; }
           var s = r.snap || {};
           return [r.wo, s.id, s.description, s.metadata, s.targetStartDate, s.categoryId == null ? null : s.categoryId, s.priorityStatus, s.flag, s.assignedTo || null];
         })
@@ -18661,15 +18682,16 @@
       return count > 0 && !!stampPreview && stampNow === stampPreview && typed === 'APPLY ' + count;
     }
 
-    // One WO's open tasks. -> { status:'ok', tasks } | { status:'notfound'|'readfail'|'incomplete', reason }
+    // One WO + its open tasks. -> { status:'ok', wo:{number,assignedTo,statusId}, tasks } | { status:'notfound'|'ambiguous'|'readfail', reason }
     function btReadWO(wo) {
       return bwnGql(BT_WO_Q, { n: wo }).then(function (d) {
         if (!d || !d.workOrder || d.workOrder.number !== wo) return { status: 'ambiguous', reason: 'Ambiguous work-order match' };
+        var woRec = { number: d.workOrder.number, assignedTo: d.workOrder.assignedTo || null, statusId: d.workOrder.statusId };
         return bwnGql(BT_TASKS_Q, { id: String(wo) }).then(function (td) {
           var r = td && td.tasksByEntityTypeAndId;
           if (!r || !Array.isArray(r.tasks)) return { status: 'readfail', reason: 'Task read failed' };
           if (typeof r.total === 'number' && r.total > r.tasks.length) return { status: 'readfail', reason: 'Task read incomplete (' + r.tasks.length + ' of ' + r.total + ')' };
-          return { status: 'ok', tasks: r.tasks.filter(function (t) { return t && t.isComplete === false; }) };
+          return { status: 'ok', wo: woRec, tasks: r.tasks.filter(function (t) { return t && t.isComplete === false; }) };
         });
       }, function (err) {
         var msg = String((err && err.message) || err);
@@ -18679,11 +18701,26 @@
     }
 
     // Preview rows for one WO read. Pure. Every open task becomes a row; nothing is dropped silently.
-    function btRowsFor(wo, res, targetId) {
-      if (res.status !== 'ok') return [{ wo: wo, taskId: null, action: 'Skip', reason: res.reason }];
-      if (!res.tasks.length) return [{ wo: wo, taskId: null, action: 'Skip', reason: 'No open task' }];
-      return res.tasks.map(function (t) {
-        var row = { wo: wo, taskId: t.id || null, desc: t.description || '', cur: t.assignedTo || null, to: targetId || null, snap: t, action: 'Skip', reason: '' };
+    // withWO: also plan the WO's own Assigned To (one 'wo' row first), so a WO with no open task -
+    // e.g. an automation-created PM - still gets its owner moved.
+    // withWO: false = tasks only, true = tasks + the WO's Assigned To, 'only' = the WO's Assigned To only.
+    function btRowsFor(wo, res, targetId, withWO, targetIsTeam) {
+      if (res.status !== 'ok') return [{ kind: 'wo', wo: wo, taskId: null, action: 'Skip', reason: res.reason }];
+      var rows = [];
+      if (withWO) {
+        var w = res.wo || {};
+        var wr = { kind: 'wo', wo: wo, taskId: null, desc: 'Work order Assigned To', cur: w.assignedTo || null, to: targetId || null, woSnap: w, action: 'Skip', reason: '' };
+        if (!targetId) wr.reason = 'No resolved target user';
+        else if (w.number !== wo) wr.reason = 'Ambiguous work-order match';
+        else if (targetIsTeam && !BT_TEAM_WO_VERIFIED) wr.reason = 'A team as work-order owner is not yet verified live - set it by hand';
+        else if ((w.assignedTo || null) === targetId) wr.reason = 'Work order already assigned to target';
+        else wr.action = 'Reassign';
+        rows.push(wr);
+      }
+      if (withWO === 'only') return rows;
+      if (!res.tasks.length) return withWO ? rows : [{ kind: 'wo', wo: wo, taskId: null, action: 'Skip', reason: 'No open task' }];
+      return rows.concat(res.tasks.map(function (t) {
+        var row = { kind: 'task', wo: wo, taskId: t.id || null, desc: t.description || '', cur: t.assignedTo || null, to: targetId || null, snap: t, action: 'Skip', reason: '' };
         var miss = btMissing(t);
         if (!targetId) row.reason = 'No resolved target user';
         else if (miss.length) row.reason = 'Missing required field(s): ' + miss.join(', ');
@@ -18695,7 +18732,7 @@
         else if (t.flag === true || t.categoryId != null) row.reason = 'Flagged or categorised task - not yet verified live, reassign by hand';
         else { row.action = 'Reassign'; row.reason = ''; }
         return row;
-      });
+      }));
     }
 
     // Execute ONE previewed Reassign row. Never throws; always resolves a result:
@@ -18712,9 +18749,55 @@
         return hit;   // null = no longer open (completed / deleted)
       });
     }
+    // One WO Assigned To row: fresh read (skip if the owner or status moved since preview), ONE
+    // patchWorkOrder carrying only { workOrderNumber, assignedTo }, then a read-back that must show
+    // the target owner with the status unchanged. Same result vocabulary as a task row.
+    function btExecWoRow(row, targetId) {
+      var before = (row.woSnap && row.woSnap.assignedTo) || null;
+      function out(result, reason, after) { return { kind: 'wo', key: btKey(row), wo: row.wo, taskId: null, result: result, reason: reason || '', before: before, after: after === undefined ? null : after }; }
+      function readWo() {
+        return bwnGql(BT_WO_Q, { n: row.wo }).then(function (d) {
+          var w = d && d.workOrder;
+          if (!w || w.number !== row.wo) throw new Error('wo read failed');
+          return { assignedTo: w.assignedTo || null, statusId: w.statusId };
+        });
+      }
+      return readWo().then(function (fresh) {
+        if (fresh.assignedTo !== before || fresh.statusId !== row.woSnap.statusId) {
+          return out('Skipped', 'Changed since preview (' + (fresh.assignedTo !== before ? 'assignedTo' : 'status') + ')');
+        }
+        var vars = { data: { workOrderNumber: row.wo, assignedTo: cond(targetId) } };
+        var sendErr = null;
+        return bwnGqlOp('patchWorkOrder', BT_WO_PATCH_M, vars, {
+          feature: 'bulkTask', confirmed: true, ids: { wo: row.wo },
+          before: { assignedTo: before }, after: { assignedTo: targetId },
+          validate: function (v) {
+            var d = v && v.data;
+            if (!d || d.workOrderNumber !== row.wo) return 'bad workOrderNumber';
+            if (Object.keys(d).join(',') !== 'workOrderNumber,assignedTo') return 'only assignedTo may be sent';
+            if (!d.assignedTo || Object.keys(d.assignedTo).join(',') !== 'shouldInclude,value' || d.assignedTo.shouldInclude !== true) return 'bad assignee wrapper';
+            if (d.assignedTo.value !== targetId || typeof targetId !== 'string' || !targetId) return 'bad assignee';
+            return true;
+          }
+        }).then(null, function (e) { sendErr = e; }).then(function () {
+          return readWo().then(function (post) {
+            if (sendErr) return out('Mutation failed', btErrCategory(sendErr) +
+              (post.assignedTo === targetId ? ' - READ-BACK SHOWS THE TARGET ASSIGNEE: the write may have landed, review this work order' : ''), post.assignedTo);
+            if (post.assignedTo !== targetId) return out('Verification failed', 'Read-back assignee is not the target', post.assignedTo);
+            if (post.statusId !== fresh.statusId) return out('Verification failed', 'Work order status changed', post.assignedTo);
+            return out('Verified', '', post.assignedTo);
+          }, function () {
+            if (sendErr) return out('Mutation failed', btErrCategory(sendErr) + ' (read-back also failed)');
+            return out('Verification unavailable', 'Read-back failed - do not assume success');
+          });
+        });
+      }, function () { return out('Skipped', 'Pre-write re-read failed'); })
+        .then(null, function () { return out('Mutation failed', 'Internal error - review this work order by hand'); });
+    }
     function btExecRow(row, targetId) {
+      if (row.kind === 'wo') return btExecWoRow(row, targetId);
       var before = row.snap && row.snap.assignedTo || null;
-      function out(result, reason, after) { return { wo: row.wo, taskId: row.taskId, result: result, reason: reason || '', before: before, after: after === undefined ? null : after }; }
+      function out(result, reason, after) { return { kind: 'task', key: btKey(row), wo: row.wo, taskId: row.taskId, result: result, reason: reason || '', before: before, after: after === undefined ? null : after }; }
       return btFind(row.wo, row.taskId).then(function (fresh) {
         if (!fresh) return out('Skipped', 'Changed since preview (task no longer open)');
         if (!btSameProtected(fresh, row.snap) || (fresh.assignedTo || null) !== before) {
@@ -18764,7 +18847,7 @@
       var results = [];
       return rows.reduce(function (p, row) {
         return p.then(function () {
-          if (shouldStop && shouldStop()) { results.push({ wo: row.wo, taskId: row.taskId, result: 'Not run', reason: 'Cancelled', before: row.snap && row.snap.assignedTo || null, after: null }); return; }
+          if (shouldStop && shouldStop()) { results.push({ kind: row.kind, key: btKey(row), wo: row.wo, taskId: row.taskId, result: 'Not run', reason: 'Cancelled', before: row.kind === 'wo' ? ((row.woSnap && row.woSnap.assignedTo) || null) : (row.snap && row.snap.assignedTo || null), after: null }); return; }
           return btExecRow(row, targetId).then(function (r) { results.push(r); if (onRow) onRow(r); });
         });
       }, Promise.resolve()).then(function () { return results; });
@@ -18785,6 +18868,7 @@
         ambiguousInputCount: parsed.ambiguous.length, duplicateCount: parsed.dupes,
         resolvedCount: Object.keys(resolved).length,
         previewOpenTasks: (previewRows || []).filter(function (r) { return r.taskId; }).length,
+        previewWoRows: (previewRows || []).filter(function (r) { return r.kind === 'wo' && r.woSnap; }).length,
         skippedByReason: skip,
         attempted: (runResults || []).filter(function (r) { return r.result !== 'Not run' && r.result !== 'Skipped'; }).length,
         verified: res['Verified'] || 0, verificationFailed: res['Verification failed'] || 0,
@@ -18792,8 +18876,8 @@
         skippedAtRun: res['Skipped'] || 0, notRun: res['Not run'] || 0,
         rows: (previewRows || []).map(function (r) {
           var rr = null;
-          (runResults || []).forEach(function (x) { if (x.taskId && x.taskId === r.taskId) rr = x; });
-          return { wo: r.wo, task: r.taskId, before: r.cur || null, planned: r.action, plannedReason: r.reason || '',
+          (runResults || []).forEach(function (x) { if (x.key === btKey(r)) rr = x; });
+          return { wo: r.wo, kind: r.kind, task: r.taskId, before: r.cur || null, planned: r.action, plannedReason: r.reason || '',
             result: rr ? rr.result : (r.action === 'Skip' ? 'Skipped' : 'Not run'), reason: rr ? rr.reason : '', after: rr ? rr.after : null };
         })
       };
@@ -18818,7 +18902,7 @@
         document.dispatchEvent(new CustomEvent('bwn:evt', { detail: {
           id: 'bwn:dock:register', key: DOCK_KEY, label: 'Reassign tasks', icon: '👥', weight: 24,
           needPerm: 'Task.EditTask',
-          title: 'BWN Bulk Task Reassign - paste WO#s, pick a user, preview every open task, then reassign (typed confirm, verified read-back)'
+          title: 'BWN Bulk Task Reassign - pick WOs (paste, or load by current assignee), pick a person or team, preview, then reassign tasks and optionally the WO Assigned To (typed confirm, verified read-back)'
         } }));
       } catch (e) { /* dock host not up yet - the heartbeat re-registers us */ }
     }
@@ -18843,14 +18927,39 @@
     } catch (e) { /* bus unavailable */ }
     dockRegister();
 
-    // Users for the target picker: active, non-technician (the same set WO Assist's task helper
-    // offers). Read once per drawer open; the id is what is sent, never typed text.
-    function btLoadUsers() {
-      return bwnGql(BT_USERS_Q, {}).then(function (d) {
-        return ((d && d.users) || []).filter(function (u) { return u && u.id && !u.isInactive && !u.isTechnician; })
-          .map(function (u) { return { id: u.id, name: ((u.firstName || '') + ' ' + (u.lastName || '')).replace(/\s+/g, ' ').trim() }; })
-          .filter(function (u) { return u.name; })
+    // Assignable members for both pickers: active people AND teams (searchMembers BOTH). Read once
+    // per drawer open; the id is what is sent, never typed text.
+    function btLoadMembers() {
+      return bwnGql(BT_MEMBERS_Q, {}).then(function (d) {
+        var r = d && d.searchMembers;
+        var list = ((r && r.items) || []).filter(function (m) { return m && m.id && !m.isInactive && m.displayName; })
+          .map(function (m) { return { id: m.id, name: String(m.displayName).trim(), team: m.memberType === 'Team', tech: m.isTechnician === true }; })
           .sort(function (a, b) { return a.name.localeCompare(b.name); });
+        return { list: list, partial: !!(r && typeof r.rowCount === 'number' && r.rowCount > ((r.items || []).length)) };
+      });
+    }
+    // A member's open WOs, paged 200 at a time up to BT_LIST_CAP rows (read-only).
+    var BT_LIST_CAP = 1000;
+    function btLoadAssigned(memberId) {
+      var out = [], total = null;
+      function page(skip) {
+        return bwnGql(BT_LIST_Q, { page: { skip: skip, take: 200 }, sortBy: [{ columnName: 'formattedJobNumber', direction: 'DESC' }], assignedTo: [memberId], phase: 'Open' }).then(function (d) {
+          var r = d && d.listWorkOrdersPaginated;
+          if (!r || !Array.isArray(r.items)) throw new Error('list read failed');
+          total = r.rowCount;
+          r.items.forEach(function (w) { if (w && w.assignedTo === memberId && typeof w.number === 'number') out.push(w); });
+          if (r.items.length === 200 && skip + 200 < Math.min(total, BT_LIST_CAP)) return page(skip + 200);
+        });
+      }
+      return page(0).then(function () { return { items: out, total: total, capped: total > BT_LIST_CAP }; });
+    }
+    function fillMemberSelect(sel, list, placeholder) {
+      sel.textContent = '';
+      var o0 = document.createElement('option'); o0.value = ''; o0.textContent = placeholder; sel.appendChild(o0);
+      [['Teams', true], ['People', false]].forEach(function (g) {
+        var og = document.createElement('optgroup'); og.label = g[0];
+        list.filter(function (m) { return m.team === g[1]; }).forEach(function (m) { var o = document.createElement('option'); o.value = m.id; o.textContent = m.name; og.appendChild(o); });
+        if (og.children.length) sel.appendChild(og);
       });
     }
 
@@ -18862,18 +18971,38 @@
       el.id = 'bwn-bt-drawer';
       el.setAttribute('role', 'dialog');
       el.setAttribute('aria-label', 'Bulk task reassign');
+      var box = 'width:100%;box-sizing:border-box;padding:6px 8px;border:1px solid var(--bwn-border);border-radius:7px;background:var(--bwn-surface);color:var(--bwn-text)';
       // Static skeleton carries no runtime values; every dynamic string is set via textContent.
       el.innerHTML =
         '<div class="bwn-drawer-hd"><div><div class="t">Reassign tasks</div>' +
-        '<div class="s">paste WO#s · pick a user · preview · typed confirm · verified</div></div>' +
+        '<div class="s">pick WOs · pick a person or team · preview · typed confirm · verified</div></div>' +
         '<button class="bwn-drawer-x" id="bwn-bt-x" aria-label="Close" type="button">×</button></div>' +
         '<div class="bwn-drawer-body">' +
+          '<div class="bwn-ops-sec">0 · Load by current assignee<span class="d">optional · reads only</span></div>' +
+          '<div style="display:flex;gap:8px;align-items:center;flex-wrap:wrap">' +
+            '<select id="bwn-bt-from" aria-label="Current assignee" style="flex:1;min-width:150px;' + box + ';font-size:13px"><option value="">Loading...</option></select>' +
+            '<button class="bwn-ops-btn ghost" id="bwn-bt-load" type="button" disabled>Load open WOs</button>' +
+          '</div>' +
+          '<div id="bwn-bt-pickwrap" style="display:none;margin-top:6px">' +
+            '<div style="display:flex;gap:8px;align-items:center;flex-wrap:wrap;margin-bottom:4px">' +
+              '<input id="bwn-bt-pickfilter" aria-label="Filter loaded work orders" placeholder="filter: Preventative, client, scope, WO#" style="flex:1;min-width:120px;' + box + ';font-size:12px">' +
+              '<button class="bwn-ops-btn ghost" id="bwn-bt-pickall" type="button">Tick shown</button>' +
+              '<button class="bwn-ops-btn ghost" id="bwn-bt-picknone" type="button">Untick all</button>' +
+            '</div>' +
+            '<div id="bwn-bt-pickcount" role="status" aria-live="polite" style="font:500 11px ui-monospace,monospace;color:var(--bwn-text-muted);margin:2px 0 4px"></div>' +
+            '<div id="bwn-bt-picklist" style="max-height:180px;overflow:auto;border:1px solid var(--bwn-border-2);border-radius:8px"></div>' +
+            '<button class="bwn-ops-btn ghost" id="bwn-bt-pickadd" type="button" style="margin-top:6px" disabled>Add ticked to the list below</button>' +
+          '</div>' +
           '<div class="bwn-ops-sec">1 · Work orders<span class="d">newline, comma or space separated</span></div>' +
-          '<textarea id="bwn-bt-input" rows="4" aria-label="Work order numbers" placeholder="397888&#10;W-399174, 393951" style="width:100%;box-sizing:border-box;padding:6px 8px;border:1px solid var(--bwn-border);border-radius:7px;font:500 12px ui-monospace,monospace;background:var(--bwn-surface);color:var(--bwn-text)"></textarea>' +
+          '<textarea id="bwn-bt-input" rows="4" aria-label="Work order numbers" placeholder="397888&#10;W-399174, 393951" style="' + box + ';font:500 12px ui-monospace,monospace"></textarea>' +
           '<div id="bwn-bt-parse" role="status" aria-live="polite" style="font:500 11px ui-monospace,monospace;color:var(--bwn-text-muted);margin:4px 0 8px"></div>' +
-          '<div class="bwn-ops-sec">2 · Assign to<span class="d">active users only</span></div>' +
-          '<select id="bwn-bt-user" aria-label="Target user" style="width:100%;padding:6px 8px;border:1px solid var(--bwn-border);border-radius:7px;font-size:13px;background:var(--bwn-surface);color:var(--bwn-text)"><option value="">Loading users...</option></select>' +
-          '<div class="bwn-ops-note" style="display:block">Only open tasks that already exist on these work orders are moved. Nothing else on the task changes; each row is re-read before and after its write, and only a read-back that matches is reported as done.</div>' +
+          '<div class="bwn-ops-sec">2 · Assign to<span class="d">a person or a team</span></div>' +
+          '<select id="bwn-bt-user" aria-label="Target person or team" style="' + box + ';font-size:13px"><option value="">Loading...</option></select>' +
+          '<div style="margin:6px 0 2px;font-size:13px;color:var(--bwn-text)"><label for="bwn-bt-withwo">Move: </label>' +
+            '<select id="bwn-bt-withwo" style="padding:4px 6px;border:1px solid var(--bwn-border);border-radius:7px;font-size:13px;background:var(--bwn-surface);color:var(--bwn-text)">' +
+            '<option value="tasks">open tasks only</option><option value="both">open tasks + the work order&#39;s Assigned To</option><option value="wo">the work order&#39;s Assigned To only</option></select></div>' +
+          '<div class="bwn-ops-note" style="display:block">Open tasks that already exist on these work orders are moved; with the box ticked, each work order&#39;s own Assigned To is moved too (a work order with no tasks then still moves). Nothing else changes. Every row is re-read before and after its write, and only a matching read-back is reported as done.</div>' +
+          '<div id="bwn-bt-members" class="bwn-ops-note" style="display:none"></div>' +
           '<div class="bwn-ops-sec">3 · Preview<span class="d">reads only, zero writes</span></div>' +
           '<button class="bwn-ops-btn ghost" id="bwn-bt-preview" type="button" disabled>Preview (reads only)</button>' +
           '<div id="bwn-bt-pcount" style="font:500 11px ui-monospace,monospace;color:var(--bwn-text-muted);margin:6px 0"></div>' +
@@ -18887,7 +19016,7 @@
             '</div>' +
           '</div>' +
           '<div id="bwn-bt-runwrap" style="display:none">' +
-            '<div class="bwn-ops-sec">5 · Run<span class="d">one task at a time · cancel stops new rows</span></div>' +
+            '<div class="bwn-ops-sec">5 · Run<span class="d">one write at a time · cancel stops new rows</span></div>' +
             '<div style="display:flex;gap:8px;margin-bottom:6px"><button class="bwn-ops-btn ghost" id="bwn-bt-cancel" type="button">Cancel</button></div>' +
             '<div id="bwn-bt-log" style="max-height:170px;overflow:auto;font:500 11px ui-monospace,monospace;color:var(--bwn-text-muted);white-space:pre-wrap;border:1px solid var(--bwn-border-2);border-radius:8px;padding:7px 9px"></div>' +
             '<div id="bwn-bt-tally" role="status" aria-live="polite" style="font:600 12px ui-monospace,monospace;color:var(--bwn-text);margin-top:6px"></div>' +
@@ -18900,8 +19029,13 @@
 
     function wireDrawer(root) {
       function $(id) { return root.querySelector('#' + id); }
-      var users = [], names = {}, parsed = btParse(''), rows = null, stamp = null, confirmCount = 0, _previewing = false;
-      function target() { var v = $('bwn-bt-user').value; return users.some(function (u) { return u.id === v; }) ? v : ''; }
+      var members = [], names = {}, parsed = btParse(''), rows = null, stamp = null, confirmCount = 0, _previewing = false, _loading = false;
+      var loaded = [], ticked = Object.create(null);
+      function isMember(v) { return members.some(function (m) { return m.id === v; }); }
+      function targets() { return members.filter(function (m) { return !m.tech; }); }   // technicians are not assignable owners (Dispatch parity)
+      function target() { var v = $('bwn-bt-user').value; return targets().some(function (m) { return m.id === v; }) ? v : ''; }
+      function targetIsTeam() { var v = target(); return members.some(function (m) { return m.id === v && m.team; }); }
+      function withWO() { var v = $('bwn-bt-withwo').value; return v === 'both' ? true : (v === 'wo' ? 'only' : false); }
       function nameOf(id) { return id ? (names[id] || 'Not available') : 'Unassigned'; }
       function logln(s) { var l = $('bwn-bt-log'); l.appendChild(document.createTextNode(s + '\n')); l.scrollTop = l.scrollHeight; }
       function close() { if (_running) { logln('! A run is in progress - Cancel it before closing.'); return; } drawerDismiss(root); }
@@ -18926,36 +19060,100 @@
           (parsed.ambiguous.length ? ' · ' + parsed.ambiguous.length + ' ambiguous' : '') +
           (over ? ' · REFUSED: over the ' + BT_MAX_WOS + '-WO cap, the run will not truncate' : '');
         $('bwn-bt-preview').disabled = _running || _previewing || over || !target() || (!parsed.unique.length && !parsed.invalid.length && !parsed.ambiguous.length);
+        $('bwn-bt-load').disabled = _running || _loading || !isMember($('bwn-bt-from').value);
       }
       $('bwn-bt-input').oninput = invalidate;
       $('bwn-bt-user').onchange = invalidate;
+      $('bwn-bt-withwo').onchange = invalidate;
+      $('bwn-bt-from').onchange = refreshParse;
 
-      btLoadUsers().then(function (list) {
-        users = list; names = {};
-        list.forEach(function (u) { names[u.id] = u.name; });
-        var sel = $('bwn-bt-user'); sel.textContent = '';
-        var o0 = document.createElement('option'); o0.value = ''; o0.textContent = '- choose a user -'; sel.appendChild(o0);
-        list.forEach(function (u) { var o = document.createElement('option'); o.value = u.id; o.textContent = u.name; sel.appendChild(o); });
+      btLoadMembers().then(function (r) {
+        members = r.list; names = {};
+        members.forEach(function (m) { names[m.id] = m.team ? m.name + ' (team)' : m.name; });
+        fillMemberSelect($('bwn-bt-user'), targets(), '- choose a person or team -');
+        fillMemberSelect($('bwn-bt-from'), members, '- current assignee -');
+        if (r.partial) { var n = $('bwn-bt-members'); n.style.display = 'block'; n.textContent = 'Umbrava returned only part of the member list; someone may be missing from the pickers.'; }
         refreshParse();
       }, function () {
-        var sel = $('bwn-bt-user'); sel.textContent = '';
-        var o = document.createElement('option'); o.value = ''; o.textContent = 'Could not load users - reopen to retry'; sel.appendChild(o);
+        ['bwn-bt-user', 'bwn-bt-from'].forEach(function (id) {
+          var sel = $(id); sel.textContent = '';
+          var o = document.createElement('option'); o.value = ''; o.textContent = 'Could not load people/teams - reopen to retry'; sel.appendChild(o);
+        });
       });
+
+      // ---- load by current assignee (READS ONLY): tick WOs, then add them to the list ----
+      function pickShown() {
+        var f = String($('bwn-bt-pickfilter').value || '').trim().toLowerCase();
+        return loaded.filter(function (w) {
+          if (!f) return true;
+          return [w.number, w.trackingNumber, w.workOrderTypeName, w.statusName, w.clientName, w.locationName, w.scopeOfWork]
+            .map(function (x) { return String(x == null ? '' : x).toLowerCase(); }).join(' ').indexOf(f) !== -1;
+        });
+      }
+      function renderPick() {
+        var list = $('bwn-bt-picklist'); list.textContent = '';
+        var shown = pickShown(), nTicked = Object.keys(ticked).length;
+        shown.slice(0, 300).forEach(function (w) {   // ponytail: paints 300 rows; the filter narrows further
+          var lab = document.createElement('label');
+          lab.style.cssText = 'display:flex;gap:8px;align-items:flex-start;padding:5px 9px;border-bottom:1px solid var(--bwn-surface-3);font:500 11px ui-monospace,monospace;color:var(--bwn-text);cursor:pointer';
+          var cb = document.createElement('input'); cb.type = 'checkbox'; cb.checked = !!ticked[w.number];
+          cb.setAttribute('aria-label', 'Select work order ' + w.number);
+          cb.onchange = function () { if (cb.checked) ticked[w.number] = true; else delete ticked[w.number]; renderPickCount(); };
+          var t = document.createElement('span'); t.style.cssText = 'min-width:0;overflow-wrap:anywhere';
+          t.textContent = 'W-' + w.number + ' · ' + (w.workOrderTypeName || '-') + ' · ' + (w.statusName || '-') + ' · ' + (w.clientName || '-') + ' · ' +
+            String(w.scopeOfWork || '').replace(/\s+/g, ' ').trim().slice(0, 70);
+          lab.appendChild(cb); lab.appendChild(t); list.appendChild(lab);
+        });
+        renderPickCount(shown.length, nTicked);
+      }
+      function renderPickCount() {
+        var nT = Object.keys(ticked).length, shown = pickShown().length;
+        $('bwn-bt-pickcount').textContent = loaded.length + ' open WO' + (loaded.length === 1 ? '' : 's') + ' loaded · ' + shown + ' shown · ' + nT + ' ticked' +
+          (nT > BT_MAX_WOS ? ' · over the ' + BT_MAX_WOS + '-WO cap for one run' : '');
+        $('bwn-bt-pickadd').disabled = !nT || _running;
+      }
+      $('bwn-bt-pickfilter').oninput = renderPick;
+      $('bwn-bt-pickall').onclick = function () { pickShown().forEach(function (w) { ticked[w.number] = true; }); renderPick(); };
+      $('bwn-bt-picknone').onclick = function () { ticked = Object.create(null); renderPick(); };
+      $('bwn-bt-load').onclick = function () {
+        var who = $('bwn-bt-from').value;
+        if (_loading || _running || !isMember(who)) return;
+        _loading = true; refreshParse();
+        $('bwn-bt-pickwrap').style.display = 'block';
+        $('bwn-bt-pickcount').textContent = 'Loading open work orders for ' + nameOf(who) + '...';
+        $('bwn-bt-picklist').textContent = '';
+        btLoadAssigned(who).then(function (r) {
+          loaded = r.items; ticked = Object.create(null);
+          renderPick();
+          if (r.capped) $('bwn-bt-pickcount').textContent += ' · showing the first ' + BT_LIST_CAP + ' of ' + r.total;
+        }, function () {
+          loaded = []; ticked = Object.create(null);
+          $('bwn-bt-pickcount').textContent = 'Could not load that assignee’s work orders - try again.';
+        }).then(function () { _loading = false; refreshParse(); });
+      };
+      $('bwn-bt-pickadd').onclick = function () {
+        var nums = Object.keys(ticked);
+        if (!nums.length) return;
+        var cur = String($('bwn-bt-input').value || '').trim();
+        $('bwn-bt-input').value = (cur ? cur + '\n' : '') + nums.join('\n');
+        invalidate();
+      };
 
       function renderTable(list, results) {
         var box = $('bwn-bt-table'); box.textContent = '';
-        var byTask = {};
-        (results || []).forEach(function (r) { if (r.taskId) byTask[r.taskId] = r; });
+        var byKey = {};
+        (results || []).forEach(function (r) { if (r.key) byKey[r.key] = r; });
         list.forEach(function (r) {
           var line = document.createElement('div');
           line.style.cssText = 'display:grid;grid-template-columns:70px 1fr 1fr 1fr 110px;gap:6px;padding:5px 9px;border-bottom:1px solid var(--bwn-surface-3);font:500 11px ui-monospace,monospace;align-items:start';
-          var res = r.taskId ? byTask[r.taskId] : null;
+          var res = r.wo ? byKey[btKey(r)] : null;
           var verdict = res ? res.result : r.action;
           var why = res ? res.reason : r.reason;
+          var planned = r.taskId || r.woSnap;
           [r.wo ? 'W-' + r.wo + (r.input && r.input !== String(r.wo) && r.input.toUpperCase() !== 'W-' + r.wo ? ' (' + r.input + ')' : '') : String(r.input || ''),
-            r.taskId ? (String(r.desc || '').replace(/\s+/g, ' ').trim().slice(0, 60) || '(no description)') + ' [' + r.taskId.slice(0, 8) + ']' : '-',
-            r.taskId ? nameOf(r.cur) : '-',
-            r.taskId ? nameOf(r.to) : '-',
+            r.taskId ? (String(r.desc || '').replace(/\s+/g, ' ').trim().slice(0, 60) || '(no description)') + ' [' + r.taskId.slice(0, 8) + ']' : (r.woSnap ? 'Work order Assigned To' : '-'),
+            planned ? nameOf(r.cur) : '-',
+            planned ? nameOf(r.to) : '-',
             verdict + (why ? ': ' + why : '')].forEach(function (txt, i) {
             var c = document.createElement('span'); c.textContent = txt;
             c.style.cssText = 'min-width:0;overflow-wrap:anywhere;color:' + (i === 4 ? (verdict === 'Reassign' || verdict === 'Verified' ? 'var(--bwn-green)' : (verdict === 'Skip' || verdict === 'Skipped' || verdict === 'Not run' ? 'var(--bwn-text-faint)' : 'var(--bwn-bad)')) : 'var(--bwn-text)');
@@ -18971,7 +19169,7 @@
         if (_running || _previewing) return;
         // A typed confirm never carries into a new preview, even one with the same count.
         $('bwn-bt-confirm').value = ''; $('bwn-bt-approve').disabled = true; $('bwn-bt-confirmwrap').style.display = 'none';
-        var tgt = target();
+        var tgt = target(), ww = withWO(), tIsTeam = targetIsTeam();
         var p = btParse($('bwn-bt-input').value);
         if (!tgt || p.unique.length > BT_MAX_WOS) { refreshParse(); return; }
         $('bwn-bt-preview').disabled = true; _previewing = true;
@@ -18980,16 +19178,17 @@
         p.invalid.forEach(function (t) { list.push({ input: t, wo: null, taskId: null, action: 'Skip', reason: 'Invalid work-order number' }); });
         p.ambiguous.forEach(function (t) { list.push({ input: t, wo: null, taskId: null, action: 'Skip', reason: 'Ambiguous work-order reference' }); });
         p.unique.reduce(function (acc, wo) {
-          return acc.then(function () { return btReadWO(wo).then(function (res) { list = list.concat(btRowsFor(wo, res, tgt).map(function (r) { r.input = p.raw[wo]; return r; })); }); });
+          return acc.then(function () { return btReadWO(wo).then(function (res) { list = list.concat(btRowsFor(wo, res, tgt, ww, tIsTeam).map(function (r) { r.input = p.raw[wo]; return r; })); }); });
         }, Promise.resolve()).then(function () {
           _previewing = false;
           // The inputs may have moved while the reads ran; only a still-current preview may arm.
-          if (btParse($('bwn-bt-input').value).unique.join(',') !== p.unique.join(',') || target() !== tgt) { invalidate(); return; }
+          if (btParse($('bwn-bt-input').value).unique.join(',') !== p.unique.join(',') || target() !== tgt || withWO() !== ww) { invalidate(); return; }
           rows = list; parsed = p;
-          stamp = btStamp(p.unique, tgt, rows);
-          var n = rows.filter(function (r) { return r.action === 'Reassign'; }).length;
-          var skipped = rows.length - n;
-          $('bwn-bt-pcount').textContent = 'Preview: ' + n + ' to reassign · ' + skipped + ' skipped · ' + rows.filter(function (r) { return r.taskId; }).length + ' open tasks found. ZERO writes sent.';
+          stamp = btStamp(p.unique, tgt, rows, ww);
+          var act = rows.filter(function (r) { return r.action === 'Reassign'; });
+          var n = act.length, nWo = act.filter(function (r) { return r.kind === 'wo'; }).length;
+          $('bwn-bt-pcount').textContent = 'Preview: ' + n + ' to reassign (' + nWo + ' work order' + (nWo === 1 ? '' : 's') + ', ' + (n - nWo) + ' task' + (n - nWo === 1 ? '' : 's') + ') · ' +
+            (rows.length - n) + ' skipped · ' + rows.filter(function (r) { return r.taskId; }).length + ' open tasks found. ZERO writes sent.';
           renderTable(rows, null);
           confirmCount = n;
           $('bwn-bt-confirmwrap').style.display = 'block';
@@ -19002,7 +19201,7 @@
           refreshParse();
         });
       };
-      function currentStamp() { return rows ? btStamp(btParse($('bwn-bt-input').value).unique, target(), rows) : null; }
+      function currentStamp() { return rows ? btStamp(btParse($('bwn-bt-input').value).unique, target(), rows, withWO()) : null; }
       $('bwn-bt-confirm').oninput = function () {
         $('bwn-bt-approve').disabled = !btConfirmArmed($('bwn-bt-confirm').value, confirmCount, currentStamp(), stamp);
       };
@@ -19018,12 +19217,12 @@
         _running = true; _cancelled = false;
         $('bwn-bt-confirmwrap').style.display = 'none';
         $('bwn-bt-runwrap').style.display = 'block';
-        $('bwn-bt-preview').disabled = true;
-        $('bwn-bt-input').disabled = true; $('bwn-bt-user').disabled = true;
+        $('bwn-bt-preview').disabled = true; $('bwn-bt-load').disabled = true; $('bwn-bt-pickadd').disabled = true;
+        $('bwn-bt-input').disabled = true; $('bwn-bt-user').disabled = true; $('bwn-bt-withwo').disabled = true;
         $('bwn-bt-log').textContent = ''; $('bwn-bt-tally').textContent = '';
-        logln('Run ' + sessionId + ' - ' + todo.length + ' task' + (todo.length === 1 ? '' : 's') + ' to ' + nameOf(tgt) + ', one at a time, no retries');
+        logln('Run ' + sessionId + ' - ' + todo.length + ' write' + (todo.length === 1 ? '' : 's') + ' to ' + nameOf(tgt) + ', one at a time, no retries');
         btRunSequential(todo, tgt, function (r) {
-          logln('W-' + r.wo + ' [' + String(r.taskId).slice(0, 8) + ']: ' + r.result + (r.reason ? ' - ' + r.reason : ''));
+          logln('W-' + r.wo + (r.kind === 'wo' ? ' [work order]' : ' [' + String(r.taskId).slice(0, 8) + ']') + ': ' + r.result + (r.reason ? ' - ' + r.reason : ''));
         }, function () { return _cancelled; }).then(function (results) {
           _running = false;
           var s = btSummary(sessionId, parsed, previewRows, results);
@@ -19032,11 +19231,11 @@
           $('bwn-bt-tally').textContent = s.verified + ' verified · ' + s.verificationFailed + ' verification failed · ' + s.mutationFailed + ' write failed · ' +
             s.verificationUnavailable + ' unverified · ' + s.skippedAtRun + ' skipped (changed) · ' + s.notRun + ' not run';
           var bad = results.filter(function (r) { return r.result !== 'Verified' && r.result !== 'Not run' && r.result !== 'Skipped'; });
-          if (bad.length) logln('REVIEW BY HAND: ' + bad.map(function (r) { return 'W-' + r.wo + ' task ' + r.taskId; }).join(', '));
+          if (bad.length) logln('REVIEW BY HAND: ' + bad.map(function (r) { return 'W-' + r.wo + (r.kind === 'wo' ? ' (work order Assigned To)' : ' task ' + r.taskId); }).join(', '));
           rows = null; stamp = null; confirmCount = 0;   // a finished run never re-arms; preview again
           $('bwn-bt-confirm').value = ''; $('bwn-bt-approve').disabled = true;
-          $('bwn-bt-input').disabled = false; $('bwn-bt-user').disabled = false;
-          refreshParse();
+          $('bwn-bt-input').disabled = false; $('bwn-bt-user').disabled = false; $('bwn-bt-withwo').disabled = false;
+          refreshParse(); renderPickCount();
           BWN.beat('bulkTask', 'ok', 'run ' + sessionId + ': ' + s.verified + ' verified, ' + (s.verificationFailed + s.mutationFailed + s.verificationUnavailable) + ' need review');
         });
       };
