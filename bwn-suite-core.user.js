@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         BWN Suite - Core (Broadway National)
 // @namespace    broadwaynational.bwn
-// @version      1.89.2
+// @version      1.89.3
 // @downloadURL  https://raw.githubusercontent.com/Intermu/userscripts/main/bwn-suite-core.user.js
 // @updateURL    https://raw.githubusercontent.com/Intermu/userscripts/main/bwn-suite-core.user.js
 // @description  Runs several Umbrava helpers for BWN coordinators, in the browser with no privileged grants. Includes: PO Approval + ETA Builder; WO Assist (GP/ETA, a stall watchdog, DNE calculator, and a next-action playbook); Email Leak Guard (checks recipients against vendor names, PO amounts, and client budget references before an outbound email sends); WO List Heat (a triage overlay + My Day strip on the work-order list, with an optional same-origin Umbrava API scan for deterministic full-board coverage); and the BWN Launcher (opens the Azure Static Web App tools with the current WO's context). Modules share state through sessionStorage/localStorage. The only network calls are same-origin Umbrava GraphQL requests (app.umbrava.com/api/graphql, the app's own session): List Heat's full-board scan and WO Assist's work-order / trip / clock-in / document / purchase-order reads, plus ONE write - BWN Views saves the column layout through Umbrava's own putUserPreference, the same preference the column chooser writes; everything else is offline. Toggle modules in BWN_MODULES below.
@@ -113,7 +113,7 @@
   try { localStorage.setItem('bwn:status:core', JSON.stringify({ ver: BWN_VER, ts: Date.now() })); } catch (e) { /* best-effort */ }
 
   console.info('[BWN SUITE CORE] v' + BWN_VER + ' |',
-    'Shared Core 7 \u00b7 DOM Handles 1.0 \u00b7 PO Approval 1.13 \u00b7 WO Assist 2.76 \u00b7 Leak Guard 2.0 \u00b7 List Heat 3.28 \u00b7 Launcher 2.0 \u00b7 Views 3.1 \u00b7 Palette 1.1 \u00b7 Visit 1.2 \u00b7 Reminders 1.1 \u00b7 Timeline 1.1 \u00b7 TripCal 1.4 \u00b7 Bulk Ops 1.0 \u00b7 Connector 1.2 \u00b7 Governance 1.0 |',
+    'Shared Core 7 \u00b7 DOM Handles 1.0 \u00b7 PO Approval 1.13 \u00b7 WO Assist 2.76 \u00b7 Leak Guard 2.1 \u00b7 List Heat 3.28 \u00b7 Launcher 2.0 \u00b7 Views 3.1 \u00b7 Palette 1.1 \u00b7 Visit 1.2 \u00b7 Reminders 1.1 \u00b7 Timeline 1.1 \u00b7 TripCal 1.4 \u00b7 Bulk Ops 1.0 \u00b7 Connector 1.2 \u00b7 Governance 1.0 |',
     'enabled:', Object.keys(BWN_MODULES).filter(function (k) { return BWN_MODULES[k]; }).join(', '));
 
   // ===== BWN SHARED CORE v7 - KEEP IN SYNC across both suite scripts =====
@@ -7632,7 +7632,7 @@
   });
 
   // ==========================================================================
-  // MODULE: Email Leak Guard v2.0
+  // MODULE: Email Leak Guard v2.1
   // ==========================================================================
   bwnBoot('leakGuard', BWN_MODULES.leakGuard, function () {
     'use strict';
@@ -7640,7 +7640,7 @@
     var STRIP_ID = 'bwn-eg-strip';
     var STYLE_ID = 'bwn-eg-style';
 
-    console.info('[BWN EG] email leak guard v2.0 loaded on', location.href);
+    console.info('[BWN EG] email leak guard v2.1 loaded on', location.href);
 
     // ---- Config (edit here) ----------------------------------------------
     var CFG = {
@@ -8054,7 +8054,12 @@
       ensureStyle();
       var strip = document.createElement('div');
       strip.id = STRIP_ID;
-      bodyEl.parentNode.insertBefore(strip, bodyEl);
+      // v2.1: mount ABOVE the whole Body text field. The textarea's own parent is MUI's
+      // inline-flex input root, so a strip placed there became a flex column that squeezed
+      // the body text into half the width. Falls back to the textarea if the field wrapper
+      // is not a MUI FormControl.
+      var anchor = bodyEl.closest('.MuiFormControl-root') || bodyEl;
+      anchor.parentNode.insertBefore(strip, anchor);
 
       var pos = getPOs();
       var dne = getDNE();
