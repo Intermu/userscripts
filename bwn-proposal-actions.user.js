@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         BWN Proposal Actions (Broadway National)
 // @namespace    broadwaynational.bwn
-// @version      0.7.12
+// @version      0.7.13
 // @downloadURL  https://raw.githubusercontent.com/Intermu/userscripts/main/bwn-proposal-actions.user.js
 // @updateURL    https://raw.githubusercontent.com/Intermu/userscripts/main/bwn-proposal-actions.user.js
 // @description  On a Client Proposal DETAILS page, a "Proposal Actions" dropdown runs the internal review workflow in one confirmed action: Approval / TSP Review / Kickback. Each posts a note to the Proposal + the Work Order, sets the WO status, completes open tasks, and files a new task (assigned to the WO coordinator, or Ronny Sharp for TSP). The posted note is an EDITABLE field seeded with the auto-generated text (Kickback's is drafted by the on-device browser AI) so the reviewer can add what they changed as coaching for the coordinator; a "changes since review opened" line (total + GP) is prepended automatically. When the job has more than one client proposal, the trigger shows the option count, a read-only "Compare proposals" view lists every alternative side by side, and the confirm dialog names the job, the exact proposal being acted on and its siblings (with an explicit acknowledgement). Completed actions are kept as a browser-local history (never synced, never an Umbrava status) shown in Compare and as a non-blocking warning on a repeat. Opening an action only reads (proposal, work order, tasks) to prepare the confirm dialog; every change is listed there first, and no proposal or work-order change is submitted until Confirm. @grant none.
@@ -15,7 +15,7 @@
 (function () {
   'use strict';
 
-  var VER = '0.7.12';   // keep in step with @version
+  var VER = '0.7.13';   // keep in step with @version
   var DRY_RUN = false; // when true, every WRITE is console.logged instead of sent
   console.info('[BWN PROPOSAL ACTIONS] v' + VER + ' - Approval / TSP Review / Kickback workflow on the Client Proposal details page');
 
@@ -515,16 +515,11 @@
 
   // WO-notes read, for the idempotent WO-note step below. workOrderNotes is the REAL query (proven
   // live in bwn-write-queue; the vault records a fabricated `workOrderNotes` as a past bug, so this
-  // reuses the confirmed one - it is not invented). Used to skip re-posting an identical WO note.
+  // reuses the confirmed one - it is not invented). Used so a Retry does not re-post this run's WO note.
   var Q_WONOTES = 'query PA_WONotes($n: Int!){ workOrderNotes(workOrderNumber: $n){ content isDeleted } }';
   function readWONotes(n) {
     return paGql('PA_WONotes', Q_WONOTES, { n: n }).then(function (d) {
       return (d && d.workOrderNotes) || [];
-    });
-  }
-  function woNoteExists(notes, text) {
-    return (notes || []).some(function (x) {
-      return x && !x.isDeleted && String(x.content == null ? '' : x.content) === text;
     });
   }
 
@@ -1688,20 +1683,32 @@
     return { key: 'proposalNote', label: 'Add note to Proposal #' + ctx.pid + ' Notes tab', pending: false,
       run: function (noteText) { return addProposalNote(ctx.pid, noteText); } };
   }
+  // ===== PA-WONOTE START (sliced by scripts/test-proposal-actions.js) =====
+  function countWONotes(notes, text) {
+    return (notes || []).filter(function (x) {
+      return x && !x.isDeleted && String(x.content == null ? '' : x.content) === text;
+    }).length;
+  }
   function buildWONoteStep(ctx) {
     if (!bwnCan('WorkOrderNote.AddNew')) return null;
+    // Identical notes already on the WO before THIS run's first attempt. A repeat review with the same
+    // GP + total produces the same text as an earlier one (W-390980: a 9/09 TSP note made the next TSP
+    // review skip its WO note), so history alone must never suppress a post.
+    var baseline = null;
     return { key: 'woNote', label: 'Add note to Work Order W-' + ctx.n + ' notes', pending: false,
       run: function (noteText) {
-        // Idempotent (matches bwn-write-queue's note dedup, keyed on the note text via workOrderNotes):
-        // skip the post when an identical, non-deleted note already exists, so a Retry does not
-        // duplicate it. Fail OPEN - if the read fails, post anyway (a missing note is worse than a
-        // rare duplicate, and the note text is itself the stable key).
+        // Retry-safe: skip only when the count grew past the baseline, i.e. this run's earlier attempt
+        // landed even though its response failed. Fail OPEN - if the read fails, post anyway (a missing
+        // note is worse than a rare duplicate).
         return readWONotes(ctx.n).then(function (notes) {
-          if (woNoteExists(notes, noteText)) return true;
+          var have = countWONotes(notes, noteText);
+          if (baseline != null && have > baseline) return true;
+          if (baseline == null) baseline = have;
           return addWONote(ctx.n, noteText);
         }, function () { return addWONote(ctx.n, noteText); });
       } };
   }
+  // ===== PA-WONOTE END =====
   function buildCompleteStep(ctx) {
     if (!bwnCan('Task.Complete')) return null;
     var c = ctx.openTasks.length;
