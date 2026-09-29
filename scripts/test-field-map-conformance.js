@@ -1,9 +1,9 @@
 // test-field-map-conformance.js - the userscript half of the B.1 shared field map.
 //
 // scripts/field-map.json here is a byte-identical MIRROR of the CANONICAL copy in the SWA
-// repo (broadway-internal-ops/api/shared/field-map.json). The SWA routes require it at
-// runtime; a Tampermonkey @grant-none script cannot require a file in the browser, so on
-// this side the map is a test-time contract only. This test asserts that the SHIPPED
+// repo (broadway-internal-ops/api/shared/field-map.json). Neither side loads it at runtime:
+// the SWA repo holds its route vocabularies to it in scripts/test-field-map.js, and a
+// Tampermonkey @grant-none script cannot require a file in the browser. This test asserts that the SHIPPED
 // bwn-suite-core.user.js board producer (heatDatasetRows) emits only wire keys the map
 // declares with the "board" producer - so Core can never start sending a field the map
 // (and therefore the SWA route + Dashboard) doesn't know about, the drift that
