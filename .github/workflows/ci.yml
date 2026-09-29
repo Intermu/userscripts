@@ -721,11 +721,16 @@ jobs:
       # cap, and the feature:'bulkSource' kill switch - driven end to end through the real audit ring.
       - name: Bulk Source Job# engine harness (Q/R/RF shorthand + blanks-only patchWorkOrder)
         run: node scripts/test-bulk-source.js
+      - name: Bulk Task Reassign engine harness (preview / APPLY n / full-replace EditTask / read-back verify, flag bulkTask default OFF)
+        run: node scripts/test-bulk-task.js
       - name: "RM-C1 bulk console harness (bwn-write-queue: preview / dry-run / pause-cancel / threshold / CSV+JSON export; flag bulkConsole default OFF)"
         run: node scripts/test-bulk-console.js
 
       - name: Per-client profile resolver harness (T10 defaults + empty-table inert safety)
         run: node scripts/test-client-profile.js
+
+      - name: WO Assist open-task attribution harness (read-only created-by / assigned-to strip)
+        run: node scripts/test-task-attribution.js
 
       - name: Next Actions ECD-risk composite rule harness (T8-A1, self-clearing)
         run: node scripts/test-ecdrisk.js

@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         BWN Suite - AI (Broadway National)
 // @namespace    broadwaynational.bwn
-// @version      1.48.0
+// @version      1.48.1
 // @downloadURL  https://raw.githubusercontent.com/Intermu/userscripts/main/bwn-suite-ai.user.js
 // @updateURL    https://raw.githubusercontent.com/Intermu/userscripts/main/bwn-suite-ai.user.js
 // @description  The Umbrava tools that call outside APIs, kept separate from the zero-egress Core script. Client Update and WO Audit drafts (Anthropic Claude; draft-only, scrubbed before sending, you review before posting); Find Techs / Find Suppliers (Google Places; vendor leads near a WO); and Job View (opens the Ops-Dashboard job card on the WO page - WO details from Umbrava plus the authored case file and next actions, read-only). Network access is limited by the browser to the declared API hosts and the BWN Static Web App. API keys are stored in Tampermonkey's storage via the menu commands and never enter the page. Toggle modules in BWN_MODULES below.
@@ -228,7 +228,13 @@
       'cwamazon': { clientId: '20432', refFields: { sourceJob: true, sourcePo: false } },
       'jllamazon': { clientId: '20394', refFields: { sourceJob: true } },
       'caleresinc': { clientId: null },
-      'transformsrbrandsllc': { clientId: '23914', refFields: { sourceJob: true, sourcePo: true } }
+      'transformsrbrandsllc': { clientId: '23914', refFields: { sourceJob: true, sourcePo: true } },
+      // Signoff clients: billing is disputed without a signed approval tied to the WO. deepMerge
+      // replaces closeout.docs wholesale, so each row repeats the three defaults + 'signoff'
+      // (matches the drop-upload 'Signoff' document label). Advisory only, like every docs row.
+      // Separate rows on purpose - the two clients' rules may diverge.
+      'tesla': { clientId: '20441', closeout: { docs: ['signed ticket', 'sign-in/out', 'before/after photos', 'signoff'] } },
+      'crocsinc': { clientId: '20386', closeout: { docs: ['signed ticket', 'sign-in/out', 'before/after photos', 'signoff'] } }
     };
     // Shallow merge with ONE level of depth over the two nested config objects (closeout,
     // refFields) so a partial override (e.g. {refFields:{sourceJob:true}}) keeps its sibling
