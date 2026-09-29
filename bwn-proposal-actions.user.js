@@ -1,10 +1,10 @@
 // ==UserScript==
 // @name         BWN Proposal Actions (Broadway National)
 // @namespace    broadwaynational.bwn
-// @version      0.6.1
+// @version      0.7.13
 // @downloadURL  https://raw.githubusercontent.com/Intermu/userscripts/main/bwn-proposal-actions.user.js
 // @updateURL    https://raw.githubusercontent.com/Intermu/userscripts/main/bwn-proposal-actions.user.js
-// @description  On a Client Proposal DETAILS page, a "Proposal Actions" dropdown runs the internal review workflow in one confirmed action: Approval / TSP Review / Kickback. Each posts a note to the Proposal + the Work Order, sets the WO status, completes open tasks, and files a new task (assigned to the WO coordinator, or Ronny Sharp for TSP). The posted note is an EDITABLE field seeded with the auto-generated text (Kickback's is drafted by the on-device browser AI) so the reviewer can add what they changed as coaching for the coordinator; a "changes since review opened" line (total + GP) is prepended automatically. Every write is shown in a confirm dialog first; nothing fires until Confirm. @grant none.
+// @description  On a Client Proposal DETAILS page, a "Proposal Actions" dropdown runs the internal review workflow in one confirmed action: Approval / TSP Review / Kickback. Each posts a note to the Proposal + the Work Order, sets the WO status, completes open tasks, and files a new task (assigned to the WO coordinator, or Ronny Sharp for TSP). The posted note is an EDITABLE field seeded with the auto-generated text (Kickback's is drafted by the on-device browser AI) so the reviewer can add what they changed as coaching for the coordinator; a "changes since review opened" line (total + GP) is prepended automatically. When the job has more than one client proposal, the trigger shows the option count, a read-only "Compare proposals" view lists every alternative side by side, and the confirm dialog names the job, the exact proposal being acted on and its siblings (with an explicit acknowledgement). Completed actions are kept as a browser-local history (never synced, never an Umbrava status) shown in Compare and as a non-blocking warning on a repeat. Opening an action only reads (proposal, work order, tasks) to prepare the confirm dialog; every change is listed there first, and no proposal or work-order change is submitted until Confirm. @grant none.
 // @match        https://app.umbrava.com/*
 // @match        https://*.umbrava.com/*
 // @run-at       document-idle
@@ -15,7 +15,7 @@
 (function () {
   'use strict';
 
-  var VER = '0.6.1';   // keep in step with @version
+  var VER = '0.7.13';   // keep in step with @version
   var DRY_RUN = false; // when true, every WRITE is console.logged instead of sent
   console.info('[BWN PROPOSAL ACTIONS] v' + VER + ' - Approval / TSP Review / Kickback workflow on the Client Proposal details page');
 
@@ -217,7 +217,7 @@
   }
 
   var Q_PROP = 'query PA_Prop($p: Int!){ proposal(id: $p){ total { amount currency precision } grossProfitPercent } }';
-  var Q_LIST = 'query PA_List($j: Int!){ listClientProposals(jobId: $j, page: { skip: 0, take: 50 }){ items { id total { amount currency precision } grossProfitPercent } } }';
+  var Q_LIST = 'query PA_List($j: Int!){ listClientProposals(jobId: $j, page: { skip: 0, take: 50 }, sortBy: [{ columnName: "id", direction: DESC }]){ items { id total { amount currency precision } grossProfitPercent } } }';
   function toGpNumber(raw) {
     if (raw == null || raw === '') return null;
     var v = (typeof raw === 'number') ? raw : parseFloat(raw);
@@ -235,12 +235,275 @@
     }).catch(function () {
       return paGql('PA_List', Q_LIST, { j: jobId }).then(function (d) {
         var items = (d && d.listClientProposals && d.listClientProposals.items) || [];
-        var it = items.filter(function (x) { return x.id === proposalId; })[0] || items[0];
-        if (!it || !it.total) throw new Error('could not read proposal total');
+        // Match by id ONLY. The old `|| items[0]` fell back to whichever proposal sorted first, so on a
+        // job with several alternatives the note could carry a SIBLING's total and GP.
+        var it = items.filter(function (x) { return x.id === proposalId; })[0];
+        if (!it || !it.total) throw new Error('could not read the total for proposal #' + proposalId);
         return { total: it.total, gpPct: toGpNumber(it.grossProfitPercent) };
       });
     });
   }
+
+  // ===== PA-SIBLINGS START (sliced by scripts/test-pa-multi-proposal.js; references injected paGql / money / toGpNumber) =====
+  // A job can carry several client proposals that are alternatives for the same work. The workflow
+  // always acts on the proposal in the URL; these helpers read its siblings so the reviewer can compare
+  // them and the confirm dialog names exactly which one is being acted on. The extended field list is
+  // the PagedClientProposals schema (vault umbrava-graphql-operations); if the server refuses it, the
+  // read falls back to the fields this suite already reads live (PA_List + Core's terminal dates) and
+  // every field it could not read shows as "not available" rather than a guess.
+  var PA_SIB_ARGS = 'jobId: $j, page: { skip: 0, take: 50 }, sortBy: [{ columnName: "id", direction: DESC }]';
+  var Q_SIBLINGS = 'query PA_Siblings($j: Int!){ listClientProposals(' + PA_SIB_ARGS + '){ rowCount items { id number description created submittedDate approvedDate rejectedDate canceledDate isSubmitted createdByMemberName status { name } type { name } total { amount currency precision } vendorCost { amount currency precision } grossProfitPercent } } }';
+  var Q_SIBLINGS_MIN = 'query PA_SiblingsMin($j: Int!){ listClientProposals(' + PA_SIB_ARGS + '){ rowCount items { id approvedDate rejectedDate canceledDate total { amount currency precision } grossProfitPercent } } }';
+  function proposalRow(it) {
+    it = it || {};
+    var derived = it.canceledDate ? 'Canceled' : it.rejectedDate ? 'Rejected' : it.approvedDate ? 'Approved'
+      : (it.isSubmitted === true || it.submittedDate) ? 'Submitted' : (it.isSubmitted === false ? 'Draft' : '');
+    return {
+      id: it.id,
+      // Umbrava's visible per-job proposal number (#1, #2...). Live-verified 2026-09-25 to equal the '#'
+      // column for W-397334 / W-395613. DISPLAY ONLY - every lookup, URL and write keys on id.
+      number: isPosInt(it.number) ? it.number : null,
+      title: it.description || '',
+      type: (it.type && it.type.name) || '',
+      status: (it.status && it.status.name) || derived,
+      canceled: !!it.canceledDate,
+      total: (it.total && it.total.amount != null) ? money(it.total) : '',
+      gpPct: toGpNumber(it.grossProfitPercent),
+      vendorCost: (it.vendorCost && it.vendorCost.amount != null) ? money(it.vendorCost) : '',
+      created: it.created || '',
+      submitted: it.submittedDate || '',
+      createdBy: it.createdByMemberName || ''
+    };
+  }
+  function readJobProposals(jobId) {
+    function shape(d, partial) {
+      var l = (d && d.listClientProposals) || {};
+      var rows = (l.items || []).map(proposalRow);
+      return { rows: rows, rowCount: (typeof l.rowCount === 'number') ? l.rowCount : rows.length, partial: partial };
+    }
+    return paGql('PA_Siblings', Q_SIBLINGS, { j: jobId }).then(function (d) { return shape(d, false); }, function () {
+      return paGql('PA_SiblingsMin', Q_SIBLINGS_MIN, { j: jobId }).then(function (d) { return shape(d, true); });
+    });
+  }
+  // Canceled proposals are history, not options: they are listed in Compare but not counted.
+  function liveOptions(rows) { return (rows || []).filter(function (r) { return !r.canceled; }); }
+  // What the confirm dialog needs to know about the proposal being acted on and its siblings.
+  // sib = readJobProposals() result, or null when that read failed. needsAck is true whenever the
+  // reviewer could be looking at the wrong alternative: several live options, the acted-on proposal
+  // missing from the list, or the list unreadable (fail toward the extra check, never away from it).
+  function siblingContext(sib, pid) {
+    if (!sib) return { known: false, selected: null, others: [], count: null, needsAck: true };
+    var selected = sib.rows.filter(function (r) { return r.id === pid; })[0] || null;
+    var others = sib.rows.filter(function (r) { return r.id !== pid; });
+    var count = liveOptions(sib.rows).length;
+    return { known: true, selected: selected, others: others, count: count,
+      needsAck: count > 1 || !selected || sib.rowCount > sib.rows.length };
+  }
+  // ===== PA-SIBLINGS END =====
+
+  // ===== PA-HISTORY START (sliced by scripts/test-pa-multi-proposal.js; references injected localStorage / escapeHtml) =====
+  // Browser-local record of Proposal Actions that COMPLETED here, so a reviewer can see which
+  // alternative on a job was already acted on. Umbrava keeps Approval / Kickback / TSP only as the
+  // job-level WO status, so it cannot say which proposal they were for. This is a safety aid, never a
+  // status: it is not synced, not sent anywhere, and never feeds an outgoing request. Same storage
+  // convention as the bwn:audit ring (localStorage, KEY / MAX / SCHEMA constants), under its own key.
+  var PA_HIST_KEY = 'bwn:pa:history', PA_HIST_SCHEMA = 1;
+  var PA_HIST_MAX = 300;                          // newest records kept, all jobs together
+  var PA_HIST_MAX_AGE_MS = 180 * 24 * 3600 * 1000; // records older than 180 days are pruned
+  var PA_HIST_NOTE_MAX = 1000;                    // chars of the posted note kept
+  var PA_HIST_KINDS = {
+    approval: { row: 'Marked good to submit', verb: 'marked good to submit (Approval)' },
+    kickback: { row: 'Kicked back', verb: 'kicked back' },
+    tsp: { row: 'Sent to TSP', verb: 'sent to TSP' }
+  };
+  function isPosInt(v) { return typeof v === 'number' && v > 0 && Math.floor(v) === v; }
+  // Stored data is untrusted: anything not exactly our v1 shape is dropped, not repaired.
+  // ponytail: a record from a NEWER schema is dropped too (and gone on the next write); add a
+  // pass-through for schema > PA_HIST_SCHEMA when a v2 actually ships.
+  function paHistValid(r) {
+    return !!r && typeof r === 'object' && r.schema === PA_HIST_SCHEMA && r.localOnly === true &&
+      typeof r.id === 'string' && isPosInt(r.n) && isPosInt(r.pid) && PA_HIST_KINDS.hasOwnProperty(r.kind) &&
+      typeof r.ts === 'string' && !isNaN(Date.parse(r.ts));
+  }
+  // -> { records, error }  error: '' | 'unavailable' | 'corrupt'. Never throws.
+  function paHistLoad() {
+    var raw;
+    try { raw = localStorage.getItem(PA_HIST_KEY); } catch (e) { return { records: [], error: 'unavailable' }; }
+    if (raw == null) return { records: [], error: '' };
+    try {
+      var a = JSON.parse(raw);
+      if (!Array.isArray(a)) return { records: [], error: 'corrupt' };
+      return { records: a.filter(paHistValid), error: '' };
+    } catch (e) { return { records: [], error: 'corrupt' }; }
+  }
+  function paHistPrune(records, nowMs) {
+    return records.filter(function (r) { return nowMs - Date.parse(r.ts) <= PA_HIST_MAX_AGE_MS; })
+      .sort(function (a, b) { return Date.parse(b.ts) - Date.parse(a.ts); })
+      .slice(0, PA_HIST_MAX);
+  }
+  // Newest first, for one job + proposal.
+  function paHistFor(records, n, pid) {
+    return records.filter(function (r) { return r.n === n && r.pid === pid; })
+      .sort(function (a, b) { return Date.parse(b.ts) - Date.parse(a.ts); });
+  }
+  // The one write. Only this key is touched. -> 'ok' | 'dup' | 'fail'. Never throws.
+  function paHistAppend(rec, nowMs) {
+    try {
+      if (!paHistValid(rec)) return 'fail';
+      var cur = paHistLoad();
+      if (cur.error === 'unavailable') return 'fail';
+      if (cur.records.some(function (r) { return r.id === rec.id; })) return 'dup';
+      localStorage.setItem(PA_HIST_KEY, JSON.stringify(paHistPrune(cur.records.concat([rec]), nowMs)));
+      return 'ok';
+    } catch (e) { return 'fail'; }   // quota, blocked storage
+  }
+  // Called with runSteps' result. Records ONLY a fully completed run: ok, nothing skipped. The id is
+  // the confirm dialog's run id, so a Retry inside the same dialog that finally succeeds writes one
+  // record, and a second completion callback for the same run is a 'dup'. A new dialog is a new run,
+  // so a legitimate repeat action is recorded separately.
+  // -> 'none' (not complete) | 'ok' | 'dup' | 'fail'
+  function paHistOnResult(plan, noteText, res, nowMs) {
+    var c = plan && plan.ctx;
+    if (!res || !res.ok || res.skipped || !c || !plan.runId || !PA_HIST_KINDS.hasOwnProperty(plan.kind)) return 'none';
+    var sel = null;
+    try { sel = siblingContext(c.siblings, c.pid).selected; } catch (e) { sel = null; }
+    try {
+      return paHistAppend({
+      schema: PA_HIST_SCHEMA, localOnly: true, id: plan.runId,
+      ts: new Date(nowMs).toISOString(), kind: plan.kind, n: c.n, pid: c.pid,
+      title: (sel && sel.title) || '',           // only the acted-on proposal's own row
+      total: c.total || '',                      // readTotals matched this pid (no sibling fallback)
+      gpPct: (typeof c.gpPct === 'number' && !isNaN(c.gpPct)) ? c.gpPct : null,
+      note: String(noteText || '').slice(0, PA_HIST_NOTE_MAX)
+      }, nowMs);
+    } catch (e) { return 'fail'; }
+  }
+  function paHistWhen(r) {
+    try {
+      return new Date(r.ts).toLocaleString('en-US', { month: 'short', day: 'numeric', year: 'numeric', hour: 'numeric', minute: '2-digit' });
+    } catch (e) { return String(r.ts); }
+  }
+  function paHistLine(r) { return 'Local record: ' + PA_HIST_KINDS[r.kind].row + ' · ' + paHistWhen(r); }
+  // Compare-view cell: newest record, plus a native disclosure with the rest.
+  function paHistCellHtml(recs) {
+    if (!recs || !recs.length) return '<span class="na">none in this browser</span>';
+    var html = escapeHtml(paHistLine(recs[0]));
+    if (recs.length > 1) {
+      html += '<details><summary>' + recs.length + ' local records</summary><ul>' + recs.map(function (r) {
+        return '<li>' + escapeHtml(paHistLine(r)) + (r.total ? ' · ' + escapeHtml(r.total) : '') + '</li>';
+      }).join('') + '</ul></details>';
+    }
+    return html;
+  }
+  // Confirm-dialog warning. Informational only: no checkbox, never gates Confirm.
+  function paHistWarnHtml(recs) {
+    if (!recs || !recs.length) return '';
+    var r = recs[0];
+    return '<div class="warn hist">' + escapeHtml('Local history shows this proposal was previously ' +
+      PA_HIST_KINDS[r.kind].verb + ' on ' + paHistWhen(r) + '. This is not an authoritative Umbrava status.') +
+      (recs.length > 1 ? ' <span class="na">(' + recs.length + ' local records)</span>' : '') + '</div>';
+  }
+  // ===== PA-HISTORY END =====
+
+  // ===== PA-STOPPED START (sliced by scripts/test-pa-multi-proposal.js via the reads slice; references injected localStorage / escapeHtml) =====
+  // Browser-local record of an action run that STOPPED partway (runSteps returned ok:false), so a NEW
+  // dialog for the same job + proposal + action can warn that starting over repeats the steps this
+  // browser saw complete. Separate from bwn:pa:history (completed actions only) and never an Umbrava
+  // status. What it can prove: a step listed as done had its own request resolve successfully here;
+  // the failed step's request may or may not have reached Umbrava; later steps were not attempted.
+  // Keyed by action too: Approval / TSP / Kickback set different statuses and file different tasks.
+  var PA_STOP_KEY = 'bwn:pa:stopped', PA_STOP_SCHEMA = 1;
+  var PA_STOP_MAX = 100;                           // newest records kept, all jobs together
+  var PA_STOP_MAX_AGE_MS = 30 * 24 * 3600 * 1000;  // older than 30 days: pruned
+  // Stored as keys, rendered from this fixed map: step labels are not stored (the create-task label
+  // carries the note's first line), and an unknown stored key is dropped, never rendered.
+  var PA_STOP_STEPS = {
+    status: 'WO status change', proposalNote: 'proposal note', woNote: 'WO note',
+    completeTasks: 'open-task completion', createTask: 'new task'
+  };
+  var PA_STOP_ACTIONS = { approval: 'Approval', tsp: 'TSP Review', kickback: 'Kickback' };   // as named in the menu
+  function paStopValid(r) {
+    return !!r && typeof r === 'object' && r.schema === PA_STOP_SCHEMA && r.localOnly === true &&
+      isPosInt(r.n) && isPosInt(r.pid) && PA_HIST_KINDS.hasOwnProperty(r.kind) &&
+      typeof r.ts === 'string' && !isNaN(Date.parse(r.ts)) && Array.isArray(r.done) &&
+      (r.failed === '' || PA_STOP_STEPS.hasOwnProperty(r.failed)) && isPosInt(r.attempts);
+  }
+  // -> { records, error }  error: '' | 'unavailable' | 'corrupt'. Never throws.
+  function paStopLoad() {
+    var raw;
+    try { raw = localStorage.getItem(PA_STOP_KEY); } catch (e) { return { records: [], error: 'unavailable' }; }
+    if (raw == null) return { records: [], error: '' };
+    try {
+      var a = JSON.parse(raw);
+      if (!Array.isArray(a)) return { records: [], error: 'corrupt' };
+      return { records: a.filter(paStopValid), error: '' };
+    } catch (e) { return { records: [], error: 'corrupt' }; }
+  }
+  function paStopFind(records, n, pid, kind) {
+    return records.filter(function (r) { return r.n === n && r.pid === pid && r.kind === kind; })[0] || null;
+  }
+  // Called with every runSteps result. ok:false -> record (merged with an earlier stop of the same
+  // action: done steps are unioned, attempts counted). ok with nothing skipped -> resolve (remove) the
+  // matching record. Only this key is touched. -> 'none' | 'recorded' | 'resolved' | 'fail'. Never throws.
+  function paStopOnResult(plan, res, stepEls, nowMs) {
+    try {
+      var c = plan && plan.ctx;
+      if (!c || !res || !PA_HIST_KINDS.hasOwnProperty(plan.kind)) return 'none';
+      var complete = res.ok && !res.skipped;
+      if (res.ok && !complete) return 'none';
+      var cur = paStopLoad();
+      if (cur.error === 'unavailable') return 'fail';
+      var prev = paStopFind(cur.records, c.n, c.pid, plan.kind);
+      var rest = cur.records.filter(function (r) { return r !== prev; });
+      var out;
+      if (complete) {
+        if (!prev) return 'none';
+        out = rest;
+      } else {
+        var done = [], failed = '';
+        (plan.steps || []).forEach(function (s, i) {
+          var cls = stepEls && stepEls[i] && stepEls[i].className;
+          if (!s || !PA_STOP_STEPS.hasOwnProperty(s.key)) return;
+          if (cls === 'ok') done.push(s.key);
+          else if (cls === 'err') failed = s.key;
+        });
+        (prev ? prev.done : []).forEach(function (k) { if (done.indexOf(k) === -1 && PA_STOP_STEPS.hasOwnProperty(k)) done.push(k); });
+        out = rest.concat([{
+          schema: PA_STOP_SCHEMA, localOnly: true, n: c.n, pid: c.pid, kind: plan.kind,
+          ts: new Date(nowMs).toISOString(), firstTs: prev ? prev.firstTs || prev.ts : new Date(nowMs).toISOString(),
+          attempts: (prev ? prev.attempts : 0) + 1, failed: failed, done: done
+        }]);
+      }
+      out = out.filter(function (r) { return nowMs - Date.parse(r.ts) <= PA_STOP_MAX_AGE_MS; })
+        .sort(function (a, b) { return Date.parse(b.ts) - Date.parse(a.ts); }).slice(0, PA_STOP_MAX);
+      localStorage.setItem(PA_STOP_KEY, JSON.stringify(out));
+      return complete ? 'resolved' : 'recorded';
+    } catch (e) { return 'fail'; }   // quota, blocked storage
+  }
+  // Inline warning for a NEW dialog. rec = the matching record or null; error = paStopLoad().error.
+  // -> { html, needsAck }. A record requires the explicit acknowledgement; an unreadable store only
+  // says so (it cannot prove there was, or was not, an earlier attempt) and does not block.
+  function paStopWarnHtml(rec, error, kind) {
+    if (error) {
+      return { needsAck: false, html: '<div class="warn stop">' + escapeHtml('Earlier stopped attempts could not be checked (' +
+        (error === 'corrupt' ? 'the local record is unreadable' : 'browser storage is unavailable') +
+        '). That does not mean no earlier attempt happened.') + '</div>' };
+    }
+    if (!rec) return { needsAck: false, html: '' };
+    var names = function (keys) { return keys.filter(function (k) { return PA_STOP_STEPS.hasOwnProperty(k); }).map(function (k) { return PA_STOP_STEPS[k]; }); };
+    var done = names(rec.done);
+    var action = PA_STOP_ACTIONS[kind] || 'this action';
+    var text = 'Stopped attempt (this browser): a previous ' + action + ' run on this proposal stopped on ' +
+      paHistWhen(rec) + (rec.attempts > 1 ? ' (' + rec.attempts + ' stopped attempts)' : '') + '. ' +
+      (done.length ? 'The local runner saw these steps complete: ' + done.join(', ') + '. '
+        : 'The local runner saw no step complete. ') +
+      (rec.failed ? 'It stopped at the ' + PA_STOP_STEPS[rec.failed] + '; that request may or may not have reached Umbrava. ' : '') +
+      'A new run starts again at the first step. The proposal note and the new task are not de-duplicated and may be posted again; ' +
+      'the WO status, WO note and open tasks are re-checked before writing.';
+    return { needsAck: true, html: '<div class="warn stop" role="alert">' + escapeHtml(text) +
+      '<label><input type="checkbox" id="bwn-pa-ack-stopped"> I understand this new run may repeat those steps</label></div>' };
+  }
+  // ===== PA-STOPPED END =====
 
   var Q_TASKS = 'query PA_Tasks($e: String!){ tasksByEntityTypeAndId(entityType: 1, entityId: $e, includeComplete: false){ tasks { id isComplete } } }';
   function readOpenTasks(n) {
@@ -252,16 +515,11 @@
 
   // WO-notes read, for the idempotent WO-note step below. workOrderNotes is the REAL query (proven
   // live in bwn-write-queue; the vault records a fabricated `workOrderNotes` as a past bug, so this
-  // reuses the confirmed one - it is not invented). Used to skip re-posting an identical WO note.
+  // reuses the confirmed one - it is not invented). Used so a Retry does not re-post this run's WO note.
   var Q_WONOTES = 'query PA_WONotes($n: Int!){ workOrderNotes(workOrderNumber: $n){ content isDeleted } }';
   function readWONotes(n) {
     return paGql('PA_WONotes', Q_WONOTES, { n: n }).then(function (d) {
       return (d && d.workOrderNotes) || [];
-    });
-  }
-  function woNoteExists(notes, text) {
-    return (notes || []).some(function (x) {
-      return x && !x.isDeleted && String(x.content == null ? '' : x.content) === text;
     });
   }
 
@@ -670,6 +928,7 @@
   }
   // ===== PA-WRITES END ======================================================
 
+  // ===== PA-KICKBACK START (sliced by scripts/test-pa-kickback.js; references injected paGql / LanguageModel) =====
   // ===== on-device browser AI (copied from bwn-drop-upload) =================
   function langModel() {
     var g = (typeof self !== 'undefined') ? self : (typeof window !== 'undefined' ? window : null);
@@ -685,14 +944,16 @@
     } catch (e) { }
     return Promise.resolve(false);
   }
-  var _AI_SESSIONS = {};
+  // One NEW session per draft, never cached: an on-device session keeps its conversation history,
+  // so a reused session would carry one proposal's scope and prices into the next proposal's draft.
+  // ponytail: a fresh create() per draft pays the model start-up each time; clone() of a warm base
+  // session would avoid that if drafting feels slow.
   function aiSession(api, sys) {
-    var cached = _AI_SESSIONS[sys];
-    if (cached) return Promise.resolve(cached);
-    function keep(hasSystem) { return function (s) { try { s._bwnSystem = hasSystem; } catch (e) { } _AI_SESSIONS[sys] = s; return s; }; }
+    function tag(hasSystem) { return function (s) { try { s._bwnSystem = hasSystem; } catch (e) { } return s; }; }
     return Promise.resolve(api.create({ initialPrompts: [{ role: 'system', content: sys }], outputLanguage: 'en' }))
-      .then(keep(true), function () { return Promise.resolve(api.create({ outputLanguage: 'en' })).then(keep(false)); });
+      .then(tag(true), function () { return Promise.resolve(api.create({ outputLanguage: 'en' })).then(tag(false)); });
   }
+  function aiDispose(s) { try { if (s && typeof s.destroy === 'function') s.destroy(); } catch (e) { } }
   function onDevice(sys, content) {
     var api = langModel();
     if (!api || typeof api.create !== 'function') return Promise.resolve('');
@@ -700,31 +961,68 @@
       if (!ok) return '';
       return aiSession(api, sys).then(function (s) {
         var usedSystem = !!(s && s._bwnSystem !== false);
-        return s.prompt((usedSystem ? '' : sys + '\n\n') + content);
+        return Promise.resolve().then(function () { return s.prompt((usedSystem ? '' : sys + '\n\n') + content); })
+          .then(function (t) { aiDispose(s); return t; }, function (err) { aiDispose(s); throw err; });
       });
-    }).catch(function () { _AI_SESSIONS[sys] = null; return ''; });
+    }).catch(function () { return ''; });
   }
-  function draftKickbackReason(ctx) {
+  // pc = readProposalContext() result. A FAILED read is never shown to the AI: with no scope or lines
+  // to go on it could only guess (and "no scope" would read as a real finding), so no draft is made and
+  // the reviewer writes the reason. A SUCCESSFUL read says exactly what it found: an empty field is
+  // real data, a field the server did not return is "not reported".
+  function draftKickbackReason(pc, total, gpText) {
+    if (!pc || !pc.ok) return Promise.resolve('');
     var sys = 'You are an internal operations reviewer at a facilities-management company reviewing a client proposal before it is sent to the client. In 1 to 3 short, plain sentences, state specifically why this proposal is being kicked back to the coordinator instead of approved (e.g. margin too low or negative, pricing/scope issues, missing detail). Professional and direct. No greeting, no sign-off, no bullet points.';
-    var content = 'Scope of work:\n' + (ctx.scope || '(none)') +
-      '\n\nClient total: ' + ctx.total +
-      '\nGross profit: ' + ctx.gpText +
-      '\nLine items:\n' + (ctx.items || '(none)');
+    var scope = !pc.scopeReported ? '(not reported)' : (pc.scope.trim() ? pc.scope : '(empty - the proposal has no scope text)');
+    var items = !pc.itemsReported ? '(not reported)' : (pc.items ? pc.items : '(no line items on the proposal)');
+    var content = 'Scope of work:\n' + scope +
+      '\n\nClient total: ' + total +
+      '\nGross profit: ' + gpText +
+      '\nLine items:\n' + items;
     return onDevice(sys, content).then(function (t) { return (t || '').trim(); });
   }
 
-  // Scope + line-item context for the AI (best-effort; reuses the proposal details read).
+  // Scope + line-item context for the AI. -> { ok:true, scope, items, scopeReported, itemsReported }
+  // on a successful read, { ok:false } when the request failed or returned no proposal. Never throws.
   var Q_PROP_CTX = 'query PA_PropCtx($p: Int!){ proposal(id: $p){ scopeOfWork proposalLineItems { item quantity category } } }';
   function readProposalContext(proposalId) {
     return paGql('PA_PropCtx', Q_PROP_CTX, { p: proposalId }).then(function (d) {
       var pr = d && d.proposal;
-      var scope = (pr && pr.scopeOfWork) || '';
-      var items = ((pr && pr.proposalLineItems) || []).map(function (li) {
+      if (!pr) return { ok: false };
+      var scopeReported = pr.scopeOfWork != null;
+      var itemsReported = Array.isArray(pr.proposalLineItems);
+      var items = (itemsReported ? pr.proposalLineItems : []).map(function (li) {
         return '- ' + (li.item || 'item') + ' x' + (li.quantity == null ? '?' : li.quantity);
       }).join('\n');
-      return { scope: scope, items: items };
-    }).catch(function () { return { scope: '', items: '' }; });
+      return { ok: true, scope: scopeReported ? String(pr.scopeOfWork) : '', items: items, scopeReported: scopeReported, itemsReported: itemsReported };
+    }, function () { return { ok: false }; });
   }
+
+  // Kickback reason gate. The seed is built by this script, so every machine-written line has a known,
+  // fixed shape; the gate strips ONLY those and passes the note if any other line has a letter or digit.
+  // It never judges wording: whatever a reviewer (or the AI draft they can see and edit) wrote counts.
+  var PA_KB_PH_AI = '[AI draft unavailable - replace this line with the reason for the coordinator]';
+  var PA_KB_PH_READ = '[Proposal details could not be read - replace this line with the reason for the coordinator]';
+  function kickbackReasonSeed(pc, reason) {
+    if (reason) return reason;
+    return (pc && pc.ok) ? PA_KB_PH_AI : PA_KB_PH_READ;
+  }
+  function paIsMachineLine(ln) {
+    return ln === 'Summary' || ln === 'Total' ||
+      /^\$-?\d{1,3}(,\d{3})*\.\d{2}$/.test(ln) ||                  // money() output on a line of its own
+      /^Changes since review opened: .+\.$/.test(ln);             // deltaLine() output
+  }
+  // -> '' when the note carries a reason, else the message to show the reviewer.
+  function paKickbackReasonGap(noteText) {
+    var lines = String(noteText == null ? '' : noteText).split(/\r?\n/).map(function (l) { return l.trim(); });
+    var phHead = [PA_KB_PH_AI.slice(0, 22), PA_KB_PH_READ.slice(0, 22)];
+    if (lines.some(function (l) { return phHead.some(function (h) { return l.indexOf(h) !== -1; }); })) {
+      return 'Replace the placeholder line with the reason for the coordinator.';
+    }
+    var hasReason = lines.some(function (l) { return !paIsMachineLine(l) && /[\p{L}\p{N}]/u.test(l); });
+    return hasReason ? '' : 'Write the reason for the kickback first - the Summary / Total lines are not a reason.';
+  }
+  // ===== PA-KICKBACK END =====
 
   // ===== styles =============================================================
   function ensureStyle() {
@@ -738,42 +1036,205 @@
       '.bwn-pa-menu{position:fixed;z-index:2147483000;min-width:200px;background:#fff;border:1px solid #d5e6dd;border-radius:10px;' +
       'box-shadow:0 12px 34px rgba(9,30,66,.22);padding:6px;font-family:-apple-system,BlinkMacSystemFont,"Segoe UI",Arial,sans-serif;}' +
       '.bwn-pa-menu button{display:block;width:100%;text-align:left;padding:9px 12px;border:0;background:transparent;border-radius:7px;' +
-      'font:500 13px inherit;color:#12241b;cursor:pointer;}' +
+      'font-family:inherit;font-weight:500;font-size:13px;color:#12241b;cursor:pointer;}' +
       '.bwn-pa-menu button:hover{background:#f0fdf4;}' +
       '.bwn-pa-menu .sub{display:block;font-size:11px;color:#5b6b62;margin-top:1px;}' +
       '#bwn-pa-overlay{position:fixed;inset:0;z-index:2147483001;display:flex;align-items:center;justify-content:center;' +
       'background:rgba(9,30,66,.45);font-family:-apple-system,BlinkMacSystemFont,"Segoe UI",Arial,sans-serif;}' +
-      '#bwn-pa-card{width:520px;max-width:94vw;max-height:88vh;overflow:auto;background:#fff;border-radius:12px;' +
+      '#bwn-pa-card{position:relative;width:520px;max-width:calc(100vw - 24px);max-height:calc(100vh - 24px);overflow:hidden;font-size:14px;background:#fff;border-radius:12px;' +
       'box-shadow:0 20px 60px rgba(0,0,0,.35);display:flex;flex-direction:column;color:#12241b;}' +
-      '#bwn-pa-card .hd{padding:14px 18px;border-radius:12px 12px 0 0;background:linear-gradient(135deg,#1a5f3e,#0d3d26);color:#fff;}' +
-      '#bwn-pa-card .hd .t{font:600 15px inherit;}' +
-      '#bwn-pa-card .hd .s{font:400 12px inherit;opacity:.9;margin-top:2px;}' +
-      '#bwn-pa-card .bd{padding:16px 18px;}' +
+      '#bwn-pa-card .hd{flex:0 0 auto;padding:14px 18px;border-radius:12px 12px 0 0;background:linear-gradient(135deg,#1a5f3e,#0d3d26);color:#fff;}' +
+      '#bwn-pa-card .hd .t{font-weight:600;font-size:15px;}' +
+      '#bwn-pa-card .hd .s{font-weight:400;font-size:12px;opacity:.9;margin-top:2px;}' +
+      '#bwn-pa-card .bd{flex:1 1 auto;min-height:0;overflow:auto;padding:16px 18px;overflow-wrap:anywhere;}' +
       '#bwn-pa-card .steps{list-style:none;margin:0 0 12px;padding:0;}' +
       '#bwn-pa-card .steps li{padding:7px 0;border-bottom:1px solid #eef3f0;font-size:13px;display:flex;gap:8px;align-items:flex-start;}' +
-      '#bwn-pa-card .steps li .ic{flex:0 0 16px;text-align:center;}' +
+      '#bwn-pa-card .steps li .ic{flex:0 0 16px;text-align:center;}#bwn-pa-card .steps li .lb{min-width:0;}' +
       '#bwn-pa-card .pending{color:#8a6d3b;}' +
       '#bwn-pa-card .ok{color:#166534;}' +
       '#bwn-pa-card .err{color:#b42318;}' +
       '#bwn-pa-card .skip{color:#8a6d3b;}' +
       '#bwn-pa-card textarea{width:100%;min-height:120px;box-sizing:border-box;border:1px solid #cddbd3;border-radius:8px;padding:9px 11px;font:inherit;font-size:13px;resize:vertical;white-space:pre-wrap;}' +
-      '#bwn-pa-card .ft{display:flex;justify-content:flex-end;gap:10px;padding:12px 18px;border-top:1px solid #eef3f0;}' +
-      '#bwn-pa-card .btn{padding:8px 16px;border-radius:8px;border:1px solid #1a5f3e;font:600 13px inherit;cursor:pointer;}' +
+      '#bwn-pa-card .ft{flex:0 0 auto;flex-wrap:wrap;align-items:center;display:flex;justify-content:flex-end;gap:10px;padding:12px 18px;border-top:1px solid #eef3f0;}' +
+      '#bwn-pa-card .btn{padding:8px 16px;border-radius:8px;border:1px solid #1a5f3e;font-family:inherit;font-weight:600;font-size:13px;cursor:pointer;}' +
       '#bwn-pa-card .btn.go{background:#1a5f3e;color:#fff;}' +
       '#bwn-pa-card .btn.cancel{background:#fff;color:#0d3d26;}' +
-      '#bwn-pa-card .btn:disabled{opacity:.55;cursor:default;}';
+      '#bwn-pa-card .btn:disabled{opacity:.55;cursor:default;}#bwn-pa-card .ft .hint{flex:1 1 100%;font-size:12px;color:#5b6b62;}#bwn-pa-card .btn:focus-visible,#bwn-pa-card textarea:focus-visible,#bwn-pa-card a:focus-visible,#bwn-pa-card input:focus-visible,.bwn-pa-menu button:focus-visible,.bwn-pa-trigger:focus-visible{outline:2px solid #1a5f3e;outline-offset:2px;}.bwn-pa-menu button:focus-visible{background:#f0fdf4;}' +
+      // The count chip is absolutely positioned so it adds NO width: the trigger sits in the proposal header
+      // row next to Umbrava's Submit, and a wider trigger pushed Submit out of view (live 2026-09-25, 950px).
+      '.bwn-pa-trigger{position:relative;}' +
+      '.bwn-pa-trigger .opts{position:absolute;top:-9px;right:-8px;padding:0 6px;border-radius:999px;background:#fef3c7;border:1px solid #f5d77a;color:#7a4b00;font-size:10px;line-height:14px;font-weight:700;white-space:nowrap;pointer-events:none;}' +
+      '#bwn-pa-card.wide{width:960px;}' +
+      '#bwn-pa-card .sum{display:grid;grid-template-columns:auto 1fr;gap:4px 12px;margin:0 0 12px;font-size:13px;}' +
+      '#bwn-pa-card .sum dt{color:#5b6b62;}#bwn-pa-card .sum dd{margin:0;font-weight:600;}' +
+      '#bwn-pa-card .warn{background:#fffbeb;border:1px solid #f5d77a;border-radius:8px;padding:9px 11px;margin:0 0 12px;font-size:12.5px;color:#5c3d00;}' +
+      '#bwn-pa-card .warn ul{margin:4px 0 6px 18px;padding:0;}' +
+      '#bwn-pa-card .na{color:#8a948f;font-style:italic;font-weight:400;}' +
+      '#bwn-pa-card .tbl{overflow-x:auto;}' +
+      '#bwn-pa-card table{border-collapse:collapse;width:100%;font-size:12.5px;}' +
+      '#bwn-pa-card th,#bwn-pa-card td{padding:7px 8px;border-bottom:1px solid #eef3f0;text-align:left;vertical-align:top;}' +
+      '#bwn-pa-card th{font-weight:600;color:#5b6b62;white-space:nowrap;}#bwn-pa-card .tbl td{overflow-wrap:normal;}' +
+      '#bwn-pa-card td.num{text-align:right;white-space:nowrap;}' +
+      '#bwn-pa-card tr.sel td{background:#f0fdf4;}#bwn-pa-card tr.sel td:first-child{box-shadow:inset 3px 0 0 #1a5f3e;}' +
+      '#bwn-pa-card tr.cxl td{color:#8a948f;}' +
+      '#bwn-pa-card .chip{display:inline-block;padding:1px 7px;border-radius:999px;background:#1a5f3e;color:#fff;font-size:11px;font-weight:600;white-space:nowrap;}' +
+      '#bwn-pa-card .note{font-size:12px;color:#5b6b62;margin:10px 0 0;}' +
+      '#bwn-pa-card .warn.hist{background:#eff6ff;border-color:#bfdbfe;color:#1e3a5f;}' +
+      '#bwn-pa-card details summary{cursor:pointer;color:#1a5f3e;font-size:12px;}#bwn-pa-card details ul{margin:4px 0 0 16px;padding:0;}';
     document.head.appendChild(st);
   }
 
   // ===== toast (copied pattern from bwn-proposal-copy) ======================
+  // One toast at a time (a new one replaces the last instead of stacking in the same spot), announced
+  // politely to screen readers.
+  var _paToastEl = null;
+  // With a Proposal Actions dialog open, the toast is a bar INSIDE the card, pinned under the title over
+  // the top of the scrolling body: it covers neither the title nor the footer buttons, and sits inside the aria-modal
+  // dialog where screen readers still hear it. Otherwise it floats bottom-centre over the page as before.
+  function paPlaceToast(el) {
+    var look = 'background:#1b2a4a;color:#fff;font:500 13px -apple-system,BlinkMacSystemFont,"Segoe UI",Arial,sans-serif;box-sizing:border-box;';
+    var card = document.getElementById && document.getElementById('bwn-pa-card');
+    var hd = card && card.querySelector('.hd');
+    if (card) {
+      // Pinned just under the title as an overlay bar: no reflow, so a status line the body has just
+      // scrolled into view stays in view.
+      el.style.cssText = look + 'position:absolute;left:0;right:0;z-index:1;padding:8px 18px;box-shadow:0 4px 12px rgba(0,0,0,.18);' +
+        'top:' + (hd && hd.offsetHeight ? hd.offsetHeight : 0) + 'px;';
+      card.insertBefore(el, hd ? hd.nextSibling : card.firstChild);
+    } else {
+      el.style.cssText = look + 'position:fixed;bottom:24px;left:0;right:0;margin:0 auto;width:fit-content;z-index:2147483002;' +
+        'padding:10px 18px;border-radius:8px;box-shadow:0 6px 24px rgba(0,0,0,.3);max-width:min(560px,calc(100vw - 32px));';
+      document.body.appendChild(el);
+    }
+  }
+  // A dialog just opened: pull a still-showing floating toast into it, so it does not sit over the footer.
+  function paAdoptToast() {
+    if (_paToastEl && _paToastEl.parentNode === document.body) { try { paPlaceToast(_paToastEl); } catch (e) { } }
+  }
   function paToast(msg) {
-    var el = document.createElement('div');
-    el.style.cssText = 'position:fixed;bottom:24px;left:50%;transform:translateX(-50%);z-index:2147483002;' +
-      'background:#1b2a4a;color:#fff;padding:10px 18px;border-radius:8px;' +
-      'font:500 13px -apple-system,BlinkMacSystemFont,"Segoe UI",Arial,sans-serif;box-shadow:0 6px 24px rgba(0,0,0,.3);max-width:70vw;';
-    el.textContent = 'BWN Proposal Actions: ' + msg;
-    document.body.appendChild(el);
-    setTimeout(function () { el.remove(); }, 6000);
+    if (_paToastEl) { try { _paToastEl.remove(); } catch (e) { } }
+    var el = _paToastEl = document.createElement('div');
+    el.setAttribute('role', 'status');
+    el.className = 'bwn-pa-toast';
+    paPlaceToast(el);
+    el.textContent = 'BWN Proposal Actions: ' + msg;   // after insertion, so the status region announces it
+    setTimeout(function () { el.remove(); if (_paToastEl === el) _paToastEl = null; }, 6000);
+  }
+
+  // ===== focus trap (paste-identical copy of the suite helper; drift-guarded by scripts/test-a11y-focus.js) =====
+  function bwnFocusTrap(modalEl) {
+    if (!modalEl || !modalEl.addEventListener) return function () { };
+    var SEL = 'a[href],area[href],input:not([disabled]),select:not([disabled]),textarea:not([disabled]),button:not([disabled]),[tabindex]:not([tabindex="-1"]),[contenteditable="true"],[contenteditable=""]';
+    var prev = document.activeElement;
+    var released = false, mo = null, pmo = null;
+    function visible(el) { return el.offsetWidth > 0 || el.offsetHeight > 0 || (el.getClientRects && el.getClientRects().length > 0); }
+    function focusables() { return [].slice.call(modalEl.querySelectorAll(SEL)).filter(visible); }
+    function onKey(e) {
+      if (e.key !== 'Tab') return;
+      var f = focusables();
+      if (!f.length) { e.preventDefault(); return; }
+      var first = f[0], last = f[f.length - 1], a = document.activeElement;
+      if (e.shiftKey) { if (a === first || !modalEl.contains(a)) { e.preventDefault(); last.focus(); } }
+      else if (a === last || !modalEl.contains(a)) { e.preventDefault(); first.focus(); }
+    }
+    function release() {
+      if (released) return; released = true;
+      try { modalEl.removeEventListener('keydown', onKey, true); } catch (e) { }
+      try { if (mo) mo.disconnect(); } catch (e) { }
+      try { if (pmo) pmo.disconnect(); } catch (e) { }
+      if (modalEl._bwnFocusRelease === release) modalEl._bwnFocusRelease = null;
+      try { if (prev && prev.focus && prev.isConnected !== false) prev.focus(); } catch (e) { }
+    }
+    modalEl.addEventListener('keydown', onKey, true);
+    modalEl._bwnFocusRelease = release;
+    try {
+      mo = new MutationObserver(function () { if (modalEl.classList && modalEl.classList.contains('bwn-closing')) release(); });
+      mo.observe(modalEl, { attributes: true, attributeFilter: ['class'] });
+      if (modalEl.parentNode) {
+        pmo = new MutationObserver(function (recs) {
+          for (var i = 0; i < recs.length; i++) {
+            var rm = recs[i].removedNodes || [];
+            for (var j = 0; j < rm.length; j++) { if (rm[j] === modalEl) { release(); return; } }
+          }
+        });
+        pmo.observe(modalEl.parentNode, { childList: true });
+      }
+    } catch (e) { }
+    if (!modalEl.contains(document.activeElement)) {
+      var f0 = focusables();
+      if (f0.length) { try { f0[0].focus(); } catch (e) { } }
+      else { try { if (!modalEl.hasAttribute('tabindex')) modalEl.setAttribute('tabindex', '-1'); modalEl.focus(); } catch (e) { } }
+    }
+    return release;
+  }
+
+  // ===== multi-proposal display helpers =====================================
+  function na(why) { return '<span class="na">' + escapeHtml(why || 'not available') + '</span>'; }
+  function orNa(v, why) { return v ? escapeHtml(v) : na(why); }
+  // Live listClientProposals dates are UTC with an offset and 7 fraction digits
+  // ("2026-09-22T17:57:32.5739342+00:00", verified 2026-09-25). Format in the reviewer's LOCAL zone:
+  // slicing the leading YYYY-MM-DD showed the UTC day, one day ahead for anything after 8 PM Eastern.
+  function fmtDate(s) {
+    if (!s) return '';
+    var t = Date.parse(String(s));
+    if (!isNaN(t)) return new Date(t).toLocaleDateString('en-US', { month: '2-digit', day: '2-digit', year: 'numeric' });
+    var m = /^(\d{4})-(\d{2})-(\d{2})/.exec(String(s));
+    return m ? m[2] + '/' + m[3] + '/' + m[1] : String(s);
+  }
+  function gpPctText(p) { return (typeof p === 'number' && !isNaN(p)) ? (p * 100).toFixed(1) + '%' : ''; }
+  // '#2 (ID 561841)' when the row carries a proven visible number, else '#561841' exactly as before.
+  // Never derived from row position or id order: no number on the row -> id only.
+  function propLabel(r, id) { return (r && isPosInt(r.number)) ? '#' + r.number + ' (ID ' + id + ')' : '#' + id; }
+  function proposalHref(n, id) { return '/work-orders/' + n + '/proposals/client-proposals/' + id + '/details'; }
+  // Local-history read problems are said once per page session, and only from user-opened views
+  // (Compare, confirm) - never from the 900ms inject loop.
+  var _paHistWarned = false;
+  function paHistNotice(error) {
+    if (!error || _paHistWarned) return;
+    _paHistWarned = true;
+    paToast(error === 'corrupt'
+      ? 'Local action history was unreadable and is ignored (it is replaced on the next completed action). Actions still work.'
+      : 'Local action history is unavailable in this browser. Actions still work.');
+  }
+  // A plan is bound to the WO + proposal it was gathered for; the page must still show that pair.
+  function stillOnPlanPage(plan) {
+    var c = plan && plan.ctx;
+    return !c || (woNumberFromUrl() === c.n && proposalIdFromUrl() === c.pid);
+  }
+  // The "what exactly am I about to do" block at the top of the confirm dialog.
+  function confirmSummaryHtml(plan) {
+    var c = plan && plan.ctx;
+    if (!c) return '';
+    var sc = siblingContext(c.siblings, c.pid);
+    var sel = sc.selected;
+    var titleBits = sel ? [sel.title, sel.type].filter(Boolean).join(' · ') : '';
+    var html = '<dl class="sum">' +
+      '<dt>Job</dt><dd>W-' + escapeHtml(c.n) + (c.wo && c.wo.statusName ? ' <span class="na">(WO status now: ' + escapeHtml(c.wo.statusName) + ')</span>' : '') + '</dd>' +
+      '<dt>Proposal</dt><dd>' + escapeHtml(propLabel(sel, c.pid)) + (titleBits ? ' - ' + escapeHtml(titleBits) : ' ' + na('title not available')) + '</dd>' +
+      '<dt>Vendor</dt><dd>' + na('not on the client proposal record') + (sel && sel.vendorCost ? ' <span class="na">(vendor cost ' + escapeHtml(sel.vendorCost) + ')</span>' : '') + '</dd>' +
+      '<dt>Amount</dt><dd>' + escapeHtml(c.total) + ' · ' + escapeHtml(c.gp) + (c.gpText !== 'unknown' ? ' (' + escapeHtml(c.gpText) + ')' : '') + '</dd>' +
+      '<dt>Action</dt><dd>' + escapeHtml(plan.action || plan.title) + '</dd>' +
+      '<dt>Routing</dt><dd>' + orNa(plan.routing) + '</dd>' +
+      '<dt>Comment</dt><dd>Required - the editable note below</dd>' +
+      '</dl>';
+    var hist = paHistLoad();
+    paHistNotice(hist.error);
+    html += paHistWarnHtml(paHistFor(hist.records, c.n, c.pid));   // informational; never gates Confirm
+    // A stopped earlier attempt of THIS action gates Confirm on its own acknowledgement (#bwn-pa-ack-stopped).
+    var stop = paStopLoad();
+    html += paStopWarnHtml(paStopFind(stop.records, c.n, c.pid, plan.kind), stop.error, plan.kind).html;
+    if (!sc.needsAck) return html;
+    var why;
+    if (!sc.known) why = 'The other proposals on this job could not be read, so this dialog cannot rule out a sibling option.';
+    else if (!sel) why = 'Proposal #' + c.pid + ' was not found in this job\'s proposal list.';
+    else why = 'This job has ' + sc.count + ' proposal options. Only ' + propLabel(sel, c.pid) + ' gets the proposal note; the WO status and tasks change for the whole job.';
+    var list = sc.others.map(function (r) {
+      return '<li>' + escapeHtml(propLabel(r, r.id)) + ' - ' + orNa(r.status, 'status n/a') + ' · ' + orNa(r.total, 'total n/a') +
+        (r.title ? ' · ' + escapeHtml(r.title) : '') + '</li>';
+    }).join('');
+    if (c.siblings && c.siblings.rowCount > c.siblings.rows.length) list += '<li>' + na('+' + (c.siblings.rowCount - c.siblings.rows.length) + ' more not shown') + '</li>';
+    return html + '<div class="warn">' + escapeHtml(why) + (list ? '<ul>' + list + '</ul>' : '') +
+      '<label><input type="checkbox" id="bwn-pa-ack"> I am acting on Proposal ' + escapeHtml(propLabel(sel, c.pid)) + '</label></div>';
   }
 
   // ===== confirm modal ======================================================
@@ -789,9 +1250,19 @@
     // (see the build*Step functions). Dropping them HERE keeps the three workflow definitions
     // readable and means the plan the operator confirms is exactly the plan that will run.
     if (plan && Array.isArray(plan.steps)) plan.steps = plan.steps.filter(Boolean);
+    // Nothing left to run: say why instead of opening a dialog that would report "All 0 steps completed".
+    if (!plan || !Array.isArray(plan.steps) || !plan.steps.length) {
+      paToast((plan && plan.action ? plan.action : 'This action') + ' was not opened: your Umbrava permissions do not allow any of its steps ' +
+        '(WO status, proposal note, WO note, task completion, new task). Nothing was sent. Ask an Umbrava admin to check your role.');
+      return;
+    }
+    // The reads between the menu click and here are async; if the reviewer moved to another proposal
+    // meanwhile, this plan belongs to a page they are no longer looking at. Refuse rather than open it.
+    if (!stillOnPlanPage(plan)) { paToast('You moved to a different proposal - nothing opened. Run Proposal Actions again on the proposal you want.'); return; }
+    if (!paTakeOverlaySlot()) return;   // a run is in flight in the dialog on screen: keep it, open nothing
+    // One id per opened dialog: the local-history identity of this run (Retry reuses it).
+    plan.runId = 'pa-' + Date.now().toString(36) + '-' + Math.random().toString(36).slice(2, 8);
     ensureStyle();
-    var prior = document.getElementById('bwn-pa-overlay');
-    if (prior) prior.remove();
 
     var overlay = document.createElement('div');
     overlay.id = 'bwn-pa-overlay';
@@ -799,29 +1270,33 @@
     card.id = 'bwn-pa-card';
     card.setAttribute('role', 'dialog');
     card.setAttribute('aria-modal', 'true');
+    card.setAttribute('aria-labelledby', 'bwn-pa-title');
 
     var stepEls = [];
     var stepsHtml = plan.steps.map(function (s, i) {
       return '<li data-i="' + i + '" class="' + (s.pending ? 'pending' : '') + '">' +
-        '<span class="ic">' + (s.pending ? '⚠' : '•') + '</span>' +
+        '<span class="ic" aria-hidden="true">' + (s.pending ? '⚠' : '•') + '</span>' +
         '<span class="lb">' + escapeHtml(s.label) + (s.pending ? ' <em>(pending capture)</em>' : '') + '</span></li>';
     }).join('');
 
     card.innerHTML =
-      '<div class="hd"><div class="t">' + escapeHtml(plan.title) + '</div>' +
+      '<div class="hd"><div class="t" id="bwn-pa-title">' + escapeHtml(plan.title) + '</div>' +
       (plan.subtitle ? '<div class="s">' + escapeHtml(plan.subtitle) + '</div>' : '') + '</div>' +
-      '<div class="bd">' +
-      '<div style="font-size:12px;color:#5b6b62;margin:0 0 4px;">Note that will be posted (editable) - add what you changed for the coordinator:</div>' +
+      '<div class="bd">' + confirmSummaryHtml(plan) +
+      '<label for="bwn-pa-note" style="display:block;font-size:12px;color:#5b6b62;margin:0 0 4px;">Note that will be posted (editable) - add what you changed for the coordinator:</label>' +
       '<textarea id="bwn-pa-note"></textarea>' +
       '<div style="height:12px;"></div>' +
       '<div style="font-size:12px;color:#5b6b62;margin:0 0 4px;">This will:</div>' +
       '<ul class="steps">' + stepsHtml + '</ul>' +
+      '<div id="bwn-pa-runstat" aria-live="polite"></div>' +
       '</div>' +
-      '<div class="ft"><button class="btn cancel" id="bwn-pa-cancel">Cancel</button>' +
-      '<button class="btn go" id="bwn-pa-go">Confirm</button></div>';
+      '<div class="ft"><span class="hint" id="bwn-pa-go-hint" hidden></span>' +
+      '<button type="button" class="btn cancel" id="bwn-pa-cancel">Cancel</button>' +
+      '<button type="button" class="btn go" id="bwn-pa-go" aria-describedby="bwn-pa-go-hint">Confirm</button></div>';
 
     overlay.appendChild(card);
     document.body.appendChild(overlay);
+    paAdoptToast();
 
     var cancelBtn = card.querySelector('#bwn-pa-cancel');
     var goBtn = card.querySelector('#bwn-pa-go');
@@ -829,34 +1304,68 @@
     plan.steps.forEach(function (s, i) { stepEls[i] = card.querySelector('li[data-i="' + i + '"]'); });
 
     noteTa.value = plan.noteSeed || '';
-
-    function close() { try { overlay.remove(); } catch (e) { } document.removeEventListener('keydown', onKey); }
-    function onKey(e) { if (e.key === 'Escape') close(); }
-    document.addEventListener('keydown', onKey);
-    overlay.addEventListener('click', function (e) { if (e.target === overlay) close(); });
-    cancelBtn.addEventListener('click', close);
-
-    goBtn.addEventListener('click', function () {
-      var noteText = noteTa.value;
-      if (!noteText.trim()) {
-        paToast('Enter a note first.');
-        return;
-      }
-      goBtn.disabled = true; cancelBtn.disabled = true; noteTa.disabled = true;
-      runSteps(plan.steps, noteText, stepEls).then(function (res) {
-        if (res.ok) {
-          goBtn.textContent = res.skipped ? 'Done (some pending)' : 'Done';
-          paToast(res.skipped
-            ? 'Proven steps done. ' + res.skipped + ' step(s) skipped - awaiting mutation capture.'
-            : 'All steps complete.');
-          setTimeout(close, res.skipped ? 4500 : 2200);
-        } else {
-          cancelBtn.disabled = false;
-          goBtn.disabled = false; goBtn.textContent = 'Retry';
-          paToast('Stopped at "' + res.failedLabel + '": ' + res.error);
-        }
-      });
+    // Several alternatives on the job (or siblings unreadable): Confirm stays disabled until the
+    // reviewer ticks that this is the proposal they mean.
+    var ack = card.querySelector('#bwn-pa-ack');
+    var ackStopped = card.querySelector('#bwn-pa-ack-stopped');
+    var ctl = paConfirmController(plan, { goBtn: goBtn, cancelBtn: cancelBtn, noteTa: noteTa, ack: ack, ackStopped: ackStopped, stepEls: stepEls, card: card, status: card.querySelector('#bwn-pa-runstat') }, close);
+    _paActiveCtl = ctl;
+    overlay._paClose = close;
+    // Says WHY Confirm is greyed out, only while an unticked acknowledgement is the reason.
+    var goHint = card.querySelector('#bwn-pa-go-hint');
+    function syncGoHint() {
+      if (!goHint) return;
+      goHint.hidden = !(ctl.state() === 'idle' && goBtn.disabled);
+      goHint.textContent = goHint.hidden ? '' : 'Tick the acknowledgement above to enable Confirm.';
+    }
+    [ack, ackStopped].forEach(function (a) {
+      if (!a) return;
+      goBtn.disabled = true;
+      a.addEventListener('change', ctl.ackChanged);
+      a.addEventListener('change', syncGoHint);
     });
+    syncGoHint();
+    var releaseTrap = paArmTrap(overlay);
+
+    // Every dismissal path goes through ctl.requestClose, which refuses while a run is in flight
+    // (Escape / Cancel via requestDismiss below, the backdrop via pristine()).
+    function close() {
+      try { overlay.remove(); } catch (e) { }
+      document.removeEventListener('keydown', onKey);
+      if (_paActiveCtl === ctl) _paActiveCtl = null;
+      try { releaseTrap(); } catch (e) { }   // focus back to the Proposal Actions trigger
+    }
+    // Escape / Cancel: an edited, not-yet-posted note is only discarded after the reviewer says so.
+    // Unchanged note, a finished run (the note was posted) or a running dialog: exactly the old path.
+    // Declining keeps the dialog and the edit, with focus back in the note (or on Cancel once a run has
+    // locked the note). After a stopped run some steps may already have posted the note, so that case
+    // gets its own wording instead of "not posted".
+    function requestDismiss() {
+      if (ctl.state() === 'idle' && noteTa.value !== (plan.noteSeed || '')) {
+        var ran = stepEls.some(function (li) { return li && (li.className === 'ok' || li.className === 'err'); });
+        var ok;
+        try {
+          ok = window.confirm(ran
+            ? 'Close this dialog and discard the edited note?\n\nSteps already completed stay done; closing does not undo them. The edited text is not kept for another attempt. OK closes; Cancel keeps the dialog open.'
+            : 'Discard your edits to the note?\n\nThe edited note has not been posted. OK closes this dialog and discards your edits; Cancel keeps the dialog open with them.');
+        } catch (e) { ok = false; }
+        if (!ok) { try { (noteTa.disabled ? cancelBtn : noteTa).focus(); } catch (e) { } return false; }
+      }
+      return ctl.requestClose();
+    }
+    function onKey(e) { if (e.key === 'Escape') requestDismiss(); }
+    document.addEventListener('keydown', onKey);
+    // A stray backdrop click must not discard work: it closes only a pristine dialog (note as seeded,
+    // no run attempted). Once the note is edited or a run has shown results, only Cancel / Close /
+    // Escape close it.
+    function pristine() {
+      return noteTa.value === (plan.noteSeed || '') &&
+        !stepEls.some(function (li) { return li && li.className && li.className !== 'pending'; });
+    }
+    overlay.addEventListener('click', function (e) { if (e.target === overlay && pristine()) ctl.requestClose(); });
+    cancelBtn.addEventListener('click', requestDismiss);
+    goBtn.addEventListener('click', ctl.go);
+    goBtn.addEventListener('click', syncGoHint);   // a run started: the "tick the box" hint no longer applies
   }
 
   function mark(li, cls, icon, note) {
@@ -866,6 +1375,15 @@
     if (note) { var lb = li.querySelector('.lb'); if (lb) lb.innerHTML = lb.innerHTML.replace(/ <em>.*<\/em>/, '') + ' <em>' + escapeHtml(note) + '</em>'; }
   }
 
+  // The runner's own step marks (li.className) are the one progress record: '' = before any run,
+  // 'wait' = not started, 'run' = running, 'ok' = completed (run() resolved: change made, or a re-check found it in place), 'err' = failed.
+  // Retry resumes at the first step that is not 'ok'; the status line reads the same marks.
+  function paFirstUnfinished(stepEls, n) {
+    var i = 0;
+    while (i < n && stepEls[i] && stepEls[i].className === 'ok') i++;
+    return i;
+  }
+
   // Sequential runner. noteText (the operator's final, edited note) is threaded to each step's run.
   function runSteps(steps, noteText, stepEls) {
     var skipped = 0;
@@ -873,28 +1391,210 @@
     // previous run) is not re-run, so a Retry after a mid-sequence failure does NOT re-post a note,
     // re-create the task, or re-set the status that already succeeded. First run: nothing is 'ok', so
     // idx stays 0 and behaviour is unchanged.
-    var idx = 0;
-    while (idx < steps.length && stepEls[idx] && stepEls[idx].className === 'ok') idx++;
+    var idx = paFirstUnfinished(stepEls, steps.length);
+    for (var w = idx; w < steps.length; w++) mark(stepEls[w], 'wait', '•', 'not started');
     function next() {
       if (idx >= steps.length) return Promise.resolve({ ok: true, skipped: skipped });
       var s = steps[idx];
       var li = stepEls[idx];
-      if (li) { var ic = li.querySelector('.ic'); if (ic) ic.textContent = '…'; }
+      mark(li, 'run', '…', 'running');
       return Promise.resolve().then(function () { return s.run(noteText); }).then(function () {
-        mark(li, 'ok', '✓');
+        mark(li, 'ok', '✓', 'completed');
         idx++; return next();
       }, function (err) {
         var msg = (err && err.message) || String(err);
         if (/^NOT_PINNED/.test(msg)) {
           skipped++;
-          mark(li, 'skip', '⚠', 'skipped - not yet captured');
+          mark(li, 'skip', '⚠', 'skipped - not supported yet');
           idx++; return next();
         }
-        mark(li, 'err', '✗', msg);
+        mark(li, 'err', '✗', 'failed: ' + msg);
         return { ok: false, failedLabel: s.label, error: msg };
       });
     }
     return next();
+  }
+
+  // The dialog's persistent run-status line, built from the runner's marks above (no second tracker).
+  // phase: 'ready' | 'running' | 'failed' | 'done'; res = runSteps' result for 'failed' / 'done'.
+  // A failed request is reported as uncertain: it may or may not have reached Umbrava.
+  function paRunStatusHtml(phase, steps, stepEls, res) {
+    var n = steps.length;
+    function lbl(i) { return 'step ' + (i + 1) + ' (' + steps[i].label + ')'; }
+    if (phase === 'ready') {
+      return '<div class="note runstat-msg">' + escapeHtml('No proposal or work-order changes are submitted until you press Confirm. Cancel closes this dialog without submitting any.') + '</div>';
+    }
+    if (phase === 'running') {
+      return '<div class="note runstat-msg">' + escapeHtml('Running: steps run one at a time, in the order listed. Cancel is unavailable until this run stops.') + '</div>';
+    }
+    if (phase === 'done') {
+      var sk = (res && res.skipped) || 0;
+      return '<div class="note runstat-msg">' + escapeHtml((sk
+        ? (n - sk) + ' of ' + n + ' steps completed; ' + sk + ' step(s) skipped (not supported yet, not sent).'
+        : 'All ' + n + ' steps completed.') + ' A completed step either made its change or found it already in place.') + '</div>';
+    }
+    var completed = [], failedAt = -1;
+    for (var i = 0; i < n; i++) {
+      var c = stepEls[i] && stepEls[i].className;
+      if (c === 'ok') completed.push(i);
+      // 'run' = an unexpected stop left this step's request in flight: just as uncertain as a failure
+      else if ((c === 'err' || c === 'run') && failedAt < 0) failedAt = i;
+    }
+    var resume = paFirstUnfinished(stepEls, n);
+    var err = res && res.error ? ' (error: ' + res.error + ')' : '';
+    var lines = [
+      failedAt >= 0
+        ? 'This run stopped at ' + lbl(failedAt) + ', ' + (failedAt + 1) + ' of ' + n + '.'
+        : 'This run stopped unexpectedly' + err + '.',
+      completed.length
+        // 'ok' only means the step's run() resolved: it made its change, or a re-check found the change
+        // already in place (status, WO note, open tasks re-check before writing). Say exactly that.
+        ? 'Completed: ' + completed.map(lbl).join('; ') + '. A completed step either made its change or found it already in place.'
+        : 'No step completed.'
+    ];
+    if (failedAt >= 0) lines.push('The failed request may or may not have reached Umbrava' + err + '.');
+    if (resume < n) lines.push('Retry resumes at step ' + (resume + 1) + ' and does not repeat completed steps.' +
+      (failedAt >= 0 ? ' It sends step ' + (failedAt + 1) + ' again, so if that request did reach Umbrava it may be repeated.' : ''));
+    // res.stopRecord = paStopOnResult's outcome: 'fail' means no stopped-attempt record exists, so a new
+    // dialog has nothing to warn from - do not promise that it will.
+    lines.push('Cancel is available now: it stops this dialog from attempting further steps; it does not undo completed steps. ' +
+      (res && res.stopRecord === 'fail'
+        ? 'This browser could not save a stopped-attempt record, so a new dialog for this action will not warn that it may repeat steps.'
+        : 'If you start this action again in a new dialog, that dialog warns that it may repeat steps.'));
+    // No role="alert": the region is already aria-live="polite", and an alert inside it is read twice.
+    return '<div class="warn runstat-msg"><b>' + escapeHtml(lines[0]) + '</b>' +
+      lines.slice(1).map(function (t) { return '<div>' + escapeHtml(t) + '</div>'; }).join('') + '</div>';
+  }
+
+  // Confirm-dialog run lifecycle: ONE run at a time, and no dismissal while it is in flight. The steps
+  // are separate non-atomic writes, so a second overlapping run would re-send steps the first has not
+  // finished (duplicate proposal note / task), and hiding a running dialog would hide a partial
+  // failure. state: 'idle' (not started, or failed and retryable) -> 'running' -> 'done' | 'idle'.
+  // els = { goBtn, cancelBtn, noteTa, ack (or null), stepEls }; closeFn removes the dialog.
+  function paConfirmController(plan, els, closeFn) {
+    var state = 'idle';
+    var goBtn = els.goBtn, cancelBtn = els.cancelBtn, noteTa = els.noteTa;
+    // Every acknowledgement the dialog rendered must be ticked: the multi-option one and/or the
+    // stopped-attempt one. Either may be absent (null).
+    var acks = [els.ack, els.ackStopped].filter(Boolean);
+    function allAcked() { return acks.every(function (a) { return a.checked; }); }
+    function setAcksDisabled(v) { acks.forEach(function (a) { a.disabled = v; }); }
+    // The persistent in-dialog status line (els.status, optional): the runner's marks, in words.
+    function setStatus(phase, res) {
+      if (!els.status) return;
+      els.status.innerHTML = paRunStatusHtml(phase, plan.steps, els.stepEls, res);
+      // The dialog body scrolls; a stop / finish message below a long note must not stay out of view.
+      if (phase !== 'ready' && els.status.scrollIntoView) { try { els.status.scrollIntoView({ block: 'nearest' }); } catch (e) { } }
+    }
+    setStatus('ready');
+    function unlockForRetry() {
+      state = 'idle';
+      cancelBtn.disabled = false;
+      goBtn.disabled = false; goBtn.textContent = 'Retry';
+      setAcksDisabled(false);
+    }
+    function requestClose() {
+      if (state === 'running') return false;
+      closeFn();
+      return true;
+    }
+    // Only an idle dialog lets the acknowledgement drive Confirm; mid-run or after Done it is inert.
+    function ackChanged() { if (state === 'idle' && acks.length) goBtn.disabled = !allAcked(); }
+    function go() {
+      if (state !== 'idle') return null;   // a run is in flight or already done
+      var noteText = noteTa.value;
+      if (!allAcked()) return null;
+      if (!stillOnPlanPage(plan)) {
+        closeFn();   // first, so the toast below floats on the page instead of vanishing with the card
+        paToast('This page now shows a different proposal - nothing sent.');
+        return null;
+      }
+      if (!noteText.trim()) {
+        paToast('Enter a note first.');
+        return null;
+      }
+      // A kickback must tell the coordinator why: the Summary / Total block, the change-since-review
+      // line and the placeholder are not a reason. Approval and TSP are unaffected.
+      var kbGap = plan.kind === 'kickback' ? paKickbackReasonGap(noteText) : '';
+      if (kbGap) {
+        paToast(kbGap);
+        return null;
+      }
+      state = 'running';
+      goBtn.disabled = true; cancelBtn.disabled = true; noteTa.disabled = true;
+      setAcksDisabled(true);
+      // Disabling the focused Confirm drops focus to <body>, outside the focus trap; park it on the
+      // card so Tab stays contained while every control is disabled.
+      if (els.card) { try { els.card.setAttribute('tabindex', '-1'); els.card.focus(); } catch (e) { } }
+      setStatus('running');
+      return runSteps(plan.steps, noteText, els.stepEls).then(function (res) {
+        // Stopped-attempt record: written on a stop, resolved on a full completion (never on cancel).
+        var sw = paStopOnResult(plan, res, els.stepEls, Date.now());
+        var swNote = sw === 'fail' ? ' (The stopped-attempt record could not be ' + (res.ok ? 'cleared' : 'saved') + ' in this browser.)' : '';
+        if (res.ok) {
+          state = 'done';
+          setStatus('done', res);
+          goBtn.textContent = res.skipped ? 'Done (some skipped)' : 'Done';
+          // After the writes, never before; a failed history write never changes the outcome.
+          var h = paHistOnResult(plan, noteText, res, Date.now());
+          paToast((res.skipped
+            ? 'Supported steps done. ' + res.skipped + ' step(s) skipped - not supported yet.'
+            : 'All steps complete.') + (h === 'fail' ? ' (Local action history could not be saved in this browser.)' : '') + swNote);
+          // No auto-close: the result stays until the reviewer closes it. Cancel becomes Close and takes
+          // focus (Confirm stays disabled as "Done"); closing returns focus to the Proposal Actions trigger.
+          cancelBtn.textContent = 'Close';
+          cancelBtn.disabled = false;
+          if (cancelBtn.focus) { try { cancelBtn.focus(); } catch (e) { } }
+        } else {
+          unlockForRetry();
+          setStatus('failed', { ok: false, error: res.error, stopRecord: sw });   // persistent; the toast below is only a courtesy
+          paToast('Stopped at "' + res.failedLabel + '": ' + res.error + swNote);
+        }
+        return res;
+      }).then(null, function (err) {
+        // runSteps itself never rejects; this only keeps an unexpected throw from leaving the
+        // dialog locked in 'running' with no way to close or retry.
+        if (state === 'running') unlockForRetry();
+        // a throw after Done must not turn a completed run's status into a failure/Retry message
+        if (state !== 'done') setStatus('failed', { ok: false, error: String((err && err.message) || err) });
+        paToast('Run stopped unexpectedly: ' + ((err && err.message) || err));
+        return { ok: false, error: String((err && err.message) || err) };
+      });
+    }
+    return { go: go, ackChanged: ackChanged, requestClose: requestClose, state: function () { return state; } };
+  }
+
+  // Active-run overlay guard. The confirmation on screen registers its controller here; every path
+  // that opens the menu, Compare, or another confirmation asks paRefuseWhileRunning() first, and the
+  // one place a prior overlay is removed for a new one (paTakeOverlaySlot) refuses while that run is
+  // in flight - so nothing can hide or replace a dialog whose writes are still going out.
+  var _paActiveCtl = null;
+  var _paBusyToastAt = 0;
+  var PA_BUSY_TOAST_MS = 4000;   // at most one "still running" notice per 4s of blocked attempts
+  function paRunBusy() { return !!(_paActiveCtl && _paActiveCtl.state() === 'running'); }
+  function paRefuseWhileRunning() {
+    if (!paRunBusy()) return false;
+    var now = Date.now();
+    if (now - _paBusyToastAt > PA_BUSY_TOAST_MS) {
+      _paBusyToastAt = now;
+      paToast('An action is still running on this proposal - wait for it to finish.');
+    }
+    return true;
+  }
+  // -> true when the slot is free (any prior overlay closed through its own close path).
+  function paTakeOverlaySlot() {
+    if (paRefuseWhileRunning()) return false;
+    var prior = document.getElementById('bwn-pa-overlay');
+    if (prior) { if (typeof prior._paClose === 'function') prior._paClose(); else prior.remove(); }
+    return true;
+  }
+  // Arm the suite focus trap on a confirmation overlay. The menu item that started the action is
+  // gone by the time the dialog opens, so the trigger is focused first: the trap records it as the
+  // opener and returns focus there on close.
+  function paArmTrap(overlay) {
+    var trig = document.querySelector('#bwn-pa-dropdown .bwn-pa-trigger');
+    if (trig && trig.focus) { try { trig.focus(); } catch (e) { } }
+    return bwnFocusTrap(overlay);
   }
 
   // ===== "what changed" delta (total + GP) ==================================
@@ -943,12 +1643,16 @@
     return readWO(n).then(function (wo) {
       return readTotals(wo.jobId, pid).then(function (tot) {
         return readOpenTasks(n).then(function (openTasks) {
-          return {
-            n: n, pid: pid, wo: wo,
-            total: money(tot.total), totalRaw: tot.total, gpPct: tot.gpPct, gp: gpLabel(tot.gpPct),
-            gpText: (tot.gpPct == null ? 'unknown' : (tot.gpPct * 100).toFixed(2) + '%'),
-            openTasks: openTasks
-          };
+          // Siblings are read fresh at action time (not from the badge cache) so the confirm dialog's
+          // list is current. A failed read is null, which the dialog treats as "cannot rule out".
+          return readJobProposals(wo.jobId).catch(function () { return null; }).then(function (siblings) {
+            return {
+              n: n, pid: pid, wo: wo,
+              total: money(tot.total), totalRaw: tot.total, gpPct: tot.gpPct, gp: gpLabel(tot.gpPct),
+              gpText: (tot.gpPct == null ? 'unknown' : (tot.gpPct * 100).toFixed(2) + '%'),
+              openTasks: openTasks, siblings: siblings
+            };
+          });
         });
       });
     });
@@ -956,7 +1660,7 @@
 
   function buildStatusStep(ctx, statusName) {
     return {
-      label: 'Set WO status → ' + statusName, pending: false,
+      key: 'status', label: 'Set WO status → ' + statusName, pending: false,
       run: function () {
         // Idempotent set (matches bwn-write-queue's set-verb skip): re-read the WO's current status
         // and skip the write when it is already at the target, so a Retry never resets the
@@ -976,27 +1680,39 @@
     // The resume-from-first-incomplete-step fix above stops a re-post in the normal case; a true
     // read-then-skip dedup (like the WO note below) needs a billing-notes read query pinned first.
     if (!bwnCan('WorkOrderProposal.AddNote')) return null;   // dropped from the plan by openConfirm
-    return { label: 'Add note to Proposal #' + ctx.pid + ' Notes tab', pending: false,
+    return { key: 'proposalNote', label: 'Add note to Proposal #' + ctx.pid + ' Notes tab', pending: false,
       run: function (noteText) { return addProposalNote(ctx.pid, noteText); } };
+  }
+  // ===== PA-WONOTE START (sliced by scripts/test-proposal-actions.js) =====
+  function countWONotes(notes, text) {
+    return (notes || []).filter(function (x) {
+      return x && !x.isDeleted && String(x.content == null ? '' : x.content) === text;
+    }).length;
   }
   function buildWONoteStep(ctx) {
     if (!bwnCan('WorkOrderNote.AddNew')) return null;
-    return { label: 'Add note to Work Order W-' + ctx.n + ' notes', pending: false,
+    // Identical notes already on the WO before THIS run's first attempt. A repeat review with the same
+    // GP + total produces the same text as an earlier one (W-390980: a 9/09 TSP note made the next TSP
+    // review skip its WO note), so history alone must never suppress a post.
+    var baseline = null;
+    return { key: 'woNote', label: 'Add note to Work Order W-' + ctx.n + ' notes', pending: false,
       run: function (noteText) {
-        // Idempotent (matches bwn-write-queue's note dedup, keyed on the note text via workOrderNotes):
-        // skip the post when an identical, non-deleted note already exists, so a Retry does not
-        // duplicate it. Fail OPEN - if the read fails, post anyway (a missing note is worse than a
-        // rare duplicate, and the note text is itself the stable key).
+        // Retry-safe: skip only when the count grew past the baseline, i.e. this run's earlier attempt
+        // landed even though its response failed. Fail OPEN - if the read fails, post anyway (a missing
+        // note is worse than a rare duplicate).
         return readWONotes(ctx.n).then(function (notes) {
-          if (woNoteExists(notes, noteText)) return true;
+          var have = countWONotes(notes, noteText);
+          if (baseline != null && have > baseline) return true;
+          if (baseline == null) baseline = have;
           return addWONote(ctx.n, noteText);
         }, function () { return addWONote(ctx.n, noteText); });
       } };
   }
+  // ===== PA-WONOTE END =====
   function buildCompleteStep(ctx) {
     if (!bwnCan('Task.Complete')) return null;
     var c = ctx.openTasks.length;
-    return { label: c ? ('Complete ' + c + ' open task(s)') : 'No open tasks to complete', pending: false,
+    return { key: 'completeTasks', label: c ? ('Complete ' + c + ' open task(s)') : 'No open tasks to complete', pending: false,
       run: function () {
         // Idempotent (skip the task write when already at the target state): re-read at execution
         // time and complete only the still-open tasks, so a Retry completes nothing already done.
@@ -1012,7 +1728,7 @@
     // on). It is the LAST step, so the resume fix means it only re-runs if it ITSELF failed; grounding
     // a read-then-skip here needs a task-identity field pinned first.
     // Label previews the seed's first line; the task actually posts the operator's final note text.
-    return { label: 'Create task for ' + assigneeName + ': ' + firstLine(seedText), pending: false,
+    return { key: 'createTask', label: 'Create task for ' + assigneeName + ': ' + firstLine(seedText), pending: false,
       run: function (noteText) { return createTask(ctx.n, assigneeGuid, noteText); } };
   }
 
@@ -1021,6 +1737,7 @@
   function startKickback() { startWorkflow('kickback'); }
 
   function startWorkflow(kind) {
+    if (paRefuseWhileRunning()) return;   // no reads, no new plan while a confirmation run is in flight
     paToast('Reading proposal…');
     gatherContext().then(function (ctx) {
       if (kind === 'approval') {
@@ -1029,6 +1746,8 @@
           openConfirm({
             title: 'Approve proposal - Internal Proposal Approved',
             subtitle: 'W-' + ctx.n + '  ·  Proposal #' + ctx.pid + '  ·  ' + ctx.total + '  ·  ' + ctx.gp,
+            ctx: ctx, kind: 'approval', action: 'Approval (good to submit)',
+            routing: 'WO status → Internal Proposal Approved; task → ' + name + ' (coordinator)',
             noteSeed: aSeed,
             steps: [
               buildStatusStep(ctx, 'Internal Proposal Approved'),
@@ -1044,10 +1763,12 @@
         var tSeed = seedWithDelta(ctx.pid, ctx.totalRaw, ctx.gpPct, tspNote(ctx.gp, ctx.total));
         // RM-A3: resolve the TSP assignee LIVE and fail closed - never file a task on a stale RONNY_GUID.
         return resolveTspAssignee().then(function (tsp) {
-          if (!tsp) { paToast('TSP assignee "' + TSP_ASSIGNEE_NAME + '" could not be verified live - nothing sent. (Set bwn:modules.paLegacyFallback=true to override.)'); return; }
+          if (!tsp) { paToast('TSP assignee "' + TSP_ASSIGNEE_NAME + '" could not be verified live - nothing sent. Ask a suite admin to check the TSP assignee.'); console.info('[BWN PROPOSAL ACTIONS] TSP assignee unresolved; bwn:modules.paLegacyFallback=true reinstates the built-in fallback.'); return; }
           openConfirm({
             title: 'Send to Trade Specialist - Pending Trade Specialist',
             subtitle: 'W-' + ctx.n + '  ·  Proposal #' + ctx.pid + '  ·  ' + ctx.total + '  ·  ' + ctx.gp,
+            ctx: ctx, kind: 'tsp', action: 'TSP Review',
+            routing: 'WO status → Pending Trade Specialist; task → ' + tsp.name + ' (Trade Specialist)',
             noteSeed: tSeed,
             steps: [
               buildStatusStep(ctx, 'Pending Trade Specialist'),
@@ -1060,14 +1781,18 @@
         });
       }
       // kickback: the on-device AI drafts the rejection reason; that becomes the editable seed, so
-      // the reviewer confirms/edits the WHOLE note (reason + summary) in one field.
+      // the reviewer confirms/edits the WHOLE note (reason + summary) in one field. No draft (AI
+      // unavailable, or the proposal details could not be read) seeds a placeholder the reviewer must
+      // replace - Confirm refuses until the note carries a reason (paKickbackReasonGap).
       return readProposalContext(ctx.pid).then(function (pc) {
-        return draftKickbackReason({ scope: pc.scope, items: pc.items, total: ctx.total, gpText: ctx.gpText }).then(function (reason) {
+        return draftKickbackReason(pc, ctx.total, ctx.gpText).then(function (reason) {
           return resolveUserName(ctx.wo.coordinator).then(function (name) {
-            var kSeed = seedWithDelta(ctx.pid, ctx.totalRaw, ctx.gpPct, kickbackNote(reason, ctx.total));
+            var kSeed = seedWithDelta(ctx.pid, ctx.totalRaw, ctx.gpPct, kickbackNote(kickbackReasonSeed(pc, reason), ctx.total));
             openConfirm({
               title: 'Kick back proposal - Internal Proposal Rejected',
               subtitle: 'W-' + ctx.n + '  ·  Proposal #' + ctx.pid + '  ·  ' + ctx.total + '  ·  ' + ctx.gp,
+              ctx: ctx, kind: 'kickback', action: 'Kickback (correction / more info)',
+              routing: 'WO status → Internal Proposal Rejected; task → ' + name + ' (coordinator)',
               noteSeed: kSeed,
               steps: [
                 buildStatusStep(ctx, 'Internal Proposal Rejected'),
@@ -1085,12 +1810,143 @@
     });
   }
 
+  // ===== job-level proposal count (trigger badge) ===========================
+  // One sibling read per WO per page session, for the badge only. null = in flight or failed (no badge,
+  // no retry storm from the 900ms inject loop). Compare and the confirm dialog always re-read fresh.
+  var _paJob = {};   // WO# -> readJobProposals() result | null
+  function loadJobProposals(n) {
+    if (n == null || _paJob[n] !== undefined) return;
+    _paJob[n] = null;
+    readWO(n).then(function (wo) { return readJobProposals(wo.jobId); })
+      .then(function (r) { _paJob[n] = r; paintTrigger(); }, function () { /* stays null: no badge */ });
+  }
+  function optionCount() {
+    var r = _paJob[woNumberFromUrl()];
+    return r ? liveOptions(r.rows).length : 0;
+  }
+  function paintTrigger() {
+    var t = document.querySelector('#' + DROPDOWN_ID + ' .bwn-pa-trigger');
+    if (!t) return;
+    var c = optionCount();
+    var key = proposalIdFromUrl() + ':' + c;
+    if (t.getAttribute('data-k') === key) return;   // unchanged: no DOM write, so no observer echo
+    t.setAttribute('data-k', key);
+    t.innerHTML = 'Proposal Actions ▾' + (c > 1 ? '<span class="opts">' + c + ' options</span>' : '');
+    t.title = c > 1 ? 'This job has ' + c + ' proposal options. Actions apply only to #' + proposalIdFromUrl() + ' (this page).' : '';
+    // The tooltip is mouse-only; the accessible name carries the same explanation (and drops the arrow glyph).
+    t.setAttribute('aria-label', 'Proposal Actions' + (c > 1 ? '. ' + t.title : ''));
+  }
+
+  // ===== compare view (read-only) ===========================================
+  // Every proposal on the job side by side. Selecting another proposal NAVIGATES to its own details
+  // page: the page URL stays the single source of "selected", so an action can never target a
+  // proposal other than the one the reviewer is looking at.
+  function openCompare() {
+    var n = woNumberFromUrl(), pid = proposalIdFromUrl();
+    if (n == null || pid == null) return;
+    if (paRefuseWhileRunning()) return;   // no read, no overlay while a confirmation run is in flight
+    paToast('Reading proposals on this job…');
+    readWO(n).then(function (wo) {
+      return readJobProposals(wo.jobId).then(function (sib) { renderCompare(n, pid, wo, sib); });
+    }).catch(function (err) { paToast('Could not read this job\'s proposals: ' + ((err && err.message) || err)); });
+  }
+  function renderCompare(n, pid, wo, sib) {
+    if (woNumberFromUrl() !== n || proposalIdFromUrl() !== pid) return;   // navigated away during the read
+    if (!paTakeOverlaySlot()) return;   // a confirmation run is in flight: keep that dialog, render nothing
+    ensureStyle();
+    var overlay = document.createElement('div');
+    overlay.id = 'bwn-pa-overlay';
+    var card = document.createElement('div');
+    card.id = 'bwn-pa-card';
+    card.className = 'wide';
+    card.setAttribute('role', 'dialog');
+    card.setAttribute('aria-modal', 'true');
+    card.setAttribute('aria-label', 'Compare proposals on W-' + n);
+    var live = liveOptions(sib.rows).length, cxl = sib.rows.length - live;
+    var hist = paHistLoad();
+    paHistNotice(hist.error);
+    var rows = sib.rows.map(function (r) {
+      var isSel = r.id === pid;
+      var pick = isSel ? '<span class="chip" aria-current="page">Selected (this page)</span>'
+        : '<a href="' + escapeHtml(proposalHref(n, r.id)) + '">Open to act on ' + escapeHtml(propLabel(r, r.id)) + '</a>';
+      return '<tr class="' + (isSel ? 'sel' : '') + (r.canceled ? ' cxl' : '') + '">' +
+        '<td>' + escapeHtml(propLabel(r, r.id)) + '</td>' +
+        '<td>' + orNa(r.title, 'no description') + (r.type ? '<div class="na">' + escapeHtml(r.type) + '</div>' : '') + '</td>' +
+        '<td class="num">' + orNa(r.total) + '</td>' +
+        '<td class="num">' + orNa(gpPctText(r.gpPct)) + '</td>' +
+        '<td class="num">' + orNa(r.vendorCost) + '</td>' +
+        '<td>' + orNa(r.status) + '</td>' +
+        '<td>' + orNa(fmtDate(r.created)) + (r.createdBy ? '<div class="na">' + escapeHtml(r.createdBy) + '</div>' : '') + '</td>' +
+        '<td>' + orNa(fmtDate(r.submitted), 'not submitted / n/a') + '</td>' +
+        '<td>' + paHistCellHtml(paHistFor(hist.records, n, r.id)) + '</td>' +
+        '<td>' + pick + '</td></tr>';
+    }).join('');
+    card.innerHTML =
+      '<div class="hd"><div class="t">Compare proposals - W-' + escapeHtml(n) + '</div>' +
+      '<div class="s">' + live + ' option(s)' + (cxl ? ' + ' + cxl + ' canceled' : '') + '  ·  WO status: ' + escapeHtml(wo.statusName || 'not available') + '</div></div>' +
+      '<div class="bd"><div class="tbl"><table><thead><tr>' +
+      '<th>Proposal</th><th>Description</th><th>Total</th><th>GP</th><th>Vendor cost</th><th>Status</th><th>Created</th><th>Submitted</th><th>Local action history</th><th>Selection</th>' +
+      '</tr></thead><tbody>' + rows + '</tbody></table></div>' +
+      (sib.rowCount > sib.rows.length ? '<div class="note">Showing the first ' + sib.rows.length + ' of ' + sib.rowCount + ' proposals.</div>' : '') +
+      (sib.partial ? '<div class="note">The extended proposal read was refused, so description, type, vendor cost, created and submitted dates are not available here.</div>' : '') +
+      '<div class="note">Approval / TSP Review / Kickback act only on the selected proposal. The WO status and tasks they change are job-wide. ' +
+      'Local action history lists only actions completed in THIS browser; it is not an Umbrava status and is not shared. ' +
+      'Vendor, trade and NTE are not on client proposal records. Approval / Kickback / TSP are job-level WO statuses, not stored per proposal.</div>' +
+      '</div><div class="ft"><button class="btn cancel" id="bwn-pa-cmp-close">Close</button></div>';
+    overlay.appendChild(card);
+    document.body.appendChild(overlay);
+    paAdoptToast();
+    // Same trap as the confirm dialog: Tab stays inside, and closing returns focus to the trigger.
+    var releaseTrap = paArmTrap(overlay);
+    function close() {
+      try { overlay.remove(); } catch (e) { }
+      document.removeEventListener('keydown', onKey);
+      try { releaseTrap(); } catch (e) { }
+    }
+    overlay._paClose = close;
+    function onKey(e) { if (e.key === 'Escape') close(); }
+    document.addEventListener('keydown', onKey);
+    overlay.addEventListener('click', function (e) { if (e.target === overlay) close(); });
+    var closeBtn = card.querySelector('#bwn-pa-cmp-close');
+    closeBtn.addEventListener('click', close);
+    closeBtn.focus();
+  }
+
   // ===== dropdown UI ========================================================
   var DROPDOWN_ID = 'bwn-pa-dropdown';
   var openMenuEl = null;
-  function closeMenu() { if (openMenuEl) { openMenuEl.remove(); openMenuEl = null; document.removeEventListener('click', onDocClick, true); } }
-  function onDocClick(e) { if (openMenuEl && !openMenuEl.contains(e.target) && !e.target.classList.contains('bwn-pa-trigger')) closeMenu(); }
+  var menuTrigger = null;   // the trigger that opened the menu: aria-expanded + where focus returns
+  function closeMenu(focusTrigger) {
+    if (openMenuEl) {
+      openMenuEl.remove(); openMenuEl = null;
+      document.removeEventListener('click', onDocClick, true);
+      document.removeEventListener('keydown', onMenuKey, true);
+    }
+    if (menuTrigger) {
+      try { menuTrigger.setAttribute('aria-expanded', 'false'); if (focusTrigger) menuTrigger.focus(); } catch (e) { }
+      menuTrigger = null;
+    }
+  }
+  function onDocClick(e) { if (openMenuEl && !openMenuEl.contains(e.target) && !(e.target.closest && e.target.closest('.bwn-pa-trigger'))) closeMenu(); }
+  // Menu-button keyboard pattern: arrows / Home / End move between items, Escape closes and returns
+  // focus to the trigger, Tab closes and lets focus move on from the trigger.
+  function onMenuKey(e) {
+    if (!openMenuEl) return;
+    var items = [].slice.call(openMenuEl.querySelectorAll('[role="menuitem"]'));
+    var n = items.length, i = items.indexOf(document.activeElement), to = -1;
+    if (e.key === 'Escape') { e.preventDefault(); e.stopPropagation(); closeMenu(true); return; }
+    if (e.key === 'Tab') { closeMenu(true); return; }
+    if (!n) return;
+    if (e.key === 'ArrowDown') to = i < 0 ? 0 : (i + 1) % n;
+    else if (e.key === 'ArrowUp') to = i < 0 ? n - 1 : (i - 1 + n) % n;
+    else if (e.key === 'Home') to = 0;
+    else if (e.key === 'End') to = n - 1;
+    if (to < 0) return;
+    e.preventDefault();
+    items[to].focus();
+  }
   function buildMenu(trigger) {
+    if (paRefuseWhileRunning()) return;
     closeMenu();
     var menu = document.createElement('div');
     menu.className = 'bwn-pa-menu';
@@ -1100,29 +1956,39 @@
       { label: 'TSP Review', sub: 'Send to Ronny → Pending Trade Specialist', fn: startTsp },
       { label: 'Kickback', sub: 'AI reason → Internal Proposal Rejected', fn: startKickback }
     ];
+    var c = optionCount();
+    if (c > 1) items.unshift({ label: 'Compare proposals (' + c + ' options)', sub: 'Read-only - nothing is changed', fn: openCompare });
     items.forEach(function (it) {
       var b = document.createElement('button');
       b.type = 'button'; b.setAttribute('role', 'menuitem');
       b.innerHTML = escapeHtml(it.label) + '<span class="sub">' + escapeHtml(it.sub) + '</span>';
-      b.addEventListener('click', function () { closeMenu(); it.fn(); });
+      b.addEventListener('click', function () { closeMenu(true); it.fn(); });
       menu.appendChild(b);
     });
     document.body.appendChild(menu);
     var r = trigger.getBoundingClientRect();
-    menu.style.top = Math.round(r.bottom + 4) + 'px';
-    menu.style.left = Math.round(Math.min(r.left, window.innerWidth - menu.offsetWidth - 8)) + 'px';
+    var top = r.bottom + 4, h = menu.offsetHeight;
+    if (top + h > window.innerHeight - 8 && r.top - h - 4 >= 8) top = r.top - h - 4;   // no room below: open upward
+    menu.style.top = Math.round(top) + 'px';
+    menu.style.left = Math.round(Math.max(8, Math.min(r.left, window.innerWidth - menu.offsetWidth - 8))) + 'px';
     openMenuEl = menu;
+    menuTrigger = trigger;
+    try { trigger.setAttribute('aria-expanded', 'true'); } catch (e) { }
     setTimeout(function () { document.addEventListener('click', onDocClick, true); }, 0);
-    document.addEventListener('keydown', function esc(e) { if (e.key === 'Escape') { closeMenu(); document.removeEventListener('keydown', esc); } });
+    document.addEventListener('keydown', onMenuKey, true);   // removed by closeMenu, however the menu closes
+    var first = menu.querySelector('[role="menuitem"]');
+    if (first) { try { first.focus(); } catch (e) { } }
   }
   function buildDropdown() {
     var wrap = document.createElement('span');
     wrap.id = DROPDOWN_ID;
     wrap.style.display = 'inline-flex';
+    wrap.style.alignSelf = 'center';   // in a flex row: do not stretch to the row height (keeps the badge inside it)
     var trigger = document.createElement('button');
     trigger.type = 'button';
     trigger.className = 'bwn-pa-trigger';
     trigger.setAttribute('aria-haspopup', 'menu');
+    trigger.setAttribute('aria-expanded', 'false');
     trigger.textContent = 'Proposal Actions ▾';
     trigger.addEventListener('click', function (e) {
       e.preventDefault(); e.stopPropagation();
@@ -1134,16 +2000,21 @@
   }
 
   // ===== injection lifecycle ================================================
+  // Returns the WHOLE Details/Notes tab component; the trigger is inserted as its next sibling, in the
+  // row that holds it. Live 2026-09-25 (878px): that row is a flex row with visible overflow and free
+  // space to the right of the tabs. Two placements were measured and rejected:
+  //  - beside Umbrava's Submit (<= 0.7.7): on a long title the trigger pushed Submit out of view;
+  //  - inside the tablist, before "Details" (0.7.8): the tab scroller clipped the options badge, the
+  //    selected-tab underline moved under our trigger, and a non-tab control sat among the tabs.
+  // null -> the caller's fixed fallback (never the tablist, never Submit's row).
   function findAnchor() {
-    // Prefer sitting next to the proposal's "Submit" button (top-right of the details header).
-    var btns = [].slice.call(document.querySelectorAll('button'));
-    var submit = btns.filter(function (b) { return /^\s*Submit\s*$/i.test(b.textContent || ''); })[0];
-    if (submit && submit.parentNode) return submit;
-    // Else the Details/Notes tab strip: a link/tab labelled "Details".
     var tab = [].slice.call(document.querySelectorAll('a,button,[role="tab"]'))
       .filter(function (el) { return /^\s*Details\s*$/i.test(el.textContent || ''); })[0];
-    if (tab && tab.parentNode) return tab;
-    return null;
+    var comp = tab && tab.closest ? tab.closest('.MuiTabs-root') : null;   // MUI's stable component class
+    if (!comp || !comp.parentNode) return null;
+    var rowHasSubmit = [].slice.call(comp.parentNode.querySelectorAll('button'))
+      .some(function (b) { return /^\s*Submit\s*$/i.test(b.textContent || ''); });
+    return rowHasSubmit ? null : comp;
   }
   function removeDropdown() { var d = document.getElementById(DROPDOWN_ID); if (d) { closeMenu(); d.remove(); } }
   function injectDropdown() {
@@ -1155,12 +2026,26 @@
       // Fails OPEN while the decode is unknown.
       if (!bwnCan('WorkOrderField.Status')) { removeDropdown(); return; }
       captureBaseline(proposalIdFromUrl());   // snapshot total+GP once, before the reviewer edits
+      loadJobProposals(woNumberFromUrl());    // sibling count for the badge, once per WO
       ensureStyle();
-      if (document.getElementById(DROPDOWN_ID)) return;   // presence-based guard (React wipes; we re-add)
+      var existing = document.getElementById(DROPDOWN_ID);
+      if (existing) {   // presence-based guard (React wipes; we re-add)
+        // Injected before the tab strip rendered -> it sits in the fixed fallback. Move that same node
+        // (listeners intact) into the tab row once the anchor exists, instead of floating over the page.
+        if (existing.style.position === 'fixed') {
+          var late = findAnchor();
+          if (late && late.parentNode) {
+            existing.style.position = ''; existing.style.top = ''; existing.style.right = ''; existing.style.zIndex = '';
+            late.parentNode.insertBefore(existing, late.nextSibling);   // after the tab component
+          }
+        }
+        paintTrigger();
+        return;
+      }
       var dd = buildDropdown();
       var anchor = findAnchor();
       if (anchor && anchor.parentNode) {
-        anchor.parentNode.insertBefore(dd, anchor);
+        anchor.parentNode.insertBefore(dd, anchor.nextSibling);   // sibling AFTER the whole tab component
       } else {
         // Fixed fallback so the control is always reachable even before the anchor is pinned.
         dd.style.position = 'fixed';
@@ -1169,6 +2054,7 @@
         dd.style.zIndex = '2147483000';
         document.body.appendChild(dd);
       }
+      paintTrigger();
     } catch (e) { /* never break the page */ }
   }
 

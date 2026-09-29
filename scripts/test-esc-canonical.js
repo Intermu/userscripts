@@ -116,6 +116,7 @@ var EXPECT = {
   'bwn-suite-ai.user.js':         ['escapeHtml', 'srEsc'],   // ported jobView escapeHtml + supplier-search srEsc
   'bwn-suite-core.user.js':       ['esc', 'esc', 'esc'],     // three render/copy paths
   'bwn-temp-vendor.user.js':      ['tvEsc'],
+  'bwn-wo-audit.user.js':         ['esc'],   // live-activity log + file-card metadata (workbook filename) render into innerHTML
   'bwn-write-queue.user.js':      ['esc']
 };
 

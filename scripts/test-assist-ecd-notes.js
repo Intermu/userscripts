@@ -346,6 +346,29 @@ var t6 = Promise.resolve().then(function () {
   var h6 = build({ notes: [note('eta 1-5 days, but complete by 8/20', '2026-08-04T09:00:00Z', 5)], notesSrc: 'api' });
   A.eq('a real date still wins when a range sits beside it',
     ymd(+h6.api.proposeECD(state()).date), '2026-8-20');
+
+  // ---- An undateable note must not forward-project into next year ----------------------
+  // User-reported off a REMOVED pinned note: "ECD 4/26" logged as 4/26/2027. A pinned note
+  // renders "Pinned" not a timestamp, so tsAbs is null AND parseNoteDate(ts) fails -> when is
+  // null -> parseBodyDate anchored the bare 4/26 on TODAY (2026-08-05) and bumped April, already
+  // past, to April 2027. A promise you can't date can't be resolved; fall back, don't invent.
+  var u1 = build({ notes: [{ id: '9', label: '', body: 'ECD 4/26', ts: 'Pinned', tsAbs: null }], notesSrc: 'view' });
+  A.eq('an undateable note does not invent a next-year ECD (falls back to 2nd Friday)',
+    ymd(+u1.api.proposeECD(state()).date), '2026-8-14');
+  A.eq('and it is not offered as a noted ETA at all', u1.api.latestNotedEta(state()), null);
+
+  // ---- A pasted email SIGNATURE date carries its own year ------------------------------
+  // Live-reported on W-368564 (tracking 1214704): a "NEED NEW ETA" note held an email header
+  // "Sent: Monday, June 8, 2026". parseBodyDate's month-name branch captured "June 8" but DROPPED
+  // the "2026", read it as yearless, and - June being >45 days before the note - forward-projected
+  // it to June 2027, which was then proposed as the ECD over the real PO/trip signals. The year is
+  // in the text; honour it.
+  var e1 = build({ notes: [note('need new eta. From: X Sent: Monday, June 8, 2026 4:40 PM', '2026-08-04T09:00:00Z', 5)], notesSrc: 'api' });
+  A.eq('an email-header date with its own year is not forward-projected (June 8 2026 is past -> Friday)',
+    ymd(+e1.api.proposeECD(state()).date), '2026-8-14');
+  // A month-name date with an explicit FUTURE year is taken as-is (not re-anchored).
+  var e2 = build({ notes: [note('complete by August 20, 2026 per vendor', '2026-08-04T09:00:00Z', 5)], notesSrc: 'api' });
+  A.eq('a month-name date with an explicit year is honoured', ymd(+e2.api.proposeECD(state()).date), '2026-8-20');
 });
 
 // ---- Mutations: revert one piece each, assert the harness reddens ----------------------
@@ -417,6 +440,25 @@ var t7 = Promise.all([t2, t3, t4, t5, t6]).then(function () {
   });
   A.ok('M8 without the hyphen strip "1-5" becomes January 5 of the NEXT year',
     ymd(+m8.api.proposeECD(state()).date) === '2027-1-5', ymd(+m8.api.proposeECD(state()).date));
+
+  // M9: drop the undateable-note guard -> the removed-pinned-note 2027 proposal comes back.
+  // Control for the fix above: without it, "ECD 4/26" on a timestamp-less note forward-projects
+  // off today (2026-08-05) into next April.
+  var m9 = build({
+    notes: [{ id: '9', label: '', body: 'ECD 4/26', ts: 'Pinned', tsAbs: null }], notesSrc: 'view',
+    src: mutate(SOURCE, '        if (when == null) continue;\n        var dm = parseBodyDate(b, when);', '        var dm = parseBodyDate(b, when);')
+  });
+  A.ok('M9 without the undateable guard an undated "ECD 4/26" invents 2027',
+    ymd(+m9.api.proposeECD(state()).date) === '2027-4-26', ymd(+m9.api.proposeECD(state()).date));
+
+  // M10: drop the year capture from the month-name branch -> the email-header "June 8, 2026"
+  // reads yearless again and forward-projects to June 2027. Control for the email-date fix.
+  var m10 = build({
+    notes: [note('need new eta. From: X Sent: Monday, June 8, 2026 4:40 PM', '2026-08-04T09:00:00Z', 5)], notesSrc: 'api',
+    src: mutate(SOURCE, '(\\d{1,2})(?:,?\\s*(\\d{4}))?\\b/ig, m2;', '(\\d{1,2})\\b/ig, m2;')
+  });
+  A.ok('M10 without the year capture an email-header date forward-projects to 2027',
+    ymd(+m10.api.proposeECD(state()).date) === '2027-6-8', ymd(+m10.api.proposeECD(state()).date));
 
   // M4: drop the nav guard - WO A's history gets hung off WO B.
   var m4 = build({
@@ -577,7 +619,7 @@ var t8 = t7b.then(function () {
     });
   });
 
-  console.log('\n(auto-warm x auto-pop gate x proposal x write echo, real source, 8 mutations. Nothing here proves');
+  console.log('\n(auto-warm x auto-pop gate x proposal x write echo, real source, 10 mutations. Nothing here proves');
   console.log(' the popup renders, that Umbrava answers in a real tab, or that the proposed date is');
   console.log(' the one the coordinator wanted - the live test on a WO with a noted ETA covers that.)');
   A.finish();

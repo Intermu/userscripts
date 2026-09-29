@@ -42,10 +42,10 @@ function slice(startNeedle, endNeedle, what) {
 // stripHtml + latin1Of + the MIME helpers + parseEml, verbatim. The slice is a superset (it also
 // pulls parseMsg + a few map helpers); their bodies are never invoked, so undefined refs are inert.
 var BLOCK = slice('function stripHtml(', 'function pdfToText(', 'parseEml cluster');
-// isInlineAttach sits ABOVE stripHtml (it belongs to the .msg reader), so it needs its own slice.
-var INLINE = slice('function isInlineAttach(', 'function utf16(', 'inline-attachment mark reader');
-var api = { atob: atob, Uint8Array: Uint8Array, String: String };
-vm.runInNewContext(INLINE + '\n' + BLOCK + '\n;this.parseEml=parseEml;this.isInlineAttach=isInlineAttach;', api);
+// isInlineAttach + rtfDecompress (+ utf16/latin1) sit ABOVE stripHtml (the .msg reader), so they get their own slice.
+var INLINE = slice('function isInlineAttach(', 'function stripHtml(', 'inline-attachment mark reader');
+var api = { atob: atob, Uint8Array: Uint8Array, DataView: DataView, String: String };
+vm.runInNewContext(INLINE + '\n' + BLOCK + '\n;this.parseEml=parseEml;this.isInlineAttach=isInlineAttach;this.rtfDecompress=rtfDecompress;', api);
 
 // ---- Build the synthetic multipart/mixed .eml, CRLF like a real one ---------
 var CRLF = '\r\n';
@@ -218,5 +218,18 @@ A.eq('filtering by the mark leaves exactly the real attachment',
 // A Content-ID on a part that is disposed `attachment` must NOT drop it - Outlook gives a cid to
 // real attachments too (all ten on the Pilot request had one), so the disposition is load-bearing.
 A.eq('the earlier PDF attachment is still not inline', p.attachments[0].inline, false);
+
+// ---- .msg: new Outlook signature logo is only marked by a body-cited Content-ID --------------
+// New Outlook ships its logo ("Outlook-xxxxxxxx") with NO hidden / ATT_MHTML_REF flag; the only tell
+// is <img src="cid:..."> in PR_HTML or, when that is absent, the compressed RTF body. parseMsg
+// decompresses it with rtfDecompress - pinned here on the MS-OXRTFCP 3.1.1 spec sample, same as
+// test-drop-upload-eml.js (real encoder output).
+console.log('# rtfDecompress - MS-OXRTFCP LZFu spec sample');
+var SPEC = Uint8Array.from([0x2d,0,0,0,0x2b,0,0,0,0x4c,0x5a,0x46,0x75,0xf1,0xc5,0xc7,0xa7,0x03,0x00,0x0a,0x00,0x72,0x63,0x70,0x67,
+  0x31,0x32,0x35,0x42,0x32,0x0a,0xf3,0x20,0x68,0x65,0x6c,0x09,0x00,0x20,0x62,0x77,0x05,0xb0,0x6c,0x64,0x7d,0x0a,0x80,0x0f,0xa0]);
+var BS = String.fromCharCode(92);
+A.eq('LZFu spec sample decompresses', api.rtfDecompress(SPEC),
+  '{' + BS + 'rtf1' + BS + 'ansi' + BS + 'ansicpg1252' + BS + 'pard hello world}\r\n');
+A.eq('an unknown compression type reads as nothing', api.rtfDecompress(new Uint8Array(16)), '');
 
 A.finish();

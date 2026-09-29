@@ -104,6 +104,9 @@ jobs:
       - name: Launcher dock latent-fix harness
         run: node scripts/test-dock-latent-fixes.js
 
+      - name: Launcher dock duplicate-key harness
+        run: node scripts/test-dock-dup-key.js
+
       - name: W-9 TIN region harness
         run: node scripts/test-w9-tin-region.js
 
@@ -119,6 +122,13 @@ jobs:
       - name: WO Audit deterministic flags harness
         run: node scripts/test-wo-audit-flags.js
 
+      # WO Audit 0.13.0 redesign: the operator-facing audit checks - the deterministic cancellation/
+      # no-service note scan, the flag->category map, and applyChecks gating (incl. the safe
+      # "missing key = enabled" default, per-category mutation controls, and the guarantee that an
+      # unrecognized flag is never silently dropped). Pure; negative controls throughout.
+      - name: WO Audit checks harness (0.13.0)
+        run: node scripts/test-wo-audit-checks.js
+
       # WO Audit 0.10.0: the note-POST helpers - eligibility (aged >30d, strict), the
       # WorkOrderNoteInput shape + fixed flags, the idempotency marker detect + embed. Each case
       # carries a negative control.
@@ -130,6 +140,63 @@ jobs:
       # chain - ECD" wrapping (incl. the PAST/needs-ECD flag). Each case carries a negative control.
       - name: WO Audit over-30 timeline harness (0.11.0)
         run: node scripts/test-wo-audit-timeline.js
+
+      # WO Audit 0.12.0: the normalized operational-state layer - the deterministic stage/blocker/
+      # owner/next-action/ECD derivation, the deterministic fallback note, and the STRICT AI output
+      # gate. Pins the rules that stop an audit note inventing operational facts: an arrival or
+      # delivery date NEVER becomes an ECD, a lapsed ECD reads TBD, age and silence NEVER assign an
+      # owner, this tool's own prior notes are not evidence for the next run, and any date the model
+      # prints that is absent from the evidence is rejected outright. Also re-pins the three shipped
+      # over-30 tails so the state layer cannot drift the established note format. Negative control
+      # on every rule.
+      - name: WO Audit operational-state + fallback + AI-output gate (0.12.0)
+        run: node scripts/test-wo-audit-state.js
+
+      # WO Audit 0.13.0: the evidence layer. Pins the four things that release added or hardened -
+      # the claim gate (an AI line may not assert completion, approval, pricing/NTE/DNE/PO,
+      # scheduling/dispatch/on-site, vendor assignment, client contact, fault, ownership or internal
+      # tooling wording the evidence does not carry), the widened GROUNDING date tokenizer that
+      # closes the ISO / hyphen / month-name bypass, strict work-order key normalization (a compound
+      # cell is REFUSED, never silently concatenated into a different real work order), and the
+      # read-only WOA_PHASE status-coverage diagnostic. Also pins that this tool's own [bwn:wo-audit]
+      # posts are excluded from AI evidence while still blocking a duplicate post, that the
+      # deterministic fallback passes its own gate for every stage, and that the over-30 ECD tails
+      # and the tally shape are unchanged. Table-driven, negative control on every rule.
+      - name: WO Audit evidence gate + key normalization + status coverage (0.13.0)
+        run: node scripts/test-wo-audit-evidence.js
+
+      # WO Audit 0.17.0: the Operations Action List engine (deriveAction) + the sheet builder. Slices
+      # the pure BWN WO-AUDIT ACTIONS block and pins the deterministic manager layer that sits on top
+      # of deriveState - one action bucket per phase, the P0/P1/P2/Monitor priority model (safety and
+      # P1-Critical gates included), internal owner vs external escalation, LABEL-only action-due,
+      # short pipe risk flags, rule IDs, data gaps, the actionable-only + sorted sheet build, and the
+      # run-date helpers. Negative controls throughout: a bare P1 is NOT safety, a future-dated visit
+      # is Monitor (not a verification miss), a valid owner is never rewritten - the rules that would
+      # otherwise fire unconditionally and inflate the list.
+      - name: WO Audit operations action list engine (0.17.0)
+        run: node scripts/test-wo-audit-actions.js
+
+      # WO Audit 0.18.0: the operational WORK-QUEUE model layered on the action engine. Slices the
+      # pure BWN WO-AUDIT ACTIONS block and drives deriveAction end to end plus the model functions
+      # (isOnsiteDateExpected / isEcdExpected / evaluateWaitingState / evaluateContradictions /
+      # calculateOperationalRisk / calculateActionability / classifyActionQueue) and the queue-grouped
+      # sheet builder. Covers all 13 spec scenarios - onsite-blocked P0, valid client-approval wait,
+      # overdue external commitment, future visit not P0-by-age, closeout-evidence-missing,
+      # meaningful-update-missing, proposed-no-decision-date, scheduled-no-visit, pending-schedule-
+      # no-vendor, action-undefined triage, no-false-unscheduled, no-false-ECD, and valid-waiting
+      # rank suppression - each with a negative control.
+      - name: WO Audit operational work queue (0.18.0)
+        run: node scripts/test-wo-audit-queue.js
+
+      # WO Audit 0.17.0 Commit 2: the Dashboard + Audit Rules sheet builders and the workbook
+      # header-alias mapping. Slices the pure BWN WO-AUDIT DASHBOARD block (deterministic counts,
+      # owner/FM/bucket/priority rollups sorted count-desc, the manager-review top-20 sort+cap, the
+      # 11-row rule catalog and the interpretation statement) and the BWN WO-AUDIT MAP block driven
+      # with a stubbed XLSX (every operational alias resolves, an absent field records -1, and the
+      # "Last Note Date" trap is never mistaken for the note-content column). Negative controls on the
+      # rollup key, the top-20 cap and the note-column trap.
+      - name: WO Audit dashboard + rules + column mapping (0.17.0)
+        run: node scripts/test-wo-audit-dashboard.js
 
       # bwn-wo-extract (Operations Assist): the thin, read-only caller for the deployed
       # /api/extract-work-order endpoint. Byte-sliced + fake-env harness pinning the bounded
@@ -206,6 +273,26 @@ jobs:
       - name: dispatch patchWorkOrder engine harness (status/assign/ECD writes)
         run: node scripts/test-dispatch-patch.js
 
+      # bwn-dispatch 0.12.3: the modal reported a failed ECD write as a contentless "GraphQL error"
+      # because gql() read errors[0].message and nothing else. Umbrava answers with three envelopes -
+      # standard GraphQL, an ASP.NET 400 whose `errors` is an OBJECT (no .length, so the old guard
+      # never even fired), and bare strings. Slices gqlErrText and pins that all three produce
+      # readable text, that a clean response stays null, and the 300-char cap. Four controls.
+      - name: dispatch GraphQL error-envelope harness (three envelopes, not just errors[0].message)
+        run: node scripts/test-dispatch-gql-errors.js
+
+      # bwn-dispatch 0.13.0: DISPATCH_API is the authoritative inventory of every network op the
+      # feature can run (direct reads + the two best-effort fallbacks + the WO write + the SWA notify
+      # POST), as metadata that never copies a selector. Slices DISPATCH_API and gqlErrText+gql from
+      # the shipped bytes and pins: the metadata contract on every entry; the UNREGISTERED-OP GUARD
+      # (every named GraphQL constant in source has an entry, so a new op cannot enter the dispatch
+      # path unregistered); the notify POST registered with its timeout sourced from the registry;
+      # the confirm->notify fail-closed ordering + stage timings; and gql() naming empty-body /
+      # non-JSON HTTP failures by status instead of a parser error. Two synthetic controls prove the
+      # guard and the empty-body handling can go red.
+      - name: dispatch API inventory + gql diagnostics harness (DISPATCH_API + empty-body 400)
+        run: node scripts/test-dispatch-api.js
+
       # temp-vendor 0.3.0: the vendor activate/deactivate writes routed through bwnGqlOp. Slices the
       # real write block (real bwnGqlOp runs, not a stub) and pins: activate resolves the reason id by
       # NAME then fires activateVendor with an audit entry (high-risk, confirmed:true from its panel);
@@ -256,6 +343,37 @@ jobs:
       # tripwire for the route going missing again: the slices throw if it is not in source.
       - name: Docs API harness (jobDocuments reader + docs:none gate)
         run: node scripts/test-docs-api.js
+
+      # API purchase-order read (purchaseOrders(workOrderNumber)) added beside the DOM readPOs(),
+      # plus a field-level parity log between the two. state.pos stays DOM-sourced; this is the
+      # tripwire for the API reader and the query shape (root field, not the deprecated nested
+      # workOrder{purchaseOrders}) drifting or regressing.
+      - name: PO API harness (purchaseOrders reader + parity log)
+        run: node scripts/test-po-api.js
+
+      # bwnVendorTokens / bwnVendorMatch - the distinctive-token vendor matcher Leak Guard and PO
+      # Approval share. Characterizes current rules on synthetic data; sliced by declaration, no markers.
+      - name: Leak Guard vendor-matcher harness (distinctive-token rules)
+        run: node scripts/test-leak-guard-matcher.js
+
+      # PO Approval poll lifecycle - schedule() / stopPoll() single-timer guard, stop on modal gone or
+      # buttons mounted, and the page-lifetime document.body observer. Characterizes current behavior.
+      - name: PO Approval poll-lifecycle harness (single timer + page-lifetime observer)
+        run: node scripts/test-po-approval-poll-lifecycle.js
+
+      # PO Approval v1.14 - the NTE comes from the PO row whose "..." menu opened the Send PO modal
+      # (10-minute window, same-vendor check), before recipient matching. Negative controls included.
+      - name: PO Approval clicked-row NTE harness
+        run: node scripts/test-po-approval-clicked-row.js
+
+      # bwnGqlRead() - the classified GraphQL read envelope (kind / status / codes, never rejects) that
+      # the PO shadow reader's give-up warn uses to tell auth-empty from schema drift from a dead
+      # network. Fixture-driven: 200 data, 200 partial, 200 errors-only, 400 JSON, tokenless 500 HTML,
+      # malformed JSON, 200 data:null, a body stream that dies mid-read, free-text / over-long error
+      # codes, network rejection; plus the pins that bwnGql()'s own throwing contract is intact and that
+      # Core's single bwnGqlRead call site is a `query` document.
+      - name: bwnGqlRead envelope harness
+        run: node scripts/test-bwn-gql-read.js
 
       # drop-upload 1.11.0 writes notes + documents via Umbrava's own mutations
       # (addEditJobNote; initializeJobDocument -> blob PUT -> bulkAddWorkOrderDocuments),
@@ -322,6 +440,33 @@ jobs:
       # do not rot in confirm-complete. Mirror of docs:none; a suggestion, never auto-advances.
       - name: Next Actions closure auto-advance harness (WO Assist 2.69)
         run: node scripts/test-assist-advance-gate.js
+
+      # Coordinator Action Queue (WO Assist 2.75): a PURE classification + partition + ranking
+      # layer over the engine's output. Three harnesses slice the real COORD-QUEUE block and run
+      # it in a vm (nothing restates the logic), each with negative controls.
+      #  - classify: ownership / readiness / urgency (off the shared clock) / friction, plus the
+      #    plain-language reason/doneWhen and the conservative unknown-clock handling.
+      - name: Coordinator Action Queue classification harness (WO Assist 2.75)
+        run: node scripts/test-coord-classify.js
+
+      #  - queue: the DO-NOW attention gate, the 3-item cap with overflow, the section precedence
+      #    and counts, and the coordinatorScore ordering (ready+due beats a higher-base waiting item;
+      #    critical beats due; low friction is only a bounded tie-break).
+      - name: Coordinator Action Queue partition + ranking harness (WO Assist 2.75)
+        run: node scripts/test-coord-queue.js
+
+      #  - waits: the waiting/revisit foundation - a valid wait suppresses before revisitAt, expires
+      #    and re-enters after, invalidates on a state-fingerprint change, and NEVER suppresses on
+      #    malformed/unknown storage (fail-open to visible).
+      - name: Coordinator Action Queue waiting/revisit harness (WO Assist 2.75)
+        run: node scripts/test-coord-waits.js
+
+      #  - render (WO Assist 2.76, BWN ODS pass): pins the render-layer contracts - semantic colour
+      #    (no white-on-amber, no green on Upcoming/One-click), real <button> header / nav label,
+      #    no prompt() in Mark waiting, honest error fallback, focus restore across rebuilds - each
+      #    probe with a negative control that reintroduces the old defect.
+      - name: Coordinator Action Queue render-contract harness (WO Assist 2.76)
+        run: node scripts/test-coord-render.js
 
       # UI-contract completeness ledger: names every bwn-*.user.js and forces each into a classified
       # row per shared UI contract (drawer exit / toast motion / reduced-motion / rail anchor), tied
@@ -495,6 +640,23 @@ jobs:
       # refusal is pinned in test-proposal-actions.js.)
       - name: "Proposal Actions live-resolve harness (RM-A3: status id + TSP assignee, fail-closed)"
         run: node scripts/test-pa-live-resolve.js
+
+      # Multiple proposals per job (bwn-proposal-actions 0.7.0): slices PA-SIBLINGS + readTotals and pins
+      # the sibling read (extended fields, fallback to the live-proven set, sortBy on both), canceled =
+      # not an option, the acknowledgement rule (several options / id missing / truncated / unreadable),
+      # and that readTotals never borrows a sibling's total. 0.7.1 adds the browser-local action history
+      # (one record per completed run via the real runSteps, dedup, retention, corrupt/blocked storage,
+      # Local record rendering, non-blocking confirm warning). Negative controls turn it red.
+      - name: Proposal Actions multi-proposal harness (sibling read, acknowledgement, no sibling total)
+        run: node scripts/test-pa-multi-proposal.js
+
+      # Kickback reliability (bwn-proposal-actions 0.7.12): slices PA-KICKBACK and pins one isolated,
+      # disposed AI session per draft, a failed proposal-context read never shown to the AI as an empty
+      # proposal (while a real empty scope / no lines is), and the reason gate (Summary / Total block,
+      # change-since-review line and placeholders are not a reason; any other wording is). The Confirm
+      # wiring is pinned in test-pa-multi-proposal.js. Negative controls turn it red.
+      - name: Proposal Actions kickback reliability harness (isolated AI session, context read, reason gate)
+        run: node scripts/test-pa-kickback.js
 
       # Track C write-back DRAIN half (bwn-write-queue.user.js): the coordinator's-tab executor that
       # claims a queued command from /api/wo-write-queue, confirms it, and turns it into a real

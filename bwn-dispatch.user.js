@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         BWN Dispatch (Broadway National)
 // @namespace    broadwaynational.bwn
-// @version      0.12.2
+// @version      0.13.0
 // @downloadURL  https://raw.githubusercontent.com/Intermu/userscripts/main/bwn-dispatch.user.js
 // @updateURL    https://raw.githubusercontent.com/Intermu/userscripts/main/bwn-dispatch.user.js
 // @description  One-click Dispatch for a work order - replaces manually typing a row into Dispatch_Notifications.xlsx. The Dispatch launcher shows only on a WO that is in "Pending Dispatch". It opens a confirm modal prefilled from the BWN Ops Suite bus (Tracking) and a same-origin Umbrava GraphQL read (Location as the site NUMBER, Priority, and the coordinator to ping): it uses the person this WO is assigned to (whoever a supervisor/manager assigned it to, read live when you open it), and when that is a team or blank it falls back to the coordinator from the most recent work order(s) at the same location. The coordinator name + email are editable before you send. On submit it POSTs the 5 typed fields plus the WO number (read from the URL, never typed - the flow needs it to deep-link the card, because Tracking is the CLIENT's tracking number and points at the wrong record) to the broadway-internal-ops SWA proxy (x-bwn-key gated) which forwards to the HTTP-triggered "Dispatch HTTP" Power Automate flow - the flow adds the row to Dispatch_Notifications.xlsx AND dispatches it (posts a Teams adaptive card to the coordinator and waits for their accept). Dispatching is a coordinator action, so there is no role gate (the x-bwn-key is the boundary). The assignee's email is not on the WO record (Umbrava exposes the coordinator NAME only), so it is resolved from a per-user name->email roster you maintain (seeded with you, and it remembers each coordinator you dispatch to); for a coordinator the roster has never met it falls back to a GUESS derived from the house name pattern and the signed-in user's own domain, shown with a "check it before you send" warning and always editable - never a silent send to an address nobody confirmed. The flow's secret URL stays server-side; nothing sensitive lives in this script. As of 0.10.0 the modal also writes the WO RECORD directly via the same-origin Umbrava GraphQL patchWorkOrder mutation (the write kanban proved live) - an operator-picked target status, an operator-picked assignee (a real Umbrava user, so the assign carries a proper GUID and the card name/email come from the record), and an auto priority-scaled Expected Completion Date - behind a confirm that spells out each write and warns that a status change resets the time-in-status clock. Writes run first and atomically; the Teams card is posted only if the record change succeeds. Registers a single "Dispatch" launcher into the shared dock (bwn:dock:*) - the dock tab is the only launcher; no floating fallback button.
@@ -18,7 +18,7 @@
 (function () {
   'use strict';
 
-  var VER = '0.12.2';   // keep in step with @version - this is what the console banner reports
+  var VER = '0.13.0';   // keep in step with @version - this is what the console banner reports
   var FONT = "-apple-system,BlinkMacSystemFont,'Segoe UI','Helvetica Neue',Arial,sans-serif";
   var GREEN = '#0d3d26';          // BWN Ops Suite brand green - matches CC Request / WO Audit
   var SWA_BASE = 'https://green-stone-0717dab0f.7.azurestaticapps.net';
@@ -29,6 +29,52 @@
   // does not hide the launcher.
   var DISPATCH_STATUS_RE = /pending\s+dispatch/i;
   console.info('[BWN DISPATCH] v' + VER + ' - Pending-Dispatch-gated launcher -> confirm modal (bus + live GraphQL prefill, name->email roster) -> direct patchWorkOrder writes (status/assign/ECD) + SWA /api/dispatch (x-bwn-key) -> Dispatch HTTP flow -> Dispatch_Notifications.xlsx + Teams card. Registers into the shared dock (bwn:dock:*); no floating fallback button.');
+
+  // ---- DISPATCH_API: the authoritative inventory of every network op this feature can run ----
+  // One entry per operation the dispatch path can execute - the DIRECT reads AND the indirect
+  // fallbacks AND the notify POST, not just the fetch() call-sites. It is metadata, never a second
+  // copy of a selector: the query/mutation TEXT stays in its own `const:`-named constant, so a
+  // registry row can never drift from the wire text. scripts/test-dispatch-api.js pins it two ways -
+  // every named GraphQL constant in the source has an entry here (the "unregistered op" build gate),
+  // and every entry points at a symbol that really exists. The WRITE op is ALSO enforced at RUNTIME
+  // by bwnGqlOp (BWN_OPS + scripts/test-registry-authoritative.js): an unregistered write is refused
+  // before it leaves the browser. Fields:
+  //   stage      prefill = runs when the modal OPENS, off the confirm->notify critical path;
+  //              write-gate / notify = ON the post-confirm critical path (timed, see submit()).
+  //   required   true = dispatch cannot complete without it; false = best-effort (fail-open / degrade).
+  //   after      the op that must resolve first when it cannot run in parallel (else null).
+  //   safeRetry  true ONLY for idempotent reads. The write and the notify POST are NEVER auto-retried
+  //              (no idempotency key exists - a retried card double-notifies, a retried write re-resets
+  //              the time-in-status clock).
+  //   fail       stable failure category for logs - never the raw server text (that carries input echo).
+  var DISPATCH_API = Object.freeze({
+    gateStatusRead:   { key: 'gateStatusRead',   name: 'WO status (dispatch gate)', transport: 'graphql',   method: 'POST', endpoint: '/api/graphql', operation: 'workOrder.statusName', const: 'GATE_Q',    payload: '{ n:Int }',      kind: 'read',         required: false, stage: 'prefill',    after: null,             timeoutMs: 0,     retry: 'none', safeRetry: true,  fail: 'gate-read' },
+    workOrderRead:    { key: 'workOrderRead',    name: 'WO hydration read',        transport: 'graphql',   method: 'POST', endpoint: '/api/graphql', operation: 'workOrder',          const: 'DISP_WO_Q', payload: '{ n:Int }',      kind: 'read',         required: false, stage: 'prefill',    after: null,             timeoutMs: 0,     retry: 'none', safeRetry: true,  fail: 'wo-read' },
+    userRead:         { key: 'userRead',         name: 'Assignee GUID -> person',  transport: 'graphql',   method: 'POST', endpoint: '/api/graphql', operation: 'user',               const: 'USER_Q',    payload: '{ id:ID! }',     kind: 'read',         required: false, stage: 'prefill',    after: 'workOrderRead',  timeoutMs: 0,     retry: 'none', safeRetry: true,  fail: 'user-read' },
+    statusList:       { key: 'statusList',       name: 'WO status list (picker)',  transport: 'graphql',   method: 'POST', endpoint: '/api/graphql', operation: 'workOrderStatuses',  const: 'STATUS_Q',  payload: '{}',             kind: 'read',         required: false, stage: 'prefill',    after: null,             timeoutMs: 0,     retry: 'none', safeRetry: true,  fail: 'status-list' },
+    userList:         { key: 'userList',         name: 'Users list (picker)',      transport: 'graphql',   method: 'POST', endpoint: '/api/graphql', operation: 'users',              const: 'USERS_Q',   payload: '{}',             kind: 'read',         required: false, stage: 'prefill',    after: null,             timeoutMs: 0,     retry: 'none', safeRetry: true,  fail: 'user-list' },
+    schemaIntrospect: { key: 'schemaIntrospect', name: 'Loc-field discovery',      transport: 'graphql',   method: 'POST', endpoint: '/api/graphql', operation: '__schema/__type',    const: null,        payload: '{ t?:String }',  kind: 'fallback',     required: false, stage: 'prefill',    after: null,             timeoutMs: 0,     retry: 'none', safeRetry: true,  fail: 'introspect' },
+    locationRoster:   { key: 'locationRoster',   name: 'Location-history roster',  transport: 'graphql',   method: 'POST', endpoint: '/api/graphql', operation: '(discovered field)', const: 'ROSTER_SEL', payload: '{ loc:ID!|Int! }', kind: 'fallback',   required: false, stage: 'prefill',    after: 'schemaIntrospect', timeoutMs: 0,   retry: 'none', safeRetry: true,  fail: 'roster' },
+    patchWorkOrder:   { key: 'patchWorkOrder',   name: 'WO record write',          transport: 'graphql',   method: 'POST', endpoint: '/api/graphql', operation: 'patchWorkOrder',     const: 'PATCH_M',   payload: '{ data:PatchWorkOrderInput }', kind: 'write', required: true,  stage: 'write-gate', after: null,        timeoutMs: 0,     retry: 'none', safeRetry: false, fail: 'wo-write' },
+    dispatchNotify:   { key: 'dispatchNotify',   name: 'SWA dispatch card POST',   transport: 'swa-proxy', method: 'POST', endpoint: '/api/dispatch', operation: 'dispatch',          const: 'PROXY_URL', payload: '5 fields + WONumber + actor',  kind: 'notification', required: true, stage: 'notify', after: 'patchWorkOrder', timeoutMs: 30000, retry: 'none', safeRetry: false, fail: 'notify' }
+  });
+
+  // High-resolution clock for the confirm->notify stage timings (submit()). Falls back to Date.now()
+  // where performance is unavailable; only ever measures elapsed ms, never wall-clock, never PII.
+  function perfNow() { try { return (typeof performance !== 'undefined' && performance.now) ? performance.now() : Date.now(); } catch (e) { return Date.now(); } }
+  // Log the critical-path stage timings, keyed by DISPATCH_API op. Numbers + op keys + outcome only -
+  // no field values, no addresses, no server text. console.debug so it is opt-in in the operator's
+  // devtools, not noise in the normal console.
+  function logDispatchTimings(t) {
+    try {
+      var parts = [];
+      if (t.hasWrites) parts.push(DISPATCH_API.patchWorkOrder.key + ' write-gate=' + Math.round(t.writeGateMs) + 'ms');
+      parts.push(DISPATCH_API.dispatchNotify.key + ' proxy=' + Math.round(t.proxyMs) + 'ms');
+      parts.push('confirm->proxy-start=' + Math.round(t.confirmToProxyStartMs) + 'ms');
+      parts.push('confirm->' + t.outcome + '=' + Math.round(t.confirmToDoneMs) + 'ms');
+      console.debug('[BWN DISPATCH] timings ' + parts.join(' | '));
+    } catch (e) { /* timing log is best-effort - never breaks a dispatch */ }
+  }
 
   // ---- WO id + BWN Ops Suite bus (read-only consumer, suite data contract v1) --
   // bwn-suite-core (WO Assist) PUBLISHES the current WO's facts to sessionStorage
@@ -168,16 +214,74 @@
   // app.umbrava.com is same-origin, so a plain fetch needs no @connect; the page's own
   // bearer is passed explicitly so it works from the GM_* sandbox. Best-effort only: any
   // miss leaves gating fail-open and the modal on its bus prefill, never blocks the send.
+  // Umbrava answers with THREE different error envelopes and only one of them is standard GraphQL,
+  // so a handler that reads `errors[0].message` alone reports a contentless "GraphQL error" for the
+  // other two. That is exactly what a live ECD dispatch hit 2026-09-18 (WO 1327282): the write was
+  // refused and the modal could only say "GraphQL error", with the real reason on the wire and
+  // nowhere else. The ASP.NET form was already documented as a known trap in
+  // [[umbrava-graphql-operations]] ("a handler that only inspects errors[0].message will
+  // mis-report it") and is worse than contentless here: `errors` is an OBJECT, so `.length` is
+  // undefined, the throw never fires, and gql resolves `undefined` - the failure then surfaces as
+  // bwnGqlOp's generic "unrecognized write response" instead of the field that was rejected.
+  //   GraphQL      { errors: [ { message: "..." } ] }
+  //   ASP.NET 400  { errors: { Field: ["The Field field is required."] } }   <- object, no .length
+  //   bare strings { errors: [ "..." ] }
+  // Returns null when there is no error. Capped so a server string cannot flood the modal; the text
+  // is shown to the operator only and never enters the PII-free audit ring (bwnGqlOp logs a fixed
+  // category, see F5).
+  function gqlErrText(j) {
+    var e = j && j.errors, parts;
+    if (!e) return null;
+    if (Object.prototype.toString.call(e) === '[object Array]') {
+      parts = e.map(function (x) {
+        if (typeof x === 'string') return x;
+        if (x && x.message) return String(x.message);
+        try { return JSON.stringify(x); } catch (err) { return String(x); }
+      });
+    } else if (typeof e === 'object') {
+      parts = Object.keys(e).map(function (k) { return k + ': ' + [].concat(e[k]).join(' '); });
+    } else {
+      parts = [String(e)];
+    }
+    var out = parts.join('; ').trim();
+    return out ? out.slice(0, 300) : null;
+  }
   function gql(query, variables) {
     var tok = authToken();
+    var status = 0;
     return fetch('/api/graphql', {
       method: 'POST',
       headers: { 'Authorization': 'Bearer ' + tok, 'Content-Type': 'application/json' },
       body: JSON.stringify({ query: query, variables: variables || {} })
-    }).then(function (r) { return r.json(); })
+    })
+      // Read the body as TEXT and parse it ourselves. r.json() throws a bare "Unexpected end of JSON
+      // input" on an EMPTY body - exactly what the REST backend behind this gateway returns on a
+      // BAD_USER_INPUT 400 (measured on WO 396636: 400, body "") - so the operator saw a parser error
+      // instead of the HTTP status. Now an empty / non-JSON body degrades to a status-named error the
+      // operator can forward, and the status rides err.bwnStatus for the caller's log.
+      .then(function (r) {
+        status = r.status;
+        return r.text().then(function (t) {
+          var j = null;
+          if (t) { try { j = JSON.parse(t); } catch (e) { /* non-JSON body - handled below */ } }
+          return j;
+        });
+      })
       .then(function (j) {
-        if (j && j.errors && j.errors.length) throw new Error(j.errors[0].message || 'GraphQL error');
-        return j && j.data;
+        var em = gqlErrText(j);
+        if (em) { var e = new Error(em); e.bwnStatus = status; throw e; }
+        if (j == null) {
+          // No parseable body. An HTTP error with an empty/non-JSON body cannot name the field it
+          // disliked, so name the status instead; a 4xx is deterministic (retrying repeats it).
+          if (status < 200 || status >= 300) {
+            var he = new Error('HTTP ' + status + ' with no readable error body');
+            he.bwnStatus = status;
+            if (status >= 400 && status < 500) he.bwnNonTransient = true;
+            throw he;
+          }
+          return null;   // 2xx with empty body: no data (the caller's null-guards handle it)
+        }
+        return j.data;
       });
   }
   // All selectors proven live (bwn-ask CORE_Q / STATUS_Q / COORD_Q). Isolated queries -
@@ -530,11 +634,34 @@
     if (rm > 0) return { mins: rm, from: 'response' };
     return null;
   }
-  function computeEcd(priority, nowMs) {
+  // Umbrava hands every date back as a LOCAL-OFFSET, minute-precision string
+  // ("2026-09-21T11:41:00-04:00"). toISOString() emits UTC with milliseconds
+  // ("2026-09-20T16:01:47.656Z") - valid ISO 8601, but the only date in the patch body that is not
+  // in the record's own shape, and the REST backend behind the GraphQL gateway answers a bad patch
+  // with a 400 carrying an EMPTY body (measured 2026-09-18 on WO 396636: BAD_USER_INPUT, upstream
+  // http://jobrestapi/api/WorkOrder/Patch, body ""), so it can never name the field it disliked.
+  // Match the record's shape rather than argue with a server that does not explain itself.
+  function pad2(n) { return (n < 10 ? '0' : '') + n; }
+  function isoLocal(d) {
+    var off = -d.getTimezoneOffset(), sign = off < 0 ? '-' : '+', abs = Math.abs(off);
+    return d.getFullYear() + '-' + pad2(d.getMonth() + 1) + '-' + pad2(d.getDate()) +
+      'T' + pad2(d.getHours()) + ':' + pad2(d.getMinutes()) + ':' + pad2(d.getSeconds()) +
+      sign + pad2(Math.floor(abs / 60)) + ':' + pad2(abs % 60);
+  }
+  // FLOOR AT firstTripDate (Mike, 2026-09-18). The priority-scaled basis alone put the completion
+  // date BEFORE the WO's own first trip on a live dispatch - WO 396636 auto-ECD 09/20 12:01 against
+  // a firstTripDate of 09/21 11:41 - which is wrong data whether or not it is what the backend
+  // refused. A completion date can never precede the first trip, so the later of the two wins.
+  // `basis` reports which one did, so the modal and the confirm both name it.
+  function ecdPlan(priority, nowMs) {
     var b = ecdBasisMinutes(priority);
     if (!b) return null;
-    return new Date((nowMs == null ? Date.now() : nowMs) + b.mins * 60000).toISOString();
+    var ms = (nowMs == null ? Date.now() : nowMs) + b.mins * 60000, floored = false;
+    var trip = priority && priority.firstTripDate ? Date.parse(priority.firstTripDate) : NaN;
+    if (isFinite(trip) && trip > ms) { ms = trip; floored = true; }
+    return { iso: isoLocal(new Date(ms)), mins: b.mins, from: b.from, floored: floored };
   }
+  function computeEcd(priority, nowMs) { var p = ecdPlan(priority, nowMs); return p ? p.iso : null; }
   // Build the whole-object priority value for the ECD write: copy the READ priority verbatim, map the
   // read's `hasPriorityOverride` onto the input's `hasOverridePriority` (forced true - a manual ECD
   // IS a priority override, matching the captured write), and override only expectedCompletionDate.
@@ -1151,12 +1278,33 @@
       if (hasWrites) {
         if (sel.statusId) { var so = statusSel.options[statusSel.selectedIndex]; wlines.push('  • Status → ' + (so ? so.text.replace(/ - current$/, '') : sel.statusId) + '   (RESETS the time-in-status clock)'); }
         if (sel.assignedTo) { var ao = assigneeSel.options[assigneeSel.selectedIndex]; wlines.push('  • Assign → ' + (ao ? (ao.getAttribute('data-name') || ao.text) : sel.assignedTo)); }
-        if (sel.ecd) wlines.push('  • Expected completion → ' + fmtEcd(sel.ecd) + '   (auto, now + ' + _ecdBasis + ')');
+        if (sel.ecd) wlines.push('  • Expected completion → ' + fmtEcd(sel.ecd) + '   (auto, ' + _ecdBasis + ')');
       }
       var confirmMsg = hasWrites
         ? ('This will WRITE to work order ' + woId + ':\n\n' + wlines.join('\n') + '\n\nThen post a Teams dispatch card to ' + payload.AssignedToName + '.\n\nContinue?')
         : ('Post a Teams dispatch card to ' + payload.AssignedToName + ' (Tracking ' + payload.Tracking + ')?\n\nNo work-order record changes were selected.');
       if (!window.confirm(confirmMsg)) return;
+
+      // Stage timings (confirm-OK -> Teams notify). The write concurrency is deliberately NONE: the
+      // three record changes are coalesced into ONE atomic patchWorkOrder (buildPatchData above), never
+      // three parallel writes. `priority` is a WHOLE-OBJECT replace, so concurrent field writes to the
+      // same WorkOrder/Patch endpoint would last-write-wins-clobber each other and could half-dispatch a
+      // WO. So "reduce confirm-to-notify latency" is won at MODAL OPEN (all prefill reads hydrate then,
+      // snapshot reused here - no re-read at confirm), leaving the confirm path at exactly one write +
+      // one POST. These marks measure that path; the stages match DISPATCH_API (see test-dispatch-api.js).
+      var perf = { confirm: perfNow(), writeStart: 0, writeEnd: 0, proxyStart: 0, proxyEnd: 0 };
+      function emitTimings(outcome) {
+        perf.proxyEnd = perfNow();
+        var ranProxy = perf.proxyStart > 0;   // 0 when a write failure aborted before the POST
+        logDispatchTimings({
+          hasWrites: hasWrites,
+          writeGateMs: perf.writeEnd - perf.writeStart,
+          proxyMs: ranProxy ? (perf.proxyEnd - perf.proxyStart) : 0,
+          confirmToProxyStartMs: ranProxy ? (perf.proxyStart - perf.confirm) : 0,
+          confirmToDoneMs: perf.proxyEnd - perf.confirm,
+          outcome: outcome
+        });
+      }
 
       var reenable = function () { submit.disabled = false; submit.textContent = 'Dispatch'; };
       submit.disabled = true;
@@ -1166,13 +1314,16 @@
       // successful write tells the operator the record already changed - re-running would re-write
       // (and re-reset the clock), so the message says to re-send the card only.
       function postCard() {
-        return gmPost(PROXY_URL, { 'Content-Type': 'application/json', 'x-bwn-key': key }, payload, 30000)
+        perf.proxyStart = perfNow();
+        return gmPost(PROXY_URL, { 'Content-Type': 'application/json', 'x-bwn-key': key }, payload, DISPATCH_API.dispatchNotify.timeoutMs)
           .then(function (r) {
             if (r.status >= 200 && r.status < 300 && r.json && r.json.ok) {
+              emitTimings('success');
               rosterRemember(payload.AssignedToName, payload.AssigneeEmail);   // learn this coordinator for next time
               closeModal();
               toast((hasWrites ? 'WO updated + dispatched ✓  ' : 'Dispatched ✓  ') + payload.AssignedToName + ' will get a Teams card to accept (Tracking ' + payload.Tracking + ').', 7000);
             } else {
+              emitTimings('card-rejected');
               reenable();
               var tail = hasWrites ? '  NOTE: the WO record WAS already updated - re-send the card only, do not re-run the writes.' : '';
               if (r.status === 400) msg.textContent = 'Card rejected (400)' + (r.json && r.json.error ? ': ' + r.json.error : ' - check the fields') + '.' + tail;
@@ -1183,6 +1334,7 @@
             }
           })
           .catch(function (err) {
+            emitTimings('proxy-error');
             reenable();
             msg.textContent = ((err && err.message) ? err.message : 'could not reach the proxy') + '.' + (hasWrites ? '  NOTE: the WO record WAS already updated; re-send the card only.' : '');
           });
@@ -1191,15 +1343,21 @@
       // Writes first (atomic); only notify if the record actually changed. A write failure aborts
       // before any card is sent, so a failed dispatch never notifies a coordinator about a WO whose
       // record did not change.
+      perf.writeStart = perfNow();
       var writeStep = hasWrites ? patchWorkOrder(data, {
         wo: sel.woNumber,
         before: { statusId: (_woRead && _woRead.statusId) || null, assignedTo: (_woRead && _woRead.assignedTo) || null, ecd: (_woRead && _woRead.priority && _woRead.priority.expectedCompletionDate) || null },
         after: { statusId: sel.statusId || null, assignedTo: sel.assignedTo || null, ecd: sel.ecd || null }
       }) : Promise.resolve(true);
       writeStep.then(function () {
+        perf.writeEnd = perfNow();   // required-write gate resolved; the proxy POST starts only now
         if (hasWrites) submit.textContent = 'Dispatching…';
         return postCard();
       }).catch(function (err) {
+        // A failed required write aborts BEFORE any card is sent. Record the gate timing for the log;
+        // proxyStart stays 0 so proxyMs reads 0 (the POST never ran) - the fail-closed gate, timed.
+        perf.writeEnd = perfNow();
+        emitTimings('write-failed');
         reenable();
         msg.textContent = 'Work order NOT updated: ' + ((err && err.message) ? err.message : err) + '. No card was sent.';
       });
@@ -1379,11 +1537,16 @@
   // priority SLA to scale from, in which case ECD is simply not written (never a baseless date).
   function showEcd(priority) {
     if (!ecdEl) return;
-    var b = ecdBasisMinutes(priority);
-    _ecdIso = b ? computeEcd(priority) : null;
+    var b = ecdPlan(priority);
+    _ecdIso = b ? b.iso : null;
     if (!_ecdIso) { _ecdBasis = ''; ecdEl.textContent = 'Expected completion date: no priority SLA on this WO - ECD will not be written.'; return; }
-    _ecdBasis = (b.from === 'SLA' ? 'SLA ' + b.mins + ' min' : 'response ' + b.mins + ' min');
-    ecdEl.innerHTML = 'Expected completion date → <strong>' + esc(fmtEcd(_ecdIso)) + '</strong><br><span style="color:#5b7367;font-size:11.5px;">auto: now + ' + esc(_ecdBasis) + ' (priority-scaled)</span>';
+    // _ecdBasis is a COMPLETE phrase, not a fragment: the floored case is not "now + something", so
+    // a shared "now + " prefix would misdescribe it in both the modal line and the confirm.
+    var window_ = (b.from === 'SLA' ? 'SLA ' : 'response ') + b.mins + ' min';
+    _ecdBasis = b.floored
+      ? 'the WO first trip - the ' + window_ + ' window lands before it'
+      : 'now + ' + window_ + ' (priority-scaled)';
+    ecdEl.innerHTML = 'Expected completion date → <strong>' + esc(fmtEcd(_ecdIso)) + '</strong><br><span style="color:#5b7367;font-size:11.5px;">auto: ' + esc(_ecdBasis) + '</span>';
   }
 
   // ---- Shared launcher dock (bwn:dock:*) -----------------------------------

@@ -2,6 +2,33 @@
 
 Standing instructions for Claude when working in this repo.
 
+## NEVER run an unbounded filesystem search (applies to subagents too)
+
+`find /` is effectively a hang on this machine, not a slow command. Measured 2026-09-17: a
+subagent ran `find / -iname "bwn-wo-audit.user.js"` and it was still running **60 minutes** later
+having produced nothing, holding its parent task open the whole time. Two reasons it never
+finishes here:
+
+- OneDrive placeholder directories can trigger per-file network hydration as `find` stats them.
+- SentinelOne inspects every `stat`, so each directory entry carries real cost.
+
+Rules - these bind every agent and subagent, not just the main session:
+
+1. **Never `find /`.** Never search from the POSIX root, and never from `/c` either.
+2. **Start from the repo root or a named bounded directory.** The repo is at
+   `/c/Users/mnajarro/repos/userscripts`; worktrees live under `/c/Users/mnajarro/repos/_wt/`.
+   Prefer the Grep and Glob tools over shelling out to `find` at all - they are already scoped.
+3. **Use Git Bash paths**, e.g. `/c/Users/mnajarro/...`. A quoted Windows path like
+   `"C:\Users\mnajarro"` is WRONG: Git Bash reads the backslashes as escapes, so `find` receives
+   the literal string `C:Usersmnajarro`, errors, and - when the caller has appended `2>/dev/null` -
+   the error is swallowed and the command silently returns nothing. This exact mistake shipped in
+   the same 2026-09-17 command.
+4. **Add `-maxdepth` whenever practical.** A bounded `find /c/Users/mnajarro -maxdepth 4 -iname
+   "bwn-wo-audit*"` answered the same question in about a second.
+5. **Do not background a command you do not need**, and kill one that is no longer needed. A
+   `run_in_background` search keeps its task "running" long after the work that wanted it is done,
+   which makes a finished agent look stuck.
+
 ## Roster changes MUST update the vault wiki (same change, before you call it done)
 
 **Trigger:** whenever the set of shipped userscripts changes -

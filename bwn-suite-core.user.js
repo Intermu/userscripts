@@ -1,10 +1,10 @@
 // ==UserScript==
 // @name         BWN Suite - Core (Broadway National)
 // @namespace    broadwaynational.bwn
-// @version      1.85.0
+// @version      1.89.5
 // @downloadURL  https://raw.githubusercontent.com/Intermu/userscripts/main/bwn-suite-core.user.js
 // @updateURL    https://raw.githubusercontent.com/Intermu/userscripts/main/bwn-suite-core.user.js
-// @description  Runs several Umbrava helpers for BWN coordinators, in the browser with no privileged grants. Includes: PO Approval + ETA Builder; WO Assist (GP/ETA, a stall watchdog, DNE calculator, and a next-action playbook); Email Leak Guard (checks recipients against vendor names, PO amounts, and client budget references before an outbound email sends); WO List Heat (a triage overlay + My Day strip on the work-order list, with an optional same-origin Umbrava API scan for deterministic full-board coverage); and the BWN Launcher (opens the Azure Static Web App tools with the current WO's context). Modules share state through sessionStorage/localStorage. The only network calls are same-origin Umbrava GraphQL requests (app.umbrava.com/api/graphql, the app's own session): List Heat's full-board scan and WO Assist's work-order / trip / clock-in / document reads, plus ONE write - BWN Views saves the column layout through Umbrava's own putUserPreference, the same preference the column chooser writes; everything else is offline. Toggle modules in BWN_MODULES below.
+// @description  Runs several Umbrava helpers for BWN coordinators, in the browser with no privileged grants. Includes: PO Approval + ETA Builder; WO Assist (GP/ETA, a stall watchdog, DNE calculator, and a next-action playbook); Email Leak Guard (checks recipients against vendor names, PO amounts, and client budget references before an outbound email sends); WO List Heat (a triage overlay + My Day strip on the work-order list, with an optional same-origin Umbrava API scan for deterministic full-board coverage); and the BWN Launcher (opens the Azure Static Web App tools with the current WO's context). Modules share state through sessionStorage/localStorage. The only network calls are same-origin Umbrava GraphQL requests (app.umbrava.com/api/graphql, the app's own session): List Heat's full-board scan and WO Assist's work-order / trip / clock-in / document / purchase-order reads, plus ONE write - BWN Views saves the column layout through Umbrava's own putUserPreference, the same preference the column chooser writes; everything else is offline. Toggle modules in BWN_MODULES below.
 // @match        https://app.umbrava.com/*
 // @match        https://*.umbrava.com/*
 // @run-at       document-start
@@ -113,7 +113,7 @@
   try { localStorage.setItem('bwn:status:core', JSON.stringify({ ver: BWN_VER, ts: Date.now() })); } catch (e) { /* best-effort */ }
 
   console.info('[BWN SUITE CORE] v' + BWN_VER + ' |',
-    'Shared Core 7 \u00b7 DOM Handles 1.0 \u00b7 PO Approval 1.13 \u00b7 WO Assist 2.74 \u00b7 Leak Guard 2.0 \u00b7 List Heat 3.28 \u00b7 Launcher 2.0 \u00b7 Views 3.1 \u00b7 Palette 1.1 \u00b7 Visit 1.2 \u00b7 Reminders 1.1 \u00b7 Timeline 1.1 \u00b7 TripCal 1.4 \u00b7 Bulk Ops 1.0 \u00b7 Connector 1.2 \u00b7 Governance 1.0 |',
+    'Shared Core 7 \u00b7 DOM Handles 1.0 \u00b7 PO Approval 1.14 \u00b7 WO Assist 2.76 \u00b7 Leak Guard 2.1 \u00b7 List Heat 3.28 \u00b7 Launcher 2.0 \u00b7 Views 3.1 \u00b7 Palette 1.1 \u00b7 Visit 1.2 \u00b7 Reminders 1.1 \u00b7 Timeline 1.1 \u00b7 TripCal 1.4 \u00b7 Bulk Ops 1.0 \u00b7 Connector 1.2 \u00b7 Governance 1.0 |',
     'enabled:', Object.keys(BWN_MODULES).filter(function (k) { return BWN_MODULES[k]; }).join(', '));
 
   // ===== BWN SHARED CORE v7 - KEEP IN SYNC across both suite scripts =====
@@ -1407,6 +1407,9 @@
   // Stays null if the WO Assist module is disabled by config, and every consumer must
   // null-guard - the audit then simply shows no next step instead of a wrong one.
   var bwnActsEngine = null;
+  // Coordinator Action Queue layer (classification + partitioning + ranking), published
+  // from the WO Assist module the same way bwnActsEngine is - null until that module loads.
+  var bwnCoordQueue = null;
 
   // ---- File-level same-origin GraphQL (shared by WO Assist reads + List Heat) --
   // @grant none: a plain SAME-ORIGIN POST to /api/graphql carries the app's Auth0
@@ -1448,6 +1451,61 @@
       return j && j.data;
     });
   }
+
+  // ===== BWN-GQL-READ START v1 (classified read envelope; sliced by scripts/test-bwn-gql-read.js) =====
+  // bwnGql() above resolves to `data` and throws errors[0].message - it drops the HTTP status and the
+  // GraphQL error CODE, which is the actionable part. Measured live 2026-09-17: UNAUTHENTICATED,
+  // BAD_USER_INPUT, GRAPHQL_VALIDATION_FAILED and FORBIDDEN all arrive as HTTP 200 bodies with
+  // `errors[]`; a tokenless POST is an HTTP 500 with a non-JSON body; ASP.NET validation is an HTTP 400
+  // JSON body with no `errors`. bwnGqlRead() NEVER rejects: it resolves an envelope
+  //   { kind, status, noToken, data, codes, messageLen }
+  // kind: 'ok' | 'partial' (data AND errors) | 'graphql-error' | 'no-data' | 'bad-json' |
+  //       'http-4xx-no-json' | 'http-5xx-no-json' | 'http-<status>' (4xx/5xx JSON without errors[]) | 'network'
+  // so a caller can tell auth-empty from schema drift from a dead network without reading a message.
+  // bwnGql()'s contract is unchanged and the per-script transport copies are untouched on purpose.
+  function bwnGqlClassify(status, body, parsed) {
+    if (status === 0) return 'network';
+    if (!parsed) return status >= 500 ? 'http-5xx-no-json' : status >= 400 ? 'http-4xx-no-json' : 'bad-json';
+    var errs = body && Array.isArray(body.errors) && body.errors.length ? body.errors : null;
+    if (status >= 400) return errs ? 'graphql-error' : 'http-' + status;
+    if (errs) return body.data ? 'partial' : 'graphql-error';
+    if (!body || body.data === undefined || body.data === null) return 'no-data';
+    return 'ok';
+  }
+  function bwnGqlEnvelope(status, body, parsed, noToken) {
+    var errs = body && Array.isArray(body.errors) ? body.errors : [];
+    return {
+      kind: bwnGqlClassify(status, body, parsed), status: status, noToken: !!noToken,
+      data: (parsed && body && body.data) || null,
+      codes: errs.slice(0, 5).map(function (e) {
+        var c = String((e && e.extensions && e.extensions.code) || 'nocode');
+        return /^[A-Za-z][A-Za-z0-9_]{0,39}$/.test(c) ? c : 'othercode';   // server-authored: shape-gate it, never print a free-text extensions.code; at most 5
+      }),
+      messageLen: errs.map(function (e) { return String((e && e.message) || '').length; })
+    };
+  }
+  function bwnGqlRead(query, variables) {
+    var tok = authToken();
+    return fetch('/api/graphql', {
+      method: 'POST',
+      headers: { 'Authorization': 'Bearer ' + tok, 'Content-Type': 'application/json' },
+      body: JSON.stringify({ query: query, variables: variables || {} })
+    }).then(function (r) {
+      // r.text() has its OWN rejection (a body stream aborted mid-response). The fetch onRejected
+      // below never sees it, so without this handler the never-rejects contract would be false
+      // exactly when the connection dies late. A truncated body is unparseable: it classifies as bad-json.
+      return r.text().then(function (t) {
+        var j = null, parsed = true;
+        try { j = JSON.parse(t); } catch (e) { parsed = false; }
+        return bwnGqlEnvelope(r.status, j, parsed, !tok);
+      }, function () { return bwnGqlEnvelope(r.status, null, false, !tok); });
+    }, function (err) {
+      var env = bwnGqlEnvelope(0, null, false, !tok);
+      env.messageLen = [String((err && err.message) || err || '').length];
+      return env;
+    });
+  }
+  // ===== BWN-GQL-READ END v1 =====
 
   // ===== BWN-OPS START v1 (operation registry + audited GraphQL wrapper; sliced by scripts/test-bwn-ops.js) =====
   // The suite's safety spine for /api/graphql. bwnGqlOp() classifies an operation against
@@ -1922,7 +1980,9 @@
   //    generic trade word (ELECTRIC = 8) can never clear the bar by itself;
   //  - names with no distinctive token keep the legacy full-name LCS >= 6;
   //  - names whose distinctive letters are too short to test ("AB24 Electric")
-  //    require nearly the WHOLE compressed name in the recipient.
+  //    require nearly the WHOLE compressed name in the recipient;
+  //  - a vendor known by its INITIALS matches when 3+ leading initials start a
+  //    recipient word ("The Neutral Zone Electrical ..." -> TNZ -> "tnzelectric@").
   function bwnVendorMatch(vendorName, recipientRaw) {
     if (!vendorName || !recipientRaw) return { hit: false, token: null };
     var key = '|' + String(recipientRaw).toUpperCase().split(/[^A-Z0-9]+/)
@@ -1934,6 +1994,11 @@
       if (alphaTok.length < 4) continue;
       if (key.indexOf('|' + alphaTok) !== -1) return { hit: true, token: toks[i] };
       if (alphaTok.length >= 6 && alpha.indexOf(alphaTok) !== -1) return { hit: true, token: toks[i] };
+    }
+    var initials = String(vendorName).toUpperCase().replace(/[^A-Z0-9 ]/g, ' ').split(/\s+/)
+      .map(function (w) { return w.charAt(0); }).join('').replace(/[^A-Z]/g, '');
+    for (var k = initials.length; k >= 3; k--) {
+      if (key.indexOf('|' + initials.slice(0, k)) !== -1) return { hit: true, token: initials.slice(0, k) };
     }
     var distinct = toks.map(function (t2) { return t2.replace(/[^A-Z]/g, ''); }).join('');
     if (distinct.length >= 6 && BWN.lcsLen(distinct, alpha) >= 6) return { hit: true, token: null };
@@ -1948,7 +2013,7 @@
 
 
   // ==========================================================================
-  // MODULE: PO Approval + ETA Builder v1.12
+  // MODULE: PO Approval + ETA Builder v1.14
   // ==========================================================================
   bwnBoot('poApproval', BWN_MODULES.poApproval, function () {
     'use strict';
@@ -2019,7 +2084,55 @@
       return to ? (to.textContent || '') : '';
     }
 
+    // Prefer the dedicated vendor-name element; fall back to the row's text.
+    // Measured 2026-09-03: Umbrava now renders the vendor as `purchase-order-vendor-link`
+    // on every PO row and `-name` did not appear once, so without the link fallback this
+    // silently degraded to the WHOLE row text - which carries amounts and dates and makes
+    // the vendor match noisier exactly where it guards an outbound mail.
+    function rowVendor(row) {
+      var vEl = row.querySelector('[data-testid="purchase-order-vendor-name"]') ||
+                row.querySelector('[data-testid="purchase-order-vendor-link"]');
+      return (vEl ? vEl.textContent : row.textContent) || '';
+    }
+    // v1.10: same amount semantics as WO Assist/Leak Guard - every $ figure in
+    // the row, cents optional, largest wins. The old cents-required first-match
+    // regex made "$4,500" invisible and could pick a smaller line item.
+    // v1.12: zero amounts dropped - a drafted "$0.00" PO row must never win and
+    // put "a not-to-exceed of $0.00" in the vendor's approval email.
+    function rowAmounts(row) {
+      var amts = [];
+      var re = /\$\s*([\d,]+(?:\.\d{1,2})?)/g, m;
+      while ((m = re.exec(row.textContent || '')) !== null) {
+        var a9 = parseFloat(m[1].replace(/,/g, ''));
+        if (a9 > 0) amts.push(a9);
+      }
+      return amts;
+    }
+
+    // v1.14: the Send Purchase Order modal is opened from ONE PO row's "..." menu
+    // (purchase-order-popper-menu, inside that row's POAccordion). Remember which row,
+    // so its amount is used directly instead of guessing the row from the recipients.
+    // Keyed by testid + vendor text: POAccordion-<n> is a render index, so a row whose
+    // vendor changed under the same index is not trusted. Recipient matching stays as
+    // the fallback (modal opened some other way, or the click is older than 10 min).
+    var lastPoMenu = null;
+    document.addEventListener('click', function (e) {
+      var btn = e.target && e.target.closest && e.target.closest('[data-testid="purchase-order-popper-menu"]');
+      var row = btn && btn.closest('[data-testid^="POAccordion-"]');
+      if (row) lastPoMenu = { tid: row.getAttribute('data-testid'), vendor: rowVendor(row), t: Date.now() };
+    }, true);
+    function clickedRowNTE() {
+      if (!lastPoMenu || Date.now() - lastPoMenu.t > 10 * 60000) return null;
+      var row = document.querySelector('[data-testid="' + lastPoMenu.tid + '"]');
+      if (!row || rowVendor(row) !== lastPoMenu.vendor) return null;
+      var amts = rowAmounts(row);
+      return amts.length ? fmtMoney(Math.max.apply(null, amts)) : null;
+    }
+
     function findNTE(modal) {
+      var clicked = clickedRowNTE();
+      if (clicked) { console.info('[BWN PO] NTE from the PO row whose menu opened this modal:', clicked); return clicked; }
+
       var recRaw = recipientsRaw(modal);
       var recipients = alphaOnly(recRaw);
       if (!recipients) return null;
@@ -2028,26 +2141,8 @@
       var best = null, bestScore = 0;
       for (var i = 0; i < rows.length; i++) {
         var row = rows[i];
-        // Prefer the dedicated vendor-name element; fall back to the row's text.
-        // Measured 2026-09-03: Umbrava now renders the vendor as `purchase-order-vendor-link`
-        // on every PO row and `-name` did not appear once, so without the link fallback this
-        // silently degraded to the WHOLE row text - which carries amounts and dates and makes
-        // the vendor match noisier exactly where it guards an outbound mail. vendorOf() below
-        // already had this fallback; this call site did not.
-        var vEl = row.querySelector('[data-testid="purchase-order-vendor-name"]') ||
-                  row.querySelector('[data-testid="purchase-order-vendor-link"]');
-        var vendorRaw = (vEl ? vEl.textContent : row.textContent) || '';
-        // v1.10: same amount semantics as WO Assist/Leak Guard - every $ figure in
-        // the row, cents optional, largest wins. The old cents-required first-match
-        // regex made "$4,500" invisible and could pick a smaller line item.
-        // v1.12: zero amounts dropped - a drafted "$0.00" PO row must never win and
-        // put "a not-to-exceed of $0.00" in the vendor's approval email.
-        var amts = [];
-        var re = /\$\s*([\d,]+(?:\.\d{1,2})?)/g, m;
-        while ((m = re.exec(row.textContent || '')) !== null) {
-          var a9 = parseFloat(m[1].replace(/,/g, ''));
-          if (a9 > 0) amts.push(a9);
-        }
+        var vendorRaw = rowVendor(row);
+        var amts = rowAmounts(row);
         if (!amts.length) continue;
         // v1.12: tiered scoring - a distinctive-token hit (tier 1000) beats any
         // overlap; within a tier, LCS breaks ties so two token-hitting rows rank by
@@ -2239,7 +2334,7 @@
   });
 
   // ==========================================================================
-  // MODULE: WO Assist: GP + ETA Watchdog + Playbook v2.74 (Connector 1.2)
+  // MODULE: WO Assist: GP + ETA Watchdog + Playbook v2.76 (Connector 1.2)
   // ==========================================================================
   bwnBoot('woAssist', BWN_MODULES.woAssist, function () {
     'use strict';
@@ -2269,7 +2364,7 @@
     var PANEL_ID = 'bwn-gp-panel';
     var GREEN = BWN.GREEN;
 
-    console.info('[BWN GP] WO Assist v2.74 loaded on', location.href);
+    console.info('[BWN GP] WO Assist v2.76 loaded on', location.href);
 
     // ---- Parsing helpers (shared via BWN core) -----------------------------
     var parseMoney = BWN.parseMoney;
@@ -2781,7 +2876,7 @@
     // Confident reads only: a failed/absent read leaves bwn:props absent (unknown), never a
     // guessed 0 - same unknown-vs-empty contract as the docs reader.
     var PROPS_DONE = Object.create(null);
-    var CLIENT_PROPS_Q = 'query WOClientProposals($jobId: Int!) { listClientProposals(jobId: $jobId, page: { skip: 0, take: 50 }) { rowCount items { id approvedDate rejectedDate canceledDate } } }';
+    var CLIENT_PROPS_Q = 'query WOClientProposals($jobId: Int!) { listClientProposals(jobId: $jobId, page: { skip: 0, take: 50 }, sortBy: [{ columnName: "id", direction: DESC }]) { rowCount items { id approvedDate rejectedDate canceledDate } } }';
     function fetchProposals(woNum, jobId) {
       if (!woNum || !jobId || PROPS_DONE[woNum]) return;
       PROPS_DONE[woNum] = 'pending';
@@ -2816,6 +2911,200 @@
         try { refresh(); } catch (e) { }
       }).catch(function () { TASKS_DONE[woNum] = 'error'; });
     }
+
+    // ===== BWN-PO-API START v1 (API purchase-order read + parity log; sliced by scripts/test-po-api.js) =====
+    // Root query field only - purchaseOrders(workOrderNumber). The nested workOrder { purchaseOrders }
+    // shape is DEPRECATED on this schema and returns null - do not switch to it.
+    // paidDate is the EMPTY STRING, not null/absent, when a PO has not been paid.
+    // ADDITIVE ONLY: state.pos stays sourced from the DOM readPOs() above until this parity log has
+    // been read against live WOs - nothing here changes Next Actions behaviour.
+    var PO_CACHE = Object.create(null);    // woNum -> { pos, apiCount, ts } | 'pending' | 'error'
+    var PO_PARITY = Object.create(null);   // woNum -> true once poParityLog has logged it
+    var PO_WARNED = Object.create(null);   // woNum -> true once a failed read has been warned about (retries stay silent)
+    var PO_TRIES = Object.create(null);    // woNum -> failed attempts
+    var PO_MAX_TRIES = 3;   // the shadow read must not add a second per-render retry loop on a persistent failure (e.g. a tokenless HTTP 500) - fetchDocs retries forever, this one goes quiet after PO_MAX_TRIES per page load
+    // Warn asymmetry: a rejected (network) failure warns once on first failure and once more at
+    // give-up (two warns); a schema-drift (non-array) failure never warns on first failure, only
+    // once at give-up (one warn) - both name the WO only, never a row value.
+    var PO_API_Q = 'query BwnWOPOs($n: Int!) { purchaseOrders(workOrderNumber: $n) { id number formattedPurchaseOrderNumber phase statusId statusName state notToExceed { amount currency precision } nextOnsiteDate hasScheduledTrip trips { id number onSiteDate status completedDate canceledDate } vendorId vendorName vendorIdentity { id companyName isDependent hasActiveUsers } paidDate vendorAcceptedDate purchaseOrderDate acceptedEmailStatus } }';
+    // Terminal phases (done=true). Closed counts as done here - an INTENTIONAL divergence from the
+    // DOM regex above, which has no "Closed" keyword to match.
+    var PO_DONE_PHASES = { Canceled: 1, Closed: 1, Declined: 1, Revoked: 1, WorkComplete: 1, ConfirmComplete: 1 };
+    var PO_COST_CLOSED_PHASES = { Canceled: 1, Declined: 1, Revoked: 1 };
+    function poApiDateStr(v) {
+      if (!v) return null;
+      var d = new Date(v);
+      return isNaN(+d) ? null : ((d.getMonth() + 1) + '/' + d.getDate() + '/' + d.getFullYear());
+    }
+    function poFromApi(row) {
+      var phase = String(row.phase || '');
+      var statusName = String(row.statusName || '');
+      var sn = statusName.toLowerCase();
+      var nte = row.notToExceed;
+      // precision defaults to 2 here on purpose (NOT bwnMoney's `|| 0`, which would 100x the dollars
+      // on a missing precision); a missing notToExceed reads amount 0 AND is flagged via api.nteAbsent
+      // below so parity can tell a real $0 from an absent NTE.
+      var precision = (nte && typeof nte.precision === 'number') ? nte.precision : 2;
+      var amount = (nte && typeof nte.amount === 'number') ? nte.amount / Math.pow(10, precision) : 0;
+      var done = !!PO_DONE_PHASES[phase];
+      var poStatus = '';
+      if (sn === 'confirm complete') poStatus = 'confirm';
+      else if (sn === 'material ordered' || sn === 'need material') poStatus = 'materials';
+      else if (sn === 'pending acceptance') poStatus = 'accept';   // "Unassigned" stays '' - no vendor to chase
+      var costOpen = amount > 0 && !PO_COST_CLOSED_PHASES[phase] && sn !== 'paid' && sn !== 'invoiced';
+      var vendor = String(row.vendorName || (row.vendorIdentity && row.vendorIdentity.companyName) || '(vendor n/a)')
+        .replace(/\s+/g, ' ').trim() || '(vendor n/a)';
+      var num = String(row.number);
+      var trips = Array.isArray(row.trips) ? row.trips : [];
+      var openTripCount = trips.filter(function (t) { return t && !t.completedDate && !t.canceledDate; }).length;
+      return {
+        vendor: vendor, num: num, sid: 'ln' + num.padStart(3, '0'),
+        amount: amount, schedDate: poApiDateStr(row.nextOnsiteDate), done: done,
+        poStatus: poStatus, statusText: statusName, costOpen: costOpen,
+        api: {
+          id: row.id, number: row.number, statusId: Number(row.statusId), phase: phase, state: row.state,
+          vendorId: row.vendorId, nextOnsiteDate: row.nextOnsiteDate || null,
+          hasScheduledTrip: !!row.hasScheduledTrip, openTripCount: openTripCount,
+          paid: sn === 'paid' || !!row.paidDate, nteAbsent: !nte
+        }
+      };
+    }
+    function fetchPOs(woNum) {
+      if (!woNum) return;
+      var c = PO_CACHE[woNum];
+      if (c === 'pending' || (c && c !== 'error')) return;
+      if ((PO_TRIES[woNum] || 0) >= PO_MAX_TRIES) return;
+      PO_CACHE[woNum] = 'pending';
+      bwnGqlRead(PO_API_Q, { n: Number(woNum) }).then(function (env) {
+        // Only a CLEAN read feeds the parity cache. A 'partial' (data AND errors[]) is a degraded body:
+        // a FORBIDDEN on one field nulls it while the rest of the row survives, which would cache a
+        // wrong-but-plausible row as a SUCCESS (no retry) and log a false DOM-vs-API mismatch; and it
+        // usually arrives as data:{purchaseOrders:null}, which would fall into the schema-drift branch
+        // below and throw the failure CLASS away - the thing this read exists to report. bwnGql() threw
+        // on any errors[]; this consumer keeps that bar. Everything but 'ok' is routed to the catch
+        // below carrying the class + GraphQL error codes (never a message), so the one warn per WO says
+        // network / http-500 / graphql-error:UNAUTHENTICATED instead of a server-authored string.
+        if (env.kind !== 'ok') { var fail = new Error(env.kind); fail.bwnKind = env.kind; fail.bwnCodes = env.codes; fail.bwnStatus = env.status; fail.bwnNoToken = env.noToken; throw fail; }
+        var d = env.data;
+        var rows = d && d.purchaseOrders;
+        if (!Array.isArray(rows)) { PO_CACHE[woNum] = 'error'; PO_TRIES[woNum] = (PO_TRIES[woNum] || 0) + 1; if (PO_TRIES[woNum] >= PO_MAX_TRIES) console.warn('[BWN PO] api read gave up for this page load', woNum); return; }   // schema drift = unknown, NEVER empty; schema-drift path
+        var seenSids = {};
+        var pos = rows.map(function (row) {
+          var p = poFromApi(row);
+          if (seenSids[p.sid]) p.sid = p.sid + '-' + row.id;   // two POs can share a number - keys must stay distinct
+          seenSids[p.sid] = 1;
+          return p;
+        });
+        PO_CACHE[woNum] = { pos: pos, apiCount: pos.length, ts: Date.now() };
+        try { poParityLog(woNum); } catch (e) { }
+        try { refresh(); } catch (e) { }
+      }).catch(function (err) {
+        PO_CACHE[woNum] = 'error';   // retried on the next render, like fetchDocs; warn once per WO, not once per retry
+        PO_TRIES[woNum] = (PO_TRIES[woNum] || 0) + 1;
+        if (PO_TRIES[woNum] >= PO_MAX_TRIES) console.warn('[BWN PO] api read gave up for this page load', woNum);   // rejected-fetch path
+        if (!PO_WARNED[woNum]) {
+          PO_WARNED[woNum] = true;
+          console.warn('[BWN PO] api read failed', woNum, err && err.bwnKind ? (err.bwnKind + (err.bwnCodes && err.bwnCodes.length ? ':' + err.bwnCodes.join(',') : '') + ' http' + err.bwnStatus + (err.bwnNoToken ? ' no-token' : '')) : String(err && err.message || err).slice(0, 200));   // class + code for a transport failure; the 200-char message slice only for a thrown exception inside the reader
+        }
+      });
+    }
+    function readPOsApi() {
+      var woNum = currentWOId();
+      if (!woNum) return null;
+      var c = PO_CACHE[woNum];
+      if (c && c !== 'pending' && c !== 'error') return c.pos;
+      fetchPOs(woNum);
+      return null;   // pending / errored / just-fired - unknown, never a guessed empty
+    }
+    // Parity: DOM readPOs() vs the API read above, joined by sid (digit line-label sids only, /^ln\d{2,4}(-\d+)?$/),
+    // logged once per WO per page load. Counts, sids and field NAMES only - never amounts, dates,
+    // vendor strings or GUIDs (a sid that collided on its line number carries the PO's internal Int
+    // id as a suffix; nothing else from the row reaches the summary). schedDate mismatches report a
+    // fixed category string (schedDate:domAbsent/domNull/apiNull/day), never a date value. The summary
+    // also carries hdrSeen (did the header testid resolve - the URL guard stays the only gate when it
+    // did not), domSkipped (DOM rows excluded from the join - a vendor-GUID/render-index sid, or any other sid shape),
+    // unjoinedDomSids (the sid list, same redaction class as the existing unjoinedApiSids),
+    // apiAmountAbsent (API rows with no notToExceed), and tzOffsetMin (so a pasted summary is
+    // interpretable for the date-boundary question). This re-calls readPOs(), which re-fires its own
+    // pre-existing '[BWN GP] PO row has multiple amounts' info line on a multi-$ row - that line is
+    // old and carries amounts; the parity summary itself never does.
+    // Both published sid lists (unjoinedDomSids, unjoinedApiSids) pass the same digit-line-label
+    // filter above, so unjoinedApi may exceed unjoinedApiSids.length - the difference is
+    // unpublishable API sids, a schema-drift signal, never a value from those rows.
+    // Redaction in full: the console.warn above carries only the WO number and an error string
+    // truncated to 200 chars (never a row value); the summary itself carries only counts, sids,
+    // field names, booleans, and tzOffsetMin.
+    function poParityLog(woNum) {
+      if (!woNum || PO_PARITY[woNum]) return;
+      var c = PO_CACHE[woNum];
+      if (!c || c === 'pending' || c === 'error') return;
+      // Never latch another WO's DOM: after an SPA route change the URL moves before the accordion
+      // re-renders, so require the URL AND the rendered header (when present) to name this WO.
+      if (String(currentWOId()) !== String(woNum)) return;
+      var hdr = (typeof document.querySelector === 'function') ? document.querySelector('[data-testid="work-order-header-number-formatted"]') : null;
+      if (hdr && (hdr.textContent || '').indexOf(String(woNum)) === -1) return;
+      var domRows = readPOs();
+      var domCount = domRows.length;
+      var apiRows = c.pos;
+      if (!domCount && apiRows.length) return;   // DOM not rendered yet (or the scrape is broken) - wait for it; a confident-empty API list + an empty DOM logs below (the stuck-handoff evidence)
+      function dayOf(s) { if (!s) return null; var d = new Date(s); return isNaN(+d) ? null : (d.getFullYear() + '-' + d.getMonth() + '-' + d.getDate()); }
+      var domBySid = {}, domLabelAbsent = 0, domSkipped = 0;
+      domRows.forEach(function (r) {
+        // Only digit line labels (optionally the numeric collision suffix) may reach unjoinedDomSids;
+        // anything else is counted, never published.
+        if (r.sid && /^ln\d{2,4}(-\d+)?$/.test(r.sid)) domBySid[r.sid] = r; else domSkipped++;
+        if (r.schedDate === undefined) domLabelAbsent++;
+      });
+      var domMultiAmount = 0;
+      var amtRe = /\$\s*([\d,]+(?:\.\d{1,2})?)/g;
+      document.querySelectorAll('[data-testid^="POAccordion-"]').forEach(function (row) {
+        var n = 0, mm; amtRe.lastIndex = 0;
+        while ((mm = amtRe.exec(row.textContent || '')) !== null) n++;
+        if (n > 1) domMultiAmount++;
+      });
+      var apiBySid = {}, apiTerminalNoSched = 0, apiAmountAbsent = 0;
+      apiRows.forEach(function (r) {
+        apiBySid[r.sid] = r;
+        if (r.done && !r.api.nextOnsiteDate) apiTerminalNoSched++;
+        if (r.api.nteAbsent) apiAmountAbsent++;
+      });
+      var joined = 0, unjoinedDomSids = [], unjoinedApiSids = [], unjoinedApiCount = 0, mismatches = [];
+      Object.keys(domBySid).forEach(function (sid) {
+        var d = domBySid[sid], a = apiBySid[sid];
+        if (!a) { unjoinedDomSids.push(sid); return; }
+        joined++;
+        var fields = [];
+        if (Math.abs((d.amount || 0) - (a.amount || 0)) >= 0.005) fields.push('amount');
+        if (dayOf(d.schedDate) !== dayOf(a.schedDate)) fields.push(d.schedDate === undefined ? 'schedDate:domAbsent' : !d.schedDate ? 'schedDate:domNull' : !a.schedDate ? 'schedDate:apiNull' : 'schedDate:day');
+        if (!!d.done !== !!a.done) fields.push('done');
+        if ((d.poStatus || '') !== (a.poStatus || '')) fields.push('poStatus');
+        if (!!d.costOpen !== !!a.costOpen) fields.push('costOpen');
+        if (nvVendor(d.vendor) !== nvVendor(a.vendor)) fields.push('vendor');
+        // The DOM status region may carry extra tokens ("Open Material Ordered") and punctuation
+        // differences ("On-Site" / "On Site"), so compare API statusName as a normalized substring;
+        // an EMPTY API name is flagged, never vacuously matched.
+        var as = nvVendor(a.statusText || '').replace(/[^A-Z0-9]+/g, ' ').trim(); if (!as || nvVendor(d.statusText || '').replace(/[^A-Z0-9]+/g, ' ').trim().indexOf(as) === -1) fields.push('statusText');
+        if (fields.length) mismatches.push({ sid: sid, fields: fields });
+      });
+      Object.keys(apiBySid).forEach(function (sid) { if (!domBySid[sid]) { unjoinedApiCount++; if (/^ln\d{2,4}(-\d+)?$/.test(sid)) unjoinedApiSids.push(sid); } });
+      var summary = {
+        wo: woNum, domCount: domCount, apiCount: apiRows.length, joined: joined,
+        unjoinedDom: unjoinedDomSids.length, unjoinedDomSids: unjoinedDomSids,
+        unjoinedApi: unjoinedApiCount, unjoinedApiSids: unjoinedApiSids,
+        domMultiAmount: domMultiAmount, domLabelAbsent: domLabelAbsent, domSkipped: domSkipped,
+        apiTerminalNoSched: apiTerminalNoSched, apiAmountAbsent: apiAmountAbsent, mismatches: mismatches,
+        hdrSeen: !!hdr, tzOffsetMin: new Date().getTimezoneOffset()
+      };
+      PO_PARITY[woNum] = true;
+      console.info('[BWN PO parity]', summary);
+      try { window.__bwnPoParity = summary; } catch (e) { }
+    }
+    function poParityTick() {
+      readPOsApi();
+      var woNum = currentWOId();
+      if (woNum) poParityLog(woNum);
+    }
+    // ===== BWN-PO-API END v1 =====
 
     // ---- Documents via jobDocuments(workOrderNumber) ---------------------------
     // Third reader in this cluster, same cache shape as readWO/fetchTrips: async
@@ -2905,9 +3194,15 @@
         consider(anchored(parseInt(m[1], 10), parseInt(m[2], 10), yr));
       }
       var MO = ['jan', 'feb', 'mar', 'apr', 'may', 'jun', 'jul', 'aug', 'sep', 'oct', 'nov', 'dec'];
-      var re2 = /\b(jan|feb|mar|apr|may|jun|jul|aug|sep|oct|nov|dec)[a-z]*\.?\s+(\d{1,2})\b/ig, m2;
+      // Honour an explicit year when the body gives one ("July 8, 2026"), exactly as the
+      // slash branch above already does. Without this a pasted email SIGNATURE line -
+      // "Sent: Wednesday, July 8, 2026" - was read as a yearless "July 8", and because that
+      // month is >45 days before the note it forward-projected to July 2027 and was proposed
+      // as the ECD (live-reported on W-368564 / tracking 1214704). The year is right there in
+      // the text; drop-it-then-guess was the whole defect.
+      var re2 = /\b(jan|feb|mar|apr|may|jun|jul|aug|sep|oct|nov|dec)[a-z]*\.?\s+(\d{1,2})(?:,?\s*(\d{4}))?\b/ig, m2;
       while ((m2 = re2.exec(s || '')) !== null) {
-        consider(anchored(MO.indexOf(m2[1].slice(0, 3).toLowerCase()) + 1, parseInt(m2[2], 10), null));
+        consider(anchored(MO.indexOf(m2[1].slice(0, 3).toLowerCase()) + 1, parseInt(m2[2], 10), m2[3] ? parseInt(m2[3], 10) : null));
       }
       return out;
     }
@@ -3091,6 +3386,7 @@
       try { if (woApi && woApi.id) fetchProposals(currentWOId(), woApi.id); } catch (e) { }   // async: populates bwn:props open-count for the live-jobs push (needs jobId)
       try { fetchTasks(currentWOId()); } catch (e) { }   // async: populates bwn:tasks open-count for the live-jobs push (needs only the WO number)
       var pos = readPOs();
+      try { poParityTick(); } catch (e) { }
       var vendorTotal = pos.reduce(function (a, p) { return a + (p.amount > 0 ? p.amount : 0); }, 0);
       var nte = detectNTE();
       // WO-header override: when the workOrder API has landed, trust its exact money over the
@@ -3302,9 +3598,6 @@
         '.bwn-act-row.nudge{box-shadow:inset 3px 0 0 var(--bwn-bad);padding-left:8px;}' +
         '.bwn-act-dis{font:500 11px ui-monospace,"Segoe UI Mono","SF Mono",monospace;color:var(--bwn-warn);margin-top:3px;}' +
         '.bwn-act-btns{display:flex;flex-direction:column;gap:4px;flex:none;align-items:stretch;}' +
-        '.bwn-act-lbl.nav{cursor:pointer;}' +
-        '.bwn-act-lbl.nav:hover{text-decoration:underline;text-underline-offset:2px;}' +
-        '.bwn-act-lbl.nav:focus-visible{outline:2px solid var(--bwn-accent);outline-offset:2px;border-radius:4px;}' +
         '.bwn-act-help-t{display:inline-block;margin-left:6px;padding:0;width:15px;height:15px;line-height:14px;vertical-align:1px;border:1px solid var(--bwn-border);border-radius:999px;background:var(--bwn-surface-2);color:var(--bwn-text-faint);font:600 10px ui-monospace,"Segoe UI Mono","SF Mono",monospace;cursor:pointer;flex:none;}' +
         '.bwn-act-help-t:hover{color:var(--bwn-green);border-color:var(--bwn-green);}' +
         '.bwn-act-help{margin-top:5px;padding:7px 9px;border-left:2px solid var(--bwn-green);border-radius:0 6px 6px 0;background:var(--bwn-surface-2);font-size:11.5px;line-height:1.45;color:var(--bwn-text-strong);}' +
@@ -3316,15 +3609,97 @@
         '.bwn-act-esc{padding:7px 12px;font:500 11.5px ui-monospace,"Segoe UI Mono","SF Mono",monospace;background:var(--bwn-warn-bg);color:var(--bwn-warn-fg);border-top:1px solid var(--bwn-border-2);line-height:1.4;}' +
         '.bwn-act-esc:last-child{border-radius:0 0 9px 9px;}' +
         '.bwn-actc{display:block;width:100%;align-self:stretch;box-sizing:border-box;margin:6px 0 14px;border:1px solid var(--bwn-border);border-left:3px solid var(--bwn-green);border-radius:10px;background:var(--bwn-surface);font-family:-apple-system,BlinkMacSystemFont,"Segoe UI","Helvetica Neue",Arial,sans-serif;box-shadow:0 1px 4px rgba(13,38,26,.06);}' +
-        '.bwn-actc-hd{display:flex;align-items:center;gap:10px;padding:8px 12px;cursor:pointer;user-select:none;}' +
-        '.bwn-actc-hd:focus-visible{outline:2px solid var(--bwn-accent);outline-offset:-2px;}' +
+        // Card header is a real <button aria-expanded> (was a div role=button). Focus rings in this
+        // card use --bwn-text-strong, not the accent: #2ECC71 on the white host panel is ~1.9:1 and
+        // fails the 3:1 indicator floor; text-strong is ~12:1 light and re-maps for dark.
+        '.bwn-actc-hd{display:flex;align-items:center;gap:10px;width:100%;box-sizing:border-box;padding:8px 12px;border:none;border-radius:9px;background:none;color:inherit;font:inherit;text-align:left;cursor:pointer;user-select:none;}' +
+        '.bwn-actc-hd:focus-visible{outline:2px solid var(--bwn-text-strong);outline-offset:-2px;}' +
         '.bwn-actc-t{font:500 10px ui-monospace,"Segoe UI Mono","SF Mono",monospace;color:var(--bwn-green);letter-spacing:.08em;}' +
-        '.bwn-actc-n{font:500 10px ui-monospace,"Segoe UI Mono","SF Mono",monospace;color:#fff;background:var(--bwn-warn);border-radius:999px;padding:2px 9px;white-space:nowrap;}' +
-        '.bwn-actc-n.ok{background:var(--bwn-accent);color:var(--bwn-green-dk);}' +
+        // Counts use the warn / ok TRIADS: white on --bwn-warn was ~2.9:1 at 10px (fails AA).
+        '.bwn-actc-n{font:600 10px ui-monospace,"Segoe UI Mono","SF Mono",monospace;color:var(--bwn-warn-fg);background:var(--bwn-warn-bg);border:1px solid var(--bwn-warn);border-radius:999px;padding:2px 9px;white-space:nowrap;}' +
+        '.bwn-actc-n.ok{background:var(--bwn-ok-bg);color:var(--bwn-ok-fg);border-color:var(--bwn-green);}' +
+        '.bwn-actc-n.bad{background:var(--bwn-bad-bg);color:var(--bwn-bad-fg);border-color:var(--bwn-bad);}' +
         '.bwn-actc-n.anchor{background:var(--bwn-surface-3);color:var(--bwn-text-faint);}' +
-        '.bwn-actc-s{font:500 10px ui-monospace,"Segoe UI Mono","SF Mono",monospace;color:var(--bwn-text-faint);margin-left:auto;}' +
+        '.bwn-actc-s{flex:1 1 80px;min-width:0;text-align:right;font:500 10px ui-monospace,"Segoe UI Mono","SF Mono",monospace;color:var(--bwn-text-faint);margin-left:auto;}' +
         '.bwn-actc-x{color:var(--bwn-text-faint);font-size:11px;}' +
-        '.bwn-actc-body{padding:2px 12px 9px;}';
+        '.bwn-actc-body{padding:2px 12px 9px;}' +
+        // ---- Coordinator Action Queue -----------------------------------------
+        // Semantic colour (BWN ODS): DO NOW with work in it is AMBER (action needed) on a quiet
+        // surface; green only when it is genuinely clear. It used to sit on the green tint, which
+        // read "all good" while listing due work.
+        '.bwn-cq-donow{margin:4px 0 6px;padding:8px 10px 4px;border:1px solid var(--bwn-border);border-left:3px solid var(--bwn-warn);border-radius:9px;background:var(--bwn-surface);}' +
+        '.bwn-cq-donow.is-clear{border-left-color:var(--bwn-green);background:var(--bwn-ok-bg);}' +
+        '.bwn-cq-donow-hd{display:flex;align-items:center;gap:9px;margin-bottom:2px;}' +
+        '.bwn-cq-donow-t{font:600 10px ui-monospace,"Segoe UI Mono","SF Mono",monospace;letter-spacing:.1em;color:var(--bwn-text-strong);}' +
+        '.bwn-cq-donow-n{font:600 10px ui-monospace,"Segoe UI Mono","SF Mono",monospace;color:var(--bwn-warn-fg);background:var(--bwn-warn-bg);border:1px solid var(--bwn-warn);border-radius:999px;padding:2px 9px;}' +
+        '.bwn-cq-donow.is-clear .bwn-cq-donow-n{color:var(--bwn-ok-fg);background:var(--bwn-ok-bg);border-color:var(--bwn-green);}' +
+        '.bwn-cq-donow .bwn-act-row:last-child{border-bottom:none;}' +
+        '.bwn-cq-card{align-items:flex-start;}' +
+        '.bwn-cq-reason{font-size:12.5px;color:var(--bwn-text);line-height:1.4;margin-top:3px;}' +
+        '.bwn-cq-done{font:500 11px ui-monospace,"Segoe UI Mono","SF Mono",monospace;color:var(--bwn-text-faint);margin-top:4px;}' +
+        '.bwn-cq-zero{font-size:12.5px;color:var(--bwn-text);padding:4px 2px 2px;}' +
+        '.bwn-cq-zero-sub{font:500 11px ui-monospace,"Segoe UI Mono","SF Mono",monospace;color:var(--bwn-text-faint);padding:2px 2px 4px;}' +
+        '.bwn-cq-badges{display:inline-flex;flex-wrap:wrap;gap:4px;margin-top:3px;}' +
+        // Badges: red = critical, amber = due, everything else (upcoming / owner / snoozed /
+        // one-click) is neutral gray. Green is reserved for a confirmed state, so "Upcoming" and
+        // "One-click" no longer wear it. Every badge is text, never a colour-only dot.
+        '.bwn-cq-badge{font:600 10px ui-monospace,"Segoe UI Mono","SF Mono",monospace;letter-spacing:.03em;padding:1px 6px;border-radius:999px;white-space:nowrap;background:var(--bwn-surface-3);color:var(--bwn-text-muted);border:1px solid transparent;}' +
+        '.bwn-cq-badge.u-critical{background:var(--bwn-bad);color:#fff;}' +
+        '.bwn-cq-badge.u-due{background:var(--bwn-warn-bg);color:var(--bwn-warn-fg);border-color:var(--bwn-warn);}' +
+        '.bwn-cq-badge.sched,.bwn-cq-badge.blk{background:var(--bwn-surface-2);border-color:var(--bwn-border);}' +
+        '.bwn-cq-badge.fric{background:transparent;border-color:var(--bwn-border);}' +
+        '.bwn-cq-dbg{font:500 10px ui-monospace,"Segoe UI Mono","SF Mono",monospace;color:var(--bwn-text-faint);margin-top:4px;padding:3px 6px;border-radius:5px;background:var(--bwn-surface-2);word-break:break-all;}' +
+        '.bwn-cq-sec{margin-top:6px;}' +
+        '.bwn-cq-sec-hd{display:flex;align-items:center;gap:8px;width:100%;box-sizing:border-box;padding:6px 8px;border:none;border-radius:7px;background:var(--bwn-surface-2);color:var(--bwn-text-muted);cursor:pointer;text-align:left;font:500 11px ui-monospace,"Segoe UI Mono","SF Mono",monospace;}' +
+        '.bwn-cq-sec-hd:hover{background:var(--bwn-surface-3);}' +
+        '.bwn-cq-sec-hd{min-height:32px;}' +
+        '.bwn-cq-sec-hd:focus-visible{outline:2px solid var(--bwn-text-strong);outline-offset:1px;}' +
+        '.bwn-cq-sec-x{color:var(--bwn-text-faint);width:10px;}' +
+        '.bwn-cq-sec-t{color:var(--bwn-text);}' +
+        '.bwn-cq-sec-n{background:var(--bwn-surface-3);color:var(--bwn-text-muted);border-radius:999px;padding:1px 8px;}' +
+        '.bwn-cq-sec-hd .bwn-cq-badge{margin-left:auto;}' +
+        '.bwn-cq-sec-body{padding:2px 4px 2px;}' +
+        '.bwn-cq-compact{display:flex;flex-wrap:wrap;gap:6px 9px;align-items:flex-start;padding:7px 2px;border-bottom:1px solid var(--bwn-surface-3);}' +
+        '.bwn-cq-compact:last-child{border-bottom:none;}' +
+        '.bwn-cq-compact .bwn-act-main{flex:1;min-width:0;}' +
+        '.bwn-cq-snz{font-size:11.5px;color:var(--bwn-text-muted);margin-top:3px;}' +
+        '.bwn-cq-warn{margin:4px 0 6px;padding:8px 10px;border:1px solid var(--bwn-warn);border-left-width:3px;border-radius:7px;background:var(--bwn-warn-bg);color:var(--bwn-warn-fg);font-size:12.5px;line-height:1.4;}' +
+        // Row controls, scoped to this card so no other .bwn-wa-btn surface changes. Buttons wrap
+        // onto their own line under the text (the Notes panel is narrow; the old right-hand
+        // column squeezed the reason text) and meet the 32px dense-target floor. All are
+        // secondary weight; the ONE primary is Actioned on the top DO NOW card (.bwn-cq-primary),
+        // so the eye finds a single intended action. Flat fill - no gradient.
+        '.bwn-actc .bwn-act-row{flex-wrap:wrap;}' +
+        '.bwn-actc .bwn-act-btns{flex:1 1 100%;flex-direction:row;flex-wrap:wrap;align-items:center;gap:6px;padding-left:28px;}' +
+        '.bwn-actc .bwn-cq-compact .bwn-act-btns{padding-left:0;}' +
+        '.bwn-actc .bwn-act-btns:empty{display:none;}' +
+        '.bwn-actc .bwn-wa-btn{min-height:32px;padding:5px 11px;border:1px solid var(--bwn-border);border-radius:7px;background:var(--bwn-surface);color:var(--bwn-text);font-size:12px;line-height:1.2;}' +
+        '.bwn-actc .bwn-wa-btn:hover{background:var(--bwn-surface-2);border-color:var(--bwn-text-faint);filter:none;}' +
+        '.bwn-actc .bwn-wa-btn:focus-visible{outline:2px solid var(--bwn-text-strong);outline-offset:2px;}' +
+        '.bwn-actc .bwn-wa-btn[aria-expanded="true"]{background:var(--bwn-surface-3);border-color:var(--bwn-text-muted);}' +
+        '.bwn-actc .bwn-wa-btn.bwn-cq-primary{background:var(--bwn-green);border-color:var(--bwn-green);color:#fff;}' +
+        '.bwn-actc .bwn-wa-btn.bwn-cq-primary:hover{background:var(--bwn-green-dk);}' +
+        '.bwn-actc .bwn-wa-btn.bwn-cq-tert{border-color:transparent;background:transparent;color:var(--bwn-text-muted);}' +
+        // 32px checkbox target: the label wrapper carries the hit area; the box stays 15px.
+        '.bwn-cq-cbw{flex:none;display:inline-flex;align-items:center;justify-content:center;width:32px;height:32px;margin:-8px -8px -8px -9px;border-radius:6px;cursor:pointer;}' +
+        '.bwn-cq-cbw input[type=checkbox]{margin:0;}' +
+        '.bwn-cq-cbw:focus-within{outline:2px solid var(--bwn-text-strong);outline-offset:-4px;}' +
+        // Step label that scrolls to its field: a real <button> (was a div role=button that ALSO
+        // contained the "?" button - nested interactive controls). Dotted underline = it goes somewhere.
+        '.bwn-cq-nav{margin:0;padding:0;border:0;background:none;color:inherit;font:inherit;line-height:inherit;text-align:left;cursor:pointer;text-decoration:underline dotted;text-underline-offset:3px;}' +
+        '.bwn-cq-nav:hover{text-decoration-style:solid;}' +
+        '.bwn-cq-nav:focus-visible{outline:2px solid var(--bwn-text-strong);outline-offset:2px;border-radius:3px;}' +
+        // "?" help toggle: 15px glyph, ~33px hit area via an invisible ::after.
+        '.bwn-actc .bwn-act-help-t{position:relative;}' +
+        '.bwn-actc .bwn-act-help-t::after{content:"";position:absolute;inset:-9px;}' +
+        '.bwn-actc .bwn-act-help-t:focus-visible{outline:2px solid var(--bwn-text-strong);outline-offset:2px;}' +
+        // Inline Mark-waiting form (replaces two prompt() dialogs that silently coerced bad input).
+        '.bwn-cq-wait{flex:1 1 100%;display:flex;flex-wrap:wrap;align-items:flex-end;gap:8px 12px;margin:2px 0 2px 28px;padding:8px 10px;border:1px solid var(--bwn-border);border-radius:7px;background:var(--bwn-surface-2);color:var(--bwn-text);}' +
+        '.bwn-cq-wait label{display:flex;flex-direction:column;gap:3px;font-size:11.5px;font-weight:600;color:var(--bwn-text-muted);}' +
+        '.bwn-cq-wait select{min-height:32px;padding:4px 6px;border:1px solid var(--bwn-border);border-radius:6px;background:var(--bwn-surface);color:var(--bwn-text);font:13px -apple-system,BlinkMacSystemFont,"Segoe UI","Helvetica Neue",Arial,sans-serif;}' +
+        '.bwn-cq-wait select:focus-visible{outline:2px solid var(--bwn-text-strong);outline-offset:1px;}' +
+        '.bwn-cq-wait-note{flex:1 1 100%;margin:0;font-size:11.5px;line-height:1.4;color:var(--bwn-text-muted);}' +
+        '.bwn-cq-wait-acts{display:flex;gap:6px;}';
       document.head.appendChild(st);
     }
 
@@ -4183,6 +4558,342 @@
     // localStorage side effect (stagePlanPush) that must not fire 200 times per scan.
     bwnActsEngine = computeNextActions;
 
+    // ==== COORD-QUEUE BEGIN =====================================================
+    // Coordinator Action Queue: a PURE classification + partition + ranking layer over
+    // the acts computeNextActions produced. It never regenerates, drops, or reorders the
+    // lifecycle output - it ENRICHES each action with coordinator-facing properties
+    // (ownership / readiness / urgency / friction / reason / doneWhen / coordinatorScore)
+    // and sorts them into a "DO NOW" set vs. collapsed sections. Same purity contract as
+    // computeNextActions: no DOM, no storage, no network, no side effects - deterministic
+    // given (acts, state, C, now). The render layer feeds it the engine output plus
+    // state.waits (the waiting/revisit records the IMPURE layer loaded from localStorage,
+    // like state.docs) and a `now`.
+    //
+    // Timing is NOT re-invented: urgency reads the SAME shared clock the engine uses
+    // (bwnThresholdsFor + ESCALATE_DAYS + bwnPrioMult). Unknown source data stays
+    // conservative - a failed/absent read never manufactures coordinator ownership,
+    // readiness, or urgency (mirrors the docs===null contract).
+    var COORD_CFG = {
+      // coordinatorScore tuning - initial values, centralized so nothing scatters. A
+      // ready+due coordinator action must outrank a more-severe-looking waiting one, and a
+      // low-friction bonus must never outweigh criticality / readiness / ownership.
+      score: {
+        ownCoordinator: 30, readyReady: 25,
+        urg: { critical: 50, due: 30, upcoming: 10, 'not-due': -35 },
+        fric: { 'one-click': 8, assisted: 5, manual: 0, external: 0 },
+        waiting: -40, blocked: -25, notCoordinator: -30
+      },
+      urgencyRank: { critical: 3, due: 2, upcoming: 1, 'not-due': 0, informational: -1 },
+      doNowMax: 3,
+      // How far past the status "bad" clock reads as critical (mirrors the engine's own
+      // stale720 = overRatio>=3 and the escalate overLimit = 2x tests).
+      criticalOverRatio: 3
+    };
+    // Per-key-prefix metadata: intrinsic actor + whether it is a coordinator-actionable
+    // INTERNAL step. Chase steps (actor vendor/client) flip to coordinator ownership only
+    // once their follow-up window has arrived (see coordOwnership). Unlisted -> a
+    // conservative coordinator/internal default.
+    var COORD_META = {
+      noshow: { actor: 'vendor', internal: false }, stall: { actor: 'vendor', internal: false },
+      eta: { actor: 'vendor', internal: false }, ecdrisk: { actor: 'vendor', internal: false },
+      poacc: { actor: 'vendor', internal: false }, pomat: { actor: 'vendor', internal: false },
+      poconf: { actor: 'vendor', internal: false },
+      pocost: { actor: 'coordinator', internal: true }, docs: { actor: 'coordinator', internal: true },
+      docsverify: { actor: 'coordinator', internal: true }, advance: { actor: 'coordinator', internal: true },
+      intake: { actor: 'coordinator', internal: true }, ecd: { actor: 'coordinator', internal: true },
+      dne: { actor: 'coordinator', internal: true }, unbilled: { actor: 'coordinator', internal: true },
+      note: { actor: 'coordinator', internal: true }, clientcad: { actor: 'coordinator', internal: true },
+      task: { actor: 'coordinator', internal: true }, authored: { actor: 'coordinator', internal: true },
+      escalate: { actor: 'escalate', internal: false }, anchor: { actor: 'system', internal: false }
+    };
+    // WO status phase -> intrinsic actor for the generic phase chase.
+    var COORD_PHASE_ACTOR = {
+      schedule: 'coordinator', intake: 'coordinator', 'proposal-approved': 'coordinator',
+      onhold: 'coordinator', recall: 'coordinator', workcomplete: 'coordinator',
+      billing: 'coordinator', invoiced: 'coordinator',
+      proposal: 'vendor', materials: 'vendor', scheduled: 'vendor', onsite: 'vendor',
+      inprogress: 'vendor', accept: 'vendor', confirmcomplete: 'vendor',
+      'proposal-sent': 'client', client: 'client', 'materials-client': 'client'
+    };
+    function coordPrefix(a) { return (a && a.key ? String(a.key) : '').split(':')[0]; }
+    function coordPhase(a) { return (a && a.key || '').indexOf('phase:') === 0 ? (a.key.split(':')[1] || '') : null; }
+
+    // Static friction capability, from the action's SHAPE only (pure - never touches the
+    // DOM; the render layer still gates the real button on live dock/selectors). one-click
+    // = a proven in-page nav target or a tool-drawer mapping (open/focus/reveal, no write);
+    // assisted = a prefilled note/copy the coordinator reviews then saves; external = it is
+    // on another party; manual = a human task with no in-app affordance.
+    var COORD_NAV_KEYS = { pomat: 1, poacc: 1, poconf: 1, pocost: 1, ecd: 1 };
+    function coordToolable(a) {
+      var k = a.key || '';
+      if (k.indexOf('phase:schedule') === 0 || k.indexOf('phase:intake') === 0) return true;
+      return coordPrefix(a) === 'escalate';
+    }
+    function coordNavable(a) {
+      var p = coordPrefix(a);
+      if (COORD_NAV_KEYS[p]) return true;
+      if (p === 'intake' && /\bNTE\b/.test(a.why || '')) return true;
+      return false;
+    }
+    // ---- Urgency: from the SAME shared clock the engine uses -------------------
+    function coordStatusRatio(state, C) {
+      if (!state || state.hrs == null) return null;
+      var th = bwnThresholdsFor(state.status, state.priority, C);
+      if (!(th.bad > 0)) return null;
+      return { over: state.hrs / th.bad, warn: state.hrs / (th.warn || th.bad) };
+    }
+    function coordUrgency(a, state, C, now) {
+      var p = coordPrefix(a);
+      if (a.anchor) return 'informational';
+      if (p === 'ecdrisk' || p === 'escalate') return 'critical';
+      if (p === 'noshow' || p === 'stall') {
+        var escDays = Math.max(2, Math.round(ESCALATE_DAYS * bwnPrioMult(state.priority)));
+        var days = (p === 'stall' && state.stall) ? state.stall.days
+          : (state.noShow ? Math.max(1, Math.round((now - state.noShow.ms) / 86400000)) : 0);
+        return days > escDays ? 'critical' : 'due';
+      }
+      if (p === 'task') return /overdue/i.test((a.label || '') + ' ' + (a.why || '')) ? 'critical' : 'due';
+      if (p === 'authored') return /overdue/i.test(a.label || '') ? 'critical' : 'due';
+      if (p === 'docsverify') return 'upcoming';
+      if (p === 'ecd') return a.key === 'ecd:none' ? 'upcoming' : 'due';
+      if (p === 'pomat' || p === 'poacc' || p === 'phase') {
+        var r = coordStatusRatio(state, C);
+        if (!r) return p === 'phase' ? 'not-due' : 'due';
+        return r.over >= COORD_CFG.criticalOverRatio ? 'critical' : r.over >= 1 ? 'due' : r.warn >= 1 ? 'upcoming' : 'not-due';
+      }
+      // docs / advance / intake / pocost / poconf / eta / unbilled / note / clientcad / dne
+      // are actionable gates the engine only emits when already actionable -> due.
+      return 'due';
+    }
+    function coordScheduled(a, state, now) {
+      return coordWaitValidPure(state && state.waits && state.waits[a.key], a, state, now);
+    }
+    function coordOwnership(a, state, C, now, urgency) {
+      var p = coordPrefix(a);
+      if (a.anchor) return 'system';
+      if (p === 'escalate') {
+        // The escalation TIER owner: supervisor / management keep their ownership (the
+        // decision moves up, out of the coordinator's hands); a director reader owns the
+        // call themselves, so it reads as a coordinator decision.
+        return a.owner === 'management' ? 'management' : a.owner === 'supervisor' ? 'supervisor' : 'coordinator';
+      }
+      var meta = COORD_META[p] || { actor: 'coordinator', internal: true };
+      var actor = meta.actor, internal = meta.internal;
+      if (p === 'phase') { actor = COORD_PHASE_ACTOR[coordPhase(a)] || 'coordinator'; internal = (actor === 'coordinator'); }
+      if (internal) return 'coordinator';
+      // Chase class: the coordinator owns the follow-up only once it is due/critical; before
+      // that the ball is genuinely in the other party's court (do not nag a fresh dispatch).
+      return (urgency === 'due' || urgency === 'critical') ? 'coordinator' : actor;
+    }
+    function coordReadiness(a, state, C, now, urgency, ownership) {
+      if (a.anchor) return 'informational';
+      if (coordScheduled(a, state, now)) return 'scheduled';
+      if (a.blocked) return 'blocked';   // explicit engine hint (none emitted today; keeps the partition honest + future-proof)
+      if (ownership !== 'coordinator') return 'waiting';
+      return 'ready';
+    }
+    function coordFriction(a, state, C, now, readiness) {
+      if (a.anchor) return 'manual';
+      if (readiness === 'waiting' || readiness === 'scheduled') return 'external';
+      if (coordNavable(a) || coordToolable(a)) return 'one-click';
+      if (a.text || a.openEcd) return 'assisted';
+      return 'manual';
+    }
+    // ---- Plain-language reason + doneWhen (no rule jargon in Coordinator UI) ----
+    var COORD_REASON = {
+      noshow: 'A scheduled visit passed with no completion on file.',
+      stall: 'The vendor has gone quiet past the scheduled visit and chasing has not moved it.',
+      eta: 'An approved PO has no scheduled date on record.',
+      ecdrisk: 'The completion date is within 24 hours and no visit is confirmed.',
+      poacc: 'A vendor has not accepted the PO, so nobody is committed to the work.',
+      pomat: 'Work is waiting on materials and there is no delivery ETA on file.',
+      poconf: 'A vendor marked the work complete and the completion package needs collecting.',
+      pocost: 'A PO is done but its final cost is not locked before billing.',
+      docs: 'The work reads done but no completion documents are attached.',
+      docsverify: 'Documents are on file but a required closeout type was not matched.',
+      advance: 'Everything needed to close this WO is on file - it just needs to be marked Work Complete.',
+      intake: 'The WO is missing fields it needs before it can be dispatched.',
+      ecd: 'The expected completion date is missing or already past.',
+      dne: 'Gross profit is under target - the cost side needs a decision.',
+      unbilled: 'The work is complete but the WO has not moved to invoicing.',
+      note: 'This WO has gone quiet - no recent notes.',
+      clientcad: 'The client is overdue a proactive status update for this job priority.',
+      task: 'An Umbrava task on this WO is open or overdue.',
+      escalate: 'This is past what routine chasing fixes - ownership needs to move up.',
+      authored: 'A step written for this job by hand.'
+    };
+    var COORD_DONEWHEN = {
+      noshow: 'The vendor confirms the visit was completed with docs, or commits to a new date.',
+      stall: 'The vendor confirms an ETA, or the job is reassigned.',
+      eta: 'The vendor gives a scheduled date you can log.',
+      ecdrisk: 'A tech is confirmed on site for today, or a real completion date is set.',
+      poacc: 'The vendor accepts the PO with a date, or declines so it can be reassigned.',
+      pomat: 'You have the supplier, delivery date, tracking, and the return-visit date.',
+      poconf: 'The completion documents are attached and the PO is confirmed.',
+      pocost: 'The final cost on the PO is confirmed so the WO can move to billing.',
+      docs: 'The completion package is attached and reviewed.',
+      docsverify: 'The required closeout documents are confirmed attached.',
+      advance: 'The work order is advanced to Work Complete.',
+      intake: 'Every required field is filled so the WO can be dispatched.',
+      ecd: 'A realistic completion date is set and the client has been told.',
+      dne: 'The cost is reduced, the DNE is increased with client approval, or the write-down is accepted.',
+      unbilled: 'The client invoice is created and submitted.',
+      note: 'A status note is posted describing the current state.',
+      clientcad: 'A client-facing update is posted.',
+      task: 'The task is completed in Umbrava.',
+      escalate: 'The named tier has the job and the handoff is recorded as a WO note.',
+      authored: 'The written step is done and logged, or unchecked if it no longer applies.'
+    };
+    var COORD_PHASE_REASON = {
+      schedule: 'No vendor is scheduled yet - the WO needs coverage.',
+      intake: 'The WO is not yet assigned or scoped.',
+      proposal: 'A vendor proposal is needed to move the WO forward.',
+      'proposal-sent': 'The proposal is with the client and awaiting approval.',
+      'proposal-approved': 'The proposal is approved - send it to the client and issue the vendor PO.',
+      materials: 'The job is waiting on materials.',
+      'materials-client': 'The job is waiting on client-supplied materials.',
+      scheduled: 'A visit is booked and needs confirming.',
+      onsite: 'A tech is on site - progress and an ETA are needed.',
+      inprogress: 'Work is in progress and needs a status.',
+      recall: 'Completed work was rejected or reopened - a return visit is needed.',
+      client: 'The WO is on hold pending client direction.',
+      onhold: 'The WO is on hold - the blocker needs review.',
+      accept: 'The WO is pending vendor acceptance.',
+      confirmcomplete: 'The vendor marked complete - the completion package is needed.'
+    };
+    var COORD_PHASE_DONEWHEN = {
+      schedule: 'A vendor is scheduled with a date.',
+      intake: 'The WO is assigned or scoped and moving.',
+      proposal: 'A vendor proposal is received.',
+      'proposal-sent': 'The client approves, declines, or requests a revision.',
+      'proposal-approved': 'The client signs off and the vendor PO is issued.',
+      materials: 'Materials are confirmed with a delivery date.',
+      'materials-client': 'The client confirms the materials delivery date.',
+      scheduled: 'The vendor confirms the tech and arrival window.',
+      onsite: 'The vendor sends progress and an ETA to completion.',
+      inprogress: 'The vendor confirms the current stage and next step.',
+      recall: 'A return visit is scheduled.',
+      client: 'The client gives direction on how to proceed.',
+      onhold: 'The hold is released or confirmed with a new date.',
+      accept: 'The vendor accepts with a date, or declines so it can be reassigned.',
+      confirmcomplete: 'The completion documents are attached.'
+    };
+    function coordReason(a, state) {
+      if (a.anchor) return a.why || 'For reference only.';
+      if (coordPrefix(a) === 'phase') return COORD_PHASE_REASON[coordPhase(a)] || 'The work order status needs to move forward.';
+      var p = a.authored ? 'authored' : coordPrefix(a);
+      return COORD_REASON[p] || (a.why ? String(a.why).split(' · ')[0] : 'Needs a coordinator decision.');
+    }
+    function coordDoneWhen(a, state) {
+      if (a.anchor) return 'The WO status becomes Work Complete, Invoiced, or Paid.';
+      if (coordPrefix(a) === 'phase') return COORD_PHASE_DONEWHEN[coordPhase(a)] || 'The status advances to the next state.';
+      var p = a.authored ? 'authored' : coordPrefix(a);
+      return COORD_DONEWHEN[p] || 'The situation is resolved and logged as a WO note.';
+    }
+    function coordScore(c) {
+      var S = COORD_CFG.score, s = Number(c.baseScore || 0);
+      if (c.ownership === 'coordinator') s += S.ownCoordinator;
+      if (c.readiness === 'ready') s += S.readyReady;
+      s += (S.urg[c.urgency] != null ? S.urg[c.urgency] : 0);
+      s += (S.fric[c.friction] != null ? S.fric[c.friction] : 0);
+      if (c.readiness === 'waiting') s += S.waiting;
+      if (c.readiness === 'blocked') s += S.blocked;
+      if (c.ownership !== 'coordinator') s += S.notCoordinator;
+      return s;
+    }
+    function classifyCoordinatorAction(a, state, C, now) {
+      now = now || Date.now();
+      var urgency = coordUrgency(a, state, C, now);
+      var ownership = coordOwnership(a, state, C, now, urgency);
+      var readiness = coordReadiness(a, state, C, now, urgency, ownership);
+      var friction = coordFriction(a, state, C, now, readiness);
+      var baseScore = 0; try { baseScore = scoreAct(a, state); } catch (e) { baseScore = 0; }
+      var c = {};
+      for (var k in a) if (Object.prototype.hasOwnProperty.call(a, k)) c[k] = a[k];
+      c.ownership = ownership; c.readiness = readiness; c.urgency = urgency; c.friction = friction;
+      c.reason = coordReason(a, state); c.doneWhen = coordDoneWhen(a, state);
+      c.baseScore = baseScore;
+      c.coordinatorScore = coordScore(c);
+      return c;
+    }
+    function needsCoordinatorAttention(c) {
+      return c.ownership === 'coordinator' && c.readiness === 'ready' && c.urgency !== 'not-due';
+    }
+    function coordTieBreak(x, y) {
+      if (y.coordinatorScore !== x.coordinatorScore) return y.coordinatorScore - x.coordinatorScore;
+      var rx = COORD_CFG.urgencyRank[x.urgency] || 0, ry = COORD_CFG.urgencyRank[y.urgency] || 0;
+      if (ry !== rx) return ry - rx;
+      if ((y.baseScore || 0) !== (x.baseScore || 0)) return (y.baseScore || 0) - (x.baseScore || 0);
+      return String(x.key) < String(y.key) ? -1 : String(x.key) > String(y.key) ? 1 : 0;
+    }
+    function buildCoordinatorQueue(acts, state, C, now) {
+      now = now || Date.now();
+      var classified = (acts || []).map(function (a) { return classifyCoordinatorAction(a, state, C, now); });
+      var doNow = [], blocked = [], waiting = [], upcoming = [];
+      classified.forEach(function (c) {
+        // Deterministic precedence, exactly one collapsed bucket per item:
+        // DO NOW > Blocked > Waiting-on-others > Upcoming. Informational (the anchor) is
+        // reference-only: it lives in Full lifecycle, never in an action bucket.
+        if (c.readiness === 'informational') return;
+        if (needsCoordinatorAttention(c)) doNow.push(c);
+        else if (c.readiness === 'blocked') blocked.push(c);
+        else if (c.readiness === 'waiting' || c.readiness === 'scheduled' ||
+          c.ownership === 'vendor' || c.ownership === 'client' ||
+          c.ownership === 'supervisor' || c.ownership === 'management') waiting.push(c);
+        else upcoming.push(c);   // coordinator-owned but upcoming / not-due
+      });
+      doNow.sort(coordTieBreak);
+      // The DO NOW cap keeps the coordinator's immediate list to three, but the 4th+
+      // attention-needed actions are STILL attention-needed - they get their OWN bucket
+      // ("More requiring attention"). They are NEVER folded into Upcoming, which is
+      // future / not-due work only: labelling a due/ready action "Upcoming" is the exact
+      // defect this split fixes.
+      var moreAttention = doNow.slice(COORD_CFG.doNowMax);
+      doNow = doNow.slice(0, COORD_CFG.doNowMax);
+      [moreAttention, blocked, waiting, upcoming].forEach(function (g) { g.sort(coordTieBreak); });
+      function crit(g) { return g.some(function (c) { return c.urgency === 'critical'; }); }
+      return {
+        doNow: doNow, moreAttention: moreAttention, blocked: blocked, waiting: waiting, upcoming: upcoming,
+        fullLifecycle: classified,
+        counts: { doNow: doNow.length, moreAttention: moreAttention.length, blocked: blocked.length, waiting: waiting.length, upcoming: upcoming.length, full: classified.length },
+        critical: { blocked: crit(blocked), waiting: crit(waiting), moreAttention: crit(moreAttention) }
+      };
+    }
+    // ---- Waiting / revisit foundation (Phase C data model) ---------------------
+    // A coordinator can mark a DO-NOW item "waiting on <party> until <revisitAt>". The
+    // record is versioned and keyed by the STABLE (woId, actionKey) pair. It suppresses the
+    // item (readiness 'scheduled') ONLY while VALID: well-formed, not past revisitAt, and
+    // the state it was taken against is unchanged (fingerprint match). A wait NEVER marks
+    // the lifecycle requirement complete - an expired or invalidated wait simply drops and
+    // the action re-enters normal evaluation. A missing/invalid revisitAt or fingerprint
+    // does NOT suppress (fail-open to visible - never silently hide real work).
+    var COORD_WAIT_V = 1;
+    function coordFingerprintPure(a, state) {
+      // Minimal STABLE source fields whose change should cancel a wait. No timestamps, no
+      // DOM, no volatile display text - only what would make the action meaningfully
+      // different work.
+      var parts = [String((state && state.status) || '').toLowerCase(), coordPrefix(a)];
+      var pos = (state && state.pos) || [];
+      parts.push(pos.map(function (p) { return String(p.sid) + '=' + (p.done ? 'd' : '') + (p.poStatus || '') + (p.schedDate ? 's' : ''); }).sort().join(','));
+      parts.push((state && state.docs && state.docs.count != null) ? 'docs' + state.docs.count : 'docs?');
+      parts.push((state && state.due && state.due.raw) ? 'ecd' + state.due.raw : 'ecd?');
+      var str = parts.join('|'), h = 0;
+      for (var i = 0; i < str.length; i++) h = (h * 31 + str.charCodeAt(i)) | 0;
+      return (h >>> 0).toString(36);
+    }
+    function coordWaitValidPure(rec, a, state, now) {
+      if (!rec || rec.v !== COORD_WAIT_V || rec.disposition !== 'waiting') return false;
+      if (!rec.actionKey || rec.actionKey !== a.key) return false;
+      if (!rec.revisitAt || !rec.stateFingerprint) return false;   // malformed -> do not suppress
+      var due = Date.parse(rec.revisitAt);
+      if (isNaN(due) || now >= due) return false;                  // past revisit -> re-enter normal evaluation
+      if (rec.stateFingerprint !== coordFingerprintPure(a, state)) return false;   // state changed -> invalidate
+      return true;
+    }
+    // Published for the audit / cross-module consumers, same shape as bwnActsEngine.
+    bwnCoordQueue = buildCoordinatorQueue;
+    // ==== COORD-QUEUE END =======================================================
+
     // ---- Action Checklist (inline card above Purchase Orders) -----------------
     // The playbook as a WORKING surface: a card embedded in the WO page directly
     // above the Purchase Orders section. Each row: a checkbox, the chase text
@@ -4228,6 +4939,44 @@
       } catch (e) { return {}; }
     }
     function actsSave(d) { try { localStorage.setItem(actsKey(), JSON.stringify(d)); } catch (e) { /* best-effort */ } }
+
+    // ---- Waiting/revisit store (IMPURE adapter; the pure layer only reads state.waits) ---
+    // Isolated, versioned, defensively parsed. Keyed PER WO so different work orders keep
+    // distinct records. The pure coordWaitValidPure / coordFingerprintPure decide
+    // suppression; this layer only persists and hands back a { actionKey: record } map.
+    function coordWaitsKey() { var id = currentWOId(); return 'bwn:coordwaits:' + (id || location.pathname); }
+    function coordWaitsLoad() {
+      try {
+        var raw = JSON.parse(localStorage.getItem(coordWaitsKey()) || 'null');
+        if (!raw || raw.v !== COORD_WAIT_V || !raw.items || typeof raw.items !== 'object') return {};
+        var out = {};
+        Object.keys(raw.items).forEach(function (k) {
+          var r = raw.items[k];
+          if (r && r.v === COORD_WAIT_V && r.disposition === 'waiting' && r.actionKey === k) out[k] = r;
+        });
+        return out;
+      } catch (e) { return {}; }   // malformed storage -> empty (fail-open to visible)
+    }
+    function coordWaitsSave(map) {
+      try { localStorage.setItem(coordWaitsKey(), JSON.stringify({ v: COORD_WAIT_V, items: map || {} })); } catch (e) { /* best-effort */ }
+    }
+    function coordWaitSet(a, state, waitingOn, revisitAt) {
+      var map = coordWaitsLoad();
+      map[a.key] = {
+        v: COORD_WAIT_V, actionKey: a.key, disposition: 'waiting',
+        waitingOn: waitingOn || 'vendor', revisitAt: revisitAt,
+        stateFingerprint: coordFingerprintPure(a, state), createdAt: new Date().toISOString()
+      };
+      coordWaitsSave(map);
+    }
+    function coordWaitClear(key) { var map = coordWaitsLoad(); if (map[key]) { delete map[key]; coordWaitsSave(map); } }
+    // Maintainer debug: a per-browser toggle that reveals the classification internals on
+    // each row. Off for normal coordinators, so no rule jargon leaks into the normal UI.
+    function coordDebugOn() { try { return localStorage.getItem('bwn:coordq:debug') === '1'; } catch (e) { return false; } }
+    // Collapsed-section preference (same localStorage convention as bwn:acts:collapsed).
+    // Sections default COLLAPSED.
+    function coordSecOpen(name) { try { return localStorage.getItem('bwn:coordq:sec:' + name) === '1'; } catch (e) { return false; } }
+    function coordSecToggle(name) { try { localStorage.setItem('bwn:coordq:sec:' + name, coordSecOpen(name) ? '' : '1'); } catch (e) { } }
     // ONE-TIME per-WO store migration for the PO act re-key (render index -> stable sid,
     // 2026-08-02). Old keys look like 'pomat:2:ACME' - a BARE-DIGITS middle, which the new
     // form never produces (the poKeyOf ladder yields 'ln001' / 'v<guid>' / 'ix2', plus a
@@ -5113,7 +5862,7 @@
     }
     function actNavGo(nav) {
       var el = actNavTarget(nav);
-      if (!el) return;   // best-effort by contract: a missing target is a silent no-op
+      if (!el) return false;   // best-effort by contract: no navigation; the caller says so (never a silent dead click)
       try { el.scrollIntoView({ behavior: 'smooth', block: 'center' }); } catch (e) { try { el.scrollIntoView(); } catch (e2) { } }
       // Outline-only highlight (no layout shift), self-clearing - we are decorating
       // Umbrava's own element, so it must leave no trace.
@@ -5122,6 +5871,7 @@
         flash.classList.add('bwn-act-flash');
         setTimeout(function () { try { flash.classList.remove('bwn-act-flash'); } catch (e3) { } }, 1600);
       } catch (e4) { }
+      return true;
     }
 
     // TRAINING LAYER. Three static lines per step type - what it means, where in Umbrava
@@ -5155,11 +5905,373 @@
     }
     var actHelpOpen = {};   // key -> 1 while its help block is expanded (render state only)
 
+    // ---- Coordinator Action Queue render helpers (DOM / prompt layer) ----------
+    var COORD_URG_LABEL = { critical: 'Critical', due: 'Due', upcoming: 'Upcoming', 'not-due': 'Not due', informational: '' };
+    var COORD_OWNER_LABEL = { vendor: 'Vendor', client: 'Client', supervisor: 'Supervisor', management: 'Management', system: '' };
+    function coordBadges(a) {
+      var out = [];
+      if (a.urgency && a.urgency !== 'not-due' && a.urgency !== 'informational') out.push({ t: COORD_URG_LABEL[a.urgency], c: 'u-' + a.urgency });
+      if (a.readiness === 'scheduled') out.push({ t: 'Snoozed', c: 'sched' });
+      else if (a.readiness === 'blocked') out.push({ t: 'Blocked', c: 'blk' });
+      if (a.ownership && a.ownership !== 'coordinator' && a.ownership !== 'system') out.push({ t: 'On ' + (COORD_OWNER_LABEL[a.ownership] || a.ownership), c: 'own' });
+      if (a.friction === 'one-click') out.push({ t: 'One-click', c: 'fric' });
+      else if (a.friction === 'assisted') out.push({ t: 'Assisted', c: 'fric' });
+      return out;
+    }
+    function coordBadgeEls(a) {
+      var wrap = document.createElement('span'); wrap.className = 'bwn-cq-badges';
+      coordBadges(a).forEach(function (b) { var s = document.createElement('span'); s.className = 'bwn-cq-badge ' + b.c; s.textContent = b.t; wrap.appendChild(s); });
+      return wrap;
+    }
+    function coordDebugEl(a) {
+      var d = document.createElement('div'); d.className = 'bwn-cq-dbg';
+      d.textContent = a.key + ' · base ' + a.baseScore + ' · coord ' + a.coordinatorScore + ' · ' + a.ownership + '/' + a.readiness + '/' + a.urgency + '/' + a.friction;
+      return d;
+    }
+    // Rebuild-safe focus + announcements. renderActsInline tears the card down and rebuilds it
+    // on every change, which destroyed the focused control - a keyboard user lost their place on
+    // every toggle. Each focusable control carries a stable data-bwn-fk (section-scoped, since
+    // one action can render in DO NOW and in Full lifecycle); the render puts focus back on the
+    // same key, or on coordFocusNext when an action moved its own row (Mark waiting / Resume /
+    // done), falling back to the card header.
+    var coordFocusNext = null;
+    function coordFk(el, key) { el.setAttribute('data-bwn-fk', key); return el; }
+    // ONE persistent polite live region, outside the card, so a rebuild cannot swallow a message.
+    function coordAnnounce(msg) {
+      var lr = document.getElementById('bwn-cq-live');
+      if (!lr) {
+        lr = document.createElement('div'); lr.id = 'bwn-cq-live';
+        lr.setAttribute('role', 'status'); lr.setAttribute('aria-live', 'polite');
+        lr.style.cssText = 'position:absolute;width:1px;height:1px;margin:-1px;overflow:hidden;clip:rect(0 0 0 0);white-space:nowrap;border:0;padding:0;';
+        document.body.appendChild(lr);
+      }
+      lr.textContent = '';
+      setTimeout(function () { lr.textContent = msg; }, 60);   // clear-then-set so a repeat message re-announces
+    }
+    function coordFmtDay(ms) { var d = new Date(ms); return ['Sun', 'Mon', 'Tue', 'Wed', 'Thu', 'Fri', 'Sat'][d.getDay()] + ' ' + (d.getMonth() + 1) + '/' + d.getDate(); }
+    function coordBtn(label, cls, fk, title) {
+      var b = document.createElement('button');
+      b.type = 'button'; b.className = 'bwn-wa-btn ' + cls; b.textContent = label;
+      if (title) b.title = title;
+      return coordFk(b, fk);
+    }
+    function coordCopy(btn, text, idle) {
+      navigator.clipboard.writeText(text).then(function () {
+        btn.textContent = 'Copied ✓'; coordAnnounce('Chase text copied to the clipboard.');
+        setTimeout(function () { btn.textContent = idle; }, 1500);
+      }, function () { prompt('Copy manually:', text); });
+    }
+
+    // Mark waiting: an INLINE form (party + revisit horizon) under the row - no modal, no
+    // prompt(). The old two-prompt flow silently turned a typo into "vendor" and a bad day count
+    // into 2; native <select>s make an invalid value impossible instead. No WO/PO/note/status
+    // side effects: it writes only the bwn:coordwaits:* record, exactly as before.
+    var COORD_WAIT_PARTIES = ['vendor', 'client', 'technician', 'management', 'supervisor'];
+    var COORD_WAIT_DAYS = [1, 2, 3, 5, 7, 14];
+    var coordWaitForm = {};   // action key -> { party, days } while its form is open (render state only)
+    function coordWaitFormId(a) { return 'bwn-cq-wait-' + String(a.key).replace(/[^\w-]/g, '_'); }
+    function coordWaitFormOpen(a) {
+      coordWaitForm[a.key] = { party: (a.ownership && COORD_WAIT_PARTIES.indexOf(a.ownership) !== -1) ? a.ownership : 'vendor', days: 2 };
+    }
+    function buildWaitForm(a, state, sec) {
+      var f = coordWaitForm[a.key];
+      var box = document.createElement('div'); box.className = 'bwn-cq-wait'; box.id = coordWaitFormId(a);
+      box.setAttribute('role', 'group'); box.setAttribute('aria-label', 'Mark waiting: ' + a.label);
+      function sel(text, fk, options, value, onChange) {
+        var lb = document.createElement('label'); lb.textContent = text;
+        var s = coordFk(document.createElement('select'), fk);
+        options.forEach(function (o) { var op = document.createElement('option'); op.value = String(o.v); op.textContent = o.t; if (String(o.v) === String(value)) op.selected = true; s.appendChild(op); });
+        s.addEventListener('change', function () { onChange(s.value); });
+        lb.appendChild(s); box.appendChild(lb);
+      }
+      sel('Waiting on', sec + ':wparty:' + a.key, COORD_WAIT_PARTIES.map(function (p) { return { v: p, t: p.charAt(0).toUpperCase() + p.slice(1) }; }), f.party, function (v) { f.party = v; });
+      var now = Date.now();
+      sel('Check back', sec + ':wdays:' + a.key, COORD_WAIT_DAYS.map(function (d) { return { v: d, t: 'In ' + d + ' day' + (d === 1 ? '' : 's') + ' (' + coordFmtDay(now + d * 86400000) + ')' }; }), f.days, function (v) { f.days = parseInt(v, 10); });
+      var acts = document.createElement('div'); acts.className = 'bwn-cq-wait-acts';
+      var save = coordBtn('Snooze', '', sec + ':wsave:' + a.key);
+      var cancel = coordBtn('Cancel', 'bwn-cq-tert', sec + ':wcancel:' + a.key);
+      function close() { delete coordWaitForm[a.key]; coordFocusNext = sec + ':mw:' + a.key; renderActsInline(state); }
+      save.addEventListener('click', function () {
+        var until = Date.now() + f.days * 86400000;
+        coordWaitSet(a, state, f.party, new Date(until).toISOString());
+        delete coordWaitForm[a.key];
+        coordFocusNext = 'sec:waiting';
+        coordAnnounce('Snoozed "' + a.label + '" until ' + coordFmtDay(until) + ', waiting on ' + f.party + '. It is listed under Waiting on others.');
+        renderActsInline(state);
+      });
+      cancel.addEventListener('click', close);
+      box.addEventListener('keydown', function (ev) { if (ev.key === 'Escape') { ev.preventDefault(); ev.stopPropagation(); close(); } });
+      acts.appendChild(save); acts.appendChild(cancel); box.appendChild(acts);
+      var note = document.createElement('p'); note.className = 'bwn-cq-wait-note';
+      note.textContent = 'Hides this step until then. It comes back sooner if the WO data changes. Does not change the WO status, notes, or POs.';
+      box.appendChild(note);
+      return box;
+    }
+
+    // Full interactive action row. `a` is a CLASSIFIED action (engine fields + coordinator
+    // ownership/readiness/urgency/friction/reason/doneWhen). Every existing behavior -
+    // checkbox + critical-dismiss + nav + help + tool launch + Chase + Actioned + Set ECD +
+    // guided-write - is preserved. opts.card = the prominent DO-NOW card (plain-language
+    // reason/doneWhen + badges + a Mark-waiting quick-assist); otherwise the compact
+    // Full-lifecycle row (keeps the original technical `why`). Anchors render as the
+    // uncheckable completion gate. Returns the row node.
+    // opts.sec scopes the focus keys (see coordFk); opts.primary marks the ONE primary button.
+    function buildActRow(a, state, store, escSt, opts) {
+      opts = opts || {};
+      var fk = (opts.sec || 'full') + ':';
+      if (a.anchor) {
+        var ra = document.createElement('div'); ra.className = 'bwn-act-row bwn-act-anchor';
+        var mka = document.createElement('div'); mka.className = 'bwn-act-anchor-mk'; mka.textContent = '⚑';
+        var maa = document.createElement('div'); maa.className = 'bwn-act-main';
+        var lba = document.createElement('div'); lba.className = 'bwn-act-lbl'; lba.textContent = a.label;
+        var wya = document.createElement('div'); wya.className = 'bwn-act-why'; wya.textContent = a.why;
+        maa.appendChild(lba); maa.appendChild(wya);
+        ra.appendChild(mka); ra.appendChild(maa);
+        return ra;
+      }
+      var rec = store[a.key];
+      var isDone = !!(rec && rec.done);
+      var r = document.createElement('div'); r.className = 'bwn-act-row' + (opts.card ? ' bwn-cq-card' : '') + (a.nudge && !isDone ? ' nudge' : '');
+      var cb = coordFk(document.createElement('input'), fk + 'cb:' + a.key); cb.type = 'checkbox'; cb.checked = isDone;
+      cb.setAttribute('aria-label', (isDone ? 'Done: ' : 'Mark done: ') + a.label);
+      cb.title = isDone ? 'Uncheck to reopen' : 'Mark done without posting a note';
+      cb.addEventListener('change', function () {
+        if (cb.checked) { actsMarkDone(a, ''); coordAnnounce('Marked done: ' + a.label + '. It moves to Full lifecycle.'); renderActsInline(state); return; }
+        var rec2 = actsLoad()[a.key];
+        if (rec2 && rec2.done && rec2.auto) { actsMarkUndone(a, '', true); renderActsInline(state); return; }
+        if (rec2 && rec2.done && !rec2.note && rec2.ts && Date.now() - rec2.ts < 120000) { actsMarkUndone(a, '', true); renderActsInline(state); return; }
+        if (actIsCritical(a)) {
+          var why2 = prompt('"' + a.label + '" is a critical step.\nWhy is it being dismissed? (required - this becomes the WO note)', '');
+          if (why2 === null || !why2.trim()) { cb.checked = true; return; }   // not dismissed
+          actsMarkUndone(a, why2.trim());
+          var disNote = 'Dismissed step: ' + a.label + ' - ' + why2.trim();
+          try { navigator.clipboard.writeText(disNote).catch(function () { }); } catch (e2) { }
+          renderActsInline(state);
+          insertWONote(disNote, function () { /* posted manually by the coordinator */ });
+          return;
+        }
+        actsMarkUndone(a, '');
+        renderActsInline(state);
+      });
+      var main = document.createElement('div'); main.className = 'bwn-act-main';
+      var lbl = document.createElement('div'); lbl.className = 'bwn-act-lbl' + (isDone ? ' done' : '');
+      var nav = actNav(a);
+      if (nav) {
+        // A real button for the label text; the "?" stays a SIBLING (no nested controls).
+        var nb = coordFk(document.createElement('button'), fk + 'nav:' + a.key);
+        nb.type = 'button'; nb.className = 'bwn-cq-nav'; nb.textContent = a.label;
+        nb.title = 'Show this on the page';
+        nb.addEventListener('click', function () {
+          if (!actNavGo(nav)) coordAnnounce('That field is not on this view right now - scroll the work order to find it.');
+        });
+        lbl.appendChild(nb);
+      } else {
+        lbl.appendChild(document.createTextNode(a.label));
+      }
+      var helpTxt = actHelp(a);
+      if (helpTxt) {
+        var ht = coordFk(document.createElement('button'), fk + 'help:' + a.key);
+        ht.type = 'button'; ht.className = 'bwn-act-help-t'; ht.textContent = '?';
+        ht.title = 'What this step means, where to do it, and what done looks like';
+        ht.setAttribute('aria-label', 'Explain this step: ' + a.label);
+        ht.setAttribute('aria-expanded', actHelpOpen[a.key] ? 'true' : 'false');
+        ht.addEventListener('click', function (ev) {
+          ev.stopPropagation();   // the label may itself be a nav control
+          if (actHelpOpen[a.key]) delete actHelpOpen[a.key]; else actHelpOpen[a.key] = 1;
+          renderActsInline(state);
+        });
+        lbl.appendChild(ht);
+      }
+      main.appendChild(lbl);
+      // Classification badges (urgency / non-coordinator owner / friction) on every row.
+      main.appendChild(coordBadgeEls(a));
+      if (opts.card) {
+        // DO-NOW: plain-language WHY (no rule jargon), then a "Done when" line. The
+        // technical `why` moves into the "?" help / debug so it is not lost.
+        var rsn = document.createElement('div'); rsn.className = 'bwn-cq-reason'; rsn.textContent = a.reason || a.why;
+        main.appendChild(rsn);
+      } else {
+        var why = document.createElement('div'); why.className = 'bwn-act-why'; why.textContent = a.why;
+        main.appendChild(why);
+      }
+      if (helpTxt && actHelpOpen[a.key]) {
+        var hbx = document.createElement('div'); hbx.className = 'bwn-act-help';
+        for (var hi = 0; hi < ACT_HELP_PFX.length; hi++) {
+          var hln = document.createElement('div');
+          hln.textContent = ACT_HELP_PFX[hi] + helpTxt[hi];
+          hbx.appendChild(hln);
+        }
+        main.appendChild(hbx);
+      }
+      if (!isDone && rec && rec.dismissed && rec.reason) {
+        var dis = document.createElement('div'); dis.className = 'bwn-act-dis';
+        var dd = new Date(rec.dismissed);
+        dis.textContent = '✗ dismissed ' + (dd.getMonth() + 1) + '/' + dd.getDate() + ': ' + rec.reason;
+        main.appendChild(dis);
+      }
+      if (isDone && rec.note) {
+        var lg = document.createElement('div'); lg.className = 'bwn-act-log';
+        var d = new Date(rec.ts || Date.now());
+        lg.textContent = '✓ ' + (d.getMonth() + 1) + '/' + d.getDate() + ' - ' + rec.note;
+        main.appendChild(lg);
+      }
+      if (opts.card && !isDone) {
+        var dw = document.createElement('div'); dw.className = 'bwn-cq-done'; dw.textContent = 'Done when: ' + a.doneWhen;
+        main.appendChild(dw);
+      }
+      if (coordDebugOn()) main.appendChild(coordDebugEl(a));
+      var btns = document.createElement('div'); btns.className = 'bwn-act-btns';
+      // Tool launch - rendered only while the owning dock registrant is live (never a dead
+      // control). Same bwn:dock:open the rail emits.
+      var tool = actTool(a);
+      if (tool && !isDone) {
+        tool.docks.forEach(function (dk) {
+          if (!waDockAlive(dk)) return;
+          var tb = coordBtn(waEscToolLabel(dk, escSt), 'ghost', fk + 'tool:' + dk + ':' + a.key);
+          tb.title = (dk === 'assist' && escSt)
+            ? 'An escalation is already open on this work order - view, acknowledge or resolve it'
+            : 'Open the ' + (ACT_TOOL_LABEL[dk] || 'tool').replace(/…$/, '') + ' drawer for this work order';
+          tb.addEventListener('click', function () {
+            try { document.dispatchEvent(new CustomEvent('bwn:evt', { detail: { id: 'bwn:dock:open', key: dk } })); } catch (e) { }
+          });
+          btns.appendChild(tb);
+        });
+      }
+      if (a.text) {
+        var cp = coordBtn('Chase', 'ghost', fk + 'chase:' + a.key, a.text);
+        cp.setAttribute('aria-label', 'Copy chase text: ' + a.label);
+        cp.addEventListener('click', function () { coordCopy(cp, a.text, 'Chase'); });
+        btns.appendChild(cp);
+      }
+      var ab = coordBtn(isDone ? 'Re-log' : 'Actioned…', 'primary' + (opts.primary && !isDone ? ' bwn-cq-primary' : ''), fk + 'act:' + a.key,
+        'Log what you did - prefills a WO note for you to review and post');
+      ab.addEventListener('click', function () {
+        var typed = prompt('What did you do? (one line - becomes the WO note)\n\n' + a.label, '');
+        if (typed === null) return;
+        var noteText = a.label + (typed.trim() ? ' - ' + typed.trim() : '');
+        actsMarkDone(a, typed.trim());
+        renderActsInline(state);
+        try { navigator.clipboard.writeText(noteText).catch(function () { }); } catch (e) { }
+        var actNoteType = (a.openEcd || /^ecd/.test(a.key || '')) ? 'Internal'
+          : /^clientcad/.test(a.key || '') ? 'Client' : undefined;
+        insertWONote(noteText, function () { /* posted manually by the coordinator */ }, actNoteType);
+      });
+      btns.appendChild(ab);
+      if (a.openEcd) {
+        var eb = coordBtn('Set ECD…', 'ghost', fk + 'ecd:' + a.key, 'Propose + set the expected completion date, and draft the client note');
+        eb.addEventListener('click', function () { ecdHelperOpen(state); });
+        btns.appendChild(eb);
+      }
+      // Mark-waiting quick assist (DO-NOW cards only): a non-writing snooze that suppresses
+      // the item until a revisit time, cleared automatically if the WO data changes. It
+      // NEVER touches WO status, notes, or POs. Opens the inline form below the row.
+      var waitOpen = !!(opts.card && !isDone && coordWaitForm[a.key]);
+      if (opts.card && !isDone) {
+        var mw = coordBtn('Mark waiting', 'ghost', fk + 'mw:' + a.key, 'Snooze this until a check-back date (waiting on another party). Does not change the WO.');
+        mw.setAttribute('aria-expanded', waitOpen ? 'true' : 'false');
+        mw.setAttribute('aria-controls', coordWaitFormId(a));
+        mw.addEventListener('click', function () {
+          if (coordWaitForm[a.key]) { delete coordWaitForm[a.key]; coordFocusNext = fk + 'mw:' + a.key; }
+          else { coordWaitFormOpen(a); coordFocusNext = fk + 'wparty:' + a.key; }
+          renderActsInline(state);
+        });
+        btns.appendChild(mw);
+      }
+      if (BWN_MODULES.woAssistWrites) {
+        (function (act) {
+          if (bwnCan('Task.AddNew')) {
+            var tkb = coordBtn('Create task…', 'ghost', fk + 'task:' + act.key, 'Create a follow-up task on this work order (assigned to the coordinator)');
+            tkb.addEventListener('click', function () { taskHelperOpen(state, act); });
+            btns.appendChild(tkb);
+          }
+          if (bwnCan('WorkOrderField.Status') && (act.key === 'advance:workcomplete' || act.key.indexOf('phase:') === 0)) {
+            var csb = coordBtn('Change status…', 'ghost', fk + 'status:' + act.key, 'Change this work order’s status (guided, logged, typed confirm)');
+            csb.addEventListener('click', function () { statusHelperOpen(state, act); });
+            btns.appendChild(csb);
+          }
+        })(a);
+      }
+      var cbw = document.createElement('label'); cbw.className = 'bwn-cq-cbw'; cbw.appendChild(cb);
+      r.appendChild(cbw); r.appendChild(main); r.appendChild(btns);
+      if (waitOpen) r.appendChild(buildWaitForm(a, state, opts.sec || 'full'));
+      return r;
+    }
+
+    // Compact read-only summary row for the collapsed Waiting / Upcoming / Blocked sections
+    // (the full interactive controls live in Full lifecycle). Shows the label, badges, and
+    // plain-language reason; a Chase copy where one exists; and a Resume control on a snoozed
+    // (scheduled) item so a wait can be cleared early.
+    function buildCompactRow(a, state, sec) {
+      var fk = sec + ':';
+      var r = document.createElement('div'); r.className = 'bwn-cq-compact';
+      var main = document.createElement('div'); main.className = 'bwn-act-main';
+      var lbl = document.createElement('div'); lbl.className = 'bwn-act-lbl';
+      lbl.textContent = a.label;   // "Critical" rides the badge row (text), not a ⚠ glyph
+      main.appendChild(lbl);
+      main.appendChild(coordBadgeEls(a));
+      var rsn = document.createElement('div'); rsn.className = 'bwn-act-why'; rsn.textContent = a.reason || a.why;
+      main.appendChild(rsn);
+      // A snoozed item says WHEN it comes back and on whom - the badge alone left that invisible.
+      var wrec = a.readiness === 'scheduled' && state.waits && state.waits[a.key];
+      if (wrec) {
+        var snz = document.createElement('div'); snz.className = 'bwn-cq-snz';
+        snz.textContent = 'Snoozed until ' + coordFmtDay(Date.parse(wrec.revisitAt)) + ' · waiting on ' + (wrec.waitingOn || 'vendor') + ' · returns sooner if the WO changes';
+        main.appendChild(snz);
+      }
+      if (coordDebugOn()) main.appendChild(coordDebugEl(a));
+      r.appendChild(main);
+      var btns = document.createElement('div'); btns.className = 'bwn-act-btns';
+      if (a.readiness === 'scheduled') {
+        var rb = coordBtn('Resume', 'ghost', fk + 'resume:' + a.key, 'Clear the wait and re-evaluate this item now');
+        rb.setAttribute('aria-label', 'Resume: ' + a.label);
+        rb.addEventListener('click', function () {
+          coordWaitClear(a.key);
+          coordFocusNext = 'sec:' + sec;
+          coordAnnounce('Resumed: ' + a.label + '. It is back in the queue.');
+          renderActsInline(state);
+        });
+        btns.appendChild(rb);
+      }
+      if (a.text) {
+        var cp = coordBtn('Chase', 'ghost', fk + 'chase:' + a.key, a.text);
+        cp.setAttribute('aria-label', 'Copy chase text: ' + a.label);
+        cp.addEventListener('click', function () { coordCopy(cp, a.text, 'Chase'); });
+        btns.appendChild(cp);
+      }
+      r.appendChild(btns);
+      return r;
+    }
+
+    // A collapsible section: a semantic <button aria-expanded> header with title + count
+    // (+ a critical marker), and the rendered items when open. Sections default collapsed.
+    function buildCoordSection(name, title, items, critical, render, state) {
+      var sec = document.createElement('div'); sec.className = 'bwn-cq-sec';
+      var open = coordSecOpen(name);
+      var bodyId = 'bwn-cq-sec-' + name;
+      var hd = coordFk(document.createElement('button'), 'sec:' + name);
+      hd.type = 'button'; hd.className = 'bwn-cq-sec-hd';
+      hd.setAttribute('aria-expanded', open ? 'true' : 'false');
+      hd.setAttribute('aria-controls', bodyId);
+      var cx = document.createElement('span'); cx.className = 'bwn-cq-sec-x'; cx.textContent = open ? '▾' : '▸'; cx.setAttribute('aria-hidden', 'true');
+      var tt = document.createElement('span'); tt.className = 'bwn-cq-sec-t'; tt.textContent = title;
+      var ct = document.createElement('span'); ct.className = 'bwn-cq-sec-n'; ct.textContent = String(items.length);
+      hd.appendChild(cx); hd.appendChild(tt); hd.appendChild(ct);
+      if (critical) { var cm = document.createElement('span'); cm.className = 'bwn-cq-badge u-critical'; cm.textContent = 'Has critical'; hd.appendChild(cm); }
+      hd.addEventListener('click', function () { coordSecToggle(name); renderActsInline(state); });
+      sec.appendChild(hd);
+      if (open) {
+        var bd = document.createElement('div'); bd.className = 'bwn-cq-sec-body'; bd.id = bodyId;
+        items.forEach(function (a) { bd.appendChild(render(a)); });
+        sec.appendChild(bd);
+      }
+      return sec;
+    }
+
     function renderActsInline(state) {
       var card = document.getElementById(ACT_CARD_ID);
       var acts = nextActions(state);
       var row = actsAnchorBlock();
-      if (!acts.length || !row) { if (card) card.remove(); return; }
+      if (!acts.length || !row) { if (card) card.remove(); coordFocusNext = null; return; }
       ensureWAStyle();
       // PO-key store migration runs BEFORE anything reads or writes the store this
       // page-load (autoDetectActioned loads it next line-ish) - see actsMigratePO.
@@ -5170,72 +6282,88 @@
       }
       autoDetectActioned(acts, state);
       var store = actsLoad();
-      // Open steps first (already worst-first from nextActions), done steps sink to the
-      // bottom - a stable partition, so the urgency order is preserved within each group.
-      acts = acts.filter(function (a) { return !(store[a.key] && store[a.key].done); }).concat(acts.filter(function (a) { return store[a.key] && store[a.key].done; }));
-      var open = acts.filter(function (a) { return !(store[a.key] && store[a.key].done); }).length;
-      // "Real" open = open steps excluding the completion anchor. The anchor is never
-      // "done", so it keeps `open` ≥ 1 on any non-terminal WO; realOpen tells us whether
-      // there is actual work left vs. just the "advance the status" gate.
-      var realOpen = acts.filter(function (a) { return !a.anchor && !(store[a.key] && store[a.key].done); }).length;
+      // Feed the waiting/revisit records to the PURE queue layer (the engine and classifier
+      // never touch storage - this is the one read, in the impure render).
+      state.waits = coordWaitsLoad();
+      var C = state.cfg || bwnConfig();
+      var now = Date.now();
+      function isDone(a) { return !!(store[a.key] && store[a.key].done); }
+      // Buckets are built from the OPEN (not-done) actions; done items are shown struck in
+      // Full lifecycle only. classifyCoordinatorAction is pure and done-agnostic.
+      var liveActs = acts.filter(function (a) { return !isDone(a); });
+      // ERROR STATE: if the (pure, tested) queue layer ever throws on odd live data, degrade
+      // honestly to the plain engine list under a warning - never a blank card, and never a
+      // green "nothing needs attention" that is really "we could not tell".
+      var q, qErr = false;
+      try { q = buildCoordinatorQueue(liveActs, state, C, now); } catch (eq) {
+        qErr = true;
+        try { console.warn('[BWN GP] Coordinator Action Queue could not classify this WO; showing the unsorted list', eq); } catch (e) { }
+        q = { doNow: [], moreAttention: [], blocked: [], waiting: [], upcoming: [], fullLifecycle: liveActs,
+          counts: { doNow: 0, moreAttention: 0, blocked: 0, waiting: 0, upcoming: 0, full: liveActs.length }, critical: {} };
+      }
+      var doneClassified = acts.filter(isDone).map(function (a) { try { return classifyCoordinatorAction(a, state, C, now); } catch (e) { return a; } });
+      var fullList = q.fullLifecycle.concat(doneClassified);
+      // Escalation severity handoff fires per classified item regardless of section, so a
+      // supervisor/management escalation parked in Waiting still posts its severity.
+      fullList.forEach(function (c) { try { armAssistDue(c, isDone(c)); } catch (e) { } });
       var collapsed = false;
       try { collapsed = localStorage.getItem('bwn:acts:collapsed') === '1'; } catch (e) { }
-      // Live escalation state (render-layer only; see waEscState). Part of the signature
-      // so the strip appears, flips and clears the moment the assist script publishes.
       var escSt = null;
       try { escSt = waEscState(); } catch (e) { }
-      // Signature gate: rebuild only when content or placement actually changed, so
-      // the steady-state refresh loop never re-renders the card under the cursor.
-      var sig = JSON.stringify([collapsed, escSt ? escSt.status + '|' + escSt.id + '|' + (escSt.ackAt || '') : '', acts.map(function (a) {
-        var r = store[a.key];
-        // Phase 2 additions to the signature: a tool button appearing when its registrant
-        // comes online (or vanishing when it drops) and a help block toggling are both
-        // real content changes - without them the gate would hold a stale card.
-        var tl = actTool(a);
-        return a.key + '|' + a.label + '|' + (r && r.done ? 1 : 0) + '|' + ((r && r.note) || '') + '|' + (a.nudge || 0) + '|' + ((r && r.reason) || '') +
-          '|' + (tl ? tl.docks.filter(waDockAlive).join(',') : '') + '|' + (actHelpOpen[a.key] ? 1 : 0);
-      })]);
-      if (card && card.isConnected && card.nextElementSibling === row && card.dataset.sig === sig) return;
+      var secState = { more: coordSecOpen('more'), blocked: coordSecOpen('blocked'), waiting: coordSecOpen('waiting'), upcoming: coordSecOpen('upcoming'), full: coordSecOpen('full') };
+      var dbg = coordDebugOn();
+      // Signature gate: rebuild only when content, classification, section state, or
+      // placement actually changed, so the steady-state refresh loop never re-renders under
+      // the cursor.
+      var doNowKeys = q.doNow.map(function (c) { return c.key; }).join(',');
+      var moreKeys = q.moreAttention.map(function (c) { return c.key; }).join(',');
+      var sig = JSON.stringify([collapsed, dbg, secState, doNowKeys, moreKeys, qErr,
+        escSt ? escSt.status + '|' + escSt.id + '|' + (escSt.ackAt || '') : '',
+        fullList.map(function (c) {
+          var r = store[c.key]; var tl = actTool(c);
+          var w = state.waits && state.waits[c.key];
+          return c.key + '|' + c.label + '|' + (r && r.done ? 1 : 0) + '|' + ((r && r.note) || '') + '|' + (c.nudge || 0) + '|' + ((r && r.reason) || '') +
+            '|' + c.ownership + '|' + c.readiness + '|' + c.urgency + '|' + c.friction + '|' + c.coordinatorScore +
+            '|' + (tl ? tl.docks.filter(waDockAlive).join(',') : '') + '|' + (actHelpOpen[c.key] ? 1 : 0) +
+            '|' + (coordWaitForm[c.key] ? 1 : 0) + '|' + (w ? w.revisitAt + w.waitingOn : '');
+        })]);
+      if (card && card.isConnected && card.nextElementSibling === row && card.dataset.sig === sig) { coordFocusNext = null; return; }
+      // Remember which control had focus so the rebuild does not drop a keyboard user to <body>.
+      var fkWas = null;
+      if (card && document.activeElement && card.contains(document.activeElement)) {
+        var fEl = document.activeElement.closest('[data-bwn-fk]');
+        fkWas = fEl ? fEl.getAttribute('data-bwn-fk') : 'hd';
+      }
       if (card) card.remove();
       card = document.createElement('div');
       card.id = ACT_CARD_ID;
       card.className = 'bwn-actc';
       card.dataset.sig = sig;
 
-      var hd = document.createElement('div'); hd.className = 'bwn-actc-hd';
-      hd.setAttribute('role', 'button'); hd.tabIndex = 0;
-      hd.title = collapsed ? 'Expand the checklist' : 'Collapse to one line';
+      var hd = coordFk(document.createElement('button'), 'hd'); hd.type = 'button'; hd.className = 'bwn-actc-hd';
+      hd.setAttribute('aria-expanded', collapsed ? 'false' : 'true');
+      if (!collapsed) hd.setAttribute('aria-controls', 'bwn-act-card-body');
+      hd.title = collapsed ? 'Expand the action queue' : 'Collapse to one line';
       var ht = document.createElement('span'); ht.className = 'bwn-actc-t'; ht.textContent = 'NEXT ACTIONS';
-      var hc = document.createElement('span'); hc.className = 'bwn-actc-n' + (realOpen ? '' : (open ? ' anchor' : ' ok'));
-      // realOpen===0 but the anchor keeps open≥1: no actionable steps remain, but the WO
-      // is NOT complete (that's only terminal, which shows no card). Phase-neutral wording -
-      // the anchor row carries the "not complete until Work Complete/Invoiced/Paid" message,
-      // so this must NOT imply the job is ready to close (it can be mid-lifecycle).
-      hc.textContent = realOpen ? realOpen + ' open' : (open ? 'no open steps' : 'all done ✓');
+      var dn = q.counts.doNow;
+      var more = q.counts.moreAttention;
+      var totalAttn = dn + more;
+      var hc = document.createElement('span'); hc.className = 'bwn-actc-n' + (qErr ? ' bad' : totalAttn ? '' : ' ok');
+      hc.textContent = qErr ? 'queue unavailable' : totalAttn ? totalAttn + ' need' + (totalAttn === 1 ? 's' : '') + ' attention' : 'nothing needs attention';
+      var otherCount = q.counts.blocked + q.counts.waiting + q.counts.upcoming;
       var hs = document.createElement('span'); hs.className = 'bwn-actc-s';
-      // Phase 1: the card is a MERGE now, so claiming one source for the whole list would
-      // mislabel live generated steps as plan items - the exact confusion the merge exists
-      // to fix. A single source is stated only when every step came from the plan; a mixed
-      // card counts each side, and per-row `why` tags carry the individual sources.
-      var nAuth = 0, nGen = 0;
-      acts.forEach(function (a) { if (a.authored) nAuth++; else if (!a.anchor) nGen++; });
-      var planSrcLbl = acts.some(function (a) { return a.authored && String(a.planRef || '').indexOf('dash') === 0; })
-        ? 'the dashboard case file' : 'your Next Actions Required note';
-      hs.textContent = !nAuth ? 'chase → do it → log it as a WO note'
-        : (nGen ? nAuth + ' from ' + planSrcLbl + ' · ' + nGen + ' from the playbook' : 'from ' + planSrcLbl);
-      var hx = document.createElement('span'); hx.className = 'bwn-actc-x'; hx.textContent = collapsed ? '▸' : '▾';
+      // Overflow beyond the DO NOW three is still attention-needed - say so, never "below"/"upcoming".
+      hs.textContent = qErr ? liveActs.length + ' open step' + (liveActs.length === 1 ? '' : 's') + ', unsorted'
+        : more ? (more + ' more requiring attention')
+        : (otherCount ? otherCount + ' more below' : 'everything else is healthy');
+      var hx = document.createElement('span'); hx.className = 'bwn-actc-x'; hx.textContent = collapsed ? '▸' : '▾'; hx.setAttribute('aria-hidden', 'true');
       hd.appendChild(ht); hd.appendChild(hc); hd.appendChild(hs); hd.appendChild(hx);
-      function toggleCollapse() {
+      hd.addEventListener('click', function () {
         try { localStorage.setItem('bwn:acts:collapsed', collapsed ? '' : '1'); } catch (e) { }
         renderActsInline(state);
-      }
-      hd.addEventListener('click', toggleCollapse);
-      hd.addEventListener('keydown', function (e) { if (e.key === 'Enter' || e.key === ' ') { e.preventDefault(); toggleCollapse(); } });
+      });
       card.appendChild(hd);
 
-      // The round-trip strip: "Escalated - awaiting mgmt" while the queue holds an
-      // ACTIVE item for this WO. Deliberately outside the collapsed gate - an open
-      // escalation is exactly what a one-line glance is for.
       if (escSt) {
         var esb = document.createElement('div');
         esb.className = 'bwn-act-esc';
@@ -5244,202 +6372,48 @@
         card.appendChild(esb);
       }
 
-      if (!collapsed) {
-        var body = document.createElement('div'); body.className = 'bwn-actc-body';
-        acts.forEach(function (a) {
-          if (a.anchor) {
-            // Uncheckable completion gate - a flag + label, no checkbox/buttons. It sits
-            // at the bottom of the open group and can only clear by the status advancing.
-            var ra = document.createElement('div'); ra.className = 'bwn-act-row bwn-act-anchor';
-            var mka = document.createElement('div'); mka.className = 'bwn-act-anchor-mk'; mka.textContent = '⚑';
-            var maa = document.createElement('div'); maa.className = 'bwn-act-main';
-            var lba = document.createElement('div'); lba.className = 'bwn-act-lbl'; lba.textContent = a.label;
-            var wya = document.createElement('div'); wya.className = 'bwn-act-why'; wya.textContent = a.why;
-            maa.appendChild(lba); maa.appendChild(wya);
-            ra.appendChild(mka); ra.appendChild(maa); body.appendChild(ra);
-            return;
+      if (!collapsed && qErr) {
+        var ebody = document.createElement('div'); ebody.className = 'bwn-actc-body'; ebody.id = 'bwn-act-card-body';
+        var warn = document.createElement('div'); warn.className = 'bwn-cq-warn'; warn.setAttribute('role', 'status');
+        warn.textContent = 'Could not sort this work order’s steps into a priority queue. Every open step is listed below, unsorted - the checkboxes, Chase, and Actioned still work. Reload the page to retry.';
+        ebody.appendChild(warn);
+        fullList.forEach(function (a) { ebody.appendChild(buildActRow(a, state, store, escSt, { card: false, sec: 'full' })); });
+        card.appendChild(ebody);
+      } else if (!collapsed) {
+        var body = document.createElement('div'); body.className = 'bwn-actc-body'; body.id = 'bwn-act-card-body';
+
+        // ---- DO NOW: the coordinator's up-to-3 attention queue, expanded by default ----
+        var dnWrap = document.createElement('div'); dnWrap.className = 'bwn-cq-donow' + (dn ? '' : ' is-clear');
+        var dnHd = document.createElement('div'); dnHd.className = 'bwn-cq-donow-hd';
+        var dnT = document.createElement('span'); dnT.className = 'bwn-cq-donow-t'; dnT.textContent = 'DO NOW';
+        var dnN = document.createElement('span'); dnN.className = 'bwn-cq-donow-n';
+        dnN.textContent = dn ? dn + ' action' + (dn === 1 ? '' : 's') + ' require' + (dn === 1 ? 's' : '') + ' attention' : 'clear';
+        dnHd.appendChild(dnT); dnHd.appendChild(dnN); dnWrap.appendChild(dnHd);
+        if (q.doNow.length) {
+          q.doNow.forEach(function (c, i) { dnWrap.appendChild(buildActRow(c, state, store, escSt, { card: true, sec: 'donow', primary: i === 0 })); });
+        } else {
+          var zero = document.createElement('div'); zero.className = 'bwn-cq-zero';
+          zero.textContent = 'No Coordinator actions require attention right now.';
+          dnWrap.appendChild(zero);
+          if (otherCount) {
+            var zsub = document.createElement('div'); zsub.className = 'bwn-cq-zero-sub';
+            zsub.textContent = 'Everything else is healthy, scheduled, blocked, or waiting on someone else - ' + otherCount + ' item' + (otherCount === 1 ? '' : 's') + ' below.';
+            dnWrap.appendChild(zsub);
           }
-          var rec = store[a.key];
-          var isDone = !!(rec && rec.done);
-          var r = document.createElement('div'); r.className = 'bwn-act-row' + (a.nudge && !isDone ? ' nudge' : '');
-          var cb = document.createElement('input'); cb.type = 'checkbox'; cb.checked = isDone;
-          cb.setAttribute('aria-label', a.label);
-          cb.title = isDone ? 'Uncheck to reopen' : 'Mark done without posting a note';
-          cb.addEventListener('change', function () {
-            if (cb.checked) { actsMarkDone(a, ''); renderActsInline(state); return; }
-            // Unchecking: three cases.
-            //  1. Correcting a wrong AUTO-check → frictionless (never punish fixing the machine).
-            //  2. Dismissing a CRITICAL step → a reason is REQUIRED; it becomes a WO note
-            //     (manual save = Umbrava attribution) and rides to the activity log.
-            //     Empty/cancelled reason = NOT dismissed - the box stays checked.
-            //  3. Anything else → plain reopen, counted in the usage stats.
-            var rec2 = actsLoad()[a.key];
-            if (rec2 && rec2.done && rec2.auto) { actsMarkUndone(a, '', true); renderActsInline(state); return; }
-            // Undo grace: a bare manual check (no note typed) unchecked within 2 minutes
-            // is a misclick correction, not a dismissal - frictionless and NOT a skip.
-            // Without this, Cancel leaves a live critical step falsely "done" and the only
-            // exit fabricates a dismissal + a skip stat for fixing a fat-finger (review).
-            if (rec2 && rec2.done && !rec2.note && rec2.ts && Date.now() - rec2.ts < 120000) { actsMarkUndone(a, '', true); renderActsInline(state); return; }
-            if (actIsCritical(a)) {
-              var why2 = prompt('"' + a.label + '" is a critical step.\nWhy is it being dismissed? (required - this becomes the WO note)', '');
-              if (why2 === null || !why2.trim()) { cb.checked = true; return; }   // not dismissed
-              actsMarkUndone(a, why2.trim());
-              var disNote = 'Dismissed step: ' + a.label + ' - ' + why2.trim();
-              try { navigator.clipboard.writeText(disNote).catch(function () { }); } catch (e2) { }
-              renderActsInline(state);
-              insertWONote(disNote, function () { /* posted manually by the coordinator */ });
-              return;
-            }
-            actsMarkUndone(a, '');
-            renderActsInline(state);
-          });
-          var main = document.createElement('div'); main.className = 'bwn-act-main';
-          var lbl = document.createElement('div'); lbl.className = 'bwn-act-lbl' + (isDone ? ' done' : '');
-          lbl.textContent = a.label;
-          // Phase 2 navigation: the label walks the page to the thing the step is about,
-          // but only where a proven target exists (actNav). Elsewhere it stays plain text.
-          var nav = actNav(a);
-          if (nav) {
-            lbl.className += ' nav';
-            lbl.setAttribute('role', 'button'); lbl.tabIndex = 0;
-            lbl.title = 'Show this on the page';
-            lbl.addEventListener('click', function () { actNavGo(nav); });
-            lbl.addEventListener('keydown', function (ev) { if (ev.key === 'Enter' || ev.key === ' ') { ev.preventDefault(); actNavGo(nav); } });
-          }
-          // Phase 2 training layer: "?" opens three static lines explaining the step.
-          var helpTxt = actHelp(a);
-          if (helpTxt) {
-            var ht = document.createElement('button');
-            ht.type = 'button'; ht.className = 'bwn-act-help-t'; ht.textContent = '?';
-            ht.title = 'What this step means, where to do it, and what done looks like';
-            ht.setAttribute('aria-expanded', actHelpOpen[a.key] ? 'true' : 'false');
-            ht.addEventListener('click', function (ev) {
-              ev.stopPropagation();   // the label may itself be a nav control
-              if (actHelpOpen[a.key]) delete actHelpOpen[a.key]; else actHelpOpen[a.key] = 1;
-              renderActsInline(state);
-            });
-            lbl.appendChild(ht);
-          }
-          var why = document.createElement('div'); why.className = 'bwn-act-why'; why.textContent = a.why;
-          main.appendChild(lbl); main.appendChild(why);
-          if (helpTxt && actHelpOpen[a.key]) {
-            var hbx = document.createElement('div'); hbx.className = 'bwn-act-help';
-            for (var hi = 0; hi < ACT_HELP_PFX.length; hi++) {
-              var hln = document.createElement('div');
-              hln.textContent = ACT_HELP_PFX[hi] + helpTxt[hi];
-              hbx.appendChild(hln);
-            }
-            main.appendChild(hbx);
-          }
-          // A dismissed-with-reason step stays OPEN and shows its logged reason - the
-          // dismissal is visible and reversible, never a silent deletion.
-          if (!isDone && rec && rec.dismissed && rec.reason) {
-            var dis = document.createElement('div'); dis.className = 'bwn-act-dis';
-            var dd = new Date(rec.dismissed);
-            dis.textContent = '✗ dismissed ' + (dd.getMonth() + 1) + '/' + dd.getDate() + ': ' + rec.reason;
-            main.appendChild(dis);
-          }
-          if (isDone && rec.note) {
-            var lg = document.createElement('div'); lg.className = 'bwn-act-log';
-            var d = new Date(rec.ts || Date.now());
-            lg.textContent = '✓ ' + (d.getMonth() + 1) + '/' + d.getDate() + ' - ' + rec.note;
-            main.appendChild(lg);
-          }
-          var btns = document.createElement('div'); btns.className = 'bwn-act-btns';
-          armAssistDue(a, isDone);
-          // Phase 2 tool launch - rendered only while the owning dock registrant is live,
-          // so this is never a dead control. The click is the same bwn:dock:open the rail
-          // itself emits, so the tool opens exactly as if launched from the dock. A step
-          // can map to more than one tool (recruit = Dispatch OR Email RFP); each button
-          // gates on its OWN registrant, so only installed-and-live tools render.
-          var tool = actTool(a);
-          if (tool && !isDone) {
-            tool.docks.forEach(function (dk) {
-              if (!waDockAlive(dk)) return;
-              var tb = document.createElement('button');
-              tb.type = 'button'; tb.className = 'bwn-wa-btn ghost'; tb.textContent = waEscToolLabel(dk, escSt);
-              tb.style.cssText = 'padding:3px 9px;font-size:10px;';
-              tb.title = (dk === 'assist' && escSt)
-                ? 'An escalation is already open on this work order - view, acknowledge or resolve it'
-                : 'Open the ' + (ACT_TOOL_LABEL[dk] || 'tool').replace(/…$/, '') + ' drawer for this work order';
-              tb.addEventListener('click', function () {
-                try { document.dispatchEvent(new CustomEvent('bwn:evt', { detail: { id: 'bwn:dock:open', key: dk } })); } catch (e) { }
-              });
-              btns.appendChild(tb);
-            });
-          }
-          if (a.text) {
-            var cp = document.createElement('button');
-            cp.type = 'button'; cp.className = 'bwn-wa-btn ghost'; cp.textContent = 'Chase';
-            cp.style.cssText = 'padding:3px 9px;font-size:10px;';
-            cp.title = a.text;
-            cp.addEventListener('click', function () {
-              navigator.clipboard.writeText(a.text).then(function () {
-                cp.textContent = 'Copied ✓';
-                setTimeout(function () { cp.textContent = 'Chase'; }, 1500);
-              }, function () { prompt('Copy manually:', a.text); });
-            });
-            btns.appendChild(cp);
-          }
-          var ab = document.createElement('button');
-          ab.type = 'button'; ab.className = 'bwn-wa-btn primary'; ab.textContent = isDone ? 'Re-log' : 'Actioned…';
-          ab.style.cssText = 'padding:3px 9px;font-size:10px;';
-          ab.title = 'Log what you did - prefills a WO note for you to review and post';
-          ab.addEventListener('click', function () {
-            var typed = prompt('What did you do? (one line - becomes the WO note)\n\n' + a.label, '');
-            if (typed === null) return;
-            var noteText = a.label + (typed.trim() ? ' - ' + typed.trim() : '');
-            actsMarkDone(a, typed.trim());
-            renderActsInline(state);
-            // Silent clipboard backup first: some rich editors re-render from their own
-            // state and swallow programmatic text - paste is then the instant recovery.
-            try { navigator.clipboard.writeText(noteText).catch(function () { }); } catch (e) { }
-            // ECD-related actions log an internal audit note - default the type to Internal.
-            // The client-cadence step IS a client-facing update - default it to Client so the
-            // posted note both reads correctly AND resets lastClientNoteDays (self-converges).
-            var actNoteType = (a.openEcd || /^ecd/.test(a.key || '')) ? 'Internal'
-              : /^clientcad/.test(a.key || '') ? 'Client' : undefined;
-            insertWONote(noteText, function () { /* posted manually by the coordinator */ }, actNoteType);
-          });
-          btns.appendChild(ab);
-          if (a.openEcd) {
-            var eb = document.createElement('button');
-            eb.type = 'button'; eb.className = 'bwn-wa-btn ghost'; eb.textContent = 'Set ECD…';
-            eb.style.cssText = 'padding:3px 9px;font-size:10px;';
-            eb.title = 'Propose + set the expected completion date, and draft the client note';
-            eb.addEventListener('click', function () { ecdHelperOpen(state); });
-            btns.appendChild(eb);
-          }
-          // Guided-WRITE buttons - gated by BWN_MODULES.woAssistWrites (shipping default OFF).
-          // The flag hides the UI; the mutations still pass feature:'woAssist' to bwnGqlOp, so
-          // Core's kill switch + audit gate governs the write even if a button ever leaked in.
-          if (BWN_MODULES.woAssistWrites) {
-            // "Create task…" - on every non-anchor act row (spin a follow-up off any next action).
-            (function (act) {
-              // Third gate, and the per-USER one: Umbrava's own checkboxes. bwnCan fails OPEN on
-              // anything it cannot decide, so these render exactly as before for an undecoded user.
-              if (bwnCan('Task.AddNew')) {
-                var tkb = document.createElement('button');
-                tkb.type = 'button'; tkb.className = 'bwn-wa-btn ghost'; tkb.textContent = 'Create task…';
-                tkb.style.cssText = 'padding:3px 9px;font-size:10px;';
-                tkb.title = 'Create a follow-up task on this work order (assigned to the coordinator)';
-                tkb.addEventListener('click', function () { taskHelperOpen(state, act); });
-                btns.appendChild(tkb);
-              }
-              // "Change status…" - only on the advance-to-complete gate + the phase-chase rows.
-              if (bwnCan('WorkOrderField.Status') && (act.key === 'advance:workcomplete' || act.key.indexOf('phase:') === 0)) {
-                var csb = document.createElement('button');
-                csb.type = 'button'; csb.className = 'bwn-wa-btn ghost'; csb.textContent = 'Change status…';
-                csb.style.cssText = 'padding:3px 9px;font-size:10px;';
-                csb.title = 'Change this work order’s status (guided, logged, typed confirm)';
-                csb.addEventListener('click', function () { statusHelperOpen(state, act); });
-                btns.appendChild(csb);
-              }
-            })(a);
-          }
-          r.appendChild(cb); r.appendChild(main); r.appendChild(btns);
-          body.appendChild(r);
-        });
+        }
+        body.appendChild(dnWrap);
+
+        // ---- Collapsed secondary sections (deterministic precedence order) ----
+        // More requiring attention: the DO NOW overflow. SAME classification and SAME
+        // interactive cards as DO NOW (never called Upcoming) - just collapsed by default.
+        if (q.moreAttention.length) body.appendChild(buildCoordSection('more', 'More requiring attention', q.moreAttention, q.critical.moreAttention, function (a) { return buildActRow(a, state, store, escSt, { card: true, sec: 'more' }); }, state));
+        if (q.blocked.length) body.appendChild(buildCoordSection('blocked', 'Blocked', q.blocked, q.critical.blocked, function (a) { return buildCompactRow(a, state, 'blocked'); }, state));
+        if (q.waiting.length) body.appendChild(buildCoordSection('waiting', 'Waiting on others', q.waiting, q.critical.waiting, function (a) { return buildCompactRow(a, state, 'waiting'); }, state));
+        if (q.upcoming.length) body.appendChild(buildCoordSection('upcoming', 'Upcoming', q.upcoming, false, function (a) { return buildCompactRow(a, state, 'upcoming'); }, state));
+        // Full lifecycle: the complete generated list (open + done + anchor), fully
+        // interactive - the power-user / debugging reference surface. Never styled like DO NOW.
+        body.appendChild(buildCoordSection('full', 'Full lifecycle', fullList, false, function (a) { return buildActRow(a, state, store, escSt, { card: false, sec: 'full' }); }, state));
+
         var meta = document.createElement('div'); meta.className = 'bwn-wa-meta';
         meta.textContent = 'Auto-updates with the WO - steps clear when the job state resolves them or a note logs them; the posted note is the real record.';
         body.appendChild(meta);
@@ -5447,6 +6421,13 @@
       }
 
       row.parentNode.insertBefore(card, row);
+      // Put focus back where it was (or where the action said it should go), else the header.
+      var fkGo = coordFocusNext || fkWas; coordFocusNext = null;
+      if (fkGo) {
+        var fTo = null, fAll = card.querySelectorAll('[data-bwn-fk]');
+        for (var fi = 0; fi < fAll.length && !fTo; fi++) if (fAll[fi].getAttribute('data-bwn-fk') === fkGo) fTo = fAll[fi];
+        try { (fTo || hd).focus({ preventScroll: true }); } catch (e) { }
+      }
     }
 
     // ---- ECD helper: propose + set the expected-completion date ---------------
@@ -5507,6 +6488,13 @@
         // note - an ETA is a future promise, so bare M/D must look forward, not back.
         // API notes carry an exact epoch (tsAbs); scraped ones only a rendered string.
         var when = (notes[i].tsAbs != null) ? notes[i].tsAbs : parseNoteDate(notes[i].ts);
+        // No anchor, no yearless promise. When a note carries no resolvable timestamp
+        // (a pinned/removed note renders "Pinned" not a date, so tsAbs is null AND the
+        // ts text won't parse), parseBodyDate falls back to anchoring on TODAY and
+        // forward-projects a bare M/D into the next year - "ECD 4/26" became 4/26/2027
+        // (user-reported, off a removed pinned note). A promise you can't date can't be
+        // resolved; drop it and let the PO/trip signals or the 2nd-Friday fallback stand.
+        if (when == null) continue;
         var dm = parseBodyDate(b, when);
         if (dm === null || dm < today) continue;   // forward-looking ETAs only - a blown promise isn't a completion date
         // The note written LAST is the promise that stands. Ranking by furthest-future
@@ -6681,7 +7669,7 @@
   });
 
   // ==========================================================================
-  // MODULE: Email Leak Guard v2.0
+  // MODULE: Email Leak Guard v2.1
   // ==========================================================================
   bwnBoot('leakGuard', BWN_MODULES.leakGuard, function () {
     'use strict';
@@ -6689,7 +7677,7 @@
     var STRIP_ID = 'bwn-eg-strip';
     var STYLE_ID = 'bwn-eg-style';
 
-    console.info('[BWN EG] email leak guard v2.0 loaded on', location.href);
+    console.info('[BWN EG] email leak guard v2.1 loaded on', location.href);
 
     // ---- Config (edit here) ----------------------------------------------
     var CFG = {
@@ -7103,7 +8091,12 @@
       ensureStyle();
       var strip = document.createElement('div');
       strip.id = STRIP_ID;
-      bodyEl.parentNode.insertBefore(strip, bodyEl);
+      // v2.1: mount ABOVE the whole Body text field. The textarea's own parent is MUI's
+      // inline-flex input root, so a strip placed there became a flex column that squeezed
+      // the body text into half the width. Falls back to the textarea if the field wrapper
+      // is not a MUI FormControl.
+      var anchor = bodyEl.closest('.MuiFormControl-root') || bodyEl;
+      anchor.parentNode.insertBefore(strip, anchor);
 
       var pos = getPOs();
       var dne = getDNE();
@@ -11971,6 +12964,7 @@
       var c = {};
       try { c = JSON.parse(localStorage.getItem('bwn:config') || '{}') || {}; } catch (e) { c = {}; }
       c.views = list;
+      c.v = 1;
       localStorage.setItem('bwn:config', JSON.stringify(c));
       return list;
     }
