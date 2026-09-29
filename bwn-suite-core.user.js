@@ -57,6 +57,14 @@
                          // still passes a dry-run + a typed confirm, and every write routes through
                          // bwnGqlOp feature:'bulkSource' (its per-feature kill switch + audit ring)
                          // via the proven patchWorkOrder. Flip back to false to kill the module.
+    bulkTask: false,     // SHIPPING DEFAULT OFF: Bulk Task Reassign - paste WO#s, pick one user, move
+                         // every EXISTING open task on them to that user (never creates a task). The
+                         // whole module - dock entry, drawer, every read and write - mounts only when
+                         // this is on. Each run needs a read-only preview + a typed APPLY n; each
+                         // write re-reads the task, sends it back unchanged but for assignedTo
+                         // (EditTask is a full replace), and only a matching read-back counts as done.
+                         // Writes route through bwnGqlOp feature:'bulkTask' (kill switch + Task.EditTask
+                         // permission + high-risk confirm + audit ring).
     permGate: true,      // decode this user's Umbrava permission checkboxes (me.permissions) once a
                          // session and hide the suite controls they are not allowed to use - the
                          // dock rail rows, the WO-Assist write buttons, the bulk consoles. Core is
@@ -1579,6 +1587,10 @@
       ok: 'Task created.', fail: 'The task was not created.' },
     completeTask: { kind: 'write', perm: 'Task.Complete', target: 'task', risk: 'moderate', idempotent: true, retry: 'none',
       ok: 'Task completed.', fail: 'The task was not completed.' },
+    // FULL REPLACE of the task (live capture 2026-09-29): the caller must send the fresh record back
+    // with only the intended field changed. High risk: a partial payload could blank task fields.
+    editTask: { kind: 'write', perm: 'Task.EditTask', target: 'task', risk: 'high', idempotent: false, retry: 'none',
+      ok: 'Task updated.', fail: 'The task was not updated.' },
     deactivateVendor: { kind: 'write', perm: 'Vendor.ManageProfile', target: 'vendor', risk: 'moderate', idempotent: true, retry: 'none',
       ok: 'Vendor deactivated.', fail: 'The vendor was not deactivated.' },
 
@@ -12557,6 +12569,7 @@
     BWN_DOCK_POLICY['dispatch']    = { minRank: 3, perms: [] };  // Dispatch; registrant ALSO keeps its Pending-Dispatch context gate (additive)
     BWN_DOCK_POLICY['operate']     = { minRank: 4, perms: [] };  // AI Operate - high blast radius
     BWN_DOCK_POLICY['bulk-ops']    = { minRank: 4, perms: [] };  // Bulk Ops - mass action
+    BWN_DOCK_POLICY['bulk-task']   = { minRank: 4, perms: ['Task.EditTask'] };  // Bulk task reassign - mass write, flag bulkTask
     var dockPolicyWarned = Object.create(null);   // one console.warn per unclassified key
 
     function dockEmit(id, extra) {
@@ -12650,6 +12663,8 @@
       // scans SIBLING .user.js files) never covered it - it fell back to its 🔖 emoji beside the
       // line-icon rows. A pencil, matching the "Edit" name.
       'bulk-source': ['M12 20h9', 'M16.5 3.5a2.121 2.121 0 0 1 3 3L7 19l-4 1 1-4z'],
+      // Reassign tasks (bulk-task, Core-internal): two people, the hand-off between them.
+      'bulk-task': ['M9 11a3 3 0 1 0 0-6 3 3 0 0 0 0 6z', 'M3 20a6 6 0 0 1 12 0', 'M16 8h5', 'M19 5l2 3-2 3'],
       dispatch: ['M7 17a2 2 0 1 0 4 0 2 2 0 0 0-4 0z', 'M15 17a2 2 0 1 0 4 0 2 2 0 0 0-4 0z',
         'M5 17H3V6a1 1 0 0 1 1-1h9v12m-2 0h4m4 0h2v-6h-8m0-5h5l3 5'],
       // A 3D box (📦): the front silhouette, the top edges meeting at centre, and the seam down.
@@ -18523,6 +18538,513 @@
 
     startObserving();
     BWN.beat('bulkSource', 'ok', 'ready (flag on)');
+  });
+
+  // ==========================================================================
+  // MODULE: Bulk Task Reassign v1.0  (reassign EXISTING open WO tasks from pasted WO#s, flag OFF)
+  // ==========================================================================
+  // Coordinator pastes work-order numbers, picks ONE target user, previews every open task on those
+  // WOs (reads only), types "APPLY <n>", and the run moves each previewed task to the target user.
+  // It NEVER creates a task and never touches description / date / metadata / category / priority /
+  // flag / completion - EditTask is a FULL REPLACE (live capture 2026-09-29, see
+  // wiki/umbrava-graphql-operations.md "editTask"), so every write re-reads the task first, refuses
+  // the row if anything moved since the preview, sends the fresh record back byte-for-byte with only
+  // `assignedTo` changed, then re-reads again and reports success ONLY when that read-back shows the
+  // target assignee with every protected field unchanged. The response's success flag is never
+  // trusted on its own. Sequential, no retry (EditTask is not idempotent). The whole module - dock
+  // entry, drawer, every read and write - mounts ONLY when BWN_MODULES.bulkTask is on (default OFF),
+  // and each write also routes through bwnGqlOp (feature:'bulkTask' kill switch + Task.EditTask
+  // permission gate + risk:'high' confirm gate + bwn:audit ring).
+  bwnBoot('bulkTask', BWN_MODULES.bulkTask, function () {
+
+    // ===== BULK-TASK-ENGINE START v1 (pure, DOM-FREE; sliced + driven by scripts/test-bulk-task.js
+    //        against a stubbed transport. Closes over ONLY bwnGql + bwnGqlOp from the enclosing
+    //        scope.) =====
+    var BT_WO_Q = 'query BTWorkOrder($n: Int!) { workOrder(workOrderNumber: $n) { number } }';
+    // includeComplete:false -> `total` is the OPEN count (live-verified 2026-09-29), so a page that
+    // came back short of it is detected instead of silently missing tasks.
+    var BT_TASKS_Q = 'query BTOpenTasks($id: String!) { tasksByEntityTypeAndId(entityType: 1, entityId: $id, includeComplete: false, take: 100) { total tasks { id entityId entityType description targetStartDate assignedTo metadata categoryId isComplete flag priorityStatus } } }';
+    var BT_EDIT_M = 'mutation EditTask($data: EditTaskInput!) { editTask(data: $data) { success message } }';
+    var BT_USERS_Q = 'query BTUsers { users(includeInactiveUsers: false, includeSystemUsers: false) { id firstName lastName isInactive isTechnician } }';
+    var BT_MAX_WOS = 50;   // per-run cap on unique WO#s. Over the cap the preview is REFUSED, never truncated.
+    // The exact message Umbrava returns for a WO number that does not exist (live-verified).
+    var BT_NOT_FOUND_RE = /Cannot return null for non-nullable field Query\.workOrder/;
+    var BT_DATE_RE = /^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}(:\d{2}(\.\d{1,3})?)?(Z|[+-]\d{2}:\d{2})$/;
+    // Fixed failure categories - the server's error text can echo task data, so it never reaches
+    // the local log or the screen (same rule as the bwn:audit ring).
+    function btErrCategory(e) {
+      var m = String((e && e.message) || e);
+      if (e && e.bwnPermissionDenied) return 'Not permitted (Task.EditTask)';
+      if (/feature "bulkTask" is disabled/.test(m)) return 'Feature disabled - not sent';
+      if (/validation failed/.test(m)) return 'Blocked by pre-send check - not sent';
+      if (/high-risk|confirm/i.test(m)) return 'Confirmation gate refused - not sent';
+      if (e && e.bwnNonTransient) return 'Refused by Umbrava';
+      return 'Request failed';
+    }
+
+    // Paste -> { total, unique:[n], invalid:[tok], ambiguous:[tok], dupes }. Separators: any run of
+    // whitespace, commas or semicolons. "397888", "W-397888", "w397888" are one WO. A token with more
+    // than one number in it ("W-397888-001", "397888/397889") could mean a PO or two WOs - ambiguous,
+    // never guessed. Anything else is invalid.
+    function btParse(text) {
+      var toks = String(text == null ? '' : text).split(/[\s,;]+/).filter(Boolean);
+      var seen = Object.create(null), raw = {}, unique = [], invalid = [], ambiguous = [], dupes = 0;
+      toks.forEach(function (raw) {
+        var t = raw.trim();
+        var m = /^(?:w-?)?(\d{1,9})$/i.exec(t);
+        if (m) {
+          var n = parseInt(m[1], 10);
+          if (!(n > 0)) { invalid.push(t); return; }
+          if (seen[n]) { dupes++; return; }
+          seen[n] = true; raw[n] = t; unique.push(n); return;
+        }
+        if ((t.match(/\d+/g) || []).length > 1) ambiguous.push(t); else invalid.push(t);
+      });
+      return { total: toks.length, unique: unique, raw: raw, invalid: invalid, ambiguous: ambiguous, dupes: dupes };
+    }
+
+    // The full-replace fields a task MUST carry before it may be rewritten. [] = complete.
+    function btMissing(t) {
+      var miss = [];
+      if (!t || typeof t.id !== 'string' || !t.id) miss.push('id');
+      if (!t || typeof t.entityId !== 'string' || !t.entityId) miss.push('entityId');
+      if (!t || t.entityType !== 1) miss.push('entityType');
+      if (!t || typeof t.description !== 'string') miss.push('description');
+      if (!t || typeof t.metadata !== 'string' || !t.metadata) miss.push('metadata');
+      // An offset-less or sub-millisecond date would be shifted / truncated by the ISO re-serialize.
+      if (!t || typeof t.targetStartDate !== 'string' || !BT_DATE_RE.test(t.targetStartDate) || !isFinite(Date.parse(t.targetStartDate))) miss.push('targetStartDate');
+      if (t && t.categoryId != null && typeof t.categoryId !== 'number') miss.push('categoryId');
+      return miss;
+    }
+    // Protected-field equality (everything but assignedTo). Dates compare by instant, so the read's
+    // "+00:00" and the SPA's ".000Z" forms of the same moment are equal.
+    function btSameProtected(a, b) {
+      if (!a || !b) return false;
+      return a.id === b.id && a.entityId === b.entityId && a.entityType === b.entityType &&
+        a.description === b.description && a.metadata === b.metadata &&
+        Date.parse(a.targetStartDate) === Date.parse(b.targetStartDate) &&
+        (a.categoryId == null ? null : a.categoryId) === (b.categoryId == null ? null : b.categoryId) &&
+        a.priorityStatus === b.priorityStatus && a.flag === b.flag && a.isComplete === b.isComplete;
+    }
+    // Which protected fields differ (for a precise reason string).
+    function btDiff(a, b) {
+      return ['description', 'metadata', 'entityId', 'entityType', 'targetStartDate', 'categoryId', 'priorityStatus', 'flag', 'isComplete']
+        .filter(function (k) {
+          if (k === 'targetStartDate') return Date.parse(a && a[k]) !== Date.parse(b && b[k]);
+          if (k === 'categoryId') return ((a && a[k]) == null ? null : a[k]) !== ((b && b[k]) == null ? null : b[k]);
+          return (a && a[k]) !== (b && b[k]);
+        });
+    }
+    // EditTask variables exactly as the SPA sends them (captured order), from a FRESH record, with
+    // only assignedTo changed. categoryId is OMITTED (not null) when the task has none.
+    function btPayload(t, targetId) {
+      var d = {
+        id: t.id, entityId: t.entityId, entityType: t.entityType, description: t.description,
+        targetStartDate: new Date(Date.parse(t.targetStartDate)).toISOString(),
+        assignedTo: targetId, metadata: t.metadata
+      };
+      if (t.categoryId != null) d.categoryId = t.categoryId;
+      return { data: d };
+    }
+    // What the preview/run binds to: the WO list, the target, and every Reassign row's task id plus
+    // its protected snapshot. Any change -> a different stamp -> the typed confirm no longer arms.
+    function btStamp(unique, targetId, rows) {
+      return JSON.stringify({
+        wos: unique.slice().sort(function (a, b) { return a - b; }), target: targetId || '',
+        rows: (rows || []).filter(function (r) { return r.action === 'Reassign'; }).map(function (r) {
+          var s = r.snap || {};
+          return [r.wo, s.id, s.description, s.metadata, s.targetStartDate, s.categoryId == null ? null : s.categoryId, s.priorityStatus, s.flag, s.assignedTo || null];
+        })
+      });
+    }
+    function btConfirmArmed(typed, count, stampNow, stampPreview) {
+      return count > 0 && !!stampPreview && stampNow === stampPreview && typed === 'APPLY ' + count;
+    }
+
+    // One WO's open tasks. -> { status:'ok', tasks } | { status:'notfound'|'readfail'|'incomplete', reason }
+    function btReadWO(wo) {
+      return bwnGql(BT_WO_Q, { n: wo }).then(function (d) {
+        if (!d || !d.workOrder || d.workOrder.number !== wo) return { status: 'ambiguous', reason: 'Ambiguous work-order match' };
+        return bwnGql(BT_TASKS_Q, { id: String(wo) }).then(function (td) {
+          var r = td && td.tasksByEntityTypeAndId;
+          if (!r || !Array.isArray(r.tasks)) return { status: 'readfail', reason: 'Task read failed' };
+          if (typeof r.total === 'number' && r.total > r.tasks.length) return { status: 'readfail', reason: 'Task read incomplete (' + r.tasks.length + ' of ' + r.total + ')' };
+          return { status: 'ok', tasks: r.tasks.filter(function (t) { return t && t.isComplete === false; }) };
+        });
+      }, function (err) {
+        var msg = String((err && err.message) || err);
+        if (BT_NOT_FOUND_RE.test(msg)) return { status: 'notfound', reason: 'Work order not found' };
+        return { status: 'readfail', reason: 'Read failed (permission or network)' };
+      }).catch(function () { return { status: 'readfail', reason: 'Task read failed' }; });
+    }
+
+    // Preview rows for one WO read. Pure. Every open task becomes a row; nothing is dropped silently.
+    function btRowsFor(wo, res, targetId) {
+      if (res.status !== 'ok') return [{ wo: wo, taskId: null, action: 'Skip', reason: res.reason }];
+      if (!res.tasks.length) return [{ wo: wo, taskId: null, action: 'Skip', reason: 'No open task' }];
+      return res.tasks.map(function (t) {
+        var row = { wo: wo, taskId: t.id || null, desc: t.description || '', cur: t.assignedTo || null, to: targetId || null, snap: t, action: 'Skip', reason: '' };
+        var miss = btMissing(t);
+        if (!targetId) row.reason = 'No resolved target user';
+        else if (miss.length) row.reason = 'Missing required field(s): ' + miss.join(', ');
+        else if (t.entityId !== String(wo)) row.reason = 'Task does not belong to this work order';
+        else if (t.assignedTo === targetId) row.reason = 'Already assigned to target user';
+        // ponytail: the one live EditTask capture was an unflagged, uncategorised task. Flag rides a
+        // separate flag/unflag mutation and the categoryId round-trip is unproven, so both are skipped
+        // until a live capture of such a task shows the full replace keeps them.
+        else if (t.flag === true || t.categoryId != null) row.reason = 'Flagged or categorised task - not yet verified live, reassign by hand';
+        else { row.action = 'Reassign'; row.reason = ''; }
+        return row;
+      });
+    }
+
+    // Execute ONE previewed Reassign row. Never throws; always resolves a result:
+    //   { result: 'Verified' | 'Skipped' | 'Mutation failed' | 'Verification failed' | 'Verification unavailable', reason, before, after }
+    // Reads the task fresh first (refuse if it moved since preview), writes once (no retry), then
+    // reads back and verifies. The read-back runs after a FAILED write too, so a write that landed
+    // despite an error is surfaced for review - but it is never labelled success.
+    function btFind(wo, taskId) {
+      return bwnGql(BT_TASKS_Q, { id: String(wo) }).then(function (td) {
+        var r = td && td.tasksByEntityTypeAndId;
+        if (!r || !Array.isArray(r.tasks)) throw new Error('task read failed');
+        var hit = null;
+        r.tasks.forEach(function (t) { if (t && t.id === taskId) hit = t; });
+        return hit;   // null = no longer open (completed / deleted)
+      });
+    }
+    function btExecRow(row, targetId) {
+      var before = row.snap && row.snap.assignedTo || null;
+      function out(result, reason, after) { return { wo: row.wo, taskId: row.taskId, result: result, reason: reason || '', before: before, after: after === undefined ? null : after }; }
+      return btFind(row.wo, row.taskId).then(function (fresh) {
+        if (!fresh) return out('Skipped', 'Changed since preview (task no longer open)');
+        if (!btSameProtected(fresh, row.snap) || (fresh.assignedTo || null) !== before) {
+          var dd = btDiff(fresh, row.snap);
+          if ((fresh.assignedTo || null) !== before) dd.push('assignedTo');
+          return out('Skipped', 'Changed since preview (' + dd.join(', ') + ')');
+        }
+        if (btMissing(fresh).length) return out('Skipped', 'Missing required field(s): ' + btMissing(fresh).join(', '));
+        var vars = btPayload(fresh, targetId);
+        var sendErr = null;
+        return bwnGqlOp('editTask', BT_EDIT_M, vars, {
+          feature: 'bulkTask', confirmed: true, ids: { wo: row.wo, task: row.taskId },
+          before: { assignedTo: before }, after: { assignedTo: targetId },
+          validate: function (v) {
+            var d = v && v.data;
+            if (!d || d.id !== fresh.id || d.entityId !== fresh.entityId || d.entityType !== 1) return 'identity mismatch';
+            if (d.description !== fresh.description || d.metadata !== fresh.metadata) return 'protected field mismatch';
+            if (Date.parse(d.targetStartDate) !== Date.parse(fresh.targetStartDate)) return 'date mismatch';
+            if (fresh.categoryId == null ? ('categoryId' in d) : d.categoryId !== fresh.categoryId) return 'category mismatch';
+            if (typeof d.assignedTo !== 'string' || !d.assignedTo || d.assignedTo !== targetId) return 'bad assignee';
+            return true;
+          }
+        }).then(null, function (e) { sendErr = e; }).then(function () {
+          return btFind(row.wo, row.taskId).then(function (post) {
+            var postTo = post ? (post.assignedTo || null) : null;
+            if (sendErr) return out('Mutation failed', btErrCategory(sendErr) +
+              (post && postTo === targetId ? ' - READ-BACK SHOWS THE TARGET ASSIGNEE: the write may have landed, review this task' : ''), postTo);
+            if (!post) return out('Verification failed', 'Task not found open on read-back', null);
+            if (postTo !== targetId) return out('Verification failed', 'Read-back assignee is not the target user', postTo);
+            var diff = btDiff(post, fresh);
+            if (diff.length) return out('Verification failed', 'Protected field(s) changed: ' + diff.join(', '), postTo);
+            return out('Verified', '', postTo);
+          }, function () {
+            if (sendErr) return out('Mutation failed', btErrCategory(sendErr) + ' (read-back also failed)');
+            return out('Verification unavailable', 'Read-back failed - do not assume success');
+          });
+        });
+      }, function () { return out('Skipped', 'Pre-write re-read failed'); })
+        // Last line: an unexpected throw must never reject the run chain (that would strand the
+        // drawer in 'running'). Never labelled success; the task is surfaced for review.
+        .then(null, function (e) { return out('Mutation failed', 'Internal error - review this task by hand'); });
+    }
+
+    // Strictly sequential runner (no pool: one EditTask in flight at a time). shouldStop is checked
+    // between rows; a row already started finishes. Never retries.
+    function btRunSequential(rows, targetId, onRow, shouldStop) {
+      var results = [];
+      return rows.reduce(function (p, row) {
+        return p.then(function () {
+          if (shouldStop && shouldStop()) { results.push({ wo: row.wo, taskId: row.taskId, result: 'Not run', reason: 'Cancelled', before: row.snap && row.snap.assignedTo || null, after: null }); return; }
+          return btExecRow(row, targetId).then(function (r) { results.push(r); if (onRow) onRow(r); });
+        });
+      }, Promise.resolve()).then(function () { return results; });
+    }
+
+    // Local session summary: identifiers + outcomes only (no task text, no metadata).
+    function btSummary(sessionId, parsed, previewRows, runResults) {
+      var skip = {}, res = {};
+      (previewRows || []).forEach(function (r) { if (r.action === 'Skip') skip[r.reason] = (skip[r.reason] || 0) + 1; });
+      (runResults || []).forEach(function (r) { res[r.result] = (res[r.result] || 0) + 1; });
+      var resolved = (previewRows || []).reduce(function (s, r) {
+        if (r.wo && r.reason !== 'Work order not found' && r.reason !== 'Ambiguous work-order match' && r.reason.indexOf('Read failed') !== 0) s[r.wo] = true;
+        return s;
+      }, {});
+      return {
+        session: sessionId, ts: new Date().toISOString(),
+        inputCount: parsed.total, uniqueCount: parsed.unique.length, invalidCount: parsed.invalid.length,
+        ambiguousInputCount: parsed.ambiguous.length, duplicateCount: parsed.dupes,
+        resolvedCount: Object.keys(resolved).length,
+        previewOpenTasks: (previewRows || []).filter(function (r) { return r.taskId; }).length,
+        skippedByReason: skip,
+        attempted: (runResults || []).filter(function (r) { return r.result !== 'Not run' && r.result !== 'Skipped'; }).length,
+        verified: res['Verified'] || 0, verificationFailed: res['Verification failed'] || 0,
+        mutationFailed: res['Mutation failed'] || 0, verificationUnavailable: res['Verification unavailable'] || 0,
+        skippedAtRun: res['Skipped'] || 0, notRun: res['Not run'] || 0,
+        rows: (previewRows || []).map(function (r) {
+          var rr = null;
+          (runResults || []).forEach(function (x) { if (x.taskId && x.taskId === r.taskId) rr = x; });
+          return { wo: r.wo, task: r.taskId, before: r.cur || null, planned: r.action, plannedReason: r.reason || '',
+            result: rr ? rr.result : (r.action === 'Skip' ? 'Skipped' : 'Not run'), reason: rr ? rr.reason : '', after: rr ? rr.after : null };
+        })
+      };
+    }
+    // ===== BULK-TASK-ENGINE END v1 =====
+
+    var BT_LOG_KEY = 'bwn:bulkTask:log';   // last 20 session summaries, this browser only
+    function btSaveSummary(s) {
+      try {
+        var a = JSON.parse(localStorage.getItem(BT_LOG_KEY) || '[]');
+        if (!Array.isArray(a)) a = [];
+        a.unshift(s);
+        localStorage.setItem(BT_LOG_KEY, JSON.stringify(a.slice(0, 20)));
+      } catch (e) { /* storage full or blocked: the on-screen log still shows the run */ }
+      try { console.info('[BWN bulkTask] session', s.session, s); } catch (e) { }
+    }
+
+    // ---- shared launcher dock (bwn:dock:*) - same register/open handshake as Bulk Source ----------
+    var DOCK_KEY = 'bulk-task';
+    function dockRegister() {
+      try {
+        document.dispatchEvent(new CustomEvent('bwn:evt', { detail: {
+          id: 'bwn:dock:register', key: DOCK_KEY, label: 'Reassign tasks', icon: '👥', weight: 24,
+          needPerm: 'Task.EditTask',
+          title: 'BWN Bulk Task Reassign - paste WO#s, pick a user, preview every open task, then reassign (typed confirm, verified read-back)'
+        } }));
+      } catch (e) { /* dock host not up yet - the heartbeat re-registers us */ }
+    }
+    function drawerDismiss(el) {
+      var reduce = false;
+      try { reduce = !!(window.matchMedia && window.matchMedia('(prefers-reduced-motion: reduce)').matches); } catch (e) { /* default to motion */ }
+      if (reduce) { el.remove(); return; }
+      el.removeAttribute('id'); el.setAttribute('aria-hidden', 'true');
+      el.classList.add('bwn-closing');
+      setTimeout(function () { el.remove(); }, 170);
+    }
+    var _running = false, _cancelled = false;
+    try {
+      document.addEventListener('bwn:evt', function (e) {
+        var d = e && e.detail; if (!d) return;
+        if (d.id === 'bwn:dock:host' || d.id === 'bwn:dock:ping') dockRegister();
+        if (d.id === 'bwn:dock:open' && d.key === DOCK_KEY) buildDrawer();
+        if (d.id === 'bwn:drawer:open' && d.key !== DOCK_KEY && !_running) {
+          var o = document.getElementById('bwn-bt-drawer'); if (o) drawerDismiss(o);
+        }
+      });
+    } catch (e) { /* bus unavailable */ }
+    dockRegister();
+
+    // Users for the target picker: active, non-technician (the same set WO Assist's task helper
+    // offers). Read once per drawer open; the id is what is sent, never typed text.
+    function btLoadUsers() {
+      return bwnGql(BT_USERS_Q, {}).then(function (d) {
+        return ((d && d.users) || []).filter(function (u) { return u && u.id && !u.isInactive && !u.isTechnician; })
+          .map(function (u) { return { id: u.id, name: ((u.firstName || '') + ' ' + (u.lastName || '')).replace(/\s+/g, ' ').trim() }; })
+          .filter(function (u) { return u.name; })
+          .sort(function (a, b) { return a.name.localeCompare(b.name); });
+      });
+    }
+
+    function buildDrawer() {
+      if (document.getElementById('bwn-bt-drawer')) return;   // idempotent mount
+      try { document.dispatchEvent(new CustomEvent('bwn:evt', { detail: { id: 'bwn:drawer:open', key: DOCK_KEY } })); } catch (e) { /* others close their own */ }
+      var el = document.createElement('aside');
+      el.className = 'bwn-drawer';
+      el.id = 'bwn-bt-drawer';
+      el.setAttribute('role', 'dialog');
+      el.setAttribute('aria-label', 'Bulk task reassign');
+      // Static skeleton carries no runtime values; every dynamic string is set via textContent.
+      el.innerHTML =
+        '<div class="bwn-drawer-hd"><div><div class="t">Reassign tasks</div>' +
+        '<div class="s">paste WO#s · pick a user · preview · typed confirm · verified</div></div>' +
+        '<button class="bwn-drawer-x" id="bwn-bt-x" aria-label="Close" type="button">×</button></div>' +
+        '<div class="bwn-drawer-body">' +
+          '<div class="bwn-ops-sec">1 · Work orders<span class="d">newline, comma or space separated</span></div>' +
+          '<textarea id="bwn-bt-input" rows="4" aria-label="Work order numbers" placeholder="397888&#10;W-399174, 393951" style="width:100%;box-sizing:border-box;padding:6px 8px;border:1px solid var(--bwn-border);border-radius:7px;font:500 12px ui-monospace,monospace;background:var(--bwn-surface);color:var(--bwn-text)"></textarea>' +
+          '<div id="bwn-bt-parse" role="status" aria-live="polite" style="font:500 11px ui-monospace,monospace;color:var(--bwn-text-muted);margin:4px 0 8px"></div>' +
+          '<div class="bwn-ops-sec">2 · Assign to<span class="d">active users only</span></div>' +
+          '<select id="bwn-bt-user" aria-label="Target user" style="width:100%;padding:6px 8px;border:1px solid var(--bwn-border);border-radius:7px;font-size:13px;background:var(--bwn-surface);color:var(--bwn-text)"><option value="">Loading users...</option></select>' +
+          '<div class="bwn-ops-note" style="display:block">Only open tasks that already exist on these work orders are moved. Nothing else on the task changes; each row is re-read before and after its write, and only a read-back that matches is reported as done.</div>' +
+          '<div class="bwn-ops-sec">3 · Preview<span class="d">reads only, zero writes</span></div>' +
+          '<button class="bwn-ops-btn ghost" id="bwn-bt-preview" type="button" disabled>Preview (reads only)</button>' +
+          '<div id="bwn-bt-pcount" style="font:500 11px ui-monospace,monospace;color:var(--bwn-text-muted);margin:6px 0"></div>' +
+          '<div id="bwn-bt-table" style="max-height:220px;overflow:auto;border:1px solid var(--bwn-border-2);border-radius:8px"></div>' +
+          '<div id="bwn-bt-confirmwrap" style="display:none">' +
+            '<div class="bwn-ops-sec">4 · Confirm<span class="d">type the phrase EXACTLY to arm the run</span></div>' +
+            '<div id="bwn-bt-confirmtarget" style="font:600 13px ui-monospace,monospace;color:var(--bwn-text);margin-bottom:4px"></div>' +
+            '<div style="display:flex;gap:8px;align-items:center;flex-wrap:wrap">' +
+              '<input id="bwn-bt-confirm" aria-label="Type APPLY and the count" placeholder="APPLY n" style="flex:1;min-width:110px;padding:6px 9px;border:1px solid var(--bwn-border);border-radius:7px;font:600 13px ui-monospace,monospace;background:var(--bwn-surface);color:var(--bwn-text)">' +
+              '<button class="bwn-ops-btn primary" id="bwn-bt-approve" type="button" disabled>Reassign</button>' +
+            '</div>' +
+          '</div>' +
+          '<div id="bwn-bt-runwrap" style="display:none">' +
+            '<div class="bwn-ops-sec">5 · Run<span class="d">one task at a time · cancel stops new rows</span></div>' +
+            '<div style="display:flex;gap:8px;margin-bottom:6px"><button class="bwn-ops-btn ghost" id="bwn-bt-cancel" type="button">Cancel</button></div>' +
+            '<div id="bwn-bt-log" style="max-height:170px;overflow:auto;font:500 11px ui-monospace,monospace;color:var(--bwn-text-muted);white-space:pre-wrap;border:1px solid var(--bwn-border-2);border-radius:8px;padding:7px 9px"></div>' +
+            '<div id="bwn-bt-tally" role="status" aria-live="polite" style="font:600 12px ui-monospace,monospace;color:var(--bwn-text);margin-top:6px"></div>' +
+          '</div>' +
+        '</div>' +
+        '<div class="bwn-drawer-ft"><button class="bwn-ops-btn ghost" id="bwn-bt-close" type="button">Close</button></div>';
+      document.body.appendChild(el);
+      wireDrawer(el);
+    }
+
+    function wireDrawer(root) {
+      function $(id) { return root.querySelector('#' + id); }
+      var users = [], names = {}, parsed = btParse(''), rows = null, stamp = null, confirmCount = 0, _previewing = false;
+      function target() { var v = $('bwn-bt-user').value; return users.some(function (u) { return u.id === v; }) ? v : ''; }
+      function nameOf(id) { return id ? (names[id] || 'Not available') : 'Unassigned'; }
+      function logln(s) { var l = $('bwn-bt-log'); l.appendChild(document.createTextNode(s + '\n')); l.scrollTop = l.scrollHeight; }
+      function close() { if (_running) { logln('! A run is in progress - Cancel it before closing.'); return; } drawerDismiss(root); }
+      $('bwn-bt-x').onclick = close;
+      $('bwn-bt-close').onclick = close;
+
+      function invalidate() {
+        rows = null; stamp = null; confirmCount = 0;
+        $('bwn-bt-confirmwrap').style.display = 'none';
+        $('bwn-bt-confirm').value = '';
+        $('bwn-bt-approve').disabled = true;
+        $('bwn-bt-table').textContent = '';
+        $('bwn-bt-pcount').textContent = '';
+        refreshParse();
+      }
+      function refreshParse() {
+        parsed = btParse($('bwn-bt-input').value);
+        var over = parsed.unique.length > BT_MAX_WOS;
+        $('bwn-bt-parse').textContent = parsed.total + ' entered · ' + parsed.unique.length + ' unique WO#' +
+          (parsed.dupes ? ' · ' + parsed.dupes + ' duplicate' : '') +
+          (parsed.invalid.length ? ' · ' + parsed.invalid.length + ' invalid' : '') +
+          (parsed.ambiguous.length ? ' · ' + parsed.ambiguous.length + ' ambiguous' : '') +
+          (over ? ' · REFUSED: over the ' + BT_MAX_WOS + '-WO cap, the run will not truncate' : '');
+        $('bwn-bt-preview').disabled = _running || _previewing || over || !target() || (!parsed.unique.length && !parsed.invalid.length && !parsed.ambiguous.length);
+      }
+      $('bwn-bt-input').oninput = invalidate;
+      $('bwn-bt-user').onchange = invalidate;
+
+      btLoadUsers().then(function (list) {
+        users = list; names = {};
+        list.forEach(function (u) { names[u.id] = u.name; });
+        var sel = $('bwn-bt-user'); sel.textContent = '';
+        var o0 = document.createElement('option'); o0.value = ''; o0.textContent = '- choose a user -'; sel.appendChild(o0);
+        list.forEach(function (u) { var o = document.createElement('option'); o.value = u.id; o.textContent = u.name; sel.appendChild(o); });
+        refreshParse();
+      }, function () {
+        var sel = $('bwn-bt-user'); sel.textContent = '';
+        var o = document.createElement('option'); o.value = ''; o.textContent = 'Could not load users - reopen to retry'; sel.appendChild(o);
+      });
+
+      function renderTable(list, results) {
+        var box = $('bwn-bt-table'); box.textContent = '';
+        var byTask = {};
+        (results || []).forEach(function (r) { if (r.taskId) byTask[r.taskId] = r; });
+        list.forEach(function (r) {
+          var line = document.createElement('div');
+          line.style.cssText = 'display:grid;grid-template-columns:70px 1fr 1fr 1fr 110px;gap:6px;padding:5px 9px;border-bottom:1px solid var(--bwn-surface-3);font:500 11px ui-monospace,monospace;align-items:start';
+          var res = r.taskId ? byTask[r.taskId] : null;
+          var verdict = res ? res.result : r.action;
+          var why = res ? res.reason : r.reason;
+          [r.wo ? 'W-' + r.wo + (r.input && r.input !== String(r.wo) && r.input.toUpperCase() !== 'W-' + r.wo ? ' (' + r.input + ')' : '') : String(r.input || ''),
+            r.taskId ? (String(r.desc || '').replace(/\s+/g, ' ').trim().slice(0, 60) || '(no description)') + ' [' + r.taskId.slice(0, 8) + ']' : '-',
+            r.taskId ? nameOf(r.cur) : '-',
+            r.taskId ? nameOf(r.to) : '-',
+            verdict + (why ? ': ' + why : '')].forEach(function (txt, i) {
+            var c = document.createElement('span'); c.textContent = txt;
+            c.style.cssText = 'min-width:0;overflow-wrap:anywhere;color:' + (i === 4 ? (verdict === 'Reassign' || verdict === 'Verified' ? 'var(--bwn-green)' : (verdict === 'Skip' || verdict === 'Skipped' || verdict === 'Not run' ? 'var(--bwn-text-faint)' : 'var(--bwn-bad)')) : 'var(--bwn-text)');
+            line.appendChild(c);
+          });
+          box.appendChild(line);
+        });
+        if (!list.length) { var em = document.createElement('div'); em.style.cssText = 'padding:9px;color:var(--bwn-text-faint);font-size:12px'; em.textContent = 'Nothing to preview.'; box.appendChild(em); }
+      }
+
+      // ---- preview (READS ONLY) ----
+      $('bwn-bt-preview').onclick = function () {
+        if (_running || _previewing) return;
+        // A typed confirm never carries into a new preview, even one with the same count.
+        $('bwn-bt-confirm').value = ''; $('bwn-bt-approve').disabled = true; $('bwn-bt-confirmwrap').style.display = 'none';
+        var tgt = target();
+        var p = btParse($('bwn-bt-input').value);
+        if (!tgt || p.unique.length > BT_MAX_WOS) { refreshParse(); return; }
+        $('bwn-bt-preview').disabled = true; _previewing = true;
+        $('bwn-bt-pcount').textContent = 'Reading ' + p.unique.length + ' work order' + (p.unique.length === 1 ? '' : 's') + '...';
+        var list = [];
+        p.invalid.forEach(function (t) { list.push({ input: t, wo: null, taskId: null, action: 'Skip', reason: 'Invalid work-order number' }); });
+        p.ambiguous.forEach(function (t) { list.push({ input: t, wo: null, taskId: null, action: 'Skip', reason: 'Ambiguous work-order reference' }); });
+        p.unique.reduce(function (acc, wo) {
+          return acc.then(function () { return btReadWO(wo).then(function (res) { list = list.concat(btRowsFor(wo, res, tgt).map(function (r) { r.input = p.raw[wo]; return r; })); }); });
+        }, Promise.resolve()).then(function () {
+          _previewing = false;
+          // The inputs may have moved while the reads ran; only a still-current preview may arm.
+          if (btParse($('bwn-bt-input').value).unique.join(',') !== p.unique.join(',') || target() !== tgt) { invalidate(); return; }
+          rows = list; parsed = p;
+          stamp = btStamp(p.unique, tgt, rows);
+          var n = rows.filter(function (r) { return r.action === 'Reassign'; }).length;
+          var skipped = rows.length - n;
+          $('bwn-bt-pcount').textContent = 'Preview: ' + n + ' to reassign · ' + skipped + ' skipped · ' + rows.filter(function (r) { return r.taskId; }).length + ' open tasks found. ZERO writes sent.';
+          renderTable(rows, null);
+          confirmCount = n;
+          $('bwn-bt-confirmwrap').style.display = 'block';
+          if (!n) { $('bwn-bt-confirmtarget').textContent = 'Nothing to reassign.'; $('bwn-bt-confirm').style.display = 'none'; $('bwn-bt-approve').style.display = 'none'; }
+          else {
+            $('bwn-bt-confirm').style.display = ''; $('bwn-bt-approve').style.display = '';
+            $('bwn-bt-confirmtarget').textContent = 'Type exactly:  APPLY ' + n + '   (to ' + nameOf(tgt) + ')';
+            $('bwn-bt-confirm').placeholder = 'APPLY ' + n;
+          }
+          refreshParse();
+        });
+      };
+      function currentStamp() { return rows ? btStamp(btParse($('bwn-bt-input').value).unique, target(), rows) : null; }
+      $('bwn-bt-confirm').oninput = function () {
+        $('bwn-bt-approve').disabled = !btConfirmArmed($('bwn-bt-confirm').value, confirmCount, currentStamp(), stamp);
+      };
+
+      // ---- run ----
+      $('bwn-bt-approve').onclick = function () {
+        if ($('bwn-bt-approve').disabled || _running) return;
+        if (!btConfirmArmed($('bwn-bt-confirm').value, confirmCount, currentStamp(), stamp)) { invalidate(); return; }   // last-line guard
+        var tgt = target();
+        var todo = rows.filter(function (r) { return r.action === 'Reassign'; });
+        if (todo.length !== confirmCount) { invalidate(); return; }
+        var previewRows = rows, sessionId = 'bt-' + Date.now().toString(36);
+        _running = true; _cancelled = false;
+        $('bwn-bt-confirmwrap').style.display = 'none';
+        $('bwn-bt-runwrap').style.display = 'block';
+        $('bwn-bt-preview').disabled = true;
+        $('bwn-bt-input').disabled = true; $('bwn-bt-user').disabled = true;
+        $('bwn-bt-log').textContent = ''; $('bwn-bt-tally').textContent = '';
+        logln('Run ' + sessionId + ' - ' + todo.length + ' task' + (todo.length === 1 ? '' : 's') + ' to ' + nameOf(tgt) + ', one at a time, no retries');
+        btRunSequential(todo, tgt, function (r) {
+          logln('W-' + r.wo + ' [' + String(r.taskId).slice(0, 8) + ']: ' + r.result + (r.reason ? ' - ' + r.reason : ''));
+        }, function () { return _cancelled; }).then(function (results) {
+          _running = false;
+          var s = btSummary(sessionId, parsed, previewRows, results);
+          btSaveSummary(s);
+          renderTable(previewRows, results);
+          $('bwn-bt-tally').textContent = s.verified + ' verified · ' + s.verificationFailed + ' verification failed · ' + s.mutationFailed + ' write failed · ' +
+            s.verificationUnavailable + ' unverified · ' + s.skippedAtRun + ' skipped (changed) · ' + s.notRun + ' not run';
+          var bad = results.filter(function (r) { return r.result !== 'Verified' && r.result !== 'Not run' && r.result !== 'Skipped'; });
+          if (bad.length) logln('REVIEW BY HAND: ' + bad.map(function (r) { return 'W-' + r.wo + ' task ' + r.taskId; }).join(', '));
+          rows = null; stamp = null; confirmCount = 0;   // a finished run never re-arms; preview again
+          $('bwn-bt-confirm').value = ''; $('bwn-bt-approve').disabled = true;
+          $('bwn-bt-input').disabled = false; $('bwn-bt-user').disabled = false;
+          refreshParse();
+          BWN.beat('bulkTask', 'ok', 'run ' + sessionId + ': ' + s.verified + ' verified, ' + (s.verificationFailed + s.mutationFailed + s.verificationUnavailable) + ' need review');
+        });
+      };
+      $('bwn-bt-cancel').onclick = function () { if (_running) { _cancelled = true; logln('-- cancelling: no new rows will start --'); } };
+      refreshParse();
+    }
+
+    BWN.beat('bulkTask', 'ok', 'ready (flag on)');
   });
 
   // ---- Flush the module queue -------------------------------------------------
