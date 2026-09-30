@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         BWN Proposal Copy (Broadway National)
 // @namespace    broadwaynational.bwn
-// @version      0.5.1
+// @version      0.5.2
 // @downloadURL  https://raw.githubusercontent.com/Intermu/userscripts/main/bwn-proposal-copy.user.js
 // @updateURL    https://raw.githubusercontent.com/Intermu/userscripts/main/bwn-proposal-copy.user.js
 // @description  Copy a client proposal from an aged-out work order onto a chosen replacement WO as an un-submitted Draft, in one confirmed action. Replays Umbrava's own createDraftProposal + editProposal mutations (line items copied verbatim); never submits, deletes, or retries. Manager-gated visibility. @grant none.
@@ -15,7 +15,7 @@
 (function () {
   'use strict';
 
-  var VER = '0.5.1';   // keep in step with @version
+  var VER = '0.5.2';   // keep in step with @version
   var DRY_RUN = false; // when true, the two WRITE mutations are logged, not sent
   var FONT = "-apple-system,BlinkMacSystemFont,'Segoe UI','Helvetica Neue',Arial,sans-serif";
   var GREEN = '#0d3d26';
@@ -557,8 +557,9 @@
       description: source.description,
       disclaimer: source.disclaimer,
       timeFrameDays: source.timeFrameDays && (source.timeFrameDays.value != null)
-        ? { value: source.timeFrameDays.value } : null,
-      clientPurchaseOrderNumber: source.formattedClientPurchaseOrderNumber || null
+        ? { value: source.timeFrameDays.value } : null
+      // formattedClientPurchaseOrderNumber (W-<wo>-<seq>) is NOT a client PO: Umbrava stamps its own
+      // on every new proposal (vendor PO line numbering), so it is never copied or compared.
     } };
   }
   function buildEditVars(newProposalId, source) {
@@ -619,16 +620,8 @@
           var newN = nu && Array.isArray(nu.proposalLineItems) ? nu.proposalLineItems.length : -1;
           var srcSub = source.subtotal ? source.subtotal.amount : null;
           var newSub = nu && nu.subtotal ? nu.subtotal.amount : null;
-          // EditProposalInput has NO clientPurchaseOrderNumber field (confirmed against the pinned
-          // schema), so editProposal can never resend the PO that createDraftProposal set. If the
-          // server does a whole-object replace on edit, that PO could be silently nulled out - compare
-          // it here so the drop is visible instead of passing as a clean match. Two null/absent POs
-          // (neither side ever had one) still agree.
-          var srcPO = source.formattedClientPurchaseOrderNumber || null;
-          var newPO = (nu && nu.formattedClientPurchaseOrderNumber) || null;
-          var poMatch = srcPO === newPO;
-          var match = (newN === srcN) && (srcSub == null || newSub === srcSub) && poMatch;
-          return { ok: true, newProposalId: newId, created: true, filled: true, readBack: { sourceItems: srcN, newItems: newN, sourceSubtotal: srcSub, newSubtotal: newSub, sourcePO: srcPO, newPO: newPO, match: match } };
+          var match = (newN === srcN) && (srcSub == null || newSub === srcSub);
+          return { ok: true, newProposalId: newId, created: true, filled: true, readBack: { sourceItems: srcN, newItems: newN, sourceSubtotal: srcSub, newSubtotal: newSub, match: match } };
         });
       })
       .then(function (r) {
@@ -1520,7 +1513,6 @@
       if (mismatch) {
         if (rb.newItems !== rb.sourceItems) diffs.push('line items ' + rb.sourceItems + ' → ' + rb.newItems);
         if (rb.sourceSubtotal != null && rb.newSubtotal !== rb.sourceSubtotal) diffs.push('subtotal changed');
-        if (rb.sourcePO !== rb.newPO) diffs.push('client PO ' + (rb.sourcePO || 'none') + ' → ' + (rb.newPO || 'none'));
         console.warn('[BWN PROPOSAL COPY] read-back did NOT match the source on the new Draft', rb);
         reportFail({ level: 'warn', tag: 'proposalCopy.readback.mismatch', feature: 'proposalCopy', ids: { proposal: pid, wo: Number(tnum) }, code: 'readback-mismatch' });
       }
@@ -1536,11 +1528,10 @@
         (r.newProposalId != null ? '<div><strong>New draft id:</strong> #' + escapeHtml(r.newProposalId) + '</div>' : '') +
         '<div><strong>Target WO:</strong> W-' + escapeHtml(tnum) + (loc ? ' · ' + escapeHtml(loc) : '') + '</div>' +
         '<div><strong>Lines copied:</strong> ' + escapeHtml(rb.newItems != null ? rb.newItems : items.length) + '</div>' +
-        '<div><strong>Total copied:</strong> ' + escapeHtml(fmtMoney(source.subtotal)) + '</div>' +
-        (rb.newPO ? '<div><strong>Client PO:</strong> ' + escapeHtml(rb.newPO) + '</div>' : '');
+        '<div><strong>Total copied:</strong> ' + escapeHtml(fmtMoney(source.subtotal)) + '</div>';
       bd.appendChild(meta);
       var note = document.createElement('div');
-      if (mismatch) { note.className = 'bcp-note warn'; note.innerHTML = bcpIcon('warning') + '<span></span>'; note.querySelector('span').textContent = 'The draft was created, but the read-back did not match the source (' + (diffs.join('; ') || 'read-back differs') + '). Open the target work order and check its line items, total and client PO.'; }
+      if (mismatch) { note.className = 'bcp-note warn'; note.innerHTML = bcpIcon('warning') + '<span></span>'; note.querySelector('span').textContent = 'The draft was created, but the read-back did not match the source (' + (diffs.join('; ') || 'read-back differs') + '). Open the target work order and check its line items and total.'; }
       else { note.className = 'bcp-note ok'; note.innerHTML = bcpIcon('check') + '<span>The draft is on the target work order’s Proposals tab. Review and submit it through the normal proposal workflow.</span>'; }
       bd.appendChild(note);
       card.appendChild(bd); M.body.appendChild(card);
