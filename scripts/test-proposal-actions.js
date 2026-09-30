@@ -224,7 +224,7 @@ function callsOf(g, op) { return g.calls.filter(function (c) { return c.op === o
   A.ok("every write still honors DRY_RUN", (full.match(/\[PA DRY_RUN\]/g) || []).length >= 5);
   var mV = full.match(/@version\s+([0-9.]+)/), mR = full.match(/VER\s*=\s*'([0-9.]+)'/);
   A.ok("@version and runtime VER agree", !!(mV && mR && mV[1] === mR[1]));
-  A.eq("shipped at 0.7.13", mV && mV[1], "0.7.13");
+  A.eq("shipped at 0.7.14", mV && mV[1], "0.7.14");
 
   // ---- WO-note dedup is scoped to THIS run, not the WO's whole history ------------------------
   // W-390980: a 9/09 TSP note with the same GP + total made the next TSP review skip its WO note.

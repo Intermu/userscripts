@@ -643,6 +643,12 @@ jobs:
       - name: Proposal Actions write harness (addClientProposalNote / addTask / completeTask)
         run: node scripts/test-proposal-actions.js
 
+      # Proposal Actions "Margin check" (flag marginGuardrail, default OFF, read-only): one margin
+      # target (default = the shared 33% GP threshold), a verdict that compares the displayed 1-decimal
+      # percent, and panel markup that escapes every Umbrava value. Seven controls each turn it red.
+      - name: Proposal Actions margin-check harness
+        run: node scripts/test-margin-guardrail.js
+
       # RM-A3 / R3: bwn-proposal-actions de-hardcodes the STATUS_FALLBACK status-id map and the
       # RONNY_GUID TSP assignee. Both now resolve LIVE and FAIL CLOSED when they cannot (no write on a
       # stale id), with a bwn:modules.paLegacyFallback rollback flag reinstating the constants. Slices
