@@ -209,12 +209,12 @@ function loadCore(env) {
   var rW = await apiW.copyProposal(500, 8002, { dryRun: false });
   A.ok('read-back mismatch -> ok true, match false (warning)', rW.ok === true && rW.readBack.match === false);
 
-  // read-back PO mismatch -> ok true but match false (EditProposalInput has no PO field, so a
-  // server-side whole-object replace on edit could silently drop the PO createDraftProposal set)
+  // Umbrava stamps its own W-<wo>-<seq> number on each new proposal, so a differing PO is NOT a
+  // mismatch, and the source's number is never sent on create
   var eP = makeEnv({ replies: baseReplies({ ClientProposalDetails: function (vars) { if (vars.proposalId === 9003) return { data: { proposal: Object.assign({}, SOURCE, { id: 9003, formattedClientPurchaseOrderNumber: 'PO-999' }) } }; return detailsReply(vars); } }) }); var apiP = loadCore(eP);
   var rP = await apiP.copyProposal(500, 8002, { dryRun: false });
-  A.ok('read-back PO mismatch -> ok true, match false', rP.ok === true && rP.readBack.match === false);
-  A.ok('read-back PO mismatch -> sourcePO/newPO exposed on readBack', rP.readBack.sourcePO === 'PO-123' && rP.readBack.newPO === 'PO-999');
+  A.ok('server-stamped PO differs -> still a clean match', rP.ok === true && rP.readBack.match === true);
+  A.ok('create never sends the source PO number', eP.calls.some(function (c) { return c.op === 'CreateDraftProposal'; }) && eP.calls.filter(function (c) { return c.op === 'CreateDraftProposal'; }).every(function (c) { return JSON.stringify(c).indexOf('PO-123') === -1; }));
 
   // null target -> resolve-target failure, no write
   var eT = makeEnv({ replies: baseReplies({ ProposalWO: function () { return { data: { job: null } }; } }) }); var apiT = loadCore(eT);
