@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         BWN Suite - Core (Broadway National)
 // @namespace    broadwaynational.bwn
-// @version      1.90.1
+// @version      1.91.0
 // @downloadURL  https://raw.githubusercontent.com/Intermu/userscripts/main/bwn-suite-core.user.js
 // @updateURL    https://raw.githubusercontent.com/Intermu/userscripts/main/bwn-suite-core.user.js
 // @description  Runs several Umbrava helpers for BWN coordinators, in the browser with no privileged grants. Includes: PO Approval + ETA Builder; WO Assist (GP/ETA, a stall watchdog, DNE calculator, and a next-action playbook); Email Leak Guard (checks recipients against vendor names, PO amounts, and client budget references before an outbound email sends); WO List Heat (a triage overlay + My Day strip on the work-order list, with an optional same-origin Umbrava API scan for deterministic full-board coverage); and the BWN Launcher (opens the Azure Static Web App tools with the current WO's context). Modules share state through sessionStorage/localStorage. The only network calls are same-origin Umbrava GraphQL requests (app.umbrava.com/api/graphql, the app's own session): List Heat's full-board scan and WO Assist's work-order / trip / clock-in / document / purchase-order reads, plus ONE write - BWN Views saves the column layout through Umbrava's own putUserPreference, the same preference the column chooser writes; everything else is offline. Toggle modules in BWN_MODULES below.
@@ -30,6 +30,13 @@
                            // smoke test. The mutations themselves still route through bwnGqlOp
                            // with feature:'woAssist' (its kill switch + audit gate) - two gates:
                            // this flag hides the UI, bwnGqlOp enforces the write governance.
+    actsCard: true,      // WO Assist sub-feature: the NEXT ACTIONS card on the WO page. Off only hides
+                         // the card - the engine still runs, so Job View pills + the bus stay fed.
+    ecdPrompt: true,     // WO Assist sub-feature: auto-open the Set-ECD prompt when the ECD is missing
+                         // or overdue (the manual "Set ECD..." step button is unaffected).
+    closePreflight: true, // WO Assist sub-feature: the close-out preflight + billing prompt shown when
+                         // the status moves to a terminal / Work Complete state.
+                         // The three sub-features above apply LIVE from Suite settings (no reload).
     leakGuard: true,     // outbound email cross-contamination guard
     listHeat: true,      // heat overlay + audit on the Work Orders list
     launcher: true,      // BWN tools dock (left edge)
@@ -7647,10 +7654,11 @@
         var _pl = document.getElementById(PILL_ID); if (_pl) _pl.remove();
         var _pn = document.getElementById(PANEL_ID); if (_pn) _pn.remove();
       }
-      renderActsInline(st);
+      if (BWN_MODULES.actsCard) renderActsInline(st);
+      else { var _ac = document.getElementById(ACT_CARD_ID); if (_ac) _ac.remove(); }
       try { renderPOGroups(); } catch (e) { /* PO grouping is best-effort - never break the engine */ }
-      maybeAutoECD(st);
-      maybePreflight(st);
+      if (BWN_MODULES.ecdPrompt) maybeAutoECD(st);
+      if (BWN_MODULES.closePreflight) maybePreflight(st);
       BWN.beat('woAssist', 'ok', 'pill active');
       // Publish the canonical WO state for the rest of the suite. This one REPLACES: it carries
       // every identity field as well, so it stays authoritative over the early patch above -
@@ -11620,12 +11628,18 @@
     var SUITE_MODULES = [
       { k: 'clientUpdate', script: 'AI', label: 'AI Draft (Client Update / Audit)' },
       { k: 'findTechs', script: 'AI', label: 'Find Techs / Suppliers' },
+      { k: 'jobView', script: 'AI', label: 'Job View (dashboard job modal)' },
+      { k: 'serviceRequest', script: 'AI', label: 'Build Requests helper (NTE preset + team inbox)' },
+      { k: 'operate', script: 'AI', label: 'Operate (watch an agent read the page)' },
       // Kill-switch honored LIVE by every connector tick in the AI script (no reload
       // needed) - off disables ALL SWA egress: activity events, checklist merge,
       // Over-30 line sync, and the daily trend relay.
       { k: 'connector', script: 'AI', label: 'SWA connector (dashboard sync + reporting)' },
       { k: 'poApproval', script: 'Core', label: 'PO Approval + ETA' },
       { k: 'woAssist', script: 'Core', label: 'WO Assist (GP/ETA watchdog)' },
+      { k: 'actsCard', script: 'Core', label: '\u2003WO Assist \u00b7 Next Actions card', live: true },
+      { k: 'ecdPrompt', script: 'Core', label: '\u2003WO Assist \u00b7 ECD auto-prompt', live: true },
+      { k: 'closePreflight', script: 'Core', label: '\u2003WO Assist \u00b7 Close-out preflight + billing prompt', live: true },
       { k: 'leakGuard', script: 'Core', label: 'Email Leak Guard' },
       { k: 'listHeat', script: 'Core', label: 'WO List Heat + My Day' },
       { k: 'launcher', script: 'Core', label: 'Tools launcher - hosts this panel' },
@@ -11816,6 +11830,8 @@
           }
           modPref[mod.k] = cb.checked;
           try { localStorage.setItem('bwn:modules', JSON.stringify(modPref)); } catch (e) { }
+          // Render-only sub-features apply now: WO Assist re-renders on bwn:config.
+          if (mod.live) { BWN_MODULES[mod.k] = cb.checked; try { document.dispatchEvent(new CustomEvent('bwn:config')); } catch (e) { } return; }
           if (reloadNote) reloadNote.style.display = '';
         });
         row.appendChild(lbl); row.appendChild(scr); row.appendChild(cb);
