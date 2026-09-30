@@ -61,4 +61,28 @@ Update all of these:
 on a branch, and not as a side-load. BWN GraphQL Capture is TEMPORARY side-load-only, never committed
 and never installed by URL, so it stays **out** of the roster on purpose.
 
+## Version bumps ALSO sync the version-bearing docs (Mike, 2026-09-14: "keep these synced with ALL updates")
+
+A plain `@version` bump is not a roster change, but the version-bearing docs must still track it once
+the bump is on `origin/main` - in the same piece of work, do not defer:
+
+1. `wiki\userscript-install-links.md` - the Version column, the `## Links (... @ <sha> on <date>)`
+   header, and the "re-synced" note under the table.
+2. `outputs\bwn-userscript-suite-one-pager.html` and `outputs\bwn-userscript-suite-onepage.html` -
+   the version chip on each bumped card and the "Versions as of" line.
+3. `outputs\bwn-tooling-roster-one-pager.html` - the version chip on each bumped row and the
+   "versions read from origin/main @ <sha>" footer.
+4. `outputs\Broadway_Asset_Register.html` - the version cell on each bumped script's row.
+5. Rebuild each edited page's PDF with headless Edge (use its own `--user-data-dir` so a running
+   Edge does not swallow the job, and forward-slash output paths), then republish the two
+   artifacts: The BWN Suite (`https://claude.ai/artifact/BfsAo5gRXesaRhAyEysByo`) and Ops Tooling
+   Roster (`https://claude.ai/artifact/LnxA9zjg6qExW87jbPQrhX`). Pass the `url`, or you create a
+   second artifact.
+
+Read every version from `git show origin/main:<file>.user.js | grep -m1 @version` (the raw URL serves
+only `origin/main`), and re-read EVERY header on `origin/main`, not just the one you touched - other
+pushes drift these docs between visits. The suite **hub** (`bwn-suite-userscripts.md`) is a dated
+historical log, not a current-version roster, so a pure version bump does NOT rewrite it - touch it
+only on an add / retire / rename / fold.
+
 Then fold both the repo and the vault into the same session's write-back.
