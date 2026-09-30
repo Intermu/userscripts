@@ -1,10 +1,10 @@
 // ==UserScript==
 // @name         BWN Proposal Actions (Broadway National)
 // @namespace    broadwaynational.bwn
-// @version      0.7.13
+// @version      0.7.14
 // @downloadURL  https://raw.githubusercontent.com/Intermu/userscripts/main/bwn-proposal-actions.user.js
 // @updateURL    https://raw.githubusercontent.com/Intermu/userscripts/main/bwn-proposal-actions.user.js
-// @description  On a Client Proposal DETAILS page, a "Proposal Actions" dropdown runs the internal review workflow in one confirmed action: Approval / TSP Review / Kickback. Each posts a note to the Proposal + the Work Order, sets the WO status, completes open tasks, and files a new task (assigned to the WO coordinator, or Ronny Sharp for TSP). The posted note is an EDITABLE field seeded with the auto-generated text (Kickback's is drafted by the on-device browser AI) so the reviewer can add what they changed as coaching for the coordinator; a "changes since review opened" line (total + GP) is prepended automatically. When the job has more than one client proposal, the trigger shows the option count, a read-only "Compare proposals" view lists every alternative side by side, and the confirm dialog names the job, the exact proposal being acted on and its siblings (with an explicit acknowledgement). Completed actions are kept as a browser-local history (never synced, never an Umbrava status) shown in Compare and as a non-blocking warning on a repeat. Opening an action only reads (proposal, work order, tasks) to prepare the confirm dialog; every change is listed there first, and no proposal or work-order change is submitted until Confirm. @grant none.
+// @description  On a Client Proposal DETAILS page, a "Proposal Actions" dropdown runs the internal review workflow in one confirmed action: Approval / TSP Review / Kickback. Each posts a note to the Proposal + the Work Order, sets the WO status, completes open tasks, and files a new task (assigned to the WO coordinator, or Ronny Sharp for TSP). The posted note is an EDITABLE field seeded with the auto-generated text (Kickback's is drafted by the on-device browser AI) so the reviewer can add what they changed as coaching for the coordinator; a "changes since review opened" line (total + GP) is prepended automatically. When the job has more than one client proposal, the trigger shows the option count, a read-only "Compare proposals" view lists every alternative side by side, and the confirm dialog names the job, the exact proposal being acted on and its siblings (with an explicit acknowledgement). Completed actions are kept as a browser-local history (never synced, never an Umbrava status) shown in Compare and as a non-blocking warning on a repeat. Opening an action only reads (proposal, work order, tasks) to prepare the confirm dialog; every change is listed there first, and no proposal or work-order change is submitted until Confirm. With the flag bwn:modules.marginGuardrail turned on (default OFF), a read-only "Margin check" item compares the proposal's GP% to a margin target (the shared bwn:gov governance snapshot when it publishes one, otherwise 33%) and lists missing priced categories; it makes Umbrava GraphQL reads only and never writes. @grant none.
 // @match        https://app.umbrava.com/*
 // @match        https://*.umbrava.com/*
 // @run-at       document-idle
@@ -15,7 +15,7 @@
 (function () {
   'use strict';
 
-  var VER = '0.7.13';   // keep in step with @version
+  var VER = '0.7.14';   // keep in step with @version
   var DRY_RUN = false; // when true, every WRITE is console.logged instead of sent
   console.info('[BWN PROPOSAL ACTIONS] v' + VER + ' - Approval / TSP Review / Kickback workflow on the Client Proposal details page');
 
@@ -190,6 +190,140 @@
     return gpPct < GP_GOOD_THRESHOLD ? 'Low GP' : 'Good GP';
   }
   // ===== PA-GPLABEL END =====
+
+  // ===== PA-MARGIN-LOGIC START (advisory margin check; pure, DOM/fetch-free, sliced by
+  // scripts/test-margin-guardrail.js) =====
+  // Math + markup for the read-only "Margin check" panel. gpPct is the API's grossProfitPercent
+  // FRACTION (0.41 = 41%), the same convention as gpLabel. There is ONE threshold, the margin TARGET.
+  // Its default is the shared GP_GOOD_THRESHOLD, so with no governance target the panel and the
+  // Low/Good GP label always agree.
+  var MARGIN_TARGET_DEFAULT = GP_GOOD_THRESHOLD;
+  var BIZRULES_TTL_MS = 24 * 3600 * 1000;   // an older (or undated) governance target is not trusted
+  // TODO(enum): the proposalLineItems.category values are not captured yet (one live proposal read
+  // is needed). REQUIRED_CATEGORIES stays EMPTY until then so the live panel never shows a false
+  // "missing category"; the set-difference logic is proven in the test against a fixture set.
+  var REQUIRED_CATEGORIES = [];
+
+  function marginNum(x) { var v = (typeof x === 'number') ? x : parseFloat(x); return isFinite(v) ? v : null; }
+  function marginFrac(x) { var n = marginNum(x); return (n != null && n > 0 && n <= 1) ? n : null; }
+
+  // parseBizRules(raw, nowMs) -> { target, source }. Reads ONLY bizRules.marginTarget (or
+  // margin.marginTarget) with a ts inside the TTL; anything else falls back to the default, so an
+  // unrelated key elsewhere in the bwn:gov bundle can never be misread as a margin target.
+  // TODO(shape): the governance bundle has no margin slot today - this is the shape to publish.
+  function parseBizRules(raw, nowMs) {
+    var d = { target: MARGIN_TARGET_DEFAULT, source: 'default' };
+    var slot = (raw && typeof raw === 'object') ? (raw.bizRules || raw.margin) : null;
+    if (!slot || typeof slot !== 'object') return d;
+    var target = marginFrac(slot.marginTarget);
+    if (target == null) return d;
+    var ts = marginNum(slot.ts != null ? slot.ts : raw.ts);
+    var now = (typeof nowMs === 'number') ? nowMs : Date.now();
+    if (ts == null || (now - ts) > BIZRULES_TTL_MS) { d.source = 'stale'; return d; }
+    return { target: target, source: 'governance' };
+  }
+
+  // Percent rounded to the one decimal the panel shows. The verdict compares THESE, so the banner
+  // can never read "GP 28.0% is below the 28.0% target".
+  function pct1(f) { return Math.round(f * 1000) / 10; }
+  function marginFmtPct(f) { return pct1(f).toFixed(1) + '%'; }
+  // A null/NaN GP is "unknown" - never a confident verdict (same rule as gpLabel).
+  function marginVerdict(gpPct, target) {
+    if (typeof gpPct !== 'number' || isNaN(gpPct)) return { known: false, below: false };
+    return { known: true, below: pct1(gpPct) < pct1(target) };
+  }
+
+  function normCat(c) { return String(c == null ? '' : c).trim().toLowerCase(); }
+  // The DISTINCT non-empty categories across the line items.
+  function presentCategories(lineItems) {
+    var seen = {}, out = [];
+    (lineItems || []).forEach(function (li) {
+      var c = normCat(li && li.category);
+      if (c && !seen[c]) { seen[c] = true; out.push(c); }
+    });
+    return out;
+  }
+  // missing = required \ present (case-insensitive). Returns the required labels verbatim.
+  function missingCategories(present, required) {
+    var have = {};
+    (present || []).forEach(function (c) { have[normCat(c)] = true; });
+    return (required || []).filter(function (r) { return !have[normCat(r)]; });
+  }
+
+  // Money minor-units -> dollars ONCE; implied cost = revenue * (1 - gpPct), kept in dollars.
+  // ponytail: repeats money()'s amount/10^precision step so this slice runs alone in the test vm;
+  // fold money() onto it if a third copy ever appears.
+  function moneyToDollars(m) {
+    if (!m || m.amount == null) return null;
+    var p = (m.precision != null) ? m.precision : 2;
+    var v = Number(m.amount) / Math.pow(10, p);
+    return isFinite(v) ? v : null;
+  }
+  function impliedCostDollars(revenueDollars, gpPct) {
+    if (typeof revenueDollars !== 'number' || !isFinite(revenueDollars)) return null;
+    if (typeof gpPct !== 'number' || isNaN(gpPct)) return null;
+    return revenueDollars * (1 - gpPct);
+  }
+  function fmtDollars(n) {
+    if (typeof n !== 'number' || !isFinite(n)) return 'n/a';
+    return '$' + n.toLocaleString('en-US', { minimumFractionDigits: 2, maximumFractionDigits: 2 });
+  }
+
+  // Plain-TEXT reasons for the below-target banner (never color-only - each is a full sentence).
+  function marginDrivers(gpPct, target, missing) {
+    var out = [];
+    if (marginVerdict(gpPct, target).below) {
+      out.push('GP ' + marginFmtPct(gpPct) + ' is below the ' + marginFmtPct(target) + ' target.');
+    }
+    if (typeof gpPct === 'number' && !isNaN(gpPct) && gpPct < 0) {
+      out.push('Gross profit is negative - the proposal loses money as priced.');
+    }
+    if (missing && missing.length) out.push('Missing priced categories: ' + missing.join(', ') + '.');
+    return out;
+  }
+
+  // The panel's inner markup. v = { n, pid, total, gpPct, cost, biz:{target,source},
+  // items:{ok, categories} }; esc = escapeHtml. EVERY value from Umbrava goes through esc.
+  function marginPanelHtml(v, esc) {
+    var verdict = marginVerdict(v.gpPct, v.biz.target);
+    var cats = (v.items && v.items.ok) ? v.items.categories : null;   // null = the line-item read failed
+    var missing = cats ? missingCategories(cats, REQUIRED_CATEGORIES) : [];
+    var drivers = marginDrivers(v.gpPct, v.biz.target, missing);
+    var gpText = verdict.known ? marginFmtPct(v.gpPct) : 'unknown';
+    var tText = marginFmtPct(v.biz.target);
+    var src = v.biz.source === 'governance' ? 'governance target'
+      : (v.biz.source === 'stale' ? 'governance target out of date - default used' : 'default - no governance target published');
+    var head;
+    if (!verdict.known) head = '<p><strong>GP could not be read - the margin cannot be checked.</strong></p>';
+    else if (verdict.below || drivers.length) {
+      head = '<div class="warn" role="alert"><strong>' + (verdict.below ? 'Below the margin target' : 'Check before sending') + '</strong>' +
+        '<ul>' + drivers.map(function (d) { return '<li>' + esc(d) + '</li>'; }).join('') + '</ul></div>';
+    } else head = '<p><strong>GP ' + esc(gpText) + ' meets the ' + esc(tText) + ' margin target.</strong></p>';
+    var catLine;
+    if (!cats) catLine = 'Line items could not be read, so priced categories were not checked.';
+    else if (!REQUIRED_CATEGORIES.length) {
+      catLine = 'Required-category check is not active yet (the category list has not been captured). Categories on this proposal: ' +
+        esc(cats.length ? cats.join(', ') : 'none') + '.';
+    } else catLine = missing.length ? 'Missing priced categories: ' + esc(missing.join(', ')) + '.' : 'All required categories are priced.';
+    return '<div class="hd"><div class="t">Margin check</div>' +
+      '<div class="s">W-' + esc(v.n) + '  ·  Proposal #' + esc(v.pid) + '  ·  ' + esc(v.total) + '  ·  GP ' + esc(gpText) + '</div></div>' +
+      '<div class="bd">' + head +
+      '<dl class="sum"><dt>GP</dt><dd>' + esc(gpText) + '</dd>' +
+      '<dt>Margin target</dt><dd>' + esc(tText) + ' <span class="na">(' + esc(src) + ')</span></dd>' +
+      '<dt>Client total</dt><dd>' + esc(v.total) + '</dd>' +
+      '<dt>Implied cost</dt><dd>' + esc(fmtDollars(v.cost)) + '</dd></dl>' +
+      '<div class="note">' + catLine + '</div>' +
+      '<div class="note">Implied cost is worked out from the total and GP%. The labor / material / travel / markup split is not in the proposal data, so it is not shown.</div>' +
+      '<div class="note">Scope-gap questions (on-device AI):</div>' +
+      '<div class="note" id="bwn-pa-scopegaps" aria-live="polite">Not run yet.</div>' +
+      '</div><div class="ft"><button class="btn cancel" id="bwn-pa-ai" type="button">Ask AI for scope gaps</button>' +
+      '<button class="btn go" id="bwn-pa-close" type="button">Close</button></div>';
+  }
+  // ===== PA-MARGIN-LOGIC END =====
+  // ponytail: advisory only. DEFERRED, not built here: TODO(write-path) the enforced exception-approval
+  // write (flag marginApproval) - needs a server route + ops_* roles first; TODO(rate-cards) no rate
+  // cards in the data; TODO(comparables) historical comparables / recommended NTE.
+
   function textToHtml(t) {
     return String(t == null ? '' : t).split('\n').map(function (ln) {
       return '<p>' + (ln === '' ? '<br>' : escapeHtml(ln)) + '</p>';
@@ -1912,6 +2046,87 @@
     closeBtn.focus();
   }
 
+  // ===== margin check (read-only; flag bwn:modules.marginGuardrail, default OFF) ============
+  // The target comes from the SHARED governance snapshot only: bwn-suite-ai is the one fetcher and
+  // caches the bundle to localStorage 'bwn:gov' (the same snapshot bwnApplyGov reads). No fetch here.
+  function readBizRules() {
+    var raw = null;
+    try { raw = JSON.parse(localStorage.getItem('bwn:gov') || 'null'); } catch (e) { raw = null; }
+    return parseBizRules(raw, Date.now());
+  }
+  // Categories for the panel. Same query as readProposalContext, kept separate so the kickback
+  // reader's return shape (pinned by test-pa-kickback.js) is untouched. -> { ok, categories }.
+  function readMarginItems(pid) {
+    return paGql('PA_PropCtx', Q_PROP_CTX, { p: pid }).then(function (d) {
+      var pr = d && d.proposal;
+      if (!pr || !Array.isArray(pr.proposalLineItems)) return { ok: false };
+      return { ok: true, categories: presentCategories(pr.proposalLineItems) };
+    }, function () { return { ok: false }; });
+  }
+  // Same rule as the kickback draft: a FAILED read is never shown to the AI.
+  function draftScopeGaps(pc, total, gpText) {
+    if (!pc || !pc.ok) return Promise.resolve('');
+    var sys = 'You are an internal operations reviewer at a facilities-management company reviewing a client proposal for completeness before it is sent. In 2 to 5 short lines, list the most important scope or pricing GAPS or clarifying questions a coordinator should resolve (e.g. missing labor / material / travel lines, unclear quantities, permit or access assumptions). Be specific to the scope given. No greeting, no sign-off, no markdown.';
+    var content = 'Scope of work:\n' + (pc.scopeReported ? (pc.scope.trim() || '(empty)') : '(not reported)') +
+      '\n\nClient total: ' + total + '\nGross profit: ' + gpText +
+      '\nLine items:\n' + (pc.itemsReported ? (pc.items || '(no line items)') : '(not reported)');
+    return onDevice(sys, content).then(function (t) { return (t || '').trim(); });
+  }
+  function startMarginCheck() {
+    var n = woNumberFromUrl(), pid = proposalIdFromUrl();
+    if (n == null || pid == null) return;
+    if (paRefuseWhileRunning()) return;   // never open over a confirmation run in flight
+    paToast('Reading proposal for margin check…');
+    readWO(n).then(function (wo) {
+      return Promise.all([readTotals(wo.jobId, pid), readMarginItems(pid)]);
+    }).then(function (r) { renderMarginCheck(n, pid, r[0], r[1]); })
+      .catch(function (err) { paToast('Could not read proposal: ' + ((err && err.message) || err)); });
+  }
+  function renderMarginCheck(n, pid, tot, items) {
+    if (woNumberFromUrl() !== n || proposalIdFromUrl() !== pid) return;   // navigated away during the read
+    if (!paTakeOverlaySlot()) return;   // a confirmation run is in flight: keep that dialog, render nothing
+    ensureStyle();
+    var total = money(tot.total);
+    var gpText = (tot.gpPct == null ? 'unknown' : (tot.gpPct * 100).toFixed(2) + '%');
+    var overlay = document.createElement('div');
+    overlay.id = 'bwn-pa-overlay';
+    var card = document.createElement('div');
+    card.id = 'bwn-pa-card';
+    card.setAttribute('role', 'dialog');
+    card.setAttribute('aria-modal', 'true');
+    card.setAttribute('aria-label', 'Margin check for proposal ' + pid);
+    card.innerHTML = marginPanelHtml({
+      n: n, pid: pid, total: total, gpPct: tot.gpPct, biz: readBizRules(), items: items,
+      cost: impliedCostDollars(moneyToDollars(tot.total), tot.gpPct)
+    }, escapeHtml);
+    overlay.appendChild(card);
+    document.body.appendChild(overlay);
+    paAdoptToast();
+    var releaseTrap = paArmTrap(overlay);
+    function close() {
+      try { overlay.remove(); } catch (e) { }
+      document.removeEventListener('keydown', onKey);
+      try { releaseTrap(); } catch (e) { }
+    }
+    overlay._paClose = close;
+    function onKey(e) { if (e.key === 'Escape') close(); }
+    document.addEventListener('keydown', onKey);
+    overlay.addEventListener('click', function (e) { if (e.target === overlay) close(); });
+    var closeBtn = card.querySelector('#bwn-pa-close');
+    var aiBtn = card.querySelector('#bwn-pa-ai');
+    var gapsBox = card.querySelector('#bwn-pa-scopegaps');
+    closeBtn.addEventListener('click', close);
+    aiBtn.addEventListener('click', function () {
+      aiBtn.disabled = true;
+      gapsBox.textContent = 'Asking the on-device AI…';
+      var none = 'No questions generated - the on-device AI is unavailable in this browser, or the proposal details could not be read.';
+      readProposalContext(pid).then(function (pc) { return draftScopeGaps(pc, total, gpText); }).then(function (t) {
+        gapsBox.textContent = t || none; aiBtn.disabled = false;
+      }, function () { gapsBox.textContent = none; aiBtn.disabled = false; });
+    });
+    closeBtn.focus();
+  }
+
   // ===== dropdown UI ========================================================
   var DROPDOWN_ID = 'bwn-pa-dropdown';
   var openMenuEl = null;
@@ -1958,6 +2173,9 @@
     ];
     var c = optionCount();
     if (c > 1) items.unshift({ label: 'Compare proposals (' + c + ' options)', sub: 'Read-only - nothing is changed', fn: openCompare });
+    if (BWN_MODULES.marginGuardrail === true) {   // strict: an absent flag is OFF
+      items.push({ label: 'Margin check', sub: 'Read-only - GP vs margin target', fn: startMarginCheck });
+    }
     items.forEach(function (it) {
       var b = document.createElement('button');
       b.type = 'button'; b.setAttribute('role', 'menuitem');
