@@ -132,6 +132,8 @@ var LEDGER = {
   // property -> rmotion NA. Does not read `--bwn-dock-shift` -> rail NA. It KEEPS bwnFocusTrap, so it
   // stays in the focus-trap FAMILY in test-a11y-focus.js (that is a separate contract from these four).
   'bwn-proposal-copy.user.js': { drawer: 'NA',        toast: 'NA',        rmotion: 'NA',  rail: 'NA'  },
+  // Proposal Pricing 0.2.0: read-only side panel, no shared drawer/toast/animation/rail.
+  'bwn-proposal-pricing.user.js': { drawer: 'NA',        toast: 'NA',        rmotion: 'NA',  rail: 'NA'  },
   'bwn-suite-ai.user.js':      { drawer: 'NA',        toast: 'DIVERGENT', rmotion: 'HAS', rail: 'HAS' },
   'bwn-suite-core.user.js':    { drawer: 'HAS',       toast: 'DIVERGENT', rmotion: 'HAS', rail: 'HAS' },
   // Own inline panel inside the PO dialog (#bwn-tv-panel) + own body-modal fallback; closes by plain
