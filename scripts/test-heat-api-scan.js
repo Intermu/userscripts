@@ -1336,7 +1336,7 @@ console.log('\n-- the shipped call site --');
   // run its body at document-start, with no document.body - the exact failure this
   // restructure exists to avoid, and one that shows up as a module silently not mounting.
   var dispatch = core.match(/^  bwnBoot\('\w+', BWN_MODULES\.\w+, function \(\) \{$/gm) || [];
-  A.eq('all 14 modules are registered through bwnBoot', dispatch.length, 14);   // +domHandle (phase 4), +bulkOps (Bulk Operations Console), +bulkSource (Bulk Source Job#)
+  A.eq('all 16 modules are registered through bwnBoot', dispatch.length, 16);   // +domHandle (phase 4), +bulkOps (Bulk Operations Console), +bulkSource (Bulk Source Job#), +bulkTask (Bulk Task Reassign), +hideHelp (Help button toggle)
   A.eq('and none is dispatched inline', (core.match(/^  if \(BWN_MODULES\.\w+\) BWN\.safeModule\(/gm) || []).length, 0);
   // Cheap proof the ids still line up with their kill switches after a bulk rewrite.
   var mismatched = dispatch.filter(function (d) {

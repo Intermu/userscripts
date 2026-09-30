@@ -105,14 +105,19 @@ var EXPECT = {
   'bwn-ask.user.js':              ['esc'],
   'bwn-bid-out.user.js':          ['esc'],
   'bwn-dispatch.user.js':         ['esc'],
-  'bwn-drop-upload.user.js':      ['esc', 'esc'],       // two: textToHtml (line ~875) + a second builder
+  'bwn-drop-upload.user.js':      ['duEsc', 'esc', 'esc'],   // textToHtml + a second builder, plus duEsc:
+  //   the module-level copy the @-mention span builder uses. That span puts a display name inside
+  //   FIVE quoted attributes, so it is the one place here where an unescaped quote does not merely
+  //   render wrong - it breaks out of data-label and the mention resolves to nobody.
   'bwn-low-gp.user.js':           ['lgEsc'],
   'bwn-notes.user.js':            ['esc'],
   'bwn-proposal-actions.user.js': ['escapeHtml'],
   'bwn-proposal-copy.user.js':    ['escapeHtml'],
+  'bwn-proposal-pricing.user.js': ['escapeHtml'],
   'bwn-suite-ai.user.js':         ['escapeHtml', 'srEsc'],   // ported jobView escapeHtml + supplier-search srEsc
   'bwn-suite-core.user.js':       ['esc', 'esc', 'esc'],     // three render/copy paths
   'bwn-temp-vendor.user.js':      ['tvEsc'],
+  'bwn-wo-audit.user.js':         ['esc'],   // live-activity log + file-card metadata (workbook filename) render into innerHTML
   'bwn-write-queue.user.js':      ['esc']
 };
 

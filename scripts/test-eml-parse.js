@@ -42,8 +42,10 @@ function slice(startNeedle, endNeedle, what) {
 // stripHtml + latin1Of + the MIME helpers + parseEml, verbatim. The slice is a superset (it also
 // pulls parseMsg + a few map helpers); their bodies are never invoked, so undefined refs are inert.
 var BLOCK = slice('function stripHtml(', 'function pdfToText(', 'parseEml cluster');
-var api = { atob: atob, Uint8Array: Uint8Array, String: String };
-vm.runInNewContext(BLOCK + '\n;this.parseEml=parseEml;', api);
+// isInlineAttach + rtfDecompress (+ utf16/latin1) sit ABOVE stripHtml (the .msg reader), so they get their own slice.
+var INLINE = slice('function isInlineAttach(', 'function stripHtml(', 'inline-attachment mark reader');
+var api = { atob: atob, Uint8Array: Uint8Array, DataView: DataView, String: String };
+vm.runInNewContext(INLINE + '\n' + BLOCK + '\n;this.parseEml=parseEml;this.isInlineAttach=isInlineAttach;this.rtfDecompress=rtfDecompress;', api);
 
 // ---- Build the synthetic multipart/mixed .eml, CRLF like a real one ---------
 var CRLF = '\r\n';
@@ -122,5 +124,112 @@ var s = api.parseEml(simple);
 A.eq('simple senderEmail', s.senderEmail, 'alerts@corrigo.com');
 A.ok('simple body present', /Location: Store 305[\s\S]*NTE: \$650\.00/.test(s.body), JSON.stringify(s.body));
 A.eq('simple has no attachments', s.attachments.length, 0);
+
+// ---- The sender's HTML SIGNATURE is not an attachment the requester sent -----------------------
+// Outlook ships signature graphics (logo, social icons) as real MAPI attachments. On the Pilot
+// store 258 painting request that meant four of the ten "attachments" were a logo and three social
+// icons, and all four were uploaded to the WO's Documents alongside the six site photos.
+//
+// The marks below are the ones MEASURED on that email: the four signature images each carried
+// PR_ATTACHMENT_HIDDEN (0x7FFE, PT_BOOLEAN) = true AND PR_ATTACH_FLAGS (0x3714, PT_LONG) with bit
+// ATT_MHTML_REF (0x4) set; the six real photos carried NEITHER property. PR_RENDERING_POSITION was
+// -1 on ALL TEN, real photos included - the last case below pins that, because a rendering-position
+// rule looks right in the docs and would have dropped every photo.
+//
+// Property stream layout (MS-OXMSG 2.4): 8-byte header, then 16-byte entries of
+//   [4B tag: bytes 0-1 = property type LE, bytes 2-3 = property id LE][4B flags][8B value].
+console.log('# isInlineAttach - the MAPI marks that separate a signature graphic from a real file');
+function propStream(entries) {
+  var b = new Uint8Array(8 + entries.length * 16);            // 8-byte header, then the entries
+  entries.forEach(function (e, i) {
+    var o = 8 + i * 16;
+    b[o] = e.type & 0xFF; b[o + 1] = (e.type >> 8) & 0xFF;    // property TYPE (low half of the tag)
+    b[o + 2] = e.id & 0xFF; b[o + 3] = (e.id >> 8) & 0xFF;    // property ID   (high half of the tag)
+    b[o + 8] = e.value & 0xFF; b[o + 9] = (e.value >>> 8) & 0xFF;
+    b[o + 10] = (e.value >>> 16) & 0xFF; b[o + 11] = (e.value >>> 24) & 0xFF;
+  });
+  return b;
+}
+var METHOD = { id: 0x3705, type: 0x0003, value: 1 };            // PR_ATTACH_METHOD, on every attachment
+var RENDER_NONE = { id: 0x370B, type: 0x0003, value: 0xFFFFFFFF };   // PR_RENDERING_POSITION = -1
+var HIDDEN = { id: 0x7FFE, type: 0x000B, value: 1 };
+var MHTML_REF = { id: 0x3714, type: 0x0003, value: 4 };
+
+A.eq('a signature graphic (hidden + ATT_MHTML_REF) is inline',
+  api.isInlineAttach(propStream([METHOD, RENDER_NONE, HIDDEN, MHTML_REF])), true);
+A.eq('PR_ATTACHMENT_HIDDEN alone is enough', api.isInlineAttach(propStream([METHOD, HIDDEN])), true);
+A.eq('PR_ATTACH_FLAGS ATT_MHTML_REF alone is enough', api.isInlineAttach(propStream([METHOD, MHTML_REF])), true);
+A.eq('a real site photo (neither property) is NOT inline',
+  api.isInlineAttach(propStream([METHOD, RENDER_NONE])), false);
+A.eq('PR_RENDERING_POSITION -1 does NOT by itself mean inline (it was -1 on the real photos too)',
+  api.isInlineAttach(propStream([RENDER_NONE])), false);
+A.eq('PR_ATTACH_FLAGS without the MHTML_REF bit is not inline',
+  api.isInlineAttach(propStream([{ id: 0x3714, type: 0x0003, value: 1 }])), false);
+A.eq('PR_ATTACHMENT_HIDDEN false is not inline',
+  api.isInlineAttach(propStream([{ id: 0x7FFE, type: 0x000B, value: 0 }])), false);
+A.eq('the id is not confused with the type (0x000B as an ID must not read as HIDDEN)',
+  api.isInlineAttach(propStream([{ id: 0x000B, type: 0x7FFE, value: 1 }])), false);
+A.eq('no properties stream -> not inline (never drop what we cannot classify)', api.isInlineAttach(null), false);
+A.eq('an empty properties stream -> not inline', api.isInlineAttach(new Uint8Array(8)), false);
+
+// ---- The .eml analogue: inline disposition + a Content-ID -------------------------------------
+// NOT measured against a real signature .eml (only this synthetic fixture), so the rule is written
+// to need BOTH marks: a part disposed `attachment` is never dropped, whatever else it carries.
+console.log('# parseEml - an inline signature image is marked, a real attachment is not');
+var IMG = Buffer.from('\x89PNG\r\n\x1a\nfake-logo-bytes', 'latin1');
+var PHOTO = Buffer.from('\xff\xd8\xff\xe0fake-site-photo-bytes', 'latin1');
+var B = '_005_SYNTHsig_';
+var sigEml = [
+  'From: Alex Roe <alex.roe@example.com>',
+  'Subject: 299 store Painting',
+  'MIME-Version: 1.0',
+  'Content-Type: multipart/mixed;',
+  '\tboundary="' + B + '"',
+  '',
+  '--' + B,
+  'Content-Type: text/plain; charset="us-ascii"',
+  '',
+  'See attached store. I need a quote to paint this location.',
+  '',
+  '--' + B,
+  'Content-Type: image/png; name="image485826.png"',
+  'Content-Disposition: inline; filename="image485826.png"',
+  'Content-ID: <image485826.png@70259B92.2165DC4D>',
+  'Content-Transfer-Encoding: base64',
+  '',
+  IMG.toString('base64'),
+  '--' + B,
+  'Content-Type: image/jpeg; name="original-site.jpeg"',
+  'Content-Disposition: attachment; filename="original-site.jpeg"',
+  'Content-Transfer-Encoding: base64',
+  '',
+  PHOTO.toString('base64'),
+  '--' + B + '--',
+  ''
+].join(CRLF);
+var sp = api.parseEml(sigEml);
+A.eq('both parts are still parsed out (the filter is the caller\'s job, not the parser\'s)', sp.attachments.length, 2);
+A.eq('the inline signature image is marked inline', sp.attachments[0].inline, true);
+A.eq('the attached site photo is NOT marked inline', sp.attachments[1].inline, false);
+A.ok('the site photo bytes survive intact', Buffer.from(sp.attachments[1].bytes).equals(PHOTO));
+A.eq('filtering by the mark leaves exactly the real attachment',
+  sp.attachments.filter(function (a) { return !a.inline; }).map(function (a) { return a.name; }),
+  ['original-site.jpeg']);
+// A Content-ID on a part that is disposed `attachment` must NOT drop it - Outlook gives a cid to
+// real attachments too (all ten on the Pilot request had one), so the disposition is load-bearing.
+A.eq('the earlier PDF attachment is still not inline', p.attachments[0].inline, false);
+
+// ---- .msg: new Outlook signature logo is only marked by a body-cited Content-ID --------------
+// New Outlook ships its logo ("Outlook-xxxxxxxx") with NO hidden / ATT_MHTML_REF flag; the only tell
+// is <img src="cid:..."> in PR_HTML or, when that is absent, the compressed RTF body. parseMsg
+// decompresses it with rtfDecompress - pinned here on the MS-OXRTFCP 3.1.1 spec sample, same as
+// test-drop-upload-eml.js (real encoder output).
+console.log('# rtfDecompress - MS-OXRTFCP LZFu spec sample');
+var SPEC = Uint8Array.from([0x2d,0,0,0,0x2b,0,0,0,0x4c,0x5a,0x46,0x75,0xf1,0xc5,0xc7,0xa7,0x03,0x00,0x0a,0x00,0x72,0x63,0x70,0x67,
+  0x31,0x32,0x35,0x42,0x32,0x0a,0xf3,0x20,0x68,0x65,0x6c,0x09,0x00,0x20,0x62,0x77,0x05,0xb0,0x6c,0x64,0x7d,0x0a,0x80,0x0f,0xa0]);
+var BS = String.fromCharCode(92);
+A.eq('LZFu spec sample decompresses', api.rtfDecompress(SPEC),
+  '{' + BS + 'rtf1' + BS + 'ansi' + BS + 'ansicpg1252' + BS + 'pard hello world}\r\n');
+A.eq('an unknown compression type reads as nothing', api.rtfDecompress(new Uint8Array(16)), '');
 
 A.finish();

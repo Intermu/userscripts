@@ -1,10 +1,10 @@
 // ==UserScript==
 // @name         BWN Suite - Core (Broadway National)
 // @namespace    broadwaynational.bwn
-// @version      1.80.2
+// @version      1.93.0
 // @downloadURL  https://raw.githubusercontent.com/Intermu/userscripts/main/bwn-suite-core.user.js
 // @updateURL    https://raw.githubusercontent.com/Intermu/userscripts/main/bwn-suite-core.user.js
-// @description  Runs several Umbrava helpers for BWN coordinators, in the browser with no privileged grants. Includes: PO Approval + ETA Builder; WO Assist (GP/ETA, a stall watchdog, DNE calculator, and a next-action playbook); Email Leak Guard (checks recipients against vendor names, PO amounts, and client budget references before an outbound email sends); WO List Heat (a triage overlay + My Day strip on the work-order list, with an optional same-origin Umbrava API scan for deterministic full-board coverage); and the BWN Launcher (opens the Azure Static Web App tools with the current WO's context). Modules share state through sessionStorage/localStorage. The only network calls are same-origin Umbrava GraphQL requests (app.umbrava.com/api/graphql, the app's own session): List Heat's full-board scan and WO Assist's work-order / trip / clock-in / document reads, plus ONE write - BWN Views saves the column layout through Umbrava's own putUserPreference, the same preference the column chooser writes; everything else is offline. Toggle modules in BWN_MODULES below.
+// @description  Runs several Umbrava helpers for BWN coordinators, in the browser with no privileged grants. Includes: PO Approval + ETA Builder; WO Assist (GP/ETA, a stall watchdog, DNE calculator, and a next-action playbook); Email Leak Guard (checks recipients against vendor names, PO amounts, and client budget references before an outbound email sends); WO List Heat (a triage overlay + My Day strip on the work-order list, with an optional same-origin Umbrava API scan for deterministic full-board coverage); and the BWN Launcher (opens the Azure Static Web App tools with the current WO's context). Modules share state through sessionStorage/localStorage. The only network calls are same-origin Umbrava GraphQL requests (app.umbrava.com/api/graphql, the app's own session): List Heat's full-board scan and WO Assist's work-order / trip / clock-in / document / purchase-order reads, plus ONE write - BWN Views saves the column layout through Umbrava's own putUserPreference, the same preference the column chooser writes; everything else is offline. Toggle modules in BWN_MODULES below.
 // @match        https://app.umbrava.com/*
 // @match        https://*.umbrava.com/*
 // @run-at       document-start
@@ -30,6 +30,13 @@
                            // smoke test. The mutations themselves still route through bwnGqlOp
                            // with feature:'woAssist' (its kill switch + audit gate) - two gates:
                            // this flag hides the UI, bwnGqlOp enforces the write governance.
+    actsCard: true,      // WO Assist sub-feature: the NEXT ACTIONS card on the WO page. Off only hides
+                         // the card - the engine still runs, so Job View pills + the bus stay fed.
+    ecdPrompt: true,     // WO Assist sub-feature: auto-open the Set-ECD prompt when the ECD is missing
+                         // or overdue (the manual "Set ECD..." step button is unaffected).
+    closePreflight: true, // WO Assist sub-feature: the close-out preflight + billing prompt shown when
+                         // the status moves to a terminal / Work Complete state.
+                         // The three sub-features above apply LIVE from Suite settings (no reload).
     leakGuard: true,     // outbound email cross-contamination guard
     listHeat: true,      // heat overlay + audit on the Work Orders list
     launcher: true,      // BWN tools dock (left edge)
@@ -57,12 +64,29 @@
                          // still passes a dry-run + a typed confirm, and every write routes through
                          // bwnGqlOp feature:'bulkSource' (its per-feature kill switch + audit ring)
                          // via the proven patchWorkOrder. Flip back to false to kill the module.
+    bulkTask: false,     // SHIPPING DEFAULT OFF: Bulk Task Reassign - paste WO#s (or tick them from a
+                         // current assignee's open WOs), pick one person or team, move every EXISTING
+                         // open task on them and/or the WO's own Assigned To (never creates a task). The
+                         // whole module - dock entry, drawer, every read and write - mounts only when
+                         // this is on. Each run needs a read-only preview + a typed APPLY n; each
+                         // write re-reads the task, sends it back unchanged but for assignedTo
+                         // (EditTask is a full replace), and only a matching read-back counts as done.
+                         // Writes route through bwnGqlOp feature:'bulkTask' (kill switch + Task.EditTask
+                         // permission + high-risk confirm + audit ring).
+    permGate: true,      // decode this user's Umbrava permission checkboxes (me.permissions) once a
+                         // session and hide the suite controls they are not allowed to use - the
+                         // dock rail rows, the WO-Assist write buttons, the bulk consoles. Core is
+                         // the only PRODUCER; sibling scripts read the published slot. Off = nothing
+                         // is decoded, everything reads as unknown, and every control shows (the
+                         // pre-2026-09-02 behaviour). Umbrava's server enforces regardless.
     routeHelper: false,  // RM-B4, SHIPPING DEFAULT OFF: when on, consumers that have adopted the
                          // central BWN.onRoute (window.bwnOnRoute) route helper use it INSTEAD of
                          // pasting their own history.pushState/popstate trio. Off = each adopter
                          // keeps its own hooks (current behavior, byte-for-byte). The helper itself
                          // is always DEFINED; this flag only flips whether an adopter routes through
                          // it, so a stuck/unresolved flag never silently changes lifecycle.
+    hideHelp: true,      // hide Umbrava's floating bottom-right Help button; a Show/Hide toggle
+                         // sits in the initials (profile) menu above Logout
     errorReporter: false, // RM-B2, SHIPPING DEFAULT OFF: when on, BWN.report writes a bounded,
                          // PII-free breadcrumb to the bwn:errlog ring alongside its toast. Off = the
                          // toast still shows (unchanged at paths that already toasted) but NOTHING is
@@ -100,11 +124,33 @@
     });
   } catch (e) { /* defaults */ }
 
+  // Central governance flags (governance-sync): apply the org flags blob that bwn-suite-ai
+  // caches to bwn:gov as ONE-WAY disables over the local module set. Remote may DISABLE a
+  // feature (flags[key]===false) or trip flags.globalKillSwitch, but NEVER enable one - a
+  // stuck, absent, or corrupt bundle can only leave the suite SAFER, never less safe. Runs
+  // after the user-toggle merge (so precedence is: defaults -> user toggle -> remote disable)
+  // and re-applies live on the bwn:gov ping, so a kill blocks new writes with no reload (the
+  // bwnGqlOp per-feature check reads BWN_MODULES live). Absent bundle = local defaults.
+  // BWN-GOV-APPLY-SLICE-START (sliced by scripts/test-governance-sync.js)
+  function bwnApplyGov() {
+    try {
+      var g = JSON.parse(localStorage.getItem('bwn:gov') || 'null');
+      if (!g || typeof g !== 'object' || !g.flags || typeof g.flags !== 'object') return;
+      var f = g.flags, kill = f.globalKillSwitch === true;
+      Object.keys(BWN_MODULES).forEach(function (k) {
+        if (kill || f[k] === false) BWN_MODULES[k] = false;   // one-way: only ever disable
+      });
+    } catch (e) { /* corrupt bundle -> keep local defaults (safe) */ }
+  }
+  bwnApplyGov();
+  // BWN-GOV-APPLY-SLICE-END
+  try { document.addEventListener('bwn:gov', function () { bwnApplyGov(); }); } catch (e) { }
+
   // Publish version for the Ops Suite panel status readout.
   try { localStorage.setItem('bwn:status:core', JSON.stringify({ ver: BWN_VER, ts: Date.now() })); } catch (e) { /* best-effort */ }
 
   console.info('[BWN SUITE CORE] v' + BWN_VER + ' |',
-    'Shared Core 7 \u00b7 DOM Handles 1.0 \u00b7 PO Approval 1.13 \u00b7 WO Assist 2.71 \u00b7 Leak Guard 2.0 \u00b7 List Heat 3.28 \u00b7 Launcher 2.0 \u00b7 Views 3.1 \u00b7 Palette 1.1 \u00b7 Visit 1.2 \u00b7 Reminders 1.1 \u00b7 Timeline 1.1 \u00b7 TripCal 1.4 \u00b7 Bulk Ops 1.0 \u00b7 Doc Compliance 1.0 \u00b7 Connector 1.2 |',
+    'Shared Core 7 \u00b7 DOM Handles 1.0 \u00b7 PO Approval 1.14 \u00b7 WO Assist 2.76 \u00b7 Leak Guard 2.1 \u00b7 List Heat 3.28 \u00b7 Launcher 2.0 \u00b7 Views 3.1 \u00b7 Palette 1.1 \u00b7 Visit 1.2 \u00b7 Reminders 1.1 \u00b7 Timeline 1.1 \u00b7 TripCal 1.4 \u00b7 Bulk Ops 1.0 \u00b7 Doc Compliance 1.0 \u00b7 Connector 1.2 \u00b7 Governance 1.0 |',
     'enabled:', Object.keys(BWN_MODULES).filter(function (k) { return BWN_MODULES[k]; }).join(', '));
 
   // ===== BWN SHARED CORE v7 - KEEP IN SYNC across both suite scripts =====
@@ -238,7 +284,13 @@
       'cwamazon': { clientId: '20432', refFields: { sourceJob: true, sourcePo: false } },
       'jllamazon': { clientId: '20394', refFields: { sourceJob: true } },
       'caleresinc': { clientId: null },
-      'transformsrbrandsllc': { clientId: '23914', refFields: { sourceJob: true, sourcePo: true } }
+      'transformsrbrandsllc': { clientId: '23914', refFields: { sourceJob: true, sourcePo: true } },
+      // Signoff clients: billing is disputed without a signed approval tied to the WO. deepMerge
+      // replaces closeout.docs wholesale, so each row repeats the three defaults + 'signoff'
+      // (matches the drop-upload 'Signoff' document label). Advisory only, like every docs row.
+      // Separate rows on purpose - the two clients' rules may diverge.
+      'tesla': { clientId: '20441', closeout: { docs: ['signed ticket', 'sign-in/out', 'before/after photos', 'signoff'] } },
+      'crocsinc': { clientId: '20386', closeout: { docs: ['signed ticket', 'sign-in/out', 'before/after photos', 'signoff'] } }
     };
     // Shallow merge with ONE level of depth over the nested config objects (closeout, refFields,
     // compliance) so a partial override (e.g. {refFields:{sourceJob:true}} or {compliance:{checks:
@@ -307,6 +359,20 @@
     }
 
     // ---- Field readers / React-safe setter ------------------------------------
+    // Umbrava rebuilt the WO detail form (measured live 2026-09-03, W-371126): the header
+    // wrapper now holds NO inputs at all, and the fields that used to carry a data-testid
+    // carry a `name` equal to their API field path instead - `priority.expectedCompletionDate`,
+    // `priority.firstTripDate`, `sourceJobNumber`, `doNotExceed`, `scopeOfWork`. Key on that
+    // `name`: it is the same string the GraphQL patch uses, so DOM and API stay in step, and
+    // unlike the label's `for` (`mui-32`) it is not MUI's per-render counter.
+    // A PO edit form can carry the same field names, so anything inside a PO accordion is
+    // skipped - the WO's own field is the one that is not in a POAccordion.
+    function woFieldInput(name) {
+      var els = document.querySelectorAll('input[name="' + name + '"], textarea[name="' + name + '"]');
+      for (var i = 0; i < els.length; i++) { if (!els[i].closest('[data-testid^="POAccordion-"]')) return els[i]; }
+      return null;
+    }
+    function woFieldVal(name) { var el = woFieldInput(name); return el ? (el.value || '') : ''; }
     function inputVal(testid) {
       var el = document.querySelector('[data-testid="' + testid + '"]');
       if (!el) return '';
@@ -878,7 +944,7 @@
       CLIENT_DEFAULTS_SEED: CLIENT_DEFAULTS_SEED, CLIENT_PROFILE_SEED: CLIENT_PROFILE_SEED, bwnClientProfile: bwnClientProfile,
       money: money, parseMoney: parseMoney, parseBare: parseBare, parseUSDate: parseUSDate,
       alphaOnly: alphaOnly, lcsLen: lcsLen,
-      inputVal: inputVal, setNativeValue: setNativeValue,
+      inputVal: inputVal, woFieldInput: woFieldInput, woFieldVal: woFieldVal, setNativeValue: setNativeValue,
       GREEN: GREEN, injectTokens: injectTokens,
       getTheme: getTheme, setTheme: setTheme, applyTheme: applyTheme,
       makeDropdown: makeDropdown, a11yDialog: a11yDialog,
@@ -1458,6 +1524,9 @@
   // Stays null if the WO Assist module is disabled by config, and every consumer must
   // null-guard - the audit then simply shows no next step instead of a wrong one.
   var bwnActsEngine = null;
+  // Coordinator Action Queue layer (classification + partitioning + ranking), published
+  // from the WO Assist module the same way bwnActsEngine is - null until that module loads.
+  var bwnCoordQueue = null;
 
   // ---- File-level same-origin GraphQL (shared by WO Assist reads + List Heat) --
   // @grant none: a plain SAME-ORIGIN POST to /api/graphql carries the app's Auth0
@@ -1500,6 +1569,61 @@
     });
   }
 
+  // ===== BWN-GQL-READ START v1 (classified read envelope; sliced by scripts/test-bwn-gql-read.js) =====
+  // bwnGql() above resolves to `data` and throws errors[0].message - it drops the HTTP status and the
+  // GraphQL error CODE, which is the actionable part. Measured live 2026-09-17: UNAUTHENTICATED,
+  // BAD_USER_INPUT, GRAPHQL_VALIDATION_FAILED and FORBIDDEN all arrive as HTTP 200 bodies with
+  // `errors[]`; a tokenless POST is an HTTP 500 with a non-JSON body; ASP.NET validation is an HTTP 400
+  // JSON body with no `errors`. bwnGqlRead() NEVER rejects: it resolves an envelope
+  //   { kind, status, noToken, data, codes, messageLen }
+  // kind: 'ok' | 'partial' (data AND errors) | 'graphql-error' | 'no-data' | 'bad-json' |
+  //       'http-4xx-no-json' | 'http-5xx-no-json' | 'http-<status>' (4xx/5xx JSON without errors[]) | 'network'
+  // so a caller can tell auth-empty from schema drift from a dead network without reading a message.
+  // bwnGql()'s contract is unchanged and the per-script transport copies are untouched on purpose.
+  function bwnGqlClassify(status, body, parsed) {
+    if (status === 0) return 'network';
+    if (!parsed) return status >= 500 ? 'http-5xx-no-json' : status >= 400 ? 'http-4xx-no-json' : 'bad-json';
+    var errs = body && Array.isArray(body.errors) && body.errors.length ? body.errors : null;
+    if (status >= 400) return errs ? 'graphql-error' : 'http-' + status;
+    if (errs) return body.data ? 'partial' : 'graphql-error';
+    if (!body || body.data === undefined || body.data === null) return 'no-data';
+    return 'ok';
+  }
+  function bwnGqlEnvelope(status, body, parsed, noToken) {
+    var errs = body && Array.isArray(body.errors) ? body.errors : [];
+    return {
+      kind: bwnGqlClassify(status, body, parsed), status: status, noToken: !!noToken,
+      data: (parsed && body && body.data) || null,
+      codes: errs.slice(0, 5).map(function (e) {
+        var c = String((e && e.extensions && e.extensions.code) || 'nocode');
+        return /^[A-Za-z][A-Za-z0-9_]{0,39}$/.test(c) ? c : 'othercode';   // server-authored: shape-gate it, never print a free-text extensions.code; at most 5
+      }),
+      messageLen: errs.map(function (e) { return String((e && e.message) || '').length; })
+    };
+  }
+  function bwnGqlRead(query, variables) {
+    var tok = authToken();
+    return fetch('/api/graphql', {
+      method: 'POST',
+      headers: { 'Authorization': 'Bearer ' + tok, 'Content-Type': 'application/json' },
+      body: JSON.stringify({ query: query, variables: variables || {} })
+    }).then(function (r) {
+      // r.text() has its OWN rejection (a body stream aborted mid-response). The fetch onRejected
+      // below never sees it, so without this handler the never-rejects contract would be false
+      // exactly when the connection dies late. A truncated body is unparseable: it classifies as bad-json.
+      return r.text().then(function (t) {
+        var j = null, parsed = true;
+        try { j = JSON.parse(t); } catch (e) { parsed = false; }
+        return bwnGqlEnvelope(r.status, j, parsed, !tok);
+      }, function () { return bwnGqlEnvelope(r.status, null, false, !tok); });
+    }, function (err) {
+      var env = bwnGqlEnvelope(0, null, false, !tok);
+      env.messageLen = [String((err && err.message) || err || '').length];
+      return env;
+    });
+  }
+  // ===== BWN-GQL-READ END v1 =====
+
   // ===== BWN-OPS START v1 (operation registry + audited GraphQL wrapper; sliced by scripts/test-bwn-ops.js) =====
   // The suite's safety spine for /api/graphql. bwnGqlOp() classifies an operation against
   // BWN_OPS, stamps a correlation id, applies a conservative retry policy, and - for writes -
@@ -1520,6 +1644,10 @@
   //              kind==='read' OR idempotent===true. A non-idempotent write is NEVER auto-retried
   //              (there is no idempotency key for these Umbrava mutations).
   //   metered    a paid / server-side-LLM call - never retried, never looped over a board
+  //   perm       (writes) the Umbrava permission checkbox(es) this write needs: a 'Group.Flag'
+  //              string, an array of them, or fn(variables) returning either - the function form
+  //              is how patchWorkOrder asks per FIELD. Enforced in bwnGqlOp (G7); missing = the
+  //              write is not permission-gated. Fails OPEN on an undecoded user ([[BWN-PERM]]).
   //   ok / fail  user-facing toast text a caller may surface
   var BWN_OPS = {
     // ---- reads (idempotent; a transient failure may be retried) ----
@@ -1538,6 +1666,7 @@
     tasks:                   { kind: 'read', target: 'task',       retry: 'safe' },
     tasksByEntityTypeAndId:  { kind: 'read', target: 'task',       retry: 'safe' },
     user:                    { kind: 'read', target: 'user',       retry: 'safe' },
+    me:                      { kind: 'read', target: 'user',       retry: 'safe' },
     userPreference:          { kind: 'read', target: 'preference', retry: 'safe' },
     listVendorProposals:     { kind: 'read', target: 'proposal',   retry: 'safe' },
     listClientProposals:     { kind: 'read', target: 'proposal',   retry: 'safe' },
@@ -1549,19 +1678,23 @@
       ok: 'View saved.', fail: 'Could not save the view.' },
 
     // ---- moderate-risk writes ----
-    addEditJobNote: { kind: 'write', target: 'note', risk: 'moderate', idempotent: false, retry: 'none',
+    addEditJobNote: { kind: 'write', perm: 'WorkOrderNote.AddNew', target: 'note', risk: 'moderate', idempotent: false, retry: 'none',
       ok: 'Note posted.', fail: 'The note was not posted.' },
-    addClientProposalNote: { kind: 'write', target: 'proposal', risk: 'moderate', idempotent: false, retry: 'none',
+    addClientProposalNote: { kind: 'write', perm: 'WorkOrderProposal.AddNote', target: 'proposal', risk: 'moderate', idempotent: false, retry: 'none',
       ok: 'Proposal note posted.', fail: 'The proposal note was not posted.' },
-    initializeJobDocument: { kind: 'write', target: 'document', risk: 'moderate', idempotent: false, retry: 'none',
+    initializeJobDocument: { kind: 'write', perm: 'WorkOrderDocument.AddNew', target: 'document', risk: 'moderate', idempotent: false, retry: 'none',
       ok: 'Document upload started.', fail: 'The upload could not start.' },
-    bulkAddWorkOrderDocuments: { kind: 'write', target: 'document', risk: 'moderate', idempotent: false, retry: 'none',
+    bulkAddWorkOrderDocuments: { kind: 'write', perm: 'WorkOrderDocument.AddNew', target: 'document', risk: 'moderate', idempotent: false, retry: 'none',
       ok: 'Documents attached.', fail: 'The documents were not attached.' },
-    addTask: { kind: 'write', target: 'task', risk: 'moderate', idempotent: false, retry: 'none',
+    addTask: { kind: 'write', perm: 'Task.AddNew', target: 'task', risk: 'moderate', idempotent: false, retry: 'none',
       ok: 'Task created.', fail: 'The task was not created.' },
-    completeTask: { kind: 'write', target: 'task', risk: 'moderate', idempotent: true, retry: 'none',
+    completeTask: { kind: 'write', perm: 'Task.Complete', target: 'task', risk: 'moderate', idempotent: true, retry: 'none',
       ok: 'Task completed.', fail: 'The task was not completed.' },
-    deactivateVendor: { kind: 'write', target: 'vendor', risk: 'moderate', idempotent: true, retry: 'none',
+    // FULL REPLACE of the task (live capture 2026-09-29): the caller must send the fresh record back
+    // with only the intended field changed. High risk: a partial payload could blank task fields.
+    editTask: { kind: 'write', perm: 'Task.EditTask', target: 'task', risk: 'high', idempotent: false, retry: 'none',
+      ok: 'Task updated.', fail: 'The task was not updated.' },
+    deactivateVendor: { kind: 'write', perm: 'Vendor.ManageProfile', target: 'vendor', risk: 'moderate', idempotent: true, retry: 'none',
       ok: 'Vendor deactivated.', fail: 'The vendor was not deactivated.' },
 
     // ---- high-risk writes (dispatch, status/ECD, activation) ----
@@ -1571,13 +1704,16 @@
     // registry write entry has no bwnGqlOp call-site (or a call-site has no entry). Their captured
     // mutation shapes live in wiki/umbrava-graphql-operations.md - re-add an entry here only when a
     // real caller is wired.
-    patchWorkOrder: { kind: 'write', target: 'workOrder', risk: 'high', idempotent: false, retry: 'none',
+    patchWorkOrder: { kind: 'write', perm: bwnPermsForPatch, target: 'workOrder', risk: 'high', idempotent: false, retry: 'none',
       ok: 'Work order updated.', fail: 'The work order was not updated.' },
-    activateVendor: { kind: 'write', target: 'vendor', risk: 'high', idempotent: true, retry: 'none',
+    activateVendor: { kind: 'write', perm: 'Vendor.ManageProfile', target: 'vendor', risk: 'high', idempotent: true, retry: 'none',
       ok: 'Vendor activated.', fail: 'The vendor was not activated.' }
   };
 
-  // ===== BWN-OPS-WRAP START v2 (paste-identical across adopters; SHA-gated by scripts/test-bwn-ops.js) =====
+  // ===== BWN-OPS-WRAP START v3 (paste-identical across adopters; SHA-gated by scripts/test-bwn-ops.js) =====
+  // v3 (2026-09-02) adds the Umbrava permission gate (G7 below). It closes over bwnCan/bwnCanAll
+  // from the BWN-PERM block, so an adopter of this wrapper must carry that block too - the ledger
+  // in scripts/test-perm-block-ledger.js is what keeps the two lists in step.
   // Generic machinery only - NO registry, NO window hook - so it is byte-identical in every
   // sandbox that adopts it (Core, drop-upload, ...). It closes over four things each sandbox
   // supplies on its own: BWN_OPS (that file's registry), BWN_MODULES (kill switches), BWN_VER,
@@ -1685,6 +1821,29 @@
       writeAudit('denied', { reason: 'feature-off:' + opts.feature });
       return Promise.reject(new Error('bwnGqlOp: feature "' + opts.feature + '" is disabled'));
     }
+    // Umbrava permission gate (G7). The UI hides a control the operator's checkboxes do not cover,
+    // but hiding is not enforcement: a palette entry, a stale drawer, a queued command, or a future
+    // caller can all reach a write whose button was never rendered. This is the enforcement point -
+    // every registered write passes through here, so ONE guard covers every caller.
+    //   meta.perm  'Group.Flag' | ['Group.Flag', ...] | fn(variables) -> either of those
+    // A function is how a multi-field mutation (patchWorkOrder) asks per FIELD instead of per op.
+    // bwnCanAll fails OPEN on anything undecided - no slot, a stale slot, an unmapped group - so
+    // this refuses ONLY a positively-known missing checkbox. Refusals are non-transient (retrying
+    // cannot grant a permission) and audited `denied`, so a refusal is visible in the ring rather
+    // than silent. The reason carries the permission NAME, which is a static key, never user data.
+    if (isWrite && meta.perm) {
+      var need = (typeof meta.perm === 'function') ? meta.perm(variables) : meta.perm;
+      if (typeof need === 'string') need = [need];
+      if (!Array.isArray(need)) need = [];
+      if (need.length && !bwnCanAll(need)) {
+        var missing = need.filter(function (k) { return !bwnCan(k); });
+        writeAudit('denied', { reason: 'permission:' + missing.join('+') });
+        var noPerm = new Error('bwnGqlOp: "' + op + '" needs Umbrava permission ' + missing.join(' + ') + ' - the write was NOT sent.');
+        noPerm.bwnNonTransient = true;
+        noPerm.bwnPermissionDenied = missing;
+        return Promise.reject(noPerm);
+      }
+    }
     // Validate a write BEFORE it leaves the browser.
     if (isWrite && typeof opts.validate === 'function') {
       var vr = opts.validate(variables);
@@ -1769,7 +1928,7 @@
     return attempt(1);
   }
   bwnGqlOp.setConfirm = function (fn) { _confirmFn = (typeof fn === 'function') ? fn : null; };
-  // ===== BWN-OPS-WRAP END v2 =====
+  // ===== BWN-OPS-WRAP END v3 =====
 
   // Console diagnostics/export hook - lets a coordinator or admin read and export the local
   // audit trail today, before any writer adopts the wrapper. Read-only; carries no PII beyond
@@ -1782,6 +1941,144 @@
     };
   } catch (e) { /* non-fatal */ }
   // ===== BWN-OPS END v1 =====
+
+  // ===== BWN-PERM START v1 (paste-identical; pinned by scripts/test-perm-block-ledger.js) =====
+  // Umbrava's own per-user permission checkboxes, as the one question a control has:
+  //   bwnCan('WorkOrderNote.AddNew') -> true | false
+  // Umbrava returns me.permissions as a JSON STRING of {"<Type>Permissions": "<bitmask>"} - one
+  // bit per checkbox on /company/users/<id>/permissions. bwn-suite-core decodes it once a session
+  // and publishes the DECODED grant list to `bwn:perm:last` + the `bwn:perm` bus event, the same
+  // one-way producer/consumer shape as bwn:role. This block only READS that slot, so every
+  // sandbox that pastes it needs neither the query, the token, nor the flag numbers.
+  //
+  // FAIL-OPEN on anything unknown - no slot yet, a stale slot, or a group the producer does not
+  // map. Umbrava's server is the real boundary (it refuses the mutation either way), so an
+  // unreadable cache must never strand a coordinator mid-shift. Fail-CLOSED only on a
+  // positively-known missing bit. localStorage is per-origin, so this answers "unknown" (and
+  // therefore allows) anywhere but app.umbrava.com - by design.
+  var BWN_PERM_KEY = 'bwn:perm:last';
+  var BWN_PERM_TTL_MS = 24 * 3600 * 1000;
+  var _bwnPermSlot = null;      // memoized parse; invalidated by the bwn:perm listener below
+  function bwnPermSlot() {
+    if (_bwnPermSlot) return _bwnPermSlot;
+    try {
+      var p = JSON.parse(localStorage.getItem(BWN_PERM_KEY) || 'null');
+      if (p && p.ts && (Date.now() - p.ts) < BWN_PERM_TTL_MS &&
+        Array.isArray(p.groups) && Array.isArray(p.granted)) _bwnPermSlot = p;
+    } catch (e) { /* an unreadable cache reads as unknown, which fails open */ }
+    return _bwnPermSlot;
+  }
+  function bwnCan(key) {
+    var p = bwnPermSlot();
+    if (!p) return true;                                          // nothing decoded yet -> allow
+    var grp = String(key).split('.')[0];
+    if (p.groups.indexOf(grp) === -1) return true;                // group unmapped/absent -> allow
+    return p.granted.indexOf(key) !== -1;
+  }
+  // keys: a 'Group.Flag' string, or an array of them (ALL must be granted).
+  function bwnCanAll(keys) {
+    if (!keys) return true;
+    if (typeof keys === 'string') return bwnCan(keys);
+    for (var i = 0; i < keys.length; i++) { if (!bwnCan(keys[i])) return false; }
+    return true;
+  }
+  // patchWorkOrder is ONE mutation over MANY fields and Umbrava gates each field separately, so
+  // its permission depends on the variables rather than the operation. This maps the data keys the
+  // suite actually sends, all of them wire-proven; a key this map does not know contributes NO
+  // requirement, which is the block's unknown -> allow rule and keeps a future field from being
+  // blocked by a map nobody updated. `workOrderNumber` is the identifier, not a field write.
+  var BWN_PATCH_FIELD_PERM = {
+    statusId: 'WorkOrderField.Status',
+    assignedTo: 'WorkOrderField.AssignedTo',
+    // ECD rides inside the whole-object `priority` replace, and the SPA bundles the SLA id with it.
+    priority: 'WorkOrderField.CompletionSLA',
+    serviceLevelAgreementId: 'WorkOrderField.CompletionSLA',
+    sourceJobNumber: 'WorkOrderField.SourceJobNumber',
+    sourcePurchaseOrderNumber: 'WorkOrderField.SourcePurchaseOrderNumber'
+  };
+  // -> [] | ['WorkOrderField.Status', ...]; deduped, so a bundled priority+SLA asks once.
+  function bwnPermsForPatch(variables) {
+    var data = (variables && variables.data) || {};
+    var out = [];
+    Object.keys(data).forEach(function (k) {
+      var p = BWN_PATCH_FIELD_PERM[k];
+      if (p && out.indexOf(p) === -1) out.push(p);
+    });
+    return out;
+  }
+  try {
+    document.addEventListener('bwn:evt', function (e) {
+      var d = e && e.detail;
+      if (d && d.id === 'bwn:perm') _bwnPermSlot = null;          // a fresh decode landed
+    });
+  } catch (e) { }
+  // ===== BWN-PERM END v1 =====
+
+  // ---- Permission PRODUCER (bwn-suite-core only) ------------------------------
+  // The flag numbers are Umbrava's own, read live from the SPA bundle that renders the
+  // permissions page (2026-09-02) and spot-checked against a real user's page counts (Note 5/9
+  // decoded to exactly the 5 boxes shown ticked). They are per TYPE, so the alias on the left is
+  // just the short name call sites use. A group missing from this map is reported as unknown and
+  // fails OPEN - add a group here only when something actually gates on it.
+  var BWN_PERM_MAP = {
+    WorkOrder: { type: 'WorkOrderActionPermissions', flags: { View: 1, Export: 2, ViewAudit: 16, EditAnyPhase: 64, Flag: 128, BulkUpdate: 512, Complete: 1024, Cancel: 2048, ReOpen: 4096, BulkAdd: 8192, Reject: 16384, Accept: 32768, Recall: 65536, Hold: 262144, Close: 524288, CreateWorkOrder: 1048576, ManageTrips: 2097152, LinkWorkOrder: 4194304, ViewDispatchBoard: 8388608, ManageInventory: 16777216, ManageExpense: 33554432 } },
+    WorkOrderField: { type: 'WorkOrderFieldPermissions', flags: { ClientDNE: 1, AssignedTo: 2, Status: 4, Priority: 8, SourceJobNumber: 16, SourcePurchaseOrderNumber: 32, Location: 64, Trades: 128, FirstTripSLA: 256, CompletionSLA: 512, Asset: 1024, Type: 2048 } },
+    WorkOrderNote: { type: 'WorkOrderNoteActionPermissions', flags: { AddNew: 2, EditOwnNote: 4, EditOtherUsersNote: 8, ExportAllNotes: 16, ExportSelectionOfNotes: 32, ViewAudit: 64, Share: 128, DeleteOwnNote: 256, DeleteOtherUsersNote: 512 } },
+    WorkOrderDocument: { type: 'WorkOrderDocumentActionPermissions', flags: { View: 1, AddNew: 2, Download: 4, Share: 8, Archive: 16 } },
+    WorkOrderPO: { type: 'WorkOrderPurchaseOrderActionPermissions', flags: { AddNew: 2, ViewAudit: 4, Export: 16, GetIVRLink: 32, AssignVendor: 64, EditAnyPhase: 128, Complete: 256, Cancel: 512, ReOpen: 1024, Recall: 2048, Revoke: 4096, Hold: 8192, Close: 16384, AssignInactiveVendor: 32768, ManageTrips: 65536, AcceptOnVendorsBehalf: 131072 } },
+    WorkOrderPOField: { type: 'WorkOrderPurchaseOrderFieldPermissions', flags: { Status: 1, Trades: 2, VendorNTE: 4, Priority: 8, FirstTripSLA: 16, CompletionSLA: 32 } },
+    WorkOrderProposal: { type: 'WorkOrderProposalActionPermissions', flags: { View: 1, AddNew: 2, ChangeState: 4, ViewAudit: 8, EditFields: 16, Export: 32, ConvertToInvoice: 64, AddNote: 128, EditNote: 256, DeleteNote: 512, EditAnyState: 1024 } },
+    WorkOrderInvoice: { type: 'WorkOrderInvoiceActionPermissions', flags: { View: 1, AddNew: 2, ChangeState: 4, Export: 8, ViewAudit: 16, EditFields: 32, SubmitOverDNE: 64, EditAnyState: 128, AddNote: 512, EditNote: 1024, DeleteNote: 2048 } },
+    WorkOrderBill: { type: 'WorkOrderBillActionPermissions', flags: { View: 1, AddNew: 2, ChangeState: 4, ViewAudit: 8, EditFields: 16, ApproveOverNTE: 32, EditAnyState: 64, AddNote: 128, EditNote: 256, DeleteNote: 512, Download: 1024 } },
+    Task: { type: 'TaskActionPermissions', flags: { AddNew: 2, Complete: 4, CompleteAddNew: 8, EditTask: 16, Flag: 32 } },
+    Vendor: { type: 'VendorV2ActionPermissions', flags: { CreateVendor: 2, ManageProfile: 4, ManageBilling: 8, ManageNotes: 16, ManageDocuments: 32, ManageRelationship: 64, ManageCompliance: 128, ManageRehireEligibility: 256 } },
+    Inventory: { type: 'InventoryPermissions', flags: { ViewInventory: 1, ViewMasterInventory: 2, ManageItems: 4, ManageGlobalInventory: 8, ViewInventoryAudit: 16, ManageStorageAreas: 32, ManageStock: 64 } },
+    Analytics: { type: 'AnalyticsPermissions', flags: { ViewCompanyAnalytics: 2, ViewLocationsAnalytics: 4, ViewFinancialAnalytics: 8, ViewWorkOrdersAnalytics: 16, ViewProjectsAnalytics: 32, ViewVendorsAnalytics: 64, ViewDataDiscoveryAnalytics: 128, EditDataDiscoveryAnalytics: 256 } }
+  };
+  // Verified live 2026-09-02 against the real schema: `me` is the ONLY no-arg current-user root
+  // ([[umbrava-role-auth]]) and `permissions` is an `Any!` scalar carrying the JSON string.
+  var BWN_PERM_Q = '{ me { id permissions } }';
+  var BWN_PERM_REFRESH_MS = 6 * 3600 * 1000;   // re-decode at most this often; TTL above is 24h
+
+  // Bit test by division, NOT `&`: JavaScript's bitwise operators truncate to 32 bits signed and
+  // these masks are already at 2^25 with room to grow. Math.floor stays exact to 2^53.
+  function bwnPermHasBit(mask, flag) { return Math.floor(mask / flag) % 2 === 1; }
+
+  function bwnPermPublish(raw) {
+    var obj = null;
+    try { obj = (typeof raw === 'string') ? JSON.parse(raw) : raw; } catch (e) { obj = null; }
+    if (!obj || typeof obj !== 'object') return null;
+    var groups = [], granted = [];
+    Object.keys(BWN_PERM_MAP).forEach(function (alias) {
+      var def = BWN_PERM_MAP[alias];
+      if (!Object.prototype.hasOwnProperty.call(obj, def.type)) return;   // Umbrava did not send it
+      var mask = Number(obj[def.type]);
+      if (!isFinite(mask)) return;
+      groups.push(alias);
+      Object.keys(def.flags).forEach(function (f) {
+        if (bwnPermHasBit(mask, def.flags[f])) granted.push(alias + '.' + f);
+      });
+    });
+    if (!groups.length) return null;             // an empty decode is drift, not "no permissions"
+    var rec = { v: 1, ts: Date.now(), ver: BWN_VER, groups: groups, granted: granted };
+    try { localStorage.setItem(BWN_PERM_KEY, JSON.stringify(rec)); } catch (e) { }
+    _bwnPermSlot = null;
+    try { document.dispatchEvent(new CustomEvent('bwn:evt', { detail: { id: 'bwn:perm', groups: groups.length, granted: granted.length, ts: rec.ts } })); } catch (e) { }
+    return rec;
+  }
+  // Resolves to the record, or null when nothing could be decoded - callers never see a rejection,
+  // because a failed refresh is not an error condition: it just leaves everything unknown, and
+  // unknown fails open.
+  function bwnPermRefresh(force) {
+    if (BWN_MODULES.permGate === false) return Promise.resolve(null);
+    var p = bwnPermSlot();
+    if (!force && p && (Date.now() - p.ts) < BWN_PERM_REFRESH_MS) return Promise.resolve(p);
+    return bwnGqlOp('me', BWN_PERM_Q, {}, {}).then(function (d) {
+      return bwnPermPublish(d && d.me && d.me.permissions);
+    }, function () { return null; });
+  }
+  bwnBoot('permGate', BWN_MODULES.permGate !== false, function () { bwnPermRefresh(); });
+  try { window.__bwnPerm = { can: bwnCan, canAll: bwnCanAll, slot: bwnPermSlot, refresh: bwnPermRefresh, map: BWN_PERM_MAP }; } catch (e) { }
 
   // ---- Core-local shared helpers (PO Approval + Leak Guard) --------------------
   // Distinctive-token vendor matching: "does this recipient text belong to this
@@ -1804,7 +2101,9 @@
   //    generic trade word (ELECTRIC = 8) can never clear the bar by itself;
   //  - names with no distinctive token keep the legacy full-name LCS >= 6;
   //  - names whose distinctive letters are too short to test ("AB24 Electric")
-  //    require nearly the WHOLE compressed name in the recipient.
+  //    require nearly the WHOLE compressed name in the recipient;
+  //  - a vendor known by its INITIALS matches when 3+ leading initials start a
+  //    recipient word ("The Neutral Zone Electrical ..." -> TNZ -> "tnzelectric@").
   function bwnVendorMatch(vendorName, recipientRaw) {
     if (!vendorName || !recipientRaw) return { hit: false, token: null };
     var key = '|' + String(recipientRaw).toUpperCase().split(/[^A-Z0-9]+/)
@@ -1816,6 +2115,11 @@
       if (alphaTok.length < 4) continue;
       if (key.indexOf('|' + alphaTok) !== -1) return { hit: true, token: toks[i] };
       if (alphaTok.length >= 6 && alpha.indexOf(alphaTok) !== -1) return { hit: true, token: toks[i] };
+    }
+    var initials = String(vendorName).toUpperCase().replace(/[^A-Z0-9 ]/g, ' ').split(/\s+/)
+      .map(function (w) { return w.charAt(0); }).join('').replace(/[^A-Z]/g, '');
+    for (var k = initials.length; k >= 3; k--) {
+      if (key.indexOf('|' + initials.slice(0, k)) !== -1) return { hit: true, token: initials.slice(0, k) };
     }
     var distinct = toks.map(function (t2) { return t2.replace(/[^A-Z]/g, ''); }).join('');
     if (distinct.length >= 6 && BWN.lcsLen(distinct, alpha) >= 6) return { hit: true, token: null };
@@ -1830,7 +2134,7 @@
 
 
   // ==========================================================================
-  // MODULE: PO Approval + ETA Builder v1.12
+  // MODULE: PO Approval + ETA Builder v1.14
   // ==========================================================================
   bwnBoot('poApproval', BWN_MODULES.poApproval, function () {
     'use strict';
@@ -1901,7 +2205,55 @@
       return to ? (to.textContent || '') : '';
     }
 
+    // Prefer the dedicated vendor-name element; fall back to the row's text.
+    // Measured 2026-09-03: Umbrava now renders the vendor as `purchase-order-vendor-link`
+    // on every PO row and `-name` did not appear once, so without the link fallback this
+    // silently degraded to the WHOLE row text - which carries amounts and dates and makes
+    // the vendor match noisier exactly where it guards an outbound mail.
+    function rowVendor(row) {
+      var vEl = row.querySelector('[data-testid="purchase-order-vendor-name"]') ||
+                row.querySelector('[data-testid="purchase-order-vendor-link"]');
+      return (vEl ? vEl.textContent : row.textContent) || '';
+    }
+    // v1.10: same amount semantics as WO Assist/Leak Guard - every $ figure in
+    // the row, cents optional, largest wins. The old cents-required first-match
+    // regex made "$4,500" invisible and could pick a smaller line item.
+    // v1.12: zero amounts dropped - a drafted "$0.00" PO row must never win and
+    // put "a not-to-exceed of $0.00" in the vendor's approval email.
+    function rowAmounts(row) {
+      var amts = [];
+      var re = /\$\s*([\d,]+(?:\.\d{1,2})?)/g, m;
+      while ((m = re.exec(row.textContent || '')) !== null) {
+        var a9 = parseFloat(m[1].replace(/,/g, ''));
+        if (a9 > 0) amts.push(a9);
+      }
+      return amts;
+    }
+
+    // v1.14: the Send Purchase Order modal is opened from ONE PO row's "..." menu
+    // (purchase-order-popper-menu, inside that row's POAccordion). Remember which row,
+    // so its amount is used directly instead of guessing the row from the recipients.
+    // Keyed by testid + vendor text: POAccordion-<n> is a render index, so a row whose
+    // vendor changed under the same index is not trusted. Recipient matching stays as
+    // the fallback (modal opened some other way, or the click is older than 10 min).
+    var lastPoMenu = null;
+    document.addEventListener('click', function (e) {
+      var btn = e.target && e.target.closest && e.target.closest('[data-testid="purchase-order-popper-menu"]');
+      var row = btn && btn.closest('[data-testid^="POAccordion-"]');
+      if (row) lastPoMenu = { tid: row.getAttribute('data-testid'), vendor: rowVendor(row), t: Date.now() };
+    }, true);
+    function clickedRowNTE() {
+      if (!lastPoMenu || Date.now() - lastPoMenu.t > 10 * 60000) return null;
+      var row = document.querySelector('[data-testid="' + lastPoMenu.tid + '"]');
+      if (!row || rowVendor(row) !== lastPoMenu.vendor) return null;
+      var amts = rowAmounts(row);
+      return amts.length ? fmtMoney(Math.max.apply(null, amts)) : null;
+    }
+
     function findNTE(modal) {
+      var clicked = clickedRowNTE();
+      if (clicked) { console.info('[BWN PO] NTE from the PO row whose menu opened this modal:', clicked); return clicked; }
+
       var recRaw = recipientsRaw(modal);
       var recipients = alphaOnly(recRaw);
       if (!recipients) return null;
@@ -1910,20 +2262,8 @@
       var best = null, bestScore = 0;
       for (var i = 0; i < rows.length; i++) {
         var row = rows[i];
-        // Prefer the dedicated vendor-name element; fall back to the row's text.
-        var vEl = row.querySelector('[data-testid="purchase-order-vendor-name"]');
-        var vendorRaw = (vEl ? vEl.textContent : row.textContent) || '';
-        // v1.10: same amount semantics as WO Assist/Leak Guard - every $ figure in
-        // the row, cents optional, largest wins. The old cents-required first-match
-        // regex made "$4,500" invisible and could pick a smaller line item.
-        // v1.12: zero amounts dropped - a drafted "$0.00" PO row must never win and
-        // put "a not-to-exceed of $0.00" in the vendor's approval email.
-        var amts = [];
-        var re = /\$\s*([\d,]+(?:\.\d{1,2})?)/g, m;
-        while ((m = re.exec(row.textContent || '')) !== null) {
-          var a9 = parseFloat(m[1].replace(/,/g, ''));
-          if (a9 > 0) amts.push(a9);
-        }
+        var vendorRaw = rowVendor(row);
+        var amts = rowAmounts(row);
         if (!amts.length) continue;
         // v1.12: tiered scoring - a distinctive-token hit (tier 1000) beats any
         // overlap; within a tier, LCS breaks ties so two token-hitting rows rank by
@@ -2115,7 +2455,7 @@
   });
 
   // ==========================================================================
-  // MODULE: WO Assist: GP + ETA Watchdog + Playbook v2.71 (Connector 1.2)
+  // MODULE: WO Assist: GP + ETA Watchdog + Playbook v2.76 (Connector 1.2)
   // ==========================================================================
   bwnBoot('woAssist', BWN_MODULES.woAssist, function () {
     'use strict';
@@ -2145,7 +2485,7 @@
     var PANEL_ID = 'bwn-gp-panel';
     var GREEN = BWN.GREEN;
 
-    console.info('[BWN GP] WO Assist v2.71 loaded on', location.href);
+    console.info('[BWN GP] WO Assist v2.76 loaded on', location.href);
 
     // ---- Parsing helpers (shared via BWN core) -----------------------------
     var parseMoney = BWN.parseMoney;
@@ -2155,6 +2495,7 @@
     function daysUntil(ts) { return Math.ceil((ts - Date.now()) / 86400000); }
     function daysSince(ts) { return Math.floor((Date.now() - ts) / 86400000); }
     var inputVal = BWN.inputVal;
+    var woFieldInput = BWN.woFieldInput, woFieldVal = BWN.woFieldVal;
 
     // ---- BWN bus (suite data contract v1; shared via BWN core) -------------
     // WO Assist is the PRODUCER of bwn:wo:{id}; others consume DOM-first, bus-fallback.
@@ -2558,7 +2899,7 @@
     // re-renders when it lands. Gives the exact priority label (the DOM read can
     // silently fall back to neutral) and the internal job id (the DOM can't).
     var WO_CACHE = Object.create(null);   // woNum -> wo | 'pending' | 'error'
-    var WORKORDER_Q = 'query WorkOrderHeader($n: Int!) { workOrder(workOrderNumber: $n) { id number statusName systemStatusName phase priority { label category } doNotExceed { amount currency precision } totalNTE { amount currency precision } grossProfitInfo { estimatedGrossProfitPercent trueGrossProfitPercent grossProfitPercentType } trades { id name } locationNumber locationName scopeOfWork } }';
+    var WORKORDER_Q = 'query WorkOrderHeader($n: Int!) { workOrder(workOrderNumber: $n) { id number statusName systemStatusName phase priority { label category } doNotExceed { amount currency precision } totalNTE { amount currency precision } grossProfitInfo { estimatedGrossProfitPercent trueGrossProfitPercent grossProfitPercentType } trades { id name } locationNumber locationName clientId scopeOfWork } }';
     function fetchWO(woNum) {
       if (!woNum) return;
       var c = WO_CACHE[woNum];
@@ -2656,7 +2997,7 @@
     // Confident reads only: a failed/absent read leaves bwn:props absent (unknown), never a
     // guessed 0 - same unknown-vs-empty contract as the docs reader.
     var PROPS_DONE = Object.create(null);
-    var CLIENT_PROPS_Q = 'query WOClientProposals($jobId: Int!) { listClientProposals(jobId: $jobId, page: { skip: 0, take: 50 }) { rowCount items { id approvedDate rejectedDate canceledDate } } }';
+    var CLIENT_PROPS_Q = 'query WOClientProposals($jobId: Int!) { listClientProposals(jobId: $jobId, page: { skip: 0, take: 50 }, sortBy: [{ columnName: "id", direction: DESC }]) { rowCount items { id approvedDate rejectedDate canceledDate } } }';
     function fetchProposals(woNum, jobId) {
       if (!woNum || !jobId || PROPS_DONE[woNum]) return;
       PROPS_DONE[woNum] = 'pending';
@@ -2678,19 +3019,252 @@
     // docs reader's !isArchived). Confident reads only -> bwn:tasks:<wo>; a failed read stays absent
     // (unknown), never a guessed 0.
     var TASKS_DONE = Object.create(null);
-    var OPEN_TASKS_Q = 'query WOOpenTasks($id: String!) { tasksByEntityTypeAndId(entityType: 1, entityId: $id, includeComplete: false) { tasks { id isComplete } } }';
+    // Also selects who created / is assigned each task, for the read-only "Open tasks" strip in
+    // the Next Actions card (fields live-verified on this exact query 2026-09-29, W-394868).
+    var OPEN_TASKS_Q = 'query WOOpenTasks($id: String!) { tasksByEntityTypeAndId(entityType: 1, entityId: $id, includeComplete: false) { tasks { id isComplete description assignedTo createdBy_UserProfileId createdDate } } }';
+    var TASK_ROWS = Object.create(null);   // woNum -> open task rows (raw user ids), confident reads only
+    var USER_NAMES = null;                 // user id -> "First Last", one read per page load
+    var USER_NAMES_Q = 'query WAUserNames { users(includeInactiveUsers: false, includeSystemUsers: false) { id firstName lastName } }';
+    function fetchUserNames() {
+      if (USER_NAMES) return;
+      USER_NAMES = {};   // claim first so concurrent refreshes don't re-read; a failed read leaves ids unresolved
+      bwnGql(USER_NAMES_Q, {}).then(function (d) {
+        ((d && d.users) || []).forEach(function (u) {
+          var n = u && ((u.firstName || '') + ' ' + (u.lastName || '')).replace(/\s+/g, ' ').trim();
+          if (u && u.id && n) USER_NAMES[u.id] = n;
+        });
+        try { refresh(); } catch (e) { }
+      }).catch(function () { });
+    }
     function fetchTasks(woNum) {
       if (!woNum || TASKS_DONE[woNum]) return;
       TASKS_DONE[woNum] = 'pending';
       bwnGql(OPEN_TASKS_Q, { id: String(woNum) }).then(function (d) {
         var r = d && d.tasksByEntityTypeAndId;
-        if (!r || !Array.isArray(r.tasks)) { TASKS_DONE[woNum] = 'error'; return; }   // schema drift = unknown, NEVER a guessed 0
+        if (!r || !Array.isArray(r.tasks)) { TASKS_DONE[woNum] = 'error'; delete TASK_ROWS[woNum]; return; }   // schema drift = unknown, NEVER a guessed 0
         var open = r.tasks.filter(function (t) { return t && !t.isComplete; }).length;
+        var openRows = r.tasks.filter(function (t) { return t && !t.isComplete; });   // the same rows, for the attribution strip
         TASKS_DONE[woNum] = true;
+        TASK_ROWS[woNum] = openRows;
+        if (open) fetchUserNames();
         try { BWN.lsSetJSON('bwn:tasks:' + woNum, { open: open, ts: new Date().toISOString() }); } catch (e) { }
         try { refresh(); } catch (e) { }
-      }).catch(function () { TASKS_DONE[woNum] = 'error'; });
+      }).catch(function () { TASKS_DONE[woNum] = 'error'; delete TASK_ROWS[woNum]; });   // a failed re-read never leaves the old rows up
     }
+    // BWN-TASK-ATTR-START (pure; sliced by scripts/test-task-attribution.js)
+    // Display lines for the read-only "Open tasks" strip. Shows only what the task record says:
+    // its creator and assignee as recorded - never which task (or who) caused a billing issue.
+    // An id the name map can't resolve (inactive / system user, or the users read failed) and any
+    // absent field read "Not available", never a guess.
+    function taskAttrLines(rows, names) {
+      var NA = 'Not available';
+      function who(id) { return (id && names && names[id]) || NA; }
+      function day(iso) {
+        var m = /^(\d{4})-(\d{2})-(\d{2})/.exec(String(iso || ''));
+        return m ? (+m[2]) + '/' + (+m[3]) + '/' + m[1] : NA;
+      }
+      return (rows || []).map(function (t) {
+        var desc = String((t && t.description) || '').replace(/\s+/g, ' ').trim();
+        if (desc.length > 90) desc = desc.slice(0, 89) + '…';
+        return (desc || '(no description)') + ' · Created by: ' + who(t && t.createdBy_UserProfileId) +
+          ' · Assigned to: ' + who(t && t.assignedTo) + ' · Created: ' + day(t && t.createdDate);
+      });
+    }
+    // BWN-TASK-ATTR-END
+
+    // ===== BWN-PO-API START v1 (API purchase-order read + parity log; sliced by scripts/test-po-api.js) =====
+    // Root query field only - purchaseOrders(workOrderNumber). The nested workOrder { purchaseOrders }
+    // shape is DEPRECATED on this schema and returns null - do not switch to it.
+    // paidDate is the EMPTY STRING, not null/absent, when a PO has not been paid.
+    // ADDITIVE ONLY: state.pos stays sourced from the DOM readPOs() above until this parity log has
+    // been read against live WOs - nothing here changes Next Actions behaviour.
+    var PO_CACHE = Object.create(null);    // woNum -> { pos, apiCount, ts } | 'pending' | 'error'
+    var PO_PARITY = Object.create(null);   // woNum -> true once poParityLog has logged it
+    var PO_WARNED = Object.create(null);   // woNum -> true once a failed read has been warned about (retries stay silent)
+    var PO_TRIES = Object.create(null);    // woNum -> failed attempts
+    var PO_MAX_TRIES = 3;   // the shadow read must not add a second per-render retry loop on a persistent failure (e.g. a tokenless HTTP 500) - fetchDocs retries forever, this one goes quiet after PO_MAX_TRIES per page load
+    // Warn asymmetry: a rejected (network) failure warns once on first failure and once more at
+    // give-up (two warns); a schema-drift (non-array) failure never warns on first failure, only
+    // once at give-up (one warn) - both name the WO only, never a row value.
+    var PO_API_Q = 'query BwnWOPOs($n: Int!) { purchaseOrders(workOrderNumber: $n) { id number formattedPurchaseOrderNumber phase statusId statusName state notToExceed { amount currency precision } nextOnsiteDate hasScheduledTrip trips { id number onSiteDate status completedDate canceledDate } vendorId vendorName vendorIdentity { id companyName isDependent hasActiveUsers } paidDate vendorAcceptedDate purchaseOrderDate acceptedEmailStatus } }';
+    // Terminal phases (done=true). Closed counts as done here - an INTENTIONAL divergence from the
+    // DOM regex above, which has no "Closed" keyword to match.
+    var PO_DONE_PHASES = { Canceled: 1, Closed: 1, Declined: 1, Revoked: 1, WorkComplete: 1, ConfirmComplete: 1 };
+    var PO_COST_CLOSED_PHASES = { Canceled: 1, Declined: 1, Revoked: 1 };
+    function poApiDateStr(v) {
+      if (!v) return null;
+      var d = new Date(v);
+      return isNaN(+d) ? null : ((d.getMonth() + 1) + '/' + d.getDate() + '/' + d.getFullYear());
+    }
+    function poFromApi(row) {
+      var phase = String(row.phase || '');
+      var statusName = String(row.statusName || '');
+      var sn = statusName.toLowerCase();
+      var nte = row.notToExceed;
+      // precision defaults to 2 here on purpose (NOT bwnMoney's `|| 0`, which would 100x the dollars
+      // on a missing precision); a missing notToExceed reads amount 0 AND is flagged via api.nteAbsent
+      // below so parity can tell a real $0 from an absent NTE.
+      var precision = (nte && typeof nte.precision === 'number') ? nte.precision : 2;
+      var amount = (nte && typeof nte.amount === 'number') ? nte.amount / Math.pow(10, precision) : 0;
+      var done = !!PO_DONE_PHASES[phase];
+      var poStatus = '';
+      if (sn === 'confirm complete') poStatus = 'confirm';
+      else if (sn === 'material ordered' || sn === 'need material') poStatus = 'materials';
+      else if (sn === 'pending acceptance') poStatus = 'accept';   // "Unassigned" stays '' - no vendor to chase
+      var costOpen = amount > 0 && !PO_COST_CLOSED_PHASES[phase] && sn !== 'paid' && sn !== 'invoiced';
+      var vendor = String(row.vendorName || (row.vendorIdentity && row.vendorIdentity.companyName) || '(vendor n/a)')
+        .replace(/\s+/g, ' ').trim() || '(vendor n/a)';
+      var num = String(row.number);
+      var trips = Array.isArray(row.trips) ? row.trips : [];
+      var openTripCount = trips.filter(function (t) { return t && !t.completedDate && !t.canceledDate; }).length;
+      return {
+        vendor: vendor, num: num, sid: 'ln' + num.padStart(3, '0'),
+        amount: amount, schedDate: poApiDateStr(row.nextOnsiteDate), done: done,
+        poStatus: poStatus, statusText: statusName, costOpen: costOpen,
+        api: {
+          id: row.id, number: row.number, statusId: Number(row.statusId), phase: phase, state: row.state,
+          vendorId: row.vendorId, nextOnsiteDate: row.nextOnsiteDate || null,
+          hasScheduledTrip: !!row.hasScheduledTrip, openTripCount: openTripCount,
+          paid: sn === 'paid' || !!row.paidDate, nteAbsent: !nte
+        }
+      };
+    }
+    function fetchPOs(woNum) {
+      if (!woNum) return;
+      var c = PO_CACHE[woNum];
+      if (c === 'pending' || (c && c !== 'error')) return;
+      if ((PO_TRIES[woNum] || 0) >= PO_MAX_TRIES) return;
+      PO_CACHE[woNum] = 'pending';
+      bwnGqlRead(PO_API_Q, { n: Number(woNum) }).then(function (env) {
+        // Only a CLEAN read feeds the parity cache. A 'partial' (data AND errors[]) is a degraded body:
+        // a FORBIDDEN on one field nulls it while the rest of the row survives, which would cache a
+        // wrong-but-plausible row as a SUCCESS (no retry) and log a false DOM-vs-API mismatch; and it
+        // usually arrives as data:{purchaseOrders:null}, which would fall into the schema-drift branch
+        // below and throw the failure CLASS away - the thing this read exists to report. bwnGql() threw
+        // on any errors[]; this consumer keeps that bar. Everything but 'ok' is routed to the catch
+        // below carrying the class + GraphQL error codes (never a message), so the one warn per WO says
+        // network / http-500 / graphql-error:UNAUTHENTICATED instead of a server-authored string.
+        if (env.kind !== 'ok') { var fail = new Error(env.kind); fail.bwnKind = env.kind; fail.bwnCodes = env.codes; fail.bwnStatus = env.status; fail.bwnNoToken = env.noToken; throw fail; }
+        var d = env.data;
+        var rows = d && d.purchaseOrders;
+        if (!Array.isArray(rows)) { PO_CACHE[woNum] = 'error'; PO_TRIES[woNum] = (PO_TRIES[woNum] || 0) + 1; if (PO_TRIES[woNum] >= PO_MAX_TRIES) console.warn('[BWN PO] api read gave up for this page load', woNum); return; }   // schema drift = unknown, NEVER empty; schema-drift path
+        var seenSids = {};
+        var pos = rows.map(function (row) {
+          var p = poFromApi(row);
+          if (seenSids[p.sid]) p.sid = p.sid + '-' + row.id;   // two POs can share a number - keys must stay distinct
+          seenSids[p.sid] = 1;
+          return p;
+        });
+        PO_CACHE[woNum] = { pos: pos, apiCount: pos.length, ts: Date.now() };
+        try { poParityLog(woNum); } catch (e) { }
+        try { refresh(); } catch (e) { }
+      }).catch(function (err) {
+        PO_CACHE[woNum] = 'error';   // retried on the next render, like fetchDocs; warn once per WO, not once per retry
+        PO_TRIES[woNum] = (PO_TRIES[woNum] || 0) + 1;
+        if (PO_TRIES[woNum] >= PO_MAX_TRIES) console.warn('[BWN PO] api read gave up for this page load', woNum);   // rejected-fetch path
+        if (!PO_WARNED[woNum]) {
+          PO_WARNED[woNum] = true;
+          console.warn('[BWN PO] api read failed', woNum, err && err.bwnKind ? (err.bwnKind + (err.bwnCodes && err.bwnCodes.length ? ':' + err.bwnCodes.join(',') : '') + ' http' + err.bwnStatus + (err.bwnNoToken ? ' no-token' : '')) : String(err && err.message || err).slice(0, 200));   // class + code for a transport failure; the 200-char message slice only for a thrown exception inside the reader
+        }
+      });
+    }
+    function readPOsApi() {
+      var woNum = currentWOId();
+      if (!woNum) return null;
+      var c = PO_CACHE[woNum];
+      if (c && c !== 'pending' && c !== 'error') return c.pos;
+      fetchPOs(woNum);
+      return null;   // pending / errored / just-fired - unknown, never a guessed empty
+    }
+    // Parity: DOM readPOs() vs the API read above, joined by sid (digit line-label sids only, /^ln\d{2,4}(-\d+)?$/),
+    // logged once per WO per page load. Counts, sids and field NAMES only - never amounts, dates,
+    // vendor strings or GUIDs (a sid that collided on its line number carries the PO's internal Int
+    // id as a suffix; nothing else from the row reaches the summary). schedDate mismatches report a
+    // fixed category string (schedDate:domAbsent/domNull/apiNull/day), never a date value. The summary
+    // also carries hdrSeen (did the header testid resolve - the URL guard stays the only gate when it
+    // did not), domSkipped (DOM rows excluded from the join - a vendor-GUID/render-index sid, or any other sid shape),
+    // unjoinedDomSids (the sid list, same redaction class as the existing unjoinedApiSids),
+    // apiAmountAbsent (API rows with no notToExceed), and tzOffsetMin (so a pasted summary is
+    // interpretable for the date-boundary question). This re-calls readPOs(), which re-fires its own
+    // pre-existing '[BWN GP] PO row has multiple amounts' info line on a multi-$ row - that line is
+    // old and carries amounts; the parity summary itself never does.
+    // Both published sid lists (unjoinedDomSids, unjoinedApiSids) pass the same digit-line-label
+    // filter above, so unjoinedApi may exceed unjoinedApiSids.length - the difference is
+    // unpublishable API sids, a schema-drift signal, never a value from those rows.
+    // Redaction in full: the console.warn above carries only the WO number and an error string
+    // truncated to 200 chars (never a row value); the summary itself carries only counts, sids,
+    // field names, booleans, and tzOffsetMin.
+    function poParityLog(woNum) {
+      if (!woNum || PO_PARITY[woNum]) return;
+      var c = PO_CACHE[woNum];
+      if (!c || c === 'pending' || c === 'error') return;
+      // Never latch another WO's DOM: after an SPA route change the URL moves before the accordion
+      // re-renders, so require the URL AND the rendered header (when present) to name this WO.
+      if (String(currentWOId()) !== String(woNum)) return;
+      var hdr = (typeof document.querySelector === 'function') ? document.querySelector('[data-testid="work-order-header-number-formatted"]') : null;
+      if (hdr && (hdr.textContent || '').indexOf(String(woNum)) === -1) return;
+      var domRows = readPOs();
+      var domCount = domRows.length;
+      var apiRows = c.pos;
+      if (!domCount && apiRows.length) return;   // DOM not rendered yet (or the scrape is broken) - wait for it; a confident-empty API list + an empty DOM logs below (the stuck-handoff evidence)
+      function dayOf(s) { if (!s) return null; var d = new Date(s); return isNaN(+d) ? null : (d.getFullYear() + '-' + d.getMonth() + '-' + d.getDate()); }
+      var domBySid = {}, domLabelAbsent = 0, domSkipped = 0;
+      domRows.forEach(function (r) {
+        // Only digit line labels (optionally the numeric collision suffix) may reach unjoinedDomSids;
+        // anything else is counted, never published.
+        if (r.sid && /^ln\d{2,4}(-\d+)?$/.test(r.sid)) domBySid[r.sid] = r; else domSkipped++;
+        if (r.schedDate === undefined) domLabelAbsent++;
+      });
+      var domMultiAmount = 0;
+      var amtRe = /\$\s*([\d,]+(?:\.\d{1,2})?)/g;
+      document.querySelectorAll('[data-testid^="POAccordion-"]').forEach(function (row) {
+        var n = 0, mm; amtRe.lastIndex = 0;
+        while ((mm = amtRe.exec(row.textContent || '')) !== null) n++;
+        if (n > 1) domMultiAmount++;
+      });
+      var apiBySid = {}, apiTerminalNoSched = 0, apiAmountAbsent = 0;
+      apiRows.forEach(function (r) {
+        apiBySid[r.sid] = r;
+        if (r.done && !r.api.nextOnsiteDate) apiTerminalNoSched++;
+        if (r.api.nteAbsent) apiAmountAbsent++;
+      });
+      var joined = 0, unjoinedDomSids = [], unjoinedApiSids = [], unjoinedApiCount = 0, mismatches = [];
+      Object.keys(domBySid).forEach(function (sid) {
+        var d = domBySid[sid], a = apiBySid[sid];
+        if (!a) { unjoinedDomSids.push(sid); return; }
+        joined++;
+        var fields = [];
+        if (Math.abs((d.amount || 0) - (a.amount || 0)) >= 0.005) fields.push('amount');
+        if (dayOf(d.schedDate) !== dayOf(a.schedDate)) fields.push(d.schedDate === undefined ? 'schedDate:domAbsent' : !d.schedDate ? 'schedDate:domNull' : !a.schedDate ? 'schedDate:apiNull' : 'schedDate:day');
+        if (!!d.done !== !!a.done) fields.push('done');
+        if ((d.poStatus || '') !== (a.poStatus || '')) fields.push('poStatus');
+        if (!!d.costOpen !== !!a.costOpen) fields.push('costOpen');
+        if (nvVendor(d.vendor) !== nvVendor(a.vendor)) fields.push('vendor');
+        // The DOM status region may carry extra tokens ("Open Material Ordered") and punctuation
+        // differences ("On-Site" / "On Site"), so compare API statusName as a normalized substring;
+        // an EMPTY API name is flagged, never vacuously matched.
+        var as = nvVendor(a.statusText || '').replace(/[^A-Z0-9]+/g, ' ').trim(); if (!as || nvVendor(d.statusText || '').replace(/[^A-Z0-9]+/g, ' ').trim().indexOf(as) === -1) fields.push('statusText');
+        if (fields.length) mismatches.push({ sid: sid, fields: fields });
+      });
+      Object.keys(apiBySid).forEach(function (sid) { if (!domBySid[sid]) { unjoinedApiCount++; if (/^ln\d{2,4}(-\d+)?$/.test(sid)) unjoinedApiSids.push(sid); } });
+      var summary = {
+        wo: woNum, domCount: domCount, apiCount: apiRows.length, joined: joined,
+        unjoinedDom: unjoinedDomSids.length, unjoinedDomSids: unjoinedDomSids,
+        unjoinedApi: unjoinedApiCount, unjoinedApiSids: unjoinedApiSids,
+        domMultiAmount: domMultiAmount, domLabelAbsent: domLabelAbsent, domSkipped: domSkipped,
+        apiTerminalNoSched: apiTerminalNoSched, apiAmountAbsent: apiAmountAbsent, mismatches: mismatches,
+        hdrSeen: !!hdr, tzOffsetMin: new Date().getTimezoneOffset()
+      };
+      PO_PARITY[woNum] = true;
+      console.info('[BWN PO parity]', summary);
+      try { window.__bwnPoParity = summary; } catch (e) { }
+    }
+    function poParityTick() {
+      readPOsApi();
+      var woNum = currentWOId();
+      if (woNum) poParityLog(woNum);
+    }
+    // ===== BWN-PO-API END v1 =====
 
     // ---- Documents via jobDocuments(workOrderNumber) ---------------------------
     // Third reader in this cluster, same cache shape as readWO/fetchTrips: async
@@ -2954,9 +3528,15 @@
         consider(anchored(parseInt(m[1], 10), parseInt(m[2], 10), yr));
       }
       var MO = ['jan', 'feb', 'mar', 'apr', 'may', 'jun', 'jul', 'aug', 'sep', 'oct', 'nov', 'dec'];
-      var re2 = /\b(jan|feb|mar|apr|may|jun|jul|aug|sep|oct|nov|dec)[a-z]*\.?\s+(\d{1,2})\b/ig, m2;
+      // Honour an explicit year when the body gives one ("July 8, 2026"), exactly as the
+      // slash branch above already does. Without this a pasted email SIGNATURE line -
+      // "Sent: Wednesday, July 8, 2026" - was read as a yearless "July 8", and because that
+      // month is >45 days before the note it forward-projected to July 2027 and was proposed
+      // as the ECD (live-reported on W-368564 / tracking 1214704). The year is right there in
+      // the text; drop-it-then-guess was the whole defect.
+      var re2 = /\b(jan|feb|mar|apr|may|jun|jul|aug|sep|oct|nov|dec)[a-z]*\.?\s+(\d{1,2})(?:,?\s*(\d{4}))?\b/ig, m2;
       while ((m2 = re2.exec(s || '')) !== null) {
-        consider(anchored(MO.indexOf(m2[1].slice(0, 3).toLowerCase()) + 1, parseInt(m2[2], 10), null));
+        consider(anchored(MO.indexOf(m2[1].slice(0, 3).toLowerCase()) + 1, parseInt(m2[2], 10), m2[3] ? parseInt(m2[3], 10) : null));
       }
       return out;
     }
@@ -3062,8 +3642,7 @@
         var dates = labeled.map(function (p) { return p.schedDate; }).join(', ');
         return { ok: true, label: 'POs sched: ' + dates, detail: 'Every active PO shows a scheduled date.' };
       }
-      var ftEl = document.querySelector('[data-testid="work-order-first-trip-date-picker"]');
-      var ft = ftEl ? (ftEl.tagName === 'INPUT' ? ftEl.value : (ftEl.querySelector('input') ? ftEl.querySelector('input').value : '')) : '';
+      var ft = woFieldVal('priority.firstTripDate');
       if (ft && ft.trim()) return { ok: true, label: 'Trip: ' + ft.trim(), detail: 'First-trip date set on the WO (no per-PO dates found).' };
       var hit = null;
       notes.forEach(function (n) {
@@ -3087,8 +3666,31 @@
       return { ok: false, label: 'No ETA found', detail: 'No per-PO scheduled dates, no first-trip date, and no note pairs an ETA word with a date. Use Deep Scan to cover the full note history.' };
     }
 
+    // ---- ECD write echo (the DOM does not re-render after our patch) ----------
+    // Setting the ECD is an API patch (patchWorkOrder) since Umbrava rebuilt the WO form -
+    // and the form does NOT re-render from it, so until a reload the field still reads the
+    // PRE-write date. Every consumer of state.due then reads the WO as overdue/undated: the
+    // header pill, the checklist, and the once-per-WO auto-pop, which re-fires on the very WO
+    // that was just fixed the moment its guard re-arms (a tab hop). So the write leaves an
+    // echo here and dueStatus substitutes it - trusted ONLY while the field still shows
+    // `before`. Any other value means the DOM has caught up (reload) or moved on (edited in
+    // Umbrava's own UI), and the echo is dropped rather than believed over the page.
+    // sessionStorage, so it cannot outlive the tab.
+    function ecdEcho(domRaw) {
+      var w = currentWOId(); if (!w) return null;
+      var k = 'bwn:ecdset:' + w;
+      var rec = BWN.ssGetJSON(k, null);
+      if (!rec || !rec.after) return null;
+      var domTs = parseUSDate(domRaw), beforeTs = rec.before ? parseUSDate(ecdFmtUS(new Date(rec.before))) : null;
+      if (domTs !== beforeTs) { try { sessionStorage.removeItem(k); } catch (e) { } return null; }
+      return rec.after;
+    }
     function dueStatus(C) {
-      var v = inputVal('work-order-expected-completion-date-picker');
+      var v = woFieldVal('priority.expectedCompletionDate');
+      var echo = ecdEcho(v);
+      // Same convention either way: the day at LOCAL midnight, so an echoed date reads
+      // exactly as the field's own "MM/DD/YYYY, 11:59 PM" would once it catches up.
+      if (echo) v = ecdFmtUS(new Date(echo));
       var ts = parseUSDate(v);
       if (!ts) return null;
       var d = daysUntil(ts);
@@ -3118,6 +3720,7 @@
       try { if (woApi && woApi.id) fetchProposals(currentWOId(), woApi.id); } catch (e) { }   // async: populates bwn:props open-count for the live-jobs push (needs jobId)
       try { fetchTasks(currentWOId()); } catch (e) { }   // async: populates bwn:tasks open-count for the live-jobs push (needs only the WO number)
       var pos = readPOs();
+      try { poParityTick(); } catch (e) { }
       var vendorTotal = pos.reduce(function (a, p) { return a + (p.amount > 0 ? p.amount : 0); }, 0);
       var nte = detectNTE();
       // WO-header override: when the workOrder API has landed, trust its exact money over the
@@ -3355,9 +3958,6 @@
         '.bwn-act-row.nudge{box-shadow:inset 3px 0 0 var(--bwn-bad);padding-left:8px;}' +
         '.bwn-act-dis{font:500 11px ui-monospace,"Segoe UI Mono","SF Mono",monospace;color:var(--bwn-warn);margin-top:3px;}' +
         '.bwn-act-btns{display:flex;flex-direction:column;gap:4px;flex:none;align-items:stretch;}' +
-        '.bwn-act-lbl.nav{cursor:pointer;}' +
-        '.bwn-act-lbl.nav:hover{text-decoration:underline;text-underline-offset:2px;}' +
-        '.bwn-act-lbl.nav:focus-visible{outline:2px solid var(--bwn-accent);outline-offset:2px;border-radius:4px;}' +
         '.bwn-act-help-t{display:inline-block;margin-left:6px;padding:0;width:15px;height:15px;line-height:14px;vertical-align:1px;border:1px solid var(--bwn-border);border-radius:999px;background:var(--bwn-surface-2);color:var(--bwn-text-faint);font:600 10px ui-monospace,"Segoe UI Mono","SF Mono",monospace;cursor:pointer;flex:none;}' +
         '.bwn-act-help-t:hover{color:var(--bwn-green);border-color:var(--bwn-green);}' +
         '.bwn-act-help{margin-top:5px;padding:7px 9px;border-left:2px solid var(--bwn-green);border-radius:0 6px 6px 0;background:var(--bwn-surface-2);font-size:11.5px;line-height:1.45;color:var(--bwn-text-strong);}' +
@@ -3368,16 +3968,101 @@
         '.bwn-act-anchor-mk{flex:none;width:15px;text-align:center;color:var(--bwn-warn);margin-top:1px;font-size:13px;}' +
         '.bwn-act-esc{padding:7px 12px;font:500 11.5px ui-monospace,"Segoe UI Mono","SF Mono",monospace;background:var(--bwn-warn-bg);color:var(--bwn-warn-fg);border-top:1px solid var(--bwn-border-2);line-height:1.4;}' +
         '.bwn-act-esc:last-child{border-radius:0 0 9px 9px;}' +
+        '.bwn-act-tasks{padding:6px 12px;font-size:11.5px;line-height:1.45;color:var(--bwn-text-strong);background:var(--bwn-surface-2);border-top:1px solid var(--bwn-border-2);}' +
+        '.bwn-act-tasks:last-child{border-radius:0 0 9px 9px;}' +
+        '.bwn-act-tasks-t{font:500 10px ui-monospace,"Segoe UI Mono","SF Mono",monospace;color:var(--bwn-text-faint);letter-spacing:.08em;margin-bottom:2px;}' +
         '.bwn-actc{display:block;width:100%;align-self:stretch;box-sizing:border-box;margin:6px 0 14px;border:1px solid var(--bwn-border);border-left:3px solid var(--bwn-green);border-radius:10px;background:var(--bwn-surface);font-family:-apple-system,BlinkMacSystemFont,"Segoe UI","Helvetica Neue",Arial,sans-serif;box-shadow:0 1px 4px rgba(13,38,26,.06);}' +
-        '.bwn-actc-hd{display:flex;align-items:center;gap:10px;padding:8px 12px;cursor:pointer;user-select:none;}' +
-        '.bwn-actc-hd:focus-visible{outline:2px solid var(--bwn-accent);outline-offset:-2px;}' +
+        // Card header is a real <button aria-expanded> (was a div role=button). Focus rings in this
+        // card use --bwn-text-strong, not the accent: #2ECC71 on the white host panel is ~1.9:1 and
+        // fails the 3:1 indicator floor; text-strong is ~12:1 light and re-maps for dark.
+        '.bwn-actc-hd{display:flex;align-items:center;gap:10px;width:100%;box-sizing:border-box;padding:8px 12px;border:none;border-radius:9px;background:none;color:inherit;font:inherit;text-align:left;cursor:pointer;user-select:none;}' +
+        '.bwn-actc-hd:focus-visible{outline:2px solid var(--bwn-text-strong);outline-offset:-2px;}' +
         '.bwn-actc-t{font:500 10px ui-monospace,"Segoe UI Mono","SF Mono",monospace;color:var(--bwn-green);letter-spacing:.08em;}' +
-        '.bwn-actc-n{font:500 10px ui-monospace,"Segoe UI Mono","SF Mono",monospace;color:#fff;background:var(--bwn-warn);border-radius:999px;padding:2px 9px;white-space:nowrap;}' +
-        '.bwn-actc-n.ok{background:var(--bwn-accent);color:var(--bwn-green-dk);}' +
+        // Counts use the warn / ok TRIADS: white on --bwn-warn was ~2.9:1 at 10px (fails AA).
+        '.bwn-actc-n{font:600 10px ui-monospace,"Segoe UI Mono","SF Mono",monospace;color:var(--bwn-warn-fg);background:var(--bwn-warn-bg);border:1px solid var(--bwn-warn);border-radius:999px;padding:2px 9px;white-space:nowrap;}' +
+        '.bwn-actc-n.ok{background:var(--bwn-ok-bg);color:var(--bwn-ok-fg);border-color:var(--bwn-green);}' +
+        '.bwn-actc-n.bad{background:var(--bwn-bad-bg);color:var(--bwn-bad-fg);border-color:var(--bwn-bad);}' +
         '.bwn-actc-n.anchor{background:var(--bwn-surface-3);color:var(--bwn-text-faint);}' +
-        '.bwn-actc-s{font:500 10px ui-monospace,"Segoe UI Mono","SF Mono",monospace;color:var(--bwn-text-faint);margin-left:auto;}' +
+        '.bwn-actc-s{flex:1 1 80px;min-width:0;text-align:right;font:500 10px ui-monospace,"Segoe UI Mono","SF Mono",monospace;color:var(--bwn-text-faint);margin-left:auto;}' +
         '.bwn-actc-x{color:var(--bwn-text-faint);font-size:11px;}' +
-        '.bwn-actc-body{padding:2px 12px 9px;}';
+        '.bwn-actc-body{padding:2px 12px 9px;}' +
+        // ---- Coordinator Action Queue -----------------------------------------
+        // Semantic colour (BWN ODS): DO NOW with work in it is AMBER (action needed) on a quiet
+        // surface; green only when it is genuinely clear. It used to sit on the green tint, which
+        // read "all good" while listing due work.
+        '.bwn-cq-donow{margin:4px 0 6px;padding:8px 10px 4px;border:1px solid var(--bwn-border);border-left:3px solid var(--bwn-warn);border-radius:9px;background:var(--bwn-surface);}' +
+        '.bwn-cq-donow.is-clear{border-left-color:var(--bwn-green);background:var(--bwn-ok-bg);}' +
+        '.bwn-cq-donow-hd{display:flex;align-items:center;gap:9px;margin-bottom:2px;}' +
+        '.bwn-cq-donow-t{font:600 10px ui-monospace,"Segoe UI Mono","SF Mono",monospace;letter-spacing:.1em;color:var(--bwn-text-strong);}' +
+        '.bwn-cq-donow-n{font:600 10px ui-monospace,"Segoe UI Mono","SF Mono",monospace;color:var(--bwn-warn-fg);background:var(--bwn-warn-bg);border:1px solid var(--bwn-warn);border-radius:999px;padding:2px 9px;}' +
+        '.bwn-cq-donow.is-clear .bwn-cq-donow-n{color:var(--bwn-ok-fg);background:var(--bwn-ok-bg);border-color:var(--bwn-green);}' +
+        '.bwn-cq-donow .bwn-act-row:last-child{border-bottom:none;}' +
+        '.bwn-cq-card{align-items:flex-start;}' +
+        '.bwn-cq-reason{font-size:12.5px;color:var(--bwn-text);line-height:1.4;margin-top:3px;}' +
+        '.bwn-cq-done{font:500 11px ui-monospace,"Segoe UI Mono","SF Mono",monospace;color:var(--bwn-text-faint);margin-top:4px;}' +
+        '.bwn-cq-zero{font-size:12.5px;color:var(--bwn-text);padding:4px 2px 2px;}' +
+        '.bwn-cq-zero-sub{font:500 11px ui-monospace,"Segoe UI Mono","SF Mono",monospace;color:var(--bwn-text-faint);padding:2px 2px 4px;}' +
+        '.bwn-cq-badges{display:inline-flex;flex-wrap:wrap;gap:4px;margin-top:3px;}' +
+        // Badges: red = critical, amber = due, everything else (upcoming / owner / snoozed /
+        // one-click) is neutral gray. Green is reserved for a confirmed state, so "Upcoming" and
+        // "One-click" no longer wear it. Every badge is text, never a colour-only dot.
+        '.bwn-cq-badge{font:600 10px ui-monospace,"Segoe UI Mono","SF Mono",monospace;letter-spacing:.03em;padding:1px 6px;border-radius:999px;white-space:nowrap;background:var(--bwn-surface-3);color:var(--bwn-text-muted);border:1px solid transparent;}' +
+        '.bwn-cq-badge.u-critical{background:var(--bwn-bad);color:#fff;}' +
+        '.bwn-cq-badge.u-due{background:var(--bwn-warn-bg);color:var(--bwn-warn-fg);border-color:var(--bwn-warn);}' +
+        '.bwn-cq-badge.sched,.bwn-cq-badge.blk{background:var(--bwn-surface-2);border-color:var(--bwn-border);}' +
+        '.bwn-cq-badge.fric{background:transparent;border-color:var(--bwn-border);}' +
+        '.bwn-cq-dbg{font:500 10px ui-monospace,"Segoe UI Mono","SF Mono",monospace;color:var(--bwn-text-faint);margin-top:4px;padding:3px 6px;border-radius:5px;background:var(--bwn-surface-2);word-break:break-all;}' +
+        '.bwn-cq-sec{margin-top:6px;}' +
+        '.bwn-cq-sec-hd{display:flex;align-items:center;gap:8px;width:100%;box-sizing:border-box;padding:6px 8px;border:none;border-radius:7px;background:var(--bwn-surface-2);color:var(--bwn-text-muted);cursor:pointer;text-align:left;font:500 11px ui-monospace,"Segoe UI Mono","SF Mono",monospace;}' +
+        '.bwn-cq-sec-hd:hover{background:var(--bwn-surface-3);}' +
+        '.bwn-cq-sec-hd{min-height:32px;}' +
+        '.bwn-cq-sec-hd:focus-visible{outline:2px solid var(--bwn-text-strong);outline-offset:1px;}' +
+        '.bwn-cq-sec-x{color:var(--bwn-text-faint);width:10px;}' +
+        '.bwn-cq-sec-t{color:var(--bwn-text);}' +
+        '.bwn-cq-sec-n{background:var(--bwn-surface-3);color:var(--bwn-text-muted);border-radius:999px;padding:1px 8px;}' +
+        '.bwn-cq-sec-hd .bwn-cq-badge{margin-left:auto;}' +
+        '.bwn-cq-sec-body{padding:2px 4px 2px;}' +
+        '.bwn-cq-compact{display:flex;flex-wrap:wrap;gap:6px 9px;align-items:flex-start;padding:7px 2px;border-bottom:1px solid var(--bwn-surface-3);}' +
+        '.bwn-cq-compact:last-child{border-bottom:none;}' +
+        '.bwn-cq-compact .bwn-act-main{flex:1;min-width:0;}' +
+        '.bwn-cq-snz{font-size:11.5px;color:var(--bwn-text-muted);margin-top:3px;}' +
+        '.bwn-cq-warn{margin:4px 0 6px;padding:8px 10px;border:1px solid var(--bwn-warn);border-left-width:3px;border-radius:7px;background:var(--bwn-warn-bg);color:var(--bwn-warn-fg);font-size:12.5px;line-height:1.4;}' +
+        // Row controls, scoped to this card so no other .bwn-wa-btn surface changes. Buttons wrap
+        // onto their own line under the text (the Notes panel is narrow; the old right-hand
+        // column squeezed the reason text) and meet the 32px dense-target floor. All are
+        // secondary weight; the ONE primary is Actioned on the top DO NOW card (.bwn-cq-primary),
+        // so the eye finds a single intended action. Flat fill - no gradient.
+        '.bwn-actc .bwn-act-row{flex-wrap:wrap;}' +
+        '.bwn-actc .bwn-act-btns{flex:1 1 100%;flex-direction:row;flex-wrap:wrap;align-items:center;gap:6px;padding-left:28px;}' +
+        '.bwn-actc .bwn-cq-compact .bwn-act-btns{padding-left:0;}' +
+        '.bwn-actc .bwn-act-btns:empty{display:none;}' +
+        '.bwn-actc .bwn-wa-btn{min-height:32px;padding:5px 11px;border:1px solid var(--bwn-border);border-radius:7px;background:var(--bwn-surface);color:var(--bwn-text);font-size:12px;line-height:1.2;}' +
+        '.bwn-actc .bwn-wa-btn:hover{background:var(--bwn-surface-2);border-color:var(--bwn-text-faint);filter:none;}' +
+        '.bwn-actc .bwn-wa-btn:focus-visible{outline:2px solid var(--bwn-text-strong);outline-offset:2px;}' +
+        '.bwn-actc .bwn-wa-btn[aria-expanded="true"]{background:var(--bwn-surface-3);border-color:var(--bwn-text-muted);}' +
+        '.bwn-actc .bwn-wa-btn.bwn-cq-primary{background:var(--bwn-green);border-color:var(--bwn-green);color:#fff;}' +
+        '.bwn-actc .bwn-wa-btn.bwn-cq-primary:hover{background:var(--bwn-green-dk);}' +
+        '.bwn-actc .bwn-wa-btn.bwn-cq-tert{border-color:transparent;background:transparent;color:var(--bwn-text-muted);}' +
+        // 32px checkbox target: the label wrapper carries the hit area; the box stays 15px.
+        '.bwn-cq-cbw{flex:none;display:inline-flex;align-items:center;justify-content:center;width:32px;height:32px;margin:-8px -8px -8px -9px;border-radius:6px;cursor:pointer;}' +
+        '.bwn-cq-cbw input[type=checkbox]{margin:0;}' +
+        '.bwn-cq-cbw:focus-within{outline:2px solid var(--bwn-text-strong);outline-offset:-4px;}' +
+        // Step label that scrolls to its field: a real <button> (was a div role=button that ALSO
+        // contained the "?" button - nested interactive controls). Dotted underline = it goes somewhere.
+        '.bwn-cq-nav{margin:0;padding:0;border:0;background:none;color:inherit;font:inherit;line-height:inherit;text-align:left;cursor:pointer;text-decoration:underline dotted;text-underline-offset:3px;}' +
+        '.bwn-cq-nav:hover{text-decoration-style:solid;}' +
+        '.bwn-cq-nav:focus-visible{outline:2px solid var(--bwn-text-strong);outline-offset:2px;border-radius:3px;}' +
+        // "?" help toggle: 15px glyph, ~33px hit area via an invisible ::after.
+        '.bwn-actc .bwn-act-help-t{position:relative;}' +
+        '.bwn-actc .bwn-act-help-t::after{content:"";position:absolute;inset:-9px;}' +
+        '.bwn-actc .bwn-act-help-t:focus-visible{outline:2px solid var(--bwn-text-strong);outline-offset:2px;}' +
+        // Inline Mark-waiting form (replaces two prompt() dialogs that silently coerced bad input).
+        '.bwn-cq-wait{flex:1 1 100%;display:flex;flex-wrap:wrap;align-items:flex-end;gap:8px 12px;margin:2px 0 2px 28px;padding:8px 10px;border:1px solid var(--bwn-border);border-radius:7px;background:var(--bwn-surface-2);color:var(--bwn-text);}' +
+        '.bwn-cq-wait label{display:flex;flex-direction:column;gap:3px;font-size:11.5px;font-weight:600;color:var(--bwn-text-muted);}' +
+        '.bwn-cq-wait select{min-height:32px;padding:4px 6px;border:1px solid var(--bwn-border);border-radius:6px;background:var(--bwn-surface);color:var(--bwn-text);font:13px -apple-system,BlinkMacSystemFont,"Segoe UI","Helvetica Neue",Arial,sans-serif;}' +
+        '.bwn-cq-wait select:focus-visible{outline:2px solid var(--bwn-text-strong);outline-offset:1px;}' +
+        '.bwn-cq-wait-note{flex:1 1 100%;margin:0;font-size:11.5px;line-height:1.4;color:var(--bwn-text-muted);}' +
+        '.bwn-cq-wait-acts{display:flex;gap:6px;}';
       document.head.appendChild(st);
     }
 
@@ -4243,6 +4928,342 @@
     // localStorage side effect (stagePlanPush) that must not fire 200 times per scan.
     bwnActsEngine = computeNextActions;
 
+    // ==== COORD-QUEUE BEGIN =====================================================
+    // Coordinator Action Queue: a PURE classification + partition + ranking layer over
+    // the acts computeNextActions produced. It never regenerates, drops, or reorders the
+    // lifecycle output - it ENRICHES each action with coordinator-facing properties
+    // (ownership / readiness / urgency / friction / reason / doneWhen / coordinatorScore)
+    // and sorts them into a "DO NOW" set vs. collapsed sections. Same purity contract as
+    // computeNextActions: no DOM, no storage, no network, no side effects - deterministic
+    // given (acts, state, C, now). The render layer feeds it the engine output plus
+    // state.waits (the waiting/revisit records the IMPURE layer loaded from localStorage,
+    // like state.docs) and a `now`.
+    //
+    // Timing is NOT re-invented: urgency reads the SAME shared clock the engine uses
+    // (bwnThresholdsFor + ESCALATE_DAYS + bwnPrioMult). Unknown source data stays
+    // conservative - a failed/absent read never manufactures coordinator ownership,
+    // readiness, or urgency (mirrors the docs===null contract).
+    var COORD_CFG = {
+      // coordinatorScore tuning - initial values, centralized so nothing scatters. A
+      // ready+due coordinator action must outrank a more-severe-looking waiting one, and a
+      // low-friction bonus must never outweigh criticality / readiness / ownership.
+      score: {
+        ownCoordinator: 30, readyReady: 25,
+        urg: { critical: 50, due: 30, upcoming: 10, 'not-due': -35 },
+        fric: { 'one-click': 8, assisted: 5, manual: 0, external: 0 },
+        waiting: -40, blocked: -25, notCoordinator: -30
+      },
+      urgencyRank: { critical: 3, due: 2, upcoming: 1, 'not-due': 0, informational: -1 },
+      doNowMax: 3,
+      // How far past the status "bad" clock reads as critical (mirrors the engine's own
+      // stale720 = overRatio>=3 and the escalate overLimit = 2x tests).
+      criticalOverRatio: 3
+    };
+    // Per-key-prefix metadata: intrinsic actor + whether it is a coordinator-actionable
+    // INTERNAL step. Chase steps (actor vendor/client) flip to coordinator ownership only
+    // once their follow-up window has arrived (see coordOwnership). Unlisted -> a
+    // conservative coordinator/internal default.
+    var COORD_META = {
+      noshow: { actor: 'vendor', internal: false }, stall: { actor: 'vendor', internal: false },
+      eta: { actor: 'vendor', internal: false }, ecdrisk: { actor: 'vendor', internal: false },
+      poacc: { actor: 'vendor', internal: false }, pomat: { actor: 'vendor', internal: false },
+      poconf: { actor: 'vendor', internal: false },
+      pocost: { actor: 'coordinator', internal: true }, docs: { actor: 'coordinator', internal: true },
+      docsverify: { actor: 'coordinator', internal: true }, advance: { actor: 'coordinator', internal: true },
+      intake: { actor: 'coordinator', internal: true }, ecd: { actor: 'coordinator', internal: true },
+      dne: { actor: 'coordinator', internal: true }, unbilled: { actor: 'coordinator', internal: true },
+      note: { actor: 'coordinator', internal: true }, clientcad: { actor: 'coordinator', internal: true },
+      task: { actor: 'coordinator', internal: true }, authored: { actor: 'coordinator', internal: true },
+      escalate: { actor: 'escalate', internal: false }, anchor: { actor: 'system', internal: false }
+    };
+    // WO status phase -> intrinsic actor for the generic phase chase.
+    var COORD_PHASE_ACTOR = {
+      schedule: 'coordinator', intake: 'coordinator', 'proposal-approved': 'coordinator',
+      onhold: 'coordinator', recall: 'coordinator', workcomplete: 'coordinator',
+      billing: 'coordinator', invoiced: 'coordinator',
+      proposal: 'vendor', materials: 'vendor', scheduled: 'vendor', onsite: 'vendor',
+      inprogress: 'vendor', accept: 'vendor', confirmcomplete: 'vendor',
+      'proposal-sent': 'client', client: 'client', 'materials-client': 'client'
+    };
+    function coordPrefix(a) { return (a && a.key ? String(a.key) : '').split(':')[0]; }
+    function coordPhase(a) { return (a && a.key || '').indexOf('phase:') === 0 ? (a.key.split(':')[1] || '') : null; }
+
+    // Static friction capability, from the action's SHAPE only (pure - never touches the
+    // DOM; the render layer still gates the real button on live dock/selectors). one-click
+    // = a proven in-page nav target or a tool-drawer mapping (open/focus/reveal, no write);
+    // assisted = a prefilled note/copy the coordinator reviews then saves; external = it is
+    // on another party; manual = a human task with no in-app affordance.
+    var COORD_NAV_KEYS = { pomat: 1, poacc: 1, poconf: 1, pocost: 1, ecd: 1 };
+    function coordToolable(a) {
+      var k = a.key || '';
+      if (k.indexOf('phase:schedule') === 0 || k.indexOf('phase:intake') === 0) return true;
+      return coordPrefix(a) === 'escalate';
+    }
+    function coordNavable(a) {
+      var p = coordPrefix(a);
+      if (COORD_NAV_KEYS[p]) return true;
+      if (p === 'intake' && /\bNTE\b/.test(a.why || '')) return true;
+      return false;
+    }
+    // ---- Urgency: from the SAME shared clock the engine uses -------------------
+    function coordStatusRatio(state, C) {
+      if (!state || state.hrs == null) return null;
+      var th = bwnThresholdsFor(state.status, state.priority, C);
+      if (!(th.bad > 0)) return null;
+      return { over: state.hrs / th.bad, warn: state.hrs / (th.warn || th.bad) };
+    }
+    function coordUrgency(a, state, C, now) {
+      var p = coordPrefix(a);
+      if (a.anchor) return 'informational';
+      if (p === 'ecdrisk' || p === 'escalate') return 'critical';
+      if (p === 'noshow' || p === 'stall') {
+        var escDays = Math.max(2, Math.round(ESCALATE_DAYS * bwnPrioMult(state.priority)));
+        var days = (p === 'stall' && state.stall) ? state.stall.days
+          : (state.noShow ? Math.max(1, Math.round((now - state.noShow.ms) / 86400000)) : 0);
+        return days > escDays ? 'critical' : 'due';
+      }
+      if (p === 'task') return /overdue/i.test((a.label || '') + ' ' + (a.why || '')) ? 'critical' : 'due';
+      if (p === 'authored') return /overdue/i.test(a.label || '') ? 'critical' : 'due';
+      if (p === 'docsverify') return 'upcoming';
+      if (p === 'ecd') return a.key === 'ecd:none' ? 'upcoming' : 'due';
+      if (p === 'pomat' || p === 'poacc' || p === 'phase') {
+        var r = coordStatusRatio(state, C);
+        if (!r) return p === 'phase' ? 'not-due' : 'due';
+        return r.over >= COORD_CFG.criticalOverRatio ? 'critical' : r.over >= 1 ? 'due' : r.warn >= 1 ? 'upcoming' : 'not-due';
+      }
+      // docs / advance / intake / pocost / poconf / eta / unbilled / note / clientcad / dne
+      // are actionable gates the engine only emits when already actionable -> due.
+      return 'due';
+    }
+    function coordScheduled(a, state, now) {
+      return coordWaitValidPure(state && state.waits && state.waits[a.key], a, state, now);
+    }
+    function coordOwnership(a, state, C, now, urgency) {
+      var p = coordPrefix(a);
+      if (a.anchor) return 'system';
+      if (p === 'escalate') {
+        // The escalation TIER owner: supervisor / management keep their ownership (the
+        // decision moves up, out of the coordinator's hands); a director reader owns the
+        // call themselves, so it reads as a coordinator decision.
+        return a.owner === 'management' ? 'management' : a.owner === 'supervisor' ? 'supervisor' : 'coordinator';
+      }
+      var meta = COORD_META[p] || { actor: 'coordinator', internal: true };
+      var actor = meta.actor, internal = meta.internal;
+      if (p === 'phase') { actor = COORD_PHASE_ACTOR[coordPhase(a)] || 'coordinator'; internal = (actor === 'coordinator'); }
+      if (internal) return 'coordinator';
+      // Chase class: the coordinator owns the follow-up only once it is due/critical; before
+      // that the ball is genuinely in the other party's court (do not nag a fresh dispatch).
+      return (urgency === 'due' || urgency === 'critical') ? 'coordinator' : actor;
+    }
+    function coordReadiness(a, state, C, now, urgency, ownership) {
+      if (a.anchor) return 'informational';
+      if (coordScheduled(a, state, now)) return 'scheduled';
+      if (a.blocked) return 'blocked';   // explicit engine hint (none emitted today; keeps the partition honest + future-proof)
+      if (ownership !== 'coordinator') return 'waiting';
+      return 'ready';
+    }
+    function coordFriction(a, state, C, now, readiness) {
+      if (a.anchor) return 'manual';
+      if (readiness === 'waiting' || readiness === 'scheduled') return 'external';
+      if (coordNavable(a) || coordToolable(a)) return 'one-click';
+      if (a.text || a.openEcd) return 'assisted';
+      return 'manual';
+    }
+    // ---- Plain-language reason + doneWhen (no rule jargon in Coordinator UI) ----
+    var COORD_REASON = {
+      noshow: 'A scheduled visit passed with no completion on file.',
+      stall: 'The vendor has gone quiet past the scheduled visit and chasing has not moved it.',
+      eta: 'An approved PO has no scheduled date on record.',
+      ecdrisk: 'The completion date is within 24 hours and no visit is confirmed.',
+      poacc: 'A vendor has not accepted the PO, so nobody is committed to the work.',
+      pomat: 'Work is waiting on materials and there is no delivery ETA on file.',
+      poconf: 'A vendor marked the work complete and the completion package needs collecting.',
+      pocost: 'A PO is done but its final cost is not locked before billing.',
+      docs: 'The work reads done but no completion documents are attached.',
+      docsverify: 'Documents are on file but a required closeout type was not matched.',
+      advance: 'Everything needed to close this WO is on file - it just needs to be marked Work Complete.',
+      intake: 'The WO is missing fields it needs before it can be dispatched.',
+      ecd: 'The expected completion date is missing or already past.',
+      dne: 'Gross profit is under target - the cost side needs a decision.',
+      unbilled: 'The work is complete but the WO has not moved to invoicing.',
+      note: 'This WO has gone quiet - no recent notes.',
+      clientcad: 'The client is overdue a proactive status update for this job priority.',
+      task: 'An Umbrava task on this WO is open or overdue.',
+      escalate: 'This is past what routine chasing fixes - ownership needs to move up.',
+      authored: 'A step written for this job by hand.'
+    };
+    var COORD_DONEWHEN = {
+      noshow: 'The vendor confirms the visit was completed with docs, or commits to a new date.',
+      stall: 'The vendor confirms an ETA, or the job is reassigned.',
+      eta: 'The vendor gives a scheduled date you can log.',
+      ecdrisk: 'A tech is confirmed on site for today, or a real completion date is set.',
+      poacc: 'The vendor accepts the PO with a date, or declines so it can be reassigned.',
+      pomat: 'You have the supplier, delivery date, tracking, and the return-visit date.',
+      poconf: 'The completion documents are attached and the PO is confirmed.',
+      pocost: 'The final cost on the PO is confirmed so the WO can move to billing.',
+      docs: 'The completion package is attached and reviewed.',
+      docsverify: 'The required closeout documents are confirmed attached.',
+      advance: 'The work order is advanced to Work Complete.',
+      intake: 'Every required field is filled so the WO can be dispatched.',
+      ecd: 'A realistic completion date is set and the client has been told.',
+      dne: 'The cost is reduced, the DNE is increased with client approval, or the write-down is accepted.',
+      unbilled: 'The client invoice is created and submitted.',
+      note: 'A status note is posted describing the current state.',
+      clientcad: 'A client-facing update is posted.',
+      task: 'The task is completed in Umbrava.',
+      escalate: 'The named tier has the job and the handoff is recorded as a WO note.',
+      authored: 'The written step is done and logged, or unchecked if it no longer applies.'
+    };
+    var COORD_PHASE_REASON = {
+      schedule: 'No vendor is scheduled yet - the WO needs coverage.',
+      intake: 'The WO is not yet assigned or scoped.',
+      proposal: 'A vendor proposal is needed to move the WO forward.',
+      'proposal-sent': 'The proposal is with the client and awaiting approval.',
+      'proposal-approved': 'The proposal is approved - send it to the client and issue the vendor PO.',
+      materials: 'The job is waiting on materials.',
+      'materials-client': 'The job is waiting on client-supplied materials.',
+      scheduled: 'A visit is booked and needs confirming.',
+      onsite: 'A tech is on site - progress and an ETA are needed.',
+      inprogress: 'Work is in progress and needs a status.',
+      recall: 'Completed work was rejected or reopened - a return visit is needed.',
+      client: 'The WO is on hold pending client direction.',
+      onhold: 'The WO is on hold - the blocker needs review.',
+      accept: 'The WO is pending vendor acceptance.',
+      confirmcomplete: 'The vendor marked complete - the completion package is needed.'
+    };
+    var COORD_PHASE_DONEWHEN = {
+      schedule: 'A vendor is scheduled with a date.',
+      intake: 'The WO is assigned or scoped and moving.',
+      proposal: 'A vendor proposal is received.',
+      'proposal-sent': 'The client approves, declines, or requests a revision.',
+      'proposal-approved': 'The client signs off and the vendor PO is issued.',
+      materials: 'Materials are confirmed with a delivery date.',
+      'materials-client': 'The client confirms the materials delivery date.',
+      scheduled: 'The vendor confirms the tech and arrival window.',
+      onsite: 'The vendor sends progress and an ETA to completion.',
+      inprogress: 'The vendor confirms the current stage and next step.',
+      recall: 'A return visit is scheduled.',
+      client: 'The client gives direction on how to proceed.',
+      onhold: 'The hold is released or confirmed with a new date.',
+      accept: 'The vendor accepts with a date, or declines so it can be reassigned.',
+      confirmcomplete: 'The completion documents are attached.'
+    };
+    function coordReason(a, state) {
+      if (a.anchor) return a.why || 'For reference only.';
+      if (coordPrefix(a) === 'phase') return COORD_PHASE_REASON[coordPhase(a)] || 'The work order status needs to move forward.';
+      var p = a.authored ? 'authored' : coordPrefix(a);
+      return COORD_REASON[p] || (a.why ? String(a.why).split(' · ')[0] : 'Needs a coordinator decision.');
+    }
+    function coordDoneWhen(a, state) {
+      if (a.anchor) return 'The WO status becomes Work Complete, Invoiced, or Paid.';
+      if (coordPrefix(a) === 'phase') return COORD_PHASE_DONEWHEN[coordPhase(a)] || 'The status advances to the next state.';
+      var p = a.authored ? 'authored' : coordPrefix(a);
+      return COORD_DONEWHEN[p] || 'The situation is resolved and logged as a WO note.';
+    }
+    function coordScore(c) {
+      var S = COORD_CFG.score, s = Number(c.baseScore || 0);
+      if (c.ownership === 'coordinator') s += S.ownCoordinator;
+      if (c.readiness === 'ready') s += S.readyReady;
+      s += (S.urg[c.urgency] != null ? S.urg[c.urgency] : 0);
+      s += (S.fric[c.friction] != null ? S.fric[c.friction] : 0);
+      if (c.readiness === 'waiting') s += S.waiting;
+      if (c.readiness === 'blocked') s += S.blocked;
+      if (c.ownership !== 'coordinator') s += S.notCoordinator;
+      return s;
+    }
+    function classifyCoordinatorAction(a, state, C, now) {
+      now = now || Date.now();
+      var urgency = coordUrgency(a, state, C, now);
+      var ownership = coordOwnership(a, state, C, now, urgency);
+      var readiness = coordReadiness(a, state, C, now, urgency, ownership);
+      var friction = coordFriction(a, state, C, now, readiness);
+      var baseScore = 0; try { baseScore = scoreAct(a, state); } catch (e) { baseScore = 0; }
+      var c = {};
+      for (var k in a) if (Object.prototype.hasOwnProperty.call(a, k)) c[k] = a[k];
+      c.ownership = ownership; c.readiness = readiness; c.urgency = urgency; c.friction = friction;
+      c.reason = coordReason(a, state); c.doneWhen = coordDoneWhen(a, state);
+      c.baseScore = baseScore;
+      c.coordinatorScore = coordScore(c);
+      return c;
+    }
+    function needsCoordinatorAttention(c) {
+      return c.ownership === 'coordinator' && c.readiness === 'ready' && c.urgency !== 'not-due';
+    }
+    function coordTieBreak(x, y) {
+      if (y.coordinatorScore !== x.coordinatorScore) return y.coordinatorScore - x.coordinatorScore;
+      var rx = COORD_CFG.urgencyRank[x.urgency] || 0, ry = COORD_CFG.urgencyRank[y.urgency] || 0;
+      if (ry !== rx) return ry - rx;
+      if ((y.baseScore || 0) !== (x.baseScore || 0)) return (y.baseScore || 0) - (x.baseScore || 0);
+      return String(x.key) < String(y.key) ? -1 : String(x.key) > String(y.key) ? 1 : 0;
+    }
+    function buildCoordinatorQueue(acts, state, C, now) {
+      now = now || Date.now();
+      var classified = (acts || []).map(function (a) { return classifyCoordinatorAction(a, state, C, now); });
+      var doNow = [], blocked = [], waiting = [], upcoming = [];
+      classified.forEach(function (c) {
+        // Deterministic precedence, exactly one collapsed bucket per item:
+        // DO NOW > Blocked > Waiting-on-others > Upcoming. Informational (the anchor) is
+        // reference-only: it lives in Full lifecycle, never in an action bucket.
+        if (c.readiness === 'informational') return;
+        if (needsCoordinatorAttention(c)) doNow.push(c);
+        else if (c.readiness === 'blocked') blocked.push(c);
+        else if (c.readiness === 'waiting' || c.readiness === 'scheduled' ||
+          c.ownership === 'vendor' || c.ownership === 'client' ||
+          c.ownership === 'supervisor' || c.ownership === 'management') waiting.push(c);
+        else upcoming.push(c);   // coordinator-owned but upcoming / not-due
+      });
+      doNow.sort(coordTieBreak);
+      // The DO NOW cap keeps the coordinator's immediate list to three, but the 4th+
+      // attention-needed actions are STILL attention-needed - they get their OWN bucket
+      // ("More requiring attention"). They are NEVER folded into Upcoming, which is
+      // future / not-due work only: labelling a due/ready action "Upcoming" is the exact
+      // defect this split fixes.
+      var moreAttention = doNow.slice(COORD_CFG.doNowMax);
+      doNow = doNow.slice(0, COORD_CFG.doNowMax);
+      [moreAttention, blocked, waiting, upcoming].forEach(function (g) { g.sort(coordTieBreak); });
+      function crit(g) { return g.some(function (c) { return c.urgency === 'critical'; }); }
+      return {
+        doNow: doNow, moreAttention: moreAttention, blocked: blocked, waiting: waiting, upcoming: upcoming,
+        fullLifecycle: classified,
+        counts: { doNow: doNow.length, moreAttention: moreAttention.length, blocked: blocked.length, waiting: waiting.length, upcoming: upcoming.length, full: classified.length },
+        critical: { blocked: crit(blocked), waiting: crit(waiting), moreAttention: crit(moreAttention) }
+      };
+    }
+    // ---- Waiting / revisit foundation (Phase C data model) ---------------------
+    // A coordinator can mark a DO-NOW item "waiting on <party> until <revisitAt>". The
+    // record is versioned and keyed by the STABLE (woId, actionKey) pair. It suppresses the
+    // item (readiness 'scheduled') ONLY while VALID: well-formed, not past revisitAt, and
+    // the state it was taken against is unchanged (fingerprint match). A wait NEVER marks
+    // the lifecycle requirement complete - an expired or invalidated wait simply drops and
+    // the action re-enters normal evaluation. A missing/invalid revisitAt or fingerprint
+    // does NOT suppress (fail-open to visible - never silently hide real work).
+    var COORD_WAIT_V = 1;
+    function coordFingerprintPure(a, state) {
+      // Minimal STABLE source fields whose change should cancel a wait. No timestamps, no
+      // DOM, no volatile display text - only what would make the action meaningfully
+      // different work.
+      var parts = [String((state && state.status) || '').toLowerCase(), coordPrefix(a)];
+      var pos = (state && state.pos) || [];
+      parts.push(pos.map(function (p) { return String(p.sid) + '=' + (p.done ? 'd' : '') + (p.poStatus || '') + (p.schedDate ? 's' : ''); }).sort().join(','));
+      parts.push((state && state.docs && state.docs.count != null) ? 'docs' + state.docs.count : 'docs?');
+      parts.push((state && state.due && state.due.raw) ? 'ecd' + state.due.raw : 'ecd?');
+      var str = parts.join('|'), h = 0;
+      for (var i = 0; i < str.length; i++) h = (h * 31 + str.charCodeAt(i)) | 0;
+      return (h >>> 0).toString(36);
+    }
+    function coordWaitValidPure(rec, a, state, now) {
+      if (!rec || rec.v !== COORD_WAIT_V || rec.disposition !== 'waiting') return false;
+      if (!rec.actionKey || rec.actionKey !== a.key) return false;
+      if (!rec.revisitAt || !rec.stateFingerprint) return false;   // malformed -> do not suppress
+      var due = Date.parse(rec.revisitAt);
+      if (isNaN(due) || now >= due) return false;                  // past revisit -> re-enter normal evaluation
+      if (rec.stateFingerprint !== coordFingerprintPure(a, state)) return false;   // state changed -> invalidate
+      return true;
+    }
+    // Published for the audit / cross-module consumers, same shape as bwnActsEngine.
+    bwnCoordQueue = buildCoordinatorQueue;
+    // ==== COORD-QUEUE END =======================================================
+
     // ---- Action Checklist (inline card above Purchase Orders) -----------------
     // The playbook as a WORKING surface: a card embedded in the WO page directly
     // above the Purchase Orders section. Each row: a checkbox, the chase text
@@ -4288,6 +5309,44 @@
       } catch (e) { return {}; }
     }
     function actsSave(d) { try { localStorage.setItem(actsKey(), JSON.stringify(d)); } catch (e) { /* best-effort */ } }
+
+    // ---- Waiting/revisit store (IMPURE adapter; the pure layer only reads state.waits) ---
+    // Isolated, versioned, defensively parsed. Keyed PER WO so different work orders keep
+    // distinct records. The pure coordWaitValidPure / coordFingerprintPure decide
+    // suppression; this layer only persists and hands back a { actionKey: record } map.
+    function coordWaitsKey() { var id = currentWOId(); return 'bwn:coordwaits:' + (id || location.pathname); }
+    function coordWaitsLoad() {
+      try {
+        var raw = JSON.parse(localStorage.getItem(coordWaitsKey()) || 'null');
+        if (!raw || raw.v !== COORD_WAIT_V || !raw.items || typeof raw.items !== 'object') return {};
+        var out = {};
+        Object.keys(raw.items).forEach(function (k) {
+          var r = raw.items[k];
+          if (r && r.v === COORD_WAIT_V && r.disposition === 'waiting' && r.actionKey === k) out[k] = r;
+        });
+        return out;
+      } catch (e) { return {}; }   // malformed storage -> empty (fail-open to visible)
+    }
+    function coordWaitsSave(map) {
+      try { localStorage.setItem(coordWaitsKey(), JSON.stringify({ v: COORD_WAIT_V, items: map || {} })); } catch (e) { /* best-effort */ }
+    }
+    function coordWaitSet(a, state, waitingOn, revisitAt) {
+      var map = coordWaitsLoad();
+      map[a.key] = {
+        v: COORD_WAIT_V, actionKey: a.key, disposition: 'waiting',
+        waitingOn: waitingOn || 'vendor', revisitAt: revisitAt,
+        stateFingerprint: coordFingerprintPure(a, state), createdAt: new Date().toISOString()
+      };
+      coordWaitsSave(map);
+    }
+    function coordWaitClear(key) { var map = coordWaitsLoad(); if (map[key]) { delete map[key]; coordWaitsSave(map); } }
+    // Maintainer debug: a per-browser toggle that reveals the classification internals on
+    // each row. Off for normal coordinators, so no rule jargon leaks into the normal UI.
+    function coordDebugOn() { try { return localStorage.getItem('bwn:coordq:debug') === '1'; } catch (e) { return false; } }
+    // Collapsed-section preference (same localStorage convention as bwn:acts:collapsed).
+    // Sections default COLLAPSED.
+    function coordSecOpen(name) { try { return localStorage.getItem('bwn:coordq:sec:' + name) === '1'; } catch (e) { return false; } }
+    function coordSecToggle(name) { try { localStorage.setItem('bwn:coordq:sec:' + name, coordSecOpen(name) ? '' : '1'); } catch (e) { } }
     // ONE-TIME per-WO store migration for the PO act re-key (render index -> stable sid,
     // 2026-08-02). Old keys look like 'pomat:2:ACME' - a BARE-DIGITS middle, which the new
     // form never produces (the poKeyOf ladder yields 'ln001' / 'v<guid>' / 'ix2', plus a
@@ -4323,6 +5382,18 @@
       var btns = document.querySelectorAll('button');
       for (var i = 0; i < btns.length; i++) {
         if (/add note/i.test((btns[i].textContent || '').trim())) return btns[i];
+      }
+      return null;
+    }
+    // The WO tab that hosts the notes list (and therefore the Add Note button). Matched by
+    // EXACT label so a "Notes" tab is never confused with "Note Templates" or a card heading;
+    // the href form is the belt for a router link that carries no tab role. Visible only -
+    // an unmounted tab panel's link is not something a click can reach.
+    function noteTabControl() {
+      var els = document.querySelectorAll('[role="tab"], a[href*="/notes"]');
+      for (var i = 0; i < els.length; i++) {
+        if (!els[i].offsetParent) continue;
+        if (/^notes?$/i.test((els[i].textContent || '').trim())) return els[i];
       }
       return null;
     }
@@ -4424,9 +5495,28 @@
         try { document.execCommand('insertHTML', false, html); } catch (e3) { try { ed.textContent = String(text); ed.dispatchEvent(new Event('input', { bubbles: true })); } catch (e4) { } }
       }
     }
-    function insertWONote(text, cb, noteType) {
+    // `_hopped` is internal: set on the one retry after a tab hop, so a view that still
+    // has no Add Note button falls back instead of hopping forever.
+    function insertWONote(text, cb, noteType, _hopped) {
       var btn = findAddNoteBtn();
-      if (!btn) { noteFallback(text); if (cb) cb(false); return; }
+      if (!btn) {
+        // The Add Note button only exists on the WO views that host the notes list. The ECD
+        // helper - and every other drafted note - runs on the DETAILS route, and the note
+        // steps fire from the AI Job View too, so on those views the draft used to die
+        // straight into the clipboard fallback with nothing opened. Hop to the Notes tab and
+        // retry once. Same ladder as bwn-drop-upload's triggerNoteComposer (live-proven),
+        // minus its Documents-only split-button branch, which has no target here.
+        var tab = _hopped ? null : noteTabControl();
+        if (!tab) { noteFallback(text); if (cb) cb(false); return; }
+        tab.click();
+        var hops = 0;
+        (function waitTab() {
+          if (findAddNoteBtn()) { insertWONote(text, cb, noteType, true); return; }
+          if (++hops > 20) { noteFallback(text); if (cb) cb(false); return; }   // 5s
+          setTimeout(waitTab, 250);
+        })();
+        return;
+      }
       var beforeEls = Array.prototype.slice.call(document.querySelectorAll('textarea, [contenteditable="true"], [contenteditable=""]'));
       btn.click();
       var tries = 0;
@@ -4450,7 +5540,7 @@
       // the flow when the clipboard write rejects, e.g. the tab isn't focused). Copy
       // best-effort and surface a dismissible toast instead.
       try { navigator.clipboard.writeText(text).catch(function () { }); } catch (e) { }
-      ecdToast('Add Note composer not found - the note text was copied to your clipboard. Open a new note and paste it.', null);
+      ecdToast('Add Note composer not found - the note text was copied to your clipboard. Open a new note and paste it.', 'error');
     }
 
     // The FULL-WIDTH block to insert the card before, derived STRUCTURALLY (never
@@ -4511,8 +5601,14 @@
     }
     function tasksAnchorBlock() {
       var head = null;
+      var own = document.getElementById(ACT_CARD_ID);
       var els = document.querySelectorAll('h1,h2,h3,h4,h5,h6,div,span,p');
       for (var i = 0; i < els.length; i++) {
+        // Skip OUR card: its read-only "OPEN TASKS (n)" strip matches the heading test and sits
+        // earlier in document order than Umbrava's section. Anchoring to it put the rebuilt card
+        // inside the old (detached) one, so every other refresh blanked the card and the notes
+        // pane above it grew and shrank in a loop (seen live on a collapsed card with open tasks).
+        if (own && own.contains(els[i])) continue;
         var tx = (els[i].textContent || '').replace(/\s+/g, ' ').trim();
         if (/^open tasks/i.test(tx) && els[i].querySelectorAll('*').length <= 2) { head = els[i]; break; }
       }
@@ -4522,7 +5618,6 @@
       // "s" and "0". A \b test fails there, stops the climb at the heading, and the card
       // gets inserted INTO the heading row, rendering beside "Open Tasks" instead of
       // above the section (seen live on WO 364040).
-      var own = document.getElementById(ACT_CARD_ID);
       var node = head, hops = 0;
       while (node.parentElement && node.parentElement !== document.body && hops++ < 8) {
         if (!/^open tasks/i.test(sectionTxt(node.parentElement, own))) break;   // parent holds more than this section
@@ -5148,7 +6243,7 @@
     }
     function actNavGo(nav) {
       var el = actNavTarget(nav);
-      if (!el) return;   // best-effort by contract: a missing target is a silent no-op
+      if (!el) return false;   // best-effort by contract: no navigation; the caller says so (never a silent dead click)
       try { el.scrollIntoView({ behavior: 'smooth', block: 'center' }); } catch (e) { try { el.scrollIntoView(); } catch (e2) { } }
       // Outline-only highlight (no layout shift), self-clearing - we are decorating
       // Umbrava's own element, so it must leave no trace.
@@ -5157,6 +6252,7 @@
         flash.classList.add('bwn-act-flash');
         setTimeout(function () { try { flash.classList.remove('bwn-act-flash'); } catch (e3) { } }, 1600);
       } catch (e4) { }
+      return true;
     }
 
     // TRAINING LAYER. Three static lines per step type - what it means, where in Umbrava
@@ -5190,11 +6286,373 @@
     }
     var actHelpOpen = {};   // key -> 1 while its help block is expanded (render state only)
 
+    // ---- Coordinator Action Queue render helpers (DOM / prompt layer) ----------
+    var COORD_URG_LABEL = { critical: 'Critical', due: 'Due', upcoming: 'Upcoming', 'not-due': 'Not due', informational: '' };
+    var COORD_OWNER_LABEL = { vendor: 'Vendor', client: 'Client', supervisor: 'Supervisor', management: 'Management', system: '' };
+    function coordBadges(a) {
+      var out = [];
+      if (a.urgency && a.urgency !== 'not-due' && a.urgency !== 'informational') out.push({ t: COORD_URG_LABEL[a.urgency], c: 'u-' + a.urgency });
+      if (a.readiness === 'scheduled') out.push({ t: 'Snoozed', c: 'sched' });
+      else if (a.readiness === 'blocked') out.push({ t: 'Blocked', c: 'blk' });
+      if (a.ownership && a.ownership !== 'coordinator' && a.ownership !== 'system') out.push({ t: 'On ' + (COORD_OWNER_LABEL[a.ownership] || a.ownership), c: 'own' });
+      if (a.friction === 'one-click') out.push({ t: 'One-click', c: 'fric' });
+      else if (a.friction === 'assisted') out.push({ t: 'Assisted', c: 'fric' });
+      return out;
+    }
+    function coordBadgeEls(a) {
+      var wrap = document.createElement('span'); wrap.className = 'bwn-cq-badges';
+      coordBadges(a).forEach(function (b) { var s = document.createElement('span'); s.className = 'bwn-cq-badge ' + b.c; s.textContent = b.t; wrap.appendChild(s); });
+      return wrap;
+    }
+    function coordDebugEl(a) {
+      var d = document.createElement('div'); d.className = 'bwn-cq-dbg';
+      d.textContent = a.key + ' · base ' + a.baseScore + ' · coord ' + a.coordinatorScore + ' · ' + a.ownership + '/' + a.readiness + '/' + a.urgency + '/' + a.friction;
+      return d;
+    }
+    // Rebuild-safe focus + announcements. renderActsInline tears the card down and rebuilds it
+    // on every change, which destroyed the focused control - a keyboard user lost their place on
+    // every toggle. Each focusable control carries a stable data-bwn-fk (section-scoped, since
+    // one action can render in DO NOW and in Full lifecycle); the render puts focus back on the
+    // same key, or on coordFocusNext when an action moved its own row (Mark waiting / Resume /
+    // done), falling back to the card header.
+    var coordFocusNext = null;
+    function coordFk(el, key) { el.setAttribute('data-bwn-fk', key); return el; }
+    // ONE persistent polite live region, outside the card, so a rebuild cannot swallow a message.
+    function coordAnnounce(msg) {
+      var lr = document.getElementById('bwn-cq-live');
+      if (!lr) {
+        lr = document.createElement('div'); lr.id = 'bwn-cq-live';
+        lr.setAttribute('role', 'status'); lr.setAttribute('aria-live', 'polite');
+        lr.style.cssText = 'position:absolute;width:1px;height:1px;margin:-1px;overflow:hidden;clip:rect(0 0 0 0);white-space:nowrap;border:0;padding:0;';
+        document.body.appendChild(lr);
+      }
+      lr.textContent = '';
+      setTimeout(function () { lr.textContent = msg; }, 60);   // clear-then-set so a repeat message re-announces
+    }
+    function coordFmtDay(ms) { var d = new Date(ms); return ['Sun', 'Mon', 'Tue', 'Wed', 'Thu', 'Fri', 'Sat'][d.getDay()] + ' ' + (d.getMonth() + 1) + '/' + d.getDate(); }
+    function coordBtn(label, cls, fk, title) {
+      var b = document.createElement('button');
+      b.type = 'button'; b.className = 'bwn-wa-btn ' + cls; b.textContent = label;
+      if (title) b.title = title;
+      return coordFk(b, fk);
+    }
+    function coordCopy(btn, text, idle) {
+      navigator.clipboard.writeText(text).then(function () {
+        btn.textContent = 'Copied ✓'; coordAnnounce('Chase text copied to the clipboard.');
+        setTimeout(function () { btn.textContent = idle; }, 1500);
+      }, function () { prompt('Copy manually:', text); });
+    }
+
+    // Mark waiting: an INLINE form (party + revisit horizon) under the row - no modal, no
+    // prompt(). The old two-prompt flow silently turned a typo into "vendor" and a bad day count
+    // into 2; native <select>s make an invalid value impossible instead. No WO/PO/note/status
+    // side effects: it writes only the bwn:coordwaits:* record, exactly as before.
+    var COORD_WAIT_PARTIES = ['vendor', 'client', 'technician', 'management', 'supervisor'];
+    var COORD_WAIT_DAYS = [1, 2, 3, 5, 7, 14];
+    var coordWaitForm = {};   // action key -> { party, days } while its form is open (render state only)
+    function coordWaitFormId(a) { return 'bwn-cq-wait-' + String(a.key).replace(/[^\w-]/g, '_'); }
+    function coordWaitFormOpen(a) {
+      coordWaitForm[a.key] = { party: (a.ownership && COORD_WAIT_PARTIES.indexOf(a.ownership) !== -1) ? a.ownership : 'vendor', days: 2 };
+    }
+    function buildWaitForm(a, state, sec) {
+      var f = coordWaitForm[a.key];
+      var box = document.createElement('div'); box.className = 'bwn-cq-wait'; box.id = coordWaitFormId(a);
+      box.setAttribute('role', 'group'); box.setAttribute('aria-label', 'Mark waiting: ' + a.label);
+      function sel(text, fk, options, value, onChange) {
+        var lb = document.createElement('label'); lb.textContent = text;
+        var s = coordFk(document.createElement('select'), fk);
+        options.forEach(function (o) { var op = document.createElement('option'); op.value = String(o.v); op.textContent = o.t; if (String(o.v) === String(value)) op.selected = true; s.appendChild(op); });
+        s.addEventListener('change', function () { onChange(s.value); });
+        lb.appendChild(s); box.appendChild(lb);
+      }
+      sel('Waiting on', sec + ':wparty:' + a.key, COORD_WAIT_PARTIES.map(function (p) { return { v: p, t: p.charAt(0).toUpperCase() + p.slice(1) }; }), f.party, function (v) { f.party = v; });
+      var now = Date.now();
+      sel('Check back', sec + ':wdays:' + a.key, COORD_WAIT_DAYS.map(function (d) { return { v: d, t: 'In ' + d + ' day' + (d === 1 ? '' : 's') + ' (' + coordFmtDay(now + d * 86400000) + ')' }; }), f.days, function (v) { f.days = parseInt(v, 10); });
+      var acts = document.createElement('div'); acts.className = 'bwn-cq-wait-acts';
+      var save = coordBtn('Snooze', '', sec + ':wsave:' + a.key);
+      var cancel = coordBtn('Cancel', 'bwn-cq-tert', sec + ':wcancel:' + a.key);
+      function close() { delete coordWaitForm[a.key]; coordFocusNext = sec + ':mw:' + a.key; renderActsInline(state); }
+      save.addEventListener('click', function () {
+        var until = Date.now() + f.days * 86400000;
+        coordWaitSet(a, state, f.party, new Date(until).toISOString());
+        delete coordWaitForm[a.key];
+        coordFocusNext = 'sec:waiting';
+        coordAnnounce('Snoozed "' + a.label + '" until ' + coordFmtDay(until) + ', waiting on ' + f.party + '. It is listed under Waiting on others.');
+        renderActsInline(state);
+      });
+      cancel.addEventListener('click', close);
+      box.addEventListener('keydown', function (ev) { if (ev.key === 'Escape') { ev.preventDefault(); ev.stopPropagation(); close(); } });
+      acts.appendChild(save); acts.appendChild(cancel); box.appendChild(acts);
+      var note = document.createElement('p'); note.className = 'bwn-cq-wait-note';
+      note.textContent = 'Hides this step until then. It comes back sooner if the WO data changes. Does not change the WO status, notes, or POs.';
+      box.appendChild(note);
+      return box;
+    }
+
+    // Full interactive action row. `a` is a CLASSIFIED action (engine fields + coordinator
+    // ownership/readiness/urgency/friction/reason/doneWhen). Every existing behavior -
+    // checkbox + critical-dismiss + nav + help + tool launch + Chase + Actioned + Set ECD +
+    // guided-write - is preserved. opts.card = the prominent DO-NOW card (plain-language
+    // reason/doneWhen + badges + a Mark-waiting quick-assist); otherwise the compact
+    // Full-lifecycle row (keeps the original technical `why`). Anchors render as the
+    // uncheckable completion gate. Returns the row node.
+    // opts.sec scopes the focus keys (see coordFk); opts.primary marks the ONE primary button.
+    function buildActRow(a, state, store, escSt, opts) {
+      opts = opts || {};
+      var fk = (opts.sec || 'full') + ':';
+      if (a.anchor) {
+        var ra = document.createElement('div'); ra.className = 'bwn-act-row bwn-act-anchor';
+        var mka = document.createElement('div'); mka.className = 'bwn-act-anchor-mk'; mka.textContent = '⚑';
+        var maa = document.createElement('div'); maa.className = 'bwn-act-main';
+        var lba = document.createElement('div'); lba.className = 'bwn-act-lbl'; lba.textContent = a.label;
+        var wya = document.createElement('div'); wya.className = 'bwn-act-why'; wya.textContent = a.why;
+        maa.appendChild(lba); maa.appendChild(wya);
+        ra.appendChild(mka); ra.appendChild(maa);
+        return ra;
+      }
+      var rec = store[a.key];
+      var isDone = !!(rec && rec.done);
+      var r = document.createElement('div'); r.className = 'bwn-act-row' + (opts.card ? ' bwn-cq-card' : '') + (a.nudge && !isDone ? ' nudge' : '');
+      var cb = coordFk(document.createElement('input'), fk + 'cb:' + a.key); cb.type = 'checkbox'; cb.checked = isDone;
+      cb.setAttribute('aria-label', (isDone ? 'Done: ' : 'Mark done: ') + a.label);
+      cb.title = isDone ? 'Uncheck to reopen' : 'Mark done without posting a note';
+      cb.addEventListener('change', function () {
+        if (cb.checked) { actsMarkDone(a, ''); coordAnnounce('Marked done: ' + a.label + '. It moves to Full lifecycle.'); renderActsInline(state); return; }
+        var rec2 = actsLoad()[a.key];
+        if (rec2 && rec2.done && rec2.auto) { actsMarkUndone(a, '', true); renderActsInline(state); return; }
+        if (rec2 && rec2.done && !rec2.note && rec2.ts && Date.now() - rec2.ts < 120000) { actsMarkUndone(a, '', true); renderActsInline(state); return; }
+        if (actIsCritical(a)) {
+          var why2 = prompt('"' + a.label + '" is a critical step.\nWhy is it being dismissed? (required - this becomes the WO note)', '');
+          if (why2 === null || !why2.trim()) { cb.checked = true; return; }   // not dismissed
+          actsMarkUndone(a, why2.trim());
+          var disNote = 'Dismissed step: ' + a.label + ' - ' + why2.trim();
+          try { navigator.clipboard.writeText(disNote).catch(function () { }); } catch (e2) { }
+          renderActsInline(state);
+          insertWONote(disNote, function () { /* posted manually by the coordinator */ });
+          return;
+        }
+        actsMarkUndone(a, '');
+        renderActsInline(state);
+      });
+      var main = document.createElement('div'); main.className = 'bwn-act-main';
+      var lbl = document.createElement('div'); lbl.className = 'bwn-act-lbl' + (isDone ? ' done' : '');
+      var nav = actNav(a);
+      if (nav) {
+        // A real button for the label text; the "?" stays a SIBLING (no nested controls).
+        var nb = coordFk(document.createElement('button'), fk + 'nav:' + a.key);
+        nb.type = 'button'; nb.className = 'bwn-cq-nav'; nb.textContent = a.label;
+        nb.title = 'Show this on the page';
+        nb.addEventListener('click', function () {
+          if (!actNavGo(nav)) coordAnnounce('That field is not on this view right now - scroll the work order to find it.');
+        });
+        lbl.appendChild(nb);
+      } else {
+        lbl.appendChild(document.createTextNode(a.label));
+      }
+      var helpTxt = actHelp(a);
+      if (helpTxt) {
+        var ht = coordFk(document.createElement('button'), fk + 'help:' + a.key);
+        ht.type = 'button'; ht.className = 'bwn-act-help-t'; ht.textContent = '?';
+        ht.title = 'What this step means, where to do it, and what done looks like';
+        ht.setAttribute('aria-label', 'Explain this step: ' + a.label);
+        ht.setAttribute('aria-expanded', actHelpOpen[a.key] ? 'true' : 'false');
+        ht.addEventListener('click', function (ev) {
+          ev.stopPropagation();   // the label may itself be a nav control
+          if (actHelpOpen[a.key]) delete actHelpOpen[a.key]; else actHelpOpen[a.key] = 1;
+          renderActsInline(state);
+        });
+        lbl.appendChild(ht);
+      }
+      main.appendChild(lbl);
+      // Classification badges (urgency / non-coordinator owner / friction) on every row.
+      main.appendChild(coordBadgeEls(a));
+      if (opts.card) {
+        // DO-NOW: plain-language WHY (no rule jargon), then a "Done when" line. The
+        // technical `why` moves into the "?" help / debug so it is not lost.
+        var rsn = document.createElement('div'); rsn.className = 'bwn-cq-reason'; rsn.textContent = a.reason || a.why;
+        main.appendChild(rsn);
+      } else {
+        var why = document.createElement('div'); why.className = 'bwn-act-why'; why.textContent = a.why;
+        main.appendChild(why);
+      }
+      if (helpTxt && actHelpOpen[a.key]) {
+        var hbx = document.createElement('div'); hbx.className = 'bwn-act-help';
+        for (var hi = 0; hi < ACT_HELP_PFX.length; hi++) {
+          var hln = document.createElement('div');
+          hln.textContent = ACT_HELP_PFX[hi] + helpTxt[hi];
+          hbx.appendChild(hln);
+        }
+        main.appendChild(hbx);
+      }
+      if (!isDone && rec && rec.dismissed && rec.reason) {
+        var dis = document.createElement('div'); dis.className = 'bwn-act-dis';
+        var dd = new Date(rec.dismissed);
+        dis.textContent = '✗ dismissed ' + (dd.getMonth() + 1) + '/' + dd.getDate() + ': ' + rec.reason;
+        main.appendChild(dis);
+      }
+      if (isDone && rec.note) {
+        var lg = document.createElement('div'); lg.className = 'bwn-act-log';
+        var d = new Date(rec.ts || Date.now());
+        lg.textContent = '✓ ' + (d.getMonth() + 1) + '/' + d.getDate() + ' - ' + rec.note;
+        main.appendChild(lg);
+      }
+      if (opts.card && !isDone) {
+        var dw = document.createElement('div'); dw.className = 'bwn-cq-done'; dw.textContent = 'Done when: ' + a.doneWhen;
+        main.appendChild(dw);
+      }
+      if (coordDebugOn()) main.appendChild(coordDebugEl(a));
+      var btns = document.createElement('div'); btns.className = 'bwn-act-btns';
+      // Tool launch - rendered only while the owning dock registrant is live (never a dead
+      // control). Same bwn:dock:open the rail emits.
+      var tool = actTool(a);
+      if (tool && !isDone) {
+        tool.docks.forEach(function (dk) {
+          if (!waDockAlive(dk)) return;
+          var tb = coordBtn(waEscToolLabel(dk, escSt), 'ghost', fk + 'tool:' + dk + ':' + a.key);
+          tb.title = (dk === 'assist' && escSt)
+            ? 'An escalation is already open on this work order - view, acknowledge or resolve it'
+            : 'Open the ' + (ACT_TOOL_LABEL[dk] || 'tool').replace(/…$/, '') + ' drawer for this work order';
+          tb.addEventListener('click', function () {
+            try { document.dispatchEvent(new CustomEvent('bwn:evt', { detail: { id: 'bwn:dock:open', key: dk } })); } catch (e) { }
+          });
+          btns.appendChild(tb);
+        });
+      }
+      if (a.text) {
+        var cp = coordBtn('Chase', 'ghost', fk + 'chase:' + a.key, a.text);
+        cp.setAttribute('aria-label', 'Copy chase text: ' + a.label);
+        cp.addEventListener('click', function () { coordCopy(cp, a.text, 'Chase'); });
+        btns.appendChild(cp);
+      }
+      var ab = coordBtn(isDone ? 'Re-log' : 'Actioned…', 'primary' + (opts.primary && !isDone ? ' bwn-cq-primary' : ''), fk + 'act:' + a.key,
+        'Log what you did - prefills a WO note for you to review and post');
+      ab.addEventListener('click', function () {
+        var typed = prompt('What did you do? (one line - becomes the WO note)\n\n' + a.label, '');
+        if (typed === null) return;
+        var noteText = a.label + (typed.trim() ? ' - ' + typed.trim() : '');
+        actsMarkDone(a, typed.trim());
+        renderActsInline(state);
+        try { navigator.clipboard.writeText(noteText).catch(function () { }); } catch (e) { }
+        var actNoteType = (a.openEcd || /^ecd/.test(a.key || '')) ? 'Internal'
+          : /^clientcad/.test(a.key || '') ? 'Client' : undefined;
+        insertWONote(noteText, function () { /* posted manually by the coordinator */ }, actNoteType);
+      });
+      btns.appendChild(ab);
+      if (a.openEcd) {
+        var eb = coordBtn('Set ECD…', 'ghost', fk + 'ecd:' + a.key, 'Propose + set the expected completion date, and draft the client note');
+        eb.addEventListener('click', function () { ecdHelperOpen(state); });
+        btns.appendChild(eb);
+      }
+      // Mark-waiting quick assist (DO-NOW cards only): a non-writing snooze that suppresses
+      // the item until a revisit time, cleared automatically if the WO data changes. It
+      // NEVER touches WO status, notes, or POs. Opens the inline form below the row.
+      var waitOpen = !!(opts.card && !isDone && coordWaitForm[a.key]);
+      if (opts.card && !isDone) {
+        var mw = coordBtn('Mark waiting', 'ghost', fk + 'mw:' + a.key, 'Snooze this until a check-back date (waiting on another party). Does not change the WO.');
+        mw.setAttribute('aria-expanded', waitOpen ? 'true' : 'false');
+        mw.setAttribute('aria-controls', coordWaitFormId(a));
+        mw.addEventListener('click', function () {
+          if (coordWaitForm[a.key]) { delete coordWaitForm[a.key]; coordFocusNext = fk + 'mw:' + a.key; }
+          else { coordWaitFormOpen(a); coordFocusNext = fk + 'wparty:' + a.key; }
+          renderActsInline(state);
+        });
+        btns.appendChild(mw);
+      }
+      if (BWN_MODULES.woAssistWrites) {
+        (function (act) {
+          if (bwnCan('Task.AddNew')) {
+            var tkb = coordBtn('Create task…', 'ghost', fk + 'task:' + act.key, 'Create a follow-up task on this work order (assigned to the coordinator)');
+            tkb.addEventListener('click', function () { taskHelperOpen(state, act); });
+            btns.appendChild(tkb);
+          }
+          if (bwnCan('WorkOrderField.Status') && (act.key === 'advance:workcomplete' || act.key.indexOf('phase:') === 0)) {
+            var csb = coordBtn('Change status…', 'ghost', fk + 'status:' + act.key, 'Change this work order’s status (guided, logged, typed confirm)');
+            csb.addEventListener('click', function () { statusHelperOpen(state, act); });
+            btns.appendChild(csb);
+          }
+        })(a);
+      }
+      var cbw = document.createElement('label'); cbw.className = 'bwn-cq-cbw'; cbw.appendChild(cb);
+      r.appendChild(cbw); r.appendChild(main); r.appendChild(btns);
+      if (waitOpen) r.appendChild(buildWaitForm(a, state, opts.sec || 'full'));
+      return r;
+    }
+
+    // Compact read-only summary row for the collapsed Waiting / Upcoming / Blocked sections
+    // (the full interactive controls live in Full lifecycle). Shows the label, badges, and
+    // plain-language reason; a Chase copy where one exists; and a Resume control on a snoozed
+    // (scheduled) item so a wait can be cleared early.
+    function buildCompactRow(a, state, sec) {
+      var fk = sec + ':';
+      var r = document.createElement('div'); r.className = 'bwn-cq-compact';
+      var main = document.createElement('div'); main.className = 'bwn-act-main';
+      var lbl = document.createElement('div'); lbl.className = 'bwn-act-lbl';
+      lbl.textContent = a.label;   // "Critical" rides the badge row (text), not a ⚠ glyph
+      main.appendChild(lbl);
+      main.appendChild(coordBadgeEls(a));
+      var rsn = document.createElement('div'); rsn.className = 'bwn-act-why'; rsn.textContent = a.reason || a.why;
+      main.appendChild(rsn);
+      // A snoozed item says WHEN it comes back and on whom - the badge alone left that invisible.
+      var wrec = a.readiness === 'scheduled' && state.waits && state.waits[a.key];
+      if (wrec) {
+        var snz = document.createElement('div'); snz.className = 'bwn-cq-snz';
+        snz.textContent = 'Snoozed until ' + coordFmtDay(Date.parse(wrec.revisitAt)) + ' · waiting on ' + (wrec.waitingOn || 'vendor') + ' · returns sooner if the WO changes';
+        main.appendChild(snz);
+      }
+      if (coordDebugOn()) main.appendChild(coordDebugEl(a));
+      r.appendChild(main);
+      var btns = document.createElement('div'); btns.className = 'bwn-act-btns';
+      if (a.readiness === 'scheduled') {
+        var rb = coordBtn('Resume', 'ghost', fk + 'resume:' + a.key, 'Clear the wait and re-evaluate this item now');
+        rb.setAttribute('aria-label', 'Resume: ' + a.label);
+        rb.addEventListener('click', function () {
+          coordWaitClear(a.key);
+          coordFocusNext = 'sec:' + sec;
+          coordAnnounce('Resumed: ' + a.label + '. It is back in the queue.');
+          renderActsInline(state);
+        });
+        btns.appendChild(rb);
+      }
+      if (a.text) {
+        var cp = coordBtn('Chase', 'ghost', fk + 'chase:' + a.key, a.text);
+        cp.setAttribute('aria-label', 'Copy chase text: ' + a.label);
+        cp.addEventListener('click', function () { coordCopy(cp, a.text, 'Chase'); });
+        btns.appendChild(cp);
+      }
+      r.appendChild(btns);
+      return r;
+    }
+
+    // A collapsible section: a semantic <button aria-expanded> header with title + count
+    // (+ a critical marker), and the rendered items when open. Sections default collapsed.
+    function buildCoordSection(name, title, items, critical, render, state) {
+      var sec = document.createElement('div'); sec.className = 'bwn-cq-sec';
+      var open = coordSecOpen(name);
+      var bodyId = 'bwn-cq-sec-' + name;
+      var hd = coordFk(document.createElement('button'), 'sec:' + name);
+      hd.type = 'button'; hd.className = 'bwn-cq-sec-hd';
+      hd.setAttribute('aria-expanded', open ? 'true' : 'false');
+      hd.setAttribute('aria-controls', bodyId);
+      var cx = document.createElement('span'); cx.className = 'bwn-cq-sec-x'; cx.textContent = open ? '▾' : '▸'; cx.setAttribute('aria-hidden', 'true');
+      var tt = document.createElement('span'); tt.className = 'bwn-cq-sec-t'; tt.textContent = title;
+      var ct = document.createElement('span'); ct.className = 'bwn-cq-sec-n'; ct.textContent = String(items.length);
+      hd.appendChild(cx); hd.appendChild(tt); hd.appendChild(ct);
+      if (critical) { var cm = document.createElement('span'); cm.className = 'bwn-cq-badge u-critical'; cm.textContent = 'Has critical'; hd.appendChild(cm); }
+      hd.addEventListener('click', function () { coordSecToggle(name); renderActsInline(state); });
+      sec.appendChild(hd);
+      if (open) {
+        var bd = document.createElement('div'); bd.className = 'bwn-cq-sec-body'; bd.id = bodyId;
+        items.forEach(function (a) { bd.appendChild(render(a)); });
+        sec.appendChild(bd);
+      }
+      return sec;
+    }
+
     function renderActsInline(state) {
       var card = document.getElementById(ACT_CARD_ID);
       var acts = nextActions(state);
       var row = actsAnchorBlock();
-      if (!acts.length || !row) { if (card) card.remove(); return; }
+      if (!acts.length || !row) { if (card) card.remove(); coordFocusNext = null; return; }
       ensureWAStyle();
       // PO-key store migration runs BEFORE anything reads or writes the store this
       // page-load (autoDetectActioned loads it next line-ish) - see actsMigratePO.
@@ -5205,64 +6663,89 @@
       }
       autoDetectActioned(acts, state);
       var store = actsLoad();
-      // Open steps first (already worst-first from nextActions), done steps sink to the
-      // bottom - a stable partition, so the urgency order is preserved within each group.
-      acts = acts.filter(function (a) { return !(store[a.key] && store[a.key].done); }).concat(acts.filter(function (a) { return store[a.key] && store[a.key].done; }));
-      var open = acts.filter(function (a) { return !(store[a.key] && store[a.key].done); }).length;
-      // "Real" open = open steps excluding the completion anchor. The anchor is never
-      // "done", so it keeps `open` ≥ 1 on any non-terminal WO; realOpen tells us whether
-      // there is actual work left vs. just the "advance the status" gate.
-      var realOpen = acts.filter(function (a) { return !a.anchor && !(store[a.key] && store[a.key].done); }).length;
+      // Feed the waiting/revisit records to the PURE queue layer (the engine and classifier
+      // never touch storage - this is the one read, in the impure render).
+      state.waits = coordWaitsLoad();
+      var C = state.cfg || bwnConfig();
+      var now = Date.now();
+      function isDone(a) { return !!(store[a.key] && store[a.key].done); }
+      // Buckets are built from the OPEN (not-done) actions; done items are shown struck in
+      // Full lifecycle only. classifyCoordinatorAction is pure and done-agnostic.
+      var liveActs = acts.filter(function (a) { return !isDone(a); });
+      // ERROR STATE: if the (pure, tested) queue layer ever throws on odd live data, degrade
+      // honestly to the plain engine list under a warning - never a blank card, and never a
+      // green "nothing needs attention" that is really "we could not tell".
+      var q, qErr = false;
+      try { q = buildCoordinatorQueue(liveActs, state, C, now); } catch (eq) {
+        qErr = true;
+        try { console.warn('[BWN GP] Coordinator Action Queue could not classify this WO; showing the unsorted list', eq); } catch (e) { }
+        q = { doNow: [], moreAttention: [], blocked: [], waiting: [], upcoming: [], fullLifecycle: liveActs,
+          counts: { doNow: 0, moreAttention: 0, blocked: 0, waiting: 0, upcoming: 0, full: liveActs.length }, critical: {} };
+      }
+      var doneClassified = acts.filter(isDone).map(function (a) { try { return classifyCoordinatorAction(a, state, C, now); } catch (e) { return a; } });
+      var fullList = q.fullLifecycle.concat(doneClassified);
+      // Escalation severity handoff fires per classified item regardless of section, so a
+      // supervisor/management escalation parked in Waiting still posts its severity.
+      fullList.forEach(function (c) { try { armAssistDue(c, isDone(c)); } catch (e) { } });
       var collapsed = false;
       try { collapsed = localStorage.getItem('bwn:acts:collapsed') === '1'; } catch (e) { }
       // Documentation-compliance summary (flag-gated; null otherwise). Part of the signature below
       // so the card rebuilds when the score changes (a docs read landing flips checks miss->ok).
       var dc = (BWN_MODULES.docCompliance && state.compliance) ? state.compliance : null;
       var dcSig = dc ? (dc.score + '/' + dc.total + '/' + dc.rulesVersion + '/' + complianceMisses(dc).join(',')) : '';
-      // Live escalation state (render-layer only; see waEscState). Part of the signature
-      // so the strip appears, flips and clears the moment the assist script publishes.
       var escSt = null;
       try { escSt = waEscState(); } catch (e) { }
-      // Signature gate: rebuild only when content or placement actually changed, so
-      // the steady-state refresh loop never re-renders the card under the cursor.
-      var sig = JSON.stringify([collapsed, dcSig, escSt ? escSt.status + '|' + escSt.id + '|' + (escSt.ackAt || '') : '', acts.map(function (a) {
-        var r = store[a.key];
-        // Phase 2 additions to the signature: a tool button appearing when its registrant
-        // comes online (or vanishing when it drops) and a help block toggling are both
-        // real content changes - without them the gate would hold a stale card.
-        var tl = actTool(a);
-        return a.key + '|' + a.label + '|' + (r && r.done ? 1 : 0) + '|' + ((r && r.note) || '') + '|' + (a.nudge || 0) + '|' + ((r && r.reason) || '') +
-          '|' + (tl ? tl.docks.filter(waDockAlive).join(',') : '') + '|' + (actHelpOpen[a.key] ? 1 : 0);
-      })]);
-      if (card && card.isConnected && card.nextElementSibling === row && card.dataset.sig === sig) return;
+      // Read-only open-task attribution (TASK_ROWS / USER_NAMES, filled by fetchTasks). Never
+      // clocks in, completes, reassigns or opens a task to get it.
+      var taskLines = [];
+      try { var tRows = TASK_ROWS[currentWOId()]; if (tRows && tRows.length) taskLines = taskAttrLines(tRows, USER_NAMES); } catch (e) { }
+      var secState = { more: coordSecOpen('more'), blocked: coordSecOpen('blocked'), waiting: coordSecOpen('waiting'), upcoming: coordSecOpen('upcoming'), full: coordSecOpen('full') };
+      var dbg = coordDebugOn();
+      // Signature gate: rebuild only when content, classification, section state, or
+      // placement actually changed, so the steady-state refresh loop never re-renders under
+      // the cursor.
+      var doNowKeys = q.doNow.map(function (c) { return c.key; }).join(',');
+      var moreKeys = q.moreAttention.map(function (c) { return c.key; }).join(',');
+      var sig = JSON.stringify([collapsed, dbg, dcSig, secState, doNowKeys, moreKeys, qErr, taskLines,
+        escSt ? escSt.status + '|' + escSt.id + '|' + (escSt.ackAt || '') : '',
+        fullList.map(function (c) {
+          var r = store[c.key]; var tl = actTool(c);
+          var w = state.waits && state.waits[c.key];
+          return c.key + '|' + c.label + '|' + (r && r.done ? 1 : 0) + '|' + ((r && r.note) || '') + '|' + (c.nudge || 0) + '|' + ((r && r.reason) || '') +
+            '|' + c.ownership + '|' + c.readiness + '|' + c.urgency + '|' + c.friction + '|' + c.coordinatorScore +
+            '|' + (tl ? tl.docks.filter(waDockAlive).join(',') : '') + '|' + (actHelpOpen[c.key] ? 1 : 0) +
+            '|' + (coordWaitForm[c.key] ? 1 : 0) + '|' + (w ? w.revisitAt + w.waitingOn : '');
+        })]);
+      if (card && card.isConnected && card.nextElementSibling === row && card.dataset.sig === sig) { coordFocusNext = null; return; }
+      // Remember which control had focus so the rebuild does not drop a keyboard user to <body>.
+      var fkWas = null;
+      if (card && document.activeElement && card.contains(document.activeElement)) {
+        var fEl = document.activeElement.closest('[data-bwn-fk]');
+        fkWas = fEl ? fEl.getAttribute('data-bwn-fk') : 'hd';
+      }
       if (card) card.remove();
       card = document.createElement('div');
       card.id = ACT_CARD_ID;
       card.className = 'bwn-actc';
       card.dataset.sig = sig;
 
-      var hd = document.createElement('div'); hd.className = 'bwn-actc-hd';
-      hd.setAttribute('role', 'button'); hd.tabIndex = 0;
-      hd.title = collapsed ? 'Expand the checklist' : 'Collapse to one line';
+      var hd = coordFk(document.createElement('button'), 'hd'); hd.type = 'button'; hd.className = 'bwn-actc-hd';
+      hd.setAttribute('aria-expanded', collapsed ? 'false' : 'true');
+      if (!collapsed) hd.setAttribute('aria-controls', 'bwn-act-card-body');
+      hd.title = collapsed ? 'Expand the action queue' : 'Collapse to one line';
       var ht = document.createElement('span'); ht.className = 'bwn-actc-t'; ht.textContent = 'NEXT ACTIONS';
-      var hc = document.createElement('span'); hc.className = 'bwn-actc-n' + (realOpen ? '' : (open ? ' anchor' : ' ok'));
-      // realOpen===0 but the anchor keeps open≥1: no actionable steps remain, but the WO
-      // is NOT complete (that's only terminal, which shows no card). Phase-neutral wording -
-      // the anchor row carries the "not complete until Work Complete/Invoiced/Paid" message,
-      // so this must NOT imply the job is ready to close (it can be mid-lifecycle).
-      hc.textContent = realOpen ? realOpen + ' open' : (open ? 'no open steps' : 'all done ✓');
+      var dn = q.counts.doNow;
+      var more = q.counts.moreAttention;
+      var totalAttn = dn + more;
+      var hc = document.createElement('span'); hc.className = 'bwn-actc-n' + (qErr ? ' bad' : totalAttn ? '' : ' ok');
+      hc.textContent = qErr ? 'queue unavailable' : totalAttn ? totalAttn + ' need' + (totalAttn === 1 ? 's' : '') + ' attention' : 'nothing needs attention';
+      var otherCount = q.counts.blocked + q.counts.waiting + q.counts.upcoming;
       var hs = document.createElement('span'); hs.className = 'bwn-actc-s';
-      // Phase 1: the card is a MERGE now, so claiming one source for the whole list would
-      // mislabel live generated steps as plan items - the exact confusion the merge exists
-      // to fix. A single source is stated only when every step came from the plan; a mixed
-      // card counts each side, and per-row `why` tags carry the individual sources.
-      var nAuth = 0, nGen = 0;
-      acts.forEach(function (a) { if (a.authored) nAuth++; else if (!a.anchor) nGen++; });
-      var planSrcLbl = acts.some(function (a) { return a.authored && String(a.planRef || '').indexOf('dash') === 0; })
-        ? 'the dashboard case file' : 'your Next Actions Required note';
-      hs.textContent = !nAuth ? 'chase → do it → log it as a WO note'
-        : (nGen ? nAuth + ' from ' + planSrcLbl + ' · ' + nGen + ' from the playbook' : 'from ' + planSrcLbl);
-      var hx = document.createElement('span'); hx.className = 'bwn-actc-x'; hx.textContent = collapsed ? '▸' : '▾';
+      // Overflow beyond the DO NOW three is still attention-needed - say so, never "below"/"upcoming".
+      hs.textContent = qErr ? liveActs.length + ' open step' + (liveActs.length === 1 ? '' : 's') + ', unsorted'
+        : more ? (more + ' more requiring attention')
+        : (otherCount ? otherCount + ' more below' : 'everything else is healthy');
+      var hx = document.createElement('span'); hx.className = 'bwn-actc-x'; hx.textContent = collapsed ? '▸' : '▾'; hx.setAttribute('aria-hidden', 'true');
       hd.appendChild(ht); hd.appendChild(hc); hd.appendChild(hs);
       // Documentation-compliance pill: fraction TEXT + a status ICON, colour as reinforcement only
       // (never the sole signal). aria-label enumerates exactly what is missing; role=status so a
@@ -5282,17 +6765,12 @@
         hd.appendChild(dcPill);
       }
       hd.appendChild(hx);
-      function toggleCollapse() {
+      hd.addEventListener('click', function () {
         try { localStorage.setItem('bwn:acts:collapsed', collapsed ? '' : '1'); } catch (e) { }
         renderActsInline(state);
-      }
-      hd.addEventListener('click', toggleCollapse);
-      hd.addEventListener('keydown', function (e) { if (e.key === 'Enter' || e.key === ' ') { e.preventDefault(); toggleCollapse(); } });
+      });
       card.appendChild(hd);
 
-      // The round-trip strip: "Escalated - awaiting mgmt" while the queue holds an
-      // ACTIVE item for this WO. Deliberately outside the collapsed gate - an open
-      // escalation is exactly what a one-line glance is for.
       if (escSt) {
         var esb = document.createElement('div');
         esb.className = 'bwn-act-esc';
@@ -5300,9 +6778,26 @@
         esb.title = 'Live from the assist queue' + (escSt.requester ? ' · requested by ' + escSt.requester : '') + (escSt.reason ? ' · ' + escSt.reason : '') + ' · acknowledge or resolve from the Escalate drawer or the dashboard';
         card.appendChild(esb);
       }
+      if (taskLines.length) {
+        var tsb = document.createElement('div');
+        tsb.className = 'bwn-act-tasks';
+        var tst = document.createElement('div'); tst.className = 'bwn-act-tasks-t';
+        tst.textContent = 'OPEN TASKS (' + taskLines.length + ')';
+        tsb.appendChild(tst);
+        taskLines.forEach(function (ln) { var d = document.createElement('div'); d.textContent = ln; tsb.appendChild(d); });
+        tsb.title = 'Read-only, from the task records on this WO: who created each open task and who it is assigned to.';
+        card.appendChild(tsb);
+      }
 
-      if (!collapsed) {
-        var body = document.createElement('div'); body.className = 'bwn-actc-body';
+      if (!collapsed && qErr) {
+        var ebody = document.createElement('div'); ebody.className = 'bwn-actc-body'; ebody.id = 'bwn-act-card-body';
+        var warn = document.createElement('div'); warn.className = 'bwn-cq-warn'; warn.setAttribute('role', 'status');
+        warn.textContent = 'Could not sort this work order’s steps into a priority queue. Every open step is listed below, unsorted - the checkboxes, Chase, and Actioned still work. Reload the page to retry.';
+        ebody.appendChild(warn);
+        fullList.forEach(function (a) { ebody.appendChild(buildActRow(a, state, store, escSt, { card: false, sec: 'full' })); });
+        card.appendChild(ebody);
+      } else if (!collapsed) {
+        var body = document.createElement('div'); body.className = 'bwn-actc-body'; body.id = 'bwn-act-card-body';
         // Documentation-compliance detail: the exact missing/unread checks, expanded with the card.
         // ponytail: DEFERRED - per-row drop-upload / note-template deep-link shortcuts. The card's
         // existing steps (docs:none, completion-note) already carry the actionable "Copy chase" and
@@ -5328,196 +6823,39 @@
           if (dcU) { var dcUw = document.createElement('div'); dcUw.className = 'bwn-act-why'; dcUw.textContent = dcU + ' check' + (dcU === 1 ? '' : 's') + ' not read yet (open the Documents / Notes tab) - not counted for or against the score.'; dcRow.appendChild(dcUw); }
           body.appendChild(dcRow);
         }
-        acts.forEach(function (a) {
-          if (a.anchor) {
-            // Uncheckable completion gate - a flag + label, no checkbox/buttons. It sits
-            // at the bottom of the open group and can only clear by the status advancing.
-            var ra = document.createElement('div'); ra.className = 'bwn-act-row bwn-act-anchor';
-            var mka = document.createElement('div'); mka.className = 'bwn-act-anchor-mk'; mka.textContent = '⚑';
-            var maa = document.createElement('div'); maa.className = 'bwn-act-main';
-            var lba = document.createElement('div'); lba.className = 'bwn-act-lbl'; lba.textContent = a.label;
-            var wya = document.createElement('div'); wya.className = 'bwn-act-why'; wya.textContent = a.why;
-            maa.appendChild(lba); maa.appendChild(wya);
-            ra.appendChild(mka); ra.appendChild(maa); body.appendChild(ra);
-            return;
+
+        // ---- DO NOW: the coordinator's up-to-3 attention queue, expanded by default ----
+        var dnWrap = document.createElement('div'); dnWrap.className = 'bwn-cq-donow' + (dn ? '' : ' is-clear');
+        var dnHd = document.createElement('div'); dnHd.className = 'bwn-cq-donow-hd';
+        var dnT = document.createElement('span'); dnT.className = 'bwn-cq-donow-t'; dnT.textContent = 'DO NOW';
+        var dnN = document.createElement('span'); dnN.className = 'bwn-cq-donow-n';
+        dnN.textContent = dn ? dn + ' action' + (dn === 1 ? '' : 's') + ' require' + (dn === 1 ? 's' : '') + ' attention' : 'clear';
+        dnHd.appendChild(dnT); dnHd.appendChild(dnN); dnWrap.appendChild(dnHd);
+        if (q.doNow.length) {
+          q.doNow.forEach(function (c, i) { dnWrap.appendChild(buildActRow(c, state, store, escSt, { card: true, sec: 'donow', primary: i === 0 })); });
+        } else {
+          var zero = document.createElement('div'); zero.className = 'bwn-cq-zero';
+          zero.textContent = 'No Coordinator actions require attention right now.';
+          dnWrap.appendChild(zero);
+          if (otherCount) {
+            var zsub = document.createElement('div'); zsub.className = 'bwn-cq-zero-sub';
+            zsub.textContent = 'Everything else is healthy, scheduled, blocked, or waiting on someone else - ' + otherCount + ' item' + (otherCount === 1 ? '' : 's') + ' below.';
+            dnWrap.appendChild(zsub);
           }
-          var rec = store[a.key];
-          var isDone = !!(rec && rec.done);
-          var r = document.createElement('div'); r.className = 'bwn-act-row' + (a.nudge && !isDone ? ' nudge' : '');
-          var cb = document.createElement('input'); cb.type = 'checkbox'; cb.checked = isDone;
-          cb.setAttribute('aria-label', a.label);
-          cb.title = isDone ? 'Uncheck to reopen' : 'Mark done without posting a note';
-          cb.addEventListener('change', function () {
-            if (cb.checked) { actsMarkDone(a, ''); renderActsInline(state); return; }
-            // Unchecking: three cases.
-            //  1. Correcting a wrong AUTO-check → frictionless (never punish fixing the machine).
-            //  2. Dismissing a CRITICAL step → a reason is REQUIRED; it becomes a WO note
-            //     (manual save = Umbrava attribution) and rides to the activity log.
-            //     Empty/cancelled reason = NOT dismissed - the box stays checked.
-            //  3. Anything else → plain reopen, counted in the usage stats.
-            var rec2 = actsLoad()[a.key];
-            if (rec2 && rec2.done && rec2.auto) { actsMarkUndone(a, '', true); renderActsInline(state); return; }
-            // Undo grace: a bare manual check (no note typed) unchecked within 2 minutes
-            // is a misclick correction, not a dismissal - frictionless and NOT a skip.
-            // Without this, Cancel leaves a live critical step falsely "done" and the only
-            // exit fabricates a dismissal + a skip stat for fixing a fat-finger (review).
-            if (rec2 && rec2.done && !rec2.note && rec2.ts && Date.now() - rec2.ts < 120000) { actsMarkUndone(a, '', true); renderActsInline(state); return; }
-            if (actIsCritical(a)) {
-              var why2 = prompt('"' + a.label + '" is a critical step.\nWhy is it being dismissed? (required - this becomes the WO note)', '');
-              if (why2 === null || !why2.trim()) { cb.checked = true; return; }   // not dismissed
-              actsMarkUndone(a, why2.trim());
-              var disNote = 'Dismissed step: ' + a.label + ' - ' + why2.trim();
-              try { navigator.clipboard.writeText(disNote).catch(function () { }); } catch (e2) { }
-              renderActsInline(state);
-              insertWONote(disNote, function () { /* posted manually by the coordinator */ });
-              return;
-            }
-            actsMarkUndone(a, '');
-            renderActsInline(state);
-          });
-          var main = document.createElement('div'); main.className = 'bwn-act-main';
-          var lbl = document.createElement('div'); lbl.className = 'bwn-act-lbl' + (isDone ? ' done' : '');
-          lbl.textContent = a.label;
-          // Phase 2 navigation: the label walks the page to the thing the step is about,
-          // but only where a proven target exists (actNav). Elsewhere it stays plain text.
-          var nav = actNav(a);
-          if (nav) {
-            lbl.className += ' nav';
-            lbl.setAttribute('role', 'button'); lbl.tabIndex = 0;
-            lbl.title = 'Show this on the page';
-            lbl.addEventListener('click', function () { actNavGo(nav); });
-            lbl.addEventListener('keydown', function (ev) { if (ev.key === 'Enter' || ev.key === ' ') { ev.preventDefault(); actNavGo(nav); } });
-          }
-          // Phase 2 training layer: "?" opens three static lines explaining the step.
-          var helpTxt = actHelp(a);
-          if (helpTxt) {
-            var ht = document.createElement('button');
-            ht.type = 'button'; ht.className = 'bwn-act-help-t'; ht.textContent = '?';
-            ht.title = 'What this step means, where to do it, and what done looks like';
-            ht.setAttribute('aria-expanded', actHelpOpen[a.key] ? 'true' : 'false');
-            ht.addEventListener('click', function (ev) {
-              ev.stopPropagation();   // the label may itself be a nav control
-              if (actHelpOpen[a.key]) delete actHelpOpen[a.key]; else actHelpOpen[a.key] = 1;
-              renderActsInline(state);
-            });
-            lbl.appendChild(ht);
-          }
-          var why = document.createElement('div'); why.className = 'bwn-act-why'; why.textContent = a.why;
-          main.appendChild(lbl); main.appendChild(why);
-          if (helpTxt && actHelpOpen[a.key]) {
-            var hbx = document.createElement('div'); hbx.className = 'bwn-act-help';
-            for (var hi = 0; hi < ACT_HELP_PFX.length; hi++) {
-              var hln = document.createElement('div');
-              hln.textContent = ACT_HELP_PFX[hi] + helpTxt[hi];
-              hbx.appendChild(hln);
-            }
-            main.appendChild(hbx);
-          }
-          // A dismissed-with-reason step stays OPEN and shows its logged reason - the
-          // dismissal is visible and reversible, never a silent deletion.
-          if (!isDone && rec && rec.dismissed && rec.reason) {
-            var dis = document.createElement('div'); dis.className = 'bwn-act-dis';
-            var dd = new Date(rec.dismissed);
-            dis.textContent = '✗ dismissed ' + (dd.getMonth() + 1) + '/' + dd.getDate() + ': ' + rec.reason;
-            main.appendChild(dis);
-          }
-          if (isDone && rec.note) {
-            var lg = document.createElement('div'); lg.className = 'bwn-act-log';
-            var d = new Date(rec.ts || Date.now());
-            lg.textContent = '✓ ' + (d.getMonth() + 1) + '/' + d.getDate() + ' - ' + rec.note;
-            main.appendChild(lg);
-          }
-          var btns = document.createElement('div'); btns.className = 'bwn-act-btns';
-          armAssistDue(a, isDone);
-          // Phase 2 tool launch - rendered only while the owning dock registrant is live,
-          // so this is never a dead control. The click is the same bwn:dock:open the rail
-          // itself emits, so the tool opens exactly as if launched from the dock. A step
-          // can map to more than one tool (recruit = Dispatch OR Email RFP); each button
-          // gates on its OWN registrant, so only installed-and-live tools render.
-          var tool = actTool(a);
-          if (tool && !isDone) {
-            tool.docks.forEach(function (dk) {
-              if (!waDockAlive(dk)) return;
-              var tb = document.createElement('button');
-              tb.type = 'button'; tb.className = 'bwn-wa-btn ghost'; tb.textContent = waEscToolLabel(dk, escSt);
-              tb.style.cssText = 'padding:3px 9px;font-size:10px;';
-              tb.title = (dk === 'assist' && escSt)
-                ? 'An escalation is already open on this work order - view, acknowledge or resolve it'
-                : 'Open the ' + (ACT_TOOL_LABEL[dk] || 'tool').replace(/…$/, '') + ' drawer for this work order';
-              tb.addEventListener('click', function () {
-                try { document.dispatchEvent(new CustomEvent('bwn:evt', { detail: { id: 'bwn:dock:open', key: dk } })); } catch (e) { }
-              });
-              btns.appendChild(tb);
-            });
-          }
-          if (a.text) {
-            var cp = document.createElement('button');
-            cp.type = 'button'; cp.className = 'bwn-wa-btn ghost'; cp.textContent = 'Chase';
-            cp.style.cssText = 'padding:3px 9px;font-size:10px;';
-            cp.title = a.text;
-            cp.addEventListener('click', function () {
-              navigator.clipboard.writeText(a.text).then(function () {
-                cp.textContent = 'Copied ✓';
-                setTimeout(function () { cp.textContent = 'Chase'; }, 1500);
-              }, function () { prompt('Copy manually:', a.text); });
-            });
-            btns.appendChild(cp);
-          }
-          var ab = document.createElement('button');
-          ab.type = 'button'; ab.className = 'bwn-wa-btn primary'; ab.textContent = isDone ? 'Re-log' : 'Actioned…';
-          ab.style.cssText = 'padding:3px 9px;font-size:10px;';
-          ab.title = 'Log what you did - prefills a WO note for you to review and post';
-          ab.addEventListener('click', function () {
-            var typed = prompt('What did you do? (one line - becomes the WO note)\n\n' + a.label, '');
-            if (typed === null) return;
-            var noteText = a.label + (typed.trim() ? ' - ' + typed.trim() : '');
-            actsMarkDone(a, typed.trim());
-            renderActsInline(state);
-            // Silent clipboard backup first: some rich editors re-render from their own
-            // state and swallow programmatic text - paste is then the instant recovery.
-            try { navigator.clipboard.writeText(noteText).catch(function () { }); } catch (e) { }
-            // ECD-related actions log an internal audit note - default the type to Internal.
-            // The client-cadence step IS a client-facing update - default it to Client so the
-            // posted note both reads correctly AND resets lastClientNoteDays (self-converges).
-            var actNoteType = (a.openEcd || /^ecd/.test(a.key || '')) ? 'Internal'
-              : /^clientcad/.test(a.key || '') ? 'Client' : undefined;
-            insertWONote(noteText, function () { /* posted manually by the coordinator */ }, actNoteType);
-          });
-          btns.appendChild(ab);
-          if (a.openEcd) {
-            var eb = document.createElement('button');
-            eb.type = 'button'; eb.className = 'bwn-wa-btn ghost'; eb.textContent = 'Set ECD…';
-            eb.style.cssText = 'padding:3px 9px;font-size:10px;';
-            eb.title = 'Propose + set the expected completion date, and draft the client note';
-            eb.addEventListener('click', function () { ecdHelperOpen(state); });
-            btns.appendChild(eb);
-          }
-          // Guided-WRITE buttons - gated by BWN_MODULES.woAssistWrites (shipping default OFF).
-          // The flag hides the UI; the mutations still pass feature:'woAssist' to bwnGqlOp, so
-          // Core's kill switch + audit gate governs the write even if a button ever leaked in.
-          if (BWN_MODULES.woAssistWrites) {
-            // "Create task…" - on every non-anchor act row (spin a follow-up off any next action).
-            (function (act) {
-              var tkb = document.createElement('button');
-              tkb.type = 'button'; tkb.className = 'bwn-wa-btn ghost'; tkb.textContent = 'Create task…';
-              tkb.style.cssText = 'padding:3px 9px;font-size:10px;';
-              tkb.title = 'Create a follow-up task on this work order (assigned to the coordinator)';
-              tkb.addEventListener('click', function () { taskHelperOpen(state, act); });
-              btns.appendChild(tkb);
-              // "Change status…" - only on the advance-to-complete gate + the phase-chase rows.
-              if (act.key === 'advance:workcomplete' || act.key.indexOf('phase:') === 0) {
-                var csb = document.createElement('button');
-                csb.type = 'button'; csb.className = 'bwn-wa-btn ghost'; csb.textContent = 'Change status…';
-                csb.style.cssText = 'padding:3px 9px;font-size:10px;';
-                csb.title = 'Change this work order’s status (guided, logged, typed confirm)';
-                csb.addEventListener('click', function () { statusHelperOpen(state, act); });
-                btns.appendChild(csb);
-              }
-            })(a);
-          }
-          r.appendChild(cb); r.appendChild(main); r.appendChild(btns);
-          body.appendChild(r);
-        });
+        }
+        body.appendChild(dnWrap);
+
+        // ---- Collapsed secondary sections (deterministic precedence order) ----
+        // More requiring attention: the DO NOW overflow. SAME classification and SAME
+        // interactive cards as DO NOW (never called Upcoming) - just collapsed by default.
+        if (q.moreAttention.length) body.appendChild(buildCoordSection('more', 'More requiring attention', q.moreAttention, q.critical.moreAttention, function (a) { return buildActRow(a, state, store, escSt, { card: true, sec: 'more' }); }, state));
+        if (q.blocked.length) body.appendChild(buildCoordSection('blocked', 'Blocked', q.blocked, q.critical.blocked, function (a) { return buildCompactRow(a, state, 'blocked'); }, state));
+        if (q.waiting.length) body.appendChild(buildCoordSection('waiting', 'Waiting on others', q.waiting, q.critical.waiting, function (a) { return buildCompactRow(a, state, 'waiting'); }, state));
+        if (q.upcoming.length) body.appendChild(buildCoordSection('upcoming', 'Upcoming', q.upcoming, false, function (a) { return buildCompactRow(a, state, 'upcoming'); }, state));
+        // Full lifecycle: the complete generated list (open + done + anchor), fully
+        // interactive - the power-user / debugging reference surface. Never styled like DO NOW.
+        body.appendChild(buildCoordSection('full', 'Full lifecycle', fullList, false, function (a) { return buildActRow(a, state, store, escSt, { card: false, sec: 'full' }); }, state));
+
         var meta = document.createElement('div'); meta.className = 'bwn-wa-meta';
         meta.textContent = 'Auto-updates with the WO - steps clear when the job state resolves them or a note logs them; the posted note is the real record.';
         body.appendChild(meta);
@@ -5525,6 +6863,13 @@
       }
 
       row.parentNode.insertBefore(card, row);
+      // Put focus back where it was (or where the action said it should go), else the header.
+      var fkGo = coordFocusNext || fkWas; coordFocusNext = null;
+      if (fkGo) {
+        var fTo = null, fAll = card.querySelectorAll('[data-bwn-fk]');
+        for (var fi = 0; fi < fAll.length && !fTo; fi++) if (fAll[fi].getAttribute('data-bwn-fk') === fkGo) fTo = fAll[fi];
+        try { (fTo || hd).focus({ preventScroll: true }); } catch (e) { }
+      }
     }
 
     // ---- ECD helper: propose + set the expected-completion date ---------------
@@ -5532,15 +6877,17 @@
     // the best available signal - the latest FUTURE PO scheduled date, else a noted
     // ETA (same ETA-word+date heuristic etaStatus uses), else the 2nd upcoming
     // Friday - and let the coordinator confirm + capture the reason. On Apply it
-    // TYPES the date into the WO's own field (never clicks a separate Save - Umbrava
-    // persists per its normal flow) and prefills a client-facing note for manual
-    // posting. (Scheduled-trip reading is a future add, pending a Trips-tab recon.)
-    var ECD_FIELD = 'work-order-expected-completion-date-picker';
+    // PATCHES the date through the audited API (waEcdSubmit; Umbrava's rebuilt form has no
+    // Save button and no header input to type into) and prefills a client-facing note for
+    // manual posting. The page does not re-render from that patch, so the write leaves the
+    // ecdEcho record dueStatus reads. (Scheduled-trip reading is a future add, pending a
+    // Trips-tab recon.)
+    var ECD_FIELD = 'priority.expectedCompletionDate';   // a form field NAME now, not a testid - see woFieldInput
     function ecdToday() { var d = new Date(); return new Date(d.getFullYear(), d.getMonth(), d.getDate()).getTime(); }
     function ecdSecondFriday() { var d = new Date(); d.setHours(0, 0, 0, 0); var add = (5 - d.getDay() + 7) % 7; if (add === 0) add = 7; d.setDate(d.getDate() + add + 7); return d; }   // upcoming Friday + 1 week
     function ecdFmtUS(dt) { var p = function (n) { return (n < 10 ? '0' : '') + n; }; return p(dt.getMonth() + 1) + '/' + p(dt.getDate()) + '/' + dt.getFullYear(); }   // MM/DD/YYYY - mask-safe for the picker
     function ecdFmtISO(dt) { var p = function (n) { return (n < 10 ? '0' : '') + n; }; return dt.getFullYear() + '-' + p(dt.getMonth() + 1) + '-' + p(dt.getDate()); }
-    function ecdFieldInput() { var el = document.querySelector('[data-testid="' + ECD_FIELD + '"]'); if (!el) return null; return el.tagName === 'INPUT' ? el : el.querySelector('input'); }
+    function ecdFieldInput() { return woFieldInput(ECD_FIELD); }
     // CFG.ETA_WORDS is the watchdog's vocabulary and it is about a vendor ARRIVING. A
     // completion promise is written in different words - "ECD 8/20", "complete by 8/20",
     // "done by Friday" - and those notes are precisely what a coordinator means when they
@@ -5548,16 +6895,48 @@
     // watchdog's own judgement is untouched. Deliberately NOT bare "complete"/"completed":
     // "work completed 7/15" is a past-tense record, not a promise.
     var ECD_NOTE_WORDS = /\becd\b|\bcomplet(?:e|ed|ion)\s+(?:by|date)\b|\bfinish(?:ed)?\s+by\b|\bdone\s+by\b/i;
+    // A bare hyphenated pair is a RANGE, not a date - measured on W-386564 (2026-09-03), where a
+    // note containing "1-5" produced a proposal of 2027-01-05: CFG.DATE_RE accepts `-` as a date
+    // separator, so "1-5" read as January 5, and parseBodyDate then resolved that yearless date
+    // FORWARD from the note into the next year. Four months out, off a note that never mentioned
+    // a completion date, offered to a coordinator one click from Apply.
+    //
+    // Scoped deliberately to this function, which proposeECD is the only caller of. CFG.DATE_RE
+    // and parseBodyDate are SHARED with the ETA watchdog and are left exactly as they are - the
+    // watchdog's judgement is not this fix's business.
+    //
+    // Kept intact: a hyphen inside a longer run of digits and dashes, so an ISO "2026-09-03" and
+    // its "09-03" fragment still parse. The trade is that a completion date written "9-15" is no
+    // longer read as a date here; that form did not appear once in the 130-note history measured,
+    // and losing it costs the fallback (the 2nd upcoming Friday) rather than a wrong date.
+    function ecdDropHyphenRanges(body) {
+      return String(body == null ? '' : body).replace(/\d{1,2}-\d{1,2}/g, function (m, off, s) {
+        var before = off > 0 ? s.charAt(off - 1) : '';
+        var after = s.charAt(off + m.length);
+        if (/[\d-]/.test(before) || /[-\d]/.test(after)) return m;   // part of a longer date/range chain
+        return ' ';
+      });
+    }
     function latestNotedEta(state) {
       var notes = getNotes(), today = ecdToday(), best = null;
       for (var i = 0; i < notes.length; i++) {
-        var b = notes[i].body || '';
-        if (!((CFG.ETA_WORDS.test(b) || ECD_NOTE_WORDS.test(b)) && CFG.DATE_RE.test(b))) continue;
+        var raw = notes[i].body || '';
+        // Word tests run on the ORIGINAL text (stripping cannot add or remove ETA vocabulary);
+        // every DATE decision below runs on the stripped copy.
+        var b = ecdDropHyphenRanges(raw);
+        if (!((CFG.ETA_WORDS.test(raw) || ECD_NOTE_WORDS.test(raw)) && CFG.DATE_RE.test(b))) continue;
         // parseBodyDate (NOT the note-timestamp parser): scans ALL dates in the body,
         // takes the latest, and resolves a yearless "7/15" FORWARD relative to the
         // note - an ETA is a future promise, so bare M/D must look forward, not back.
         // API notes carry an exact epoch (tsAbs); scraped ones only a rendered string.
         var when = (notes[i].tsAbs != null) ? notes[i].tsAbs : parseNoteDate(notes[i].ts);
+        // No anchor, no yearless promise. When a note carries no resolvable timestamp
+        // (a pinned/removed note renders "Pinned" not a date, so tsAbs is null AND the
+        // ts text won't parse), parseBodyDate falls back to anchoring on TODAY and
+        // forward-projects a bare M/D into the next year - "ECD 4/26" became 4/26/2027
+        // (user-reported, off a removed pinned note). A promise you can't date can't be
+        // resolved; drop it and let the PO/trip signals or the 2nd-Friday fallback stand.
+        if (when == null) continue;
         var dm = parseBodyDate(b, when);
         if (dm === null || dm < today) continue;   // forward-looking ETAs only - a blown promise isn't a completion date
         // The note written LAST is the promise that stands. Ranking by furthest-future
@@ -5592,15 +6971,6 @@
       if (cands.length) { cands.sort(function (a, b) { return b.ms - a.ms; }); return { date: new Date(cands[0].ms), from: 'signal', why: cands[0].why, noteCount: meta.noteCount, noteSrc: meta.noteSrc, noteSrcLabel: meta.noteSrcLabel }; }   // latest of trip/PO/ETA = complete-by ≥ last scheduled work
       return { date: ecdSecondFriday(), from: 'default', why: 'no scheduled trip, PO date, or noted completion date - defaulted to the 2nd upcoming Friday', noteCount: meta.noteCount, noteSrc: meta.noteSrc, noteSrcLabel: meta.noteSrcLabel };
     }
-    // True when the WO already carries the ETA info the helper would ask for - used
-    // to SUPPRESS the auto-pop (don't nag when a PO date or a noted ETA is on file).
-    function ecdHasEtaSignal(state) {
-      if (state.pos.some(function (p) { return !p.done && p.amount > 0 && p.schedDate; })) return true;
-      if (latestNotedEta(state)) return true;
-      try { var tb = BWN.ssGetJSON('bwn:trips:' + currentWOId(), null); if (tb && tb.latestScheduled && tb.latestScheduled >= ecdToday()) return true; } catch (e) { }
-      return false;
-    }
-
     function ensureEcdStyle() {
       if (document.getElementById('bwn-ecd-style')) return;
       var st = document.createElement('style'); st.id = 'bwn-ecd-style';
@@ -5637,68 +7007,23 @@
         // VENDOR button and can move anything absolutely positioned inside it. Two 420ms passes
         // repainting one small button is the cheaper risk. Do not extend this pattern to
         // anything larger or more frequent.
-        '@keyframes bwnEcdPulse{from{box-shadow:0 0 0 0 rgba(46,160,90,.75);}to{box-shadow:0 0 0 9px rgba(46,160,90,0);}}' +
-        '.bwn-ecd-savepulse{animation:bwnEcdPulse .42s cubic-bezier(.23,1,.32,1) 2;outline:2px solid var(--bwn-green)!important;outline-offset:2px;border-radius:6px;}' +
-        '@media (prefers-reduced-motion:reduce){.bwn-ecd-savepulse{animation:none;}}';
       document.head.appendChild(st);
     }
 
-    // The WO header's Save (submit) button - persisting an edited Complete-By date
-    // requires clicking it (Umbrava does NOT autosave the field on blur, verified
-    // 2026-07-13). Scoped to the header wrapper; prefer the submit button, fall back
-    // to text so a markup tweak can't blind it.
-    function ecdSaveButton() {
-      var scope = document.querySelector('[data-testid="work-order-header-wrapper"]') || document;
-      var subs = scope.querySelectorAll('button[type="submit"]');
-      for (var i = 0; i < subs.length; i++) { if (/^\s*save\s*$/i.test(subs[i].textContent || '')) return subs[i]; }
-      var all = scope.querySelectorAll('button');
-      for (var j = 0; j < all.length; j++) { if (/^\s*save\s*$/i.test(all[j].textContent || '')) return all[j]; }
-      return null;
-    }
-    function ecdPulse(el) {
-      try { el.classList.add('bwn-ecd-savepulse'); setTimeout(function () { try { el.classList.remove('bwn-ecd-savepulse'); } catch (e) { } }, 5500); } catch (e2) { }
-    }
     // Dismissible, non-blocking toast (the module has no shared toast - the reminders
-    // module's is out of scope). Optional Save button gets a "Show Save" jump.
-    function ecdToast(msg, saveBtn) {
-      // Routed through the unified BWN.toast (Task 2). Extra preserved: the "Show Save"
-      // button that scrolls to + pulses the WO-header Save. id keeps it single-instance
-      // (a follow-up toast replaces the prior one, as the old getElementById did).
-      var opts = { id: 'ecd', timeout: 16000 };
-      if (saveBtn) opts.action = { label: 'Show Save', onClick: function () { try { saveBtn.scrollIntoView({ block: 'center', behavior: 'smooth' }); } catch (e) { } ecdPulse(saveBtn); } };
-      BWN.toast('success', msg, opts);
+    // module's is out of scope). The old "Show Save" action went with the Save button:
+    // Umbrava's rebuilt WO form has none, and the write no longer touches the page.
+    // id keeps it single-instance, so a follow-up toast replaces the prior one.
+    function ecdToast(msg, sev) {
+      BWN.toast(sev || 'success', msg, { id: 'ecd', timeout: 16000 });
     }
-    // Auto-persist (coordinator opted in 2026-07-13): Umbrava doesn't autosave the
-    // Complete-By field on blur, so click the WO header Save ourselves. React marks the
-    // header form dirty a tick after the write, so give it a moment then poll for the
-    // Save button to enable. If it never does, fall back to pointing them at Save
-    // (with pulse) so the filled date is never silently lost.
-    function ecdFlagSave(usDT) {
-      var tries = 0;
-      function poll() {
-        var save = ecdSaveButton();
-        if (save && !save.disabled && save.offsetWidth > 0) {
-          try { save.click(); ecdToast('Completion date saved: ' + usDT + '.', null); }
-          catch (e) { ecdToast('Completion date filled: ' + usDT + ' - click “Save” in the WO header to persist it.', save); if (save) ecdPulse(save); }
-          return;
-        }
-        if (++tries > 16) {   // ~4s: Save never enabled - hand it back to the coordinator
-          ecdToast('Completion date filled: ' + usDT + ' - click “Save” in the WO header to persist it.' + (save ? '' : ' (Save button not found on this view.)'), save);
-          if (save) ecdPulse(save);
-          return;
-        }
-        setTimeout(poll, 250);
-      }
-      setTimeout(poll, 200);   // let React commit the write before reading Save's state
-    }
-
     function ecdHelperOpen(state) {
       if (!onWO() || !currentWOId()) { alert('Open a work order to set its expected completion date.'); return; }
       fetchNotesApi(currentWOId());   // no-op if the engine already warmed it; arms the re-propose below otherwise
       ensureEcdStyle();
       var old = document.getElementById('bwn-ecd-overlay'); if (old) old.remove();
       var prop = proposeECD(state);
-      var curRaw = inputVal(ECD_FIELD);
+      var curRaw = woFieldVal(ECD_FIELD);
       var ov = document.createElement('div'); ov.id = 'bwn-ecd-overlay';
       var card = document.createElement('div'); card.className = 'bwn-ecd';
       var releaseA11y = null;
@@ -5746,30 +7071,46 @@
       card.appendChild(body);
 
       var ft = document.createElement('div'); ft.className = 'bwn-ecd-ft';
-      var note = document.createElement('span'); note.className = 'sp'; note.textContent = 'Fills the date and saves it to the WO for you.'; ft.appendChild(note);
+      var note = document.createElement('span'); note.className = 'sp'; note.textContent = 'Writes the date to the WO record, then drafts the note.'; ft.appendChild(note);
       var apply = document.createElement('button'); apply.type = 'button'; apply.className = 'pri'; apply.textContent = 'Apply + draft note';
       apply.addEventListener('click', function () {
         var iso = di.value; if (!iso) { alert('Pick a date.'); return; }
-        var pp = iso.split('-'); var dt = new Date(parseInt(pp[0], 10), parseInt(pp[1], 10) - 1, parseInt(pp[2], 10));
+        var pp = iso.split('-');
+        // 11:59 PM LOCAL on the chosen day, which is what the SPA stores: the field showing
+        // "08/07/2026, 11:59 PM" reads back as 2026-08-08T03:59:00Z. Building the instant the
+        // same way keeps the no-op comparison in waSetEcd honest.
+        var dt = new Date(parseInt(pp[0], 10), parseInt(pp[1], 10) - 1, parseInt(pp[2], 10), 23, 59, 0);
         if (isNaN(dt.getTime())) { alert('That date is not valid.'); return; }
-        // The Complete-By field is a DATETIME (e.g. "07/01/2026, 11:59 PM") - a bare
-        // date is rejected. Always stamp 11:59 PM (end of the target day).
-        var us = ecdFmtUS(dt), usDT = us + ', 11:59 PM';
-        var f = ecdFieldInput();
-        var wrote = false;
-        if (f) { try { BWN.setNativeValue(f, usDT); f.dispatchEvent(new Event('blur', { bubbles: true })); wrote = true; } catch (e) { } }
-        try { navigator.clipboard.writeText(usDT).catch(function () { }); } catch (e) { }   // backup if the picker rejects the typed value
-        ingestPush('ecd-set', usDT);   // connector: log the ECD set (drained + POSTed by the AI script)
+        var usDT = ecdFmtUS(dt) + ', 11:59 PM';       // display + note wording only
+        var woNum = currentWOId();
+        if (!woNum) { ecdToast('Could not tell which work order this is - the date was NOT written.', 'error'); return; }
         var reason = ri.value.trim();
         var noteText = 'Expected completion date set to ' + usDT + '.' + (reason ? ' ' + reason : '') + (state.status ? ' Current status: ' + state.status + '.' : '');
-        close();
-        // Umbrava no longer persists the Complete-By field on blur - it needs the WO
-        // header Save. Per the coordinator's choice we DON'T auto-submit; instead point
-        // them straight at Save so the filled date can't silently revert (verified: a
-        // write+blur without Save reverts on reload).
-        if (wrote) ecdFlagSave(usDT); else ecdToast('Couldn’t find the Complete-By field to fill - set it manually in the WO header.', null);
-        // ECD notes are internal audit records - label the composer's note type accordingly.
-        insertWONote(noteText, function () { /* posted manually by the coordinator */ }, 'Internal');
+        // The write goes through the API now, not the page. Umbrava's rebuilt form has no Save
+        // button to click and its header holds no input to fill, so patchWorkOrder is the only
+        // path that still persists this - and it cannot half-apply the way fill-without-Save did.
+        waEcdSubmit(apply, woNum, dt.toISOString(), {
+          ok: function () {
+            close();
+            ingestPush('ecd-set', usDT);   // connector: log the ECD set (drained + POSTed by the AI script)
+            ecdToast('Expected completion date set to ' + usDT + '.');
+            // ECD notes are internal audit records - label the composer's note type accordingly.
+            insertWONote(noteText, function () { /* posted manually by the coordinator */ }, 'Internal');
+            refresh();   // the header's "days left" is derived from the ECD - recompute it
+          },
+          noop: function () {
+            close();
+            ecdToast('That is already the expected completion date - nothing was written.');
+          },
+          fail: function (e) {
+            // Stay OPEN on failure so the typed reason is not lost, and say what actually
+            // happened: a missing Umbrava permission is not a transient error to retry.
+            var msg = (e && e.bwnPermissionDenied)
+              ? 'Umbrava does not allow you to change the completion date on this work order, so nothing was written.'
+              : 'The expected completion date was NOT written: ' + ((e && e.message) || 'the request failed') + '.';
+            ecdToast(msg, 'error');
+          }
+        });
       });
       var cancel = document.createElement('button'); cancel.type = 'button'; cancel.textContent = 'Cancel'; cancel.addEventListener('click', close);
       ft.appendChild(apply); ft.appendChild(cancel); card.appendChild(ft);
@@ -5866,6 +7207,89 @@
         return r;
       }, function (e) {
         btn.disabled = false;
+        if (hooks.fail) hooks.fail(e);
+        throw e;
+      });
+    }
+    // B3 - SET ECD via patchWorkOrder, replacing the old type-into-the-picker + click-Save path.
+    // Umbrava rebuilt the WO form (2026-09-03): the header carries no inputs and there is no
+    // button reading "Save" anywhere on the details route, so the DOM writer's two halves - fill
+    // the field, then point the coordinator at Save - both lost their target. The API does not
+    // depend on either, and it is the same field the DOM now names `priority.expectedCompletionDate`.
+    //
+    // patchWorkOrder REPLACES the whole `priority` object, so every sibling field must be copied
+    // back or Umbrava blanks it. priorityWriteValue + WA_ECD_WO_Q are copied VERBATIM from
+    // bwn-dispatch.user.js (wire-proven 2026-08-12) - the read's `hasPriorityOverride` maps onto
+    // the input's `hasOverridePriority`, forced true because a hand-set ECD IS an override.
+    // ponytail: this is the third verbatim copy of the same 20 lines (bwn-write-queue, Core's
+    // bulk console, here). Fold all three into one shared-scope helper when a fourth caller
+    // appears - not sooner: the bulk console sits in a different bwnBoot closure that ships
+    // flag-OFF, so hoisting today would mean editing a sentinel region two harnesses slice.
+    var WA_ECD_WO_Q = 'query($n:Int!){ workOrder(workOrderNumber:$n){ serviceLevelAgreementId priority{ label responseMinutes firstTripDate serviceLevelAgreementMinutes expirationMinutes expectedCompletionDate hasPriorityOverride category skipWeekends } } }';
+    function waNum(v) { var n = Number(v); return isFinite(n) ? n : null; }
+    function waPriorityWriteValue(readPriority, newEcd) {
+      var p = readPriority || {};
+      return {
+        label: (p.label == null ? null : String(p.label)),
+        responseMinutes: waNum(p.responseMinutes),
+        firstTripDate: (p.firstTripDate == null ? null : String(p.firstTripDate)),
+        serviceLevelAgreementMinutes: waNum(p.serviceLevelAgreementMinutes),
+        expirationMinutes: waNum(p.expirationMinutes),
+        expectedCompletionDate: newEcd,
+        hasOverridePriority: true,
+        category: (p.category == null ? null : String(p.category)),
+        skipWeekends: !!p.skipWeekends
+      };
+    }
+    // newEcd is an ISO instant. Reads the WO first (the sibling priority fields are not on the
+    // page any more, and guessing them would blank real SLA data), no-ops when the stored ECD is
+    // already that calendar day, then sends ONE atomic patch.
+    function waSetEcd(woNumber, newEcd) {
+      var wo = Number(woNumber);
+      return bwnGqlOp('workOrder', WA_ECD_WO_Q, { n: wo }, { feature: 'woAssist' }).then(function (rd) {
+        var rec = rd && rd.workOrder;
+        if (!rec) { var e = new Error('W-' + wo + ' could not be read, so the ECD was NOT written'); e.bwnNonTransient = true; throw e; }
+        var oldEcd = rec.priority && rec.priority.expectedCompletionDate;
+        // Same-day = nothing to change. A high-risk write that alters nothing is pure downside.
+        if (oldEcd && String(oldEcd).slice(0, 10) === String(newEcd).slice(0, 10)) {
+          return { noop: true, before: oldEcd, after: newEcd };
+        }
+        var data = { workOrderNumber: wo, priority: { shouldInclude: true, value: waPriorityWriteValue(rec.priority, newEcd) } };
+        // Bundled by the SPA on a real ECD edit, but ONLY when the WO carries one.
+        if (rec.serviceLevelAgreementId) data.serviceLevelAgreementId = { shouldInclude: true, value: rec.serviceLevelAgreementId };
+        return bwnGqlOp('patchWorkOrder', PATCH_M, { data: data }, {
+          confirmed: true,
+          feature: 'woAssist',
+          validate: function (v) {
+            var d = v && v.data || {};
+            if (!d.workOrderNumber) return 'no WO number';
+            if (!(d.priority && d.priority.value && d.priority.value.expectedCompletionDate)) return 'no expected completion date';
+            return true;
+          },
+          ids: { wo: wo },
+          current: { ecd: oldEcd || null }, proposed: { ecd: newEcd }, irreversible: true,
+          before: { ecd: oldEcd || null }, after: { ecd: newEcd }
+        }).then(function () {
+          // Leave the echo dueStatus reads (see ecdEcho): the page keeps showing oldEcd until a
+          // reload, and without this the WO stays "overdue" and re-pops its own auto-prompt.
+          try { BWN.ssSetJSON('bwn:ecdset:' + wo, { v: 1, ts: Date.now(), before: oldEcd || null, after: newEcd }); } catch (e) { }
+          return { noop: false, before: oldEcd || null, after: newEcd };
+        });
+      });
+    }
+    // Re-entry-guarded ECD set, same shape as waTaskSubmit / waStatusSubmit: the first click
+    // disables the button before the write lands, a failure re-enables it so the coordinator can
+    // retry, and the hooks let the dialog observe the outcome without this function touching DOM.
+    function waEcdSubmit(btn, woNumber, newEcd, hooks) {
+      hooks = hooks || {};
+      if (btn && btn.disabled) return null;
+      if (btn) btn.disabled = true;
+      return waSetEcd(woNumber, newEcd).then(function (r) {
+        if (r && r.noop) { if (hooks.noop) hooks.noop(r); return r; }
+        if (hooks.ok) hooks.ok(r);
+        return r;
+      }, function (e) {
+        if (btn) btn.disabled = false;
         if (hooks.fail) hooks.fail(e);
         throw e;
       });
@@ -6088,7 +7512,16 @@
       if (!missingOrPast) return;
       var hasActivePO = state.pos.some(function (p) { return !p.done && p.amount > 0; });
       if (!state.due && !hasActivePO) return;   // no ECD and no active work → nothing to target yet
-      if (ecdHasEtaSignal(state)) return;        // ETA is on file → the ecd action + "Set ECD…" button cover it without a popup
+      // NO signal suppressor. Until 1.81.1 this returned early whenever the WO carried a PO
+      // scheduled date, a noted ETA, or a cached scheduled trip - "an ETA is on file, don't
+      // nag". That was backwards: those three signals are exactly what proposeECD ranks a
+      // real date from, so suppressing on them left the auto-pop able to fire ONLY when it
+      // had nothing to propose but the fallback 2nd-upcoming-Friday, and silent on every WO
+      // where it had something useful to say. The signal sources accumulated over time (the
+      // trips cache, then PO schedDate capture), so the popup went quiet by degrees rather
+      // than in one commit. An overdue or empty ECD is a wrong record whether or not a date
+      // is promised somewhere - the promise is the proposal, not a reason to stay silent.
+      // Volume is held by the once-per-WO `ecdAutoShownFor` guard, not by this.
       // Defer while an Umbrava modal is open (Create WO / Vendor / Build Requests, etc.): the
       // ECD overlay would sit on top and block it. Do NOT burn the once-per-WO guard - the
       // refresh loop re-checks, so the popup opens once the modal closes.
@@ -6587,10 +8020,11 @@
         var _pl = document.getElementById(PILL_ID); if (_pl) _pl.remove();
         var _pn = document.getElementById(PANEL_ID); if (_pn) _pn.remove();
       }
-      renderActsInline(st);
+      if (BWN_MODULES.actsCard) renderActsInline(st);
+      else { var _ac = document.getElementById(ACT_CARD_ID); if (_ac) _ac.remove(); }
       try { renderPOGroups(); } catch (e) { /* PO grouping is best-effort - never break the engine */ }
-      maybeAutoECD(st);
-      maybePreflight(st);
+      if (BWN_MODULES.ecdPrompt) maybeAutoECD(st);
+      if (BWN_MODULES.closePreflight) maybePreflight(st);
       BWN.beat('woAssist', 'ok', 'pill active');
       // Publish the canonical WO state for the rest of the suite. This one REPLACES: it carries
       // every identity field as well, so it stays authoritative over the early patch above -
@@ -6604,6 +8038,10 @@
           client: hd.client || '', addr: hd.addr || '',
           coordinator: hd.coordinator || '', sourceJob: hd.sourceJob || '', sourcePo: hd.sourcePo || '',
           status: st.status, hrs: st.hrs,
+          // Client tenant GUID from the WorkOrderHeader API read (never the header name text) -
+          // bwn-notes keys its client-scoped (Tesla/Crocs signoff) templates on this. Blank until
+          // the async read lands; the next refresh republishes it.
+          clientId: (st.woApi && st.woApi.clientId) || '',
           // bwn-wo-assist prefills its escalation POST from bus.priority / bus.trade - the
           // drawer read these keys from day one, but the publish never carried them, so the
           // first live escalation (W-371126, 2026-08-03) rendered '-' for both.
@@ -6640,7 +8078,16 @@
         var acn = document.getElementById(ACT_CARD_ID); if (acn) acn.remove();   // checklist is per-WO; never carry it across
         var eo = document.getElementById('bwn-ecd-overlay'); if (eo) eo.remove();
         var pfb = document.getElementById('bwn-pf-banner'); if (pfb) pfb.remove();
-        ecdAutoShownFor = null;   // re-arm the once-per-WO ECD auto-pop for the new WO
+        // The ECD auto-pop guard holds the WO NUMBER it fired for, so a different WO re-arms it
+        // by itself and a tab hop inside ONE WO does not (nulling it on any path change is what
+        // re-popped the prompt on a WO whose ECD had just been set - 1.81.8). But LEAVING the WO
+        // ends the visit: a route with no WO at all (the board, a client, a vendor) is a real
+        // departure, and coming back should ask again if the date is still missing or overdue.
+        // Why that was the whole "never fires on a warm revisit" report: on a first visit the
+        // note read's own refresh re-runs the gate a beat later, but on a revisit that read
+        // short-circuits on the cached history, so the ONLY thing that could have re-opened the
+        // prompt was a re-armed guard - and nothing re-armed it.
+        if (!currentWOId()) ecdAutoShownFor = null;
         prevStatus = null;        // don't treat an already-terminal WO opened fresh as a "change"
       }
       clearTimeout(debounce);
@@ -6680,7 +8127,7 @@
   });
 
   // ==========================================================================
-  // MODULE: Email Leak Guard v2.0
+  // MODULE: Email Leak Guard v2.1
   // ==========================================================================
   bwnBoot('leakGuard', BWN_MODULES.leakGuard, function () {
     'use strict';
@@ -6688,7 +8135,7 @@
     var STRIP_ID = 'bwn-eg-strip';
     var STYLE_ID = 'bwn-eg-style';
 
-    console.info('[BWN EG] email leak guard v2.0 loaded on', location.href);
+    console.info('[BWN EG] email leak guard v2.1 loaded on', location.href);
 
     // ---- Config (edit here) ----------------------------------------------
     var CFG = {
@@ -7102,7 +8549,12 @@
       ensureStyle();
       var strip = document.createElement('div');
       strip.id = STRIP_ID;
-      bodyEl.parentNode.insertBefore(strip, bodyEl);
+      // v2.1: mount ABOVE the whole Body text field. The textarea's own parent is MUI's
+      // inline-flex input root, so a strip placed there became a flex column that squeezed
+      // the body text into half the width. Falls back to the textarea if the field wrapper
+      // is not a MUI FormControl.
+      var anchor = bodyEl.closest('.MuiFormControl-root') || bodyEl;
+      anchor.parentNode.insertBefore(strip, anchor);
 
       var pos = getPOs();
       var dne = getDNE();
@@ -8528,6 +9980,13 @@
         if (r.sched) row.nextOnsiteDate = r.sched;
         if (r.exp) row.expectedCompletion = r.exp;
         if (r.lastNote) row.lastNoteDate = r.lastNote;   // the primary staleness signal; paired with the route's DATE_MAP entry
+        // Umbrava's OWN lifecycle phase, the signal heatDone already trusts over the status
+        // NAME in five places in this file. It never crossed the wire, so every SWA-side "is
+        // this open" stayed a name guess - the exact disagreement heatDone's comment block
+        // records twice from the live board (19 rows, then 5). Carried so the Dashboard can ask
+        // BN.woDone(status, phase) instead. Absent on a DOM-scanned row (the board has no phase
+        // column), and the classifier degrades to the name there exactly as it does here.
+        if (r.phase) row.phase = r.phase;
         // v2 dataset fields - emitted when the scan captured them (column/field dependent); the
         // route maps sourceJob/sourcePo/projectType (STR_MAP) and woDate (DATE_MAP).
         if (r.sourceJob) row.sourceJob = r.sourceJob;
@@ -8764,6 +10223,37 @@
     }
     var heatActsWarned = false;
 
+    // ===== BWN-ACCT-FILTER START v1 (pure; sliced by scripts/test-acct-filter.js) ================
+    // Core 1.84.0: the standing ACCOUNT SCOPE, set in the Ops Suite panel > Preferences and stored
+    // at bwn:config.filters.accounts as a comma-separated list (typed spec OPS_PREF_FIELDS).
+    // It is a per-user VIEW scope, not a session filter and not a data filter:
+    //   - the list pass DIMS every row whose Client cell is out of scope (same treatment the pill
+    //     and by-client filters get - hiding rows breaks the virtualizer's layout math);
+    //   - the Audit panel scopes its entry set, so the columns, Matching WOs and Top offenders all
+    //     speak about the same rows the list is highlighting.
+    // Deliberately NOT scoped, because they are board truth that outlives one user's preference:
+    // the My Day counts and their over-30 trend, the daily bwn:heat:snap snapshot, the Over-30
+    // batch, the SWA dataset push and __bwnHeatRows. A scoped number written into either history
+    // would be silently compared against whole-board days later, so the Audit panel drops its
+    // day-over-day delta while a scope is on rather than print a mixed-basis one.
+    // Empty, absent, or all-blank -> no scope, which is exactly the pre-1.84.0 behaviour.
+    // Matching is case-insensitive SUBSTRING on the Client cell ("dollar" matches "Dollar General"),
+    // and a row with NO readable client is IN scope - fail open. The Client column can be hidden by
+    // the column chooser, and a scope that blanks the whole board because a column is off screen is
+    // worse than one that quietly does nothing (the strip's "signals off" tooltip says which).
+    function acctList(v) {
+      return String(v == null ? '' : v).split(',').map(function (s) { return s.trim().toLowerCase(); })
+        .filter(function (s) { return s.length > 0; });
+    }
+    function acctInScope(list, client) {
+      if (!list || !list.length) return true;
+      var c = String(client == null ? '' : client).trim().toLowerCase();
+      if (!c) return true;   // no readable client - fail open, never hide work on a hidden column
+      for (var i = 0; i < list.length; i++) if (c.indexOf(list[i]) !== -1) return true;
+      return false;
+    }
+    // ===== BWN-ACCT-FILTER END v1 =====
+
     // ---- Heat pass ----------------------------------------------------------------
     var heatStore = null;     // { heatKey(href): {sev, reasons[], wo, client, status, assignee, prio, hrs, days, dne, sched, lastNote, exp, sourceJob, sourcePo, projectType, woDate} }
     // The RAW API rows behind an API scan, parallel to heatStore and keyed the same way.
@@ -8841,6 +10331,12 @@
       if (!anySignal) { diag(table, H, 0); BWN.beat('listHeat', 'waiting', 'no heat columns in view - add "Time in Status" / "# Days" / "Last Note Date" via the column chooser'); return; }
       ensureStyle();
       var C = bwnConfig();
+      // Standing account scope (1.84.0). Read per pass, so a Preferences save takes effect on the
+      // next repaint like every other cfg value. With the Client column off screen every row reads
+      // as unknown and stays IN scope by design - say so on the strip instead of dimming nothing
+      // silently.
+      var acct = acctList(C.filters && C.filters.accounts);
+      if (acct.length && H.client < 0) missing.push('"Client" → account scope off');
 
       var rows = table.querySelectorAll('tbody tr');
       if (!rows.length) rows = table.rows;
@@ -8938,6 +10434,7 @@
           var dimVal = heatDim.field === 'status' ? status : heatDim.field === 'assignee' ? assignee : client;
           if (dimVal !== heatDim.value) dimmed = true;
         }
+        if (!dimmed && !acctInScope(acct, client)) dimmed = true;   // standing account scope (1.84.0)
         if (dimmed) tr.classList.add('bwn-heat-dim');
         if (reasons.length) { tr.title = (acked ? 'Snoozed \u00b7 ' : '') + reasons.join(' \u00b7 '); tr.dataset.bwnHt = '1'; }
         else if (tr.dataset.bwnHt === '1') { tr.removeAttribute('title'); delete tr.dataset.bwnHt; }
@@ -9049,8 +10546,11 @@
       if (mydayFilter) filtBits.push(mfLabel[mydayFilter] + ' only');
       if (heatDim) filtBits.push(heatDim.field + ' = ' + heatDim.value);
       var lgEl = sum.querySelector('.lg');
+      // The scope is a stored PREFERENCE, so it is reported separately from the session filters
+      // above - Clear filters must not look like it will turn it off, because it does not.
+      var scopeTxt = acct.length ? ' · account scope: ' + acct.join(', ') + ' (Preferences)' : '';
       if (lgEl) lgEl.textContent = (filtBits.length ? 'highlighting: ' + filtBits.join(' · ') + ' · full match list in Audit' : 'hover a tinted row for the why · click a pill or audit row to filter') +
-        (nAcked ? ' · ' + nAcked + ' snoozed' : '');
+        (nAcked ? ' · ' + nAcked + ' snoozed' : '') + scopeTxt;
       var clearEl = document.getElementById('bwn-heat-clear');
       if (clearEl) clearEl.style.display = filtBits.length ? '' : 'none';
       renderMyDay();
@@ -9062,7 +10562,13 @@
       if (old) { old.remove(); return; }
       var sum = document.getElementById(SUM_ID);
       if (!sum || !sum.parentNode) return;
-      var entries = heatStore ? Object.keys(heatStore).map(function (k) { var e = heatStore[k]; e._href = k; return e; }) : [];
+      // Account scope (1.84.0): the panel speaks about the same rows the list is highlighting, so
+      // it is applied ONCE here and every section below (columns, Matching WOs, Top offenders, the
+      // TSV copy) inherits it. `scanned` keeps the whole-board count so the header can say "of".
+      var acctP = acctList((bwnConfig().filters || {}).accounts);
+      var scanned = heatStore ? Object.keys(heatStore).length : 0;
+      var entries = heatStore ? Object.keys(heatStore).map(function (k) { var e = heatStore[k]; e._href = k; return e; })
+        .filter(function (e) { return acctInScope(acctP, e.client); }) : [];
       var panel = document.createElement('div');
       panel.id = PANEL_ID;
       function closePanel() { document.removeEventListener('keydown', onPanelKey); panel.remove(); }
@@ -9071,7 +10577,7 @@
 
       var ph = document.createElement('div'); ph.className = 'ph';
       ph.textContent = entries.length
-        ? 'AUDIT \u00b7 ' + entries.length + ' WOs SCANNED'
+        ? 'AUDIT \u00b7 ' + (acctP.length ? entries.length + ' of ' + scanned + ' WOs \u00b7 accounts: ' + acctP.join(', ') : entries.length + ' WOs SCANNED')
         : 'AUDIT';
       panel.appendChild(ph);
 
@@ -9086,7 +10592,10 @@
         var curS = auditOpenTally(entries);
         var bkt = curS.bkt, noHrs = curS.noHrs, noNote = curS.noNote;
         var dl = document.createElement('div'); dl.className = 'dl';
-        var pS = priorKey ? snaps[priorKey] : null;
+        // bwn:heat:snap is written whole-board (heatSnapshot reads heatStore, never this scoped
+        // set), so a scoped count minus a whole-board day is not a delta. Drop the compare rather
+        // than print a mixed-basis number.
+        var pS = (priorKey && !acctP.length) ? snaps[priorKey] : null;
         function dseg(label, nowV, thenV) {
           var sp = document.createElement('span');
           sp.appendChild(document.createTextNode(label + ' ' + nowV));
@@ -9106,7 +10615,9 @@
         dseg('open', curS.open, pS ? pS.open : undefined);
         dseg('over-30', curS.over30, pS ? pS.over30 : undefined);
         var dTail = document.createElement('span');
-        dTail.textContent = pS ? 'vs ' + priorKey : 'no prior full scan on record yet';
+        dTail.textContent = pS ? 'vs ' + priorKey
+          : acctP.length ? 'account scope on - day-over-day compare off (the daily snapshot is whole-board)'
+            : 'no prior full scan on record yet';
         dl.appendChild(dTail);
         panel.appendChild(dl);
         var ql = document.createElement('div'); ql.className = 'dl';
@@ -9141,7 +10652,11 @@
       if (!entries.length) {
         var empty = document.createElement('div'); empty.className = 'empty';
         var p1 = document.createElement('p');
-        p1.textContent = 'No scan yet \u2014 the audit needs a full sweep of the list to give book-wide numbers.';
+        // A scan that ran and was scoped to nothing is NOT "no scan yet" - saying so would send a
+        // coordinator to re-run a sweep that already succeeded.
+        p1.textContent = scanned
+          ? 'The scan read ' + scanned + ' WOs and none match your account scope (' + acctP.join(', ') + ') \u2014 clear or widen it in the Ops Suite panel > Preferences.'
+          : 'No scan yet \u2014 the audit needs a full sweep of the list to give book-wide numbers.';
         var runBtn = document.createElement('button');
         runBtn.type = 'button'; runBtn.className = 'primary'; runBtn.textContent = 'Run Scan All now';
         runBtn.addEventListener('click', function () {
@@ -9152,7 +10667,8 @@
             if (/scan/i.test(btns[b].textContent)) { btns[b].click(); break; }
           }
         });
-        empty.appendChild(p1); empty.appendChild(runBtn);
+        empty.appendChild(p1);
+        if (!scanned) empty.appendChild(runBtn);   // re-scanning cannot fix a scope that matched nothing
         panel.appendChild(empty);
       }
 
@@ -10500,12 +12016,18 @@
     var SUITE_MODULES = [
       { k: 'clientUpdate', script: 'AI', label: 'AI Draft (Client Update / Audit)' },
       { k: 'findTechs', script: 'AI', label: 'Find Techs / Suppliers' },
+      { k: 'jobView', script: 'AI', label: 'Job View (dashboard job modal)' },
+      { k: 'serviceRequest', script: 'AI', label: 'Build Requests helper (NTE preset + team inbox)' },
+      { k: 'operate', script: 'AI', label: 'Operate (watch an agent read the page)' },
       // Kill-switch honored LIVE by every connector tick in the AI script (no reload
       // needed) - off disables ALL SWA egress: activity events, checklist merge,
       // Over-30 line sync, and the daily trend relay.
       { k: 'connector', script: 'AI', label: 'SWA connector (dashboard sync + reporting)' },
       { k: 'poApproval', script: 'Core', label: 'PO Approval + ETA' },
       { k: 'woAssist', script: 'Core', label: 'WO Assist (GP/ETA watchdog)' },
+      { k: 'actsCard', script: 'Core', label: '\u2003WO Assist \u00b7 Next Actions card', live: true },
+      { k: 'ecdPrompt', script: 'Core', label: '\u2003WO Assist \u00b7 ECD auto-prompt', live: true },
+      { k: 'closePreflight', script: 'Core', label: '\u2003WO Assist \u00b7 Close-out preflight + billing prompt', live: true },
       { k: 'leakGuard', script: 'Core', label: 'Email Leak Guard' },
       { k: 'listHeat', script: 'Core', label: 'WO List Heat + My Day' },
       { k: 'launcher', script: 'Core', label: 'Tools launcher - hosts this panel' },
@@ -10516,7 +12038,78 @@
       { k: 'notesTimeline', script: 'Core', label: 'Notes timeline (chronological read)' },
       { k: 'tripCal', script: 'Core', label: 'Trips → calendar (.ics export)' }
     ];
-    var OPS_CFG_FIELDS = [['targetGP', 'Target GP %'], ['gpWarn', 'GP warn %'], ['gpBad', 'GP red %'], ['hrsWarn', 'Hours warn'], ['hrsBad', 'Hours red'], ['activeMult', 'Active ×'], ['dueWarnDays', 'Due warn (d)'], ['schedGraceDays', 'Sched grace (d)'], ['noteStaleDays', 'Note stale (d)']];
+    // ===== BWN-SETTINGS START v1 (pure; sliced by scripts/test-ops-settings.js) ==================
+    // Typed field specs for the Ops Suite panel. Spec: k (dotted = ONE level of nesting in the
+    // bwn:config blob, 'audit.gpLow' -> cfg.audit.gpLow), label, type (number|select|text), def,
+    // number min/max, select options [[value, label]]. Top-level number keys are the CFG_DEFAULTS
+    // thresholds and are always stored; nested keys are per-user OVERRIDES - blank or equal to def
+    // clears the key so the consumer's own default applies. The declarative field map is the
+    // pattern borrowed from GM_config (see wiki gm-config-assessment); its iframe renderer was not.
+    var OPS_CFG_FIELDS = [
+      { k: 'targetGP', label: 'Target GP %', type: 'number', min: 0, max: 100 },
+      { k: 'gpWarn', label: 'GP warn %', type: 'number', min: 0, max: 100 },
+      { k: 'gpBad', label: 'GP red %', type: 'number', min: 0, max: 100 },
+      { k: 'hrsWarn', label: 'Hours warn', type: 'number', min: 0, max: 8760 },
+      { k: 'hrsBad', label: 'Hours red', type: 'number', min: 0, max: 8760 },
+      { k: 'activeMult', label: 'Active ×', type: 'number', min: 0, max: 10 },
+      { k: 'dueWarnDays', label: 'Due warn (d)', type: 'number', min: 0, max: 365 },
+      { k: 'schedGraceDays', label: 'Sched grace (d)', type: 'number', min: 0, max: 365 },
+      { k: 'noteStaleDays', label: 'Note stale (d)', type: 'number', min: 0, max: 365 }
+    ];
+    // Per-user preferences (Core 1.82.0). Group names must not collide with the blob's existing
+    // top-level objects (ai, keys, clients, clientDefaults, v).
+    // Readers: bwn-wo-audit 0.9.0 reads audit.*; bwn-kanban 0.9.0 reads view.defaultWO at load;
+    // the Follow-up reminders module (this file, remChannel) reads notify.channel at fire time;
+    // List Heat (this file, BWN-ACCT-FILTER) reads filters.accounts on every list pass - it dims
+    // out-of-scope rows and scopes the Audit panel, and leaves every stored number whole-board.
+    // notify.channel's def moved 'toast' -> 'desktop' in 1.83.0: 'toast' was never stored under
+    // 1.82.0 (a value equal to def clears), so no client carries a stale value.
+    var OPS_PREF_FIELDS = [
+      { k: 'audit.gpLow', label: 'Audit: low GP %', type: 'number', def: 15, min: 0, max: 100 },
+      { k: 'audit.staleDays', label: 'Audit: stale note (d)', type: 'number', def: 7, min: 0, max: 365 },
+      { k: 'notify.channel', label: 'Reminder alerts', type: 'select', def: 'desktop', options: [['desktop', 'Desktop notification (toast if blocked)'], ['toast', 'In-page toast only'], ['quiet', 'Quiet (mute)']] },
+      { k: 'view.defaultWO', label: 'Default WO view', type: 'select', def: 'list', options: [['list', 'List (remember last toggle)'], ['board', 'Kanban board on every load']] },
+      { k: 'filters.accounts', label: 'Account scope (comma-sep)', type: 'text', def: '' }
+    ];
+    // Current value of a spec key from a cfg object (dotted = one level).
+    function bwnCfgGet(c, k) {
+      var p = k.split('.');
+      if (p.length === 1) return c ? c[k] : undefined;
+      return (c && c[p[0]] && typeof c[p[0]] === 'object') ? c[p[0]][p[1]] : undefined;
+    }
+    // Validate raw input strings against specs and build the cfgSave partial:
+    // { ok, bad: [k...], partial }. Nested groups start from the STORED object so sibling keys the
+    // panel does not own survive (same rule as the AI block), and an unchanged group is dropped
+    // from the partial so an untouched save fires no scan-invalidating churn. Never touches the DOM.
+    function bwnCfgPartial(fields, raw, stored) {
+      var partial = {}, bad = [];
+      fields.forEach(function (f) {
+        var s = String(raw[f.k] == null ? '' : raw[f.k]).trim();
+        var p = f.k.split('.'), nested = p.length === 2, val, clear = false;
+        if (f.type === 'number') {
+          if (s === '' && nested) clear = true;
+          else {
+            var n = parseFloat(s);
+            if (isNaN(n) || (typeof f.min === 'number' && n < f.min) || (typeof f.max === 'number' && n > f.max)) { bad.push(f.k); return; }
+            val = n; if (nested && n === f.def) clear = true;
+          }
+        } else if (f.type === 'select') {
+          if (!(f.options || []).some(function (o) { return o[0] === s; })) { bad.push(f.k); return; }
+          val = s; if (nested && s === f.def) clear = true;
+        } else {
+          val = s; if (s === '' || (nested && s === f.def)) clear = true;
+        }
+        if (!nested) { if (!clear) partial[f.k] = val; return; }
+        var g = p[0];
+        if (!partial[g]) partial[g] = Object.assign({}, (stored && stored[g] && typeof stored[g] === 'object') ? stored[g] : {});
+        if (clear) delete partial[g][p[1]]; else partial[g][p[1]] = val;
+      });
+      Object.keys(partial).forEach(function (g) {
+        if (partial[g] && typeof partial[g] === 'object' && JSON.stringify(partial[g]) === JSON.stringify((stored && stored[g]) || {})) delete partial[g];
+      });
+      return { ok: !bad.length, bad: bad, partial: partial };
+    }
+    // ===== BWN-SETTINGS END v1 =====
     var opsConfig = BWN.cfg;        // defaults + read/save now in the BWN core (single source of truth)
     var opsConfigSave = BWN.cfgSave;
 
@@ -10625,6 +12218,8 @@
           }
           modPref[mod.k] = cb.checked;
           try { localStorage.setItem('bwn:modules', JSON.stringify(modPref)); } catch (e) { }
+          // Render-only sub-features apply now: WO Assist re-renders on bwn:config.
+          if (mod.live) { BWN_MODULES[mod.k] = cb.checked; try { document.dispatchEvent(new CustomEvent('bwn:config')); } catch (e) { } return; }
           if (reloadNote) reloadNote.style.display = '';
         });
         row.appendChild(lbl); row.appendChild(scr); row.appendChild(cb);
@@ -10655,15 +12250,36 @@
 
       // Thresholds
       section('Thresholds', 'shared by WO Assist + List Heat');
-      var grid = document.createElement('div'); grid.className = 'bwn-ops-grid';
       var cfg = opsConfig(); var inputs = {};
-      OPS_CFG_FIELDS.forEach(function (f) {
-        var w = document.createElement('div');
-        var l = document.createElement('label'); l.textContent = f[1];
-        var inp = document.createElement('input'); inp.type = 'number'; inp.step = 'any'; inp.value = String(cfg[f[0]]);
-        inputs[f[0]] = inp; w.appendChild(l); w.appendChild(inp); grid.appendChild(w);
-      });
-      body.appendChild(grid);
+      var storedCfg = lsGet('bwn:config', {}) || {};
+      // One renderer for every typed spec (number / select / text); inputs[k] is read by Save.
+      function fieldGrid(fields, cur) {
+        var grid = document.createElement('div'); grid.className = 'bwn-ops-grid';
+        fields.forEach(function (f) {
+          var w = document.createElement('div');
+          var l = document.createElement('label'); l.textContent = f.label;
+          var v = bwnCfgGet(cur, f.k), el;
+          if (f.type === 'select') {
+            el = document.createElement('select');
+            (f.options || []).forEach(function (o) { var op = document.createElement('option'); op.value = o[0]; op.textContent = o[1]; el.appendChild(op); });
+            el.value = (f.options || []).some(function (o) { return o[0] === v; }) ? v : f.def;
+          } else {
+            el = document.createElement('input');
+            el.type = f.type === 'number' ? 'number' : 'text';
+            if (f.type === 'number') { el.step = 'any'; if (typeof f.min === 'number') el.min = String(f.min); if (typeof f.max === 'number') el.max = String(f.max); }
+            else el.style.textAlign = 'left';
+            el.value = (v === undefined || v === null) ? (f.def === undefined ? '' : String(f.def)) : String(v);
+          }
+          el.setAttribute('aria-label', f.label);
+          inputs[f.k] = el; w.appendChild(l); w.appendChild(el); grid.appendChild(w);
+        });
+        return grid;
+      }
+      body.appendChild(fieldGrid(OPS_CFG_FIELDS, cfg));
+
+      // Per-user preferences: nested overrides in bwn:config (audit.*, notify.*, view.*, filters.*).
+      section('Preferences', 'per user · audit thresholds · notifications · default view · account scope');
+      body.appendChild(fieldGrid(OPS_PREF_FIELDS, storedCfg));
 
       // AI drafting knobs (consumed by the AI script via bwn:config.ai; blank = default).
       section('AI drafting', 'model · recent window · preflight');
@@ -10711,8 +12327,36 @@
       if (aiFresh) {
         kv('Anthropic key', status.ai.anthropic ? 'set' : 'not set', status.ai.anthropic ? 'ok' : 'no');
         kv('Google Places key', status.ai.places ? 'set' : 'not set', status.ai.places ? 'ok' : 'no');
-        kv('SWA ingest key', status.ai.ingest ? 'set' : 'not set', status.ai.ingest ? 'ok' : 'no');
       }
+
+      // SWA ingest key, PER SCRIPT. This row used to read status.ai.ingest and call it "the"
+      // ingest key, which was a false suite-wide fact: GM storage is scoped per script, not per
+      // @namespace (measured 2026-09-03 on TM 5.x - [[gm-storage-is-per-script]]), so each script
+      // holds its own private copy and a newly installed one starts blank while its siblings keep
+      // working. That is the silent failure this row exists to make loud. Every script using the
+      // key publishes a BOOLEAN beacon at bwn:ingest:<slug> (never the key itself) stamped with
+      // its own load time; a script that did not load this session leaves a stale beacon and is
+      // skipped, so an uninstalled script cannot raise a permanent red row - same rule as the
+      // AI/Ask freshness rows above.
+      (function ingestKeyRollup() {
+        var PFX = 'bwn:ingest:', set = [], blank = [];
+        try {
+          for (var i = 0; i < localStorage.length; i++) {
+            var lk = localStorage.key(i);
+            if (!lk || lk.indexOf(PFX) !== 0) continue;
+            var b = lsGet(lk, null);
+            if (!b || !status.core.ts || Math.abs(status.core.ts - (b.ts || 0)) >= 60000) continue;
+            (b.k ? set : blank).push(lk.slice(PFX.length));
+          }
+        } catch (e) { /* storage refusal - fall through to the "no script reported" row */ }
+        set.sort(); blank.sort();
+        var total = set.length + blank.length;
+        if (!total) { kv('SWA ingest key', 'no script reported this session', ''); return; }
+        kv('SWA ingest key', blank.length
+          ? (set.length + ' of ' + total + ' set · BLANK: ' + blank.join(', '))
+          : ('set in all ' + total + ' loaded script' + (total === 1 ? '' : 's')),
+          blank.length ? 'no' : 'ok');
+      })();
       // Ask is its own script and can be disabled on its own, so it gets the same freshness
       // treatment as AI rather than being assumed present.
       var askFresh = !!status.ask.ver && !!status.core.ts && Math.abs((status.core.ts || 0) - (status.ask.ts || 0)) < 60000;
@@ -10859,6 +12503,22 @@
           for (var iS = 0; iS < sessionStorage.length; iS++) { var kS = sessionStorage.key(iS); if (/^bwn[:_-]/.test(kS)) { usage.session += (sessionStorage.getItem(kS) || '').length; usage.keys++; } }
         } catch (eU) { /* blocked storage: report without usage */ }
         rep.push('Storage (bwn keys): ' + usage.keys + ' keys · ' + usage.local + 'B local · ' + usage.session + 'B session');
+        // Central governance (governance-sync): the org flags/config bundle AI caches to bwn:gov,
+        // the reachability, and the EFFECTIVE module set after remote one-way disables. Flags are
+        // ops-authored booleans only (no WO/vendor/client data, no keys) - safe for the report.
+        try {
+          var gov = lsGet('bwn:gov', null);
+          if (gov && typeof gov === 'object') {
+            var ageG = gov.fetchedAt ? Math.round((Date.now() - gov.fetchedAt) / 1000) + 's ago' : 'never';
+            rep.push('Governance: v' + (gov.v || '?') + ' · reach=' + (gov.reach || '?') + ' · fetched ' + ageG + ' · etag ' + (gov.etag || '-'));
+            var gf = (gov.flags && typeof gov.flags === 'object') ? gov.flags : {};
+            rep.push('  remote flags: ' + (Object.keys(gf).length ? JSON.stringify(gf) : '{} (none)') + (gf.globalKillSwitch === true ? ' · KILL SWITCH ACTIVE' : ''));
+            try { var hw = JSON.parse(localStorage.getItem('bwn:auditHW') || '[]'); rep.push('  audit mirror high-water: ' + (Array.isArray(hw) ? hw.length : 0) + ' corrIds flushed'); } catch (eH) { }
+          } else {
+            rep.push('Governance: no bundle cached (bwn:gov absent) - local defaults in effect');
+          }
+          rep.push('Effective modules (after governance): ' + JSON.stringify(BWN_MODULES));
+        } catch (eG) { rep.push('Governance: unavailable'); }
         // Audit-ring digest (Task 3): the shared bwn:audit trail already records a corrId +
         // per-write latency (ms) + outcome per op. Fold a SANITIZED summary in - only corrId,
         // op NAME (a fixed registry key, not WO/vendor data), outcome, and latency. NEVER
@@ -10924,12 +12584,10 @@
       var ft = document.createElement('div'); ft.className = 'bwn-ops-ft';
       var saveBtn = document.createElement('button'); saveBtn.type = 'button'; saveBtn.className = 'bwn-ops-btn primary'; saveBtn.textContent = 'Save settings';
       saveBtn.addEventListener('click', function () {
-        var partial = {}, ok = true;
-        OPS_CFG_FIELDS.forEach(function (f) {
-          var n = parseFloat(inputs[f[0]].value);
-          if (isNaN(n) || n < 0) { inputs[f[0]].style.borderColor = 'var(--bwn-bad)'; ok = false; }
-          else { inputs[f[0]].style.borderColor = ''; partial[f[0]] = n; }
-        });
+        var rawVals = {}; Object.keys(inputs).forEach(function (k) { rawVals[k] = inputs[k].value; });
+        var res = bwnCfgPartial(OPS_CFG_FIELDS.concat(OPS_PREF_FIELDS), rawVals, lsGet('bwn:config', {}) || {});
+        Object.keys(inputs).forEach(function (k) { inputs[k].style.borderColor = res.bad.indexOf(k) !== -1 ? 'var(--bwn-bad)' : ''; });
+        var partial = res.partial, ok = res.ok;
         // AI knobs ride along in bwn:config.ai. Start from the STORED object so
         // non-panel keys (e.g. a hand-set includeVendor) survive; panel-owned keys
         // are then set-or-cleared explicitly. Invalid window values block the save
@@ -11127,8 +12785,8 @@
         '.bwn-ops-row input[type=checkbox]{width:16px;height:16px;accent-color:var(--bwn-green);cursor:pointer;flex:none;}' +
         '.bwn-ops-grid{display:grid;grid-template-columns:repeat(3,1fr);gap:9px;}' +
         '.bwn-ops-grid label{display:block;font:500 9px ui-monospace,"Segoe UI Mono","SF Mono",monospace;color:var(--bwn-green);margin-bottom:3px;}' +
-        '.bwn-ops-grid input{width:100%;box-sizing:border-box;padding:6px 8px;border:1px solid var(--bwn-border);border-radius:7px;font:500 13px -apple-system,BlinkMacSystemFont,"Segoe UI","Helvetica Neue",Arial,sans-serif;text-align:right;outline:none;background:var(--bwn-surface);color:var(--bwn-text);}' +
-        '.bwn-ops-grid input:focus{border-color:var(--bwn-accent);box-shadow:0 0 0 3px rgba(46,204,113,.15);}' +
+        '.bwn-ops-grid input,.bwn-ops-grid select{width:100%;box-sizing:border-box;padding:6px 8px;border:1px solid var(--bwn-border);border-radius:7px;font:500 13px -apple-system,BlinkMacSystemFont,"Segoe UI","Helvetica Neue",Arial,sans-serif;text-align:right;outline:none;background:var(--bwn-surface);color:var(--bwn-text);}' +
+        '.bwn-ops-grid input:focus,.bwn-ops-grid select:focus{border-color:var(--bwn-accent);box-shadow:0 0 0 3px rgba(46,204,113,.15);}' +
         '.bwn-ops-kv{display:flex;justify-content:space-between;gap:10px;font-size:12px;padding:5px 2px;border-bottom:1px solid var(--bwn-surface-3);color:var(--bwn-text-muted);}' +
         '.bwn-ops-kv .v{font:500 11px ui-monospace,"Segoe UI Mono","SF Mono",monospace;}' +
         '.bwn-ops-kv .v.ok{color:var(--bwn-green);}' +
@@ -11299,6 +12957,32 @@
     var dockRank = null;                           // reader's rank (UX gating only; server is the real boundary)
     var dockRenderT = null;
 
+    // Central dock-visibility policy (fail-CLOSED) - the single source of truth for which rail
+    // rows a reader sees, keyed by the entry's stable dock key. A row shows ONLY when the
+    // server-computed rank is KNOWN and >= minRank, AND (when perms are listed) the Umbrava
+    // permission decode is ready and every listed checkbox is granted. Any unknown - an
+    // unclassified key, an unresolved rank, or an undecoded required permission - HIDES the row.
+    // This is UI visibility only; every write still re-checks its own bwnCan at execution time
+    // (defense in depth), so a bug here can hide a tool but never grant an unauthorized write.
+    // Rank scale (from /api/user-role via bwn-suite-ai): 1 coordinator .. 5 director.
+    // A new registrant must be classified here before its row can appear.
+    // See wiki/bwn-dock-visibility-policy.md for the per-tool decision log.
+    var BWN_DOCK_POLICY = Object.create(null);
+    BWN_DOCK_POLICY['ask']         = { minRank: 1, perms: [] };  // read / draft AI assistant
+    BWN_DOCK_POLICY['assist']      = { minRank: 1, perms: [] };  // Escalate - advisory only
+    BWN_DOCK_POLICY['inventory']   = { minRank: 1, perms: [] };  // inventory view/lookup; writes self-gate at action time
+    BWN_DOCK_POLICY['cc']          = { minRank: 1, perms: [] };  // CC Request (coordinator workflow)
+    BWN_DOCK_POLICY['bidout']      = { minRank: 1, perms: [] };  // Email RFP / bid-out sourcing
+    BWN_DOCK_POLICY['wo-extract']  = { minRank: 1, perms: [] };  // Ops Assist - read-only WO context
+    BWN_DOCK_POLICY['note-report'] = { minRank: 1, perms: [] };  // Note Report - read-only notes the reader can already open in Umbrava
+    BWN_DOCK_POLICY['bulk-source'] = { minRank: 2, perms: [] };  // Edit source PO#/WO# - PO/WO record integrity
+    BWN_DOCK_POLICY['wo-audit']    = { minRank: 3, perms: [] };  // WO Audit; note-post also self-gates on WorkOrderNote.AddNew
+    BWN_DOCK_POLICY['dispatch']    = { minRank: 3, perms: [] };  // Dispatch; registrant ALSO keeps its Pending-Dispatch context gate (additive)
+    BWN_DOCK_POLICY['operate']     = { minRank: 4, perms: [] };  // AI Operate - high blast radius
+    BWN_DOCK_POLICY['bulk-ops']    = { minRank: 4, perms: [] };  // Bulk Ops - mass action
+    BWN_DOCK_POLICY['bulk-task']   = { minRank: 4, perms: ['Task.EditTask'] };  // Bulk task reassign - mass write, flag bulkTask
+    var dockPolicyWarned = Object.create(null);   // one console.warn per unclassified key
+
     function dockEmit(id, extra) {
       try {
         var detail = { id: id };
@@ -11325,10 +13009,42 @@
       var p = document.getElementById(DOCK_ID); if (p) p.style.display = '';
       dockSig = '';   // next render must rebuild, not match a signature whose DOM is gone
     }
+    // Normalize whatever a registrant sent into null | [ 'Group.Flag', ... ]. Anything that is not
+    // a non-empty string (or an array of them) becomes null = "no permission needed", because a
+    // malformed spec must not silently hide a working tool.
+    function dockPermSpec(v) {
+      var a = (typeof v === 'string') ? [v] : (Array.isArray(v) ? v : []);
+      a = a.filter(function (k) { return typeof k === 'string' && k.indexOf('.') > 0; });
+      return a.length ? a : null;
+    }
+    // Is the reader allowed to SEE this row? Fail-CLOSED on every unknown: an unclassified key,
+    // an unknown rank, a rank below the floor, an undecoded-but-required permission, or a
+    // known-off checkbox all hide the row. A required permission whose GROUP is absent from the
+    // decode is treated as not-the-gate-here (Umbrava never provisioned that permission type for
+    // this user; the write gate + server still protect it) - this matches bwnCan's own contract
+    // and avoids hiding a working tool over a permission type the tenant does not send.
+    function dockPolicyAllows(en) {
+      var pol = BWN_DOCK_POLICY[en.key];
+      if (!pol) {                                                 // unclassified tool -> hidden
+        if (!dockPolicyWarned[en.key]) {
+          dockPolicyWarned[en.key] = 1;
+          try { console.warn('[BWN] dock: no visibility policy for "' + en.key + '" - row hidden. Add it to BWN_DOCK_POLICY in bwn-suite-core.'); } catch (e) { }
+        }
+        return false;
+      }
+      if (dockRank == null || dockRank < pol.minRank) return false;   // rank unknown or too low
+      if (pol.perms && pol.perms.length) {
+        var slot = bwnPermSlot();
+        if (!slot) return false;                                  // permission decode not ready -> hide
+        for (var i = 0; i < pol.perms.length; i++) {
+          var grp = String(pol.perms[i]).split('.')[0];
+          if (slot.groups.indexOf(grp) !== -1 && slot.granted.indexOf(pol.perms[i]) === -1) return false;
+        }
+      }
+      return true;
+    }
     function dockVisible() {
-      var arr = Object.keys(dockRoster).map(function (k) { return dockRoster[k]; });
-      // Fail-OPEN when rank is unknown (show the entry; the server rejects if truly unauthorized).
-      arr = arr.filter(function (en) { return en.minRank == null || dockRank == null || dockRank >= en.minRank; });
+      var arr = Object.keys(dockRoster).map(function (k) { return dockRoster[k]; }).filter(dockPolicyAllows);
       arr.sort(function (a, b) { return (a.weight - b.weight) || (a.order - b.order); });
       return arr;
     }
@@ -11343,6 +13059,12 @@
       cc: ['M5 21V5a2 2 0 0 1 2-2h10a2 2 0 0 1 2 2v16l-3-2-2 2-2-2-2 2-2-2-3 2', 'M9 7h6', 'M9 11h6'],
       'wo-audit': ['M9 5H7a2 2 0 0 0-2 2v12a2 2 0 0 0 2 2h10a2 2 0 0 0 2-2V7a2 2 0 0 0-2-2h-2',
         'M9 5a2 2 0 0 1 2-2h2a2 2 0 0 1 2 2 2 2 0 0 1-2 2h-2a2 2 0 0 1-2-2z', 'M9 14l2 2 4-4'],
+      // Ops Assist (bwn-wo-extract) rail registrant. A compass: outer ring + an N-S needle, for
+      // read-only work-order context assistance. Added WITH the registrant, per this map's own rule
+      // (test-dock-latent-fixes scans sibling scripts and flags a rail key with no icon here).
+      'wo-extract': ['M12 3a9 9 0 1 0 0 18 9 9 0 0 0 0-18z', 'M12 6l2 6-2 6-2-6z'],
+      // Note Report (bwn-note-report): a page with a folded corner and text lines - a notes report.
+      'note-report': ['M14 3H6a2 2 0 0 0-2 2v14a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2V9z', 'M14 3v6h6', 'M8 13h8', 'M8 17h5'],
       ask: ['M8 9h8', 'M8 13h6', 'M9 18H6a3 3 0 0 1-3-3V7a3 3 0 0 1 3-3h12a3 3 0 0 1 3 3v8a3 3 0 0 1-3 3h-3l-3 3-3-3'],
       // Escalate + Email RFP were the two registrants with no entry here, so the rail fell back
       // to their emoji (a RED flag and a blue envelope) beside eleven monochrome line icons -
@@ -11350,6 +13072,12 @@
       // an UNKNOWN tool; these two are not unknown.
       assist: ['M6 3v18', 'M6 4h13l-3 4 3 4H6z'],
       bidout: ['M4 6h16v12H4z', 'M4 7l8 6 8-6'],
+      // Edit PO#/WO# (bulk-source) registers from Core, so the dock-icon completeness test (which
+      // scans SIBLING .user.js files) never covered it - it fell back to its 🔖 emoji beside the
+      // line-icon rows. A pencil, matching the "Edit" name.
+      'bulk-source': ['M12 20h9', 'M16.5 3.5a2.121 2.121 0 0 1 3 3L7 19l-4 1 1-4z'],
+      // Reassign tasks (bulk-task, Core-internal): two people, the hand-off between them.
+      'bulk-task': ['M9 11a3 3 0 1 0 0-6 3 3 0 0 0 0 6z', 'M3 20a6 6 0 0 1 12 0', 'M16 8h5', 'M19 5l2 3-2 3'],
       dispatch: ['M7 17a2 2 0 1 0 4 0 2 2 0 0 0-4 0z', 'M15 17a2 2 0 1 0 4 0 2 2 0 0 0-4 0z',
         'M5 17H3V6a1 1 0 0 1 1-1h9v12m-2 0h4m4 0h2v-6h-8m0-5h5l3 5'],
       // A 3D box (📦): the front silhouette, the top edges meeting at centre, and the seam down.
@@ -11557,6 +13285,9 @@
     document.addEventListener('bwn:evt', BWN.guard(function (e) {
       var d = e && e.detail; if (!d || !d.id) return;
       if (d.id === 'bwn:role' && typeof d.rank === 'number') { dockRank = d.rank; scheduleDockRender(); return; }
+      // A permission decode landed after the rail already rendered: re-render so a row the user
+      // may not use drops out (and one that was hidden on a stale slot comes back).
+      if (d.id === 'bwn:perm') { scheduleDockRender(); return; }
       if (d.id === 'bwn:dock:host') { if (dockOtherWins(d)) { dockAmHost = false; dockOtherSeen = Date.now(); removeDockStack(); } return; }
       // A host that is still alive re-announces AND pings every DOCK_PING_MS; that traffic is what
       // holds off the reclaim in the heartbeat. Guarded on hostId so our own ping - same document,
@@ -11572,6 +13303,8 @@
           weight: typeof d.weight === 'number' ? d.weight : 50,
           badge: (d.badge != null && d.badge !== '') ? String(d.badge) : '',
           minRank: typeof d.minRank === 'number' ? d.minRank : null,
+          // 'Group.Flag' or an array of them: the Umbrava permission(s) the row's tool needs.
+          needPerm: dockPermSpec(d.needPerm),
           title: d.title ? String(d.title) : '',
           order: ex ? ex.order : (++dockOrderSeq),
           seen: Date.now()
@@ -11583,6 +13316,7 @@
         if (d.icon != null) en.icon = String(d.icon);
         if (d.badge != null) en.badge = d.badge === '' ? '' : String(d.badge);
         if (typeof d.minRank === 'number') en.minRank = d.minRank;
+        if (d.needPerm != null) en.needPerm = dockPermSpec(d.needPerm);
         en.seen = Date.now();
         scheduleDockRender();
       } else if (d.id === 'bwn:dock:unregister' && d.key) {
@@ -11724,6 +13458,7 @@
       var c = {};
       try { c = JSON.parse(localStorage.getItem('bwn:config') || '{}') || {}; } catch (e) { c = {}; }
       c.views = list;
+      c.v = 1;
       localStorage.setItem('bwn:config', JSON.stringify(c));
       return list;
     }
@@ -12963,7 +14698,31 @@
     function load() { var a = BWN.lsGetJSON(STORE, []); return Array.isArray(a) ? a : []; }
     function save(a) { BWN.lsSetJSON(STORE, a); }
     function rid() { return Date.now().toString(36) + Math.random().toString(36).slice(2, 7); }
-    function reqPerm() { try { if (window.Notification && Notification.permission === 'default') Notification.requestPermission(); } catch (e) { } }
+    // ===== BWN-REM-CHANNEL START v1 (pure; sliced by scripts/test-reminders-channel.js) ==========
+    // Core 1.83.0: per-user delivery channel, set in the Ops Suite panel > Preferences and stored
+    // at bwn:config.notify.channel (typed spec OPS_PREF_FIELDS). Values:
+    //   desktop (default) - desktop Notification when granted, in-page toast otherwise. This IS
+    //                       the 1.82.0 behaviour, so an unset key changes nothing.
+    //   toast             - in-page toast only; never asks for Notification permission.
+    //   quiet             - the reminder is marked fired and nothing is shown. It leaves the
+    //                       Pending list like any fired reminder. Mute, not snooze.
+    // Anything else (absent, malformed blob, unknown value) -> desktop.
+    function remChannel(cfgRaw) {
+      try { var c = JSON.parse(cfgRaw || 'null'); var v = c && c.notify && c.notify.channel; if (v === 'toast' || v === 'quiet') return v; } catch (e) { /* malformed - default */ }
+      return 'desktop';
+    }
+    // Which path a due reminder takes for a channel + Notification.permission
+    // ('granted' | 'denied' | 'default' | null when the API is absent): 'desktop' | 'toast' | 'none'.
+    function remPlan(channel, perm) {
+      if (channel === 'quiet') return 'none';
+      if (channel === 'desktop' && perm === 'granted') return 'desktop';
+      return 'toast';
+    }
+    // ===== BWN-REM-CHANNEL END v1 =====
+    function channel() { var raw = null; try { raw = localStorage.getItem('bwn:config'); } catch (e) { } return remChannel(raw); }
+    function permState() { try { return window.Notification ? Notification.permission : null; } catch (e) { return null; } }
+    // Only the desktop channel ever asks - a toast-only or quiet user never sees the browser prompt.
+    function reqPerm() { try { if (channel() === 'desktop' && window.Notification && Notification.permission === 'default') Notification.requestPermission(); } catch (e) { } }
     function pad(n) { return (n < 10 ? '0' : '') + n; }
     function fmtWhen(ts) {
       var d = new Date(ts), now = new Date();
@@ -12977,14 +14736,16 @@
     function notify(r) {
       var title = 'WO follow-up' + (r.tracking ? ' · #' + r.tracking : '');
       var body = (r.note ? r.note + ' - ' : '') + (r.client || '') + (r.location ? ' · ' + r.location : '');
-      try {
-        if (window.Notification && Notification.permission === 'granted') {
+      var plan = remPlan(channel(), permState());
+      if (plan === 'none') return;   // quiet: fired, listed as fired, shown nowhere
+      if (plan === 'desktop') {
+        try {
           var n = new Notification(title, { body: body || 'Time to follow up.', tag: 'bwn-rem-' + r.id });
           n.onclick = function () { try { window.focus(); } catch (e) { } if (r.url) location.href = r.url; try { n.close(); } catch (e2) { } };
           return;
-        }
-      } catch (e) { }
-      toast(title + (body ? ' - ' + body : ''), r.url);   // notifications blocked → in-page fallback
+        } catch (e) { /* constructor refused - fall through to the toast */ }
+      }
+      toast(title + (body ? ' - ' + body : ''), r.url);   // toast channel, or desktop blocked / unsupported
     }
     function fireDue() {
       var arr = load(), now = Date.now(), changed = false;
@@ -13089,8 +14850,11 @@
 
       var ft = document.createElement('div'); ft.className = 'bwn-rem-ft';
       var perm = document.createElement('span'); perm.className = 'sp';
-      perm.textContent = (window.Notification && Notification.permission === 'denied') ? 'Notifications blocked - reminders show as an in-page banner instead.' :
-        (window.Notification && Notification.permission === 'granted') ? '' : 'First reminder will ask to allow notifications.';
+      var ch = channel(), ps = permState();
+      perm.textContent = ch === 'quiet' ? 'Quiet: due reminders are muted (Ops Suite > Preferences > Reminder alerts).' :
+        ch === 'toast' ? 'In-page toast only (Ops Suite > Preferences > Reminder alerts).' :
+        ps === 'denied' ? 'Notifications blocked - reminders show as an in-page banner instead.' :
+        ps === 'granted' ? '' : 'First reminder will ask to allow notifications.';
       ft.appendChild(perm);
       var closeB = document.createElement('button'); closeB.type = 'button'; closeB.textContent = 'Close'; closeB.addEventListener('click', close);
       ft.appendChild(closeB); card.appendChild(ft);
@@ -16159,6 +17923,10 @@
       try {
         document.dispatchEvent(new CustomEvent('bwn:evt', { detail: {
           id: 'bwn:dock:register', key: DOCK_KEY, label: 'Bulk Ops', icon: '📦', weight: 22,
+          // ponytail: ONE permission for the whole console, not one per op. v1 writes notes + ECD,
+          // and a user who may not bulk-update work orders has no business in a bulk console at
+          // all. Upgrade path if that ever splits: gate each op row on its own bwnCan.
+          needPerm: 'WorkOrder.BulkUpdate',
           title: 'BWN Bulk Operations Console - batch note / ECD writes from an .xlsx (dry-run + typed confirm)'
         } }));
       } catch (e) { /* dock host not up yet - the heartbeat will re-register us */ }
@@ -16904,7 +18672,11 @@
     function dockRegister() {
       try {
         document.dispatchEvent(new CustomEvent('bwn:evt', { detail: {
-          id: 'bwn:dock:register', key: DOCK_KEY, label: 'Src Job#', icon: '🔖', weight: 23,
+          id: 'bwn:dock:register', key: DOCK_KEY, label: 'Edit PO#/WO#', icon: '🔖', weight: 23,
+          // The drawer's primary write. Source PO# is the optional second column, deliberately NOT
+          // required here: a user allowed one field and not the other should still get the drawer
+          // rather than lose the tool over the column they were not going to fill.
+          needPerm: 'WorkOrderField.SourceJobNumber',
           title: 'BWN Bulk Source Job# - check work orders on the list, then stamp Source Job# (Q/R or RF) in bulk (dry-run + typed confirm)'
         } }));
       } catch (e) { /* dock host not up yet - the heartbeat re-registers us */ }
@@ -17179,6 +18951,758 @@
 
     startObserving();
     BWN.beat('bulkSource', 'ok', 'ready (flag on)');
+  });
+
+  // ==========================================================================
+  // MODULE: Bulk Task Reassign v1.1  (reassign EXISTING open WO tasks + optionally the WO's own Assigned To, flag OFF)
+  // ==========================================================================
+  // Coordinator pastes work-order numbers - or loads a current assignee's open WOs (a person or a
+  // team) and ticks the ones to move, e.g. the PMs an automation dropped on a team - picks ONE target
+  // person or team, previews every open task on those WOs (reads only), types "APPLY <n>", and the
+  // run moves each previewed task to the target. With "Also set each work order's Assigned To" the
+  // WO's own owner is moved too (single-field patchWorkOrder, same verify-by-read-back rule), so a
+  // WO with no tasks at all still moves.
+  // It NEVER creates a task and never touches description / date / metadata / category / priority /
+  // flag / completion - EditTask is a FULL REPLACE (live capture 2026-09-29, see
+  // wiki/umbrava-graphql-operations.md "editTask"), so every write re-reads the task first, refuses
+  // the row if anything moved since the preview, sends the fresh record back byte-for-byte with only
+  // `assignedTo` changed, then re-reads again and reports success ONLY when that read-back shows the
+  // target assignee with every protected field unchanged. The response's success flag is never
+  // trusted on its own. Sequential, no retry (EditTask is not idempotent). The whole module - dock
+  // entry, drawer, every read and write - mounts ONLY when BWN_MODULES.bulkTask is on (default OFF),
+  // and each write also routes through bwnGqlOp (feature:'bulkTask' kill switch + Task.EditTask
+  // permission gate + risk:'high' confirm gate + bwn:audit ring).
+  bwnBoot('bulkTask', BWN_MODULES.bulkTask, function () {
+
+    // ===== BULK-TASK-ENGINE START v1 (pure, DOM-FREE; sliced + driven by scripts/test-bulk-task.js
+    //        against a stubbed transport. Closes over ONLY bwnGql + bwnGqlOp from the enclosing
+    //        scope.) =====
+    var BT_WO_Q = 'query BTWorkOrder($n: Int!) { workOrder(workOrderNumber: $n) { number assignedTo statusId } }';
+    // The WO's own Assigned To: the same single-field patchWorkOrder assign Dispatch and the write
+    // queue already use ({ workOrderNumber, assignedTo: ConditionalIDInput }), nothing else sent.
+    var BT_WO_PATCH_M = 'mutation PatchWorkOrder($data: PatchWorkOrderInput!) { patchWorkOrder(data: $data) { success message } }';
+    // Assignable members = people AND teams (live-verified 2026-09-29: 263 items, memberType User|Team;
+    // the `users` directory has no teams, which is why Team T was missing from the first picker).
+    var BT_MEMBERS_Q = 'query BTMembers { searchMembers(searchType: BOTH, take: 500) { rowCount items { id displayName memberType isInactive isTechnician } } }';
+    // A TEAM as a work order's own Assigned To: proven live 2026-09-29 (smoke through this tool:
+    // W-393951 WO -> Team T and back via patchWorkOrder, read-back verified, status unchanged).
+    // Tasks -> team was proven by the EditTask capture the same day. Set false to skip team WO rows
+    // again if Umbrava ever changes that behaviour.
+    var BT_TEAM_WO_VERIFIED = true;
+    // A member's open work orders, for the "load by current assignee" picker (read-only; same
+    // listWorkOrdersPaginated + required page/sortBy the Heat seed uses, filtered by assignedTo).
+    var BT_LIST_Q = 'query BTAssignedWOs($page: PageInput!, $sortBy: [SortInput!]!, $assignedTo: [ID], $phase: SystemPhaseValue) { listWorkOrdersPaginated(page: $page, sortBy: $sortBy, assignedTo: $assignedTo, phase: $phase) { rowCount items { number trackingNumber clientName locationName workOrderTypeName statusName scopeOfWork assignedTo } } }';
+    function cond(v) { return { shouldInclude: true, value: v }; }   // Conditional*Input wrapper (copied from BULK-SOURCE-ENGINE)
+    function btKey(r) { return r.kind === 'wo' ? 'wo:' + r.wo : (r.taskId || 'wo:' + r.wo); }
+    // includeComplete:false -> `total` is the OPEN count (live-verified 2026-09-29), so a page that
+    // came back short of it is detected instead of silently missing tasks.
+    var BT_TASKS_Q = 'query BTOpenTasks($id: String!) { tasksByEntityTypeAndId(entityType: 1, entityId: $id, includeComplete: false, take: 100) { total tasks { id entityId entityType description targetStartDate assignedTo metadata categoryId isComplete flag priorityStatus } } }';
+    var BT_EDIT_M = 'mutation EditTask($data: EditTaskInput!) { editTask(data: $data) { success message } }';
+    var BT_MAX_WOS = 50;   // per-run cap on unique WO#s. Over the cap the preview is REFUSED, never truncated.
+    // The exact message Umbrava returns for a WO number that does not exist (live-verified).
+    var BT_NOT_FOUND_RE = /Cannot return null for non-nullable field Query\.workOrder/;
+    var BT_DATE_RE = /^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}(:\d{2}(\.\d{1,3})?)?(Z|[+-]\d{2}:\d{2})$/;
+    // Fixed failure categories - the server's error text can echo task data, so it never reaches
+    // the local log or the screen (same rule as the bwn:audit ring).
+    function btErrCategory(e) {
+      var m = String((e && e.message) || e);
+      if (e && e.bwnPermissionDenied) return 'Not permitted (' + [].concat(e.bwnPermissionDenied).join(' + ') + ')';
+      if (/feature "bulkTask" is disabled/.test(m)) return 'Feature disabled - not sent';
+      if (/validation failed/.test(m)) return 'Blocked by pre-send check - not sent';
+      if (/high-risk|confirm/i.test(m)) return 'Confirmation gate refused - not sent';
+      if (e && e.bwnNonTransient) return 'Refused by Umbrava';
+      return 'Request failed';
+    }
+
+    // Paste -> { total, unique:[n], invalid:[tok], ambiguous:[tok], dupes }. Separators: any run of
+    // whitespace, commas or semicolons. "397888", "W-397888", "w397888" are one WO. A token with more
+    // than one number in it ("W-397888-001", "397888/397889") could mean a PO or two WOs - ambiguous,
+    // never guessed. Anything else is invalid.
+    function btParse(text) {
+      var toks = String(text == null ? '' : text).split(/[\s,;]+/).filter(Boolean);
+      var seen = Object.create(null), raw = {}, unique = [], invalid = [], ambiguous = [], dupes = 0;
+      toks.forEach(function (tok) {
+        var t = tok.trim();
+        var m = /^(?:w-?)?(\d{1,9})$/i.exec(t);
+        if (m) {
+          var n = parseInt(m[1], 10);
+          if (!(n > 0)) { invalid.push(t); return; }
+          if (seen[n]) { dupes++; return; }
+          seen[n] = true; raw[n] = t; unique.push(n); return;
+        }
+        if ((t.match(/\d+/g) || []).length > 1) ambiguous.push(t); else invalid.push(t);
+      });
+      return { total: toks.length, unique: unique, raw: raw, invalid: invalid, ambiguous: ambiguous, dupes: dupes };
+    }
+
+    // The full-replace fields a task MUST carry before it may be rewritten. [] = complete.
+    function btMissing(t) {
+      var miss = [];
+      if (!t || typeof t.id !== 'string' || !t.id) miss.push('id');
+      if (!t || typeof t.entityId !== 'string' || !t.entityId) miss.push('entityId');
+      if (!t || t.entityType !== 1) miss.push('entityType');
+      if (!t || typeof t.description !== 'string') miss.push('description');
+      if (!t || typeof t.metadata !== 'string' || !t.metadata) miss.push('metadata');
+      // An offset-less or sub-millisecond date would be shifted / truncated by the ISO re-serialize.
+      if (!t || typeof t.targetStartDate !== 'string' || !BT_DATE_RE.test(t.targetStartDate) || !isFinite(Date.parse(t.targetStartDate))) miss.push('targetStartDate');
+      if (t && t.categoryId != null && typeof t.categoryId !== 'number') miss.push('categoryId');
+      return miss;
+    }
+    // Protected-field equality (everything but assignedTo). Dates compare by instant, so the read's
+    // "+00:00" and the SPA's ".000Z" forms of the same moment are equal.
+    function btSameProtected(a, b) {
+      if (!a || !b) return false;
+      return a.id === b.id && a.entityId === b.entityId && a.entityType === b.entityType &&
+        a.description === b.description && a.metadata === b.metadata &&
+        Date.parse(a.targetStartDate) === Date.parse(b.targetStartDate) &&
+        (a.categoryId == null ? null : a.categoryId) === (b.categoryId == null ? null : b.categoryId) &&
+        a.priorityStatus === b.priorityStatus && a.flag === b.flag && a.isComplete === b.isComplete;
+    }
+    // Which protected fields differ (for a precise reason string).
+    function btDiff(a, b) {
+      return ['description', 'metadata', 'entityId', 'entityType', 'targetStartDate', 'categoryId', 'priorityStatus', 'flag', 'isComplete']
+        .filter(function (k) {
+          if (k === 'targetStartDate') return Date.parse(a && a[k]) !== Date.parse(b && b[k]);
+          if (k === 'categoryId') return ((a && a[k]) == null ? null : a[k]) !== ((b && b[k]) == null ? null : b[k]);
+          return (a && a[k]) !== (b && b[k]);
+        });
+    }
+    // EditTask variables exactly as the SPA sends them (captured order), from a FRESH record, with
+    // only assignedTo changed. categoryId is OMITTED (not null) when the task has none.
+    function btPayload(t, targetId) {
+      var d = {
+        id: t.id, entityId: t.entityId, entityType: t.entityType, description: t.description,
+        targetStartDate: new Date(Date.parse(t.targetStartDate)).toISOString(),
+        assignedTo: targetId, metadata: t.metadata
+      };
+      if (t.categoryId != null) d.categoryId = t.categoryId;
+      return { data: d };
+    }
+    // What the preview/run binds to: the WO list, the target, and every Reassign row's task id plus
+    // its protected snapshot. Any change -> a different stamp -> the typed confirm no longer arms.
+    function btStamp(unique, targetId, rows, withWO) {
+      return JSON.stringify({
+        wos: unique.slice().sort(function (a, b) { return a - b; }), target: targetId || '', withWO: withWO || false,
+        rows: (rows || []).filter(function (r) { return r.action === 'Reassign'; }).map(function (r) {
+          if (r.kind === 'wo') { var w = r.woSnap || {}; return [r.wo, 'wo', w.assignedTo || null, w.statusId]; }
+          var s = r.snap || {};
+          return [r.wo, s.id, s.description, s.metadata, s.targetStartDate, s.categoryId == null ? null : s.categoryId, s.priorityStatus, s.flag, s.assignedTo || null];
+        })
+      });
+    }
+    function btConfirmArmed(typed, count, stampNow, stampPreview) {
+      return count > 0 && !!stampPreview && stampNow === stampPreview && typed === 'APPLY ' + count;
+    }
+
+    // One WO + its open tasks. -> { status:'ok', wo:{number,assignedTo,statusId}, tasks } | { status:'notfound'|'ambiguous'|'readfail', reason }
+    function btReadWO(wo) {
+      return bwnGql(BT_WO_Q, { n: wo }).then(function (d) {
+        if (!d || !d.workOrder || d.workOrder.number !== wo) return { status: 'ambiguous', reason: 'Ambiguous work-order match' };
+        var woRec = { number: d.workOrder.number, assignedTo: d.workOrder.assignedTo || null, statusId: d.workOrder.statusId };
+        return bwnGql(BT_TASKS_Q, { id: String(wo) }).then(function (td) {
+          var r = td && td.tasksByEntityTypeAndId;
+          if (!r || !Array.isArray(r.tasks)) return { status: 'readfail', reason: 'Task read failed' };
+          if (typeof r.total === 'number' && r.total > r.tasks.length) return { status: 'readfail', reason: 'Task read incomplete (' + r.tasks.length + ' of ' + r.total + ')' };
+          return { status: 'ok', wo: woRec, tasks: r.tasks.filter(function (t) { return t && t.isComplete === false; }) };
+        });
+      }, function (err) {
+        var msg = String((err && err.message) || err);
+        if (BT_NOT_FOUND_RE.test(msg)) return { status: 'notfound', reason: 'Work order not found' };
+        return { status: 'readfail', reason: 'Read failed (permission or network)' };
+      }).catch(function () { return { status: 'readfail', reason: 'Task read failed' }; });
+    }
+
+    // Preview rows for one WO read. Pure. Every open task becomes a row; nothing is dropped silently.
+    // withWO: also plan the WO's own Assigned To (one 'wo' row first), so a WO with no open task -
+    // e.g. an automation-created PM - still gets its owner moved.
+    // withWO: false = tasks only, true = tasks + the WO's Assigned To, 'only' = the WO's Assigned To only.
+    function btRowsFor(wo, res, targetId, withWO, targetIsTeam) {
+      if (res.status !== 'ok') return [{ kind: 'wo', wo: wo, taskId: null, action: 'Skip', reason: res.reason }];
+      var rows = [];
+      if (withWO) {
+        var w = res.wo || {};
+        var wr = { kind: 'wo', wo: wo, taskId: null, desc: 'Work order Assigned To', cur: w.assignedTo || null, to: targetId || null, woSnap: w, action: 'Skip', reason: '' };
+        if (!targetId) wr.reason = 'No resolved target user';
+        else if (w.number !== wo) wr.reason = 'Ambiguous work-order match';
+        else if (targetIsTeam && !BT_TEAM_WO_VERIFIED) wr.reason = 'A team as work-order owner is not yet verified live - set it by hand';
+        else if ((w.assignedTo || null) === targetId) wr.reason = 'Work order already assigned to target';
+        else wr.action = 'Reassign';
+        rows.push(wr);
+      }
+      if (withWO === 'only') return rows;
+      if (!res.tasks.length) return withWO ? rows : [{ kind: 'wo', wo: wo, taskId: null, action: 'Skip', reason: 'No open task' }];
+      return rows.concat(res.tasks.map(function (t) {
+        var row = { kind: 'task', wo: wo, taskId: t.id || null, desc: t.description || '', cur: t.assignedTo || null, to: targetId || null, snap: t, action: 'Skip', reason: '' };
+        var miss = btMissing(t);
+        if (!targetId) row.reason = 'No resolved target user';
+        else if (miss.length) row.reason = 'Missing required field(s): ' + miss.join(', ');
+        else if (t.entityId !== String(wo)) row.reason = 'Task does not belong to this work order';
+        else if (t.assignedTo === targetId) row.reason = 'Already assigned to target user';
+        // ponytail: the one live EditTask capture was an unflagged, uncategorised task. Flag rides a
+        // separate flag/unflag mutation and the categoryId round-trip is unproven, so both are skipped
+        // until a live capture of such a task shows the full replace keeps them.
+        else if (t.flag === true || t.categoryId != null) row.reason = 'Flagged or categorised task - not yet verified live, reassign by hand';
+        else { row.action = 'Reassign'; row.reason = ''; }
+        return row;
+      }));
+    }
+
+    // Execute ONE previewed Reassign row. Never throws; always resolves a result:
+    //   { result: 'Verified' | 'Skipped' | 'Mutation failed' | 'Verification failed' | 'Verification unavailable', reason, before, after }
+    // Reads the task fresh first (refuse if it moved since preview), writes once (no retry), then
+    // reads back and verifies. The read-back runs after a FAILED write too, so a write that landed
+    // despite an error is surfaced for review - but it is never labelled success.
+    function btFind(wo, taskId) {
+      return bwnGql(BT_TASKS_Q, { id: String(wo) }).then(function (td) {
+        var r = td && td.tasksByEntityTypeAndId;
+        if (!r || !Array.isArray(r.tasks)) throw new Error('task read failed');
+        var hit = null;
+        r.tasks.forEach(function (t) { if (t && t.id === taskId) hit = t; });
+        return hit;   // null = no longer open (completed / deleted)
+      });
+    }
+    // One WO Assigned To row: fresh read (skip if the owner or status moved since preview), ONE
+    // patchWorkOrder carrying only { workOrderNumber, assignedTo }, then a read-back that must show
+    // the target owner with the status unchanged. Same result vocabulary as a task row.
+    function btExecWoRow(row, targetId) {
+      var before = (row.woSnap && row.woSnap.assignedTo) || null;
+      function out(result, reason, after) { return { kind: 'wo', key: btKey(row), wo: row.wo, taskId: null, result: result, reason: reason || '', before: before, after: after === undefined ? null : after }; }
+      function readWo() {
+        return bwnGql(BT_WO_Q, { n: row.wo }).then(function (d) {
+          var w = d && d.workOrder;
+          if (!w || w.number !== row.wo) throw new Error('wo read failed');
+          return { assignedTo: w.assignedTo || null, statusId: w.statusId };
+        });
+      }
+      return readWo().then(function (fresh) {
+        if (fresh.assignedTo !== before || fresh.statusId !== row.woSnap.statusId) {
+          return out('Skipped', 'Changed since preview (' + (fresh.assignedTo !== before ? 'assignedTo' : 'status') + ')');
+        }
+        var vars = { data: { workOrderNumber: row.wo, assignedTo: cond(targetId) } };
+        var sendErr = null;
+        return bwnGqlOp('patchWorkOrder', BT_WO_PATCH_M, vars, {
+          feature: 'bulkTask', confirmed: true, ids: { wo: row.wo },
+          before: { assignedTo: before }, after: { assignedTo: targetId },
+          validate: function (v) {
+            var d = v && v.data;
+            if (!d || d.workOrderNumber !== row.wo) return 'bad workOrderNumber';
+            if (Object.keys(d).join(',') !== 'workOrderNumber,assignedTo') return 'only assignedTo may be sent';
+            if (!d.assignedTo || Object.keys(d.assignedTo).join(',') !== 'shouldInclude,value' || d.assignedTo.shouldInclude !== true) return 'bad assignee wrapper';
+            if (d.assignedTo.value !== targetId || typeof targetId !== 'string' || !targetId) return 'bad assignee';
+            return true;
+          }
+        }).then(null, function (e) { sendErr = e; }).then(function () {
+          return readWo().then(function (post) {
+            if (sendErr) return out('Mutation failed', btErrCategory(sendErr) +
+              (post.assignedTo === targetId ? ' - READ-BACK SHOWS THE TARGET ASSIGNEE: the write may have landed, review this work order' : ''), post.assignedTo);
+            if (post.assignedTo !== targetId) return out('Verification failed', 'Read-back assignee is not the target', post.assignedTo);
+            if (post.statusId !== fresh.statusId) return out('Verification failed', 'Work order status changed', post.assignedTo);
+            return out('Verified', '', post.assignedTo);
+          }, function () {
+            if (sendErr) return out('Mutation failed', btErrCategory(sendErr) + ' (read-back also failed)');
+            return out('Verification unavailable', 'Read-back failed - do not assume success');
+          });
+        });
+      }, function () { return out('Skipped', 'Pre-write re-read failed'); })
+        .then(null, function () { return out('Mutation failed', 'Internal error - review this work order by hand'); });
+    }
+    function btExecRow(row, targetId) {
+      if (row.kind === 'wo') return btExecWoRow(row, targetId);
+      var before = row.snap && row.snap.assignedTo || null;
+      function out(result, reason, after) { return { kind: 'task', key: btKey(row), wo: row.wo, taskId: row.taskId, result: result, reason: reason || '', before: before, after: after === undefined ? null : after }; }
+      return btFind(row.wo, row.taskId).then(function (fresh) {
+        if (!fresh) return out('Skipped', 'Changed since preview (task no longer open)');
+        if (!btSameProtected(fresh, row.snap) || (fresh.assignedTo || null) !== before) {
+          var dd = btDiff(fresh, row.snap);
+          if ((fresh.assignedTo || null) !== before) dd.push('assignedTo');
+          return out('Skipped', 'Changed since preview (' + dd.join(', ') + ')');
+        }
+        if (btMissing(fresh).length) return out('Skipped', 'Missing required field(s): ' + btMissing(fresh).join(', '));
+        var vars = btPayload(fresh, targetId);
+        var sendErr = null;
+        return bwnGqlOp('editTask', BT_EDIT_M, vars, {
+          feature: 'bulkTask', confirmed: true, ids: { wo: row.wo, task: row.taskId },
+          before: { assignedTo: before }, after: { assignedTo: targetId },
+          validate: function (v) {
+            var d = v && v.data;
+            if (!d || d.id !== fresh.id || d.entityId !== fresh.entityId || d.entityType !== 1) return 'identity mismatch';
+            if (d.description !== fresh.description || d.metadata !== fresh.metadata) return 'protected field mismatch';
+            if (Date.parse(d.targetStartDate) !== Date.parse(fresh.targetStartDate)) return 'date mismatch';
+            if (fresh.categoryId == null ? ('categoryId' in d) : d.categoryId !== fresh.categoryId) return 'category mismatch';
+            if (typeof d.assignedTo !== 'string' || !d.assignedTo || d.assignedTo !== targetId) return 'bad assignee';
+            return true;
+          }
+        }).then(null, function (e) { sendErr = e; }).then(function () {
+          return btFind(row.wo, row.taskId).then(function (post) {
+            var postTo = post ? (post.assignedTo || null) : null;
+            if (sendErr) return out('Mutation failed', btErrCategory(sendErr) +
+              (post && postTo === targetId ? ' - READ-BACK SHOWS THE TARGET ASSIGNEE: the write may have landed, review this task' : ''), postTo);
+            if (!post) return out('Verification failed', 'Task not found open on read-back', null);
+            if (postTo !== targetId) return out('Verification failed', 'Read-back assignee is not the target user', postTo);
+            var diff = btDiff(post, fresh);
+            if (diff.length) return out('Verification failed', 'Protected field(s) changed: ' + diff.join(', '), postTo);
+            return out('Verified', '', postTo);
+          }, function () {
+            if (sendErr) return out('Mutation failed', btErrCategory(sendErr) + ' (read-back also failed)');
+            return out('Verification unavailable', 'Read-back failed - do not assume success');
+          });
+        });
+      }, function () { return out('Skipped', 'Pre-write re-read failed'); })
+        // Last line: an unexpected throw must never reject the run chain (that would strand the
+        // drawer in 'running'). Never labelled success; the task is surfaced for review.
+        .then(null, function (e) { return out('Mutation failed', 'Internal error - review this task by hand'); });
+    }
+
+    // Strictly sequential runner (no pool: one EditTask in flight at a time). shouldStop is checked
+    // between rows; a row already started finishes. Never retries.
+    function btRunSequential(rows, targetId, onRow, shouldStop) {
+      var results = [];
+      return rows.reduce(function (p, row) {
+        return p.then(function () {
+          if (shouldStop && shouldStop()) { results.push({ kind: row.kind, key: btKey(row), wo: row.wo, taskId: row.taskId, result: 'Not run', reason: 'Cancelled', before: row.kind === 'wo' ? ((row.woSnap && row.woSnap.assignedTo) || null) : (row.snap && row.snap.assignedTo || null), after: null }); return; }
+          return btExecRow(row, targetId).then(function (r) { results.push(r); if (onRow) onRow(r); });
+        });
+      }, Promise.resolve()).then(function () { return results; });
+    }
+
+    // Local session summary: identifiers + outcomes only (no task text, no metadata).
+    function btSummary(sessionId, parsed, previewRows, runResults) {
+      var skip = {}, res = {};
+      (previewRows || []).forEach(function (r) { if (r.action === 'Skip') skip[r.reason] = (skip[r.reason] || 0) + 1; });
+      (runResults || []).forEach(function (r) { res[r.result] = (res[r.result] || 0) + 1; });
+      var resolved = (previewRows || []).reduce(function (s, r) {
+        if (r.wo && r.reason !== 'Work order not found' && r.reason !== 'Ambiguous work-order match' && r.reason.indexOf('Read failed') !== 0) s[r.wo] = true;
+        return s;
+      }, {});
+      return {
+        session: sessionId, ts: new Date().toISOString(),
+        inputCount: parsed.total, uniqueCount: parsed.unique.length, invalidCount: parsed.invalid.length,
+        ambiguousInputCount: parsed.ambiguous.length, duplicateCount: parsed.dupes,
+        resolvedCount: Object.keys(resolved).length,
+        previewOpenTasks: (previewRows || []).filter(function (r) { return r.taskId; }).length,
+        previewWoRows: (previewRows || []).filter(function (r) { return r.kind === 'wo' && r.woSnap; }).length,
+        skippedByReason: skip,
+        attempted: (runResults || []).filter(function (r) { return r.result !== 'Not run' && r.result !== 'Skipped'; }).length,
+        verified: res['Verified'] || 0, verificationFailed: res['Verification failed'] || 0,
+        mutationFailed: res['Mutation failed'] || 0, verificationUnavailable: res['Verification unavailable'] || 0,
+        skippedAtRun: res['Skipped'] || 0, notRun: res['Not run'] || 0,
+        rows: (previewRows || []).map(function (r) {
+          var rr = null;
+          (runResults || []).forEach(function (x) { if (x.key === btKey(r)) rr = x; });
+          return { wo: r.wo, kind: r.kind, task: r.taskId, before: r.cur || null, planned: r.action, plannedReason: r.reason || '',
+            result: rr ? rr.result : (r.action === 'Skip' ? 'Skipped' : 'Not run'), reason: rr ? rr.reason : '', after: rr ? rr.after : null };
+        })
+      };
+    }
+    // ===== BULK-TASK-ENGINE END v1 =====
+
+    var BT_LOG_KEY = 'bwn:bulkTask:log';   // last 20 session summaries, this browser only
+    function btSaveSummary(s) {
+      try {
+        var a = JSON.parse(localStorage.getItem(BT_LOG_KEY) || '[]');
+        if (!Array.isArray(a)) a = [];
+        a.unshift(s);
+        localStorage.setItem(BT_LOG_KEY, JSON.stringify(a.slice(0, 20)));
+      } catch (e) { /* storage full or blocked: the on-screen log still shows the run */ }
+      try { console.info('[BWN bulkTask] session', s.session, s); } catch (e) { }
+    }
+
+    // ---- shared launcher dock (bwn:dock:*) - same register/open handshake as Bulk Source ----------
+    var DOCK_KEY = 'bulk-task';
+    function dockRegister() {
+      try {
+        document.dispatchEvent(new CustomEvent('bwn:evt', { detail: {
+          id: 'bwn:dock:register', key: DOCK_KEY, label: 'Reassign tasks', icon: '👥', weight: 24,
+          needPerm: 'Task.EditTask',
+          title: 'BWN Bulk Task Reassign - pick WOs (paste, or load by current assignee), pick a person or team, preview, then reassign tasks and optionally the WO Assigned To (typed confirm, verified read-back)'
+        } }));
+      } catch (e) { /* dock host not up yet - the heartbeat re-registers us */ }
+    }
+    function drawerDismiss(el) {
+      var reduce = false;
+      try { reduce = !!(window.matchMedia && window.matchMedia('(prefers-reduced-motion: reduce)').matches); } catch (e) { /* default to motion */ }
+      if (reduce) { el.remove(); return; }
+      el.removeAttribute('id'); el.setAttribute('aria-hidden', 'true');
+      el.classList.add('bwn-closing');
+      setTimeout(function () { el.remove(); }, 170);
+    }
+    var _running = false, _cancelled = false;
+    try {
+      document.addEventListener('bwn:evt', function (e) {
+        var d = e && e.detail; if (!d) return;
+        if (d.id === 'bwn:dock:host' || d.id === 'bwn:dock:ping') dockRegister();
+        if (d.id === 'bwn:dock:open' && d.key === DOCK_KEY) buildDrawer();
+        if (d.id === 'bwn:drawer:open' && d.key !== DOCK_KEY && !_running) {
+          var o = document.getElementById('bwn-bt-drawer'); if (o) drawerDismiss(o);
+        }
+      });
+    } catch (e) { /* bus unavailable */ }
+    dockRegister();
+
+    // Assignable members for both pickers: active people AND teams (searchMembers BOTH). Read once
+    // per drawer open; the id is what is sent, never typed text.
+    function btLoadMembers() {
+      return bwnGql(BT_MEMBERS_Q, {}).then(function (d) {
+        var r = d && d.searchMembers;
+        var list = ((r && r.items) || []).filter(function (m) { return m && m.id && !m.isInactive && m.displayName; })
+          .map(function (m) { return { id: m.id, name: String(m.displayName).trim(), team: m.memberType === 'Team', tech: m.isTechnician === true }; })
+          .sort(function (a, b) { return a.name.localeCompare(b.name); });
+        return { list: list, partial: !!(r && typeof r.rowCount === 'number' && r.rowCount > ((r.items || []).length)) };
+      });
+    }
+    // A member's open WOs, paged 200 at a time up to BT_LIST_CAP rows (read-only).
+    var BT_LIST_CAP = 1000;
+    function btLoadAssigned(memberId) {
+      var out = [], total = null;
+      function page(skip) {
+        return bwnGql(BT_LIST_Q, { page: { skip: skip, take: 200 }, sortBy: [{ columnName: 'formattedJobNumber', direction: 'DESC' }], assignedTo: [memberId], phase: 'Open' }).then(function (d) {
+          var r = d && d.listWorkOrdersPaginated;
+          if (!r || !Array.isArray(r.items)) throw new Error('list read failed');
+          total = r.rowCount;
+          r.items.forEach(function (w) { if (w && w.assignedTo === memberId && typeof w.number === 'number') out.push(w); });
+          if (r.items.length === 200 && skip + 200 < Math.min(total, BT_LIST_CAP)) return page(skip + 200);
+        });
+      }
+      return page(0).then(function () { return { items: out, total: total, capped: total > BT_LIST_CAP }; });
+    }
+    function fillMemberSelect(sel, list, placeholder) {
+      sel.textContent = '';
+      var o0 = document.createElement('option'); o0.value = ''; o0.textContent = placeholder; sel.appendChild(o0);
+      [['Teams', true], ['People', false]].forEach(function (g) {
+        var og = document.createElement('optgroup'); og.label = g[0];
+        list.filter(function (m) { return m.team === g[1]; }).forEach(function (m) { var o = document.createElement('option'); o.value = m.id; o.textContent = m.name; og.appendChild(o); });
+        if (og.children.length) sel.appendChild(og);
+      });
+    }
+
+    function buildDrawer() {
+      if (document.getElementById('bwn-bt-drawer')) return;   // idempotent mount
+      try { document.dispatchEvent(new CustomEvent('bwn:evt', { detail: { id: 'bwn:drawer:open', key: DOCK_KEY } })); } catch (e) { /* others close their own */ }
+      var el = document.createElement('aside');
+      el.className = 'bwn-drawer';
+      el.id = 'bwn-bt-drawer';
+      el.setAttribute('role', 'dialog');
+      el.setAttribute('aria-label', 'Bulk task reassign');
+      var box = 'width:100%;box-sizing:border-box;padding:6px 8px;border:1px solid var(--bwn-border);border-radius:7px;background:var(--bwn-surface);color:var(--bwn-text)';
+      // Static skeleton carries no runtime values; every dynamic string is set via textContent.
+      el.innerHTML =
+        '<div class="bwn-drawer-hd"><div><div class="t">Reassign tasks</div>' +
+        '<div class="s">pick WOs · pick a person or team · preview · typed confirm · verified</div></div>' +
+        '<button class="bwn-drawer-x" id="bwn-bt-x" aria-label="Close" type="button">×</button></div>' +
+        '<div class="bwn-drawer-body">' +
+          '<div class="bwn-ops-sec">0 · Load by current assignee<span class="d">optional · reads only</span></div>' +
+          '<div style="display:flex;gap:8px;align-items:center;flex-wrap:wrap">' +
+            '<select id="bwn-bt-from" aria-label="Current assignee" style="flex:1;min-width:150px;' + box + ';font-size:13px"><option value="">Loading...</option></select>' +
+            '<button class="bwn-ops-btn ghost" id="bwn-bt-load" type="button" disabled>Load open WOs</button>' +
+          '</div>' +
+          '<div id="bwn-bt-pickwrap" style="display:none;margin-top:6px">' +
+            '<div style="display:flex;gap:8px;align-items:center;flex-wrap:wrap;margin-bottom:4px">' +
+              '<input id="bwn-bt-pickfilter" aria-label="Filter loaded work orders" placeholder="filter: Preventative, client, scope, WO#" style="flex:1;min-width:120px;' + box + ';font-size:12px">' +
+              '<button class="bwn-ops-btn ghost" id="bwn-bt-pickall" type="button">Tick shown</button>' +
+              '<button class="bwn-ops-btn ghost" id="bwn-bt-picknone" type="button">Untick all</button>' +
+            '</div>' +
+            '<div id="bwn-bt-pickcount" role="status" aria-live="polite" style="font:500 11px ui-monospace,monospace;color:var(--bwn-text-muted);margin:2px 0 4px"></div>' +
+            '<div id="bwn-bt-picklist" style="max-height:180px;overflow:auto;border:1px solid var(--bwn-border-2);border-radius:8px"></div>' +
+            '<button class="bwn-ops-btn ghost" id="bwn-bt-pickadd" type="button" style="margin-top:6px" disabled>Add ticked to the list below</button>' +
+          '</div>' +
+          '<div class="bwn-ops-sec">1 · Work orders<span class="d">newline, comma or space separated</span></div>' +
+          '<textarea id="bwn-bt-input" rows="4" aria-label="Work order numbers" placeholder="397888&#10;W-399174, 393951" style="' + box + ';font:500 12px ui-monospace,monospace"></textarea>' +
+          '<div id="bwn-bt-parse" role="status" aria-live="polite" style="font:500 11px ui-monospace,monospace;color:var(--bwn-text-muted);margin:4px 0 8px"></div>' +
+          '<div class="bwn-ops-sec">2 · Assign to<span class="d">a person or a team</span></div>' +
+          '<select id="bwn-bt-user" aria-label="Target person or team" style="' + box + ';font-size:13px"><option value="">Loading...</option></select>' +
+          '<div style="margin:6px 0 2px;font-size:13px;color:var(--bwn-text)"><label for="bwn-bt-withwo">Move: </label>' +
+            '<select id="bwn-bt-withwo" style="padding:4px 6px;border:1px solid var(--bwn-border);border-radius:7px;font-size:13px;background:var(--bwn-surface);color:var(--bwn-text)">' +
+            '<option value="tasks">open tasks only</option><option value="both">open tasks + the work order&#39;s Assigned To</option><option value="wo">the work order&#39;s Assigned To only</option></select></div>' +
+          '<div class="bwn-ops-note" style="display:block">Open tasks that already exist on these work orders are moved; with the box ticked, each work order&#39;s own Assigned To is moved too (a work order with no tasks then still moves). Nothing else changes. Every row is re-read before and after its write, and only a matching read-back is reported as done.</div>' +
+          '<div id="bwn-bt-members" class="bwn-ops-note" style="display:none"></div>' +
+          '<div class="bwn-ops-sec">3 · Preview<span class="d">reads only, zero writes</span></div>' +
+          '<button class="bwn-ops-btn ghost" id="bwn-bt-preview" type="button" disabled>Preview (reads only)</button>' +
+          '<div id="bwn-bt-pcount" style="font:500 11px ui-monospace,monospace;color:var(--bwn-text-muted);margin:6px 0"></div>' +
+          '<div id="bwn-bt-table" style="max-height:220px;overflow:auto;border:1px solid var(--bwn-border-2);border-radius:8px"></div>' +
+          '<div id="bwn-bt-confirmwrap" style="display:none">' +
+            '<div class="bwn-ops-sec">4 · Confirm<span class="d">type the phrase EXACTLY to arm the run</span></div>' +
+            '<div id="bwn-bt-confirmtarget" style="font:600 13px ui-monospace,monospace;color:var(--bwn-text);margin-bottom:4px"></div>' +
+            '<div style="display:flex;gap:8px;align-items:center;flex-wrap:wrap">' +
+              '<input id="bwn-bt-confirm" aria-label="Type APPLY and the count" placeholder="APPLY n" style="flex:1;min-width:110px;padding:6px 9px;border:1px solid var(--bwn-border);border-radius:7px;font:600 13px ui-monospace,monospace;background:var(--bwn-surface);color:var(--bwn-text)">' +
+              '<button class="bwn-ops-btn primary" id="bwn-bt-approve" type="button" disabled>Reassign</button>' +
+            '</div>' +
+          '</div>' +
+          '<div id="bwn-bt-runwrap" style="display:none">' +
+            '<div class="bwn-ops-sec">5 · Run<span class="d">one write at a time · cancel stops new rows</span></div>' +
+            '<div style="display:flex;gap:8px;margin-bottom:6px"><button class="bwn-ops-btn ghost" id="bwn-bt-cancel" type="button">Cancel</button></div>' +
+            '<div id="bwn-bt-log" style="max-height:170px;overflow:auto;font:500 11px ui-monospace,monospace;color:var(--bwn-text-muted);white-space:pre-wrap;border:1px solid var(--bwn-border-2);border-radius:8px;padding:7px 9px"></div>' +
+            '<div id="bwn-bt-tally" role="status" aria-live="polite" style="font:600 12px ui-monospace,monospace;color:var(--bwn-text);margin-top:6px"></div>' +
+          '</div>' +
+        '</div>' +
+        '<div class="bwn-drawer-ft"><button class="bwn-ops-btn ghost" id="bwn-bt-close" type="button">Close</button></div>';
+      document.body.appendChild(el);
+      wireDrawer(el);
+    }
+
+    function wireDrawer(root) {
+      function $(id) { return root.querySelector('#' + id); }
+      var members = [], names = {}, parsed = btParse(''), rows = null, stamp = null, confirmCount = 0, _previewing = false, _loading = false;
+      var loaded = [], ticked = Object.create(null);
+      function isMember(v) { return members.some(function (m) { return m.id === v; }); }
+      function targets() { return members.filter(function (m) { return !m.tech; }); }   // technicians are not assignable owners (Dispatch parity)
+      function target() { var v = $('bwn-bt-user').value; return targets().some(function (m) { return m.id === v; }) ? v : ''; }
+      function targetIsTeam() { var v = target(); return members.some(function (m) { return m.id === v && m.team; }); }
+      function withWO() { var v = $('bwn-bt-withwo').value; return v === 'both' ? true : (v === 'wo' ? 'only' : false); }
+      function nameOf(id) { return id ? (names[id] || 'Not available') : 'Unassigned'; }
+      function logln(s) { var l = $('bwn-bt-log'); l.appendChild(document.createTextNode(s + '\n')); l.scrollTop = l.scrollHeight; }
+      function close() { if (_running) { logln('! A run is in progress - Cancel it before closing.'); return; } drawerDismiss(root); }
+      $('bwn-bt-x').onclick = close;
+      $('bwn-bt-close').onclick = close;
+
+      function invalidate() {
+        rows = null; stamp = null; confirmCount = 0;
+        $('bwn-bt-confirmwrap').style.display = 'none';
+        $('bwn-bt-confirm').value = '';
+        $('bwn-bt-approve').disabled = true;
+        $('bwn-bt-table').textContent = '';
+        $('bwn-bt-pcount').textContent = '';
+        refreshParse();
+      }
+      function refreshParse() {
+        parsed = btParse($('bwn-bt-input').value);
+        var over = parsed.unique.length > BT_MAX_WOS;
+        $('bwn-bt-parse').textContent = parsed.total + ' entered · ' + parsed.unique.length + ' unique WO#' +
+          (parsed.dupes ? ' · ' + parsed.dupes + ' duplicate' : '') +
+          (parsed.invalid.length ? ' · ' + parsed.invalid.length + ' invalid' : '') +
+          (parsed.ambiguous.length ? ' · ' + parsed.ambiguous.length + ' ambiguous' : '') +
+          (over ? ' · REFUSED: over the ' + BT_MAX_WOS + '-WO cap, the run will not truncate' : '');
+        $('bwn-bt-preview').disabled = _running || _previewing || over || !target() || (!parsed.unique.length && !parsed.invalid.length && !parsed.ambiguous.length);
+        $('bwn-bt-load').disabled = _running || _loading || !isMember($('bwn-bt-from').value);
+      }
+      $('bwn-bt-input').oninput = invalidate;
+      $('bwn-bt-user').onchange = invalidate;
+      $('bwn-bt-withwo').onchange = invalidate;
+      $('bwn-bt-from').onchange = refreshParse;
+
+      btLoadMembers().then(function (r) {
+        members = r.list; names = {};
+        members.forEach(function (m) { names[m.id] = m.team ? m.name + ' (team)' : m.name; });
+        fillMemberSelect($('bwn-bt-user'), targets(), '- choose a person or team -');
+        fillMemberSelect($('bwn-bt-from'), members, '- current assignee -');
+        if (r.partial) { var n = $('bwn-bt-members'); n.style.display = 'block'; n.textContent = 'Umbrava returned only part of the member list; someone may be missing from the pickers.'; }
+        refreshParse();
+      }, function () {
+        ['bwn-bt-user', 'bwn-bt-from'].forEach(function (id) {
+          var sel = $(id); sel.textContent = '';
+          var o = document.createElement('option'); o.value = ''; o.textContent = 'Could not load people/teams - reopen to retry'; sel.appendChild(o);
+        });
+      });
+
+      // ---- load by current assignee (READS ONLY): tick WOs, then add them to the list ----
+      function pickShown() {
+        var f = String($('bwn-bt-pickfilter').value || '').trim().toLowerCase();
+        return loaded.filter(function (w) {
+          if (!f) return true;
+          return [w.number, w.trackingNumber, w.workOrderTypeName, w.statusName, w.clientName, w.locationName, w.scopeOfWork]
+            .map(function (x) { return String(x == null ? '' : x).toLowerCase(); }).join(' ').indexOf(f) !== -1;
+        });
+      }
+      function renderPick() {
+        var list = $('bwn-bt-picklist'); list.textContent = '';
+        var shown = pickShown(), nTicked = Object.keys(ticked).length;
+        shown.slice(0, 300).forEach(function (w) {   // ponytail: paints 300 rows; the filter narrows further
+          var lab = document.createElement('label');
+          lab.style.cssText = 'display:flex;gap:8px;align-items:flex-start;padding:5px 9px;border-bottom:1px solid var(--bwn-surface-3);font:500 11px ui-monospace,monospace;color:var(--bwn-text);cursor:pointer';
+          var cb = document.createElement('input'); cb.type = 'checkbox'; cb.checked = !!ticked[w.number];
+          cb.setAttribute('aria-label', 'Select work order ' + w.number);
+          cb.onchange = function () { if (cb.checked) ticked[w.number] = true; else delete ticked[w.number]; renderPickCount(); };
+          var t = document.createElement('span'); t.style.cssText = 'min-width:0;overflow-wrap:anywhere';
+          t.textContent = 'W-' + w.number + ' · ' + (w.workOrderTypeName || '-') + ' · ' + (w.statusName || '-') + ' · ' + (w.clientName || '-') + ' · ' +
+            String(w.scopeOfWork || '').replace(/\s+/g, ' ').trim().slice(0, 70);
+          lab.appendChild(cb); lab.appendChild(t); list.appendChild(lab);
+        });
+        renderPickCount(shown.length, nTicked);
+      }
+      function renderPickCount() {
+        var nT = Object.keys(ticked).length, shown = pickShown().length;
+        $('bwn-bt-pickcount').textContent = loaded.length + ' open WO' + (loaded.length === 1 ? '' : 's') + ' loaded · ' + shown + ' shown · ' + nT + ' ticked' +
+          (nT > BT_MAX_WOS ? ' · over the ' + BT_MAX_WOS + '-WO cap for one run' : '');
+        $('bwn-bt-pickadd').disabled = !nT || _running;
+      }
+      $('bwn-bt-pickfilter').oninput = renderPick;
+      $('bwn-bt-pickall').onclick = function () { pickShown().forEach(function (w) { ticked[w.number] = true; }); renderPick(); };
+      $('bwn-bt-picknone').onclick = function () { ticked = Object.create(null); renderPick(); };
+      $('bwn-bt-load').onclick = function () {
+        var who = $('bwn-bt-from').value;
+        if (_loading || _running || !isMember(who)) return;
+        _loading = true; refreshParse();
+        $('bwn-bt-pickwrap').style.display = 'block';
+        $('bwn-bt-pickcount').textContent = 'Loading open work orders for ' + nameOf(who) + '...';
+        $('bwn-bt-picklist').textContent = '';
+        btLoadAssigned(who).then(function (r) {
+          loaded = r.items; ticked = Object.create(null);
+          renderPick();
+          if (r.capped) $('bwn-bt-pickcount').textContent += ' · showing the first ' + BT_LIST_CAP + ' of ' + r.total;
+        }, function () {
+          loaded = []; ticked = Object.create(null);
+          $('bwn-bt-pickcount').textContent = 'Could not load that assignee’s work orders - try again.';
+        }).then(function () { _loading = false; refreshParse(); });
+      };
+      $('bwn-bt-pickadd').onclick = function () {
+        var nums = Object.keys(ticked);
+        if (!nums.length) return;
+        var cur = String($('bwn-bt-input').value || '').trim();
+        $('bwn-bt-input').value = (cur ? cur + '\n' : '') + nums.join('\n');
+        invalidate();
+      };
+
+      function renderTable(list, results) {
+        var box = $('bwn-bt-table'); box.textContent = '';
+        var byKey = {};
+        (results || []).forEach(function (r) { if (r.key) byKey[r.key] = r; });
+        list.forEach(function (r) {
+          var line = document.createElement('div');
+          line.style.cssText = 'display:grid;grid-template-columns:70px 1fr 1fr 1fr 110px;gap:6px;padding:5px 9px;border-bottom:1px solid var(--bwn-surface-3);font:500 11px ui-monospace,monospace;align-items:start';
+          var res = r.wo ? byKey[btKey(r)] : null;
+          var verdict = res ? res.result : r.action;
+          var why = res ? res.reason : r.reason;
+          var planned = r.taskId || r.woSnap;
+          [r.wo ? 'W-' + r.wo + (r.input && r.input !== String(r.wo) && r.input.toUpperCase() !== 'W-' + r.wo ? ' (' + r.input + ')' : '') : String(r.input || ''),
+            r.taskId ? (String(r.desc || '').replace(/\s+/g, ' ').trim().slice(0, 60) || '(no description)') + ' [' + r.taskId.slice(0, 8) + ']' : (r.woSnap ? 'Work order Assigned To' : '-'),
+            planned ? nameOf(r.cur) : '-',
+            planned ? nameOf(r.to) : '-',
+            verdict + (why ? ': ' + why : '')].forEach(function (txt, i) {
+            var c = document.createElement('span'); c.textContent = txt;
+            c.style.cssText = 'min-width:0;overflow-wrap:anywhere;color:' + (i === 4 ? (verdict === 'Reassign' || verdict === 'Verified' ? 'var(--bwn-green)' : (verdict === 'Skip' || verdict === 'Skipped' || verdict === 'Not run' ? 'var(--bwn-text-faint)' : 'var(--bwn-bad)')) : 'var(--bwn-text)');
+            line.appendChild(c);
+          });
+          box.appendChild(line);
+        });
+        if (!list.length) { var em = document.createElement('div'); em.style.cssText = 'padding:9px;color:var(--bwn-text-faint);font-size:12px'; em.textContent = 'Nothing to preview.'; box.appendChild(em); }
+      }
+
+      // ---- preview (READS ONLY) ----
+      $('bwn-bt-preview').onclick = function () {
+        if (_running || _previewing) return;
+        // A typed confirm never carries into a new preview, even one with the same count.
+        $('bwn-bt-confirm').value = ''; $('bwn-bt-approve').disabled = true; $('bwn-bt-confirmwrap').style.display = 'none';
+        var tgt = target(), ww = withWO(), tIsTeam = targetIsTeam();
+        var p = btParse($('bwn-bt-input').value);
+        if (!tgt || p.unique.length > BT_MAX_WOS) { refreshParse(); return; }
+        $('bwn-bt-preview').disabled = true; _previewing = true;
+        $('bwn-bt-pcount').textContent = 'Reading ' + p.unique.length + ' work order' + (p.unique.length === 1 ? '' : 's') + '...';
+        var list = [];
+        p.invalid.forEach(function (t) { list.push({ input: t, wo: null, taskId: null, action: 'Skip', reason: 'Invalid work-order number' }); });
+        p.ambiguous.forEach(function (t) { list.push({ input: t, wo: null, taskId: null, action: 'Skip', reason: 'Ambiguous work-order reference' }); });
+        p.unique.reduce(function (acc, wo) {
+          return acc.then(function () { return btReadWO(wo).then(function (res) { list = list.concat(btRowsFor(wo, res, tgt, ww, tIsTeam).map(function (r) { r.input = p.raw[wo]; return r; })); }); });
+        }, Promise.resolve()).then(function () {
+          _previewing = false;
+          // The inputs may have moved while the reads ran; only a still-current preview may arm.
+          if (btParse($('bwn-bt-input').value).unique.join(',') !== p.unique.join(',') || target() !== tgt || withWO() !== ww) { invalidate(); return; }
+          rows = list; parsed = p;
+          stamp = btStamp(p.unique, tgt, rows, ww);
+          var act = rows.filter(function (r) { return r.action === 'Reassign'; });
+          var n = act.length, nWo = act.filter(function (r) { return r.kind === 'wo'; }).length;
+          $('bwn-bt-pcount').textContent = 'Preview: ' + n + ' to reassign (' + nWo + ' work order' + (nWo === 1 ? '' : 's') + ', ' + (n - nWo) + ' task' + (n - nWo === 1 ? '' : 's') + ') · ' +
+            (rows.length - n) + ' skipped · ' + rows.filter(function (r) { return r.taskId; }).length + ' open tasks found. ZERO writes sent.';
+          renderTable(rows, null);
+          confirmCount = n;
+          $('bwn-bt-confirmwrap').style.display = 'block';
+          if (!n) { $('bwn-bt-confirmtarget').textContent = 'Nothing to reassign.'; $('bwn-bt-confirm').style.display = 'none'; $('bwn-bt-approve').style.display = 'none'; }
+          else {
+            $('bwn-bt-confirm').style.display = ''; $('bwn-bt-approve').style.display = '';
+            $('bwn-bt-confirmtarget').textContent = 'Type exactly:  APPLY ' + n + '   (to ' + nameOf(tgt) + ')';
+            $('bwn-bt-confirm').placeholder = 'APPLY ' + n;
+          }
+          refreshParse();
+        });
+      };
+      function currentStamp() { return rows ? btStamp(btParse($('bwn-bt-input').value).unique, target(), rows, withWO()) : null; }
+      $('bwn-bt-confirm').oninput = function () {
+        $('bwn-bt-approve').disabled = !btConfirmArmed($('bwn-bt-confirm').value, confirmCount, currentStamp(), stamp);
+      };
+
+      // ---- run ----
+      $('bwn-bt-approve').onclick = function () {
+        if ($('bwn-bt-approve').disabled || _running) return;
+        if (!btConfirmArmed($('bwn-bt-confirm').value, confirmCount, currentStamp(), stamp)) { invalidate(); return; }   // last-line guard
+        var tgt = target();
+        var todo = rows.filter(function (r) { return r.action === 'Reassign'; });
+        if (todo.length !== confirmCount) { invalidate(); return; }
+        var previewRows = rows, sessionId = 'bt-' + Date.now().toString(36);
+        _running = true; _cancelled = false;
+        $('bwn-bt-confirmwrap').style.display = 'none';
+        $('bwn-bt-runwrap').style.display = 'block';
+        $('bwn-bt-preview').disabled = true; $('bwn-bt-load').disabled = true; $('bwn-bt-pickadd').disabled = true;
+        $('bwn-bt-input').disabled = true; $('bwn-bt-user').disabled = true; $('bwn-bt-withwo').disabled = true;
+        $('bwn-bt-log').textContent = ''; $('bwn-bt-tally').textContent = '';
+        logln('Run ' + sessionId + ' - ' + todo.length + ' write' + (todo.length === 1 ? '' : 's') + ' to ' + nameOf(tgt) + ', one at a time, no retries');
+        btRunSequential(todo, tgt, function (r) {
+          logln('W-' + r.wo + (r.kind === 'wo' ? ' [work order]' : ' [' + String(r.taskId).slice(0, 8) + ']') + ': ' + r.result + (r.reason ? ' - ' + r.reason : ''));
+        }, function () { return _cancelled; }).then(function (results) {
+          _running = false;
+          var s = btSummary(sessionId, parsed, previewRows, results);
+          btSaveSummary(s);
+          renderTable(previewRows, results);
+          $('bwn-bt-tally').textContent = s.verified + ' verified · ' + s.verificationFailed + ' verification failed · ' + s.mutationFailed + ' write failed · ' +
+            s.verificationUnavailable + ' unverified · ' + s.skippedAtRun + ' skipped (changed) · ' + s.notRun + ' not run';
+          var bad = results.filter(function (r) { return r.result !== 'Verified' && r.result !== 'Not run' && r.result !== 'Skipped'; });
+          if (bad.length) logln('REVIEW BY HAND: ' + bad.map(function (r) { return 'W-' + r.wo + (r.kind === 'wo' ? ' (work order Assigned To)' : ' task ' + r.taskId); }).join(', '));
+          rows = null; stamp = null; confirmCount = 0;   // a finished run never re-arms; preview again
+          $('bwn-bt-confirm').value = ''; $('bwn-bt-approve').disabled = true;
+          $('bwn-bt-input').disabled = false; $('bwn-bt-user').disabled = false; $('bwn-bt-withwo').disabled = false;
+          refreshParse(); renderPickCount();
+          BWN.beat('bulkTask', 'ok', 'run ' + sessionId + ': ' + s.verified + ' verified, ' + (s.verificationFailed + s.mutationFailed + s.verificationUnavailable) + ' need review');
+        });
+      };
+      $('bwn-bt-cancel').onclick = function () { if (_running) { _cancelled = true; logln('-- cancelling: no new rows will start --'); } };
+      refreshParse();
+    }
+
+    BWN.beat('bulkTask', 'ok', 'ready (flag on)');
+  });
+
+  // ---- Hide Help --------------------------------------------------------------
+  // Umbrava's floating "? Help" pill (bottom-right) is the Freshworks widget launcher,
+  // an iframe#launcher-frame, and it sits over the last grid column. Hidden by default
+  // via CSS; the initials (profile) menu gets a "Show/Hide Help button" row above
+  // Logout, remembered per browser in localStorage.
+  // ponytail: Logout found by its visible text - breaks if Umbrava relabels it; pin the
+  // MUI #customized-menu structure then.
+  bwnBoot('hideHelp', BWN_MODULES.hideHelp, function () {
+    var KEY = 'bwn:hideHelp';
+    var root = document.documentElement;
+    function hidden() { try { return localStorage.getItem(KEY) !== '0'; } catch (e) { return true; } }
+    function apply() { if (hidden()) root.setAttribute('data-bwn-hidehelp', ''); else root.removeAttribute('data-bwn-hidehelp'); }
+    var st = document.createElement('style');
+    st.textContent = 'html[data-bwn-hidehelp] #launcher-frame{display:none!important}';
+    document.head.appendChild(st);
+    apply();
+
+    function addToggle() {
+      var el = document.evaluate('//body//*[normalize-space(text())="Logout"]', document, null, XPathResult.FIRST_ORDERED_NODE_TYPE, null).singleNodeValue;
+      if (!el) return;
+      var row = el.closest('li,[role="menuitem"]') || el.parentElement;
+      var prev = row.previousElementSibling;
+      if (prev && prev.hasAttribute('data-bwn-helptoggle')) return;
+      // Clone Logout's row so it inherits the menu styling. A clone carries no React
+      // handlers, so it cannot log out; its icon is blanked so it does not read as one.
+      var t = row.cloneNode(true);
+      t.setAttribute('data-bwn-helptoggle', '');
+      t.removeAttribute('id');
+      t.querySelectorAll('svg,img').forEach(function (n) { n.style.visibility = 'hidden'; });
+      var label = row === el ? t : document.evaluate('.//*[normalize-space(text())="Logout"]', t, null, XPathResult.FIRST_ORDERED_NODE_TYPE, null).singleNodeValue;
+      function sync() { label.textContent = hidden() ? 'Show Help button' : 'Hide Help button'; }
+      function flip(e) {
+        e.preventDefault(); e.stopPropagation();
+        try { localStorage.setItem(KEY, hidden() ? '0' : '1'); } catch (err) { /* private mode */ }
+        apply(); sync();
+      }
+      sync();
+      t.addEventListener('click', flip, true);
+      t.addEventListener('keydown', function (e) { if (e.key === 'Enter' || e.key === ' ') flip(e); }, true);
+      row.parentNode.insertBefore(t, row);
+    }
+    var tmr = null;
+    new MutationObserver(function () { if (!tmr) tmr = setTimeout(function () { tmr = null; addToggle(); }, 150); })
+      .observe(document.body, { childList: true, subtree: true });
+    BWN.beat('hideHelp', 'ok', hidden() ? 'help hidden' : 'help shown');
   });
 
   // ---- Flush the module queue -------------------------------------------------

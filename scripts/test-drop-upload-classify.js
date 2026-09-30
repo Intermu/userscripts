@@ -32,7 +32,7 @@ function slice(startNeedle, endNeedle, what) {
 // Deterministic layer: CLIENT_DOMAINS + classifyDomain + partyByDomain + noteTypeForEmail/ForFiles.
 var DET = slice('var CLIENT_DOMAINS = {', 'function inboundClientEmail(', 'domain classifier');
 // Label layer: DEFAULT_DOC_LABEL + PARTY_LABEL + vendorOrSupplier + classifyEmail + docLabelForFiles.
-var LBL = slice('var DEFAULT_DOC_LABEL =', 'var noteBox = null', 'label classifier');
+var LBL = slice('var DEFAULT_DOC_LABEL =', '// ---- Action note: @-mention', 'label classifier');
 
 // Prelude: the module-level helpers the label slice leans on, plus a stub bwnAI whose reply we flip.
 var prelude = [
@@ -83,11 +83,44 @@ function run() {
     .then(function (l) { A.eq('label: unknown external + AI "supplier" -> Supplier Correspondence', l, 'Supplier Correspondence'); })
     .then(function () { ctx.setAI('vendor'); return ctx.docLabelForFiles([emailFile(inbound('tech@acmehvac.com'))]); })
     .then(function (l) { A.eq('label: unknown external + AI "vendor" -> Vendor Correspondence', l, 'Vendor Correspondence'); })
+    // A known SUPPLIER domain is deterministic - Supplier even when the AI would guess vendor (the reported LSI/Power Play case).
+    .then(function () { ctx.setAI('vendor'); return ctx.docLabelForFiles([emailFile(inbound('powerplayservice@lsicorp.com'))]); })
+    .then(function (l) { A.eq('label: known supplier domain -> Supplier Correspondence (no AI guess)', l, 'Supplier Correspondence'); })
+    .then(function () { A.eq('known supplier still types the NOTE as Vendor (no Supplier note type)', ctx.noteTypeForEmail(inbound('powerplayservice@lsicorp.com')), 'Vendor'); })
     .then(function () { ctx.setAI(''); return ctx.docLabelForFiles([emailFile(inbound('who@mystery.com'))]); })
     .then(function (l) { A.eq('label: unknown external + AI MISS -> Vendor Correspondence (fallback)', l, 'Vendor Correspondence'); })
     .then(function () { ctx.setAI('supplier'); return ctx.docLabelForFiles([emailFile(outbound('boss@broadwaynational.com'))]); })
     .then(function (l) { A.eq('label: internal email -> Internal (no AI; not a client Work Order Request)', l, 'Internal'); })
     .then(function () { return ctx.docLabelForFiles([{ isEmail: false }]); })
-    .then(function (l) { A.eq('label: no email (photo/PDF) -> Work Order Request', l, 'Work Order Request'); });
+    .then(function (l) { A.eq('label: no email (photo/PDF) -> Work Order Request', l, 'Work Order Request'); })
+    .then(handoffLabels);
+}
+
+// ---- WO-intake handoff: the request email and its photos get DIFFERENT doc labels -------------
+// The handoff forced "Work Order Request" on EVERY file it uploaded, so the site photos a client
+// attaches to a request were filed as Work Order Requests too (reported 2026-09-03 on the Pilot
+// store 258 painting request - six photos, all mislabeled). It now resolves the label PER FILE.
+// Both halves below are the REAL shipped bytes: fileKind is sliced out, and the resolver's own
+// expression is lifted from the handoff call and run against it - not a restatement.
+function handoffLabels() {
+  var KIND = slice('function fileKind(', 'function humanSize(', 'file kind sniffer');
+  var kctx = {};
+  vm.runInNewContext(KIND + ';this.fileKind=fileKind;', kctx);
+  A.eq('fileKind: the dropped request email -> Email', kctx.fileKind({ name: 'store Painting.msg', type: '' }), 'Email');
+  // Outlook hands embedded photos over with mime application/octet-stream, so the NAME is what
+  // classifies them - a mime-only sniffer would have missed every one of them.
+  A.eq('fileKind: a photo attachment (octet-stream mime, .jpeg name) -> Photo',
+    kctx.fileKind({ name: 'original-C2383B61.jpeg', type: 'application/octet-stream' }), 'Photo');
+
+  var handoff = slice('runApiUpload(raw, Promise.resolve(files), udt, ctx,', '}, false);', 'WO-intake handoff upload call');
+  var m = /return (fileKind\(f\)[\s\S]*?);/.exec(handoff);
+  A.ok('the handoff passes a per-file label resolver, not one fixed name', !!m, handoff.slice(0, 200));
+  var resolve = new Function('fileKind', 'f', 'return ' + m[1] + ';');
+  A.eq('handoff: the request email itself -> Work Order Request',
+    resolve(kctx.fileKind, { name: 'store Painting.msg', type: '' }), 'Work Order Request');
+  A.eq('handoff: an image attachment -> Photo (THE FIX)',
+    resolve(kctx.fileKind, { name: 'original-C2383B61.jpeg', type: 'application/octet-stream' }), 'Photo');
+  A.eq('handoff: an attached PDF is still a Work Order Request',
+    resolve(kctx.fileKind, { name: 'scope.pdf', type: 'application/pdf' }), 'Work Order Request');
 }
 run().then(function () { A.finish(); }, function (e) { console.error('THREW:', e && e.stack || e); process.exit(2); });

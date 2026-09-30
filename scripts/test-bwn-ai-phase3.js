@@ -196,11 +196,12 @@ function run() {
 
   // === wo-audit: minimal sender + summarize (TASK-011) ================================
   chain = chain.then(function () {
-    var T = loadWoAudit({ seed: roleSlot(), gmScript: [{ ok: true, status: 'final', text: 'WO 375038 is scheduled for Tuesday.' }] });
+    var T = loadWoAudit({ seed: roleSlot(), gmScript: [{ ok: true, status: 'final', text: 'Vendor scheduling pending - Vendor to confirm an on-site date - ECD TBD' }] });
     var woFacts = { raw: 'W-375038', status: 'Pending Dispatch', city: 'Tampa', state: 'FL', location: 'PFJ #123', days: '12', assignedTo: 'Lisa P' };
     var notes = [{ content: 'Vendor confirmed Tuesday.', createdDate: '2026-07-22', type: 'client' }, { content: 'Parts arrived.', createdDate: '2026-07-21', type: 'internal' }];
     return T.summarize(woFacts, notes, 'claude-sonnet-5').then(function (note) {
-      eq('wo-audit summarize returns final text', note, 'WO 375038 is scheduled for Tuesday.');
+      eq('wo-audit summarize returns final text', note.note, 'Vendor scheduling pending - Vendor to confirm an on-site date - ECD TBD');
+      eq('a grounded line is NOT degraded', note.degraded, '');
       var body = T._gsent[0].body;
       ok('wo-audit POST hits /api/ai', /\/api\/ai$/.test(T._gsent[0].url), T._gsent[0].url);
       ok('wo-audit POST task=summarize', body.task === 'summarize');
@@ -239,10 +240,10 @@ function run() {
     var T = loadWoAudit({ seed: roleSlot(), gmScript: [
       { status: 429, json: { ok: false, error: 'rate limited; slow down' } },
       { status: 429, json: { ok: false, error: 'rate limited; slow down' } },
-      { ok: true, status: 'final', text: 'Recovered after the throttle cleared.' },
+      { ok: true, status: 'final', text: 'Scheduled - Vendor to attend the visit and report the outcome - ECD TBD' },
     ] });
     return T.summarize({ raw: '1' }, [], 'claude-sonnet-5').then(function (note) {
-      eq('429 x2 then success -> row still writes', note, 'Recovered after the throttle cleared.');
+      eq('429 x2 then success -> row still writes', note.note, 'Scheduled - Vendor to attend the visit and report the outcome - ECD TBD');
       eq('429 backoff spans the full 60s window', JSON.stringify(T._slept), '[15000,45000]');
       eq('all three attempts actually reached the wire', T._gsent.length, 3);
       ok('the row settled INSIDE the router budget', T._elapsed() < T.AI_ROUTER_TIMEOUT_MS,
@@ -365,7 +366,7 @@ function staticChecks() {
   ok('suite-ai draft passes timeoutMs 60000', /timeoutMs:\s*60000/.test(gseg));
 
   var wo = read('bwn-wo-audit.user.js');
-  var si = wo.indexOf('function summarize(woFacts, notes, model, onWait) {');
+  var si = wo.indexOf('function summarize(woFacts, notes, model, onWait, facts) {');
   ok('wo-audit summarize signature is findable', si !== -1);
   var sseg = wo.slice(si, si + 1100);
   ok('wo-audit summarize() routes through bwnAI', /bwnAI\(\{/.test(sseg));

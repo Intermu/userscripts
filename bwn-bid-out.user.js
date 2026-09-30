@@ -2254,15 +2254,29 @@
     else if (d.id === 'bwn:dock:open' && d.key === DOCK_KEY && woNumber()) launchPanel({ invite: true });
   }, false);
 
+  // ---- SWA ingest key presence beacon ---------------------------------------
+  // Boolean only, never the key. GM storage is PER SCRIPT (measured 2026-09-03), so a blank key
+  // here is invisible to every sibling; Core's Ops panel reads these beacons to name the blank
+  // ones. ts is the LOAD time, never refreshed on save - Core's freshness handshake needs that.
+  var INGEST_BEACON_TS = Date.now();
+  function publishIngestPresence() {
+    try {
+      localStorage.setItem('bwn:ingest:bid-out', JSON.stringify({ k: GM_getValue('ingest_key', '') ? 1 : 0, ts: INGEST_BEACON_TS }));
+    } catch (e) { /* best-effort */ }
+  }
+  publishIngestPresence();
+
   // ---- Key management (Tampermonkey menu) ------------------------------------
+  // Every key here is THIS script's own copy: Tampermonkey scopes GM storage per script, so
+  // none of these values reach any sibling script, whatever their @namespace.
   try {
     GM_registerMenuCommand('Set Google Places API key', function () {
       var v = prompt('Google Places API key (for net-new vendor discovery):', GM_getValue('places_key', '') || '');
       if (v !== null) { GM_setValue('places_key', v.trim()); toast(v.trim() ? 'Places key saved.' : 'Places key cleared.'); }
     });
     GM_registerMenuCommand('Set SWA ingest key', function () {
-      var v = prompt('SWA ingest key (same value as the connector WO_INGEST_KEY - used to fetch net-new emails + one-click send):', GM_getValue('ingest_key', '') || '');
-      if (v !== null) { GM_setValue('ingest_key', v.trim()); toast(v.trim() ? 'Ingest key saved.' : 'Ingest key cleared.'); }
+      var v = prompt('SWA ingest key (same value as the connector WO_INGEST_KEY - fetches net-new emails + one-click send). Tampermonkey scopes this PER SCRIPT, so setting it here sets it for Bid Out only - every other suite script needs its own copy:', GM_getValue('ingest_key', '') || '');
+      if (v !== null) { GM_setValue('ingest_key', v.trim()); publishIngestPresence(); toast(v.trim() ? 'Ingest key saved.' : 'Ingest key cleared.'); }
     });
     GM_registerMenuCommand('Set send-from email (one-click send)', function () {
       var v = prompt('Your send-from mailbox (must be on the server allowlist; the bid email sends from + replies to this):', GM_getValue('send_from', '') || (actor().email || ''));

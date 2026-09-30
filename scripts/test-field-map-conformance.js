@@ -1,9 +1,9 @@
 // test-field-map-conformance.js - the userscript half of the B.1 shared field map.
 //
 // scripts/field-map.json here is a byte-identical MIRROR of the CANONICAL copy in the SWA
-// repo (broadway-internal-ops/api/shared/field-map.json). The SWA routes require it at
-// runtime; a Tampermonkey @grant-none script cannot require a file in the browser, so on
-// this side the map is a test-time contract only. This test asserts that the SHIPPED
+// repo (broadway-internal-ops/api/shared/field-map.json). Neither side loads it at runtime:
+// the SWA repo holds its route vocabularies to it in scripts/test-field-map.js, and a
+// Tampermonkey @grant-none script cannot require a file in the browser. This test asserts that the SHIPPED
 // bwn-suite-core.user.js board producer (heatDatasetRows) emits only wire keys the map
 // declares with the "board" producer - so Core can never start sending a field the map
 // (and therefore the SWA route + Dashboard) doesn't know about, the drift that
@@ -54,7 +54,17 @@ emittedKeys.forEach(function (k) {
 });
 
 // --- Best-effort cross-repo byte check (local dev only; skipped in CI) --------------------
-var CANON = 'C:/Users/mnajarro/OneDrive - Broadway National/Documents/GitHub/broadway-internal-ops/api/shared/field-map.json';
+// The CURRENT working checkout first, the OneDrive one only as a fallback. That OneDrive path is
+// a LEGACY checkout of the same remote (boi-repos-two-checkouts-one-remote) and it goes stale on
+// its own: on 2026-09-03 it was three weeks behind and this guard reported "the two copies have
+// drifted" for a mirror that was in fact correct. A drift check pointed at a stale tree lies in
+// both directions - it cries wolf on a good mirror and stays silent on a real drift that the
+// stale copy happens to share.
+var CANON_CANDIDATES = [
+  'C:/Users/mnajarro/repos/broadway-internal-ops/api/shared/field-map.json',
+  'C:/Users/mnajarro/OneDrive - Broadway National/Documents/GitHub/broadway-internal-ops/api/shared/field-map.json'
+];
+var CANON = CANON_CANDIDATES.filter(function (p) { return fs.existsSync(p); })[0] || CANON_CANDIDATES[0];
 if (fs.existsSync(CANON)) {
   // Compare EOL-normalized text, never raw bytes: `* text=auto` in both repos means a
   // checkout on a core.autocrlf machine can hand back CRLF, and a raw-byte compare would
