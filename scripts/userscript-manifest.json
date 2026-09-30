@@ -17,6 +17,7 @@
     "bwn-inventory.user.js": { "expectedInstalled": true },
     "bwn-kanban.user.js": { "expectedInstalled": true },
     "bwn-low-gp.user.js": { "expectedInstalled": true },
+    "bwn-note-report.user.js": { "expectedInstalled": true },
     "bwn-notes.user.js": { "expectedInstalled": true },
     "bwn-proposal-actions.user.js": { "expectedInstalled": true },
     "bwn-proposal-copy.user.js": { "expectedInstalled": true },

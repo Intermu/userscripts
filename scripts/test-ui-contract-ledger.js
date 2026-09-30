@@ -118,6 +118,9 @@ var LEDGER = {
   // remove (closePanel), no shared drawerDismiss, no toast(), no animation:, no --bwn-dock-shift.
   // Carries NONE of the four SHARED primitives.
   'bwn-low-gp.user.js':        { drawer: 'NA',        toast: 'NA',        rmotion: 'NA',  rail: 'NA'  },
+  // Read-only report modal (own .bwn-nr-* overlay, own CSS, closes by [hidden]); status line instead
+  // of a toast, no animation, no --bwn-dock-shift. NONE of the four SHARED primitives.
+  'bwn-note-report.user.js':   { drawer: 'NA',        toast: 'NA',        rmotion: 'NA',  rail: 'NA'  },
   'bwn-notes.user.js':         { drawer: 'NA',        toast: 'NA',        rmotion: 'NA',  rail: 'NA'  },
   // Own #bwn-pa-card overlay/menu + own paToast (the same private-toast pattern as proposal-copy,
   // NOT the shared function toast()); no drawer, animation, or rail. NONE of the four SHARED primitives.
