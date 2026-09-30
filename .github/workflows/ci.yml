@@ -656,6 +656,13 @@ jobs:
       - name: Proposal Pricing engine harness
         run: node scripts/test-proposal-pricing.js
 
+      # Proposal Actions "Margin check" (flag marginGuardrail, default OFF, read-only): one margin
+      # target (default = the shared 33% GP threshold), a verdict that compares the displayed 1-decimal
+      # percent, and panel markup that escapes every Umbrava value. Seven controls each turn it red.
+      # (Added in #164; the step was lost in that PR's web conflict merge, restored here.)
+      - name: Proposal Actions margin-check harness
+        run: node scripts/test-margin-guardrail.js
+
       # RM-A3 / R3: bwn-proposal-actions de-hardcodes the STATUS_FALLBACK status-id map and the
       # RONNY_GUID TSP assignee. Both now resolve LIVE and FAIL CLOSED when they cannot (no write on a
       # stale id), with a bwn:modules.paLegacyFallback rollback flag reinstating the constants. Slices
@@ -762,6 +769,13 @@ jobs:
 
       - name: Per-client profile resolver harness (T10 defaults + empty-table inert safety)
         run: node scripts/test-client-profile.js
+
+      # Documentation-compliance engine (Core, flag docCompliance, default OFF, read-only): slices the
+      # BWN DOC-COMPLIANCE block and pins the score with an injected clock, UNKNOWN-vs-MISS (a failed or
+      # pending read is never a miss), per-client overrides, rulesVersion stamping, and label bucketing.
+      # A negative control (dropping a required label must flip it to miss) turns it red.
+      - name: Documentation-compliance engine harness (unknown never scored as a miss)
+        run: node scripts/test-doc-compliance.js
 
       - name: WO Assist open-task attribution harness (read-only created-by / assigned-to strip)
         run: node scripts/test-task-attribution.js
