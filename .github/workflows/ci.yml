@@ -320,6 +320,11 @@ jobs:
       # the notes pane above it grew and shrank in a loop.
       - name: Next Actions anchor harness (never anchors inside its own card)
         run: node scripts/test-acts-anchor-self.js
+
+      # Core 1.91.0: Suite settings toggles are real module keys, and the live WO Assist
+      # sub-feature toggles (Next Actions card, ECD auto-prompt, close-out preflight) gate their calls.
+      - name: Suite settings feature-toggle harness
+        run: node scripts/test-feature-toggles.js
       - name: Job-acts producer harness (Core stager + AI drain, board item 42)
         run: node scripts/test-acts-push.js
 
