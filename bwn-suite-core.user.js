@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         BWN Suite - Core (Broadway National)
 // @namespace    broadwaynational.bwn
-// @version      1.91.0
+// @version      1.92.0
 // @downloadURL  https://raw.githubusercontent.com/Intermu/userscripts/main/bwn-suite-core.user.js
 // @updateURL    https://raw.githubusercontent.com/Intermu/userscripts/main/bwn-suite-core.user.js
 // @description  Runs several Umbrava helpers for BWN coordinators, in the browser with no privileged grants. Includes: PO Approval + ETA Builder; WO Assist (GP/ETA, a stall watchdog, DNE calculator, and a next-action playbook); Email Leak Guard (checks recipients against vendor names, PO amounts, and client budget references before an outbound email sends); WO List Heat (a triage overlay + My Day strip on the work-order list, with an optional same-origin Umbrava API scan for deterministic full-board coverage); and the BWN Launcher (opens the Azure Static Web App tools with the current WO's context). Modules share state through sessionStorage/localStorage. The only network calls are same-origin Umbrava GraphQL requests (app.umbrava.com/api/graphql, the app's own session): List Heat's full-board scan and WO Assist's work-order / trip / clock-in / document / purchase-order reads, plus ONE write - BWN Views saves the column layout through Umbrava's own putUserPreference, the same preference the column chooser writes; everything else is offline. Toggle modules in BWN_MODULES below.
@@ -85,6 +85,8 @@
                          // keeps its own hooks (current behavior, byte-for-byte). The helper itself
                          // is always DEFINED; this flag only flips whether an adopter routes through
                          // it, so a stuck/unresolved flag never silently changes lifecycle.
+    hideHelp: true,      // hide Umbrava's floating bottom-right Help button; a Show/Hide toggle
+                         // sits in the initials (profile) menu above Logout
     errorReporter: false // RM-B2, SHIPPING DEFAULT OFF: when on, BWN.report writes a bounded,
                          // PII-free breadcrumb to the bwn:errlog ring alongside its toast. Off = the
                          // toast still shows (unchanged at paths that already toasted) but NOTHING is
@@ -19265,6 +19267,53 @@
     }
 
     BWN.beat('bulkTask', 'ok', 'ready (flag on)');
+  });
+
+  // ---- Hide Help --------------------------------------------------------------
+  // Umbrava's floating "? Help" pill (bottom-right) is the Freshworks widget launcher,
+  // an iframe#launcher-frame, and it sits over the last grid column. Hidden by default
+  // via CSS; the initials (profile) menu gets a "Show/Hide Help button" row above
+  // Logout, remembered per browser in localStorage.
+  // ponytail: Logout found by its visible text - breaks if Umbrava relabels it; pin the
+  // MUI #customized-menu structure then.
+  bwnBoot('hideHelp', BWN_MODULES.hideHelp, function () {
+    var KEY = 'bwn:hideHelp';
+    var root = document.documentElement;
+    function hidden() { try { return localStorage.getItem(KEY) !== '0'; } catch (e) { return true; } }
+    function apply() { if (hidden()) root.setAttribute('data-bwn-hidehelp', ''); else root.removeAttribute('data-bwn-hidehelp'); }
+    var st = document.createElement('style');
+    st.textContent = 'html[data-bwn-hidehelp] #launcher-frame{display:none!important}';
+    document.head.appendChild(st);
+    apply();
+
+    function addToggle() {
+      var el = document.evaluate('//body//*[normalize-space(text())="Logout"]', document, null, XPathResult.FIRST_ORDERED_NODE_TYPE, null).singleNodeValue;
+      if (!el) return;
+      var row = el.closest('li,[role="menuitem"]') || el.parentElement;
+      var prev = row.previousElementSibling;
+      if (prev && prev.hasAttribute('data-bwn-helptoggle')) return;
+      // Clone Logout's row so it inherits the menu styling. A clone carries no React
+      // handlers, so it cannot log out; its icon is blanked so it does not read as one.
+      var t = row.cloneNode(true);
+      t.setAttribute('data-bwn-helptoggle', '');
+      t.removeAttribute('id');
+      t.querySelectorAll('svg,img').forEach(function (n) { n.style.visibility = 'hidden'; });
+      var label = row === el ? t : document.evaluate('.//*[normalize-space(text())="Logout"]', t, null, XPathResult.FIRST_ORDERED_NODE_TYPE, null).singleNodeValue;
+      function sync() { label.textContent = hidden() ? 'Show Help button' : 'Hide Help button'; }
+      function flip(e) {
+        e.preventDefault(); e.stopPropagation();
+        try { localStorage.setItem(KEY, hidden() ? '0' : '1'); } catch (err) { /* private mode */ }
+        apply(); sync();
+      }
+      sync();
+      t.addEventListener('click', flip, true);
+      t.addEventListener('keydown', function (e) { if (e.key === 'Enter' || e.key === ' ') flip(e); }, true);
+      row.parentNode.insertBefore(t, row);
+    }
+    var tmr = null;
+    new MutationObserver(function () { if (!tmr) tmr = setTimeout(function () { tmr = null; addToggle(); }, 150); })
+      .observe(document.body, { childList: true, subtree: true });
+    BWN.beat('hideHelp', 'ok', hidden() ? 'help hidden' : 'help shown');
   });
 
   // ---- Flush the module queue -------------------------------------------------
