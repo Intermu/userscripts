@@ -58,6 +58,11 @@ function coreCtx(over) {
     JSON: JSON, Math: Math, String: String, Number: Number, Array: Array, Object: Object, Date: { now: function () { return 1755300000000; } },
     ingestSeq: 0,
     authoredKeyHash: function (s) { var h = 0, i; for (i = 0; i < String(s).length; i++) { h = (h * 31 + String(s).charCodeAt(i)) | 0; } return 'h' + (h >>> 0).toString(36); },
+    // Recovery Playbooks: the overlay calls these file-level fns (proven by test-recovery-sla.js)
+    // to precompute the SLA countdown for the engine-less case file. Stubbed here so the WIRING is
+    // exercised - the overlay must carry exactly what they return.
+    slaCountdown: function () { return { level: 'warn', badHrs: 120 }; },
+    breachPredict: function () { return { willBreach: true, dueDays: 4 }; },
     BWN: {
       lsGetJSON: function (k, d) { return Object.prototype.hasOwnProperty.call(ls, k) ? JSON.parse(ls[k]) : d; },
       lsSetJSON: function (k, v) { ls[k] = JSON.stringify(v); }
@@ -91,7 +96,8 @@ console.log('-- stageActsPush: the overlay, keyed by tracking AND wo --');
   A.eq('the overlay carries the live PO rows', e.over.pos.length, 1);
   A.eq('and the detail-page-only signals', [!!e.over.stall, e.over.openTasks.count, e.over.noteCount], [true, 1, 3]);
   A.ok('the overlay only carries known fields (no state internals leaked)',
-    Object.keys(e.over).every(function (k) { return ['pos', 'stall', 'noShow', 'docs', 'openTasks', 'gpPct', 'nte', 'vendorTotal', 'noteCount', 'lastClientNoteDays', 'staleDays', 'eta'].indexOf(k) !== -1; }));
+    Object.keys(e.over).every(function (k) { return ['pos', 'stall', 'noShow', 'docs', 'openTasks', 'gpPct', 'nte', 'vendorTotal', 'noteCount', 'lastClientNoteDays', 'staleDays', 'eta', 'slaCountdown', 'breachPredict'].indexOf(k) !== -1; }));
+  A.eq('the overlay carries the precomputed SLA countdown (for the engine-less case file)', [e.over.slaCountdown.level, e.over.breachPredict.willBreach], ['warn', true]);
   A.eq('nothing was written outside bwn:actsq (zero-egress, localStorage only)',
     Object.keys(ctx.__ls).filter(function (k) { return k !== 'bwn:actsq'; }), []);
 })();

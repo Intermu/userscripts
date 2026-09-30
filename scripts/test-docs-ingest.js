@@ -31,7 +31,7 @@ if (dc) {
 
 // ---- 2. Core publishes bwn:docs on the CONFIDENT branch only -----------------------------
 // The confident assignment and the publish sit together; the error/pending branches must not.
-var confIdx = core.indexOf('DOCS_CACHE[woNum] = { count: live.length, docs: live };');
+var confIdx = core.indexOf('DOCS_CACHE[woNum] = { count: live.length, docs: live, byLabel: byLabel };');
 A.ok('Core has the confident docs assignment', confIdx !== -1);
 var publishIdx = core.indexOf("BWN.lsSetJSON('bwn:docs:' + woNum");
 A.ok('Core publishes bwn:docs:<woNum>', publishIdx !== -1, 'no bwn:docs write in Core');
