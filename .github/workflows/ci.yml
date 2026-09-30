@@ -314,6 +314,12 @@ jobs:
       # in "Clocked Out: Complete" and muted 19 live rows in five counts at once.
       - name: List Heat open-count harness (phase beats the status name)
         run: node scripts/test-heat-open-count.js
+
+      # Core 1.90.1: the NEXT ACTIONS card's own "OPEN TASKS (n)" strip won the Open Tasks
+      # anchor search, so every other refresh re-inserted the card inside its detached self and
+      # the notes pane above it grew and shrank in a loop.
+      - name: Next Actions anchor harness (never anchors inside its own card)
+        run: node scripts/test-acts-anchor-self.js
       - name: Job-acts producer harness (Core stager + AI drain, board item 42)
         run: node scripts/test-acts-push.js
 

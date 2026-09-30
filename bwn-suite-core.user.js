@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         BWN Suite - Core (Broadway National)
 // @namespace    broadwaynational.bwn
-// @version      1.90.0
+// @version      1.90.1
 // @downloadURL  https://raw.githubusercontent.com/Intermu/userscripts/main/bwn-suite-core.user.js
 // @updateURL    https://raw.githubusercontent.com/Intermu/userscripts/main/bwn-suite-core.user.js
 // @description  Runs several Umbrava helpers for BWN coordinators, in the browser with no privileged grants. Includes: PO Approval + ETA Builder; WO Assist (GP/ETA, a stall watchdog, DNE calculator, and a next-action playbook); Email Leak Guard (checks recipients against vendor names, PO amounts, and client budget references before an outbound email sends); WO List Heat (a triage overlay + My Day strip on the work-order list, with an optional same-origin Umbrava API scan for deterministic full-board coverage); and the BWN Launcher (opens the Azure Static Web App tools with the current WO's context). Modules share state through sessionStorage/localStorage. The only network calls are same-origin Umbrava GraphQL requests (app.umbrava.com/api/graphql, the app's own session): List Heat's full-board scan and WO Assist's work-order / trip / clock-in / document / purchase-order reads, plus ONE write - BWN Views saves the column layout through Umbrava's own putUserPreference, the same preference the column chooser writes; everything else is offline. Toggle modules in BWN_MODULES below.
@@ -5292,8 +5292,14 @@
     }
     function tasksAnchorBlock() {
       var head = null;
+      var own = document.getElementById(ACT_CARD_ID);
       var els = document.querySelectorAll('h1,h2,h3,h4,h5,h6,div,span,p');
       for (var i = 0; i < els.length; i++) {
+        // Skip OUR card: its read-only "OPEN TASKS (n)" strip matches the heading test and sits
+        // earlier in document order than Umbrava's section. Anchoring to it put the rebuilt card
+        // inside the old (detached) one, so every other refresh blanked the card and the notes
+        // pane above it grew and shrank in a loop (seen live on a collapsed card with open tasks).
+        if (own && own.contains(els[i])) continue;
         var tx = (els[i].textContent || '').replace(/\s+/g, ' ').trim();
         if (/^open tasks/i.test(tx) && els[i].querySelectorAll('*').length <= 2) { head = els[i]; break; }
       }
@@ -5303,7 +5309,6 @@
       // "s" and "0". A \b test fails there, stops the climb at the heading, and the card
       // gets inserted INTO the heading row, rendering beside "Open Tasks" instead of
       // above the section (seen live on WO 364040).
-      var own = document.getElementById(ACT_CARD_ID);
       var node = head, hops = 0;
       while (node.parentElement && node.parentElement !== document.body && hops++ < 8) {
         if (!/^open tasks/i.test(sectionTxt(node.parentElement, own))) break;   // parent holds more than this section
