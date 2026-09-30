@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         BWN Suite - Core (Broadway National)
 // @namespace    broadwaynational.bwn
-// @version      1.92.0
+// @version      1.92.1
 // @downloadURL  https://raw.githubusercontent.com/Intermu/userscripts/main/bwn-suite-core.user.js
 // @updateURL    https://raw.githubusercontent.com/Intermu/userscripts/main/bwn-suite-core.user.js
 // @description  Runs several Umbrava helpers for BWN coordinators, in the browser with no privileged grants. Includes: PO Approval + ETA Builder; WO Assist (GP/ETA, a stall watchdog, DNE calculator, and a next-action playbook); Email Leak Guard (checks recipients against vendor names, PO amounts, and client budget references before an outbound email sends); WO List Heat (a triage overlay + My Day strip on the work-order list, with an optional same-origin Umbrava API scan for deterministic full-board coverage); and the BWN Launcher (opens the Azure Static Web App tools with the current WO's context). Modules share state through sessionStorage/localStorage. The only network calls are same-origin Umbrava GraphQL requests (app.umbrava.com/api/graphql, the app's own session): List Heat's full-board scan and WO Assist's work-order / trip / clock-in / document / purchase-order reads, plus ONE write - BWN Views saves the column layout through Umbrava's own putUserPreference, the same preference the column chooser writes; everything else is offline. Toggle modules in BWN_MODULES below.
@@ -12588,6 +12588,7 @@
     BWN_DOCK_POLICY['cc']          = { minRank: 1, perms: [] };  // CC Request (coordinator workflow)
     BWN_DOCK_POLICY['bidout']      = { minRank: 1, perms: [] };  // Email RFP / bid-out sourcing
     BWN_DOCK_POLICY['wo-extract']  = { minRank: 1, perms: [] };  // Ops Assist - read-only WO context
+    BWN_DOCK_POLICY['note-report'] = { minRank: 1, perms: [] };  // Note Report - read-only notes the reader can already open in Umbrava
     BWN_DOCK_POLICY['bulk-source'] = { minRank: 2, perms: [] };  // Edit source PO#/WO# - PO/WO record integrity
     BWN_DOCK_POLICY['wo-audit']    = { minRank: 3, perms: [] };  // WO Audit; note-post also self-gates on WorkOrderNote.AddNew
     BWN_DOCK_POLICY['dispatch']    = { minRank: 3, perms: [] };  // Dispatch; registrant ALSO keeps its Pending-Dispatch context gate (additive)
@@ -12676,6 +12677,8 @@
       // read-only work-order context assistance. Added WITH the registrant, per this map's own rule
       // (test-dock-latent-fixes scans sibling scripts and flags a rail key with no icon here).
       'wo-extract': ['M12 3a9 9 0 1 0 0 18 9 9 0 0 0 0-18z', 'M12 6l2 6-2 6-2-6z'],
+      // Note Report (bwn-note-report): a page with a folded corner and text lines - a notes report.
+      'note-report': ['M14 3H6a2 2 0 0 0-2 2v14a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2V9z', 'M14 3v6h6', 'M8 13h8', 'M8 17h5'],
       ask: ['M8 9h8', 'M8 13h6', 'M9 18H6a3 3 0 0 1-3-3V7a3 3 0 0 1 3-3h12a3 3 0 0 1 3 3v8a3 3 0 0 1-3 3h-3l-3 3-3-3'],
       // Escalate + Email RFP were the two registrants with no entry here, so the rail fell back
       // to their emoji (a RED flag and a blue envelope) beside eleven monochrome line icons -

@@ -131,6 +131,7 @@ var LEDGER = {
   'bwn-inventory.user.js':        { status: 'ADOPTED' },
   'bwn-kanban.user.js':           { status: 'NA' },
   'bwn-low-gp.user.js':           { status: 'ADOPTED' },
+  'bwn-note-report.user.js':      { status: 'NA' },
   'bwn-notes.user.js':            { status: 'NA' },   // reads only the @@user@@ session slot, not the access-token picker
   'bwn-proposal-actions.user.js': { status: 'ADOPTED' },
   'bwn-proposal-copy.user.js':    { status: 'ADOPTED' },
@@ -187,7 +188,7 @@ onDisk.slice().sort().forEach(function (f) {
 console.log('\n-- 3. aggregate counts + one canonical SHA --');
 A.ok('ADOPTED count is 17', ledgerWith('ADOPTED').length === 17, 'got ' + ledgerWith('ADOPTED').length);
 A.ok('PENDING count is 0', ledgerWith('PENDING').length === 0, 'got ' + ledgerWith('PENDING').length);
-A.ok('NA count is 5', ledgerWith('NA').length === 5, 'got ' + ledgerWith('NA').length);
+A.ok('NA count is 6', ledgerWith('NA').length === 6, 'got ' + ledgerWith('NA').length);
 A.ok('PENDING is empty (both mega scripts folded in US-1 1b)',
   ledgerWith('PENDING').length === 0,
   ledgerWith('PENDING').join(','));
