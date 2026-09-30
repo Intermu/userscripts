@@ -53,7 +53,7 @@ function load(reads, handlers, extra) {
     if (!h) return Promise.reject(new Error('unexpected op ' + op));
     try { return Promise.resolve(h(v)); } catch (e) { return Promise.reject(e); }
   }
-  var box = { paGql: paGql, console: console };
+  var box = { paGql: paGql, console: console, BWN_MODULES: {} };   // flags default OFF, as in the script
   Object.keys(extra || {}).forEach(function (k) { box[k] = extra[k]; });
   vm.createContext(box);
   vm.runInContext(MONEY + reads, box);
@@ -517,6 +517,8 @@ var RICH = [
     sliceFn(full, 'function startWorkflow(kind)'),
     sliceFn(full, 'function openCompare()'),
     sliceFn(full, 'function renderCompare(n, pid, wo, sib)'),
+    sliceFn(full, 'function startMarginCheck()'),
+    sliceFn(full, 'function renderMarginCheck(n, pid, tot, items)'),
     sliceFn(full, 'function buildMenu(trigger)'),
     sliceFn(full, 'function bwnFocusTrap(modalEl)')
   ].join('\n');
@@ -532,7 +534,7 @@ var RICH = [
     };
     function FakeMO() { } FakeMO.prototype.observe = function () { }; FakeMO.prototype.disconnect = function () { };
     var bx = load(READS + (runnerSrc || RUNNER) + DISPLAY + ENTRY, {}, {
-      localStorage: mkStore(), document: doc, MutationObserver: FakeMO,
+      localStorage: mkStore(), document: doc, MutationObserver: FakeMO, BWN_MODULES: { marginGuardrail: true },
       paToast: function (m) { c.toasts.push(m); },
       woNumberFromUrl: function () { return 123; }, proposalIdFromUrl: function () { return 901; },
       setTimeout: function () { },
@@ -567,6 +569,8 @@ var RICH = [
     ['menu (trigger click / keyboard Enter)', function () { eb.buildMenu({}); }],
     ['Compare menu item', function () { eb.openCompare(); }],
     ['Compare render (late read result)', function () { eb.renderCompare(123, 901, { statusName: 'x' }, { rows: [], rowCount: 0, partial: false }); }],
+    ['Margin check menu item', function () { eb.startMarginCheck(); }],
+    ['Margin check render (late read result)', function () { eb.renderMarginCheck(123, 901, { total: null, gpPct: 0.2 }, { ok: true, categories: [] }); }],
     ['Approval / TSP / Kickback menu item', function () { eb.startWorkflow('approval'); }],
     ['a new confirmation (late gatherContext result)', function () { eb.openConfirm(otherPlan(eb)); }]
   ];
@@ -575,7 +579,7 @@ var RICH = [
   A.eq('blocked attempts built no overlay, no menu, and issued no read', [eb.c.built, eb.c.menus, eb.c.reads], [0, 0, 0]);
   A.eq('the running dialog was neither closed nor removed', [R.ov.closed, R.ov.removed], [0, 0]);
   A.ok('the running dialog is still the one on screen', eb.doc.getElementById('bwn-pa-overlay') === R.ov && eb._paActiveCtl === R.d.ctl);
-  A.eq('five blocked attempts -> one "still running" notice (no toast storm)', eb.c.toasts.filter(function (m) { return /still running/.test(m); }).length, 1);
+  A.eq('seven blocked attempts -> one "still running" notice (no toast storm)', eb.c.toasts.filter(function (m) { return /still running/.test(m); }).length, 1);
   A.eq('only the original run proceeds (its first step sent once, nothing else started)', R.d.calls, [1, 0]);
 
   // original run fails -> dialog stays, retryable; with no run in flight, navigation works again
@@ -648,8 +652,8 @@ var RICH = [
   // wiring the tests above rely on
   A.ok('openConfirm registers its controller and close path for the guard', /_paActiveCtl = ctl;\n    overlay\._paClose = close;/.test(full));
   A.ok('openConfirm close clears the registration and releases the trap', /if \(_paActiveCtl === ctl\) _paActiveCtl = null;\n      try \{ releaseTrap\(\); \}/.test(full));
-  A.ok('openConfirm and renderCompare take the overlay slot instead of removing the prior overlay', (full.match(/if \(!paTakeOverlaySlot\(\)\) return;/g) || []).length === 2 && full.indexOf("if (prior) prior.remove();") === -1);
-  A.ok('Compare overlay also exposes its close path', (full.match(/overlay\._paClose = close;/g) || []).length === 2);
+  A.ok('openConfirm, renderCompare and renderMarginCheck take the overlay slot instead of removing the prior overlay', (full.match(/if \(!paTakeOverlaySlot\(\)\) return;/g) || []).length === 3 && full.indexOf("if (prior) prior.remove();") === -1);
+  A.ok('Compare and Margin check overlays also expose their close path', (full.match(/overlay\._paClose = close;/g) || []).length === 3);
 
   // ---- stopped-attempt warning, C3 (0.7.6) ---------------------------------------------------------
   var SKEY = 'bwn:pa:stopped';
@@ -1277,7 +1281,7 @@ var RICH = [
   A.ok('toast (dialog open): goes INSIDE the card between title and body - covers neither the title nor the footer', !!tIn && tCard.inserted[1][1] === 'BODY_DIV' && !/position:fixed/.test(tIn.style.cssText) && tIn.attrs.role === 'status' && tIn.textContent === 'BWN Proposal Actions: inside');
   tCard = null;
   A.ok('the stale-page refusal closes the dialog BEFORE toasting, so the message is not removed with the card', /closeFn\(\);[^\n]*\n\s*paToast\('This page now shows a different proposal - nothing sent\.'\);/.test(full));
-  A.ok('both dialogs adopt a showing toast when they open', (full.match(/document\.body\.appendChild\(overlay\);\n\s*paAdoptToast\(\);/g) || []).length === 2);
+  A.ok('all three dialogs (confirm, compare, margin check) adopt a showing toast when they open', (full.match(/document\.body\.appendChild\(overlay\);\n\s*paAdoptToast\(\);/g) || []).length === 3);
 
   // F2: the backdrop closes only a pristine dialog (the REAL pristine(), with its closure inputs injected)
   function bdPristine(noteVal, seed, classes) {
