@@ -643,6 +643,11 @@ jobs:
       - name: Proposal Actions write harness (addClientProposalNote / addTask / completeTask)
         run: node scripts/test-proposal-actions.js
 
+      # Proposal Pricing (bwn-proposal-pricing.user.js): slices the PP-ENGINE block and pins the
+      # money / GP / contracted-rate math. MONEY code - any change to a money path must turn it red.
+      - name: Proposal Pricing engine harness
+        run: node scripts/test-proposal-pricing.js
+
       # RM-A3 / R3: bwn-proposal-actions de-hardcodes the STATUS_FALLBACK status-id map and the
       # RONNY_GUID TSP assignee. Both now resolve LIVE and FAIL CLOSED when they cannot (no write on a
       # stale id), with a bwn:modules.paLegacyFallback rollback flag reinstating the constants. Slices
