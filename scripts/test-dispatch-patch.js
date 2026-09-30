@@ -163,8 +163,35 @@ async function main() {
   A.eq('ecdBasis: response used when no SLA', S.ecdBasisMinutes({ serviceLevelAgreementMinutes: 0, responseMinutes: 480 }), { mins: 480, from: 'response' });
   A.eq('ecdBasis: null when neither', S.ecdBasisMinutes({}), null);
   var t0 = 1000000000000;
-  A.eq('computeEcd: now + SLA minutes', S.computeEcd({ serviceLevelAgreementMinutes: 10 }, t0), new Date(t0 + 10 * 60000).toISOString());
+  A.eq('computeEcd: now + SLA minutes', S.computeEcd({ serviceLevelAgreementMinutes: 10 }, t0), S.isoLocal(new Date(t0 + 10 * 60000)));
   A.eq('computeEcd: null with no basis', S.computeEcd({}, t0), null);
+
+  // ---- the wire FORMAT of the ECD (0.12.3) --------------------------------
+  // Umbrava returns local-offset, minute-precision dates; toISOString() emits UTC with
+  // milliseconds. The REST backend behind the GraphQL gateway rejects a bad patch with a 400 and an
+  // EMPTY body (measured on WO 396636), so the only defence is sending the record's own shape.
+  var fmt = S.computeEcd({ serviceLevelAgreementMinutes: 10 }, t0);
+  A.ok('ECD carries a local UTC offset, not Z', /[+-]\d{2}:\d{2}$/.test(fmt));
+  A.ok('ECD carries no milliseconds', fmt.indexOf('.') === -1);
+  A.ok('ECD is second-precision yyyy-MM-ddTHH:mm:ss+HH:mm', /^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}[+-]\d{2}:\d{2}$/.test(fmt));
+  A.eq('ECD round-trips to the same instant', Date.parse(fmt), t0 + 10 * 60000);
+
+  // ---- the firstTripDate FLOOR (0.12.3, Mike's call 2026-09-18) -----------
+  // A completion date can never precede the WO's own first trip. Live on WO 396636 the SLA window
+  // put the auto ECD 23h BEFORE firstTripDate; the later of the two now wins, and `floored` says so
+  // (the modal and the confirm both name the basis, so a floored date is never silent).
+  var trip = '2026-08-13T00:00:00.000Z';
+  var early = S.ecdPlan({ serviceLevelAgreementMinutes: 10, firstTripDate: trip }, Date.parse(trip) - 3600000);
+  A.eq('floor: ECD moves up to firstTripDate when the SLA window lands earlier', Date.parse(early.iso), Date.parse(trip));
+  A.eq('floor: reported as floored', early.floored, true);
+  A.eq('floor: the SLA basis is still reported', early.from, 'SLA');
+  var late = S.ecdPlan({ serviceLevelAgreementMinutes: 10, firstTripDate: trip }, Date.parse(trip) + 3600000);
+  A.eq('floor: an ECD already after the first trip is untouched', Date.parse(late.iso), Date.parse(trip) + 3600000 + 10 * 60000);
+  A.eq('floor: not reported as floored', late.floored, false);
+  var noTrip = S.ecdPlan({ serviceLevelAgreementMinutes: 10 }, t0);
+  A.eq('floor: no firstTripDate leaves the scaled date alone', Date.parse(noTrip.iso), t0 + 10 * 60000);
+  A.eq('floor: an unparseable firstTripDate is ignored, not fatal',
+    Date.parse(S.ecdPlan({ serviceLevelAgreementMinutes: 10, firstTripDate: 'not a date' }, t0).iso), t0 + 10 * 60000);
 
   // ---- patchWorkOrder resolve/throw semantics -----------------------------
   S.gql = function () { return Promise.resolve({ patchWorkOrder: { success: true } }); };
@@ -255,6 +282,19 @@ async function main() {
       // original claim = the write resolves; with confirmed:false the wrapper refuses it
       return M.patchWorkOrder({ workOrderNumber: 1 }).then(function () { return true; }, function () { return false; });
     });
+
+  await ctrl('firstTripDate floor removed (ECD may precede the first trip again)',
+    'if (isFinite(trip) && trip > ms) { ms = trip; floored = true; }',
+    'if (false) { ms = trip; floored = true; }',
+    function (M) {
+      var t = '2026-08-13T00:00:00.000Z';
+      return Date.parse(M.ecdPlan({ serviceLevelAgreementMinutes: 10, firstTripDate: t }, Date.parse(t) - 3600000).iso) === Date.parse(t);
+    });
+
+  await ctrl('ECD reverts to toISOString (UTC + milliseconds, not the record shape)',
+    'return { iso: isoLocal(new Date(ms)), mins: b.mins, from: b.from, floored: floored };',
+    'return { iso: new Date(ms).toISOString(), mins: b.mins, from: b.from, floored: floored };',
+    function (M) { return /^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}[+-]\d{2}:\d{2}$/.test(M.computeEcd({ serviceLevelAgreementMinutes: 10 }, t0)); });
 
   await ctrl('fetchUsers stops filtering technicians',
     '!u.isInactive && !u.isTechnician',

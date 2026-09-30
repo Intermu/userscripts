@@ -2,7 +2,8 @@
 //
 // Slices the pure block (firstNameFromUser / TEMPLATES / buildNote) out of the SHIPPED
 // bwn-notes.user.js bytes and runs it in a vm. Proves:
-//   - the 3 groups + 9 templates are intact (Call outs 2, Completed work 3, New work 4);
+//   - the 5 groups + 14 templates are intact (Call outs 2, Completed work 3, New work 4, Approvals 2,
+//     Signoff 3), and the Signoff group is visible only on a Tesla / Crocs WO (client tenant GUID);
 //   - firstNameFromUser reads given_name first, else the first token of the display name;
 //   - buildNote appends "-<FirstName>" to signed templates only, "-______" when no name resolves,
 //     and NOTHING to unsigned (call-out) templates;
@@ -38,7 +39,7 @@ var SRC = slice(readLF(path.join(__dirname, '..', 'bwn-notes.user.js')),
 
 function build(src) {
   var ctx = vm.createContext({ console: console });
-  vm.runInContext(src + '\nthis.firstNameFromUser = firstNameFromUser; this.TEMPLATES = TEMPLATES; this.buildNote = buildNote; this.fmtDay = fmtDay; this.fmtWeekOf = fmtWeekOf; this.applyDate = applyDate; this.spokeTag = spokeTag; this.prependSpokeTag = prependSpokeTag; this.mruAdd = mruAdd;', ctx);
+  vm.runInContext(src + '\nthis.firstNameFromUser = firstNameFromUser; this.TEMPLATES = TEMPLATES; this.buildNote = buildNote; this.fmtDay = fmtDay; this.fmtWeekOf = fmtWeekOf; this.applyDate = applyDate; this.spokeTag = spokeTag; this.prependSpokeTag = prependSpokeTag; this.mruAdd = mruAdd; this.ntTemplateAllowed = ntTemplateAllowed; this.ntFullNameFromUser = ntFullNameFromUser; this.ntNormName = ntNormName; this.TEMPLATE_ROSTER = TEMPLATE_ROSTER; this.tplVisible = tplVisible; this.visibleGroups = visibleGroups; this.SIGNOFF_CLIENTS = SIGNOFF_CLIENTS;', ctx);
   return ctx;
 }
 var env = build(SRC);
@@ -48,21 +49,25 @@ var spokeTag = env.spokeTag, prependSpokeTag = env.prependSpokeTag, mruAdd = env
 function allItems(t) { return t.reduce(function (a, g) { return a.concat(g.items); }, []); }
 
 // ---- groups + templates intact -----------------------------------------------------------
-A.eq('3 groups', TEMPLATES.length, 3);
-A.eq('group titles', TEMPLATES.map(function (g) { return g.group; }).join(' | '), 'Call outs | Completed work | New work to schedule');
+A.eq('5 groups', TEMPLATES.length, 5);
+A.eq('group titles', TEMPLATES.map(function (g) { return g.group; }).join(' | '), 'Call outs | Completed work | New work to schedule | Approvals | Signoff (Tesla / Crocs)');
 A.eq('Call outs = 2', TEMPLATES[0].items.length, 2);
 A.eq('Completed work = 3', TEMPLATES[1].items.length, 3);
 A.eq('New work to schedule = 4', TEMPLATES[2].items.length, 4);
-A.eq('9 templates total', allItems(TEMPLATES).length, 9);
+A.eq('Approvals = 2', TEMPLATES[3].items.length, 2);
+A.eq('Signoff = 3', TEMPLATES[4].items.length, 3);
+A.eq('14 templates total', allItems(TEMPLATES).length, 14);
 A.ok('every template has a label and a body', allItems(TEMPLATES).every(function (t) { return t.label && t.body && typeof t.signed === 'boolean'; }));
 A.ok('call-outs are unsigned', TEMPLATES[0].items.every(function (t) { return t.signed === false; }));
-A.ok('completed + new-work are signed', TEMPLATES[1].items.concat(TEMPLATES[2].items).every(function (t) { return t.signed === true; }));
+A.ok('completed + new-work + approvals are signed', TEMPLATES[1].items.concat(TEMPLATES[2].items).concat(TEMPLATES[3].items).every(function (t) { return t.signed === true; }));
 
 // ---- verbatim spot-checks ----------------------------------------------------------------
 function byLabel(re) { return allItems(TEMPLATES).find(function (t) { return re.test(t.label); }); }
-A.ok('reschedule template keeps the blank', /rescheduled for ______ ./.test(byLabel(/reschedule/).body));
+A.ok('reschedule template keeps the blank', /rescheduled for ______\./.test(byLabel(/reschedule/).body));
 A.ok('completed template mentions adjusting the NTE', /adjust the NTE accordingly/.test(byLabel(/Completed/).body));
 A.ok('too-far template mentions round-trip travel', /round-trip travel/.test(byLabel(/cost-effective/).body));
+A.ok('approval back-on-schedule template thanks for the approval + keeps the date blank', /Thank you for the approval, this is back on schedule for ______\./.test(byLabel(/back on schedule/).body));
+A.ok('approval order-material template thanks for the approval + follows up with a lead time', /Thank you for the approval, we will order material and follow up with a lead time/.test(byLabel(/ordering material/).body));
 
 // ---- firstNameFromUser -------------------------------------------------------------------
 A.eq('given_name wins', firstNameFromUser({ given_name: 'Alyssa', name: 'X Y' }), 'Alyssa');
@@ -71,6 +76,12 @@ A.eq('falls back to display-name first token', firstNameFromUser({ name: 'Alyssa
 A.eq('single-word name', firstNameFromUser({ name: 'Alyssa' }), 'Alyssa');
 A.eq('no claims -> empty', firstNameFromUser({}), '');
 A.eq('null user -> empty', firstNameFromUser(null), '');
+
+// ---- sign-off nicknames: Nicholas signs as Nick (from given_name or display name, any case) -----
+A.eq('nickname maps given_name Nicholas -> Nick', firstNameFromUser({ given_name: 'Nicholas' }), 'Nick');
+A.eq('nickname maps display-name Nicholas -> Nick', firstNameFromUser({ name: 'Nicholas Smith' }), 'Nick');
+A.eq('nickname is case-insensitive', firstNameFromUser({ given_name: 'nicholas' }), 'Nick');
+A.eq('a non-nicknamed name is untouched', firstNameFromUser({ given_name: 'Nick' }), 'Nick');
 
 // ---- buildNote: signature is dynamic + gated ---------------------------------------------
 var signed = byLabel(/Scheduled for/), callout = byLabel(/redirect \(week full\)/);
@@ -82,19 +93,21 @@ A.ok('no template body bakes in a literal name (signature is always dynamic)',
 
 // ---- date-fill: the picker turns y/m/d into the blank's text -----------------------------
 // The four date templates declare a `date` kind; the rest declare none (money/hours stay manual).
-A.eq('exactly 4 templates carry a date blank', allItems(TEMPLATES).filter(function (t) { return t.date; }).length, 4);
+A.eq('exactly 5 templates carry a date blank', allItems(TEMPLATES).filter(function (t) { return t.date; }).length, 5);
 A.eq('reschedule is a day', byLabel(/reschedule/).date, 'day');
 A.eq('scheduled-for is a day', byLabel(/^Scheduled for/).date, 'day');
 A.eq('soonest-on-site is a day', byLabel(/Soonest on-site/).date, 'day');
 A.eq('week-of is weekOf', byLabel(/week of/).date, 'weekOf');
+A.eq('approval back-on-schedule is a day', byLabel(/back on schedule/).date, 'day');
+A.ok('applyDate fills the approval back-on-schedule blank', /back on schedule for Friday 8\/21\./.test(applyDate(byLabel(/back on schedule/).body, 'day', 2026, 8, 21)));
 A.ok('completed FC ($, not a date) has no date kind', !byLabel(/Completed/).date);
 // Aug 21 2026 is a Friday; Monday of its week is Aug 17. Built LOCALLY so weekday is TZ-stable.
 A.eq('fmtDay -> weekday + M/D', fmtDay(2026, 8, 21), 'Friday 8/21');
 A.eq('fmtWeekOf -> that week\'s Monday, M/D', fmtWeekOf(2026, 8, 21), '8/17');
 A.eq('fmtWeekOf snaps a Monday to itself', fmtWeekOf(2026, 8, 17), '8/17');
 A.eq('fmtWeekOf snaps a Sunday back to its Monday', fmtWeekOf(2026, 8, 23), '8/17');
-A.ok('applyDate fills the reschedule blank', /rescheduled for Friday 8\/21 \./.test(applyDate(byLabel(/reschedule/).body, 'day', 2026, 8, 21)));
-A.ok('applyDate fills the week-of blank', /week of 8\/17 ,/.test(applyDate(byLabel(/week of/).body, 'weekOf', 2026, 8, 21)));
+A.ok('applyDate fills the reschedule blank', /rescheduled for Friday 8\/21\./.test(applyDate(byLabel(/reschedule/).body, 'day', 2026, 8, 21)));
+A.ok('applyDate fills the week-of blank', /week of 8\/17,/.test(applyDate(byLabel(/week of/).body, 'weekOf', 2026, 8, 21)));
 A.eq('applyDate leaves a blank-less body untouched', applyDate('no blank here', 'day', 2026, 8, 21), 'no blank here');
 
 // ---- vendor "spoke with" tag -------------------------------------------------------------
@@ -126,5 +139,46 @@ A.ok('[neg] without the signed gate, an unsigned call-out wrongly gets a signatu
 // ---- negative control: drop the Monday snap, assert weekOf no longer lands on Monday ------
 var g2 = build(mutate(SRC, 'dt.setDate(dt.getDate() - ((dt.getDay() + 6) % 7));', ''));
 A.eq('[neg] without the Monday snap, a Friday stays a Friday (8/21, not 8/17)', g2.fmtWeekOf(2026, 8, 21), '8/21');
+
+// ---- Templates dropdown roster (rank 1, named users only; fail-closed) --------------------
+A.eq('roster has the 6 named users', env.TEMPLATE_ROSTER.length, 6);
+A.eq('roster names are normalized lowercase "first last"', env.TEMPLATE_ROSTER.slice().sort().join('|'),
+  ['alyssa phelps', 'daniel bartolomei', 'jeanell quinones', 'joshua wiggins', 'kennya zambrano', 'mike najarro'].join('|'));
+A.ok('a rostered user (given_name + family_name) is allowed', env.ntTemplateAllowed({ given_name: 'Alyssa', family_name: 'Phelps' }));
+A.ok('a rostered user via the full name claim is allowed', env.ntTemplateAllowed({ name: 'Joshua Wiggins' }));
+A.ok('match is case/space-insensitive', env.ntTemplateAllowed({ name: '  MIKE   NAJARRO ' }));
+A.ok('a non-rostered user (Daniel Russell) is NOT allowed', !env.ntTemplateAllowed({ given_name: 'Daniel', family_name: 'Russell' }));
+A.ok('a similar-but-different name is NOT allowed', !env.ntTemplateAllowed({ name: 'Daniel Bartoloni' }));  // Umbrava spells it Bartolomei
+A.ok('null user fails closed (not allowed)', !env.ntTemplateAllowed(null));
+A.ok('an identity with no name fails closed', !env.ntTemplateAllowed({ email: 'x@y.com' }));
+A.eq('given+family beats a stale name claim', env.ntFullNameFromUser({ given_name: 'Kennya', family_name: 'Zambrano', name: 'old' }), 'kennya zambrano');
+
+// ---- negative control: inverting the roster check admits non-roster + denies roster -------
+var g3 = build(mutate(SRC, 'return !!n && TEMPLATE_ROSTER.indexOf(n) !== -1;', 'return !!n && TEMPLATE_ROSTER.indexOf(n) === -1;'));
+A.ok('[neg] an inverted membership test would admit a non-roster user and deny a rostered one',
+  g3.ntTemplateAllowed({ name: 'Daniel Russell' }) && !g3.ntTemplateAllowed({ name: 'Alyssa Phelps' }));
+
+// ---- client-scoped templates (Tesla / Crocs signoff) -------------------------------------
+var TESLA = '602e081c-a1b2-4b51-b158-ea077e330458', CROCS = '52b7f542-6b66-4fd8-8dd3-8edbdb48558a', LIDL = 'e88f4b3b-429a-4c34-b42e-afeeb1e2ac77';
+function titles(cid) { return env.visibleGroups(cid).map(function (g) { return g.group; }).join(' | '); }
+var GLOBAL4 = 'Call outs | Completed work | New work to schedule | Approvals';
+A.ok('only the signoff group is client-scoped; every other template has no clients filter', TEMPLATES.slice(0, 4).every(function (g) { return g.items.every(function (t) { return !t.clients; }); }) && TEMPLATES[4].items.every(function (t) { return t.clients === env.SIGNOFF_CLIENTS; }));
+A.eq('scoped to exactly Tesla + Crocs', env.SIGNOFF_CLIENTS.join(','), TESLA + ',' + CROCS);
+A.eq('Tesla WO sees the signoff group', titles(TESLA), GLOBAL4 + ' | Signoff (Tesla / Crocs)');
+A.eq('Crocs WO sees the signoff group (id match is case-insensitive)', titles(CROCS.toUpperCase()), GLOBAL4 + ' | Signoff (Tesla / Crocs)');
+A.eq('an unrelated client (LIDL) sees only the global groups', titles(LIDL), GLOBAL4);
+A.eq('no verified client id fails closed to the global groups', titles(''), GLOBAL4);
+A.ok('a client NAME never matches (ids only)', !env.tplVisible(TEMPLATES[4].items[0], 'Tesla'));
+A.eq('global templates keep identical visibility with no client id (11)', env.visibleGroups('').reduce(function (n, g) { return n + g.items.length; }, 0), 11);
+A.eq('ids keep the original group:item index when groups are hidden', env.visibleGroups(TESLA)[4].items.map(function (x) { return x.id; }).join(','), '4:0,4:1,4:2');
+A.eq('signoff labels', TEMPLATES[4].items.map(function (t) { return t.label; }).join(' | '), 'Signoff Required | Signoff Pending | Signoff Received');
+A.ok('signoff templates are signed, text-only drafts', TEMPLATES[4].items.every(function (t) { return t.signed === true && !t.date; }));
+A.eq('Signoff Required text verbatim', TEMPLATES[4].items[0].body.trim(), 'Tesla/Crocs signoff is required before billing can proceed. Please provide the signed work-order approval or confirm the approved signoff location.');
+A.eq('Signoff Pending text verbatim (billing stays on hold; no status-change claim)', TEMPLATES[4].items[1].body.trim(), 'Work is complete and the work order is pending required signoff. Billing should remain on hold until signed approval is received and attached.');
+A.eq('Signoff Received text verbatim', TEMPLATES[4].items[2].body.trim(), 'Required signoff has been received and attached to the work order. The work order is ready for the next billing review step.');
+
+// ---- negative control: drop the clients gate, assert an unrelated client sees signoff -----
+var g4 = build(mutate(SRC, 'return !t.clients || (!!clientId && t.clients.indexOf(String(clientId).toLowerCase()) !== -1);', 'return true;'));
+A.ok('[neg] without the clients gate, a LIDL WO would see the signoff group', g4.visibleGroups(LIDL).length === 5);
 
 A.finish();

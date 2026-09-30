@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         BWN Suite - AI (Broadway National)
 // @namespace    broadwaynational.bwn
-// @version      1.45.22
+// @version      1.48.2
 // @downloadURL  https://raw.githubusercontent.com/Intermu/userscripts/main/bwn-suite-ai.user.js
 // @updateURL    https://raw.githubusercontent.com/Intermu/userscripts/main/bwn-suite-ai.user.js
 // @description  The Umbrava tools that call outside APIs, kept separate from the zero-egress Core script. Client Update and WO Audit drafts (Anthropic Claude; draft-only, scrubbed before sending, you review before posting); Find Techs / Find Suppliers (Google Places; vendor leads near a WO); and Job View (opens the Ops-Dashboard job card on the WO page - WO details from Umbrava plus the authored case file and next actions, read-only). Network access is limited by the browser to the declared API hosts and the BWN Static Web App. API keys are stored in Tampermonkey's storage via the menu commands and never enter the page. Toggle modules in BWN_MODULES below.
@@ -50,10 +50,13 @@
   (function migrateGmKeys() {
     try {
       var SENT = ' bwn-absent';
-      // SCOPE: only this script's PRIVATE keys. ingest_key (SWA connector, shared by 9
-      // scripts) and places_key (shared by suite-ai + bid-out) are CROSS-SCRIPT - renaming
-      // them here alone would split the shared value, so they stay bare and are flagged for
-      // a coordinated cross-script rename. Do NOT add them here without every sibling.
+      // SCOPE: this script's keys. ingest_key and places_key stay OUT of this map, but the
+      // reason recorded here until 2026-09-03 was wrong: they were called "cross-script" and
+      // held back for "a coordinated rename". They are not cross-script. GM storage is scoped
+      // PER SCRIPT, not per @namespace (measured on TM 5.x - [[gm-storage-is-per-script]]), so
+      // this script's ingest_key was never shared with anything and there is no shared value a
+      // rename here could split. They stay bare only because renaming them is churn with no
+      // payoff: each script would still hold its own copy either way.
       var pairs = { 'sr_nte_pct': 'bwn:sr_nte_pct', 'sr_contact_email': 'bwn:sr_contact_email' };
       for (var oldK in pairs) {
         if (!Object.prototype.hasOwnProperty.call(pairs, oldK)) continue;
@@ -87,6 +90,19 @@
     } catch (e) { /* best-effort */ }
   }
   publishAiStatus();
+
+  // ---- SWA ingest key presence beacon ---------------------------------------
+  // Same boolean as `ingest` above, in the suite-wide shape Core's Ops panel rolls up. Every
+  // script that uses the key publishes one, because GM storage is PER SCRIPT (measured
+  // 2026-09-03): this script having the key says nothing about any sibling, and the panel row
+  // that read `status.ai.ingest` as "the suite's key" was reporting exactly that false fact.
+  // ts is AI_LOAD_TS, never refreshed on save, for the reason documented on publishAiStatus.
+  function publishIngestPresence() {
+    try {
+      localStorage.setItem('bwn:ingest:suite-ai', JSON.stringify({ k: GM_getValue('ingest_key', '') ? 1 : 0, ts: AI_LOAD_TS }));
+    } catch (e) { /* best-effort */ }
+  }
+  publishIngestPresence();
 
   console.info('[BWN SUITE AI] v' + BWN_VER + ' |',
     'Shared Core 7 \u00b7 Client Update 1.47 \u00b7 Find Techs 2.15 \u00b7 Connector 1.5 |',
@@ -223,7 +239,13 @@
       'cwamazon': { clientId: '20432', refFields: { sourceJob: true, sourcePo: false } },
       'jllamazon': { clientId: '20394', refFields: { sourceJob: true } },
       'caleresinc': { clientId: null },
-      'transformsrbrandsllc': { clientId: '23914', refFields: { sourceJob: true, sourcePo: true } }
+      'transformsrbrandsllc': { clientId: '23914', refFields: { sourceJob: true, sourcePo: true } },
+      // Signoff clients: billing is disputed without a signed approval tied to the WO. deepMerge
+      // replaces closeout.docs wholesale, so each row repeats the three defaults + 'signoff'
+      // (matches the drop-upload 'Signoff' document label). Advisory only, like every docs row.
+      // Separate rows on purpose - the two clients' rules may diverge.
+      'tesla': { clientId: '20441', closeout: { docs: ['signed ticket', 'sign-in/out', 'before/after photos', 'signoff'] } },
+      'crocsinc': { clientId: '20386', closeout: { docs: ['signed ticket', 'sign-in/out', 'before/after photos', 'signoff'] } }
     };
     // Shallow merge with ONE level of depth over the nested config objects (closeout, refFields,
     // compliance) so a partial override (e.g. {refFields:{sourceJob:true}} or {compliance:{checks:
@@ -292,6 +314,20 @@
     }
 
     // ---- Field readers / React-safe setter ------------------------------------
+    // Umbrava rebuilt the WO detail form (measured live 2026-09-03, W-371126): the header
+    // wrapper now holds NO inputs at all, and the fields that used to carry a data-testid
+    // carry a `name` equal to their API field path instead - `priority.expectedCompletionDate`,
+    // `priority.firstTripDate`, `sourceJobNumber`, `doNotExceed`, `scopeOfWork`. Key on that
+    // `name`: it is the same string the GraphQL patch uses, so DOM and API stay in step, and
+    // unlike the label's `for` (`mui-32`) it is not MUI's per-render counter.
+    // A PO edit form can carry the same field names, so anything inside a PO accordion is
+    // skipped - the WO's own field is the one that is not in a POAccordion.
+    function woFieldInput(name) {
+      var els = document.querySelectorAll('input[name="' + name + '"], textarea[name="' + name + '"]');
+      for (var i = 0; i < els.length; i++) { if (!els[i].closest('[data-testid^="POAccordion-"]')) return els[i]; }
+      return null;
+    }
+    function woFieldVal(name) { var el = woFieldInput(name); return el ? (el.value || '') : ''; }
     function inputVal(testid) {
       var el = document.querySelector('[data-testid="' + testid + '"]');
       if (!el) return '';
@@ -863,7 +899,7 @@
       CLIENT_DEFAULTS_SEED: CLIENT_DEFAULTS_SEED, CLIENT_PROFILE_SEED: CLIENT_PROFILE_SEED, bwnClientProfile: bwnClientProfile,
       money: money, parseMoney: parseMoney, parseBare: parseBare, parseUSDate: parseUSDate,
       alphaOnly: alphaOnly, lcsLen: lcsLen,
-      inputVal: inputVal, setNativeValue: setNativeValue,
+      inputVal: inputVal, woFieldInput: woFieldInput, woFieldVal: woFieldVal, setNativeValue: setNativeValue,
       GREEN: GREEN, injectTokens: injectTokens,
       getTheme: getTheme, setTheme: setTheme, applyTheme: applyTheme,
       makeDropdown: makeDropdown, a11yDialog: a11yDialog,
@@ -1037,9 +1073,21 @@
   // toggle (bwn:modules.connector === false) disables ALL SWA egress - read LIVE each
   // tick, so flipping it takes effect without a reload.
   var CONNECTOR_V = 1;
+  // BWN-GOV-CONN-SLICE-START (governance-sync: remote kill also gates egress; sliced by scripts/test-governance-sync.js)
+  // The local Ops Suite toggle (bwn:modules.connector) OR a central kill (bwn:gov flags
+  // globalKillSwitch / connector:false, cached by govFetch below) disables ALL SWA egress.
+  // Both are read LIVE each tick so a flip takes effect with no reload. Errors fail OPEN to
+  // the user's toggle (the established convention) - a corrupt bundle never silently kills.
   function connectorEnabled() {
-    try { var mp = JSON.parse(localStorage.getItem('bwn:modules') || '{}'); return mp.connector !== false; } catch (e) { return true; }
+    var mp; try { mp = JSON.parse(localStorage.getItem('bwn:modules') || '{}'); } catch (e) { mp = {}; }
+    if (mp && mp.connector === false) return false;
+    try {
+      var g = JSON.parse(localStorage.getItem('bwn:gov') || 'null');
+      if (g && g.flags && (g.flags.globalKillSwitch === true || g.flags.connector === false)) return false;
+    } catch (e) { /* corrupt bwn:gov -> ignore, fall through to enabled */ }
+    return true;
   }
+  // BWN-GOV-CONN-SLICE-END
   // Connector health → Ops Suite Status (BWN.beat writes on change only, so details
   // must stay stable). 3 consecutive failures = 'miss' - a wrong key (403) or a broken
   // deploy no longer fails silently while the queue grows.
@@ -1341,8 +1389,8 @@
   });
   GM_registerMenuCommand('Set SWA ingest key', function () {
     var cur = GM_getValue('ingest_key', '');
-    var v = prompt('Paste the WO_INGEST_KEY (the SWA ingest function key; stored locally in Tampermonkey, never in the page):', cur || '');
-    if (v !== null) { GM_setValue('ingest_key', v.trim()); publishAiStatus(); alert(v.trim() ? 'Saved.' : 'Cleared.'); }
+    var v = prompt('Paste the WO_INGEST_KEY (the SWA ingest function key; stored locally in Tampermonkey, never in the page). Tampermonkey scopes this PER SCRIPT, so setting it here sets it for Suite AI only - every other suite script needs its own copy:', cur || '');
+    if (v !== null) { GM_setValue('ingest_key', v.trim()); publishAiStatus(); publishIngestPresence(); alert(v.trim() ? 'Saved.' : 'Cleared.'); }
   });
 
   // In-House Dispatch Report push: Core's dispatch scan (window.__bwnDispatchSyncNow) writes the
@@ -1411,6 +1459,114 @@
     }, 120000);
     document.dispatchEvent(new CustomEvent('bwn:cmd', { detail: { id: 'bwn:dispatch:sync' } }));
     console.info('[BWN DISPATCH] requested a fresh open-book scan; will push when it completes (keep the WO list open).');
+  });
+
+  // ---- Central governance read + audit mirror (governance-sync / governance-audit) -------
+  // Wires the SHIPPED SWA governance backend (api/governance + api/audit-ingest) into the
+  // suite. This script owns the network grant + the connector, so it does the egress; Core
+  // (zero-egress) consumes the cached flags over the bwn:gov ping. Read-only for governance;
+  // append-only, PII-free for the audit mirror. No new @connect host (same green-stone SWA).
+  // BWN-GOV-SYNC-SLICE-START (sliced by scripts/test-governance-sync.js)
+  var GOV_URL = INGEST_URL.replace(/\/wo-ingest$/, '/governance');
+  var AUDIT_URL = INGEST_URL.replace(/\/wo-ingest$/, '/audit-ingest');
+
+  // govFetch is gated ONLY by the user connector toggle + the key - deliberately NOT by the
+  // remote kill, so a globalKillSwitch can always be LIFTED by a later poll (else the kill
+  // would wedge its own release). Feature egress + writes ARE gated by the kill via
+  // connectorEnabled() above.
+  function govFetchAllowed() {
+    var mp; try { mp = JSON.parse(localStorage.getItem('bwn:modules') || '{}'); } catch (e) { mp = {}; }
+    if (mp && mp.connector === false) return false;
+    return !!GM_getValue('ingest_key', '');
+  }
+  function govMark(reach) {
+    try {
+      var g = JSON.parse(localStorage.getItem('bwn:gov') || 'null') || { v: 1, flags: {} };
+      g.reach = reach; g.fetchedAt = Date.now();
+      localStorage.setItem('bwn:gov', JSON.stringify(g));
+    } catch (e) { /* best-effort */ }
+    try { document.dispatchEvent(new CustomEvent('bwn:gov')); } catch (e) { }
+  }
+  var govBusy = false;
+  function govFetch() {
+    if (govBusy) return;
+    if (!govFetchAllowed()) return;
+    var key = GM_getValue('ingest_key', ''); if (!key) return;
+    var prev = null; try { prev = JSON.parse(localStorage.getItem('bwn:gov') || 'null'); } catch (e) { }
+    var headers = { 'x-bwn-key': key };
+    if (prev && prev.etag) headers['If-None-Match'] = prev.etag;   // conditional GET -> 304 on no change
+    govBusy = true;
+    GM_xmlhttpRequest({
+      method: 'GET', url: GOV_URL, headers: headers, timeout: 20000,
+      onload: function (r) {
+        govBusy = false;
+        if (r.status === 304) { govMark('ok'); connOk(); return; }   // unchanged; keep cached bundle
+        if (r.status >= 200 && r.status < 300) {
+          var b = null; try { b = JSON.parse(r.responseText); } catch (e) { }
+          // A chased AAD login page is 200 HTML, not a bundle: require the {v,etag} shape before trusting it.
+          if (b && typeof b === 'object' && b.v && b.etag) {
+            b.reach = 'ok'; b.fetchedAt = Date.now();
+            try { localStorage.setItem('bwn:gov', JSON.stringify(b)); } catch (e) { }
+            try { document.dispatchEvent(new CustomEvent('bwn:gov')); } catch (e) { }   // Core re-applies one-way disables
+            connOk();
+          } else { govMark('unreachable'); connFail('gov-shape'); }
+          return;
+        }
+        // 403/5xx/etc: keep the last-known-good bundle, mark unreachable, NEVER relax flags (fail closed).
+        govMark('unreachable'); connFail(r.status);
+      },
+      onerror: function () { govBusy = false; govMark('unreachable'); connFail('network'); },
+      ontimeout: function () { govBusy = false; govMark('unreachable'); connFail('timeout'); }
+    });
+  }
+  setTimeout(BWN.guard(govFetch, 'govFetch'), 4000);
+  setInterval(BWN.guard(govFetch, 'govFetch'), 600000);   // ~10 min
+
+  // Central audit mirror: flush NEW PII-free bwn:audit ring entries to /api/audit-ingest under a
+  // SEPARATE key (AUDIT_INGEST_KEY, independently revocable). The server dedups by corrId, so a
+  // resend is harmless; a small local high-water avoids re-sending the whole ring each tick. v1
+  // mirrors only entries that carry a corrId (every bwnGqlOp-governed write does). Egress, so it
+  // honors connectorEnabled() (incl. the remote kill). Only a real {ok:true} advances the high-water.
+  var auditBusy = false, AUDIT_HW_MAX = 400;
+  function auditFlush() {
+    if (auditBusy) return;
+    if (!connectorEnabled()) return;                       // kill-switch (local toggle OR remote kill)
+    var key = GM_getValue('audit_key', ''); if (!key) return;
+    var ring; try { ring = JSON.parse(localStorage.getItem('bwn:audit') || '[]'); } catch (e) { return; }
+    if (!Array.isArray(ring) || !ring.length) return;
+    var hw; try { hw = JSON.parse(localStorage.getItem('bwn:auditHW') || '[]'); } catch (e) { hw = []; }
+    if (!Array.isArray(hw)) hw = [];
+    var seen = Object.create(null); hw.forEach(function (c) { seen[c] = 1; });
+    var fresh = ring.filter(function (e) { return e && e.corrId && !seen[e.corrId]; }).slice(0, 50);
+    if (!fresh.length) return;
+    var body; try { body = JSON.stringify({ actor: ingestActor(), entries: fresh }); } catch (e) { return; }
+    auditBusy = true;
+    GM_xmlhttpRequest({
+      method: 'POST', url: AUDIT_URL,
+      headers: { 'Content-Type': 'application/json', 'x-bwn-key': key },
+      data: body, timeout: 20000,
+      onload: function (r) {
+        auditBusy = false;
+        var ok = false;
+        if (r.status >= 200 && r.status < 300) { try { ok = JSON.parse(r.responseText).ok === true; } catch (e) { } }
+        if (ok) {
+          var next = hw.concat(fresh.map(function (e) { return e.corrId; }));
+          if (next.length > AUDIT_HW_MAX) next = next.slice(-AUDIT_HW_MAX);
+          try { localStorage.setItem('bwn:auditHW', JSON.stringify(next)); } catch (e) { }
+          connOk();
+        } else { connFail(r.status); }   // 403/5xx: leave ring + high-water for the next tick
+      },
+      onerror: function () { auditBusy = false; connFail('network'); },
+      ontimeout: function () { auditBusy = false; connFail('timeout'); }
+    });
+  }
+  setTimeout(BWN.guard(auditFlush, 'auditFlush'), 8000);
+  setInterval(BWN.guard(auditFlush, 'auditFlush'), 60000);
+  // BWN-GOV-SYNC-SLICE-END
+  GM_registerMenuCommand('Set SWA audit key', function () {
+    var cur = GM_getValue('audit_key', '');
+    var v = prompt('Paste the AUDIT_INGEST_KEY (SWA central-audit function key; stored locally in Tampermonkey, never in the page):', cur || '');
+    if (v !== null) { GM_setValue('audit_key', v.trim()); alert(v.trim() ? 'Saved.' : 'Cleared.'); }
   });
 
   // ===== BWN AI TRANSPORT (Phase 2 - unified bwnAI transport) =========================
@@ -2025,6 +2181,30 @@
   // Wire the real transport into the shared router. The bwnAI block above stays paste-identical
   // across the suite; ONLY this injection differs (PAT-002 / [[bwn-ai-tiering]] injected-sender).
   bwnAI.setProxy(aiProxySend);
+
+  // ---- AI summarize bridge (serves @grant none siblings, e.g. Drop Upload) --------------
+  // Drop Upload is @grant none / zero-egress and cannot reach the cloud model itself, so it asks
+  // over the shared document bus and WE run the summary through the router - cloud proxy primary
+  // (this script holds the /api/ai transport), on-device fallback, mechanical floor. Same
+  // request/reply shape as the domp / dispatch:sync bridges already on this bus:
+  //   in   bwn:cmd  { id:'ai:summarize', rid, text, oneLine?, maxChars? }
+  //   out  bwn:evt  { id:'ai:summarized', rid, text }
+  // Always replies (empty text on any miss) so the caller's own timeout is only for "AI absent".
+  document.addEventListener('bwn:cmd', function (e) {
+    var d = e && e.detail;
+    if (!d || d.id !== 'ai:summarize' || d.rid == null) return;
+    function reply(t) { try { document.dispatchEvent(new CustomEvent('bwn:evt', { detail: { id: 'ai:summarized', rid: d.rid, text: String(t || '') } })); } catch (e2) { } }
+    var text = String(d.text || '').slice(0, 6000);
+    if (text.replace(/\s/g, '').length < 30) { reply(''); return; }   // too little to summarize
+    try {
+      bwnAI({
+        task: 'summarize', tier: 'proxy', fallback: ['ondevice', 'local'],
+        oneLine: d.oneLine !== false, maxChars: d.maxChars || 160,
+        system: 'You write ONE terse line summarizing what a work-order document is and what it says, for a facilities coordinator. State the document kind (invoice, proposal, quote, report, permit, photo log, etc.) and its key facts - amount, vendor, scope, dates - if present. Max 20 words. No preamble, no label, no quotes; output only the sentence.',
+        prompt: text, timeoutMs: 12000
+      }).then(reply, function () { reply(''); });
+    } catch (e3) { reply(''); }
+  }, false);
   // ===== END BWN AI TRANSPORT =========================================================
 
 
@@ -2052,6 +2232,15 @@
 
     var BTN_ID = 'bwn-client-update-btn';
     var GREEN = BWN.GREEN;
+
+    // ESC-rank visibility floors (server-computed ladder: 1 staff .. 5 director), applied PER ITEM.
+    // Client Update is a client-safe, scrubbed, human-reviewed draft - core coordinator work, so it
+    // stays available to coordinators (rank 1+). The internal drafts (WO Audit / Recent / Next Actions
+    // / Over 30) and the Template flyout are supervisor+ (rank 3; WO Audit is rank 3 in the dock's
+    // BWN_DOCK_POLICY). The button shows whenever >= 1 item is visible. Fail-CLOSED: an unresolved
+    // rank keeps the button hidden until the rank resolves. bwnAI.rank() returns null when unknown.
+    var DRAFT_MIN_RANK = 3;             // internal drafts + templates
+    var CLIENT_UPDATE_MIN_RANK = 1;     // client-safe draft - coordinators keep it
 
     // Prompt-pack version: stamped on cached drafts so a prompt edit invalidates
     // stale caches. Bump when any SYSTEM_PROMPT_* changes materially.
@@ -2083,13 +2272,14 @@
       return el ? (el.textContent || '').trim() : '';
     }
     var inputVal = BWN.inputVal;
+    var woFieldVal = BWN.woFieldVal;
     function getHeader() {
       return {
         tracking: txt('work-order-header-tracking-number'),
         wo: txt('work-order-header-number-formatted'),
         status: inputVal('statusId-autocomplete-input'),
-        firstTrip: inputVal('work-order-first-trip-date-picker'),
-        completeBy: inputVal('work-order-expected-completion-date-picker'),
+        firstTrip: woFieldVal('priority.firstTripDate'),
+        completeBy: woFieldVal('priority.expectedCompletionDate'),
         location: txt('wo-location-dropdown-input-label'),
         assignedTo: inputVal('assignedTo-autocomplete-input')
       };
@@ -2104,7 +2294,12 @@
 
     function vendorNames() {
       var out = [];
-      document.querySelectorAll('[data-testid="purchase-order-vendor-name"]').forEach(function (el) {
+      // `-link` as well as `-name`: Umbrava renders the vendor as a LINK on every PO row now
+      // (measured 2026-09-03), so the name-only query returned nothing and this fell through to
+      // Core's bus every time. That matters more here than elsewhere - this list is what scrub()
+      // redacts before text leaves the browser, so an empty list means vendor names go UNSCRUBBED
+      // whenever Core is absent or its bus has not published yet. Matches the pair used below.
+      document.querySelectorAll('[data-testid="purchase-order-vendor-name"], [data-testid="purchase-order-vendor-link"]').forEach(function (el) {
         var v = (el.textContent || '').trim();
         if (v && out.indexOf(v) === -1) out.push(v);
       });
@@ -3261,6 +3456,11 @@
     }
 
     function mount() {
+      // ESC-rank visibility floors (fail-closed), applied per item - see the DRAFT_MIN_RANK /
+      // CLIENT_UPDATE_MIN_RANK note above. Unresolved rank keeps waiting (button hidden until it
+      // resolves); the button shows whenever >= 1 item survives the filter.
+      var _cuRank = bwnAI.rank();
+      if (_cuRank === null) { BWN.beat('clientUpdate', 'waiting', 'role rank not resolved'); return false; }
       if (document.getElementById(BTN_ID)) { BWN.beat('clientUpdate', 'ok', 'AI Draft menu mounted'); return true; }
       // Only on a notes view that actually has notes loaded.
       if (!document.querySelector('[data-testid^="wo-note-"][data-testid$="-summary"]')) { BWN.beat('clientUpdate', 'waiting', 'notes view not open'); return false; }
@@ -3269,16 +3469,19 @@
       bar.id = BTN_ID;
       bar.style.cssText = 'display:inline-flex;gap:6px;align-items:center;vertical-align:middle;margin-right:8px;';
       var draftItems = [
-        { label: 'Client Update', desc: 'Client-safe draft', fn: function () { run(CLIENT_MODE); } },
-        { label: 'WO Audit', desc: 'Internal \u00b7 full case file', fn: function () { run(AUDIT_MODE); } },
-        { label: 'Recent Update', desc: 'Internal \u00b7 recent window', fn: function () { run(RECENT_MODE); } },
-        { label: 'Next Actions', desc: 'Action \u00b7 next actions', fn: function () { run(NEXTSTEPS_MODE); } },
-        { label: 'Over 30', desc: 'Internal \u00b7 one-line', fn: function () { run(OVER30_MODE); } }
-      ];
-      // The templates come from bwn-notes over the event bus (it is a @grant-none page-context script;
-      // we are GM_-sandboxed and cannot read its page-window globals). With the list in hand, fold it
-      // in as a "Template" flyout and relabel the button "Draft"; a leaf click sends the id back for
-      // bwn-notes to draft (calendar + fill). No list yet -> stay "AI Draft" and ask again.
+        { label: 'Client Update', desc: 'Client-safe draft', minRank: CLIENT_UPDATE_MIN_RANK, fn: function () { run(CLIENT_MODE); } },
+        { label: 'WO Audit', desc: 'Internal \u00b7 full case file', minRank: DRAFT_MIN_RANK, fn: function () { run(AUDIT_MODE); } },
+        { label: 'Recent Update', desc: 'Internal \u00b7 recent window', minRank: DRAFT_MIN_RANK, fn: function () { run(RECENT_MODE); } },
+        { label: 'Next Actions', desc: 'Action \u00b7 next actions', minRank: DRAFT_MIN_RANK, fn: function () { run(NEXTSTEPS_MODE); } },
+        { label: 'Over 30', desc: 'Internal \u00b7 one-line', minRank: DRAFT_MIN_RANK, fn: function () { run(OVER30_MODE); } }
+      ].filter(function (it) { return _cuRank >= it.minRank; });
+      if (!draftItems.length) { BWN.beat('clientUpdate', 'waiting', 'no draft items at this rank'); return true; }
+      // Templates come from bwn-notes over the event bus (it is a @grant-none page-context script; we
+      // are GM_-sandboxed and cannot read its page-window globals). bwn-notes ONLY broadcasts its list
+      // to a rostered user, so the mere presence of noteTplGroups is the roster gate here - no rank
+      // check (Templates are rank 1). With the list in hand, fold it in as a "Template" flyout and
+      // relabel the button "Draft"; a leaf click sends the id back for bwn-notes to draft (calendar +
+      // fill). No list yet -> stay "AI Draft" and ask again (bwn-notes answers only if rostered).
       var draftLabel = 'AI Draft';
       if (noteTplGroups) {
         draftLabel = 'Draft';
@@ -5136,7 +5339,12 @@ if (BWN_MODULES.jobView) BWN.safeModule('jobView', function () {
     // query by. Prefer it; the header testids below are guesses that may not exist.
     var u = location.pathname.match(/\/work-orders\/(\d+)/);
     if (u) return u[1];
-    var el = document.querySelector('[data-testid="work-order-header-work-order-number"]') ||
+    // Both of the old header testids are GONE (measured 2026-09-03); the header renders
+    // `work-order-header-number-formatted` ("W-371126"). The URL above still answers first on
+    // every WO route, so this branch was already dead weight - it is corrected rather than
+    // dropped because it is the fallback for a route where the path carries no number.
+    var el = document.querySelector('[data-testid="work-order-header-number-formatted"]') ||
+      document.querySelector('[data-testid="work-order-header-work-order-number"]') ||
       document.querySelector('[data-testid="work-order-header-number"]');
     var d = el ? String(el.textContent || '').replace(/\D+/g, '') : '';
     if (d) return d;
@@ -6627,7 +6835,7 @@ if (BWN_MODULES.jobView) BWN.safeModule('jobView', function () {
       return new Promise(function (resolve) {
         var key = GM_getValue('ingest_key', '');
         if (!connectorEnabled()) return resolve({ clientError: 'The AI connector is switched off in the Ops Suite panel.' });
-        if (!key) return resolve({ clientError: 'Set the shared SWA ingest key first (Tampermonkey menu).' });
+        if (!key) return resolve({ clientError: 'Set this script\'s SWA ingest key first (Tampermonkey menu - the key is per script, so setting it elsewhere does not set it here).' });
         try {
           GM_xmlhttpRequest({
             method: 'POST', url: AI_URL, timeout: AI_REQ_TIMEOUT_MS,

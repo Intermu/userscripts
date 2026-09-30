@@ -1,10 +1,10 @@
 // ==UserScript==
 // @name         BWN Drop Upload (Broadway National)
 // @namespace    broadwaynational.bwn
-// @version      1.22.0
+// @version      1.32.0
 // @downloadURL  https://raw.githubusercontent.com/Intermu/userscripts/main/bwn-drop-upload.user.js
 // @updateURL    https://raw.githubusercontent.com/Intermu/userscripts/main/bwn-drop-upload.user.js
-// @description  Drop files anywhere on an Umbrava work order to upload them. Opens the Documents tab and upload dialog, hands over the files, and builds each file's description from its contents. Emails are parsed locally (.msg via an OLE/MAPI reader, .eml via RFC822) into an Outlook-style block - From/Sent/To/Cc/Subject and the body - that becomes the WO note, led by a one-line summary from Chrome's on-device built-in AI (zero cost, zero egress, nothing leaves the browser), falling back to local WO-field extraction (store, city/state, priority, PO, NTE, problem, requester) when the on-device model is unavailable. That same summary fills each file's Description. The WO note's Type is chosen from the email's parties: inbound is typed by the sender (client -> Client, else Vendor); outbound from Broadway is typed by the recipients (a client recipient -> Client, any vendor recipient -> Vendor, all-internal -> Internal). Umbrava's Description field is a TipTap/ProseMirror rich-text editor. It rejects synthetic paste, beforeinput, insertHTML and raw innerHTML, but honours execCommand('insertText') plus a synthetic Enter keydown - so the note is filled line by line (Enter between lines to keep paragraphs), paced ~12ms/line so ProseMirror's async commit doesn't drop lines (measured live 2026-08-10). The text is also placed on your clipboard as a backup, and if every fill method fails a "Copy the WO note" button appears (its click supplies the gesture for a reliable copy, then Ctrl+V). A console diagnostic reports which editor was found and which fill method stuck. When WO Intake hands off a just-created WO's request email, each uploaded file's Label (document type) is set to "Work Order Request" and the note Type is forced to Client (a WO Intake handoff is a client's request, even when the sender is a broker like Fairmarkit that reads as a Vendor domain). Fairmarkit / bulk-email footer boilerplate (the Fairmarkit company block: tagline + Boston address + FAQ/Privacy/Terms/Unsubscribe, and the -----!{...}!----- machine tail) plus ALL tracking URLs (safelinks/awstrack/logo) are stripped from the note body, keeping content through the suppliers@ email. A Fairmarkit RFQ body is also condensed to one line per entry - single-spaced, with each line-item rejoined to its QTY and each Details label (Buyer/Close date/RFQ ID/Shipping address) rejoined to its value. Files upload via Umbrava's own API (initializeJobDocument -> Azure blob PUT -> bulkAddWorkOrderDocuments, captured live 2026-08-12), Label set by id, so the brittle upload-dialog combobox is bypassed; the dialog remains the automatic fallback if the API is unavailable. A manual drop does NOT auto-upload: the review box shows a "Document type" picker plus an Upload button, so the coordinator CHOOSES the document type before it is committed (there is no update-label mutation, so the label must be right at upload time). The picker defaults to MATCH the note Type we assigned (Client -> Client Correspondence, Vendor -> Vendor Correspondence, Internal -> Internal) and stays in sync as the note Type is changed, until the coordinator overrides the doc type directly; for an unknown external party the on-device classifier upgrades Vendor -> Supplier Correspondence when it reads as a parts supplier. The file Description is still filled automatically from the file's contents / the email summary. Only the WO Intake handoff still uploads automatically and forces "Work Order Request". The email note is shown in a centered BWN review box (editable; the Type picker offers a curated set of the note types a drop is actually filed under, defaulted to the party-derived Client/Vendor/Internal) and posted via addEditJobNote ONLY when you click Post - it is never auto-posted, and posts under your own Umbrava session for correct attribution. Network calls are same-origin to app.umbrava.com's own /api/graphql (the app's Auth0 bearer, no @connect/GM) plus the SAS-authorized blob PUT the SPA itself makes - nothing goes to any third party. @grant none.
+// @description  Drop files anywhere on an Umbrava work order to upload them. Opens the Documents tab and upload dialog, hands over the files, and builds each file's description from its contents. Emails are parsed locally (.msg via an OLE/MAPI reader, .eml via RFC822) into an Outlook-style block - From/Sent/To/Cc/Subject and the body - that becomes the WO note, led by a one-line summary from Chrome's on-device built-in AI (zero cost, zero egress, nothing leaves the browser), falling back to local WO-field extraction (store, city/state, priority, PO, NTE, problem, requester) when the on-device model is unavailable. That same summary fills each file's Description. The WO note's Type is chosen from the email's parties: inbound is typed by the sender (client -> Client, else Vendor); outbound from Broadway is typed by the recipients (a client recipient -> Client, any vendor recipient -> Vendor, all-internal -> Internal). Umbrava's Description field is a TipTap/ProseMirror rich-text editor. It rejects synthetic paste, beforeinput, insertHTML and raw innerHTML, but honours execCommand('insertText') plus a synthetic Enter keydown - so the note is filled line by line (Enter between lines to keep paragraphs), paced ~12ms/line so ProseMirror's async commit doesn't drop lines (measured live 2026-08-10). The text is also placed on your clipboard as a backup, and if every fill method fails a "Copy the WO note" button appears (its click supplies the gesture for a reliable copy, then Ctrl+V). A console diagnostic reports which editor was found and which fill method stuck. When WO Intake hands off a just-created WO's request email, each uploaded file's Label (document type) is set to "Work Order Request" and the note Type is forced to Client (a WO Intake handoff is a client's request, even when the sender is a broker like Fairmarkit that reads as a Vendor domain). Fairmarkit / bulk-email footer boilerplate (the Fairmarkit company block: tagline + Boston address + FAQ/Privacy/Terms/Unsubscribe, and the -----!{...}!----- machine tail) plus ALL tracking URLs (safelinks/awstrack/logo) are stripped from the note body, keeping content through the suppliers@ email. A Fairmarkit RFQ body is also condensed to one line per entry - single-spaced, with each line-item rejoined to its QTY and each Details label (Buyer/Close date/RFQ ID/Shipping address) rejoined to its value. Files upload via Umbrava's own API (initializeJobDocument -> Azure blob PUT -> bulkAddWorkOrderDocuments, captured live 2026-08-12), Label set by id, so the brittle upload-dialog combobox is bypassed; the dialog remains the automatic fallback if the API is unavailable. A manual drop does NOT auto-upload: the review box gives EACH queued file its own "Document type" picker plus one Upload button, so the coordinator confirms the type per file before it is committed (there is no update-label mutation, so the label must be right at upload time). Each picker is auto-set: a photo files as Photo, an email as correspondence by party (Client -> Client Correspondence, Vendor -> Vendor Correspondence, Internal -> Internal), everything else as the WO-request default; the email rows stay in sync as the note Type is changed until overridden, and for an unknown external party the on-device classifier upgrades an email row Vendor -> Supplier Correspondence when it reads as a parts supplier. Any row can be changed individually. After Upload the button reports Uploaded (or a dialog fallback on failure). The file Description is still filled automatically from the file's contents / the email summary. Only the WO Intake handoff still uploads automatically, and it labels per file: the request email itself is the "Work Order Request", while any image attachment is filed as a "Photo". The email note is shown in a centered BWN review box (editable; the Type picker offers a curated set of the note types a drop is actually filed under, defaulted to the party-derived Client/Vendor/Internal) and posted via addEditJobNote ONLY when you click Post - it is never auto-posted, and posts under your own Umbrava session for correct attribution. A dropped email is a CONTAINER, so its real attachments (the PDF, the site photos) are extracted and uploaded as documents of their own (the note carries only the email(s) and their summary, never a list of the uploaded files; a drop with no email has no note at all - the box is just the file list, per-file types and Upload) - the sender's signature graphics are left behind, identified by their MAPI hidden / MHTML-reference marks (.msg) or by being disposed inline with a cited Content-ID (.eml) rather than by size or filename; an attached image is filed as a "Photo" while the email keeps the document type you picked. Ticking "This client email needs a response" now also posts an Action note that @-mentions the work order's assignee (the notify rides the TipTap mention span the SPA itself sends), then prompts them every 15 minutes until they log a Client note on that WO; after 5 unanswered prompts it posts an Escalation note @-mentioning their supervisor and manager. Who that is is READ FROM UMBRAVA, not configured anywhere: Company > Users shows each person's Teams, and the ops behind that page (user(id){parentTeams{parentTeam}} then users(teamId:){role{name}}) give the assignee's team and its members, from which whoever ranks supervisor or manager is told. A team may carry both or only one; the assignee is excluded, so a manager's own unanswered work does not escalate to themselves. Role-to-rank mirrors the SWA's own ladder so the two cannot disagree. Nothing to set up and no name is written down - fix the team in Umbrava and the escalation follows. The prompt ladder is local (localStorage + a ticker + a browser notification, falling back to an in-page toast), so it runs while an Umbrava tab is open; the Action note and the escalation are work-order notes, so the record of the chase survives a closed browser. Network calls are same-origin to app.umbrava.com's own /api/graphql (the app's Auth0 bearer, no @connect/GM) plus the SAS-authorized blob PUT the SPA itself makes - nothing goes to any third party. The review box lists every queued file (name, size, type icon) so it is clear what will be uploaded; each still-held file has a × to remove it before Upload (there is no delete-document mutation, so removal is pre-upload only), and a second drop of a file already in the queue (same name + size) is skipped with a count, so dragging the same thing twice does not upload it twice. @grant none.
 // @match        https://app.umbrava.com/*
 // @match        https://*.umbrava.com/*
 // @run-at       document-idle
@@ -15,9 +15,9 @@
 (function () {
   'use strict';
 
-  var VER = '1.22.0';   // keep in step with @version (drift caught earlier: banner had lagged two releases)
+  var VER = '1.32.0';   // keep in step with @version (drift caught earlier: banner had lagged two releases)
   var BWN_VER = VER;   // stamped into BWN-OPS audit entries; the wrapper references BWN_VER
-  console.info('[BWN DROP UPLOAD] v' + VER + ' · Uploads via Umbrava API (initializeJobDocument→blob PUT→bulkAddWorkOrderDocuments, Label by id), DOM dialog is the fallback · manual drop HOLDS the upload: the review box shows a Document type picker (defaulted to MATCH the note Type - Client->Client Correspondence, Vendor->Vendor Correspondence, Internal->Internal - and re-synced as the note Type changes, until overridden) + an Upload button, so the type is CHOSEN, not assumed · email→note in a human-gated BWN review box, posted via addEditJobNote on an explicit Post click (never auto-posted) · note Type by parties (inbound=sender, outbound=recipient) · note box shows instantly with a mechanical lead; the slow on-device AI brief (Gemini Nano / Edge Phi) fills in async · bwn:cmd dropupload:files bridge (handoff still forces Work Order Request)');
+  console.info('[BWN DROP UPLOAD] v' + VER + ' · Uploads via Umbrava API (initializeJobDocument→blob PUT→bulkAddWorkOrderDocuments, Label by id), DOM dialog is the fallback · manual drop HOLDS the upload: the review box shows a Document type picker (defaulted to MATCH the note Type - Client->Client Correspondence, Vendor->Vendor Correspondence, Internal->Internal - and re-synced as the note Type changes, until overridden) + an Upload button, so the type is CHOSEN, not assumed · email→note in a human-gated BWN review box, posted via addEditJobNote on an explicit Post click (never auto-posted) · note Type by parties (inbound=sender, outbound=recipient) · note box shows instantly with a mechanical lead; the slow on-device AI brief (Gemini Nano / Edge Phi) fills in async · a dropped email is a CONTAINER: its real attachments upload as their own documents (signature graphics dropped by their MAPI/Content-ID marks; an attached image files as Photo) · "needs a response" also posts an Action note @-mentioning the WO assignee, then prompts every 15 min until they log a Client note, escalating after 5 to the supervisor + manager READ from their Umbrava team (Company > Users/Teams), nothing configured · bwn:cmd dropupload:files bridge (handoff labels per file: the email = Work Order Request, image attachments = Photo) · review box LISTS every queued file with a × to remove one before Upload, and a re-dropped file (same name+size) is skipped with a count');
 
   // Active only on WO pages; checked at drag time so SPA navigation needs no watcher.
   // Excluded: the WO's billing invoice sub-pages (/billing/vendor-invoices, /billing/client-invoices),
@@ -107,18 +107,40 @@
       return;
     }
     var fname = (disp.match(/filename="?([^";\r\n]+)"?/i) || ct.match(/name="?([^";\r\n]+)"?/i) || [])[1] || '';
-    if (/attachment/i.test(disp) || (fname && !/^\s*text\//i.test(ct))) return;   // attachment bytes must never reach the note
+    if (/attachment/i.test(disp) || (fname && !/^\s*text\//i.test(ct))) {
+      // Attachment bytes must never reach the NOTE - but they are files the coordinator dropped
+      // just as much as the email itself, so they are COLLECTED here and uploaded as their own
+      // documents. (Before this they were dropped on the floor: an email carrying a PDF and six
+      // site photos uploaded as one file with nothing attached.) Mirrors bwn-wo-intake's walker.
+      // A signature graphic is disposed `inline` AND cites a Content-ID the HTML part references;
+      // BOTH marks are required, so a part disposed `attachment` is never dropped whatever else
+      // it carries.
+      if (acc.atts && /base64/.test(cte)) {
+        try { acc.atts.push({ name: attName(fname, acc.atts.length), mime: ct.split(';')[0].trim(), bytes: deb64u8(body), inline: /inline/i.test(disp) && !!hdr(head, 'Content-ID') }); } catch (e) { }
+      }
+      return;
+    }
     var txt = /quoted-printable/.test(cte) ? deqp(body) : /base64/.test(cte) ? deb64(body) : body;
     if (/text\/html/i.test(ct)) { if (!acc.html) acc.html = txt; }
     else if (!acc.plain) acc.plain = txt;
   }
+  // An attachment filename comes off the wire and becomes a real File name; strip the path
+  // separators and newlines so it cannot climb out of the name field.
+  function attName(nm, i) { return (String(nm || '').replace(/[\r\n\/\\]/g, '_').trim()) || ('attachment' + (i + 1)); }
+  function deb64u8(s) {
+    var bin = atob(String(s || '').replace(/[^A-Za-z0-9+/=]/g, ''));
+    var u8 = new Uint8Array(bin.length);
+    for (var i = 0; i < bin.length; i++) u8[i] = bin.charCodeAt(i);
+    return u8;
+  }
   function parseEml(text) {
-    var sp = splitHeadBody(text), acc = { plain: '', html: '' };
+    var sp = splitHeadBody(text), acc = { plain: '', html: '', atts: [] };
     walkPart(sp.head, sp.body, acc);
-    var body = acc.plain || acc.html || '';
+    var body = acc.plain ? cleanBody(acc.plain, false) : cleanBody(acc.html, true);
     return {
       from: hdr(sp.head, 'From'), date: hdr(sp.head, 'Date'), subject: hdr(sp.head, 'Subject'),
-      to: hdr(sp.head, 'To'), cc: hdr(sp.head, 'Cc'), body: cleanBody(body)
+      to: hdr(sp.head, 'To'), cc: hdr(sp.head, 'Cc'), body: body,
+      attachments: acc.atts
     };
   }
 
@@ -145,11 +167,32 @@
   // Strip HTML + decode the common entities, but PRESERVE newlines (paragraph
   // structure) - the email formatter relies on line breaks to trim the quoted
   // thread and keep the message readable. Only runs of spaces/tabs are collapsed.
-  function cleanBody(s) {
-    return String(s || '')
-      .replace(/<style[\s\S]*?<\/style>/gi, ' ').replace(/<[^>]+>/g, ' ')
-      .replace(/&nbsp;/gi, ' ').replace(/&amp;/gi, '&').replace(/&lt;/gi, '<').replace(/&gt;/gi, '>')
-      .replace(/[ \t]+\n/g, '\n').replace(/[ \t]{2,}/g, ' ').replace(/\n{3,}/g, '\n\n').trim();
+  // Tags are stripped ONLY from an HTML body. A text/plain body has no markup, but it does carry
+  // "Name <addr@x.com>" in the quoted reply headers - stripping those as tags erased the address
+  // the thread cut keys on, so the whole thread landed in the note. HTML block ends become line
+  // breaks (not spaces) so an HTML-only email keeps the line structure the cut reads.
+  function cleanBody(s, isHtml) {
+    s = String(s || '').replace(/\r\n?/g, '\n');
+    if (isHtml) {
+      // Line breaks in HTML SOURCE are just whitespace; only <br> and a block's end break a line. A run
+      // of closing tags (Outlook's </p></div></div>) is ONE break, so nesting does not invent blank
+      // lines, while an empty <p>&nbsp;</p> still leaves its blank line - the spacing the sender saw.
+      s = s.replace(/<!--[\s\S]*?-->/g, ' ').replace(/<(head|style|script|title)\b[\s\S]*?<\/\1>/gi, ' ')
+        .replace(/\s+/g, ' ')
+        .replace(/<br\s*\/?>/gi, '\n')
+        .replace(/(?:\s*<\/(?:p|div|tr|li|h[1-6]|table|blockquote)>)+/gi, '\n')
+        .replace(/<\/t[dh]>/gi, ' ');
+      // Strip tags to a fixed point: one pass can leave a tag rebuilt from nested input
+      // ("<<b>script>"). The text is plain text from here on - textToHtml escapes it again.
+      var prev;
+      do { prev = s; s = s.replace(/<[^<>]*>/g, ''); } while (s !== prev);
+      s = s.replace(/&nbsp;/gi, ' ').replace(/&quot;/gi, '"').replace(/&#39;|&apos;/gi, "'")
+        .replace(/&#(\d+);/g, function (m, d) { return String.fromCharCode(+d); })
+        .replace(/&#x([0-9a-f]+);/gi, function (m, h) { return String.fromCharCode(parseInt(h, 16)); })
+        .replace(/&lt;/gi, '<').replace(/&gt;/gi, '>').replace(/&amp;/gi, '&')
+        .replace(/\u00a0/g, ' ').replace(/^[ \t]+/gm, '');
+    }
+    return s.replace(/[ \t]+\n/g, '\n').replace(/[ \t]{2,}/g, ' ').replace(/\n{4,}/g, '\n\n\n').trim();   // up to 2 blank lines, as sent
   }
 
   // .msg = OLE2/CFB compound binary (Outlook). We do a real, zero-dependency parse:
@@ -203,6 +246,100 @@
 
   function utf16le(u8) { var s = ''; for (var i = 0; i + 1 < u8.length; i += 2) { var c = u8[i] | (u8[i + 1] << 8); if (c) s += String.fromCharCode(c); } return s; }
   function asciiStr(u8) { var s = ''; for (var i = 0; i < u8.length; i++) { if (u8[i]) s += String.fromCharCode(u8[i]); } return s; }
+
+  // ---- .msg HTML body (so the note keeps the email's real line spacing) ------------------------
+  // Outlook's plain-text body (PR_BODY) puts a blank line after EVERY paragraph, so a single-spaced
+  // signature comes out double-spaced and a deliberate blank line cannot be told from the automatic
+  // one. The HTML body is the layout the sender actually saw. Outlook stores it either as PR_HTML or,
+  // far more often, only inside PR_RTF_COMPRESSED as RTF-encapsulated HTML (\fromhtml1). Both readers
+  // below return '' on anything unexpected, and parseMsg then keeps the PR_BODY text as before.
+  // Compressed RTF (MS-OXRTFCP): 16-byte header, then LZ77 runs against a 4 KB dictionary seeded
+  // with this fixed 207-byte preamble.
+  var RTF_PREBUF = '{\\rtf1\\ansi\\mac\\deff0\\deftab720{\\fonttbl;}{\\f0\\fnil \\froman \\fswiss \\fmodern \\fscript \\fdecor MS Sans SerifSymbolArialTimes New RomanCourier{\\colortbl\\red0\\green0\\blue0\r\n\\par \\pard\\plain\\f0\\fs20\\b\\i\\u\\tab\\tx';
+  function rtfDecompress(u8) {
+    if (!u8 || u8.length < 16) return '';
+    var dv = new DataView(u8.buffer, u8.byteOffset, u8.byteLength);
+    var raw = dv.getUint32(4, true), type = dv.getUint32(8, true);
+    if (type === 0x414C454D) return asciiStr(u8.subarray(16, 16 + raw));   // 'MELA' = stored uncompressed
+    if (type !== 0x75465A4C || raw > 50000000) return '';                  // not 'LZFu' / implausible size
+    var dict = new Uint8Array(4096), w = 0, out = new Uint8Array(raw), o = 0, i = 16;
+    for (; w < RTF_PREBUF.length; w++) dict[w] = RTF_PREBUF.charCodeAt(w);
+    while (i < u8.length && o < raw) {
+      var flags = u8[i++];
+      for (var b = 0; b < 8 && o < raw && i < u8.length; b++) {
+        if (flags & (1 << b)) {
+          var ref = (u8[i] << 8) | u8[i + 1]; i += 2;
+          var off = ref >> 4, len = (ref & 15) + 2;
+          if (off === (w & 4095)) return asciiStr(out.subarray(0, o));    // end-of-stream marker
+          for (var k = 0; k < len && o < raw; k++) { var ch = dict[(off + k) & 4095]; out[o++] = ch; dict[w++ & 4095] = ch; }
+        } else { var c = u8[i++]; out[o++] = c; dict[w++ & 4095] = c; }
+      }
+    }
+    return asciiStr(out.subarray(0, o));
+  }
+  // RTF-encapsulated HTML (MS-OXRTFEX) -> the original HTML. {\*\htmltagN <tag>} groups carry the
+  // markup, \htmlrtf ... \htmlrtf0 spans are RTF-only duplicates to drop, other text is HTML text.
+  // Not an RTF reader: only what \fromhtml1 needs. A native-RTF body (no \fromhtml1) returns ''.
+  function rtfToHtml(rtf) {
+    if (!/\\fromhtml1/.test(rtf.slice(0, 1000))) return '';
+    var cpg = (/\\ansicpg(\d+)/.exec(rtf.slice(0, 1000)) || [])[1] || '1252';
+    var dec = null; try { dec = new TextDecoder('windows-' + cpg); } catch (e) { }
+    var out = '', bytes = [], st = { skip: false, sup: false, tag: false, uc: 1 }, stack = [];
+    var star = false, ucSkip = 0, i = 0, n = rtf.length, CW = /\\([a-zA-Z]+)(-?\d+)? ?/y;
+    function live() { return !st.skip && (st.tag || !st.sup); }
+    function flush() {
+      if (!bytes.length) return;
+      out += dec ? dec.decode(new Uint8Array(bytes)) : String.fromCharCode.apply(null, bytes);
+      bytes = [];
+    }
+    function put(s) { if (ucSkip > 0) { ucSkip--; return; } if (live()) { flush(); out += s; } }
+    while (i < n) {
+      var c = rtf.charAt(i);
+      if (c === '{') { stack.push(st); st = { skip: st.skip, sup: st.sup, tag: st.tag, uc: st.uc }; star = false; i++; continue; }
+      if (c === '}') { flush(); st = stack.pop() || st; star = false; i++; continue; }
+      if (c === '\r' || c === '\n') { i++; continue; }                    // raw RTF line breaks mean nothing
+      if (c !== '\\') { put(c); i++; continue; }
+      var nx = rtf.charAt(i + 1);
+      if (nx === '\\' || nx === '{' || nx === '}') { put(nx); i += 2; continue; }
+      if (nx === "'") {
+        if (ucSkip > 0) ucSkip--; else if (live()) bytes.push(parseInt(rtf.substr(i + 2, 2), 16) || 32);
+        i += 4; continue;
+      }
+      if (nx === '*') { star = true; i += 2; continue; }
+      CW.lastIndex = i;
+      var m = CW.exec(rtf);
+      if (!m) { i += 2; continue; }
+      i = CW.lastIndex;
+      var word = m[1], arg = m[2];
+      if (star) { star = false; if (word === 'htmltag') st.tag = true; else st.skip = true; continue; }
+      if (word === 'fonttbl' || word === 'colortbl' || word === 'stylesheet' || word === 'info' || word === 'pict') st.skip = true;
+      else if (word === 'htmlrtf') st.sup = (arg !== '0');
+      else if (word === 'par' || word === 'line') put('\n');
+      else if (word === 'tab') put('\t');
+      else if (word === 'uc') st.uc = +arg || 0;
+      else if (word === 'u') { var cc = +arg; put(String.fromCharCode(cc < 0 ? cc + 65536 : cc)); ucSkip = st.uc; }
+    }
+    flush();
+    return /<html|<body|<p\b|<div\b/i.test(out) ? out : '';
+  }
+
+  // The message's OWN body as text from its HTML, or '' to fall back to PR_BODY. Only the root
+  // storage's direct streams are read (siblings under the root, never a sub-storage), so an attached
+  // email's body can never stand in for this one.
+  function msgHtmlText(cfb, entries) {
+    try {
+      var root = entries[0], top = {}, stack = [root && root.child], seen = {};
+      while (stack.length) {
+        var id = stack.pop();
+        if (id == null || id === 0xFFFFFFFF || id >= entries.length || seen[id]) continue;
+        seen[id] = 1; top[entries[id].name] = entries[id]; stack.push(entries[id].left, entries[id].right);
+      }
+      var html = '';
+      if (top['__substg1.0_10130102']) html = new TextDecoder('utf-8').decode(cfb.readStream(top['__substg1.0_10130102']));
+      if (!/<p\b|<div\b|<br/i.test(html) && top['__substg1.0_10090102']) html = rtfToHtml(rtfDecompress(cfb.readStream(top['__substg1.0_10090102'])));
+      return html ? cleanBody(html, true) : '';
+    } catch (e) { return ''; }
+  }
 
   // Outlook .msg → the same email model shape parseEml produces (via emlToModel).
   function parseMsg(ab) {
@@ -262,13 +399,63 @@
         if (pick !== null && pick > 946684800000) sent = new Date(pick); // sanity: after 2000-01-01, else a zero/garbage FILETIME renders as a 1601 date
       }
     }
+    // Embedded attachments: each is a `__attach_version1.0_#N` storage holding the filename
+    // (3707 long / 3704 short), the mime type (370E) and the bytes (37010102 = PR_ATTACH_DATA_BIN).
+    // Same extraction bwn-wo-intake does; without it a .msg uploaded as one file and its PDF and
+    // photos never reached Documents.
+    var atts = [];
+    for (var ai = 0; ai < entries.length; ai++) {
+      if (entries[ai].type !== 1 || entries[ai].name.indexOf('__attach_version1.0_') !== 0) continue;
+      var akids = collectChildren(entries[ai].child), aby = Object.create(null);
+      for (var aj = 0; aj < akids.length; aj++) aby[akids[aj].name] = akids[aj];
+      var rd = (function (by) { return function (tag) { var x = by['__substg1.0_' + tag]; return x ? cfb.readStream(x) : null; }; })(aby);
+      var anm = utf16le(rd('3707001F') || new Uint8Array(0)) || asciiStr(rd('3707001E') || new Uint8Array(0)) ||
+        utf16le(rd('3704001F') || new Uint8Array(0)) || asciiStr(rd('3704001E') || new Uint8Array(0));
+      var amime = utf16le(rd('370E001F') || new Uint8Array(0)) || asciiStr(rd('370E001E') || new Uint8Array(0));
+      var adata = rd('37010102');
+      if (!adata || !adata.length) continue;
+      atts.push({
+        name: attName(anm, atts.length), mime: amime, bytes: adata,
+        inline: isInlineAttach(aby['__properties_version1.0'] ? cfb.readStream(aby['__properties_version1.0']) : null),
+        cid: utf16le(rd('3712001F') || new Uint8Array(0)) || asciiStr(rd('3712001E') || new Uint8Array(0))
+      });
+    }
+    // New Outlook sets NEITHER mark isInlineAttach reads on a signature logo (real Pilot .msg,
+    // 2026-09: "Outlook-vuspxaoz" svg, hidden/flags absent) - it only gives it a Content-ID that the
+    // body's <img src="cid:..."> cites. Same rule the .eml path uses: a cited cid = inline. The HTML
+    // lives in PR_HTML (1013) or, when that is absent, wrapped in the compressed RTF body (1009).
+    if (atts.some(function (a) { return a.cid && !a.inline; })) {
+      var hx = byName('__substg1.0_10130102'), rtf = byName('__substg1.0_10090102');
+      var html = (hx ? asciiStr(cfb.readStream(hx)) : '') + (rtf ? rtfDecompress(cfb.readStream(rtf)) : '');
+      atts.forEach(function (a) { if (a.cid && html.indexOf('cid:' + a.cid) !== -1) a.inline = true; });
+    }
     return {
       subject: prop('0037'),
       fromName: prop('0C1A') || prop('0042'),
       fromEmail: prop('5D01') || prop('0C1F') || prop('5D02') || prop('0065'),
       to: to, cc: cc, sent: sent, sentRaw: '',
-      body: propIn(entries, '1000').replace(/ +$/, '')
+      body: msgHtmlText(cfb, entries) || propIn(entries, '1000').replace(/ +$/, ''),
+      attachments: atts
     };
+  }
+
+  // Is this .msg attachment part of the sender's HTML SIGNATURE rather than a file they attached?
+  // Outlook ships signature graphics (logo, social icons) as real attachments. MAPI marks them and
+  // the marks are exact (measured on a real ten-attachment request in bwn-wo-intake): a signature
+  // image carries PR_ATTACHMENT_HIDDEN = true or PR_ATTACH_FLAGS bit ATT_MHTML_REF (0x4); real site
+  // photos carry NEITHER. PR_RENDERING_POSITION is NOT the discriminator - it was -1 on all ten,
+  // photos included, so a rendering-position rule would have dropped every photo. Fixed-size props
+  // live in the attachment storage's `__properties_version1.0` stream: 8-byte header, then 16-byte
+  // entries of [4B tag: low 16 = type, high 16 = id][4B flags][8B value] (MS-OXMSG 2.4).
+  function isInlineAttach(pb) {
+    if (!pb) return false;
+    for (var q = 8; q + 16 <= pb.length; q += 16) {
+      var ty = pb[q] | (pb[q + 1] << 8), id = pb[q + 2] | (pb[q + 3] << 8);
+      var val = pb[q + 8] | (pb[q + 9] << 8) | (pb[q + 10] << 16) | (pb[q + 11] << 24);
+      if (id === 0x7FFE && ty === 0x000B && val) return true;          // PR_ATTACHMENT_HIDDEN
+      if (id === 0x3714 && ty === 0x0003 && (val & 4)) return true;    // PR_ATTACH_FLAGS ATT_MHTML_REF
+    }
+    return false;
   }
 
   // Parse one address ("Name <email>" / bare email / bare name) and a comma/semicolon
@@ -294,7 +481,7 @@
   }
   function emlToModel(em) {
     var fromA = parseAddr(em.from), d = em.date ? new Date(em.date) : null; if (d && isNaN(d.getTime())) d = null;
-    return { subject: em.subject, fromName: fromA.name, fromEmail: fromA.email, to: parseAddrList(em.to), cc: parseAddrList(em.cc), sent: d, sentRaw: d ? '' : em.date, body: em.body };
+    return { subject: em.subject, fromName: fromA.name, fromEmail: fromA.email, to: parseAddrList(em.to), cc: parseAddrList(em.cc), sent: d, sentRaw: d ? '' : em.date, body: em.body, attachments: em.attachments || [] };
   }
 
   // ---- Email → Outlook-style block (what lands in the WO note) ---------------
@@ -320,7 +507,41 @@
   // artifacts and cut at the first quoted header block (the prior thread), so the
   // note carries what was actually written, not the whole reply chain.
   var BODY_MAX = 20000;   // bound regex work on pathological bodies (real plain-text email bodies are tiny)
-  function tidyBody(raw) {
+  // Index of the line where the quoted prior thread starts, or -1. The note must carry ONLY the
+  // email that was dragged in, so the first of these ends it:
+  //   - an Outlook/Gmail quoted header: a "From:" line followed within a few lines by at least two
+  //     more header fields (Sent/Date/To/Cc/Subject), one of them Sent or Date - OR a "From:" that
+  //     carries an address. Internal Outlook replies show "From: Name" with NO address, so the
+  //     address alone cannot be required (that was the whole-thread bug). Bold "*From:*" (HTML->text
+  //     conversions) counts too. Prose that merely starts a line with "From:" still does not cut:
+  //     it needs the header fields under it.
+  //   - "-----Original Message-----" / "---------- Forwarded message ---------"
+  //   - Gmail/Apple "On <date>, <name> wrote:" (possibly wrapped onto a second line)
+  var QUOTE_FIELD = /^\s*\*{0,2}\s*(from|sent|date|to|cc|subject)\s*:/i;
+  function threadCutAt(lines) {
+    for (var i = 0; i < lines.length; i++) {
+      var l = lines[i];
+      if (/^\s*-{2,}\s*(original|forwarded)\s+message\s*-{2,}\s*$/i.test(l)) return i;
+      if (/^\s*On\b.{4,250}\bwrote:\s*$/i.test(l) ||
+          (/^\s*On\b/i.test(l) && l.length < 250 && /^.{0,250}\bwrote:\s*$/i.test(lines[i + 1] || ''))) return i;
+      var f = QUOTE_FIELD.exec(l);
+      if (!f || f[1].toLowerCase() !== 'from') continue;
+      var seen = {}, hits = 0;
+      for (var j = i + 1; j < Math.min(lines.length, i + 7); j++) {
+        var g = QUOTE_FIELD.exec(lines[j]);
+        if (!g) continue;
+        var k = g[1].toLowerCase();
+        if (k === 'from' || seen[k]) continue;
+        seen[k] = 1; hits++;
+      }
+      if (hits >= 2 && (seen.sent || seen.date || /[@<]/.test(l))) return i;
+    }
+    return -1;
+  }
+  // keepThread=true leaves the quoted "From:/Sent:/Subject:" thread in place. A REPLY's content is
+  // the new text above that cut, so we drop it; a FORWARD's content IS the forwarded message below
+  // the cut, so callers summarizing a forward pass keepThread=true (then strip the envelope lines).
+  function tidyBody(raw, keepThread) {
     var rawStr = String(raw || '');
     // Fairmarkit RFQ bodies come through the plain-text stream double-spaced with every table cell on
     // its own line; they also carry a company footer + tracking URLs. Detect so the extra cleanup is
@@ -335,17 +556,12 @@
     var fcut = body.search(/Autonomous sourcing for all spend|Fairmarkit,\s*1 Beacon/i);
     if (fcut > 0) body = body.slice(0, fcut).replace(/\n[ \t]*Fairmarkit[ \t]*\s*$/i, '\n');
     var lines = body.split('\n');
-    for (var i = 0; i < lines.length; i++) {
-      // Only treat a "From:" line as the start of the quoted reply thread if it
-      // carries an actual address (@ or <…>) AND at least two more quoted-header
-      // fields (Sent/To/Subject/Cc) follow within a few lines. Prose that merely
-      // begins a line with "From:"/"To:" must NOT truncate the real message
-      // (review: the looser heuristic false-positived on ordinary body text).
-      if (/^\s*From:\s*.*[@<]/i.test(lines[i])) {
-        var look = lines.slice(i + 1, i + 6).join('\n');
-        var hits = (/^\s*Sent:/im.test(look) ? 1 : 0) + (/^\s*To:/im.test(look) ? 1 : 0) +
-                   (/^\s*Subject:/im.test(look) ? 1 : 0) + (/^\s*Cc:/im.test(look) ? 1 : 0);
-        if (hits >= 2) { lines = lines.slice(0, i); break; }
+    if (!keepThread) {
+      var cut = threadCutAt(lines);
+      if (cut >= 0) {
+        lines = lines.slice(0, cut);
+        // Drop the blank lines / Outlook "______" rule that sat just above the quoted header.
+        while (lines.length && /^\s*([_=\-]{6,})?\s*$/.test(lines[lines.length - 1])) lines.pop();
       }
     }
     body = lines.map(function (l) { return l.replace(/\s+$/, ''); }).join('\n');
@@ -357,7 +573,7 @@
       body = body.replace(/\n(Buyer:|Close date:|RFQ ID:|Shipping address:)[ \t]*\n[ \t]*/gi, '\n$1\t');
       return body.trim();
     }
-    return body.replace(/\n{3,}/g, '\n\n').trim();
+    return body.replace(/\n{4,}/g, '\n\n\n').trim();   // up to 2 blank lines survive, as sent
   }
   // Generated lead line for a client WO-request email: "<Sender> sent in WO Request for <problem>".
   // The problem text is the email's Description: section (the real scope). Added only when BOTH a
@@ -492,9 +708,21 @@
   // "Kind Regards," sign-off below. A bare "Thanks,"/"Thank you." sign-off is < 12 chars, so the length
   // guard drops it anyway.
   var SALUTATION_RE = /^(hi|hello|hey|dear|good\s+(morning|afternoon|evening)|greetings)\b/i;
+  // Drop a forwarded message's envelope header lines (From/Sent/To/Cc/Subject/Date and the
+  // "----- Forwarded message -----" rule) so a summary reads the forwarded PROSE, not the envelope.
+  function stripFwdHeaders(t) {
+    return String(t || '').split('\n').filter(function (l) {
+      return !/^\s*(from|sent|to|cc|bcc|subject|date|importance|reply-to)\s*:/i.test(l) &&
+             !/^\s*-+\s*(original|forwarded)\s+message\s*-+/i.test(l);
+    }).join('\n');
+  }
   function genericEmailSummary(m) {
     var who = (m.fromName || smtpAddr(m.fromEmail) || '').replace(/\s+/g, ' ').trim();
-    var body = tidyBody(m.body || '');
+    // A forward's content is the forwarded message BELOW the quoted-thread cut - keep it, then strip
+    // its envelope lines. A reply/original keeps the normal thread-cut (new text only).
+    var fwd = isForward(m);
+    var body = tidyBody(m.body || '', fwd);
+    if (fwd) body = stripFwdHeaders(body);
     if (!body) return '';
     var parts = body.split(/\n{2,}/), para = '';
     for (var i = 0; i < parts.length; i++) {
@@ -517,8 +745,12 @@
   // carries the real ask in its SUBJECT (WO#/store/EMERGENCY) over a body that's just a signature,
   // so lead with the subject instead ("<Sender>: Sent <Subject>"). Reply = an RE:/AW:/SV: subject.
   function isReplyEmail(m) { return /^\s*(re|aw|sv|res)\s*:/i.test((m && m.subject) || ''); }
+  function isForward(m) { return /^\s*(fw|fwd)\s*:/i.test((m && m.subject) || ''); }
   function emailLead(m) {
-    if (m && m.subject && !isReplyEmail(m)) {
+    // Only an ORIGINAL send leads with its subject. A REPLY carries its new text in the body, and a
+    // FORWARD carries the forwarded message in the body (genericEmailSummary keeps it, see below) -
+    // echoing "Sent FW: <subject>" just repeats the Outlook block's own subject line.
+    if (m && m.subject && !isReplyEmail(m) && !isForward(m)) {
       var who = (m.fromName || smtpAddr(m.fromEmail) || '').replace(/\s+/g, ' ').trim();
       return (who ? who + ': ' : '') + 'Sent ' + String(m.subject).replace(/\s+/g, ' ').trim();
     }
@@ -571,6 +803,26 @@
     if (sawExternal) return 'External';            // outbound to an unknown external party
     if (from === 'Internal') return 'Internal';    // internal <-> internal
     return '';
+  }
+  // Known SUPPLIERS (sell parts/materials/equipment, no on-site labor) by domain. Hand-maintained,
+  // mirrors CLIENT_DOMAINS: an unrecognized external domain listed here types as Supplier
+  // DETERMINISTICALLY, so a repeat supplier is never left to the flaky on-device vendor/supplier
+  // guess (reported: LSI / Power Play shipment notifications filed as Vendor Correspondence).
+  // Extend as suppliers surface; an unlisted external still falls to the AI split, not a wrong guess.
+  var SUPPLIER_DOMAINS = {
+    'lsicorp.com': 1
+    // ponytail: hand-maintained allowlist, same pattern as CLIENT_DOMAINS.
+  };
+  function knownSupplier(m) {
+    if (!m) return false;
+    var addrs = [m.fromEmail].concat(
+      (m.to || []).map(function (r) { return r && r.email; }),
+      (m.cc || []).map(function (r) { return r && r.email; }));
+    for (var i = 0; i < addrs.length; i++) {
+      var dom = (String(addrs[i] || '').split('@')[1] || '').toLowerCase().trim();
+      if (dom && SUPPLIER_DOMAINS[dom]) return true;
+    }
+    return false;
   }
   // Note Type is Client / Vendor / Internal only - there is no "Supplier" note type, so an
   // external party (vendor OR supplier) types the note as Vendor. The vendor-vs-supplier split
@@ -650,6 +902,78 @@
     } catch (e) { return ''; }
   }
   // ===== BWN-SHARED END v1 =====
+
+  // ===== BWN-PERM START v1 (paste-identical; pinned by scripts/test-perm-block-ledger.js) =====
+  // Umbrava's own per-user permission checkboxes, as the one question a control has:
+  //   bwnCan('WorkOrderNote.AddNew') -> true | false
+  // Umbrava returns me.permissions as a JSON STRING of {"<Type>Permissions": "<bitmask>"} - one
+  // bit per checkbox on /company/users/<id>/permissions. bwn-suite-core decodes it once a session
+  // and publishes the DECODED grant list to `bwn:perm:last` + the `bwn:perm` bus event, the same
+  // one-way producer/consumer shape as bwn:role. This block only READS that slot, so every
+  // sandbox that pastes it needs neither the query, the token, nor the flag numbers.
+  //
+  // FAIL-OPEN on anything unknown - no slot yet, a stale slot, or a group the producer does not
+  // map. Umbrava's server is the real boundary (it refuses the mutation either way), so an
+  // unreadable cache must never strand a coordinator mid-shift. Fail-CLOSED only on a
+  // positively-known missing bit. localStorage is per-origin, so this answers "unknown" (and
+  // therefore allows) anywhere but app.umbrava.com - by design.
+  var BWN_PERM_KEY = 'bwn:perm:last';
+  var BWN_PERM_TTL_MS = 24 * 3600 * 1000;
+  var _bwnPermSlot = null;      // memoized parse; invalidated by the bwn:perm listener below
+  function bwnPermSlot() {
+    if (_bwnPermSlot) return _bwnPermSlot;
+    try {
+      var p = JSON.parse(localStorage.getItem(BWN_PERM_KEY) || 'null');
+      if (p && p.ts && (Date.now() - p.ts) < BWN_PERM_TTL_MS &&
+        Array.isArray(p.groups) && Array.isArray(p.granted)) _bwnPermSlot = p;
+    } catch (e) { /* an unreadable cache reads as unknown, which fails open */ }
+    return _bwnPermSlot;
+  }
+  function bwnCan(key) {
+    var p = bwnPermSlot();
+    if (!p) return true;                                          // nothing decoded yet -> allow
+    var grp = String(key).split('.')[0];
+    if (p.groups.indexOf(grp) === -1) return true;                // group unmapped/absent -> allow
+    return p.granted.indexOf(key) !== -1;
+  }
+  // keys: a 'Group.Flag' string, or an array of them (ALL must be granted).
+  function bwnCanAll(keys) {
+    if (!keys) return true;
+    if (typeof keys === 'string') return bwnCan(keys);
+    for (var i = 0; i < keys.length; i++) { if (!bwnCan(keys[i])) return false; }
+    return true;
+  }
+  // patchWorkOrder is ONE mutation over MANY fields and Umbrava gates each field separately, so
+  // its permission depends on the variables rather than the operation. This maps the data keys the
+  // suite actually sends, all of them wire-proven; a key this map does not know contributes NO
+  // requirement, which is the block's unknown -> allow rule and keeps a future field from being
+  // blocked by a map nobody updated. `workOrderNumber` is the identifier, not a field write.
+  var BWN_PATCH_FIELD_PERM = {
+    statusId: 'WorkOrderField.Status',
+    assignedTo: 'WorkOrderField.AssignedTo',
+    // ECD rides inside the whole-object `priority` replace, and the SPA bundles the SLA id with it.
+    priority: 'WorkOrderField.CompletionSLA',
+    serviceLevelAgreementId: 'WorkOrderField.CompletionSLA',
+    sourceJobNumber: 'WorkOrderField.SourceJobNumber',
+    sourcePurchaseOrderNumber: 'WorkOrderField.SourcePurchaseOrderNumber'
+  };
+  // -> [] | ['WorkOrderField.Status', ...]; deduped, so a bundled priority+SLA asks once.
+  function bwnPermsForPatch(variables) {
+    var data = (variables && variables.data) || {};
+    var out = [];
+    Object.keys(data).forEach(function (k) {
+      var p = BWN_PATCH_FIELD_PERM[k];
+      if (p && out.indexOf(p) === -1) out.push(p);
+    });
+    return out;
+  }
+  try {
+    document.addEventListener('bwn:evt', function (e) {
+      var d = e && e.detail;
+      if (d && d.id === 'bwn:perm') _bwnPermSlot = null;          // a fresh decode landed
+    });
+  } catch (e) { }
+  // ===== BWN-PERM END v1 =====
   function duGql(op, query, variables) {
     var tok = authToken();
     if (!tok) return Promise.reject(new Error('no-umbrava-token'));
@@ -673,15 +997,37 @@
   // posted here lands in the SAME audit trail as Core writes.
   function bwnGql(query, variables) { var m = /\b(?:query|mutation)\s+([A-Za-z0-9_]+)/.exec(query); return duGql(m ? m[1] : null, query, variables); }
   var BWN_MODULES = (function () { try { return JSON.parse(localStorage.getItem('bwn:modules') || '{}') || {}; } catch (e) { return {}; } })();
+  // Central governance (governance-sync): fold the org flags bwn-suite-ai caches to bwn:gov into
+  // BWN_MODULES as ONE-WAY disables, the SAME shape as bwn-suite-core's bwnApplyGov(). A remote
+  // flags['dropUpload']===false or flags.globalKillSwitch DISABLES this script's writes - the bwnGqlOp
+  // per-feature gate below reads BWN_MODULES['dropUpload'] live - and can NEVER enable one. Fail-closed:
+  // an absent or corrupt bundle keeps the local defaults (last-known-good), never relaxes. Re-applies
+  // on the bwn:gov ping so a remote kill blocks new writes with no reload.
+  if (!('dropUpload' in BWN_MODULES)) BWN_MODULES.dropUpload = true;
+  function bwnApplyGov() {
+    try {
+      var g = JSON.parse(localStorage.getItem('bwn:gov') || 'null');
+      if (!g || typeof g !== 'object' || !g.flags || typeof g.flags !== 'object') return;
+      var f = g.flags, kill = f.globalKillSwitch === true;
+      Object.keys(BWN_MODULES).forEach(function (k) {
+        if (kill || f[k] === false) BWN_MODULES[k] = false;   // one-way: only ever disable
+      });
+    } catch (e) { /* corrupt bundle -> keep local defaults (safe) */ }
+  }
+  bwnApplyGov();
+  try { document.addEventListener('bwn:gov', function () { bwnApplyGov(); }); } catch (e) { }
   var BWN_OPS = {
-    addEditJobNote: { kind: 'write', target: 'note', risk: 'moderate', idempotent: false, retry: 'none',
+    addEditJobNote: { kind: 'write', perm: 'WorkOrderNote.AddNew', target: 'note', risk: 'moderate', idempotent: false, retry: 'none',
       ok: 'Note posted.', fail: 'The note was not posted.' },
-    initializeJobDocument: { kind: 'write', target: 'document', risk: 'moderate', idempotent: false, retry: 'none',
+    initializeJobDocument: { kind: 'write', perm: 'WorkOrderDocument.AddNew', target: 'document', risk: 'moderate', idempotent: false, retry: 'none',
       ok: 'Document upload started.', fail: 'The upload could not start.' },
-    bulkAddWorkOrderDocuments: { kind: 'write', target: 'document', risk: 'moderate', idempotent: false, retry: 'none',
+    bulkAddWorkOrderDocuments: { kind: 'write', perm: 'WorkOrderDocument.AddNew', target: 'document', risk: 'moderate', idempotent: false, retry: 'none',
       ok: 'Documents attached.', fail: 'The documents were not attached.' }
   };
-  // ===== BWN-OPS-WRAP START v2 (paste-identical across adopters; SHA-gated by scripts/test-bwn-ops.js) =====
+  // ===== BWN-OPS-WRAP START v3 (paste-identical across adopters; SHA-gated by scripts/test-bwn-ops.js) =====
+  // v3 (2026-09-02) adds the Umbrava permission gate (G7 below). It closes over bwnCan/bwnCanAll
+  // from the BWN-PERM block, so an adopter of this wrapper must carry that block too - the ledger
+  // in scripts/test-perm-block-ledger.js is what keeps the two lists in step.
   // Generic machinery only - NO registry, NO window hook - so it is byte-identical in every
   // sandbox that adopts it (Core, drop-upload, ...). It closes over four things each sandbox
   // supplies on its own: BWN_OPS (that file's registry), BWN_MODULES (kill switches), BWN_VER,
@@ -789,6 +1135,29 @@
       writeAudit('denied', { reason: 'feature-off:' + opts.feature });
       return Promise.reject(new Error('bwnGqlOp: feature "' + opts.feature + '" is disabled'));
     }
+    // Umbrava permission gate (G7). The UI hides a control the operator's checkboxes do not cover,
+    // but hiding is not enforcement: a palette entry, a stale drawer, a queued command, or a future
+    // caller can all reach a write whose button was never rendered. This is the enforcement point -
+    // every registered write passes through here, so ONE guard covers every caller.
+    //   meta.perm  'Group.Flag' | ['Group.Flag', ...] | fn(variables) -> either of those
+    // A function is how a multi-field mutation (patchWorkOrder) asks per FIELD instead of per op.
+    // bwnCanAll fails OPEN on anything undecided - no slot, a stale slot, an unmapped group - so
+    // this refuses ONLY a positively-known missing checkbox. Refusals are non-transient (retrying
+    // cannot grant a permission) and audited `denied`, so a refusal is visible in the ring rather
+    // than silent. The reason carries the permission NAME, which is a static key, never user data.
+    if (isWrite && meta.perm) {
+      var need = (typeof meta.perm === 'function') ? meta.perm(variables) : meta.perm;
+      if (typeof need === 'string') need = [need];
+      if (!Array.isArray(need)) need = [];
+      if (need.length && !bwnCanAll(need)) {
+        var missing = need.filter(function (k) { return !bwnCan(k); });
+        writeAudit('denied', { reason: 'permission:' + missing.join('+') });
+        var noPerm = new Error('bwnGqlOp: "' + op + '" needs Umbrava permission ' + missing.join(' + ') + ' - the write was NOT sent.');
+        noPerm.bwnNonTransient = true;
+        noPerm.bwnPermissionDenied = missing;
+        return Promise.reject(noPerm);
+      }
+    }
     // Validate a write BEFORE it leaves the browser.
     if (isWrite && typeof opts.validate === 'function') {
       var vr = opts.validate(variables);
@@ -873,7 +1242,7 @@
     return attempt(1);
   }
   bwnGqlOp.setConfirm = function (fn) { _confirmFn = (typeof fn === 'function') ? fn : null; };
-  // ===== BWN-OPS-WRAP END v2 =====
+  // ===== BWN-OPS-WRAP END v3 =====
 
   // Doc-label id map, read live off the MUI Autocomplete options (the SPA loads it once at boot,
   // never on the wire). The names are stable tenant reference data; drop-upload only ever needs
@@ -935,14 +1304,22 @@
     return ['Client', 'Vendor', 'Internal'];
   }
 
-  // Plain text -> paragraph HTML (blank line = new <p>, single newline = <br>), matching what the
-  // old TipTap paste path produced so a posted note reads like the email.
+  // Plain text -> note HTML in the SAME shape Umbrava's own TipTap editor saves: one <p> per line, and
+  // a blank line is an EMPTY <p> (measured on W-355083: every human-typed note is built this way, and
+  // Umbrava's <p> has no margin, so the empty paragraph IS the blank line). Grouping lines into
+  // paragraphs split on blank lines - what this used to do - dropped every blank line from the rendered
+  // note, so an email's spacing collapsed into one solid block.
+  var NOTE_P = '<p style="font-size: 14px; line-height: 1.4">';
   function textToHtml(text) {
     function esc(s) { return String(s == null ? '' : s).replace(/[&<>"']/g, function (c) { return { '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;' }[c]; }); }
-    return String(text).replace(/\r\n/g, '\n').split(/\n{2,}/)
-      .map(function (p) { return '<p>' + esc(p).replace(/\n/g, '<br>') + '</p>'; }).join('');
+    return String(text).replace(/\r\n?/g, '\n').split('\n')
+      .map(function (l) { return NOTE_P + esc(l) + '</p>'; }).join('');
   }
 
+  // Umbrava caps a WO note at 4,000 characters. Every note this box drafts is capped here (the "…"
+  // counts), the textarea carries a matching maxlength, and postNoteHtmlViaApi refuses anything longer.
+  var NOTE_CAP = 4000;
+  function capNote(t) { return t.length > NOTE_CAP ? t.slice(0, NOTE_CAP - 1) + '…' : t; }
   var MUT_ADD_NOTE = 'mutation AddEditWONote($addEditInput: WorkOrderNoteInput!) { addEditJobNote(data: $addEditInput) { success message note { id type } } }';
   var MUT_INIT_DOC = 'mutation InitializeJobDocument($workOrderNumber: Int, $data: NewFileInput!) { initializeJobDocument(workOrderNumber: $workOrderNumber, data: $data) { success message sasToken { documentInfoId uriWithSas displayFileName } } }';
   var MUT_BULK_ADD = 'mutation BulkAddWorkOrderDocuments($data: BulkAddWorkOrderDocumentsInput!) { bulkAddWorkOrderDocuments(data: $data) { success message documentIds } }';
@@ -950,12 +1327,18 @@
   // Post a WO note via addEditJobNote. type is the numeric note-type id (resolved from the name).
   // Returns Promise<createdNote>; throws on no-token / GraphQL error / success:false.
   function postNoteViaApi(text, typeName, woNumber) {
+    return postNoteHtmlViaApi(text, textToHtml(text), typeName, woNumber);
+  }
+  // Same write, but the caller supplies contentHtml. The @-mention notify rides ENTIRELY inside
+  // contentHtml as a TipTap span (captured live 2026-08-17, proven by bwn-low-gp), so a note that
+  // pings someone cannot go through textToHtml - it would escape the span into visible markup.
+  function postNoteHtmlViaApi(text, html, typeName, woNumber) {
     var typeId = noteTypeId(typeName);
     var input = {
       workOrderNumber: woNumber,
       type: typeId,
       content: String(text),
-      contentHtml: textToHtml(text),
+      contentHtml: html,
       isCompletion: false,
       isInvoice: false,
       isPinned: false,
@@ -965,10 +1348,12 @@
     // Routed through bwnGqlOp (BWN-OPS): correlation id + shared audit entry + pre-send
     // validate; the wrapper rejects a success:false envelope, so no inline success check.
     return bwnGqlOp('addEditJobNote', MUT_ADD_NOTE, { addEditInput: input }, {
+      feature: 'dropUpload',
       ids: { wo: woNumber },
       validate: function (v) {
         var a = v && v.addEditInput;
         if (!a || a.workOrderNumber == null || typeof a.content !== 'string' || !a.content) return 'missing WO number or note content';
+        if (a.content.length > NOTE_CAP) return 'note is ' + a.content.length + ' characters; Umbrava allows ' + NOTE_CAP;
         return true;
       }
     }).then(function (d) {
@@ -985,7 +1370,7 @@
       // fileSize is a STRING in the live schema, NOT Int (the captured request body couldn't reveal the
       // type; a live drop errored "String cannot represent a non string value: <bytes>" at data.fileSize).
       data: { fileName: rawFile.name, fileSize: String(rawFile.size) }
-    }, { ids: { wo: woNumber } }).then(function (d) {
+    }, { feature: 'dropUpload', ids: { wo: woNumber } }).then(function (d) {
       var init = d && d.initializeJobDocument;
       if (!init || init.success !== true || !init.sasToken || !init.sasToken.uriWithSas) {
         throw new Error((init && init.message) || 'initializeJobDocument returned no SAS');
@@ -1007,14 +1392,17 @@
   function uploadViaApi(rawFiles, describedFiles, labelName, woNumber) {
     if (!woNumber) return Promise.reject(new Error('no-wo-number'));
     if (!rawFiles || !rawFiles.length) return Promise.reject(new Error('no-files'));
-    var labelId = labelName ? docLabelId(labelName) : null;
     var jobs = [];
     for (var i = 0; i < rawFiles.length; i++) {
       var desc = (describedFiles && describedFiles[i] && describedFiles[i].desc) || '';
-      jobs.push(uploadOneViaApi(rawFiles[i], desc, labelId, woNumber));
+      // labelName may be a FUNCTION of the file, not one name for the batch: the WO-intake handoff
+      // labels the request email "Work Order Request" but its photo attachments "Photo". One drop,
+      // two document types - and there is no update-label mutation, so each has to be right here.
+      var nm = (typeof labelName === 'function') ? labelName(rawFiles[i]) : labelName;
+      jobs.push(uploadOneViaApi(rawFiles[i], desc, nm ? docLabelId(nm) : null, woNumber));
     }
     return Promise.all(jobs).then(function (entries) {
-      return bwnGqlOp('bulkAddWorkOrderDocuments', MUT_BULK_ADD, { data: { workOrderNumber: woNumber, documents: entries } }, { ids: { wo: woNumber } })
+      return bwnGqlOp('bulkAddWorkOrderDocuments', MUT_BULK_ADD, { data: { workOrderNumber: woNumber, documents: entries } }, { feature: 'dropUpload', ids: { wo: woNumber } })
         .then(function (d) {
           var res = d && d.bulkAddWorkOrderDocuments;
           if (!res || res.success !== true) throw new Error((res && res.message) || 'bulkAddWorkOrderDocuments reported no success');
@@ -1196,7 +1584,10 @@
   function aiBrief(m) {
     var from = (m.fromName || smtpAddr(m.fromEmail) || '').trim();
     var to = (m.to || []).map(function (r) { return r.name || smtpAddr(r.email); }).filter(Boolean).join(', ');
-    var body = tidyBody(m.body).slice(0, 4000);   // the NEW message only - thread cut
+    // Reply/original: the NEW message only (thread cut). Forward: keep the forwarded message (its
+    // whole point sits below the cut) minus the envelope header lines, so the brief has real content.
+    var fwd = isForward(m);
+    var body = (fwd ? stripFwdHeaders(tidyBody(m.body, true)) : tidyBody(m.body)).slice(0, 4000);
     var content = 'From: ' + from + '\nTo: ' + to + '\nSubject: ' + String(m.subject || '') + '\n\n' + body;
     return bwnAI({
       task: 'summarize',
@@ -1218,24 +1609,199 @@
   // claimed); a merge drop re-runs and only touches the newly added files. Never throws.
   function enrichNoteWithAI(pend) {
     if (!pend || !pend.files || !pend.files.length) return;
-    pend.files.forEach(function (f) {
-      if (!f || !f.isEmail || !f.email || !f.aiPending) return;
-      f.aiPending = false;   // claim once - a failed/empty call keeps the mechanical lead, no retry
-      aiBrief(f.email).then(function (brief) {
-        if (!brief) return;
-        var block;
-        try { block = formatEmailBlock(f.email, brief); } catch (e) { return; }
-        if (!block) return;
-        f.summary = brief; f.aiUsed = true; f.noteBlock = block;
-        // Only touch the live UI if this drop is still the current pending and its box is still open.
-        if (pending !== pend || !noteBox) return;
-        var newText;
-        try { newText = buildNoteText(pend.files); } catch (e2) { return; }
-        pend.noteText = newText;
-        var ta = noteBox.__ta;
-        if (ta && !noteBox.__noteEdited) { ta.value = newText; }
-      }).catch(function () { });
+    // Shared: rebuild the note text and refresh the box IN PLACE, but only if this drop is still
+    // the current pending, its box is still open, and the user has not edited it (their edits win).
+    function refresh() {
+      if (pending !== pend || !noteBox) return;
+      var newText; try { newText = buildNoteText(pend.files); } catch (e) { return; }
+      pend.noteText = newText;
+      var ta = noteBox.__ta;
+      if (ta && !noteBox.__noteEdited) { ta.value = newText; }
+    }
+    pend.files.forEach(function (f, i) {
+      // (a) Emails: swap the mechanical lead for the on-device AI brief.
+      if (f && f.isEmail && f.email && f.aiPending) {
+        f.aiPending = false;   // claim once - a failed/empty call keeps the mechanical lead, no retry
+        aiBrief(f.email).then(function (brief) {
+          if (!brief) return;
+          var block;
+          try { block = formatEmailBlock(f.email, brief); } catch (e) { return; }
+          if (!block) return;
+          f.summary = brief; f.aiUsed = true; f.noteBlock = block;
+          refresh();
+        }).catch(function () { });
+      }
+      // (b) Documents (PDF / plain text): read the text, get a cloud-first 1-line summary, add it
+      // to the file's note line. Never blocks the drop/upload; each doc is summarized once.
+      if (f && f.aiDocPending && f.docFile) {
+        f.aiDocPending = false;
+        extractDocText(f.docFile, f.docKind).then(function (text) {
+          if (!text || text.replace(/\s/g, '').length < 40) return;   // scanned/image PDF etc. - keep the mechanical line
+          // Upgrade the file's UNTOUCHED default label to 'Vendor Proposal' when the text reads as
+          // one. Mirrors the Vendor -> Supplier email-row upgrade: never over a touched/locked pick.
+          if (looksLikeVendorProposal(text) && pending === pend && noteBox && noteBox.__lblSels) {
+            var s = noteBox.__lblSels[i];
+            // Fire over the WO-request default OR a correspondence default (an estimate PDF attached
+            // to a vendor email now defaults to *Correspondence*, but is still a proposal). Never
+            // over a touched/locked pick.
+            if (s && !s.__touched && !s.disabled && (s.value === DEFAULT_DOC_LABEL || /Correspondence$/.test(s.value))) s.value = 'Vendor Proposal';
+          }
+          return summarizeDocText(text).then(function (sum) {
+            if (!sum) return;
+            f.summaryLine = sum; f.aiUsed = true;
+            refresh();
+          });
+        }).catch(function () { });
+      }
     });
+  }
+
+  // ---- PDF text reader (ported verbatim from bwn-wo-intake.user.js) ----------
+  // Pure browser, on-device, no library: inflate FlateDecode streams with the native
+  // DecompressionStream, union the ToUnicode CMaps, read the text ops. TEXT PDFs only -
+  // a scanned/image PDF has no text ops and yields '' (its "summary" then stays the
+  // mechanical filename line). @grant none is preserved: nothing leaves the browser here.
+  function inflate(bytes) {
+    function attempt(fmt) {
+      return new Promise(function (resolve) {
+        var d; try { d = new DecompressionStream(fmt); } catch (e) { resolve(null); return; }
+        var chunks = [], total = 0;
+        var w = d.writable.getWriter(); w.write(bytes).catch(function () { }); w.close().catch(function () { });
+        var r = d.readable.getReader();
+        (function pump() {
+          r.read().then(function (x) { if (x.done) { fin(); return; } chunks.push(x.value); total += x.value.length; pump(); }).catch(function () { fin(); });
+        })();
+        function fin() { if (!chunks.length) { resolve(null); return; } var out = new Uint8Array(total), o = 0; chunks.forEach(function (c) { out.set(c, o); o += c.length; }); resolve(out); }
+      });
+    }
+    return attempt('deflate').then(function (r) { return r || attempt('deflate-raw'); });
+  }
+  function latin1Of(u8) {
+    var CH = 0x8000, parts = [];
+    for (var i = 0; i < u8.length; i += CH) parts.push(String.fromCharCode.apply(null, u8.subarray(i, Math.min(i + CH, u8.length))));
+    return parts.join('');
+  }
+  function hexToStr(h) { var o = ''; for (var k = 0; k + 4 <= h.length; k += 4) o += String.fromCharCode(parseInt(h.substr(k, 4), 16)); return o; }
+  function pdfToText(bytes) {
+    var u8 = bytes instanceof Uint8Array ? bytes : new Uint8Array(bytes);
+    var raws = [], i = 0;
+    var STREAM = [0x73, 0x74, 0x72, 0x65, 0x61, 0x6d], ENDS = [0x65, 0x6e, 0x64, 0x73, 0x74, 0x72, 0x65, 0x61, 0x6d];
+    function indexOfSeq(hay, seq, from) {
+      outer: for (var p = from; p <= hay.length - seq.length; p++) { for (var q = 0; q < seq.length; q++) if (hay[p + q] !== seq[q]) continue outer; return p; } return -1;
+    }
+    while (true) {
+      var s = indexOfSeq(u8, STREAM, i); if (s < 0) break;
+      var ds = s + 6; if (u8[ds] === 0x0d) ds++; if (u8[ds] === 0x0a) ds++;
+      var e = indexOfSeq(u8, ENDS, ds); if (e < 0) break;
+      raws.push(u8.subarray(ds, e)); i = e + 9;
+    }
+    return Promise.all(raws.map(inflate)).then(function (streams) {
+      streams = streams.filter(Boolean);
+      var uni = {};
+      streams.forEach(function (d) {
+        var t = latin1Of(d);
+        if (t.indexOf('beginbfchar') < 0 && t.indexOf('beginbfrange') < 0) return;
+        var m, re;
+        var bc = /beginbfchar([\s\S]*?)endbfchar/g;
+        while ((m = bc.exec(t))) { re = /<([0-9A-Fa-f]+)>\s*<([0-9A-Fa-f]+)>/g; var mm; while ((mm = re.exec(m[1]))) uni[parseInt(mm[1], 16)] = hexToStr(mm[2]); }
+        var br = /beginbfrange([\s\S]*?)endbfrange/g;
+        while ((m = br.exec(t))) {
+          re = /<([0-9A-Fa-f]+)>\s*<([0-9A-Fa-f]+)>\s*(<([0-9A-Fa-f]+)>|\[([\s\S]*?)\])/g; var m2;
+          while ((m2 = re.exec(m[1]))) {
+            var lo = parseInt(m2[1], 16), hi = parseInt(m2[2], 16);
+            if (m2[4]) { var base = m2[4]; for (var c = lo; c <= hi; c++) uni[c] = hexToStr((parseInt(base, 16) + (c - lo)).toString(16).padStart(base.length, '0')); }
+            else if (m2[5]) { (m2[5].match(/<([0-9A-Fa-f]+)>/g) || []).forEach(function (a, idx) { uni[lo + idx] = hexToStr(a.replace(/[<>]/g, '')); }); }
+          }
+        }
+      });
+      function mapHex(h) { var o = ''; for (var k = 0; k + 4 <= h.length; k += 4) { var cc = parseInt(h.substr(k, 4), 16); o += (uni[cc] != null) ? uni[cc] : ''; } return o; }
+      var out = [];
+      streams.forEach(function (d) {
+        var t = latin1Of(d);
+        if (t.indexOf('beginbfchar') >= 0 || t.indexOf('beginbfrange') >= 0) return;
+        if (t.indexOf('BT') < 0 || (t.indexOf('Tj') < 0 && t.indexOf('TJ') < 0)) return;
+        var toks = [], m, advances = [];
+        var re = /(-?[\d.]+)\s+(-?[\d.]+)\s+(?:Td|TD)|T\*|<([0-9A-Fa-f]+)>\s*Tj|\[([\s\S]*?)\]\s*TJ/g;
+        while ((m = re.exec(t))) {
+          if (m[3] != null) { toks.push({ s: mapHex(m[3]) }); continue; }
+          if (m[4] != null) { (m[4].match(/<([0-9A-Fa-f]+)>|(-?[\d.]+)/g) || []).forEach(function (a) { if (a.charAt(0) === '<') toks.push({ s: mapHex(a.replace(/[<>]/g, '')) }); else if (parseFloat(a) < -120) toks.push({ s: ' ' }); }); continue; }
+          if (m[0] === 'T*') { toks.push({ nl: true }); continue; }
+          var tx = parseFloat(m[1]), ty = parseFloat(m[2]);
+          if (Math.abs(ty) > 0.5) toks.push({ nl: true }); else { toks.push({ tx: tx }); if (tx > 0) advances.push(tx); }
+        }
+        advances.sort(function (a, b) { return a - b; });
+        var med = advances.length ? advances[Math.floor(advances.length / 2)] : 3;
+        var spaceAt = Math.max(3, med * 1.6);
+        var buf = '';
+        toks.forEach(function (k) { if (k.nl != null) buf += '\n'; else if (k.tx != null) { if (k.tx > spaceAt) buf += ' '; } else buf += k.s; });
+        if (buf.replace(/\s/g, '').length > 20) out.push(buf);
+      });
+      return out.join('\n');
+    });
+  }
+
+  // ---- Document → readable text → one-line AI summary ------------------------
+  // Feeds the WO note a 1-liner per uploaded DOCUMENT. Text sources handled on-device:
+  // a text PDF (pdfToText) and plain-text files (.txt/.csv/.md/.log/.tsv). Photos and
+  // binary Office docs (.docx/.xlsx) have no readable text here and are SKIPPED (they keep
+  // the mechanical filename line) - OCR / office-unzip is a separate, heavier build.
+  function isPlainText(f) { return /\.(txt|csv|md|log|tsv)$/i.test(f && f.name || '') || /^text\//.test(f && f.type || ''); }
+  function summarizableDoc(f, kind) { return kind === 'PDF' || isPlainText(f); }
+  function readFileU8(f) { return new Promise(function (res, rej) { var r = new FileReader(); r.onerror = function () { rej(r.error); }; r.onload = function () { res(new Uint8Array(r.result)); }; r.readAsArrayBuffer(f); }); }
+  function readFileText(f) { return new Promise(function (res, rej) { var r = new FileReader(); r.onerror = function () { rej(r.error); }; r.onload = function () { res(String(r.result || '')); }; r.readAsText(f); }); }
+  function extractDocText(f, kind) {
+    try {
+      if (kind === 'PDF') return readFileU8(f).then(function (u8) { return pdfToText(u8); }).catch(function () { return ''; });
+      if (isPlainText(f)) return readFileText(f).then(function (t) { return String(t || ''); }).catch(function () { return ''; });
+    } catch (e) { }
+    return Promise.resolve('');
+  }
+
+  // A dropped vendor estimate/quote/proposal PDF auto-labels to the 'Work Order Request' default
+  // because autoDocLabel only sees the file KIND, not its text (reported: an electrical services
+  // estimate filed as Work Order Request). Once the background PDF read lands (enrichNoteWithAI),
+  // an UNTOUCHED default row is upgraded to 'Vendor Proposal'. Heuristic needs BOTH an
+  // estimate/quote/proposal cue AND a priced money token, so a client WO request that merely names
+  // an NTE dollar figure does not trip it.
+  // ponytail: keyword heuristic, no vendor/supplier split - a parts supplier's quote also reads
+  //   'Vendor Proposal'; upgrade to the on-device vendorOrSupplier() -> 'Supplier Proposal' if that
+  //   miscount matters. Only ever nudges a default-valued, untouched select, never a coordinator's pick.
+  function looksLikeVendorProposal(text) {
+    var t = String(text || '').toLowerCase();
+    return /\b(estimate|quote|quotation|proposal)\b/.test(t) && /\$\s?\d[\d,]*\.\d{2}\b/.test(t);
+  }
+  function oneLineClip(s, cap) {
+    s = String(s || '').replace(/\s+/g, ' ').trim().replace(/^["'\-–—\s]+/, '').replace(/["'\s]+$/, '');   // strip a leading dash and surrounding quotes the model may add
+    if (!s) return '';
+    return s.length > (cap || 160) ? s.slice(0, cap || 160).replace(/\s+\S*$/, '') + '…' : s;
+  }
+  // Ask the grant-holding sibling (bwn-suite-ai) to summarize over the shared bus: it runs the
+  // CLOUD model (the same /api/ai WO Audit uses), falling back to on-device, and replies. A missing
+  // reply (suite-ai not installed) is the ONLY case we then try our OWN on-device tier, since an
+  // empty reply already means suite-ai's on-device tier missed too (same browser, same model).
+  // Mirrors the rid + timeout + bwn:evt pattern of the domp / dispatch:sync bridges.
+  function busSummarize(text) {
+    return new Promise(function (resolve) {
+      var rid = 'dsum-' + Date.now() + '-' + Math.random().toString(36).slice(2, 8);
+      function onEvt(e) { var d = e && e.detail; if (!d || d.id !== 'ai:summarized' || d.rid !== rid) return; cleanup(); resolve({ answered: true, text: String(d.text || '') }); }
+      function cleanup() { clearTimeout(to); try { document.removeEventListener('bwn:evt', onEvt); } catch (e2) { } }
+      var to = setTimeout(function () { cleanup(); resolve({ answered: false, text: '' }); }, 14000);
+      document.addEventListener('bwn:evt', onEvt);
+      try { document.dispatchEvent(new CustomEvent('bwn:cmd', { detail: { id: 'ai:summarize', rid: rid, text: String(text || '').slice(0, 6000), oneLine: true, maxChars: 160 } })); }
+      catch (e3) { cleanup(); resolve({ answered: false, text: '' }); }
+    });
+  }
+  function summarizeDocText(text) {
+    text = String(text || '').replace(/[ \t]+/g, ' ').trim();
+    if (text.replace(/\s/g, '').length < 40) return Promise.resolve('');   // too little to summarize
+    return busSummarize(text).then(function (r) {
+      if (r.answered) return oneLineClip(r.text);   // suite-ai handled it (cloud/on-device) - final, empty or not
+      return bwnAI({                                // suite-ai absent -> our own on-device tier
+        task: 'summarize', tier: 'ondevice', oneLine: true, maxChars: 160,
+        system: 'You write ONE terse line summarizing what a work-order document is and says, for a facilities coordinator. Max 20 words. No preamble, no label, no quotes; output only the sentence.',
+        prompt: text.slice(0, 6000), fallback: ['ondevice'], timeoutMs: 9000
+      }).then(oneLineClip);
+    }).catch(function () { return ''; });
   }
 
   // Build per file: {kind, name, size, desc (short - Description field/clipboard),
@@ -1249,6 +1815,10 @@
     if (kind !== 'Email') {
       base.desc = kind + ' - ' + base.name + ' (' + base.size + (f.lastModified ? ', ' + shortDate(f.lastModified) : '') + ')';
       base.noteLine = '• ' + base.name + ' - ' + kind + ', ' + base.size;
+      // Mark a text-readable document (PDF / plain text) for the background AI 1-liner. The File
+      // ref is kept so enrichNoteWithAI can read its bytes AFTER the box is up - the summary must
+      // never block the drop or the upload. Photos / binary Office docs are not marked (no text).
+      if (summarizableDoc(f, kind)) { base.docFile = f; base.docKind = kind; base.aiDocPending = true; }
       return Promise.resolve(base);
     }
     return new Promise(function (resolve) {
@@ -1286,6 +1856,10 @@
           var block = formatEmailBlock(m, lead);
           if (!block) return fallback('');
           base.isEmail = true; base.email = m; base.summary = lead; base.aiUsed = false; base.aiPending = true;
+          // The email's REAL attachments (signature graphics already excluded by the parsers), for
+          // describeDrop to turn into files of their own. They are the whole point of a drop that
+          // carries "a PDF or photos" - the email alone is not the delivery.
+          base.attachments = (m.attachments || []).filter(function (a) { return a && a.bytes && a.bytes.length && !a.inline; });
           base.noteBlock = block;
           base.desc = line ? line.slice(0, 300) : emailDesc(m, base.name);
           base.noteLine = '• ' + (line || m.subject || base.name) + ' - Email';
@@ -1293,6 +1867,75 @@
         } catch (e3) { fallback(''); }
       };
       if (isMsg) rd.readAsArrayBuffer(f); else rd.readAsText(f);
+    });
+  }
+
+  // ---- Attachments: an email's files become files of their own ---------------
+  // A dropped .eml/.msg is a CONTAINER. Uploading only the container filed the email and buried
+  // the PDF, the signed proposal and the site photos inside it - the reported bug ("only being
+  // read as one file with no attachments"). describeDrop describes the dropped files, then splices
+  // each email's attachments in right behind their parent as real Files, so every downstream step
+  // (upload, per-file label, the note's file list) sees them as ordinary dropped files.
+  //
+  // Attachment files are MARKED (__bwnAtt) so the Upload click can label an attached image 'Photo'
+  // while the email itself keeps the type the coordinator picked - the same per-file labelling the
+  // WO-intake handoff already does, and the reason it exists: filing photos as correspondence is
+  // what buries them.
+  function attachmentFile(a, parentName) {
+    try {
+      var f = new File([a.bytes], a.name, { type: a.mime || 'application/octet-stream' });
+      f.__bwnAtt = parentName || true;
+      return f;
+    } catch (e) { return null; }
+  }
+  function fileSig(f) { return String(f && f.name || '') + '|' + (f && f.size); }
+  // ===== queue merge dedup =====
+  // A second drop into a still-fresh, not-yet-uploaded queue MERGES. Drop any new file whose
+  // name+size already sits in the queue so the same thing dragged twice is not uploaded twice.
+  // prevRaw = the raw Files already queued; newRaw/newFiles = this drop's raw + described (index-
+  // aligned). Returns the kept, still-aligned pair + the count dropped, so the caller can warn.
+  // Pure (no DOM, no closure state) - sliced by scripts/test-drop-upload-queue.js.
+  function dedupNewPairs(prevRaw, newRaw, newFiles) {
+    var seen = {};
+    (prevRaw || []).forEach(function (f) { seen[fileSig(f)] = 1; });
+    var raw = [], files = [], dupes = 0;
+    (newRaw || []).forEach(function (f, i) {
+      var sig = fileSig(f);
+      if (seen[sig]) { dupes++; return; }
+      seen[sig] = 1; raw.push(f); files.push(newFiles[i]);
+    });
+    return { raw: raw, files: files, dupes: dupes };
+  }
+  // ===== end queue merge dedup =====
+  function describeDrop(raw) {
+    return Promise.all(raw.map(describeFile)).then(function (files) {
+      // WO Intake hands the email AND its attachments over already split (it reads the PDF itself),
+      // so re-extracting here would upload every attachment twice. Same name + same byte length =
+      // the same file, and that is exactly the pair a double-extraction produces.
+      var seen = {};
+      raw.forEach(function (f) { seen[fileSig(f)] = 1; });
+      var extras = [];
+      files.forEach(function (d, i) {
+        (d && d.attachments || []).forEach(function (a) {
+          var f = attachmentFile(a, d.name);
+          if (!f || seen[fileSig(f)]) return;
+          seen[fileSig(f)] = 1;
+          extras.push({ file: f, at: i });
+        });
+      });
+      if (!extras.length) return { raw: raw.slice(), files: files.slice() };
+      return Promise.all(extras.map(function (x) { return describeFile(x.file); })).then(function (ds) {
+        var outRaw = [], outFiles = [];
+        files.forEach(function (d, i) {
+          outRaw.push(raw[i]); outFiles.push(d);
+          extras.forEach(function (x, j) {
+            if (x.at !== i) return;
+            ds[j].fromEmail = d.name;          // shown in the note's attachment list
+            outRaw.push(x.file); outFiles.push(ds[j]);
+          });
+        });
+        return { raw: outRaw, files: outFiles };
+      });
     });
   }
 
@@ -1307,22 +1950,17 @@
   var pendingUpload = null;
   var PENDING_TTL = 15 * 60000;
 
-  var NOTE_CAP = 6000;
   function buildNoteText(files) {
     var emailBlocks = files.filter(function (d) { return d.isEmail && d.noteBlock; });
-    // A single email dropped on its own → the note IS the email (clean, matches
-    // Outlook's own copy: From/Sent/To/Cc/Subject + the message body).
-    if (files.length === 1 && emailBlocks.length === 1) {
-      var t = emailBlocks[0].noteBlock;
-      return t.length > NOTE_CAP ? t.slice(0, NOTE_CAP) + '…' : t;
+    // Any email in the drop → the note is ONLY the email(s): each one's summary + Outlook-style block
+    // (From/Sent/To/Cc/Subject + body). The other files - its attachments, loose photos/PDFs - are
+    // already in Documents with their own Description, so the note does not list them (Mike, 9/28).
+    if (emailBlocks.length) {
+      return capNote(emailBlocks.map(function (d) { return d.noteBlock; }).join('\n\n'));
     }
-    var out = ['Uploaded to Documents (' + shortDate() + '):'];
-    files.forEach(function (d) {
-      if (d.isEmail && d.noteBlock) { out.push(''); out.push('- ' + d.name + ' -'); out.push(d.noteBlock); }
-      else out.push(d.noteLine);
-    });
-    var text = out.join('\n');
-    return text.length > NOTE_CAP ? text.slice(0, NOTE_CAP) + '…' : text;
+    // No email → no note (Mike, 9/28). The review box still shows the files + their type pickers
+    // + Upload as the confirmation; showNoteReview drops the note section when this is empty.
+    return '';
   }
 
   // ---- Umbrava upload dialog plumbing --------------------------------------
@@ -1906,36 +2544,9 @@
     if (respChip) { try { respChip.remove(); } catch (e) { } respChip = null; }
     if (respTimer) { clearTimeout(respTimer); respTimer = null; }
   }
-  function showRespChip() {
-    clearRespChip();
-    if (!pending || !inboundClientEmail(pending.files) || !woIdFromUrl()) return;
-    var box = document.createElement('div');
-    box.id = 'bwn-du-resp';
-    box.style.cssText =
-      'position:fixed;right:22px;bottom:22px;z-index:2147483001;max-width:330px;' +
-      'background:#fff;border:1px solid #c6d2cc;border-left:4px solid #b46b00;border-radius:10px;' +
-      'box-shadow:0 8px 28px rgba(0,0,0,.22);padding:11px 13px;' +
-      'font:400 12.5px/1.45 -apple-system,BlinkMacSystemFont,\'Segoe UI\',\'Helvetica Neue\',Arial,sans-serif;color:#12241b;';
-    var lab = document.createElement('label');
-    lab.style.cssText = 'display:flex;gap:9px;align-items:flex-start;cursor:pointer;';
-    var cb = document.createElement('input');
-    cb.type = 'checkbox';
-    cb.style.cssText = 'margin:2px 0 0;flex:0 0 auto;width:15px;height:15px;cursor:pointer;';
-    cb.checked = !!(pending && pending.needsResponse);
-    cb.addEventListener('change', function () { if (pending) pending.needsResponse = cb.checked; });
-    var txt = document.createElement('div');
-    txt.innerHTML =
-      '<strong style="font-weight:600;">This client email needs a response</strong>' +
-      '<div style="color:#5b6b8c;margin-top:3px;">Opens a tracked item on this WO, due on the priority clock. ' +
-      'The upload note is logged as <strong>Internal</strong> so it does not read as "we updated the client".</div>';
-    lab.appendChild(cb); lab.appendChild(txt);
-    box.appendChild(lab);
-    document.body.appendChild(box);
-    respChip = box;
-    // Outlives the drop dialog by design, but not the pending window: if the coordinator
-    // wanders off, the chip goes with the drop it belongs to.
-    respTimer = setTimeout(clearRespChip, PENDING_TTL);
-  }
+  // showRespChip() was the standalone chip this toggle used to live in. The BWN review box
+  // folded it in (and now the toggle also posts the action note and arms the prompt ladder), so the
+  // chip is gone rather than left inert with copy that no longer describes what the toggle does.
 
   // ---- BWN note review box (human-gated API note) -----------------------------
   // Replaces the old "draft into Umbrava's composer when the user clicks Upload" path. The note is
@@ -1973,6 +2584,7 @@
     if (m.__party) return Promise.resolve(m.__party);
     var p = partyByDomain(m);
     if (p !== 'External') { p = p || 'Client'; m.__party = p; return Promise.resolve(p); }
+    if (knownSupplier(m)) { m.__party = 'Supplier'; return Promise.resolve('Supplier'); }
     return vendorOrSupplier(m).then(function (r) { m.__party = r; return r; });
   }
   // Auto-pick the doc Label for a manual drop. An email is CORRESPONDENCE, labeled by the other party:
@@ -1987,6 +2599,306 @@
     if (!email) return Promise.resolve(DEFAULT_DOC_LABEL);
     return classifyEmail(email).then(function (p) { return PARTY_LABEL[p] || DEFAULT_DOC_LABEL; });
   }
+  // ---- Action note: @-mention the WO's assignee, then chase them -------------------------------
+  // "This client email needs a response" used to do one thing: open a tracked item on the priority
+  // clock. It now also puts the ask in front of a PERSON - an Action note that @-mentions the work
+  // order's assignee (Umbrava's own notify rides the mention) - and starts a 15-minute prompt
+  // ladder that stops the moment they answer and escalates when they do not.
+  //
+  // The @-mention wire format is NOT invented here: it is the TipTap span the SPA itself sends,
+  // captured live 2026-08-17 and proven by bwn-low-gp (the span alone notifies; actionNoteEmails
+  // stays null). Kept byte-compatible with that script deliberately - two spellings of a mention
+  // would be two ways for the notify to silently stop working.
+  function duEsc(s) { return String(s == null ? '' : s).replace(/[&<>"']/g, function (c) { return { '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;' }[c]; }); }
+  // localStorage['tenantId'] is stored JSON-quoted ("<guid>", length 38) - measured live. Unwrap it,
+  // or data-tenant carries &quot; around the GUID and the mention resolves to nobody.
+  function duTenant() {
+    var raw = null;
+    try { raw = localStorage.getItem('tenantId'); } catch (e) { return ''; }
+    if (raw == null) return '';
+    try { var v = JSON.parse(raw); if (typeof v === 'string') return v; } catch (e2) { /* not JSON */ }
+    return String(raw).replace(/^"|"$/g, '');
+  }
+  function mentionSpan(name, userId, tenantId) {
+    var n = duEsc(name);
+    return '<span data-type="mention" class="rich-text-editor-mention"' +
+      ' data-id="' + duEsc(userId) + '"' +
+      ' data-label="' + n + '"' +
+      ' data-tenant="' + duEsc(tenantId) + '">@' + n + '</span>';
+  }
+  // people = [{name, id}] (an id-less entry is named in the text but cannot be notified).
+  function mentionNoteHtml(people, message) {
+    var t = duTenant();
+    var spans = people.map(function (p) { return p.id ? mentionSpan(p.name, p.id, t) : duEsc('@' + p.name); }).join(' ');
+    return '<p style="font-size: 14px; line-height: 1.4">' + spans + ' ' + duEsc(message) + '</p>';
+  }
+  function mentionNoteText(people, message) {
+    return people.map(function (p) { return '@' + p.name; }).join(' ') + ' ' + message;
+  }
+
+  // The WO's assignee. `WorkOrder` exposes the assignee only as `assignedTo` (a GUID) and has NO
+  // name field; the LIST row carries `assignedToMemberName` alongside it, so one filtered list read
+  // gets both at once (~40ms, the same shape bwn-low-gp uses for its confirm card).
+  var Q_ASSIGNEE = 'query BwnDuAssignee($page:PageInput!,$sortBy:[SortInput!]!,$WorkOrderNumbers:[Int]){ listWorkOrdersPaginated(page:$page,sortBy:$sortBy,WorkOrderNumbers:$WorkOrderNumbers){ items{ number assignedTo assignedToMemberName } } }';
+  function assigneeOf(woNum) {
+    return duGql('BwnDuAssignee', Q_ASSIGNEE, {
+      page: { skip: 0, take: 1 }, sortBy: [{ columnName: 'number', direction: 'DESC' }], WorkOrderNumbers: [woNum]
+    }).then(function (d) {
+      var it = d && d.listWorkOrdersPaginated && d.listWorkOrdersPaginated.items && d.listWorkOrdersPaginated.items[0];
+      if (!it) return null;
+      var id = String(it.assignedTo == null ? '' : it.assignedTo);
+      // A WO can carry a name column with no id or the other way round; only a real GUID notifies.
+      var guid = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i.test(id) ? id : '';
+      var name = String(it.assignedToMemberName || '').trim();
+      return (guid || name) ? { id: guid, name: name } : null;
+    });
+  }
+
+
+  // WHO a coordinator escalates to. NOTHING is configured and no name is written down: Umbrava
+  // already owns the org chart. /company/users shows every person's Teams, and each team holds its
+  // coordinators alongside its supervisor and manager - so the escalation is a read, not a list
+  // somebody has to remember to update. Two ops behind that page, captured live read-only
+  // 2026-09-04 and proven end to end on a real team:
+  //   user(id:ID!){ parentTeams { parentTeam { id name } } }   - the assignee's team(s)
+  //   users(teamId:ID, includeInactiveUsers, includeSystemUsers){ ... role { name } }  - its members
+  // `users` already takes a `teamId` filter, so a team's roster is one call.
+  var Q_USER_TEAMS = 'query BwnDuUserTeams($id:ID!){ user(id:$id){ id parentTeams { parentTeam { id name } } } }';
+  var Q_TEAM_MEMBERS = 'query BwnDuTeamMembers($t:ID){ users(teamId:$t, includeInactiveUsers:false, includeSystemUsers:false){ id firstName lastName title isInactive role { name } } }';
+
+  // Role -> rank, MIRRORED from broadway-internal-ops api/shared/umbrava-auth.js so this script and
+  // the SWA cannot disagree about who outranks whom. Exact names first, then the same keyword
+  // inference for a role nobody has mapped yet. Live examples: "National Account Supervisor" = 3,
+  // "National Account Manager" = 4, "Lead Operations Coordinator" = 2, "Operations Coordinator" = 1.
+  var RANK_SUPERVISOR = 3, RANK_MANAGER = 4;
+  var ROLE_RANKS = {
+    'operations coordinator': 1, 'on call coordinator': 1, 'vendor management coordinator': 1,
+    'account executive': 1, 'construction pm': 1, 'construction + service': 1, 'projects signage': 1,
+    'new account team': 1, 'sales': 1, 'billing': 1, 'analytics': 1, 'reception': 1, 'marketing': 1,
+    'vendor compliance': 1, 'vendor management mgmt': 1, 'admin': 1, 'trade specialist': 1,
+    'lead operations coordinator': 2,
+    'national account supervisor': 3, 'on call supervisor': 3,
+    'billing manager': 4, 'national account manager': 4,
+    'director': 5
+  };
+  function rankOfRole(name) {
+    var n = String(name || '').trim().replace(/\s+/g, ' ').toLowerCase();
+    if (!n) return 1;
+    if (ROLE_RANKS[n] != null) return ROLE_RANKS[n];
+    if (/\b(director|vp|vice president|president|owner)\b/.test(n)) return 5;
+    if (/\bmanager\b/.test(n)) return 4;
+    if (/\bsupervisor\b/.test(n)) return 3;
+    if (/\blead\b/.test(n)) return 2;
+    return 1;
+  }
+  // -> Promise<[{name,id}]>: the assignee's team's supervisor(s) and manager(s), supervisor first.
+  // A team may carry both, or only one (Mike's rule, and the live data agrees) - whoever is there is
+  // who gets told. The assignee is excluded: escalating a manager's own unanswered work to that same
+  // manager is a no-op that would read as "handled". Their teams are UNIONED - somebody on two teams
+  // should not have half their chain skipped - and deduped by user id.
+  function escalationPeople(assigneeId) {
+    if (!assigneeId) return Promise.resolve([]);
+    return duGql('BwnDuUserTeams', Q_USER_TEAMS, { id: assigneeId }).then(function (d) {
+      var links = (d && d.user && d.user.parentTeams) || [];
+      var ids = [];
+      links.forEach(function (l) {
+        var t = l && l.parentTeam;
+        if (t && t.id && ids.indexOf(t.id) === -1) ids.push(t.id);
+      });
+      if (!ids.length) return [];
+      return Promise.all(ids.map(function (tid) {
+        return duGql('BwnDuTeamMembers', Q_TEAM_MEMBERS, { t: tid })
+          .then(function (r) { return (r && r.users) || []; })
+          .catch(function () { return []; });     // one unreadable team must not lose the others
+      })).then(function (lists) {
+        var seen = {}, sups = [], mgrs = [];
+        lists.forEach(function (us) {
+          us.forEach(function (u) {
+            if (!u || !u.id || u.isInactive || u.id === assigneeId || seen[u.id]) return;
+            var rank = rankOfRole(u.role && u.role.name);
+            if (rank !== RANK_SUPERVISOR && rank !== RANK_MANAGER) return;
+            seen[u.id] = 1;
+            var person = { name: String((u.firstName || '') + ' ' + (u.lastName || '')).replace(/\s+/g, ' ').trim(), id: String(u.id) };
+            if (rank === RANK_SUPERVISOR) sups.push(person); else mgrs.push(person);
+          });
+        });
+        return sups.concat(mgrs);
+      });
+    }).catch(function () { return []; });   // no read -> the escalation still posts, unaddressed
+  }
+
+  // ---- The 15-minute prompt ladder --------------------------------------------------------------
+  // Shaped after Core's Follow-up Reminders (localStorage + a ticker + a browser Notification with
+  // an in-page toast fallback) rather than a server job: no egress, nothing to deploy, and it nudges
+  // you wherever you are IN Umbrava. Its limit is that ticker's limit - it only runs while an
+  // Umbrava tab is open. What does NOT depend on the tab is the Action note: the @-mention notified
+  // the assignee through Umbrava the moment it posted, and the escalation is itself a WO note, so
+  // the record of the chase survives a closed browser even when a prompt is missed.
+  //
+  // "Answered" = the next CLIENT-type note by the assignee on that WO after the ladder opened.
+  // That is the coordinator's actual reply being logged, not a second acknowledging click nobody
+  // would make - so the ladder stops on the work getting done rather than on someone reporting it.
+  var LADDER_KEY = 'bwn:respLadder';
+  var LADDER_EVERY = 15 * 60000;
+  var LADDER_MAX = 5;              // 5 unanswered prompts (75 min), then the team is told
+  var LADDER_TICK = 60000;
+  function ladderLoad() { try { var a = JSON.parse(localStorage.getItem(LADDER_KEY) || '[]'); return Array.isArray(a) ? a : []; } catch (e) { return []; } }
+  function ladderSave(a) { try { localStorage.setItem(LADDER_KEY, JSON.stringify(a.slice(-50))); } catch (e) { } }
+  function ladderPut(entry) { var a = ladderLoad().filter(function (r) { return r.id !== entry.id; }); a.push(entry); ladderSave(a); }
+  function ladderDrop(id) { ladderSave(ladderLoad().filter(function (r) { return r.id !== id; })); }
+
+  function ladderStart(woNum, assignee, subject) {
+    var now = Date.now();
+    ladderPut({
+      id: 'L' + woNum + '-' + now,
+      woNum: woNum,
+      assigneeId: (assignee && assignee.id) || '', assigneeName: (assignee && assignee.name) || '',
+      subject: String(subject || '').slice(0, 200),
+      startedAt: now, nextAt: now + LADDER_EVERY, count: 0
+    });
+    try { if (window.Notification && Notification.permission === 'default') Notification.requestPermission(); } catch (e) { }
+  }
+
+  // The click target is REBUILT from the work-order number, never stored and replayed. A full href
+  // kept in localStorage is a navigation sink fed by a value anything same-origin can rewrite (a
+  // javascript: URL in that slot would run on the click - CodeQL flags exactly this); woNum comes
+  // off the path as digits, and is re-checked here, so the rebuilt path carries nothing to hijack.
+  function notifyPerson(title, body, woNum) {
+    var path = /^[0-9]+$/.test(String(woNum)) ? '/work-orders/' + woNum : '';
+    try {
+      if (window.Notification && Notification.permission === 'granted') {
+        var n = new Notification(title, { body: body, tag: 'bwn-du-' + title });
+        n.onclick = function () { try { window.focus(); } catch (e) { } if (path) location.href = path; try { n.close(); } catch (e2) { } };
+        return;
+      }
+    } catch (e) { }
+    toast(title + ' - ' + body);   // notifications blocked / unsupported → the in-page floor
+  }
+
+  // Has the assignee logged a Client note on this WO since the ladder opened?
+  var Q_NOTES = 'query BwnDuNotes($n:Int!){ jobNotes(workOrderNumber:$n, includeDeleted:false){ id type createdDate createdBy { firstName lastName } } }';
+  function answeredSince(entry) {
+    var clientType = noteTypeId('Client');
+    return duGql('BwnDuNotes', Q_NOTES, { n: entry.woNum }).then(function (d) {
+      var notes = (d && d.jobNotes) || [];
+      var want = String(entry.assigneeName || '').toLowerCase();
+      for (var i = 0; i < notes.length; i++) {
+        var nt = notes[i];
+        if (clientType != null && Number(nt.type) !== Number(clientType)) continue;
+        var when = Date.parse(nt.createdDate);
+        if (!(when > entry.startedAt)) continue;
+        var by = nt.createdBy ? String((nt.createdBy.firstName || '') + ' ' + (nt.createdBy.lastName || '')).replace(/\s+/g, ' ').trim().toLowerCase() : '';
+        // No assignee name recorded (an unassigned WO) -> any Client note counts; the ladder is
+        // chasing a reply to the client, and one was logged.
+        if (!want || by === want) return true;
+      }
+      return false;
+    }).catch(function () { return false; });   // a failed read must not count as answered
+  }
+
+  function ladderEscalate(entry) {
+    return escalationPeople(entry.assigneeId).then(function (people) {
+      var who = entry.assigneeName || 'the assignee';
+      var msg = 'No client response logged on this work order after ' + LADDER_MAX + ' prompts to ' +
+        who + ' over ' + Math.round((LADDER_MAX * LADDER_EVERY) / 60000) + ' minutes' +
+        (entry.subject ? ' (client email: ' + entry.subject + ')' : '') + '. Please step in.';
+      if (!people.length) {
+        // Fail LOUD, not silent: the note still lands so the escalation is on the record, and the
+        // coordinator is told exactly what to fix. Either the assignee is on no team, or their
+        // team carries nobody at supervisor or manager rank - both are answered in Umbrava under
+        // Company > Teams, which is the point of reading it from there instead of a config file.
+        toast('W-' + entry.woNum + ': 5 prompts unanswered, but ' + who +
+          ' has no supervisor or manager on their Umbrava team. Posting the escalation note unaddressed.');
+        return postNoteViaApi(msg, 'Escalation', entry.woNum);
+      }
+      return postNoteHtmlViaApi(mentionNoteText(people, msg), mentionNoteHtml(people, msg), 'Escalation', entry.woNum)
+        .then(function (r) {
+          toast('W-' + entry.woNum + ' escalated to ' + people.map(function (p) { return p.name; }).join(' and ') + '.');
+          return r;
+        });
+    });
+  }
+
+  // Post the Action note that hands the reply to a named person, then arm the prompt ladder.
+  // Never throws into the caller: the upload note has already landed, and a failed ping must not
+  // read as a failed post - it is reported as itself.
+  var ACTION_MSG = 'This client email needs a response. Please reply and log a Client note on this work order.';
+  function postActionNote(woNum, emailFile) {
+    var subject = (emailFile && emailFile.email && emailFile.email.subject) || '';
+    return assigneeOf(woNum).then(function (assignee) {
+      if (!assignee || !assignee.id) {
+        // No assignee (or a name with no user id): nobody to ping, so nobody to chase. Say so -
+        // an unassigned WO silently skipping the whole feature is the failure worth naming.
+        toast('W-' + woNum + ' has no assignee to @-mention, so no action note and no prompts. Assign it first.');
+        return null;
+      }
+      // `assignedTo` can resolve to a TEAM rather than a person (recorded in the vault's Umbrava
+      // operations notes, and Company > Teams is where those live). A team has nobody to prompt and
+      // no supervisor of its own, so the chase has no subject - name that instead of pinging a group.
+      if (/^\s*team\b/i.test(assignee.name)) {
+        toast('W-' + woNum + ' is assigned to ' + assignee.name + ', not a person - no action note and no prompts. Assign an individual first.');
+        return null;
+      }
+      var people = [assignee];
+      var msg = ACTION_MSG + (subject ? ' (' + subject + ')' : '');
+      // 'Action' is in the curated vocabulary, but a cold note-type cache resolves no id at all -
+      // fall back to Internal rather than posting a typeless note.
+      var typeName = (noteTypeId('Action') == null) ? 'Internal' : 'Action';
+      return postNoteHtmlViaApi(mentionNoteText(people, msg), mentionNoteHtml(people, msg), typeName, woNum)
+        .then(function (r) {
+          ladderStart(woNum, assignee, subject);
+          toast('Action note posted - @' + assignee.name + ' notified; prompting every 15 min until a Client note lands.');
+          return r;
+        });
+    }).catch(function (err) {
+      toast('The upload note posted, but the action note did not (' + ((err && err.message) || err) + ').');
+      return null;
+    });
+  }
+
+  function ladderTick() {
+    var all = ladderLoad();
+    if (!all.length) return;
+    var now = Date.now(), due = [], changed = false;
+    all.forEach(function (r) {
+      if (!r || r.nextAt > now) return;
+      // CLAIM the slot before the async check, and persist it now: two Umbrava tabs both run this
+      // ticker, and a claim taken after the await is two prompts for one interval.
+      r.nextAt = now + LADDER_EVERY;
+      changed = true;
+      due.push(r);
+    });
+    if (changed) ladderSave(all);
+    due.forEach(function (entry) {
+      answeredSince(entry).then(function (answered) {
+        if (answered) {
+          ladderDrop(entry.id);
+          notifyPerson('W-' + entry.woNum + ' answered', 'A client note was logged - the response chase is closed.', entry.woNum);
+          return;
+        }
+        var cur = ladderLoad().filter(function (r) { return r.id === entry.id; })[0];
+        if (!cur) return;                       // dropped from another tab while we were reading
+        cur.count = (cur.count || 0) + 1;
+        var last = cur.count >= LADDER_MAX;
+        // The 5th prompt still PROMPTS - it is the last one, and it says so. Escalating silently
+        // instead would tell the supervisor before the person ever learns they are about to be.
+        notifyPerson('W-' + cur.woNum + ' still needs a client response',
+          'Prompt ' + cur.count + ' of ' + LADDER_MAX + (cur.subject ? ' · ' + cur.subject : '') +
+          (last ? '. Escalating to your supervisor and manager now.' : '. Log a Client note when you have replied.'),
+          cur.woNum);
+        if (last) {
+          ladderDrop(cur.id);
+          ladderEscalate(cur).catch(function (err) {
+            toast('W-' + cur.woNum + ': the escalation note failed (' + ((err && err.message) || err) + ').');
+          });
+          return;
+        }
+        ladderPut(cur);
+      });
+    });
+  }
+  setInterval(ladderTick, LADDER_TICK);
+
   var noteBox = null, noteBoxTimer = null;
   function clearNoteBox() {
     if (noteBox) { try { if (noteBox.__unblockMO) noteBox.__unblockMO.disconnect(); } catch (e) { } try { noteBox.remove(); } catch (e) { } noteBox = null; }
@@ -2014,74 +2926,187 @@
       node.__unblockMO = mo;   // GC'd with the box; clearNoteBox drops the ref
     } catch (e) { }
   }
+  // Remove one queued file before it is uploaded. There is no delete-document mutation, so this
+  // only applies while the batch is still HELD (pendingUpload not fired); pending.files and
+  // pendingUpload.raw are index-aligned in that state, so one index drops from both. Rebuilds the
+  // note (unless the coordinator has edited it) and the party-derived type, then re-renders.
+  function removeQueuedFile(i) {
+    if (!pending || !pending.files || i < 0 || i >= pending.files.length) return;
+    pending.files.splice(i, 1);
+    if (pendingUpload && pendingUpload.raw) pendingUpload.raw.splice(i, 1);
+    if (!pending.files.length) { pending = null; pendingUpload = null; clearRespChip(); clearNoteBox(); toast('All files removed - nothing queued.'); return; }
+    var edited = !!(noteBox && noteBox.__noteEdited);
+    var keepText = (edited && noteBox.__ta) ? noteBox.__ta.value : null;
+    if (!edited) pending.noteText = buildNoteText(pending.files);
+    pending.noteType = noteTypeForFiles(pending.files);
+    if (pendingUpload) pendingUpload.described = Promise.resolve(pending.files);
+    showNoteReview();
+    if (keepText != null && noteBox && noteBox.__ta) { noteBox.__ta.value = keepText; noteBox.__noteEdited = true; }
+  }
   function showNoteReview() {
     clearNoteBox();
     clearRespChip();
     if (!pending || !woNumberFromUrl()) return null;
+    // No email in the drop → no note: the box is just the upload confirmation (files, per-file type,
+    // Upload). With an email, an operator who may upload documents but not post notes gets the upload
+    // without the note step, rather than a box that cannot land.
+    var noteless = !(pending.files || []).some(function (f) { return f && f.isEmail; });
+    if (!noteless && !bwnCan('WorkOrderNote.AddNew')) return null;
     var woNum = woNumberFromUrl();
     var canRespond = !!inboundClientEmail(pending.files);
     var box = document.createElement('div');
     box.id = 'bwn-du-note';
     box.style.cssText =
-      'position:fixed;left:50%;top:50%;transform:translate(-50%,-50%);z-index:2147483001;width:380px;max-width:92vw;max-height:88vh;overflow:auto;' +
-      'background:#fff;border:1px solid #c6d2cc;border-left:4px solid #2f6f4f;border-radius:10px;' +
-      'box-shadow:0 12px 40px rgba(0,0,0,.28);padding:12px 13px;' +
-      'font:400 12.5px/1.45 -apple-system,BlinkMacSystemFont,\'Segoe UI\',\'Helvetica Neue\',Arial,sans-serif;color:#12241b;';
+      'position:fixed;left:50%;top:50%;transform:translate(-50%,-50%);z-index:2147483001;width:460px;max-width:94vw;max-height:90vh;overflow:auto;' +
+      'background:#fff;border:1px solid #d7e0da;border-radius:14px;' +
+      'box-shadow:0 18px 60px rgba(9,30,66,.32);padding:0;' +
+      'font:400 13px/1.5 -apple-system,BlinkMacSystemFont,\'Segoe UI\',\'Helvetica Neue\',Arial,sans-serif;color:#12241b;';
+    // Header band - a titled green bar so the box reads as one panel, not a floating note.
+    var hdr = document.createElement('div');
+    hdr.style.cssText = 'display:flex;align-items:center;gap:9px;padding:13px 16px 11px;' +
+      'background:linear-gradient(180deg,#f3f8f5,#eaf2ec);border-bottom:1px solid #dde7e0;border-radius:14px 14px 0 0;';
+    var hicon = document.createElement('div');
+    hicon.textContent = '📎';
+    hicon.style.cssText = 'flex:0 0 auto;width:30px;height:30px;border-radius:8px;background:#2f6f4f;color:#fff;' +
+      'display:flex;align-items:center;justify-content:center;font-size:15px;box-shadow:0 2px 6px rgba(47,111,79,.35);';
+    hdr.appendChild(hicon);
+    var htext = document.createElement('div');
+    htext.style.cssText = 'flex:1 1 auto;min-width:0;';
     var h = document.createElement('div');
-    h.style.cssText = 'font-weight:600;margin-bottom:6px;';
-    h.textContent = 'Upload note for W-' + woNum;
-    box.appendChild(h);
+    h.style.cssText = 'font-weight:700;font-size:14px;color:#183a2a;letter-spacing:.1px;';
+    h.textContent = (noteless ? 'Upload to W-' : 'Upload note for W-') + woNum;
     var status = document.createElement('div');
-    status.style.cssText = 'color:#5b6b8c;margin-bottom:8px;font-size:11.5px;';
-    box.appendChild(status);
-    // Note Type -> document label map: the doc type AGREES with the note Type we assigned on drop
-    // (Mike's ask), rather than being guessed independently. Client -> Client Correspondence,
-    // Vendor -> Vendor Correspondence, Internal -> Internal (PARTY_LABEL).
+    status.style.cssText = 'color:#5b6b8c;font-size:11.5px;margin-top:1px;';
+    htext.appendChild(h); htext.appendChild(status);
+    hdr.appendChild(htext);
+    box.appendChild(hdr);
+    // Body wrapper - the header sits flush to the edges, the content gets its own padding.
+    var body = document.createElement('div');
+    body.style.cssText = 'padding:13px 16px 15px;';
+    box.appendChild(body);
+    // File list - what this drop will upload / has uploaded, each with its OWN document-type
+    // picker. A drop is a MIX (an email, its site photos, a PDF), so one type for the whole batch
+    // mislabels most of it. Each row is auto-typed - a photo files as Photo, an email as
+    // correspondence by party, everything else as the WO-request default - and each row can be
+    // overridden. The label is committed at bulkAdd with NO update-label mutation, so it has to be
+    // right per file at upload time. The × removes a still-held file (removal is pre-upload only;
+    // once fired, the list is read-only). pending.files and pendingUpload.raw are index-aligned while held.
+    var held = !!(pendingUpload && !pendingUpload.fired && pendingUpload.raw &&
+      pendingUpload.raw.length === (pending.files || []).length);
+    if (!held) status.textContent = 'Review the note below, then Post it to the work order.';
+    // Note Type -> correspondence label map (Client -> Client Correspondence, etc.); the email
+    // rows track the note Type until the coordinator overrides them.
     function noteToDocLabel(t) { return PARTY_LABEL[t] || DEFAULT_DOC_LABEL; }
     var initType = (pending.noteType && /^(Client|Vendor|Internal)$/.test(pending.noteType)) ? pending.noteType : 'Client';
     var hasEmail = (pending.files || []).some(function (f) { return f && f.isEmail; });
-    // Document-type picker + Upload gate (manual drops only). The upload is HELD until the
-    // coordinator picks a type and clicks Upload, because the label is committed at bulkAdd and
-    // there is no update-label mutation. The type defaults to the note Type's label so the two
-    // agree; the coordinator can still override either. One click in the common case.
-    if (pendingUpload && !pendingUpload.fired) {
+    // Best-effort auto-label for one described file. An unknown external email is upgraded
+    // Vendor -> Supplier below by the on-device classifier.
+    function autoDocLabel(d) {
+      if (!d) return DEFAULT_DOC_LABEL;
+      if (d.kind === 'Photo') return 'Photo';
+      if (d.isEmail) return noteToDocLabel(initType);
+      // A non-photo attachment of a correspondence email IS that correspondence, not a new Work
+      // Order Request (d.fromEmail is set only on an email's spliced-out attachment). It follows
+      // the note party like the email row, incl. the async Vendor -> Supplier upgrade below.
+      if (d.fromEmail) return noteToDocLabel(initType);
+      return DEFAULT_DOC_LABEL;
+    }
+    var lblSels = [];     // per-file <select>, index-aligned with pending.files (only while held)
+    var emailSels = [];   // the email rows' selects, synced to the note Type until touched
+    if (pending.files && pending.files.length) {
+      var list = document.createElement('div');
+      list.style.cssText = 'margin-bottom:11px;border:1px solid #e2e8ee;border-radius:9px;overflow:hidden;background:#fafcfb;';
+      pending.files.forEach(function (d, i) {
+        var row = document.createElement('div');
+        row.style.cssText = 'display:flex;align-items:center;gap:8px;padding:7px 10px;font-size:11.5px;' + (i ? 'border-top:1px solid #eef2f6;' : '');
+        var nm = document.createElement('span');
+        nm.style.cssText = 'flex:1 1 auto;min-width:0;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;';
+        var glyph = d.isEmail ? '📧' : (d.kind === 'Photo' ? '🖼️' : '📄');
+        nm.textContent = glyph + ' ' + (d.name || 'file') + (d.size ? '  (' + d.size + ')' : '');
+        nm.title = (d.name || '') + (d.fromEmail ? '  · from ' + d.fromEmail : '');
+        row.appendChild(nm);
+        if (held) {
+          var lsel = document.createElement('select');
+          lsel.title = 'Document type for this file';
+          lsel.style.cssText = 'flex:0 0 118px;max-width:118px;min-width:0;padding:2px 4px;border:1px solid #c6d2cc;border-radius:5px;font:inherit;font-size:11px;';
+          Object.keys(DOC_LABELS).forEach(function (name) { var o = document.createElement('option'); o.value = name; o.textContent = name; lsel.appendChild(o); });
+          lsel.value = autoDocLabel(d);
+          lsel.addEventListener('change', function () { lsel.__touched = true; });
+          lblSels[i] = lsel;
+          // Email rows AND a correspondence email's non-photo attachments track the note party
+          // (sync on note-Type change + the Vendor -> Supplier upgrade). A photo stays 'Photo'.
+          if (d.isEmail || (d.fromEmail && d.kind !== 'Photo')) emailSels.push(lsel);
+          row.appendChild(lsel);
+          var x = document.createElement('button'); x.type = 'button'; x.textContent = '×'; x.title = 'Remove this file';
+          x.style.cssText = 'flex:0 0 auto;width:20px;height:20px;padding:0;border:1px solid #d6c0c0;background:#fbf2f2;color:#a23;border-radius:5px;cursor:pointer;font:700 14px/1 Arial;';
+          x.addEventListener('click', function () { removeQueuedFile(i); });
+          row.appendChild(x);
+        }
+        list.appendChild(row);
+      });
+      body.appendChild(list);
+    }
+    box.__lblSels = lblSels;
+    box.__emailSels = emailSels;
+    // Upload gate (manual drops only). Held until Upload is clicked, because the label is committed
+    // at bulkAdd with no update-label mutation. Each file uploads with its own row's picked type.
+    if (held) {
       var nUp = pendingUpload.raw.length;
-      var upRow = document.createElement('div');
-      upRow.style.cssText = 'display:flex;align-items:center;gap:7px;margin-bottom:9px;flex-wrap:wrap;';
-      var dtl = document.createElement('span'); dtl.textContent = 'Document type:'; dtl.style.cssText = 'color:#5b6b8c;flex:0 0 auto;';
-      var dsel = document.createElement('select');
-      dsel.style.cssText = 'flex:1 1 110px;min-width:0;padding:3px 6px;border:1px solid #c6d2cc;border-radius:6px;font:inherit;';
-      Object.keys(DOC_LABELS).forEach(function (name) { var o = document.createElement('option'); o.value = name; o.textContent = name; dsel.appendChild(o); });
-      dsel.value = hasEmail ? noteToDocLabel(initType) : DEFAULT_DOC_LABEL;
-      box.__docSel = dsel;   // the note-Type control syncs this until the coordinator overrides it
-      dsel.addEventListener('change', function () { dsel.__touched = true; });
       // An unknown external party can be a vendor OR a supplier; the note Type has no Supplier
-      // option, so ask the on-device classifier and upgrade Vendor Correspondence -> Supplier
-      // Correspondence when it says supplier - unless the coordinator already changed the type.
+      // option, so a known-supplier domain / the on-device classifier upgrades untouched Vendor
+      // Correspondence rows (the email AND its attachments, both in emailSels) -> Supplier.
       if (hasEmail) {
         docLabelForFiles(pending.files).then(function (lbl) {
-          if (!dsel.__touched && lbl === 'Supplier Correspondence' && dsel.value === 'Vendor Correspondence') dsel.value = lbl;
+          if (lbl !== 'Supplier Correspondence') return;
+          emailSels.forEach(function (s) { if (!s.__touched && s.value === 'Vendor Correspondence') s.value = lbl; });
         }).catch(function () { });
       }
+      var upRow = document.createElement('div');
+      upRow.style.cssText = 'display:flex;align-items:center;gap:7px;margin-bottom:9px;justify-content:flex-end;';
       var up = document.createElement('button'); up.type = 'button';
       up.textContent = 'Upload ' + nUp + ' file' + (nUp > 1 ? 's' : '');
       up.style.cssText = 'flex:0 0 auto;padding:6px 12px;border:0;background:#2f6f4f;color:#fff;border-radius:7px;cursor:pointer;font:600 12px/1.2 -apple-system,BlinkMacSystemFont,\'Segoe UI\',Arial,sans-serif;';
+      box.__upBtn = up;   // runApiUpload flips this to Uploaded / Failed when the batch settles
       up.addEventListener('click', function () {
         if (!pendingUpload || pendingUpload.fired) return;
         pendingUpload.fired = true;
-        dsel.disabled = true; up.disabled = true; up.textContent = 'Uploading…';
+        up.disabled = true; up.textContent = 'Uploading…';
+        // Freeze each file's pick onto its raw File and lock the row (no post-upload edits - there is
+        // no delete- or relabel-mutation). The per-file resolver reads the frozen pick.
+        pendingUpload.raw.forEach(function (f, i) {
+          f.__pickedLabel = (lblSels[i] && lblSels[i].value) || autoDocLabel(pending.files[i]);
+          if (lblSels[i]) lblSels[i].disabled = true;
+        });
+        Array.prototype.forEach.call(box.querySelectorAll('button[title="Remove this file"]'), function (b) { b.style.display = 'none'; });
         var udt = new DataTransfer();
         pendingUpload.raw.forEach(function (f) { try { udt.items.add(f); } catch (e) { } });
-        runApiUpload(pendingUpload.raw, pendingUpload.described, udt, pendingUpload.ctx, dsel.value);
+        var byFile = function (f) { return (f && f.__pickedLabel) || DEFAULT_DOC_LABEL; };
+        byFile.fallbackLabel = (pendingUpload.raw[0] && pendingUpload.raw[0].__pickedLabel) || DEFAULT_DOC_LABEL;
+        runApiUpload(pendingUpload.raw, pendingUpload.described, udt, pendingUpload.ctx, byFile);
       });
-      upRow.appendChild(dtl); upRow.appendChild(dsel); upRow.appendChild(up);
-      box.appendChild(upRow);
-      status.textContent = nUp + ' file' + (nUp > 1 ? 's' : '') + ' ready - pick a document type, then Upload.';
+      upRow.appendChild(up);
+      body.appendChild(upRow);
+      status.textContent = nUp + ' file' + (nUp > 1 ? 's' : '') + ' ready - each is auto-typed; adjust any, then Upload.';
+    }
+    if (noteless) {
+      // Upload confirmation only: a Close button in place of the note section. Closing before Upload
+      // leaves nothing uploaded (the batch is held until the Upload click).
+      var crow = document.createElement('div');
+      crow.style.cssText = 'display:flex;justify-content:flex-end;';
+      var closeBtn = document.createElement('button');
+      closeBtn.textContent = 'Close'; closeBtn.type = 'button';
+      closeBtn.style.cssText = 'padding:6px 12px;border:1px solid #c6d2cc;background:#f4f7f5;border-radius:7px;cursor:pointer;font:inherit;';
+      closeBtn.addEventListener('click', clearNoteBox);
+      crow.appendChild(closeBtn);
+      body.appendChild(crow);
+      box.__noteless = true;
+      return mountBox();
     }
     var ta = document.createElement('textarea');
-    ta.style.cssText = 'width:100%;height:150px;box-sizing:border-box;resize:vertical;border:1px solid #c6d2cc;border-radius:7px;padding:7px;font:inherit;color:#12241b;';
+    ta.style.cssText = 'width:100%;height:168px;box-sizing:border-box;resize:vertical;border:1px solid #c6d2cc;border-radius:9px;padding:9px 10px;font:inherit;line-height:1.5;color:#12241b;background:#fcfdfc;';
+    ta.maxLength = NOTE_CAP;
     ta.value = pending.noteText || '';
-    box.appendChild(ta);
+    body.appendChild(ta);
     // enrichNoteWithAI refreshes this textarea when the on-device brief lands - but never over a user
     // edit. The flag latches on the first keystroke and is what makes the async swap safe.
     box.__ta = ta;
@@ -2099,10 +3124,10 @@
     // Keep the document type mapped to the note Type as the coordinator changes it (until they
     // override the doc type directly). The needs-response toggle sets sel.value programmatically,
     // which fires no 'change' event, so it calls this explicitly.
-    function syncDocFromNote() { var ds = box.__docSel; if (ds && hasEmail && !ds.__touched) ds.value = noteToDocLabel(sel.value); }
+    function syncDocFromNote() { (box.__emailSels || []).forEach(function (s) { if (!s.__touched) s.value = noteToDocLabel(sel.value); }); }
     sel.addEventListener('change', syncDocFromNote);
     typeRow.appendChild(tl); typeRow.appendChild(sel);
-    box.appendChild(typeRow);
+    body.appendChild(typeRow);
     var respCb = null;
     if (canRespond) {
       var lab = document.createElement('label');
@@ -2111,11 +3136,16 @@
       respCb.style.cssText = 'margin:2px 0 0;flex:0 0 auto;width:15px;height:15px;';
       var lt = document.createElement('div');
       lt.innerHTML = '<strong style="font-weight:600;">This client email needs a response</strong>' +
-        '<div style="color:#5b6b8c;margin-top:2px;">Opens a tracked item on the priority clock. The note posts as <strong>Internal</strong> so it does not read as “we updated the client”.</div>';
+        '<div style="color:#5b6b8c;margin-top:2px;">Opens a tracked item on the priority clock and posts an <strong>Action</strong> note ' +
+        '@-mentioning this WO’s assignee, then prompts them every 15 minutes until they log a Client note - ' +
+        'after 5 unanswered prompts the supervisor and manager on their Umbrava team are @-mentioned. The upload note stays a ' +
+        '<strong>Client</strong> note (Client Correspondence).</div>';
       lab.appendChild(respCb); lab.appendChild(lt);
-      box.appendChild(lab);
-      var syncType = function () { if (respCb.checked) { sel.value = 'Internal'; sel.disabled = true; } else { sel.disabled = false; } syncDocFromNote(); };
-      respCb.addEventListener('change', syncType); syncType();
+      body.appendChild(lab);
+      // needs-response no longer forces the note to Internal (Mike, 2026-09-11): the email IS client
+      // correspondence, so it stays a Client note / Client Correspondence label. The upload note posts
+      // BEFORE requestTrack sets the ladder's startedAt, so answeredSince (when > startedAt) never
+      // counts it as the reply that closes the chase.
     }
     var btns = document.createElement('div');
     btns.style.cssText = 'display:flex;gap:8px;margin-top:11px;justify-content:flex-end;';
@@ -2126,16 +3156,22 @@
     post.textContent = 'Post note to WO'; post.type = 'button';
     post.style.cssText = 'padding:6px 13px;border:0;background:#2f6f4f;color:#fff;border-radius:7px;cursor:pointer;font:600 12.5px/1.2 -apple-system,BlinkMacSystemFont,\'Segoe UI\',Arial,sans-serif;';
     btns.appendChild(skip); btns.appendChild(post);
-    box.appendChild(btns);
+    body.appendChild(btns);
 
     skip.addEventListener('click', function () { copyText(ta.value); clearNoteBox(); toast('Note skipped - kept on your clipboard.'); });
     post.addEventListener('click', function () {
       var text = ta.value, type = sel.value, needsResp = !!(respCb && respCb.checked);
-      if (needsResp) type = 'Internal';
       post.disabled = true; post.textContent = 'Posting…';
+      var files = (pending && pending.files) || [];
       postNoteViaApi(text, type, woNum).then(function () {
         toast('Note posted to W-' + woNum + ' (Type: ' + type + ').');
-        if (needsResp) { var f = inboundClientEmail(pending.files); if (f) requestTrack(f, String(woNum)); }
+        if (needsResp) {
+          var f = inboundClientEmail(files);
+          if (f) requestTrack(f, String(woNum));
+          // The tracked item is a queue row; the Action note is what puts it in front of a person.
+          // It fires after the upload note so the WO reads in order: what came in, then who owns it.
+          postActionNote(woNum, f);
+        }
         clearNoteBox();
       }).catch(function (err) {
         post.disabled = false; post.textContent = 'Post note to WO';
@@ -2145,13 +3181,16 @@
       });
     });
 
-    document.body.appendChild(box);
-    unblockFromModal(box);
-    box.__status = status;
-    noteBox = box;
-    noteBoxTimer = setTimeout(clearNoteBox, PENDING_TTL);
-    if (pending) pending.__box = true;   // tells the legacy Upload-click handler the box owns the note
-    return box;
+    return mountBox();
+    function mountBox() {
+      document.body.appendChild(box);
+      unblockFromModal(box);
+      box.__status = status;
+      noteBox = box;
+      noteBoxTimer = setTimeout(clearNoteBox, PENDING_TTL);
+      if (pending) pending.__box = true;   // tells the legacy Upload-click handler the box owns the note
+      return box;
+    }
   }
 
   // Run the API upload for a drop, update the review box, and fall back to the DOM dialog on any
@@ -2161,20 +3200,25 @@
     // A caller may FORCE a label (the WO-intake handoff passes 'Work Order Request'); otherwise the
     // label is auto-picked from the resolved files (email -> correspondence by party). Held in a closure
     // so the dialog fallback labels the same way if the API leg fails.
-    var resolvedLabel = labelName || DEFAULT_DOC_LABEL;
+    // A per-file resolver has no single name; the dialog can only set ONE label, so a resolver may
+    // carry `.fallbackLabel` (the coordinator's pick) for that leg, else the default.
+    var resolvedLabel = (typeof labelName === 'string' && labelName) ||
+      (labelName && labelName.fallbackLabel) || DEFAULT_DOC_LABEL;
     return described.then(function (files) {
       if (ctx.aborted) throw new Error('aborted');
       // docLabelForFiles is async (an unrecognized external email asks the on-device AI vendor-vs-
       // supplier); await it here so the RIGHT label lands in bulkAdd - there is no update-label
       // mutation, so the label must be correct at upload time. A forced label skips the resolve.
       return (labelName ? Promise.resolve(labelName) : docLabelForFiles(files)).then(function (lbl) {
-        resolvedLabel = lbl;
+        if (typeof lbl === 'string') resolvedLabel = lbl;
         noteBoxStatus('Uploading ' + rawFiles.length + ' file' + (rawFiles.length > 1 ? 's' : '') + '…');
-        return uploadViaApi(rawFiles, files, resolvedLabel, woNum);
+        return uploadViaApi(rawFiles, files, lbl, woNum);
       });
     }).then(function (ids) {
       var n = (ids && ids.length) || rawFiles.length;
-      noteBoxStatus('Uploaded ' + n + ' file' + (n > 1 ? 's' : '') + ' ✓  - review the note, then Post.');
+      noteBoxStatus('Uploaded ' + n + ' file' + (n > 1 ? 's' : '') + ' ✓' + (noteBox && noteBox.__noteless ? '' : '  - review the note, then Post.'));
+      var okBtn = noteBox && noteBox.__upBtn;
+      if (okBtn) { okBtn.textContent = 'Uploaded ' + n + ' ✓'; okBtn.style.background = '#8aa99a'; okBtn.style.cursor = 'default'; okBtn.disabled = true; }
       toast('Uploaded ' + rawFiles.length + ' file' + (rawFiles.length > 1 ? 's' : '') + ' to W-' + woNum + '.');
     }).catch(function (err) {
       if (ctx.aborted) return;
@@ -2183,7 +3227,9 @@
       // Name the actual failing step in the box (not a generic "API unavailable"): this path never
       // passed a live dry-run, so the reason IS the diagnostic. The note box stays editable and the
       // Post button still works even while the Umbrava dialog is open (see the unblock() in showNoteReview).
-      noteBoxStatus('Upload API failed (' + reason + ') - finish the Upload dialog; the note is still here to edit and Post.');
+      noteBoxStatus('Upload API failed (' + reason + ') - finish the Upload dialog' + (noteBox && noteBox.__noteless ? '.' : '; the note is still here to edit and Post.'));
+      var failBtn = noteBox && noteBox.__upBtn;
+      if (failBtn) { failBtn.textContent = 'Upload failed - use dialog'; failBtn.style.background = '#a23'; failBtn.style.cursor = 'default'; failBtn.disabled = true; }
       handleDrop(dt, described, ctx, { docLabel: resolvedLabel });
     });
   }
@@ -2233,22 +3279,20 @@
     var seen = pending.files.some(function (f) { return f.name && dlgText.indexOf(String(f.name).slice(0, 12)) !== -1; });
     if (!seen) return;
     var note = pending.noteText, originTab = pending.originTab || '', noteType = pending.noteType || 'Client';
-    // Step 4: a tracked inbound client email is logged as INTERNAL, not Client. Two reasons,
-    // and both are load-bearing rather than cosmetic:
-    //   1. the item converges on an OUTBOUND reply, and a Client-typed note newer than the
-    //      item would instantly self-close the thing that was just opened;
-    //   2. a Client-typed note resets Next Actions' client-cadence clock, so logging a
-    //      question we have NOT answered would read as "we updated the client".
+    // A tracked inbound client email stays a CLIENT note (Mike, 2026-09-11) - it IS client
+    // correspondence. It cannot self-close its own chase: this draft is inserted for a human to
+    // save, and answeredSince only counts a Client note whose createdDate is AFTER the ladder's
+    // startedAt (set by requestTrack, fired below).
     var track = null;
     if (pending.needsResponse) {
       var f = inboundClientEmail(pending.files);
       var woId = woIdFromUrl();
-      if (f && woId) { track = { file: f, woId: woId }; noteType = 'Internal'; }
+      if (f && woId) { track = { file: f, woId: woId }; }
     }
     pending = null;
     clearRespChip();
     // Let the dialog close and the upload kick off before touching the notes pane.
-    setTimeout(function () { insertNote(note, originTab, noteType); }, 1400);
+    if (note) setTimeout(function () { insertNote(note, originTab, noteType); }, 1400);   // no email = no note
     // Fire the track alongside the note rather than after it: the note is a human-review
     // draft that may sit unsaved for minutes, and the queue item should not wait on that.
     if (track) requestTrack(track.file, track.woId);
@@ -2299,25 +3343,42 @@
       // network share must not make the drop feel dead - review). A second drop into a
       // still-fresh pending MERGES (the note must list every file, not just the last drop).
       var ctx = { aborted: false };
-      var described = Promise.all(raw.map(describeFile));
-      described.then(function (files) {
+      // describeDrop, not describeFile: a dropped email's attachments become files of their own
+      // here, so `raw` grows and every pair (raw[i] ↔ described[i]) stays aligned.
+      describeDrop(raw).then(function (p) {
         if (ctx.aborted) return;
-        var fresh = pending && (Date.now() - pending.ts < PENDING_TTL);
-        var merged = fresh ? pending.files.concat(files) : files;
+        var files = p.files;
+        raw = p.raw;
+        // A merge is only valid into a LIVE HELD batch (a prior manual drop not yet Uploaded). A fresh
+        // `pending` is NOT enough: the WO-intake handoff (and any already-fired batch) leaves `pending`
+        // recent with pendingUpload null/fired because it auto-uploaded, so concatenating onto its
+        // pending.files while pendingUpload.raw holds only the new drop breaks the held invariant
+        // (pendingUpload.raw.length === pending.files.length) and hides the per-file pickers + Upload
+        // button. So drop-after-handoff / drop-after-upload starts a fresh batch instead of merging.
+        var canMerge = pending && (Date.now() - pending.ts < PENDING_TTL) && pendingUpload && !pendingUpload.fired;
+        // Merging into a still-held queue: drop files already queued so the same thing dragged twice is
+        // not uploaded twice, and tell the coordinator how many.
+        var dupes = 0;
+        if (canMerge) {
+          var dd = dedupNewPairs(pendingUpload.raw, raw, files);
+          dupes = dd.dupes; raw = dd.raw; files = dd.files;
+        }
+        var merged = canMerge ? pending.files.concat(files) : files;
         // On a merge, keep the FIRST drop's origin view - later drops fire after the script
         // has already switched to Documents, so their origin would just be "Documents".
-        var origin = (fresh && pending.originTab) ? pending.originTab : originTab;
+        var origin = (canMerge && pending.originTab) ? pending.originTab : originTab;
         // A merge keeps an already-ticked toggle: the coordinator answered the question once,
         // and dropping a second attachment is not them changing their mind.
-        var keepResp = !!(fresh && pending.needsResponse);
+        var keepResp = !!(canMerge && pending.needsResponse);
         // Accumulate the HELD upload across a merge so one Upload click sends every file dropped
         // in this window; a fresh window (or one already fired) starts a new batch. described is
         // set to `merged` (already-resolved described objects) so raw[i] still pairs with described[i].
-        if (fresh && pendingUpload && !pendingUpload.fired) { pendingUpload.raw = pendingUpload.raw.concat(raw); }
+        if (canMerge) { pendingUpload.raw = pendingUpload.raw.concat(raw); }
         else { pendingUpload = { raw: raw, ctx: ctx, fired: false }; }
         pendingUpload.described = Promise.resolve(merged);
         pending = { ts: Date.now(), files: merged, noteText: buildNoteText(merged), originTab: origin, noteType: noteTypeForFiles(merged), needsResponse: keepResp };
         showNoteReview();
+        if (dupes) toast('Skipped ' + dupes + ' duplicate' + (dupes > 1 ? 's' : '') + ' already in the queue.');
         enrichNoteWithAI(pending);   // upgrade the mechanical lead to the AI brief in the background
       });
       // Upload is HELD, not auto-fired: the review box's Upload button calls runApiUpload with the
@@ -2348,6 +3409,10 @@
 
   window.addEventListener('dragenter', function (e) {
     if (!onWorkOrder() || !hasFiles(e)) return;
+    // Umbrava permission gate: the overlay exists to attach documents to the work order. Without
+    // the Document > Add New checkbox the upload would 403 at the end of the flow, so the overlay
+    // never appears and the browser's own drop behaviour is left alone. Fails OPEN when unknown.
+    if (!bwnCan('WorkOrderDocument.AddNew')) return;
     // Yield to the Create Work Order modal: when BWN WO Intake's drop zone is present (or the
     // Create WO modal is open), a file drag is meant for THAT modal's prefill, not this page's
     // document upload - so don't throw the full-screen overlay over it and steal the drop.
@@ -2374,15 +3439,19 @@
   document.addEventListener('bwn:cmd', function (e) {
     var d = e && e.detail;
     if (!d || d.id !== 'dropupload:files' || !d.files || !d.files.length || !onWorkOrder()) return;
-    var raw = [], dt = new DataTransfer();
-    for (var i = 0; i < d.files.length; i++) { try { dt.items.add(d.files[i]); raw.push(d.files[i]); } catch (e2) { } }
+    var raw = [];
+    for (var i = 0; i < d.files.length; i++) { try { raw.push(d.files[i]); } catch (e2) { } }
     if (!raw.length) return;
     try { document.dispatchEvent(new CustomEvent('bwn:evt', { detail: { id: 'dropupload:accepted', count: raw.length } })); } catch (e3) { }
     var originTab = (function () { var t = document.querySelector('[role="tab"][aria-selected="true"]'); return t ? (t.textContent || '').trim() : ''; })();
     var ctx = { aborted: false };
-    var described = Promise.all(raw.map(describeFile));
-    described.then(function (files) {
+    // WO Intake usually hands the attachments over itself (it reads the WO PDF), so describeDrop's
+    // name+size dedup normally finds nothing to add here - but a client whose adapter does not
+    // split them still gets them, from the one code path.
+    describeDrop(raw).then(function (p) {
       if (ctx.aborted) return;
+      var files = p.files;
+      raw = p.raw;
       var fresh = pending && (Date.now() - pending.ts < PENDING_TTL);
       var merged = fresh ? pending.files.concat(files) : files;
       var origin = (fresh && pending.originTab) ? pending.originTab : originTab;
@@ -2391,10 +3460,18 @@
       pending = { ts: Date.now(), files: merged, noteText: buildNoteText(merged), originTab: origin, noteType: 'Client' };
       showNoteReview();
       enrichNoteWithAI(pending);   // upgrade the mechanical lead to the AI brief in the background
+      // WO Intake handoff = a just-created WO's client request email. The EMAIL is the "Work Order
+      // Request"; its image attachments are the site photos the requester sent, and filing those as
+      // Work Order Requests too is what buried them (reported on the Pilot 258 painting request).
+      // Label per file - Umbrava has no update-label mutation, so it has to be right at upload time.
+      // Fires INSIDE the resolve because describeDrop may have added files (an email whose adapter
+      // did not split its attachments); the DataTransfer for the dialog fallback is rebuilt to match.
+      var udt = new DataTransfer();
+      raw.forEach(function (f) { try { udt.items.add(f); } catch (e4) { } });
+      runApiUpload(raw, Promise.resolve(files), udt, ctx, function (f) {
+        return fileKind(f) === 'Photo' ? 'Photo' : 'Work Order Request';
+      });
     });
-    // WO Intake handoff = a just-created WO's client request email, so label the uploaded
-    // document(s) "Work Order Request". Uploads via the API; DOM dialog is the fallback.
-    runApiUpload(raw, described, dt, ctx, 'Work Order Request');
   }, false);
 
   // ---- Toast -----------------------------------------------------------------

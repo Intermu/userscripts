@@ -118,13 +118,22 @@ var LEDGER = {
   // remove (closePanel), no shared drawerDismiss, no toast(), no animation:, no --bwn-dock-shift.
   // Carries NONE of the four SHARED primitives.
   'bwn-low-gp.user.js':        { drawer: 'NA',        toast: 'NA',        rmotion: 'NA',  rail: 'NA'  },
+  // Read-only report modal (own .bwn-nr-* overlay, own CSS, closes by [hidden]); status line instead
+  // of a toast, no animation, no --bwn-dock-shift. NONE of the four SHARED primitives.
+  'bwn-note-report.user.js':   { drawer: 'NA',        toast: 'NA',        rmotion: 'NA',  rail: 'NA'  },
   'bwn-notes.user.js':         { drawer: 'NA',        toast: 'NA',        rmotion: 'NA',  rail: 'NA'  },
   // Own #bwn-pa-card overlay/menu + own paToast (the same private-toast pattern as proposal-copy,
   // NOT the shared function toast()); no drawer, animation, or rail. NONE of the four SHARED primitives.
   'bwn-proposal-actions.user.js': { drawer: 'NA',     toast: 'NA',        rmotion: 'NA',  rail: 'NA'  },
-  // Self-contained modal overlay (#bwn-pc-overlay, own sheet) + own pcToast; closes by plain
-  // remove, NOT the shared .bwn-closing exit. Carries NONE of the four SHARED primitives.
+  // 0.4.0 workflow-modal redesign: Copy Proposal is now a SELF-CONTAINED wide centered modal with
+  // its own `.bcp-*` sheet - it left the shared `.bwn-drawer` (0.3.0), so it carries NONE of the four
+  // shared primitives again. No `.className='bwn-drawer'` and no `function drawerDismiss(` (own
+  // bcpRemove close) -> drawer NA. Own private pcToast -> toast NA. Transitions only, no `animation:`
+  // property -> rmotion NA. Does not read `--bwn-dock-shift` -> rail NA. It KEEPS bwnFocusTrap, so it
+  // stays in the focus-trap FAMILY in test-a11y-focus.js (that is a separate contract from these four).
   'bwn-proposal-copy.user.js': { drawer: 'NA',        toast: 'NA',        rmotion: 'NA',  rail: 'NA'  },
+  // Proposal Pricing 0.2.0: read-only side panel, no shared drawer/toast/animation/rail.
+  'bwn-proposal-pricing.user.js': { drawer: 'NA',        toast: 'NA',        rmotion: 'NA',  rail: 'NA'  },
   'bwn-suite-ai.user.js':      { drawer: 'NA',        toast: 'DIVERGENT', rmotion: 'HAS', rail: 'HAS' },
   'bwn-suite-core.user.js':    { drawer: 'HAS',       toast: 'DIVERGENT', rmotion: 'HAS', rail: 'HAS' },
   // Own inline panel inside the PO dialog (#bwn-tv-panel) + own body-modal fallback; closes by plain
@@ -134,6 +143,10 @@ var LEDGER = {
   'bwn-wide-list.user.js':     { drawer: 'NA',        toast: 'NA',        rmotion: 'NA',  rail: 'NA'  },
   'bwn-wo-assist.user.js':     { drawer: 'HAS',       toast: 'HAS',       rmotion: 'NA',  rail: 'NA'  },
   'bwn-wo-audit.user.js':      { drawer: 'HAS',       toast: 'DIVERGENT', rmotion: 'NA',  rail: 'NA'  },
+  // Non-modal informational dock panel (#bwn-woext-panel, own inline cssText, class bwn-woext);
+  // renders read-only WO context as text and closes by plain remove. Carries NONE of the four SHARED
+  // primitives (no .bwn-drawer, no toast(), no animation:, no --bwn-dock-shift).
+  'bwn-wo-extract.user.js':    { drawer: 'NA',        toast: 'NA',        rmotion: 'NA',  rail: 'NA'  },
   'bwn-wo-intake.user.js':     { drawer: 'NA',        toast: 'HAS',       rmotion: 'NA',  rail: 'NA'  },
   // Headless Track C write-back executor + catalog pusher: no coordinator-facing UI surface at all
   // (no drawer, toast, animation, or rail). NONE of the four SHARED primitives.

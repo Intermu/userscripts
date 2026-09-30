@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         BWN Suite - Note Templates (Broadway National)
 // @namespace    broadwaynational.bwn
-// @version      0.7.2
+// @version      0.11.0
 // @description  Canned dispatch-note templates in a "Templates" dropdown beside the "+ Add" note button in the Umbrava Dispatch Board's work-order detail panel (Notes tab). Picking a template opens Umbrava's own Add Note composer and DRAFTS the note into it (signed with your first name, ______ blanks left for you to fill) - it is NEVER auto-posted; you review, set the Type, and click Save. STANDALONE: carries its own tiptap/ProseMirror inserter, so in-house techs install this one script alone - no drop-upload dependency. Still prefers drop-upload's hook (window.__bwnFillNoteEditor) when that script is also installed, so coordinator machines keep a single live-tested fill path. Also, on the regular WO page, a "Spoke with" button stamps a [Spoke with: <Vendor>] tag at the TOP of a note (vendor picked from your recent vendors or typed) so you can record which of several WO vendors you spoke with - same human-gated draft, never auto-posted. @grant none, zero egress.
 // @match        https://app.umbrava.com/*
 // @run-at       document-idle
@@ -12,6 +12,78 @@
 (function () {
   'use strict';
 
+  // ===== BWN-PERM START v1 (paste-identical; pinned by scripts/test-perm-block-ledger.js) =====
+  // Umbrava's own per-user permission checkboxes, as the one question a control has:
+  //   bwnCan('WorkOrderNote.AddNew') -> true | false
+  // Umbrava returns me.permissions as a JSON STRING of {"<Type>Permissions": "<bitmask>"} - one
+  // bit per checkbox on /company/users/<id>/permissions. bwn-suite-core decodes it once a session
+  // and publishes the DECODED grant list to `bwn:perm:last` + the `bwn:perm` bus event, the same
+  // one-way producer/consumer shape as bwn:role. This block only READS that slot, so every
+  // sandbox that pastes it needs neither the query, the token, nor the flag numbers.
+  //
+  // FAIL-OPEN on anything unknown - no slot yet, a stale slot, or a group the producer does not
+  // map. Umbrava's server is the real boundary (it refuses the mutation either way), so an
+  // unreadable cache must never strand a coordinator mid-shift. Fail-CLOSED only on a
+  // positively-known missing bit. localStorage is per-origin, so this answers "unknown" (and
+  // therefore allows) anywhere but app.umbrava.com - by design.
+  var BWN_PERM_KEY = 'bwn:perm:last';
+  var BWN_PERM_TTL_MS = 24 * 3600 * 1000;
+  var _bwnPermSlot = null;      // memoized parse; invalidated by the bwn:perm listener below
+  function bwnPermSlot() {
+    if (_bwnPermSlot) return _bwnPermSlot;
+    try {
+      var p = JSON.parse(localStorage.getItem(BWN_PERM_KEY) || 'null');
+      if (p && p.ts && (Date.now() - p.ts) < BWN_PERM_TTL_MS &&
+        Array.isArray(p.groups) && Array.isArray(p.granted)) _bwnPermSlot = p;
+    } catch (e) { /* an unreadable cache reads as unknown, which fails open */ }
+    return _bwnPermSlot;
+  }
+  function bwnCan(key) {
+    var p = bwnPermSlot();
+    if (!p) return true;                                          // nothing decoded yet -> allow
+    var grp = String(key).split('.')[0];
+    if (p.groups.indexOf(grp) === -1) return true;                // group unmapped/absent -> allow
+    return p.granted.indexOf(key) !== -1;
+  }
+  // keys: a 'Group.Flag' string, or an array of them (ALL must be granted).
+  function bwnCanAll(keys) {
+    if (!keys) return true;
+    if (typeof keys === 'string') return bwnCan(keys);
+    for (var i = 0; i < keys.length; i++) { if (!bwnCan(keys[i])) return false; }
+    return true;
+  }
+  // patchWorkOrder is ONE mutation over MANY fields and Umbrava gates each field separately, so
+  // its permission depends on the variables rather than the operation. This maps the data keys the
+  // suite actually sends, all of them wire-proven; a key this map does not know contributes NO
+  // requirement, which is the block's unknown -> allow rule and keeps a future field from being
+  // blocked by a map nobody updated. `workOrderNumber` is the identifier, not a field write.
+  var BWN_PATCH_FIELD_PERM = {
+    statusId: 'WorkOrderField.Status',
+    assignedTo: 'WorkOrderField.AssignedTo',
+    // ECD rides inside the whole-object `priority` replace, and the SPA bundles the SLA id with it.
+    priority: 'WorkOrderField.CompletionSLA',
+    serviceLevelAgreementId: 'WorkOrderField.CompletionSLA',
+    sourceJobNumber: 'WorkOrderField.SourceJobNumber',
+    sourcePurchaseOrderNumber: 'WorkOrderField.SourcePurchaseOrderNumber'
+  };
+  // -> [] | ['WorkOrderField.Status', ...]; deduped, so a bundled priority+SLA asks once.
+  function bwnPermsForPatch(variables) {
+    var data = (variables && variables.data) || {};
+    var out = [];
+    Object.keys(data).forEach(function (k) {
+      var p = BWN_PATCH_FIELD_PERM[k];
+      if (p && out.indexOf(p) === -1) out.push(p);
+    });
+    return out;
+  }
+  try {
+    document.addEventListener('bwn:evt', function (e) {
+      var d = e && e.detail;
+      if (d && d.id === 'bwn:perm') _bwnPermSlot = null;          // a fresh decode landed
+    });
+  } catch (e) { }
+  // ===== BWN-PERM END v1 =====
+
   var GREEN = 'linear-gradient(135deg,#2ECC71,#1a5f3e)';   // Broadway green (Core's --bwn-green/-dk, inlined for a standalone script)
 
   // Suite module flags (kill switches), read from the shared bwn:modules blob the Ops panel writes.
@@ -20,46 +92,106 @@
 
   // ===== Pure logic (sliced + unit-tested by scripts/test-notes-templates.js) ==============
   // BWN-NOTES-SLICE-START
+  // Sign-off nicknames: a tech whose Auth0 given_name is a full name signs with a short one instead.
+  // Keyed by the lowercased resolved first name, so anyone whose token says "Nicholas" signs as "Nick".
+  // (In-house team has one Nicholas; add a row here if another tech wants a nickname.)
+  var NICKNAMES = { nicholas: 'Nick' };
+  function applyNickname(name) { return NICKNAMES[String(name).toLowerCase()] || name; }
+
+  // The Templates dropdown is rank 1 (not rank-gated) but rostered to a named set of people (Mike's
+  // choice, 2026-09-15) - the "Spoke with" button below is NOT rostered and stays available to all.
+  // Roster keyed by Umbrava display identity (firstName lastName, exact spellings verified live via
+  // the member directory), normalized to lowercase "first last" and matched against the Auth0 token's
+  // name claims. Templates are non-sensitive canned notes, so this is a "who sees this UI" roster, not
+  // a security boundary: a @grant-none script cannot read a per-user email/GUID without a network call,
+  // so display name is the key. Pure decision so the test pins it; the token read lives outside the
+  // slice. Fail-CLOSED: an unreadable/absent identity hides the dropdown.
+  var TEMPLATE_ROSTER = ['mike najarro', 'alyssa phelps', 'jeanell quinones', 'joshua wiggins', 'daniel bartolomei', 'kennya zambrano'];
+  function ntNormName(s) { return String(s == null ? '' : s).toLowerCase().replace(/\s+/g, ' ').trim(); }
+  function ntFullNameFromUser(u) {
+    if (!u) return '';
+    var gn = u.given_name || u.givenName, fn = u.family_name || u.familyName || u.lastName;
+    if (gn && fn) return ntNormName(gn + ' ' + fn);
+    if (u.name) return ntNormName(u.name);
+    return '';
+  }
+  function ntTemplateAllowed(u) { var n = ntFullNameFromUser(u); return !!n && TEMPLATE_ROSTER.indexOf(n) !== -1; }
+
   // First name of the signed-in user. Read from the Auth0 SPA cache in localStorage (the same
   // decodedToken.user the suite's actor() helpers read) - a pure read, no network, no GUID lookup.
-  // Prefer the OIDC given_name claim if present, else the first token of the display name.
+  // Prefer the OIDC given_name claim if present, else the first token of the display name; then map
+  // through NICKNAMES so a chosen sign-off (Nicholas -> Nick) applies everywhere the signature is used.
   function firstNameFromUser(u) {
     if (!u) return '';
+    var raw = '';
     var gn = u.given_name || u.givenName;
-    if (gn) return String(gn).trim().split(/\s+/)[0];
-    if (u.name) return String(u.name).trim().split(/\s+/)[0];
-    return '';
+    if (gn) raw = String(gn).trim().split(/\s+/)[0];
+    else if (u.name) raw = String(u.name).trim().split(/\s+/)[0];
+    return applyNickname(raw);
   }
 
   // The dispatchers' most-used notes, grouped. `body` is verbatim; the signature is appended
   // dynamically (buildNote) so it is always the CURRENT user, never a baked-in name. `signed:false`
   // notes (call-outs) carry no signature, as written. Blanks (______) are left for the user to fill.
+  // Umbrava client tenant GUIDs (WorkOrder.clientId), verified live 2026-09-29: Tesla = client #20441,
+  // CROCS, Inc. = client #20386. Lowercase; tplVisible lowercases the WO's id before matching.
+  var SIGNOFF_CLIENTS = ['602e081c-a1b2-4b51-b158-ea077e330458', '52b7f542-6b66-4fd8-8dd3-8edbdb48558a'];
   var TEMPLATES = [
     { group: 'Call outs', items: [
       { label: 'Tech called out - redirect (week full)', signed: false,
-        body: 'Good morning,\nUnfortunately, our technician called out today and his schedule for the rest of the week is full.\nThis work order will need to be redirected. Sorry for any inconvenience.' },
+        body: 'Good morning,\n\nUnfortunately, our technician called out today and his schedule for the rest of the week is full. This work order will need to be redirected. Sorry for any inconvenience.' },
       { label: 'Tech called out - reschedule for ___', signed: false, date: 'day',
-        body: 'Good morning,\nUnfortunately, our technician called out today and this work order will need to be rescheduled for ______ . Apologies for the inconvenience.' }
+        body: 'Good morning,\n\nUnfortunately, our technician called out today and this work order will need to be rescheduled for ______. Apologies for the inconvenience.' }
     ] },
     { group: 'Completed work', items: [
       { label: 'Completed - FC $___, adjust NTE', signed: true,
-        body: 'Hi team this has been completed, and our FC is $______ please adjust the NTE accordingly when you have a chance\nThank you' },
+        body: 'Hi team,\n\nThis has been completed and our FC is $______. Please adjust the NTE accordingly when you have a chance. Thank you\n' },
       { label: 'Invoice + closing docs to follow', signed: true,
-        body: 'Hi team, we will get invoice and closing documents over to your shortly.\nThank you for your patience' },
+        body: 'Hi team,\n\nWe will get the invoice and closing documents over to you shortly. Thank you for your patience\n' },
       { label: 'Quote to follow', signed: true,
-        body: 'Hi team, we will get this quote over to your shortly.\nThank you for your patience' }
+        body: 'Hi team,\n\nWe will get this quote over to you shortly. Thank you for your patience\n' }
     ] },
     { group: 'New work to schedule', items: [
       { label: 'Scheduled for ___', signed: true, date: 'day',
-        body: 'Hi Team, this has been scheduled for ______\nThank you' },
+        body: 'Hi team,\n\nThis has been scheduled for ______. Thank you\n' },
       { label: 'No availability until week of ___ - redirect', signed: true, date: 'weekOf',
-        body: "Hi team, at this time we don't have availability in this area until the week of _______ , apologies please redirect" },
+        body: "Hi team,\n\nAt this time we don't have availability in this area until the week of _______, apologies please redirect\n" },
       { label: 'Soonest on-site ___ - schedule or redirect', signed: true, date: 'day',
-        body: 'Good afternoon,\nUnfortunately, the soonest we could have someone on site for this work order would be ________\nIf the store can wait until then we can get this schedule, otherwise this will need to be redirected.\nPlease advise' },
+        body: 'Good afternoon,\n\nUnfortunately, the soonest we could have someone on site for this work order would be ________. If the store can wait until then we can get this scheduled, otherwise this will need to be redirected. Please advise\n' },
       { label: 'Too far / not cost-effective - redirect', signed: true,
-        body: "Hi team,\nThis location is _____ hours from our nearest technician, which would round-trip travel of __________ in addition to the assessment fee. Given the scope of work, I don't believe this is cost-effective for either your team or ours.\nPlease redirect\nThank you." }
+        body: "Hi team,\n\nThis location is _____ hours from our nearest technician, which would be round-trip travel of __________ in addition to the assessment fee. Given the scope of work, I don't believe this is cost-effective for either your team or ours. Please redirect. Thank you\n" }
+    ] },
+    { group: 'Approvals', items: [
+      { label: 'Approved - back on schedule for ___', signed: true, date: 'day',
+        body: 'Hi team,\n\nThank you for the approval, this is back on schedule for ______.\n' },
+      { label: 'Approved - ordering material, lead time to follow', signed: true,
+        body: 'Hi team,\n\nThank you for the approval, we will order material and follow up with a lead time\n' }
+    ] },
+    // Client-scoped: shown only on a WO whose verified client is listed in `clients` (see tplVisible).
+    // Text only, like every template - drafting one never posts, moves status, or marks signoff received.
+    { group: 'Signoff (Tesla / Crocs)', items: [
+      { label: 'Signoff Required', signed: true, clients: SIGNOFF_CLIENTS,
+        body: 'Tesla/Crocs signoff is required before billing can proceed. Please provide the signed work-order approval or confirm the approved signoff location.\n' },
+      { label: 'Signoff Pending', signed: true, clients: SIGNOFF_CLIENTS,
+        body: 'Work is complete and the work order is pending required signoff. Billing should remain on hold until signed approval is received and attached.\n' },
+      { label: 'Signoff Received', signed: true, clients: SIGNOFF_CLIENTS,
+        body: 'Required signoff has been received and attached to the work order. The work order is ready for the next billing review step.\n' }
     ] }
   ];
+
+  // An item with `clients` shows only when the active WO's client tenant GUID is listed; items
+  // without it stay global. No verified client id (unknown / not loaded) -> scoped items hidden.
+  function tplVisible(t, clientId) {
+    return !t.clients || (!!clientId && t.clients.indexOf(String(clientId).toLowerCase()) !== -1);
+  }
+  // TEMPLATES filtered for one client, keeping each item's original "group:item" index as its id so
+  // a pick resolves the same template whatever was hidden. Groups left empty drop out.
+  function visibleGroups(clientId) {
+    return TEMPLATES.map(function (g, gi) {
+      return { group: g.group, items: g.items.map(function (t, ii) { return { id: gi + ':' + ii, tpl: t }; })
+        .filter(function (x) { return tplVisible(x.tpl, clientId); }) };
+    }).filter(function (g) { return g.items.length; });
+  }
 
   // Compose the note text: body verbatim, plus a "-<FirstName>" signature for signed templates.
   // When no first name resolves, leave a "-______" blank rather than a bare dash.
@@ -111,13 +243,17 @@
   }
   // BWN-NOTES-SLICE-END
 
-  function currentFirstName() {
+  // The signed-in Auth0 user object (decodedToken.user) from the SPA cache - a pure read, no network.
+  function currentUserObj() {
     try {
       var k = Object.keys(localStorage).find(function (x) { return /@@auth0spajs@@::.*::@@user@@/.test(x); });
-      var u = k ? ((JSON.parse(localStorage.getItem(k)) || {}).decodedToken || {}).user : null;
-      return firstNameFromUser(u);
-    } catch (e) { return ''; }
+      return k ? ((JSON.parse(localStorage.getItem(k)) || {}).decodedToken || {}).user : null;
+    } catch (e) { return null; }
   }
+  function currentFirstName() { return firstNameFromUser(currentUserObj()); }
+  // Live roster check for the Templates dropdown (see TEMPLATE_ROSTER in the slice). Fail-closed:
+  // no readable identity -> not allowed -> nothing mounts and nothing is broadcast to the AI script.
+  function templateRosterAllowed() { return ntTemplateAllowed(currentUserObj()); }
 
   // ===== Inlined tiptap/ProseMirror composer-fill (makes this script STANDALONE) ============
   // ponytail: verbatim copy of bwn-drop-upload's live-tested fill code (waitFor + setNativeValue +
@@ -302,16 +438,37 @@
   // req also tells us an AI script is present and will render the merged "Draft", so we stand our own
   // WO-page button down (aiWantsMerge) to avoid a double button.
   var aiWantsMerge = false;
+  // Active WO's client tenant GUID, from Core's bwn:wo:<n> bus slot (Core publishes it off its
+  // WorkOrderHeader API read - never the header name text). '' off a WO page, without Core, or
+  // before the read lands, which hides client-scoped templates (fail-closed).
+  // ponytail: the dispatch-board panel has no verified client id (no bus slot), so scoped templates
+  // never show there. Add one if the board needs them.
+  function activeClientId() {
+    var m = location.pathname.match(/work-orders\/(\d+)/);
+    if (!m) return '';
+    try {
+      var d = JSON.parse(sessionStorage.getItem('bwn:wo:' + m[1]) || 'null');
+      return (d && d.v === 1 && d.clientId) ? String(d.clientId).toLowerCase() : '';
+    } catch (e) { return ''; }
+  }
   function tplList() {
-    return TEMPLATES.map(function (g, gi) {
-      return { group: g.group, items: g.items.map(function (t, ii) { return { id: gi + ':' + ii, label: t.label, date: t.date || null }; }) };
+    return visibleGroups(activeClientId()).map(function (g) {
+      return { group: g.group, items: g.items.map(function (x) { return { id: x.id, label: x.tpl.label, date: x.tpl.date || null }; }) };
     });
   }
   function tplById(id) {
     var p = String(id).split(':'), g = TEMPLATES[+p[0]];
-    return g ? g.items[+p[1]] : null;
+    var t = g ? g.items[+p[1]] : null;
+    return (t && tplVisible(t, activeClientId())) ? t : null;   // a stale flyout can't draft a hidden one
   }
-  function announceTpl() { try { document.dispatchEvent(new CustomEvent('bwn:evt', { detail: { id: 'notes:tpl:list', groups: tplList() } })); } catch (e) { } }
+  // Only broadcast the template list to the AI script for a rostered user - this is what makes the
+  // merged Draft button's "Template" flyout appear only for the roster, without the AI script needing
+  // its own roster copy.
+  var lastTplSig = null;
+  function announceTpl() { if (!templateRosterAllowed()) return; var groups = tplList(); lastTplSig = JSON.stringify(groups); try { document.dispatchEvent(new CustomEvent('bwn:evt', { detail: { id: 'notes:tpl:list', groups: groups } })); } catch (e) { } }
+  // Core's bus publish can land after our load-time broadcast (or the user moves to another WO);
+  // re-announce only when the visible set actually changed, so the AI flyout isn't remounted per refresh.
+  document.addEventListener('bwn:update', function () { if (JSON.stringify(tplList()) !== lastTplSig) announceTpl(); });
   document.addEventListener('bwn:cmd', function (e) {
     var d = e && e.detail; if (!d) return;
     if (d.id === 'notes:tpl:req') {
@@ -319,7 +476,7 @@
       var own = document.getElementById(WO_BTN_ID); if (own) own.remove();   // AI owns the merged Draft
       announceTpl();
     } else if (d.id === 'notes:tpl:pick') {
-      var t = tplById(d.tplId); if (t) pickTemplate(t);
+      var t = tplById(d.tplId); if (t) pickTemplate(t); else { try { console.info('[BWN NOTES] template ' + d.tplId + ' is not available on this work order'); } catch (e) { } }
     }
   });
   announceTpl();   // broadcast once on load too, for an AI script that mounted before it could ask
@@ -442,9 +599,22 @@
     trig.appendChild(lab); trig.appendChild(car);
     wrap.appendChild(trig);
 
-    var menu = null;
+    // Two-level flyout: the top menu lists the GROUPS (4 short rows, so it never runs off the
+    // viewport bottom the way the old flat list did on a low trigger); hovering/clicking a group
+    // pops its items in a submenu to the LEFT (fallback right if there's no room). Both levels clamp
+    // into the viewport so every template is reachable at 100% zoom. Hover-intent (armClose/cancelClose,
+    // same shape as the AI-Draft flyout, PR #38) keeps the submenu open on a diagonal move.
+    var menu = null, sub = null, subOwner = null, subCloseT = null;
+    function removeSub() {
+      if (subCloseT) { clearTimeout(subCloseT); subCloseT = null; }
+      if (sub) { sub.remove(); sub = null; }
+      if (subOwner) { subOwner.setAttribute('aria-expanded', 'false'); subOwner.style.background = 'transparent'; subOwner = null; }
+    }
+    function armClose() { if (subCloseT) clearTimeout(subCloseT); subCloseT = setTimeout(removeSub, 220); }
+    function cancelClose() { if (subCloseT) { clearTimeout(subCloseT); subCloseT = null; } }
     function close() {
       if (!menu) return;
+      removeSub();
       menu.remove(); menu = null;
       trig.setAttribute('aria-expanded', 'false');
       document.removeEventListener('mousedown', onDoc, true);
@@ -452,33 +622,68 @@
       window.removeEventListener('scroll', close, true);
       window.removeEventListener('resize', close, true);
     }
-    function onDoc(e) { if (menu && !menu.contains(e.target) && !trig.contains(e.target)) close(); }
+    function onDoc(e) { if (menu && !menu.contains(e.target) && (!sub || !sub.contains(e.target)) && !trig.contains(e.target)) close(); }
     function onKey(e) { if (e.key === 'Escape') { e.preventDefault(); close(); } }
+    // Open one group's items to the left of the parent menu, aligned to the group row, clamped in-view.
+    function openSub(grp, ownerRow) {
+      if (subOwner === ownerRow && sub) { cancelClose(); return; }   // already open for this group
+      removeSub();
+      subOwner = ownerRow;
+      ownerRow.setAttribute('aria-expanded', 'true');
+      ownerRow.style.background = '#f0fdf4';
+      sub = document.createElement('div');
+      sub.setAttribute('role', 'menu');
+      sub.setAttribute('aria-label', grp.group + ' templates');
+      sub.style.cssText = 'position:fixed;z-index:99999;min-width:300px;max-height:80vh;overflow:auto;background:#fff;border:1px solid #e2e8f0;border-radius:10px;box-shadow:0 10px 30px rgba(0,0,0,.18);padding:6px;font-family:-apple-system,BlinkMacSystemFont,"Segoe UI",Arial,sans-serif;';
+      grp.items.forEach(function (tpl) {
+        var row = document.createElement('button');
+        row.type = 'button'; row.setAttribute('role', 'menuitem'); row.tabIndex = -1;
+        row.textContent = tpl.label;
+        row.style.cssText = 'display:block;width:100%;box-sizing:border-box;text-align:left;padding:8px 10px;border:none;background:transparent;border-radius:7px;cursor:pointer;font:500 13px -apple-system,BlinkMacSystemFont,"Segoe UI",Arial,sans-serif;color:#1e293b;';
+        row.addEventListener('mouseenter', function () { row.style.background = '#f0fdf4'; });
+        row.addEventListener('mouseleave', function () { row.style.background = 'transparent'; });
+        row.addEventListener('click', function (e) { e.preventDefault(); close(); pickTemplate(tpl); });
+        sub.appendChild(row);
+      });
+      sub.addEventListener('mouseenter', cancelClose);
+      sub.addEventListener('mouseleave', armClose);
+      document.body.appendChild(sub);
+      var mr = menu.getBoundingClientRect(), rr = ownerRow.getBoundingClientRect();
+      var sw = sub.offsetWidth || 300, sh = sub.offsetHeight || 0;
+      var left = mr.left - sw - 4;                       // to the LEFT of the parent menu
+      if (left < 8) left = mr.right + 4;                 // no room on the left -> open to the right
+      left = Math.min(left, window.innerWidth - sw - 8);
+      var top = Math.min(rr.top, window.innerHeight - sh - 8);   // align to the row, clamp to viewport
+      if (top < 8) top = 8;
+      sub.style.left = Math.round(left) + 'px';
+      sub.style.top = Math.round(top) + 'px';
+    }
     function open() {
       menu = document.createElement('div');
       menu.setAttribute('role', 'menu');
-      menu.setAttribute('aria-label', 'Note templates');
-      menu.style.cssText = 'position:fixed;z-index:99998;min-width:300px;max-height:72vh;overflow:auto;background:#fff;border:1px solid #e2e8f0;border-radius:10px;box-shadow:0 10px 30px rgba(0,0,0,.18);padding:6px;font-family:-apple-system,BlinkMacSystemFont,"Segoe UI",Arial,sans-serif;';
-      TEMPLATES.forEach(function (grp) {
-        var h = document.createElement('div');
-        h.textContent = grp.group;
-        h.style.cssText = 'padding:8px 10px 4px;font:700 10px ui-monospace,"Segoe UI Mono",monospace;letter-spacing:.6px;text-transform:uppercase;color:#64748b;';
-        menu.appendChild(h);
-        grp.items.forEach(function (tpl) {
-          var row = document.createElement('button');
-          row.type = 'button'; row.setAttribute('role', 'menuitem'); row.tabIndex = -1;
-          row.textContent = tpl.label;
-          row.style.cssText = 'display:block;width:100%;box-sizing:border-box;text-align:left;padding:8px 10px;border:none;background:transparent;border-radius:7px;cursor:pointer;font:500 13px -apple-system,BlinkMacSystemFont,"Segoe UI",Arial,sans-serif;color:#1e293b;';
-          row.addEventListener('mouseenter', function () { row.style.background = '#f0fdf4'; });
-          row.addEventListener('mouseleave', function () { row.style.background = 'transparent'; });
-          row.addEventListener('click', function (e) { e.preventDefault(); close(); pickTemplate(tpl); });
-          menu.appendChild(row);
-        });
+      menu.setAttribute('aria-label', 'Note template groups');
+      menu.style.cssText = 'position:fixed;z-index:99998;min-width:220px;max-height:80vh;overflow:auto;background:#fff;border:1px solid #e2e8f0;border-radius:10px;box-shadow:0 10px 30px rgba(0,0,0,.18);padding:6px;font-family:-apple-system,BlinkMacSystemFont,"Segoe UI",Arial,sans-serif;';
+      visibleGroups(activeClientId()).map(function (g) { return { group: g.group, items: g.items.map(function (x) { return x.tpl; }) }; }).forEach(function (grp) {
+        var row = document.createElement('button');
+        row.type = 'button'; row.setAttribute('role', 'menuitem'); row.tabIndex = -1;
+        row.setAttribute('aria-haspopup', 'menu'); row.setAttribute('aria-expanded', 'false');
+        row.style.cssText = 'display:flex;align-items:center;justify-content:space-between;gap:10px;width:100%;box-sizing:border-box;text-align:left;padding:9px 10px;border:none;background:transparent;border-radius:7px;cursor:pointer;font:600 13px -apple-system,BlinkMacSystemFont,"Segoe UI",Arial,sans-serif;color:#1e293b;';
+        var name = document.createElement('span'); name.textContent = grp.group;
+        var chev = document.createElement('span'); chev.textContent = '‹'; chev.setAttribute('aria-hidden', 'true'); chev.style.cssText = 'font-size:14px;color:#94a3b8;';
+        row.appendChild(name); row.appendChild(chev);
+        row.addEventListener('mouseenter', function () { cancelClose(); row.style.background = '#f0fdf4'; openSub(grp, row); });
+        row.addEventListener('mouseleave', function () { if (subOwner !== row) row.style.background = 'transparent'; });
+        row.addEventListener('click', function (e) { e.preventDefault(); openSub(grp, row); });   // click opens (touch, no hover)
+        menu.appendChild(row);
       });
+      menu.addEventListener('mouseenter', cancelClose);
+      menu.addEventListener('mouseleave', armClose);
       document.body.appendChild(menu);
       var r = trig.getBoundingClientRect();
-      var w = menu.offsetWidth || 300;
-      menu.style.top = Math.round(r.bottom + 4) + 'px';
+      var w = menu.offsetWidth || 220, h = menu.offsetHeight || 0;
+      var top = Math.min(r.bottom + 4, window.innerHeight - h - 8);   // clamp so the group menu itself never clips
+      if (top < 8) top = 8;
+      menu.style.top = Math.round(top) + 'px';
       menu.style.left = Math.round(Math.min(r.left, window.innerWidth - w - 8)) + 'px';
       trig.setAttribute('aria-expanded', 'true');
       document.addEventListener('mousedown', onDoc, true);
@@ -565,6 +770,11 @@
     return null;
   }
   function mount() {
+    // Roster gate (rank 1, named users only): non-roster never mounts. TRUE stops the poll.
+    if (!templateRosterAllowed()) return true;
+    // Umbrava permission gate: the templates only ever fill the note composer, and a user who may
+    // not add a note has no composer to fill. TRUE stops the mount poll. Fails OPEN when unknown.
+    if (!bwnCan('WorkOrderNote.AddNew')) return true;
     var existing = document.getElementById(BTN_ID);
     if (existing && existing.isConnected) return true;
     var search = noteSearchInput();
@@ -602,6 +812,8 @@
   var WO_BTN_ID = 'bwn-notes-wo-dd';
   function aiDraftPresent() { return !!document.getElementById('bwn-client-update-btn'); }
   function woMount() {
+    // Roster gate (rank 1, named users only): non-roster never mounts the standalone Templates button.
+    if (!templateRosterAllowed()) return true;
     // Stand our standalone button down whenever the AI script's Draft button is up (it renders the
     // merged flyout). Check the DOM, not just the bus flag: the AI script can pick up our load-time
     // broadcast without ever sending a req we hear, so the flag alone missed it and both mounted.
@@ -640,6 +852,7 @@
   // page uses woMount() for templates + mountSpoke() for the vendor tag. Returns true when nothing is
   // left to do so the poll can rest (run both WO mounts each tick - don't short-circuit one).
   function tick() {
+    // Templates gate on the roster inside mount()/woMount(); "Spoke with" is ungated. No rank gate.
     if (/dispatch-board/.test(location.pathname)) return mount();
     if (/\/work-orders\//.test(location.pathname)) return [woMount(), mountSpoke()].every(Boolean);
     return true;
