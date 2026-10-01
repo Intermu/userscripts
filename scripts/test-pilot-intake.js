@@ -314,6 +314,10 @@ A.eq('  PD on a light pole -> PD + NexRev override', tags('*PD** Customer damage
 A.eq('  lowercase "upd"/"pd" in prose is not PD', tags('please upd the pd sheet', 'OTHER'), []);
 A.eq('  Wi-Fi -> NOC', tags('Guest WiFi access point offline', 'OTHER'), ['call NOC']);
 A.eq('  Low Rise price mismatch -> Sunshine', tags('Low Rise Sign. Unleaded is showing the incorrect price', 'SIGNAGE STATIC - STATIC'), ['CALL SUNSHINE']);
+// 0.9.33, real PFJ 460 email: "high rise" describes the light poles, so no Sunshine line.
+A.eq('  "high rise light poles" -> NexRev only, NOT Sunshine', tags('Site has high rise light poles that are out we have confirmed proper voltage going up', ''), ['CALL NEXREV']);
+A.eq('  "high rise sign is dark" -> still Sunshine + NexRev', tags('high rise sign is dark', ''), ['CALL SUNSHINE', 'CALL NEXREV']);
+A.eq('  "mid-rise pricer" -> still Sunshine', tags('mid-rise not changing', ''), ['CALL SUNSHINE']);
 A.eq('  pricer not lighting -> Sunshine + NexRev', tags('Diesel pricer sign on canopy is not lighting up', 'D-BOX STATIC - STATIC'), ['CALL SUNSHINE', 'CALL NEXREV']);
 A.eq('  breaker for sunshine -> Sunshine', tags('*WOI*breaker #11 for sunshine keeps tripping', 'ELECTRICAL STATIC - STATIC'), ['CALL SUNSHINE']);
 A.eq('  canopy lights out -> NexRev', tags('Part of the diesel canopy lights are out', 'CANOPY STATIC - STATIC'), ['CALL NEXREV']);
