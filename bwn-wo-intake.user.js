@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         BWN WO Intake (Broadway National)
 // @namespace    broadwaynational.bwn
-// @version      0.9.31
+// @version      0.9.32
 // @downloadURL  https://raw.githubusercontent.com/Intermu/userscripts/main/bwn-wo-intake.user.js
 // @updateURL    https://raw.githubusercontent.com/Intermu/userscripts/main/bwn-wo-intake.user.js
 // @description  Drop a client PO/WO email (.msg or .eml) onto the Create Work Order modal and it prefills the fields. Pilot Travel Centers: from the email body - the store number is read whether it leads or follows the word "store" in the subject ("258 store Painting" as well as "Store 399, ...") and becomes the Umbrava location "PFJ 0258"; when the email carries no Asset Name the Trade is taken from the subject's own wording; and the Scope drops a bare-name salutation ("Ronny/Mike,") and stops at the Outlook signature table. Caleres (Famous Footwear / Corrigo): reads the attached WO PDF on-device for Trade, Scope, Priority, Due-By, Store, NTE. If a Caleres request has no WO PDF (image-only), it reads Store, City/State and Trade from the subject and the scope from the body (NTE + Priority stay manual - they live only in the images). Amazon (Fairmarkit RFQ): the buyer is Amazon.com, Inc. but the sender is the Fairmarkit e-bidding platform - reads the RFQ body (no PDF) for Site (matched by the Amazon site code e.g. PIT2/STL3, else the shipping address), RFQ #, Trade, Scope + line items; NTE and Priority stay manual because an RFQ carries no ceiling yet (we are the quoting supplier). The email carries no attachment - the full scope / any 'see attached file' lives on the Fairmarkit bid page - so it surfaces that RFQ link and warns you when the body defers to it. Per Amazon: Source PO # is set to the literal "Quote Request", Source Job # is set to the RFQ ID suffixed " (FM-AMZ)" (e.g. 2956102 (FM-AMZ)), Client DNE is set to 0.00, and WO Type is selected as Proposal in the create modal - all filled in the one pass (no post-Create tracking-number step). Selects Client, Location (address-verified), Trade and Priority by clicking the real dropdown option; fills Client DNE, Source Job # and Source PO #; warns you if the WO PDF shows a cancel/flag note. CW-Amazon (Cushman & Wakefield / FAMIS 360, from amazon@ilrs.360facility.net - a separate feed from Fairmarkit, so the client is "CW-Amazon"): reads the plain-text Case Summary for Site (matched by the exact site code = Umbrava locationNumber), Request ID (-> Source Job #; Source PO # is left blank per the client convention), Trade, Scope, Client DNE (from the PO/NTE amount in the Statement of Work, else 0.00) and Priority (the FAMIS P-code -> the client's "P<n> - ..." priority, or Scheduled PPM); it sets WO Type from the Type|Sub-Type line - a Request for Proposal -> Proposal, a preventive/PPM job -> Preventative, everything else -> Reactive. Then, after you Create the WO, it hands the email and its real attachments to BWN Drop Upload to attach them to the new WO's Documents - the sender's HTML signature graphics (logo, social icons) are left behind, identified by their MAPI hidden / MHTML-reference marks, or (new Outlook) by a Content-ID the body cites as <img src="cid:...">, rather than by size or filename. JLL-Amazon (Jones Lang LaSalle / CorrigoPro, from alerts@am.corrigopro.com - a separate feed again, so the client is "JLL-Amazon"): reads the "WORK ORDER #..." body for Site (matched by the exact property/site code = Umbrava locationNumber, e.g. BNA12/ATL11/DEN17), the CorrigoPro WO number (set as BOTH Source Job # and Source PO # per the client convention), Scope, Client DNE (the NTE, else 0.00) and Priority (the email's priority IS the Umbrava label - a PM job is "PM (Scheduled)"); it sets WO Type from the job kind - a PM (Scheduled) job -> Preventative, everything else -> Reactive. CW-Amazon via CorrigoPro (C&W Services on the CorrigoPro network, from alerts@am.corrigopro.com with subject "...received from C&W Services" - the SAME CorrigoPro format as JLL-Amazon but a different brand, so the client is still "CW-Amazon"): reads the "WORK ORDER #..." body for Site (the code in "Requested By: AMAZON <code>", e.g. IFM-JFK8 = Umbrava locationNumber), the CorrigoPro WO number (BOTH Source Job # and Source PO #), Scope (the Problem block), Trade (from the Problem "<Area> > <Issue>" head), Client DNE (the NTE, else 0.00), WO Type (a PM/preventive job -> Preventative, a proposal -> Proposal, else Reactive - the CorrigoPro Details "Type:" line is a ridealong and is ignored) and Priority (the Details "Priority:" value - "PM" -> "Scheduled PPM"). Transform SR Brands LLC (TransformCo / Sears / Kmart, sender @transformco.com): reads the free-text dispatch/quote email body for Location (the store number in the subject = the Umbrava locationNumber), the TransformCo WO/PO reference number (set as BOTH Source Job # and Source PO #), Client DNE (the NTE, with $1K/$2K shorthand expanded), Scope (the request body) and a best-effort Trade; WO Type is set to Reactive and Priority is left blank (the client's SLA tier is a manual coordinator pick). Reads everything in the browser; nothing is uploaded to any server. Best-effort: review every field before you click Create.
@@ -13,7 +13,7 @@
 
 (function () {
   'use strict';
-  var VER = '0.9.31';
+  var VER = '0.9.32';
   var FONT = "-apple-system,BlinkMacSystemFont,'Segoe UI','Helvetica Neue',Arial,sans-serif";
   console.info('[BWN WO INTAKE] v' + VER + ' - drop a PO / Amazon RFQ email (.msg/.eml) on Create Work Order to prefill + auto-attach to the new WO Documents (via Drop Upload); reads locally, nothing leaves the browser');
 
@@ -513,7 +513,11 @@
     // store phone and this label on one line ("(803) 868-6034\t Asset Information:"), so a pure
     // line-start anchor dropped the whole block. The required colon still blocks a mid-sentence decoy.
     var massetBlock = body.match(/(?:^|[\r\n\t])[ \t]*Asset Information[ \t]*:[ \t]*([\s\S]*?)(?:[\r\n]+[ \t]*(?:Description[ \t]*:|Dispatcher\b|Vendor\b)|$)/i);
-    var assetLines = massetBlock ? massetBlock[1].split(/\r?\n/).map(function (s) { return s.trim(); }).filter(Boolean).join('\n') : '';
+    var assetArr = massetBlock ? massetBlock[1].split(/\r?\n/).map(function (s) { return s.trim(); }).filter(Boolean) : [];
+    // Full block (warranty dates too) only on washer/dryer jobs - that is where the tech needs it.
+    // Every other asset keeps just the Asset Name, plus Model / Serial# when Pilot filled them in.
+    if (!isWasherDryer(out.assetName)) assetArr = assetArr.filter(function (l) { return /^Asset Name\s*:/i.test(l) || /^(Model|Serial#?)\s*:\s*\S/i.test(l); });
+    var assetLines = assetArr.join('\n');
     if (mdescText || assetLines) out.scope = [mdescText, assetLines ? 'Asset Information:\n' + assetLines : ''].filter(Boolean).join('\n\n').slice(0, 600);
     if (!out.scope) out.scope = genericBodyScope(body);   // free-text request body (Pilot: "Pump sign on light pole...")
     if (!out.scope) out.scope = subject.replace(/purchase order\s*:?\s*\d+/i, '').replace(/\s{2,}/g, ' ').trim().slice(0, 300);   // last resort: the routing subject
@@ -524,7 +528,52 @@
     // wrong confident trade is worse than a blank one (the "beam clamps" -> lamp -> Lighting trap).
     if (!out.trade) out.trade = amazonTrade(subject);
     out.client = clientFromDomain(senderEmail);
+    if (out.client === 'Pilot Travel Centers' || /\bPFJ\b|Pilot Store|Flying J/i.test(subject)) out._verbiage = pilotVerbiage(subject + '\n' + (mdescText || out.scope), out.assetName, out.location.replace(/\D/g, ''));
     return out;
+  }
+  // "PRESSURE WASHER" is a yard tool, not laundry.
+  function isWasherDryer(asset) { return /\b(washers?|dryers?)\b/i.test(asset || '') && !/pressure\s*washer/i.test(asset || ''); }
+  // Standing Pilot instructions appended under the intake scope, by what the request is about.
+  // Kept OUT of out.scope on purpose: sanitizeWo strips phone numbers, and these ARE phone numbers.
+  var PILOT_PD = 'Technicians must provide a detailed description of work performed, total hours worked, labor rates, and material used (with quantities, unit prices, and receipts if available). Include travel time with receipts, and document any subcontractor involvement with full breakdowns. Photos of damage and completed repairs are required. Any overtime, safety concerns, or special equipment used must be noted. Incomplete documentation may delay invoice payment.';
+  var PILOT_WIFI = 'While on site, technicians must call NOC (Network Operations Center) to troubleshoot Wi-Fi Access Points. NOC 865-474-2837. Must obtain name of the NOC Representative and obtain diagnosis, before leaving site.';
+  var PILOT_PRICER = 'PLEASE CALL SUNSHINE TO TROUBLESHOOT IF POWER IS RESTORED AND PRICES DO NOT MATCH 816-387-4216 OR 800-821-9013';
+  // Exterior-lighting control (EMS) per PFJ store, from Pilot's EMS list (Mike, 2026-10-01, 668 stores).
+  // Freedom (NexRev) is the majority and the default, so only the OTHER systems are listed here.
+  // ponytail: a store missing from the list gets NexRev; update these strings when Pilot's list changes.
+  var PILOT_EMS_LIST = {
+    Gridpoint: '3 12 21 43 49 50 60 62 75 76 77 82 87 94 114 131 144 150 152 165 167 199 219 224 226 234 237 249 261 266 267 271 280 281 282 290 296 299 301 312 319 336 337 339 340 343 352 358 365 369 375 385 386 404 408 416 430 438 441 457 468 471 476 485 489 493 503 518 595 602 603 604 605 606 607 608 609 611 614 621 623 624 625 626 627 628 630 631 632 633 634 636 638 639 640 642 643 644 647 650 652 653 655 656 657 658 659 660 661 662 663 664 665 666 667 668 669 672 673 674 675 676 677 678 682 683 684 686 687 690 692 693 694 695 696 698 699 700 701 702 703 704 705 707 708 709 710 711 713 714 716 720 722 723 724 725 727 728 729 730 733 734 735 737 739 740 742 743 744 746 747 748 749 750 752 754 758 760 761 762 764 765 768 770 772 773 774 775 777 784',
+    Honeywell: '51 97 171 304 305 412 433 439 443 449 467 469 470 472 474 475 477 481 488 491 492 498 504 517 550 552 553 554 557 559 568 571 572 575 576 580 581 583 584 586 589 590 592 593 594 596 597 599 649 685 875 1001 1002 1003 1004 1005 1006 1012 1017 1019 1020 1023 1024 1025 1026 1027 1028 1030 1033 1041 1042 1046 1047 1051 1057 1059 1061 1070 1080 1082 1083 1086 1096',
+    None: '67 69 73 88 104 106 112 126 129 132 138 158 187 191 193 215 217 222 240 278 315 316 362 376 415 447 1547 4561 7996',
+    Trane: '105 121 133 173 208',
+    Dencor: '405 432 435',
+    Emerson: '1021'
+  };
+  var PILOT_EMS = Object.create(null);
+  Object.keys(PILOT_EMS_LIST).forEach(function (k) { PILOT_EMS_LIST[k].split(' ').forEach(function (n) { PILOT_EMS[n] = k; }); });
+  function pilotLights(store) {
+    return PILOT_LIGHTS[PILOT_EMS[String(parseInt(store, 10))] || 'Freedom'];
+  }
+  // Support lines per EMS manufacturer (Mike, 2026-10-01).
+  var PILOT_LIGHTS = {
+    Freedom: 'TO OVERRIDE EXTERIOR LIGHTING PLEASE CALL NEXREV 866-601-5520',
+    Gridpoint: 'TO OVERRIDE EXTERIOR LIGHTING PLEASE CALL GRIDPOINT 866-800-8906',
+    Honeywell: 'TO OVERRIDE EXTERIOR LIGHTING PLEASE CALL HONEYWELL 1-800-845-3785 (HAVE THE CONTROLLER MODEL, SOFTWARE AND PANEL DETAILS READY)',
+    Trane: 'TO OVERRIDE EXTERIOR LIGHTING PLEASE CALL TRANE 1-833-298-3493 (REQUEST CONTROLS/BAS OR SERVICE DISPATCH)',
+    Dencor: 'TO OVERRIDE EXTERIOR LIGHTING PLEASE CALL DENCOR (303) 922-1888 (ASK FOR SUPPORT ON THE ENERGY-MANAGEMENT CONTROLLER AND EXTERIOR-LIGHTING SCHEDULE/OVERRIDE)',
+    Emerson: 'TO OVERRIDE EXTERIOR LIGHTING PLEASE CALL EMERSON (APPLETON) 1-800-621-1506 OR EMAIL appleton.technicalservices@emerson.com',
+    None: 'NO EMS AT THIS SITE - LOOK FOR PHOTOCELLS OR TIMERS THAT CONTROL THE LIGHTING. IF NONE CAN BE LOCATED, BYPASS THE CONTACTOR TO OVERRIDE LIGHTING PER PANEL LABELING.'
+  };
+  function pilotVerbiage(text, asset, store) {
+    var t = String(text || ''), a = String(asset || ''), out = [];
+    // PD = Property Damage. Uppercase-only "PD" so a word like "upd" or "pd" in prose never trips it.
+    if (/(^|[^A-Za-z])PD([^A-Za-z]|$)/.test(t) || /property damage/i.test(t)) out.push(PILOT_PD);
+    if (/\bwi-?\s?fi\b|access points?\b/i.test(t)) out.push(PILOT_WIFI);
+    if (/\b(high|mid|low)[\s-]?rise\b|\bmonument\b|\bpric(e|er|es|ing)\b|\bsunshine\b/i.test(t) || /pricer/i.test(a)) out.push(PILOT_PRICER);
+    var outdoor = /LIGHTING OUT ?SIDE|CANOPY|SIGN|PRICER/i.test(a) || /\b(canopy|canopies|poles?|pole ?heads?|lot|parking|wall ?packs?|flood|stadium|exterior|outside|building|entrance|entry|exit|signs?|logo|panaflex|pricer)\b/i.test(t);
+    var dark = /\blight(s|ing)?\b|\blit\b|illuminat|\bdark\b|\bdim\b|\bbulbs?\b|\blamps?\b/i.test(t) || (/\b(signs?|logo|panaflex)\b/i.test(t) && /\b(out|not working)\b/i.test(t));
+    if (outdoor && dark) out.push(pilotLights(store));
+    return out.join('\n\n');
   }
   // Image-based Caleres/Corrigo request: NO WO PDF - the detail is in the email SUBJECT + body
   // (e.g. subject "39089 Birmingham, MI - Allen Edmonds Lighting", body "...has 8 lights out").
@@ -1317,6 +1366,7 @@
     var done = [], picked = [], hint = [];
     sanitizeWo(wo);                                                     // before ANY of it is rendered, stored or filled
     if (wo._warn) toast('⚠ Heads up: ' + wo._warn, 18000, '#8b1a1a');   // cancel/flag on the WO PDF - warn before Create
+    if (wo._verbiage) wo.scope = [wo.scope, wo._verbiage].filter(Boolean).join('\n\n');   // after sanitize: our own text, phone numbers intended
     function setV(sel, v, label) { var el = root.querySelector(sel); if (el && v) { setNativeValue(el, v); done.push(label); } }
     setV('textarea#scopeOfWork', wo.scope, 'Scope');
     setV('input#sourcePurchaseOrderNumber', wo.po, 'Source PO #');

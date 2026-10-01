@@ -39,7 +39,7 @@ var BLOCK = slice('var CLIENT_BY_DOMAIN = {', '// Image-based Caleres/Corrigo re
 var TRADE = slice('function amazonTrade(', '  function extractAmazon(', 'shared keyword trade map');
 var exportLine = '\n;this.extractWo=extractWo;this.genericBodyScope=genericBodyScope;' +
   'this.assetToTrade=assetToTrade;this.clientFromDomain=clientFromDomain;' +
-  'this.extractCaleres=extractCaleres;this.amazonTrade=amazonTrade;';
+  'this.extractCaleres=extractCaleres;this.amazonTrade=amazonTrade;this.pilotVerbiage=pilotVerbiage;this.isWasherDryer=isWasherDryer;';
 var api = {};
 vm.runInNewContext(BLOCK + '\n' + TRADE + exportLine, api);
 
@@ -288,6 +288,52 @@ A.ok('  genericBodyScope is tried before the subject fallback',
   'ordering of the two fallbacks drifted');
 A.ok('  image-only path still keeps the subject fallback',
   full.indexOf("last resort: the routing subject") >= 0);
+
+// ---- 0.9.32: asset block trimmed off non-laundry jobs + Pilot standing verbiage ----------------
+// Mike, 2026-10-01: the full Asset Information block belongs on washer/dryer WOs only; every other
+// asset keeps the Asset Name, plus Model / Serial# when filled. Grounded on 80+ real PFJ .msg drops.
+console.log('\n# 0.9.32: non-laundry asset keeps Name (+ Model/Serial# when present), blanks + warranty dropped');
+function pfjBody(asset, model, serial, desc) {
+  return ['Store Information:', 'PFJ#: 258 Pilot', '(555) 555-0150\t Asset Information:',
+    'Asset Name: ' + asset, 'Model: ' + model, 'Serial#: ' + serial,
+    'Parts Warranty End Date: 1/1/2000', 'Labor Warranty End Date: \t', 'Description:', desc + '\t ', 'Dispatcher', 'Pat Roe'].join('\r\n');
+}
+var PSUBJ = 'Purchase Order: 170101999100 PFJ Store: 599-Travel Center';
+var elec = api.extractWo(PSUBJ, pfjBody('ELECTRICAL STATIC - STATIC', '', '', 'All power down'), SENDER);
+A.eq('  static asset -> Asset Name only', elec.scope, 'All power down\n\nAsset Information:\nAsset Name: ELECTRICAL STATIC - STATIC');
+var frz = api.extractWo(PSUBJ, pfjBody('WALK IN FREEZER', '', '016507', 'Ice build up on the floor'), SENDER);
+A.eq('  serial kept, blank model + warranty dropped', frz.scope, 'Ice build up on the floor\n\nAsset Information:\nAsset Name: WALK IN FREEZER\nSerial#: 016507');
+var pw = api.extractWo(PSUBJ, pfjBody('PRESSURE WASHER', 'VX30406G', '', 'Pull string broke'), SENDER);
+A.eq('  PRESSURE WASHER is not laundry -> trimmed', pw.scope, 'Pull string broke\n\nAsset Information:\nAsset Name: PRESSURE WASHER\nModel: VX30406G');
+A.ok('  WASHERS / DRYER - LEFT / WASHER DRYER COMBO count as laundry', api.isWasherDryer('WASHERS') && api.isWasherDryer('DRYER - LEFT') && api.isWasherDryer('WASHER DRYER COMBO - 1'));
+
+console.log('\n# 0.9.32: Pilot standing verbiage, by what the request is about');
+function tags(text, asset) { var v = api.pilotVerbiage(text, asset); return ['Technicians must', 'call NOC', 'CALL SUNSHINE', 'CALL NEXREV'].filter(function (k) { return v.indexOf(k) !== -1; }); }
+A.eq('  **PD** -> property-damage documentation', tags('**PD** Chain link fence ran over', 'STORE STATIC - STATIC'), ['Technicians must']);
+A.eq('  PD on a light pole -> PD + NexRev override', tags('*PD** Customer damaged new light pole', 'LIGHTING OUT SIDE STATIC - STATIC'), ['Technicians must', 'CALL NEXREV']);
+A.eq('  lowercase "upd"/"pd" in prose is not PD', tags('please upd the pd sheet', 'OTHER'), []);
+A.eq('  Wi-Fi -> NOC', tags('Guest WiFi access point offline', 'OTHER'), ['call NOC']);
+A.eq('  Low Rise price mismatch -> Sunshine', tags('Low Rise Sign. Unleaded is showing the incorrect price', 'SIGNAGE STATIC - STATIC'), ['CALL SUNSHINE']);
+A.eq('  pricer not lighting -> Sunshine + NexRev', tags('Diesel pricer sign on canopy is not lighting up', 'D-BOX STATIC - STATIC'), ['CALL SUNSHINE', 'CALL NEXREV']);
+A.eq('  breaker for sunshine -> Sunshine', tags('*WOI*breaker #11 for sunshine keeps tripping', 'ELECTRICAL STATIC - STATIC'), ['CALL SUNSHINE']);
+A.eq('  canopy lights out -> NexRev', tags('Part of the diesel canopy lights are out', 'CANOPY STATIC - STATIC'), ['CALL NEXREV']);
+A.eq('  entrance signs out -> NexRev', tags('exit and entrance signs 2 of them are out completely', 'SIGNAGE STATIC - STATIC'), ['CALL NEXREV']);
+A.eq('  stop sign install (no lighting) -> nothing', tags('Ticket to install speed limit sign and stop signs', 'SIGNAGE STATIC - STATIC'), []);
+A.eq('  cooler door lights (interior) -> nothing', tags('lights for cooler doors has came in', 'DOORS, COOLER STATIC - STATIC'), []);
+A.eq('  washer -> nothing', tags('both of our washers are down', 'WASHER'), []);
+var LIT = 'canopy lights are out', LA = 'CANOPY STATIC - STATIC';
+A.ok('  EMS Freedom store 258 -> NexRev', api.pilotVerbiage(LIT, LA, '258').indexOf('NEXREV 866-601-5520') !== -1);
+A.ok('  EMS Gridpoint store 605 -> GridPoint 866-800-8906', api.pilotVerbiage(LIT, LA, '0605').indexOf('GRIDPOINT 866-800-8906') !== -1);
+A.ok('  EMS Honeywell store 559 -> Honeywell 1-800-845-3785', api.pilotVerbiage(LIT, LA, '559').indexOf('HONEYWELL 1-800-845-3785') !== -1);
+A.ok('  EMS None store 67 -> photocell / timer / bypass contactor', /NO EMS AT THIS SITE.*PHOTOCELLS OR TIMERS.*BYPASS THE CONTACTOR/.test(api.pilotVerbiage(LIT, LA, '67')));
+A.ok('  EMS Trane 105 / Dencor 405 / Emerson 1021 -> their support lines', api.pilotVerbiage(LIT, LA, '105').indexOf('TRANE 1-833-298-3493') !== -1 && api.pilotVerbiage(LIT, LA, '405').indexOf('DENCOR (303) 922-1888') !== -1 && api.pilotVerbiage(LIT, LA, '1021').indexOf('EMERSON (APPLETON) 1-800-621-1506') !== -1);
+A.ok('  store not on the list -> NexRev default', api.pilotVerbiage(LIT, LA, '99999').indexOf('NEXREV') !== -1);
+A.ok('  extractWo passes the PFJ store through (PFJ 0605 -> GridPoint)',
+  api.extractWo('Purchase Order: 170101999101 PFJ Store: 605-Travel Center', pfjBody('LIGHTING OUT SIDE STATIC - STATIC', '', '', 'lot light out').replace('PFJ#: 258', 'PFJ#: 605'), SENDER)._verbiage.indexOf('GRIDPOINT') !== -1);
+A.ok('  verbiage rides on _verbiage, NOT scope (sanitizeWo would strip its phone numbers)',
+  elec._verbiage === '' && api.extractWo(PSUBJ, pfjBody('CANOPY STATIC - STATIC', '', '', 'canopy lights are out'), SENDER)._verbiage.indexOf('866-601-5520') !== -1);
+A.eq('  non-Pilot sender + subject -> no verbiage', api.extractWo('Store 12 lights out', 'canopy lights are out', 'a@staples.com')._verbiage, undefined);
+A.ok('  fillWo appends _verbiage AFTER sanitizeWo', /sanitizeWo\(wo\);[\s\S]{0,600}if \(wo\._verbiage\)[^\n]*\n[\s\S]{0,400}setV\('textarea#scopeOfWork'/.test(full));
 
 // ---- Caleres priority comes ENTIRELY from the SUBJECT word, not the PDF ------
 // Ground truth: Mike, 2026-08-17. Caleres subjects use words (never P-codes): EMERGENCY -> Priority 1,
