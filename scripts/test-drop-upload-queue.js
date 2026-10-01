@@ -94,17 +94,42 @@ var Q = load(full);
 // dedupNewPairs as prevRaw, so a retry / second drop of the same email is not filed twice.
 (function () {
   var rows = [
-    { displayFileName: "RE_ Store 81.msg", fileSize: "146432", isArchived: false },
-    { displayFileName: "RE_ Store 81.msg", fileSize: "223232" },
+    { displayFileName: "RE_ Store 81.msg", fileSize: "146432", description: "Sam: on it", isArchived: false },
+    { displayFileName: "RE_ Store 81.msg", fileSize: "223232", description: "Sam: done" },
     { displayFileName: "old.pdf", fileSize: "10", isArchived: true },
     null
   ];
   var sigs = Q.woDocSigs(rows);
   A.eq("archived + null rows dropped", sigs.length, 2);
-  var r = Q.dedupNewPairs(sigs, [F("RE_ Store 81.msg", 146432), F("RE_ Store 81.msg", 3352064), F("old.pdf", 10)], [D("dup"), D("newReply"), D("archivedName")]);
+  var r = Q.dedupNewPairs(sigs, [F("RE_ Store 81.msg", 146432), F("RE_ Store 81.msg", 3352064), F("old.pdf", 10)], [E("Sam: on it"), E("Sam: new"), D("archivedName")]);
   A.eq("string fileSize matches numeric File.size", r.dupes, 1);
-  A.eq("same-name reply with new size kept; archived doc does not block", r.files, [D("newReply"), D("archivedName")]);
+  A.eq("same-name reply with new size kept; archived doc does not block", r.files, [E("Sam: new"), D("archivedName")]);
   A.eq("off-schema payload = no sigs (fail-open)", Q.woDocSigs(undefined), []);
+})();
+
+// 1.33.1: .msg is padded to 512-byte sectors, so a NEW reply in the thread can match an earlier one on
+// name AND size (W-381605 holds two different 113152-byte "RE_ Purchase Order..." emails). For .msg the
+// body-built Description must match too; a .msg that did not parse is never a dupe. The re-drop case
+// below is real: on 2026-10-01 the same 39936-byte reply was re-dragged from Outlook (fresh bytes each
+// drag, same parsed email) and must stay skipped.
+function E(desc) { return { email: {}, desc: desc }; }                 // fake described, parsed email
+(function () {
+  var N = "RE QUOTE APPROVEDTracking # 1266826  Pilot Travel Centers  Skippers VA  STANDARD 48 HRS.msg";
+  var sigs = Q.woDocSigs([{ displayFileName: N, fileSize: "39936", description: "Lisa Porzelt: Following up on the below. Please advise." }]);
+  var r = Q.dedupNewPairs(sigs, [F(N, 39936)], [E("Stuart: Shipping tomorrow.")]);
+  A.eq("new reply, same name+size, different body = kept", r.files.length, 1);
+  r = Q.dedupNewPairs(sigs, [F(N, 39936)], [E("Lisa Porzelt:  Following up on the below.\nPlease advise.")]);
+  A.eq("same email re-dropped = skipped (whitespace-normalised)", r.dupes, 1);
+  r = Q.dedupNewPairs(sigs, [F(N, 39936)], [{ desc: "Lisa Porzelt: Following up on the below. Please advise." }]);
+  A.eq("unparsed .msg is never a dupe (fail-open)", r.files.length, 1);
+  r = Q.dedupNewPairs([F("a.msg", 512)], [F("a.msg", 512), F("a.msg", 512)], [E("x"), E("y")], [E("x")]);
+  A.eq("queue merge uses prevFiles desc", r.files, [E("y")]);
+  A.eq("non-.msg still name+size only", Q.dedupNewPairs(sigs, [F("p.pdf", 1)], [D("p")], undefined).dupes +
+    Q.dedupNewPairs([F("p.pdf", 1)], [F("p.pdf", 1)], [{ desc: "other" }], [{ desc: "one" }]).dupes, 1);
+  var G = "return isMsgFile(f) ? fileSig(f) + '|'";
+  if (full.indexOf(G) === -1) throw new Error("negative control: .msg desc sig not found - update this harness");
+  r = load(full.replace(G, "return false ? fileSig(f) + '|'")).dedupNewPairs(sigs, [F(N, 39936)], [E("Stuart: Shipping tomorrow.")]);
+  A.ok("desc guard defeated -> the W-381605 reply is wrongly skipped again", r.dupes === 1, "got dupes=" + r.dupes);
 })();
 
 // Negative control: woDocSigs must honour isArchived.
@@ -150,7 +175,7 @@ var pend = [];
 function t(name, pr, want) { pend.push(pr.then(function (v) { A.eq(name, v, want); }, function (e) { A.ok(name, false, 'rejected: ' + e); })); }
 (function () {
   var n = 0, gql = function (q, v) { n++; A.eq('read is WO-scoped Int', v, { n: 370534 }); A.ok('read is a query, not a mutation', /^query /.test(q)); return Promise.resolve(ROWS); };
-  t('happy path returns sigs', loadRead({ dropUploadWoDedupe: true }, gql).readWoDocSigs('370534'), [{ name: 'a.msg', size: 5 }]);
+  t('happy path returns sigs', loadRead({ dropUploadWoDedupe: true }, gql).readWoDocSigs('370534'), [{ name: 'a.msg', size: 5, desc: '' }]);
   t('no WO number -> [] (no read)', loadRead({ dropUploadWoDedupe: true }, gql).readWoDocSigs(0), []);
   t('killed -> [] (no read)', loadRead({ dropUploadWoDedupe: false }, gql).readWoDocSigs('370534'), []);
   pend.push(Promise.resolve().then(function () { A.eq('read skipped for no-WO and killed', n, 1); }));
