@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         BWN Bid-Out (Broadway National)
 // @namespace    broadwaynational.bwn
-// @version      0.28.2
+// @version      0.29.0
 // @downloadURL  https://raw.githubusercontent.com/Intermu/userscripts/main/bwn-bid-out.user.js
 // @updateURL    https://raw.githubusercontent.com/Intermu/userscripts/main/bwn-bid-out.user.js
 // @description  Email RFP to outside / net-new vendors, launched from a caret on Umbrava's own "See Who Is Available" button (network-vendor bidding stays native - no separate Bid-Out button). The caret menu opens the tracked email RFP wizard: finds net-new vendors nearby through Google Places, looks up their emails via the BWN scrape-contacts function, takes pasted outside addresses, and can still include assignable Umbrava vendors in the same email. You pick who's included, then review the exact recipient list and the rendered email before anything sends. Send from your own mailbox via the SWA send-bid function (Microsoft Graph), or open a plain Outlook draft. Vendors are BCC'd; nothing sends until you click Send. Network access is limited to Umbrava (same-origin), Google Places, and your SWA host.
@@ -20,7 +20,7 @@
 (function () {
   'use strict';
 
-  var VER = '0.28.2';
+  var VER = '0.29.0';
   console.info('[BWN BID-OUT] v' + VER + ' - Build Requests wizard (WO details -> select vendors -> review -> sent) · Umbrava vendors + Places net-new discovery + email scrape · one-click Graph send via SWA (Outlook-draft fallback) · sent-state flip persists bid-sent + GM baseline per WO');
 
   var COMPANY_ADDR = 'Broadway National Group, 100 Davids Dr, Hauppauge, NY 11788';
@@ -35,6 +35,12 @@
   var HVAC_BENCH_URL = 'https://green-stone-0717dab0f.7.azurestaticapps.net/api/hvac-benchmark';
   var LOGO_SRC = 'https://raw.githubusercontent.com/Intermu/userscripts/main/assets/bwn-logo.png'; // hosted with the scripts (source repo); raw.githubusercontent serves image/png, renders in email
   var COMPANY_PHONE = '1.631.737.3140';
+  var SUPPRESS_URL = SEND_URL.replace(/send-bid$/, 'bid-suppress');   // same SWA host as send
+  // Client brand terms that must never reach a vendor (replaced with "[site]"). The SWA keeps a
+  // matching default list (BID_BLOCKED_TERMS) and rejects a send that still contains one - when you
+  // extend this list, extend that one too. Bare "Pilot" / "CAP" are deliberately NOT here
+  // ("pilot light" false positive); longest-first ordering is applied at use.
+  var BID_BRAND_TERMS = ['Pilot Travel Centers', 'Pilot Travel Center', 'Pilot Flying J', 'Flying J', 'PFJ', 'CrossAmerica Partners', 'CrossAmerica', 'Primark'];
 
   // ---- Umbrava in-page GraphQL (same-origin, Auth0 bearer) -------------------
   // Token picked by CONTENT, not just key: the audience-keyed Auth0 cache slot transiently
@@ -119,6 +125,118 @@
     });
     return out;
   }
+
+  // ---- Vendor-facing scrub + do-not-contact (sliced by scripts/test-bid-out-scrub.js) ----------
+  // HARD RULE: vendor-facing content is city/state only - no client name, street address or zip.
+  // scrubVendorText is applied by BOTH body builders on every call, so the preview render and the
+  // send payload are each built from a freshly scrubbed scope (never cached preview HTML).
+  // Brand matching tolerates separator variants: a word break (or a camelCase break) in a term matches
+  // zero or more of whitespace / nbsp / hyphen / unicode dashes / underscore, so "FlyingJ", "Flying-J",
+  // "Pilot-Flying-J", "Cross-America", "Nex Rev" all hit. A bare word ("flying", "pilot") never does.
+  var BID_JOIN = '[\\s_\\-' + String.fromCharCode(0xa0, 0x2010) + '-' + String.fromCharCode(0x2015) + ']*';
+  function brandAlt(terms) {
+    return terms.slice().sort(function (a, b) { return b.length - a.length; }).map(function (t) {
+      return t.replace(/([a-z])([A-Z])/g, '$1 $2').split(/\s+/).map(function (w) { return w.replace(/[.*+?^${}()|[\]\\]/g, '\\$&'); }).join(BID_JOIN);
+    }).join('|');
+  }
+  // Replace every brand term (whole-word, case-insensitive, longest first) with `repl`.
+  function scrubBrands(s, repl) {
+    return String(s == null ? '' : s).replace(new RegExp('(^|[^A-Za-z0-9])(?:' + brandAlt(BID_BRAND_TERMS) + ')(?![A-Za-z0-9])', 'gi'),
+      function (m, pre) { return pre + repl; });
+  }
+  var BID_NEXREV_RE = new RegExp(brandAlt(['NexRev']), 'i');
+  function scrubVendorText(text, wo) {
+    var s = String(text == null ? '' : text).replace(/\r\n?/g, '\n');
+    // Internal-instruction lines: any NexRev variant, or override + call (either order). A wrapped
+    // instruction (override on one line, the call/NexRev on the next) drops both lines.
+    var src = s.split('\n'), drop = [];
+    function ov(l) { return /\boverride\b/i.test(l); }
+    function cl(l) { return /\bcall\b/i.test(l); }
+    src.forEach(function (ln, i) {
+      if (BID_NEXREV_RE.test(ln) || (ov(ln) && cl(ln))) drop[i] = true;
+      if (ov(ln) && i + 1 < src.length && (cl(src[i + 1]) || BID_NEXREV_RE.test(src[i + 1]))) { drop[i] = true; drop[i + 1] = true; }
+    });
+    s = src.filter(function (ln, i) { return !drop[i]; }).join('\n');
+    s = scrubBrands(s, '[site]');
+    var a = (wo && wo.address) || {};
+    var street = String(a.addressLine1 || a.street || a.line1 || '').trim();
+    if (street.length >= 4) {
+      s = s.replace(new RegExp(street.replace(/[.*+?^${}()|[\]\\]/g, '\\$&').replace(/\s+/g, '\\s+') + '[, \\t]*', 'gi'), '');
+    }
+    var zip = String(a.postalCode || a.zip || '').split('-')[0].trim();
+    if (/^\d{5}$/.test(zip)) s = s.replace(new RegExp('\\s*\\b' + zip + '(?:-\\d{4})?\\b', 'g'), '');
+    s = s.split('\n').map(function (ln) {
+      return ln.replace(/[ \t]{2,}/g, ' ').replace(/\s+,/g, ',').replace(/,(\s*,)+/g, ',').replace(/^[,;:\s]+/, '').trim();
+    }).join('\n');
+    return s.replace(/\n{3,}/g, '\n\n').trim();
+  }
+
+  // Every free-text field that reaches a vendor, scrubbed in one place. Both body builders call this
+  // first, so HTML and plain text cannot diverge; returns a copy (never mutates openState's raw text).
+  function scrubReq(req, wo) {
+    var r = {};
+    Object.keys(req).forEach(function (k) { r[k] = req[k]; });
+    ['scope', 'addl', 'asset', 'history', 'subject', 'contactName'].forEach(function (k) {
+      if (typeof r[k] === 'string') r[k] = scrubVendorText(r[k], wo);
+    });
+    return r;
+  }
+
+  // Recipient list from the three sources. A do-not-contact address (flagged prospect OR in the
+  // local `sup` set filled from bid-suppress check/add) is NEVER a recipient, whatever the source.
+  function recipientList(state, sup) {
+    var recips = [], seen = {};
+    sup = sup || {};
+    function picked(email) { var k = email.toLowerCase(); return (k in (state.picked || {})) ? state.picked[k] : true; }
+    function add(email) {
+      if (!email) return; var k = email.toLowerCase();
+      if (sup[k] || seen[k]) return; seen[k] = 1; recips.push({ email: email });
+    }
+    (state.rowVendors || []).forEach(function (v) { if (v.email && picked(v.email)) add(v.email); });
+    (state.netNew || []).forEach(function (l) { if (l.email && !l.dnc && picked(l.email)) add(l.email); });
+    parseEmails(state.inviteText || '').forEach(add);
+    return recips;
+  }
+
+  var suppressedSet = {};   // email(lc) -> 1; filled from bid-suppress check/add results
+  function suppressCall(body) {
+    var key = GM_getValue('ingest_key', '');
+    if (!key) return Promise.resolve(null);
+    body.userToken = authToken();
+    return gmPost(SUPPRESS_URL, { 'Content-Type': 'application/json', 'x-bwn-key': key }, body, 30000).then(function (r) {
+      if (r.status === 200 && r.json) return r.json;
+      console.info('[BWN BID-OUT] bid-suppress ' + body.action + ' not available (HTTP ' + r.status + ') - proceeding without client-side do-not-contact filtering; the server still drops them');
+      return null;
+    }).catch(function (e) {
+      console.info('[BWN BID-OUT] bid-suppress ' + body.action + ' failed (' + (e && e.message) + ') - proceeding without client-side filtering; the server still drops them');
+      return null;
+    });
+  }
+  // -> array of suppressed addresses (lowercase); [] on any error/404. Also records them locally.
+  function suppressCheck(emails) { return suppressVerify(emails).then(function (r) { return r.suppressed; }); }
+  // Same call, but says whether the list was actually consulted: { ok, suppressed }. A path the server
+  // cannot backstop (the mailto Outlook draft) uses ok === false to fail CLOSED.
+  function suppressVerify(emails) {
+    if (!emails || !emails.length) return Promise.resolve({ ok: true, suppressed: [] });
+    return suppressCall({ action: 'check', emails: emails }).then(function (j) {
+      var good = !!(j && Array.isArray(j.suppressed));
+      return { ok: good, suppressed: noteSuppressed(good ? j.suppressed : []) };
+    });
+  }
+  // Drop every address in the local suppressed set (case-insensitive) from a bcc array.
+  function dropSuppressed(bcc) { return (bcc || []).filter(function (e) { return !suppressedSet[String(e).toLowerCase()]; }); }
+  function noteSuppressed(arr) {
+    var out = [];
+    (arr || []).forEach(function (e) { var k = String(e || '').toLowerCase(); if (k) { suppressedSet[k] = 1; out.push(k); } });
+    return out;
+  }
+  function suppressAdd(addr) {
+    return suppressCall({ action: 'add', emails: [addr], note: 'marked in Bid-Out' }).then(function (j) {
+      if (!j) return false;
+      suppressedSet[String(addr).toLowerCase()] = 1; return true;
+    });
+  }
+  // ---- end vendor-facing scrub + do-not-contact
 
   // ---- Net-new discovery: Google Places (own key) + our SWA email scraper -----
   function gmPost(url, headers, bodyObj, timeoutMs) {
@@ -531,7 +649,8 @@
   function attachExtOf(name) { var m = /\.([A-Za-z0-9]{1,8})$/.exec(String(name || '')); return m ? m[1].toLowerCase() : ''; }
   function attachSafeName(name) {
     var ext = attachExtOf(name);
-    var base = String(name || '').replace(/\.[A-Za-z0-9]{1,8}$/, '').replace(/[^A-Za-z0-9 ._()\-]/g, '_').replace(/\s+/g, ' ').trim() || 'attachment';
+    var base = String(name || '').replace(/\.[A-Za-z0-9]{1,8}$/, '').replace(/[^A-Za-z0-9 ._()\-]/g, '_').replace(/\s+/g, ' ').trim();
+    base = scrubBrands(base, 'site').trim() || 'attachment';   // the filename reaches the vendor too
     return base + '.' + ext;
   }
   function attachHumanSize(n) { n = +n || 0; return n >= 1000000 ? (Math.round(n / 100000) / 10 + ' MB') : (Math.max(1, Math.round(n / 1000)) + ' KB'); }
@@ -554,11 +673,12 @@
   // Plain-text fallback body (Outlook draft). Mirrors the HTML: honors the include toggles
   // + additional info, city/state only (NO client name or street address - hard rule).
   function buildBidEmail(wo, recipients, req) {
+    req = scrubReq(req, wo);
     var me = actor();
     var inc = req.include || {};
-    var tradeLbl = (wo.trades || []).map(function (t) { return t.name; }).join(', ') || 'Service';
+    var tradeLbl = scrubVendorText((wo.trades || []).map(function (t) { return t.name; }).join(', '), wo) || 'Service';
     var cityState = wo.address ? ((wo.address.city || '') + (wo.address.state ? ', ' + wo.address.state : '')) : '';
-    var subject = req.subject || bidSubject(wo, req);
+    var subject = scrubVendorText(req.subject || bidSubject(wo, req), wo);
     var L = [];
     L.push('Hello,');
     L.push('');
@@ -574,13 +694,14 @@
     if (inc.travel !== false && req.travelRate) L.push('Travel Rate: $' + req.travelRate + ' / hr');
     if (inc.rate !== false && req.rate) L.push('Rate: $' + req.rate + ' / hr');
     if (inc.reference !== false) L.push('Reference: Tracking #' + (wo.trackingNumber || ''));
-    L.push('Scope: ' + (req.scope || wo.scopeOfWork || ''));
+    L.push('Scope: ' + (req.scope || scrubVendorText(wo.scopeOfWork || '', wo)));
     if ((req.asset || '').trim()) { L.push(''); L.push('Asset / equipment: ' + req.asset.trim()); }
     if (req.benchmark && req.benchmark.annual != null) { L.push(''); L.push(hvacPriceLineText(req.benchmark)); }
     if ((req.history || '').trim()) { L.push(''); L.push('Site / service history: ' + req.history.trim()); }
     var addl = (req.addl || '').trim();
     if (addl) { L.push(''); L.push('Additional information: ' + addl); }
-    if (inc.service !== false && (wo.serviceInstructions || '').trim()) { L.push(''); L.push('Service instructions: ' + wo.serviceInstructions.trim()); }
+    var svcT = scrubVendorText(wo.serviceInstructions || '', wo);
+    if (inc.service !== false && svcT) { L.push(''); L.push('Service instructions: ' + svcT); }
     if (req.benchmark && req.benchmark.list && req.benchmark.list.length) { L.push(''); L.push(hvacFullListText(req.benchmark)); }
     if (req.rateOffer) { L.push(''); L.push('Please include your current rate offer (labor + trip rates).'); }
     L.push('');
@@ -682,16 +803,17 @@
     var bits = [];
     if (inc.trades !== false && tl) bits.push(tl);
     if (inc.location !== false && cs) bits.push(cs);
-    return 'Request for Pricing' + (bits.length ? ': ' + bits.join(' - ') : '') + ' (Ref #' + (wo.trackingNumber || '') + ')';
+    return scrubVendorText('Request for Pricing' + (bits.length ? ': ' + bits.join(' - ') : '') + ' (Ref #' + (wo.trackingNumber || '') + ')', wo);
   }
 
   // Fill the template. EVERY interpolated value is HTML-escaped (esc/nl2br). The detail
   // grid, subject, and sections reflect ONLY the fields the coordinator chose to include,
   // plus any free-text "Additional information".
   function buildBidHtml(wo, req, fromEmail) {
+    req = scrubReq(req, wo);
     var me = actor();
     var inc = req.include || {};
-    var tradeLbl = (wo.trades || []).map(function (t) { return t.name; }).join(', ') || 'Service';
+    var tradeLbl = scrubVendorText((wo.trades || []).map(function (t) { return t.name; }).join(', '), wo) || 'Service';
     var cityState = wo.address ? ((wo.address.city || '') + (wo.address.state ? ', ' + wo.address.state : '')) : '';
     var pairs = [];
     if (inc.priority !== false && wo.priority && wo.priority.label) pairs.push({ label: 'Priority', value: wo.priority.label });
@@ -715,7 +837,7 @@
         '<td bgcolor="#e8f3ed" style="background:#e8f3ed;border:1px solid #cfe6da;border-radius:8px;padding:11px 14px;color:#0d3d26;font-size:14px;font-weight:400;line-height:1.5;">' +
         'Please include your current rate offer (labor + trip rates).</td></tr></table></td></tr>'
       : '';
-    var svc = (wo.serviceInstructions || '').trim();
+    var svc = scrubVendorText(wo.serviceInstructions || '', wo);
     var svcBlock = (inc.service !== false && svc)
       ? '<tr><td style="padding:0 24px 4px;"><div style="color:#0d3d26;font-size:14px;font-weight:500;">Service Instructions</div>' +
         '<div style="color:#5a6b62;font-size:12px;font-weight:400;margin-top:4px;line-height:1.5;">' + nl2br(svc) + '</div></td></tr>'
@@ -751,7 +873,7 @@
       .replace(/\{\{LOGO_SRC\}\}/g, function () { return LOGO_SRC; })
       .replace(/\{\{TRACKING\}\}/g, function () { return esc(wo.trackingNumber || ''); })
       .replace(/\{\{DETAILS\}\}/g, function () { return details; })
-      .replace(/\{\{SCOPE\}\}/g, function () { return nl2br(req.scope || wo.scopeOfWork || '') || '-'; })
+      .replace(/\{\{SCOPE\}\}/g, function () { return nl2br(req.scope || scrubVendorText(wo.scopeOfWork || '', wo)) || '-'; })
       .replace(/\{\{ASSET_BLOCK\}\}/g, function () { return assetBlock; })
       .replace(/\{\{BENCHMARK_BLOCK\}\}/g, function () { return benchmarkBlock; })
       .replace(/\{\{FULLLIST_BLOCK\}\}/g, function () { return fullListBlock; })
@@ -784,10 +906,10 @@
       .then(function (r) {
         if (r.status === 200 && r.json && r.json.ok) {
           // tracked/sendId/failed present only in per-vendor mode (server TRACK_BASE_URL set).
-          return { ok: true, sent: r.json.sent, tracked: !!r.json.tracked, sendId: r.json.sendId || null, failed: r.json.failed || 0, duplicate: !!r.json.duplicate };
+          return { ok: true, sent: r.json.sent, tracked: !!r.json.tracked, sendId: r.json.sendId || null, failed: r.json.failed || 0, duplicate: !!r.json.duplicate, suppressed: Array.isArray(r.json.suppressed) ? r.json.suppressed : [] };
         }
         if (r.status === 409) return { ok: false, code: 'IN_PROGRESS' };   // our 409 always means in-flight, even if the body didn't parse
-        return { ok: false, code: r.status, srvCode: (r.json && r.json.code) || null, msg: (r.json && r.json.error) || ('HTTP ' + r.status) };
+        return { ok: false, code: r.status, srvCode: (r.json && r.json.code) || null, term: (r.json && r.json.term) || '', suppressed: (r.json && Array.isArray(r.json.suppressed)) ? r.json.suppressed : [], msg: (r.json && r.json.error) || ('HTTP ' + r.status) };
       })
       .catch(function (e) { return { ok: false, code: 'NET', msg: e.message }; });
   }
@@ -1278,7 +1400,7 @@
 
     if (openState.step == null) openState.step = 1;
     if (openState.miles == null) openState.miles = DEFAULT_MILES;
-    if (openState.scope == null) openState.scope = wo.scopeOfWork || '';
+    if (openState.scope == null) openState.scope = scrubVendorText(wo.scopeOfWork || '', wo);   // default = what vendors will get
     if (openState.respond == null) openState.respond = '';
     if (openState.arrive == null) openState.arrive = '';
     if (openState.nte == null) openState.nte = '';
@@ -1326,15 +1448,36 @@
     }
 
     // Dedup recipient list from picked vendors + net-new + pasted emails (openState-driven).
-    function collectRecipients() {
-      var recips = [], seen = {};
-      function add(email) { if (!email) return; var k = email.toLowerCase(); if (!seen[k]) { seen[k] = 1; recips.push({ email: email }); } }
-      (openState.rowVendors || []).forEach(function (v) { if (v.email && isPicked(v.email)) add(v.email); });
-      // HARD RULE: a do-not-contact prospect is NEVER a recipient (isPicked defaults true, and the
-      // DNC checkbox renders disabled so its change handler can never write picked=false).
-      (openState.netNew || []).forEach(function (l) { if (l.email && !l.dnc && isPicked(l.email)) add(l.email); });
-      parseEmails(openState.inviteText || '').forEach(add);
-      return recips;
+    // HARD RULE: a do-not-contact address (flagged prospect or in suppressedSet) is NEVER a recipient,
+    // whichever source it came from (see recipientList).
+    function collectRecipients() { return recipientList(openState, suppressedSet); }
+
+    // Mark an address do-not-contact (confirm first), then drop it from the wizard.
+    function markDnc(addr) {
+      if (!window.confirm('Mark ' + addr + ' as do-not-contact?\n\nIt will be removed from this send and skipped in every future bid.')) return;
+      suppressAdd(addr).then(function (ok) {
+        if (!ok) { toast('Could not save do-not-contact for ' + addr + ' (server unavailable). Not removed.'); return; }
+        var k = addr.toLowerCase();
+        (openState.netNew || []).forEach(function (l) {
+          if (l.email && l.email.toLowerCase() === k) {
+            l.dnc = true;
+            (openState.upsertP || Promise.resolve()).then(function () {   // keep the vendor-prospects DNC outcome
+              return prospectsOutcomes([{ key: l.key || ziKey(l), status: 'do-not-contact', wo: String(woNumber() || ''), note: 'marked in Bid-Out' }]);
+            });
+          }
+        });
+        openState.picked[k] = false;
+        capture(); draw();
+      });
+    }
+    function bindDnc(root) {
+      if (!root) return;
+      root.querySelectorAll('[data-dnc]').forEach(function (a) {
+        a.addEventListener('click', function (ev) { ev.preventDefault(); markDnc(a.getAttribute('data-dnc')); });
+      });
+    }
+    function dncLink(email) {
+      return '<a href="#" data-dnc="' + esc(email) + '" title="Never email this address again" style="margin-left:6px;font:400 11px ' + FONT + ';color:#b91c1c;">do not contact</a>';
     }
 
     function vendorRows() {
@@ -1344,12 +1487,13 @@
       });
       return openState.rowVendors.map(function (v, i) {
         var hasEmail = !!v.email;
-        return '<div class="bwn-bo-v">' +
-          '<input type="checkbox" data-i="' + i + '"' + (hasEmail ? (isPicked(v.email) ? ' checked' : '') : ' disabled') + '>' +
+        var sup = hasEmail && suppressedSet[v.email.toLowerCase()];
+        return '<div class="bwn-bo-v"' + (sup ? ' style="opacity:.55;"' : '') + '>' +
+          '<input type="checkbox" data-i="' + i + '"' + (hasEmail ? (sup ? ' disabled' : (isPicked(v.email) ? ' checked' : '')) : ' disabled') + '>' +
           '<span class="nm">' + esc(v.name) + '</span>' +
           (v.rating ? '<span class="mi">★ ' + v.rating.toFixed(1) + ' (' + (v.ratingCount || 0) + ')</span>' : '') +
           '<span class="mi">' + (v.mi != null ? v.mi.toFixed(1) + ' mi' : '-') + '</span>' +
-          (hasEmail ? '<span class="em">' + esc(v.email) + '</span>' : '<span class="noem">no email - phone only</span>') +
+          (hasEmail ? '<span class="em">' + esc(v.email) + '</span>' + (sup ? '<span class="mi" style="color:#b91c1c;">do-not-contact</span>' : dncLink(v.email)) : '<span class="noem">no email - phone only</span>') +
           '</div>';
       }).join('');
     }
@@ -1359,7 +1503,7 @@
     }
     function tradeChipsHtml() {
       return (wo.trades || []).length
-        ? (wo.trades || []).map(function (t) { return '<span class="bwn-bo-chip">' + esc(t.name) + '</span>'; }).join('')
+        ? (wo.trades || []).map(function (t) { return '<span class="bwn-bo-chip">' + esc(scrubVendorText(t.name, wo)) + '</span>'; }).join('')
         : '<span class="bwn-bo-chip">Service</span>';
     }
     function stepperHtml() {
@@ -1529,6 +1673,7 @@
         '</div>' +
         '<div class="bwn-bo-row" style="margin-bottom:0;"><label>Scope</label>' + svcChk + '</div>' +
         '<textarea id="bo-scope" rows="3" placeholder="Describe the work to be priced">' + esc(openState.scope) + '</textarea>' +
+        '<div class="bwn-bo-note">Client names, street address and internal instructions are removed before sending.</div>' +
         '<div class="bwn-bo-grid2">' +
           '<div class="bwn-bo-fld"><label>Respond By</label><input id="bo-respond" type="datetime-local" value="' + esc(openState.respond) + '"></div>' +
           '<div class="bwn-bo-fld"><label>Arrive By</label><input id="bo-arrive" type="datetime-local" value="' + esc(openState.arrive) + '"></div>' +
@@ -1543,12 +1688,12 @@
         // Section order (per request): Site/service history, then Asset (with the benchmark drop
         // zone directly under the Asset field), then Additional information.
         '<div class="bwn-bo-row"><label>Site / service history (optional)</label></div>' +
-        '<textarea id="bo-history" rows="2" placeholder="Prior work or recurring issues at this site: last PM date, open deficiencies, warranty status, what a previous vendor found.">' + esc(openState.history) + '</textarea>' +
+        '<textarea id="bo-history" rows="2" placeholder="Prior work or recurring issues at this site: last PM date, open deficiencies, warranty status, what a previous vendor found.">' + esc(scrubVendorText(openState.history, wo)) + '</textarea>' +
         '<div class="bwn-bo-row"><label>Asset / equipment (optional)</label></div>' +
-        '<textarea id="bo-asset" rows="2" placeholder="Make, model, and spec vendors need to bid accurately - e.g. Bohn condenser, refrigerant R448A (not R22), 3-ton RTU, panel amperage.">' + esc(openState.asset) + '</textarea>' +
+        '<textarea id="bo-asset" rows="2" placeholder="Make, model, and spec vendors need to bid accurately - e.g. Bohn condenser, refrigerant R448A (not R22), 3-ton RTU, panel amperage.">' + esc(scrubVendorText(openState.asset, wo)) + '</textarea>' +
         hvacBarHtml() +
         '<div class="bwn-bo-row"><label>Additional information (optional)</label></div>' +
-        '<textarea id="bo-addl" rows="2" placeholder="Anything pertinent to include: access hours, # of units, parking, on-site contact, equipment make/model, etc.">' + esc(openState.addl) + '</textarea>' +
+        '<textarea id="bo-addl" rows="2" placeholder="Anything pertinent to include: access hours, # of units, parking, on-site contact, equipment make/model, etc.">' + esc(scrubVendorText(openState.addl, wo)) + '</textarea>' +
         attachBarHtml() +
         '<div class="bwn-bo-row"><label>Include in request</label></div>' +
         // Core WO fields always offered; the entered bid fields appear as toggles once they have
@@ -1597,6 +1742,7 @@
         '<div class="bwn-bo-row"><label>Invite others - paste emails</label></div>' +
         '<textarea id="bo-invite" rows="2" placeholder="Add any outside vendor emails - one per line or comma-separated: name &lt;email@co.com&gt; or just email@co.com">' + esc(openState.inviteText) + '</textarea>' +
         '<div class="bwn-bo-note" id="bo-invite-note"></div>' +
+        '<div class="bwn-bo-note" id="bo-invite-dnc"></div>' +
         '<div class="bwn-bo-note">Everyone is BCC’d (they can’t see each other). Next: review the branded email + exact recipients, then send one-click from your mailbox (or open an Outlook draft). Nothing sends without your click. A CAN-SPAM footer + opt-out is included.</div>';
       var ft = footer('<span class="sp" id="bo-count"></span><button id="bo-back">← Back</button><button class="pri" id="bo-next">Next →</button>');
 
@@ -1627,11 +1773,13 @@
               outcomeBadge(l) +
               (he ? '<span class="em">' + esc(l.email) + ((l.contact || l.title || srcTag) ? ' <span class="mi" title="Named contact">' + esc((l.contact || '') + (l.title ? ' · ' + l.title : '')) + ((l.contact || l.title) && srcTag ? ' · ' : '') + esc(srcTag) + '</span>' : '') + '</span>'
                 : (l.website && /^https?:\/\//i.test(l.website) ? '<a class="noem" href="' + esc(l.website) + '" target="_blank" rel="noopener">open site ↗</a>' : '<span class="noem">no site/email</span>')) +
+              (he && !l.dnc && !suppressedSet[l.email.toLowerCase()] ? dncLink(l.email) : '') +
               '<select data-oc="' + i + '" title="Record an outcome for this prospect (saved to the shared pipeline)" style="margin-left:auto;font:400 11px ' + FONT + ';color:#5a6b62;border:1px solid #dde6e1;border-radius:6px;padding:2px 4px;background:#fff;max-width:110px;">' +
                 '<option value="">outcome…</option><option value="declined">Declined</option><option value="no-response">No response</option><option value="joined">Joined network</option><option value="do-not-contact">Do not contact</option>' +
               '</select>' +
               '</div>';
           }).join('') + '</div>' + head;
+        bindDnc(c);
         c.querySelectorAll('input[data-nn]').forEach(function (cb) {
           cb.addEventListener('change', function () {
             var v = openState.netNew[+cb.getAttribute('data-nn')];
@@ -1651,7 +1799,11 @@
               return prospectsOutcomes([{ key: l.key || ziKey(l), status: status, wo: String(woNumber() || ''), note: note }]);
             });
             l.lastOutcome = { status: status, ts: Date.now(), wo: String(woNumber() || ''), note: note };
-            if (status === 'do-not-contact') { l.dnc = true; if (l.email) openState.picked[l.email.toLowerCase()] = false; }
+            if (status === 'do-not-contact') {
+              l.dnc = true; if (l.email) openState.picked[l.email.toLowerCase()] = false;
+              // one suppression list: also write bid-suppress, not just the vendor-prospects outcome
+              if (l.email) suppressAdd(l.email).then(function (ok) { if (!ok) toast('Saved to the prospect pipeline, but the shared do-not-contact list is unavailable for ' + l.email + '.'); });
+            }
             renderNetNew(); refreshCount();
           });
         });
@@ -1664,11 +1816,21 @@
           refreshCount();
         });
       });
+      bindDnc(body);
       var inviteEl = document.getElementById('bo-invite');
       function refreshInvite() {
         var em = parseEmails(val('bo-invite') || '');
         var el = document.getElementById('bo-invite-note');
         if (el) el.textContent = em.length ? (em.length + ' pasted email' + (em.length === 1 ? '' : 's') + ' will be added.') : '';
+        var dz = document.getElementById('bo-invite-dnc');
+        if (dz) {
+          dz.innerHTML = em.map(function (e) {
+            return suppressedSet[e.toLowerCase()]
+              ? '<div style="opacity:.55;">' + esc(e) + ' <span style="color:#b91c1c;">do-not-contact</span></div>'
+              : '<div>' + esc(e) + dncLink(e) + '</div>';
+          }).join('');
+          bindDnc(dz);
+        }
         refreshCount();
       }
       inviteEl.addEventListener('input', refreshInvite);
@@ -1754,8 +1916,15 @@
         capture();
         var recips = collectRecipients();
         if (!recips.length) { toast('Select at least one vendor, or add an outside email.'); return; }
-        if (recips.length > MAX_BCC) { toast('Too many (' + recips.length + '); cap is ' + MAX_BCC + ' per blast.'); return; }
-        openState.step = 3; draw();
+        // Do-not-contact check over the full list as the review opens (404/error = no client filter).
+        var nextBtn = ft.querySelector('#bo-next'); nextBtn.disabled = true;
+        suppressCheck(recips.map(function (x) { return x.email; })).then(function () {
+          nextBtn.disabled = false;
+          recips = collectRecipients();
+          if (!recips.length) { toast('All recipients are on the do-not-contact list - nothing to send.'); draw(); return; }
+          if (recips.length > MAX_BCC) { toast('Too many (' + recips.length + '); cap is ' + MAX_BCC + ' per blast.'); return; }
+          openState.step = 3; draw();
+        }).catch(function () { nextBtn.disabled = false; });
       });
       refreshCount();
     }
@@ -1786,6 +1955,7 @@
       req.subject = openState.subject || bidSubject(wo, req);   // keep a coordinator-edited subject across Back/Next
       var recips = collectRecipients();
       var mail = buildBidEmail(wo, recips, req);
+      var excluded = recipientList(openState, {}).map(function (x) { return x.email; }).filter(function (e) { return suppressedSet[e.toLowerCase()]; });
       // From must be the user's own mailbox (or an approved shared one) - the server rejects anything else.
       // Contact Email is NOT a From source; it only feeds the body / Reply-To.
       var fromDefault = openState.fromEmail || me.email || GM_getValue('send_from', '') || '';
@@ -1800,7 +1970,7 @@
         ((rinc.priority !== false && priorityLbl) ? sfld('Priority', priorityLbl) : '') +
         ((rinc.arrive !== false && req.arrive) ? sfld('Arrive By', fmtRespondBy(req.arrive)) : '') +
         (rinc.trades !== false ? '<div class="bwn-bo-sumfld"><div class="k">Trade(s)</div><div class="v"><div class="bwn-bo-chips">' + tradeChipsHtml() + '</div></div></div>' : '') +
-        '<div class="bwn-bo-sumfld"><div class="k">Scope</div><div class="v">' + esc(req.scope || '-') + '</div></div>' +
+        '<div class="bwn-bo-sumfld"><div class="k">Scope</div><div class="v">' + esc(scrubVendorText(req.scope, wo) || '-') + '</div></div>' +
         ((openState.include.service !== false && hasService) ? '<div class="bwn-bo-sumnote">Service Instructions Included</div>' : '') +
         ((rinc.nte !== false && req.nte) ? sfld('NTE', '$' + req.nte) : '') +
         ((rinc.techs !== false && req.techs) ? sfld('# of Techs', req.techs) : '') +
@@ -1832,6 +2002,7 @@
         '<div class="bwn-bo-meta"><span>Subject</span><input id="bo-subj" type="text" value="' + esc(mail.subject) + '" style="flex:1;min-width:300px;"></div>' +
         '<div class="bwn-bo-meta"><span>BCC - ' + mail.bcc.length + ' vendor' + (mail.bcc.length === 1 ? '' : 's') + ' (they can’t see each other)</span></div>' +
         '<div class="bwn-bo-bcc">' + mail.bcc.map(esc).join(' · ') + '</div>' +
+        (excluded.length ? '<div class="bwn-bo-note" style="opacity:.6;">Excluded (not sent): ' + excluded.map(function (e) { return esc(e) + ' <span style="color:#b91c1c;">do-not-contact</span>'; }).join(' · ') + '</div>' : '') +
         '<div class="bwn-bo-pv"><iframe id="bo-pv" sandbox=""></iframe></div>' +
         '<div class="bwn-bo-note">Sent one-click from YOUR mailbox via Microsoft Graph (lands in your Sent Items; replies come to you). ' +
         'If one-click send isn’t configured yet, use "Outlook draft instead" - same recipients, plain-text body.</div>';
@@ -1849,7 +2020,7 @@
         '<button id="bo-back">← Back</button>' +
         '<button id="bo-draft"' + draftDis + '>Outlook draft instead</button>' +
         '<button class="pri" id="bo-send">⚡ Send now (' + mail.bcc.length + ')</button>');
-      function syncSubject() { var s = (document.getElementById('bo-subj') || {}).value; if (s != null && s.trim()) { mail.subject = s.trim(); openState.subject = s.trim(); } }
+      function syncSubject() { var s = (document.getElementById('bo-subj') || {}).value; if (s != null && s.trim()) { mail.subject = scrubVendorText(s.trim(), wo) || mail.subject; openState.subject = mail.subject; } }
       pft.querySelector('#bo-back').addEventListener('click', function () {
         var f = val('bo-from'); if (f !== undefined) openState.fromEmail = f.trim();
         var sj = val('bo-subj'); if (sj !== undefined && sj.trim()) openState.subject = sj.trim();   // persist an edited subject like From
@@ -1857,6 +2028,20 @@
       });
       pft.querySelector('#bo-draft').addEventListener('click', function () {
         syncSubject();
+        var draftEl = document.getElementById('bo-draft');
+        if (draftEl) draftEl.disabled = true;
+        // A mailto draft has no server backstop, so re-check now and FAIL CLOSED if we cannot verify.
+        suppressVerify(mail.bcc).then(function (v) {
+          if (draftEl) draftEl.disabled = !!openState.draftBlocked;
+          if (!v.ok) { toast('Can’t verify the do-not-contact list - use Send instead. Draft not opened.'); return; }
+          mail.bcc = dropSuppressed(mail.bcc);
+          if (!mail.bcc.length) { toast('All recipients are on the do-not-contact list - nothing sent.'); return; }
+          doDraft();
+        }).catch(function () {
+          if (draftEl) draftEl.disabled = !!openState.draftBlocked;
+          toast('Can’t verify the do-not-contact list - use Send instead. Draft not opened.');
+        });
+        function doDraft() {
         var nAtt = (openState.attachments || []).length + (req.benchmark && req.benchmark.list && req.benchmark.list.length ? 1 : 0);
         openDraft(mail);
         // Flip: opening the Outlook draft is the coordinator's send channel, so record a (softer)
@@ -1867,12 +2052,26 @@
           (nAtt ? ' Note: attachments (' + nAtt + ') are NOT carried into an Outlook draft - use one-click Send for those, or attach them manually.' : ''));
         openState.sentInfo = { rec: drec, sent: mail.bcc.length, from: fromDefault, channel: 'draft' };
         openState.step = 4; draw();
+        }   // end doDraft
       });
       pft.querySelector('#bo-send').addEventListener('click', function () {
         var from = (fromEl.value || '').trim();
         if (!/^[^\s@]+@[^\s@]+\.[A-Za-z]{2,}$/.test(from)) { toast('Enter your send-from email first.'); return; }
         if (!GM_getValue('ingest_key', '')) { toast('Set the SWA ingest key first (Tampermonkey menu → "Set SWA ingest key") - or use "Outlook draft instead".'); return; }
         syncSubject();
+        var sendBtn = document.getElementById('bo-send');
+        sendBtn.disabled = true; sendBtn.textContent = 'Checking…';
+        // Re-check do-not-contact immediately before send (a stale list must not go out), and rebuild
+        // the HTML from the freshly scrubbed scope - never from the preview's cached markup.
+        suppressCheck(mail.bcc).then(function () {
+          mail.bcc = dropSuppressed(mail.bcc);
+          if (!mail.bcc.length) {
+            sendBtn.disabled = false; sendBtn.textContent = '⚡ Send now (0)';
+            toast('All recipients are on the do-not-contact list - nothing sent.'); return;
+          }
+          doSend();
+        }).catch(function () { sendBtn.disabled = false; sendBtn.textContent = '⚡ Send now (' + mail.bcc.length + ')'; });
+        function doSend() {
         var html = htmlFor(from);
         // Idempotency key derived PURELY from the bid content (from + sorted recipients +
         // subject + body). No per-panel nonce on purpose: the same bid MUST dedup no matter how
@@ -1908,13 +2107,16 @@
             // future search near here shows who was already asked (and their reply outcome).
             try {
               var sentSet = {}; (mail.bcc || []).forEach(function (e2) { sentSet[String(e2).toLowerCase()] = 1; });
+              (r.suppressed || []).forEach(function (e2) { delete sentSet[String(e2).toLowerCase()]; });   // skipped server-side: not "bid-sent"
               var outs = (openState.netNew || []).filter(function (l) { return l.email && sentSet[l.email.toLowerCase()]; })
                 .map(function (l) { return { key: l.key || ziKey(l), status: 'bid-sent', wo: String(woNumber() || '') }; });
               (openState.upsertP || Promise.resolve()).then(function () { return prospectsOutcomes(outs); });   // after the upsert lands
             } catch (e3) { }
             var failNote = (r.failed > 0) ? (' (' + r.failed + ' could not be sent)') : '';
             var trackNote = r.tracked ? ' Per-vendor open tracking is on - use the "📊 Who opened" menu item to see who has viewed it.' : '';
-            toast('✅ Sent to ' + r.sent + ' vendor' + (r.sent === 1 ? '' : 's') + failNote + ' from ' + from + '. Replies come to your inbox; the email is in your Sent Items.' + trackNote);
+            var skipNote = (r.suppressed && r.suppressed.length) ? (' ' + r.suppressed.length + ' address(es) skipped: do-not-contact.') : '';
+            noteSuppressed(r.suppressed);
+            toast('✅ Sent to ' + r.sent + ' vendor' + (r.sent === 1 ? '' : 's') + failNote + ' from ' + from + '. Replies come to your inbox; the email is in your Sent Items.' + skipNote + trackNote);
             openState.sentInfo = { rec: rec, sent: r.sent, from: from, tracked: !!r.tracked, failed: r.failed || 0 };
             openState.step = 4; draw(); return;
           }
@@ -1936,10 +2138,13 @@
           }
           if (r.code === 503 && /awaiting/i.test(r.msg || '')) { toast('One-click send isn’t live yet - the Graph app registration is still pending with IT. Use "Outlook draft instead" for now.'); return; }
           if (r.code === 403 && r.srvCode === 'FROM_NOT_PERMITTED') { toast(r.msg); return; }
+          if (r.srvCode === 'ALL_SUPPRESSED') { noteSuppressed(r.suppressed); toast('All recipients are on the do-not-contact list - nothing sent.'); return; }
+          if (r.srvCode === 'BLOCKED_TERM') { toast('Blocked: the email still contains a client name or internal note ("' + (r.term || '?') + '"). Edit the Scope and try again.'); return; }
           if (r.code === 403 && /allowlist/i.test(r.msg || '')) { toast('That send-from address isn’t on the server allowlist - ask IT/admin to add it (BID_FROM_ALLOWED).'); return; }
           if (r.code === 429) { toast('Daily send ceiling reached - try again tomorrow or use the Outlook draft.'); return; }
           toast('Send failed: ' + (r.msg || 'unknown error') + ' - you can still use "Outlook draft instead".');
         });
+        }   // end doSend
       });
     }
 

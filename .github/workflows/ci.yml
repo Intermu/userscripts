@@ -796,6 +796,9 @@ jobs:
       - name: Bid-out sent-state flip harness (confirmed-send gate + GM baseline)
         run: node scripts/test-bidout-sent-flip.js
 
+      - name: Bid-out vendor-text scrub + do-not-contact harness (client names, address, NexRev line; all recipient sources)
+        run: node scripts/test-bid-out-scrub.js
+
       - name: Drop Upload party/label classifier harness (broker is not a vendor)
         run: node scripts/test-drop-upload-classify.js
 
