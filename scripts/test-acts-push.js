@@ -146,7 +146,7 @@ function drainCtx(seedQueue, opts) {
   var sandbox = {
     JSON: JSON, Math: Math, String: String, Number: Number, Array: Array, Object: Object,
     connectorEnabled: function () { return opts.connector !== false; },
-    ingestActor: function () { return 'tester'; },
+    ingestActor: function () { return 'tester'; }, authToken: function () { return 'tok'; },
     GM_getValue: function () { return opts.key === undefined ? 'test-key' : opts.key; },
     INGEST_URL: 'https://swa.example/api/wo-ingest', INGEST_CLIENT: 'pilot',
     connOk: function () {}, connFail: function () {},
@@ -171,6 +171,7 @@ console.log('\n-- actsDrain: the POST contract the route expects --');
   var p = ctx.__posted[0];
   A.eq('to the wo-ingest endpoint with the client', p.url, 'https://swa.example/api/wo-ingest?client=pilot');
   A.eq('key-gated on x-bwn-key', p.headers['x-bwn-key'], 'test-key');
+  A.eq('the body carries the fresh userToken', JSON.parse(p.data).userToken, 'tok');
   var body = JSON.parse(p.data);
   A.eq('the body is { actor, acts: [...] }', [typeof body.actor, Array.isArray(body.acts)], ['string', true]);
   A.eq('each act carries target + wo + over', { target: body.acts[0].target, wo: body.acts[0].wo, pos: body.acts[0].over.pos.length }, { target: '1120182', wo: '344409', pos: 1 });
@@ -202,7 +203,7 @@ console.log('\n-- mutation controls --');
   // MC2: drop the wo from the drain body -> the dual-key join loses its WO-# half.
   var drainNoWo = mutate(SRC_DRAIN, 'return { target: e.target || \'\', wo: e.wo || \'\', over: e.over };', 'return { target: e.target || \'\', wo: \'\', over: e.over };');
   var ls2 = {}; ls2['bwn:actsq'] = JSON.stringify([QENTRY]); var posted = [];
-  var sb2 = { JSON: JSON, Math: Math, String: String, Number: Number, Array: Array, Object: Object, connectorEnabled: function () { return true; }, ingestActor: function () { return 't'; }, GM_getValue: function () { return 'k'; }, INGEST_URL: 'u', INGEST_CLIENT: 'pilot', connOk: function () {}, connFail: function () {}, BWN: { guard: function (f) { return f; }, lsGetJSON: function (k, d) { return Object.prototype.hasOwnProperty.call(ls2, k) ? JSON.parse(ls2[k]) : d; }, lsSetJSON: function (k, v) { ls2[k] = JSON.stringify(v); } }, GM_xmlhttpRequest: function (o) { posted.push(o); } };
+  var sb2 = { JSON: JSON, Math: Math, String: String, Number: Number, Array: Array, Object: Object, connectorEnabled: function () { return true; }, ingestActor: function () { return 't'; }, authToken: function () { return 'tok'; }, GM_getValue: function () { return 'k'; }, INGEST_URL: 'u', INGEST_CLIENT: 'pilot', connOk: function () {}, connFail: function () {}, BWN: { guard: function (f) { return f; }, lsGetJSON: function (k, d) { return Object.prototype.hasOwnProperty.call(ls2, k) ? JSON.parse(ls2[k]) : d; }, lsSetJSON: function (k, v) { ls2[k] = JSON.stringify(v); } }, GM_xmlhttpRequest: function (o) { posted.push(o); } };
   vm.runInNewContext(drainNoWo + '\nthis.actsDrain = actsDrain;', sb2, { filename: 'mc2.js' });
   sb2.actsDrain();
   A.eq('MC2: with the mutation the WO # is dropped from the payload', JSON.parse(posted[0].data).acts[0].wo, '');

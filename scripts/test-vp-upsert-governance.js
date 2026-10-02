@@ -64,6 +64,7 @@ function load(engineSrc, opts) {
     GM_xmlhttpRequest: function (cfg) { posts.push(cfg); if (cfg.onload) cfg.onload({ status: 200, responseText: '{"ok":true}' }); },
     vpKey: function () { return (opts.key === undefined) ? 'KEY' : opts.key; },
     connectorEnabled: function () { return opts.connector !== false; },
+    authToken: function () { return 'tok'; },
     PROSPECTS_URL: 'https://swa.example/api/vendor-prospects',
     // a deterministic stand-in for the real vpKeyOf (its keying is proven elsewhere); enough for the sig.
     vpKeyOf: function (r) { return String((r && (r.site || r.name)) || '').toLowerCase(); },

@@ -112,6 +112,7 @@ function build(src) {
     fillAssigneeOptions: function () {},
     showEcd: function () {},
     ecdEl: null,
+    authToken: function () { return 'tok'; },
     EMAIL_RE: /^[^\s@]+@[^\s@]+\.[^\s@]+$/,
   };
   vm.createContext(sandbox);
