@@ -132,7 +132,7 @@ A.ok('the notify timeout is sourced FROM the registry', full.indexOf('DISPATCH_A
 // ---- 6. the confirm->notify ordering + fail-closed gate (source structure) -------------------
 // The proxy POST is inside writeStep.then (never before the gate resolves), a write failure aborts in
 // .catch (no card), and there is exactly ONE gmPost(PROXY_URL) in the submit path.
-A.ok('the proxy POST runs only inside writeStep.then', /writeStep\.then\(function \(\) \{[\s\S]*?return postCard\(\);/.test(full));
+A.ok('the proxy POST runs only inside writeStep.then', /writeStep\.then\(function \(\) \{[\s\S]*?return postCard\((taskNote)?\);/.test(full));
 A.ok('a write failure aborts before any card', /\.catch\(function \(err\) \{[\s\S]*?No card was sent\./.test(full));
 A.eq('exactly one proxy POST in the submit path', (full.match(/gmPost\(PROXY_URL/g) || []).length, 1);
 

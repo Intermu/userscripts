@@ -301,6 +301,13 @@ jobs:
       - name: dispatch API inventory + gql diagnostics harness (DISPATCH_API + empty-body 400)
         run: node scripts/test-dispatch-api.js
 
+      # bwn-dispatch 0.14.0 + bwn-wo-intake 0.10.0 (Pilot auto-dispatch). Dispatch shows on a WO with
+      # Umbrava's open "Purchase Order created, call vendor to confirm receipt" task and can move that
+      # task via editTask (a FULL replace): pins the task match, the verbatim payload, the refuse-if-
+      # changed / flagged rules and the verified read-back. Also pins Intake's Vendor NTE at ~34% GP.
+      - name: dispatch auto-dispatch task + intake vendor NTE harness
+        run: node scripts/test-dispatch-autotask.js
+
       # temp-vendor 0.3.0: the vendor activate/deactivate writes routed through bwnGqlOp. Slices the
       # real write block (real bwnGqlOp runs, not a stub) and pins: activate resolves the reason id by
       # NAME then fires activateVendor with an audit entry (high-risk, confirmed:true from its panel);
