@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         BWN Write Queue (Broadway National)
 // @namespace    broadwaynational.bwn
-// @version      0.6.0
+// @version      0.6.1
 // @downloadURL  https://raw.githubusercontent.com/Intermu/userscripts/main/bwn-write-queue.user.js
 // @updateURL    https://raw.githubusercontent.com/Intermu/userscripts/main/bwn-write-queue.user.js
 // @description  Drains the Track C write-back queue: claims THIS coordinator's own queued Umbrava write commands from the SWA, confirms each irreversible write, executes it via patchWorkOrder/addEditJobNote, and reports the result. Self-drain; every write is human-confirmed; disabled until you turn it on. v0.5 RETIRES this script's Bulk Operations Console modal - Core (bwn-suite-core, flag bulkOps) is now the single Safe Bulk Operations Console; the drain executor stays here as Track C infrastructure.
@@ -38,7 +38,7 @@
 
 (function () {
   "use strict";
-  var VER = "0.6.0";   // keep in lockstep with @version (TM compares versions, not contents)
+  var VER = "0.6.1";   // keep in lockstep with @version (TM compares versions, not contents)
 
   var SWA_BASE = "https://green-stone-0717dab0f.7.azurestaticapps.net";
   var PROXY_URL = SWA_BASE + "/api/wo-write-queue";
@@ -584,8 +584,8 @@
   function enabled() { return GM_getValue("wq_enabled", false) === true; }
 
   // ---- Catalog push (phase 2): feed the Dashboard's Status/Assign pickers ----
-  // Reads the tenant STATUS list + USER directory and pushes them to /api/catalog-ingest (key-gated,
-  // no vouch - the catalogs are not user-specific). Runs on load REGARDLESS of wq_enabled (the pickers
+  // Reads the tenant STATUS list + USER directory and pushes them to /api/catalog-ingest (key-gated + vouched via
+  // userToken, read fresh at send time; the catalogs are not user-specific). Runs on load REGARDLESS of wq_enabled (the pickers
   // must work for Dashboard users who never enable draining), throttled to once per 6h per browser.
   var CAT_TTL_MS = 6 * 3600000;
   var CAT_STATUS_Q = "query{ workOrderStatuses{ id name isActive } }";
@@ -603,7 +603,7 @@
       var statuses = (sd && Array.isArray(sd.workOrderStatuses)) ? sd.workOrderStatuses.map(wqMapStatus).filter(Boolean) : null;
       var users = (ud && Array.isArray(ud.users)) ? ud.users.map(wqMapUser).filter(Boolean) : null;
       if((!statuses || !statuses.length) && (!users || !users.length)) return;   // read failed both ways - do not stamp the throttle
-      var body = { client: CLIENT, actor: "write-queue-catalog" };
+      var body = { client: CLIENT, actor: "write-queue-catalog", userToken: authToken() };
       if(statuses && statuses.length) body.statuses = statuses;
       if(users && users.length) body.users = users;
       gmPost(CATALOG_URL, { "Content-Type": "application/json", "x-bwn-key": ingestKey() }, body, 30000).then(function(r){
