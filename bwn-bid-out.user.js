@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         BWN Bid-Out (Broadway National)
 // @namespace    broadwaynational.bwn
-// @version      0.29.0
+// @version      0.29.1
 // @downloadURL  https://raw.githubusercontent.com/Intermu/userscripts/main/bwn-bid-out.user.js
 // @updateURL    https://raw.githubusercontent.com/Intermu/userscripts/main/bwn-bid-out.user.js
 // @description  Email RFP to outside / net-new vendors, launched from a caret on Umbrava's own "See Who Is Available" button (network-vendor bidding stays native - no separate Bid-Out button). The caret menu opens the tracked email RFP wizard: finds net-new vendors nearby through Google Places, looks up their emails via the BWN scrape-contacts function, takes pasted outside addresses, and can still include assignable Umbrava vendors in the same email. You pick who's included, then review the exact recipient list and the rendered email before anything sends. Send from your own mailbox via the SWA send-bid function (Microsoft Graph), or open a plain Outlook draft. Vendors are BCC'd; nothing sends until you click Send. Network access is limited to Umbrava (same-origin), Google Places, and your SWA host.
@@ -20,7 +20,7 @@
 (function () {
   'use strict';
 
-  var VER = '0.29.0';
+  var VER = '0.29.1';
   console.info('[BWN BID-OUT] v' + VER + ' - Build Requests wizard (WO details -> select vendors -> review -> sent) · Umbrava vendors + Places net-new discovery + email scrape · one-click Graph send via SWA (Outlook-draft fallback) · sent-state flip persists bid-sent + GM baseline per WO');
 
   var COMPANY_ADDR = 'Broadway National Group, 100 Davids Dr, Hauppauge, NY 11788';
@@ -909,7 +909,7 @@
           return { ok: true, sent: r.json.sent, tracked: !!r.json.tracked, sendId: r.json.sendId || null, failed: r.json.failed || 0, duplicate: !!r.json.duplicate, suppressed: Array.isArray(r.json.suppressed) ? r.json.suppressed : [] };
         }
         if (r.status === 409) return { ok: false, code: 'IN_PROGRESS' };   // our 409 always means in-flight, even if the body didn't parse
-        return { ok: false, code: r.status, srvCode: (r.json && r.json.code) || null, term: (r.json && r.json.term) || '', suppressed: (r.json && Array.isArray(r.json.suppressed)) ? r.json.suppressed : [], msg: (r.json && r.json.error) || ('HTTP ' + r.status) };
+        return { ok: false, code: r.status, srvCode: (r.json && r.json.code) || null, term: (r.json && r.json.term) || '', attachment: (r.json && r.json.attachment) || '', suppressed: (r.json && Array.isArray(r.json.suppressed)) ? r.json.suppressed : [], msg: (r.json && r.json.error) || ('HTTP ' + r.status) };
       })
       .catch(function (e) { return { ok: false, code: 'NET', msg: e.message }; });
   }
@@ -2139,7 +2139,8 @@
           if (r.code === 503 && /awaiting/i.test(r.msg || '')) { toast('One-click send isn’t live yet - the Graph app registration is still pending with IT. Use "Outlook draft instead" for now.'); return; }
           if (r.code === 403 && r.srvCode === 'FROM_NOT_PERMITTED') { toast(r.msg); return; }
           if (r.srvCode === 'ALL_SUPPRESSED') { noteSuppressed(r.suppressed); toast('All recipients are on the do-not-contact list - nothing sent.'); return; }
-          if (r.srvCode === 'BLOCKED_TERM') { toast('Blocked: the email still contains a client name or internal note ("' + (r.term || '?') + '"). Edit the Scope and try again.'); return; }
+          if (r.srvCode === 'BLOCKED_TERM') { toast(r.attachment ? ('Blocked: attachment "' + r.attachment + '" contains a client name or internal note ("' + (r.term || '?') + '"). Remove or rename it and try again.') : ('Blocked: the email still contains a client name or internal note ("' + (r.term || '?') + '"). Edit the Scope and try again.')); return; }
+          if (r.srvCode === 'BLOCKED_TERM_UNVERIFIABLE') { toast('Blocked: attachment "' + (r.attachment || '?') + '" could not be checked for client names. Save it as a new .xlsx, or remove it, and try again.'); return; }
           if (r.code === 403 && /allowlist/i.test(r.msg || '')) { toast('That send-from address isn’t on the server allowlist - ask IT/admin to add it (BID_FROM_ALLOWED).'); return; }
           if (r.code === 429) { toast('Daily send ceiling reached - try again tomorrow or use the Outlook draft.'); return; }
           toast('Send failed: ' + (r.msg || 'unknown error') + ' - you can still use "Outlook draft instead".');
