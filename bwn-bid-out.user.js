@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         BWN Bid-Out (Broadway National)
 // @namespace    broadwaynational.bwn
-// @version      0.28.1
+// @version      0.28.2
 // @downloadURL  https://raw.githubusercontent.com/Intermu/userscripts/main/bwn-bid-out.user.js
 // @updateURL    https://raw.githubusercontent.com/Intermu/userscripts/main/bwn-bid-out.user.js
 // @description  Email RFP to outside / net-new vendors, launched from a caret on Umbrava's own "See Who Is Available" button (network-vendor bidding stays native - no separate Bid-Out button). The caret menu opens the tracked email RFP wizard: finds net-new vendors nearby through Google Places, looks up their emails via the BWN scrape-contacts function, takes pasted outside addresses, and can still include assignable Umbrava vendors in the same email. You pick who's included, then review the exact recipient list and the rendered email before anything sends. Send from your own mailbox via the SWA send-bid function (Microsoft Graph), or open a plain Outlook draft. Vendors are BCC'd; nothing sends until you click Send. Network access is limited to Umbrava (same-origin), Google Places, and your SWA host.
@@ -20,7 +20,7 @@
 (function () {
   'use strict';
 
-  var VER = '0.28.1';
+  var VER = '0.28.2';
   console.info('[BWN BID-OUT] v' + VER + ' - Build Requests wizard (WO details -> select vendors -> review -> sent) · Umbrava vendors + Places net-new discovery + email scrape · one-click Graph send via SWA (Outlook-draft fallback) · sent-state flip persists bid-sent + GM baseline per WO');
 
   var COMPANY_ADDR = 'Broadway National Group, 100 Davids Dr, Hauppauge, NY 11788';
@@ -186,7 +186,7 @@
     var key = GM_getValue('ingest_key', '');
     if (!key) return Promise.resolve({ map: {}, skipped: true });
     if (!urls.length) return Promise.resolve({ map: {}, skipped: false });
-    return gmPost(SCRAPE_URL, { 'Content-Type': 'application/json', 'x-bwn-key': key }, { urls: urls }, 90000).then(function (r) {
+    return gmPost(SCRAPE_URL, { 'Content-Type': 'application/json', 'x-bwn-key': key }, { urls: urls, userToken: authToken() }, 90000).then(function (r) {
       if (r.status < 200 || r.status >= 300 || !r.json || !r.json.ok) return { map: {}, skipped: false, err: (r.json && r.json.error) || ('HTTP ' + r.status) };
       var map = {}, res = r.json.results || {};
       Object.keys(res).forEach(function (u) { map[u] = (res[u].emails || [])[0] || ''; });
@@ -201,7 +201,7 @@
   function enrichContacts(companies) {
     var key = GM_getValue('ingest_key', '');
     if (!key || !companies.length) return Promise.resolve({ map: {}, note: '' });
-    return gmPost(ENRICH_URL, { 'Content-Type': 'application/json', 'x-bwn-key': key }, { companies: companies }, 90000).then(function (r) {
+    return gmPost(ENRICH_URL, { 'Content-Type': 'application/json', 'x-bwn-key': key }, { companies: companies, userToken: authToken() }, 90000).then(function (r) {
       if (r.status === 503 && r.json && r.json.code === 'ZI_UNCONFIGURED') return { map: {}, note: 'ZoomInfo enrichment pending credentials (ask the ZoomInfo admin).' };
       if (r.status < 200 || r.status >= 300 || !r.json || !r.json.ok) return { map: {}, note: '' };
       var map = {}, res = r.json.results || {};
@@ -267,7 +267,7 @@
     });
     var chunks = []; for (var i = 0; i < recs.length; i += 40) chunks.push(recs.slice(i, i + 40));
     return chunks.reduce(function (p, chunk) {
-      return p.then(function () { return gmPost(PROSPECTS_URL, { 'Content-Type': 'application/json', 'x-bwn-key': key }, { upsert: chunk }, 30000).catch(function () { }); });
+      return p.then(function () { return gmPost(PROSPECTS_URL, { 'Content-Type': 'application/json', 'x-bwn-key': key }, { upsert: chunk, userToken: authToken() }, 30000).catch(function () { }); });
     }, Promise.resolve());
   }
   function prospectsOutcomes(list) {   // [{key, status, wo, note}] - fire-and-forget, batched
@@ -275,7 +275,7 @@
     if (!key || !list.length) return Promise.resolve();
     var me = actor();
     var outs = list.slice(0, 60).map(function (o) { return { key: o.key, status: o.status, wo: o.wo || '', note: o.note || '', by: me.email || me.name || '' }; });
-    return gmPost(PROSPECTS_URL, { 'Content-Type': 'application/json', 'x-bwn-key': key }, { outcomes: outs }, 30000).catch(function () { });
+    return gmPost(PROSPECTS_URL, { 'Content-Type': 'application/json', 'x-bwn-key': key }, { outcomes: outs, userToken: authToken() }, 30000).catch(function () { });
   }
   function outcomeBadge(l) {
     var o = l.lastOutcome; if (!o) return '';
