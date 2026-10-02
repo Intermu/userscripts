@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         BWN Suite - Core (Broadway National)
 // @namespace    broadwaynational.bwn
-// @version      1.94.0
+// @version      1.94.1
 // @downloadURL  https://raw.githubusercontent.com/Intermu/userscripts/main/bwn-suite-core.user.js
 // @updateURL    https://raw.githubusercontent.com/Intermu/userscripts/main/bwn-suite-core.user.js
 // @description  Runs several Umbrava helpers for BWN coordinators, in the browser with no privileged grants. Includes: PO Approval + ETA Builder; WO Assist (GP/ETA, a stall watchdog, DNE calculator, and a next-action playbook); Email Leak Guard (checks recipients against vendor names, PO amounts, and client budget references before an outbound email sends); WO List Heat (a triage overlay + My Day strip on the work-order list, with an optional same-origin Umbrava API scan for deterministic full-board coverage); and the BWN Launcher (opens the Azure Static Web App tools with the current WO's context). Modules share state through sessionStorage/localStorage. The only network calls are same-origin Umbrava GraphQL requests (app.umbrava.com/api/graphql, the app's own session): List Heat's full-board scan and WO Assist's work-order / trip / clock-in / document / purchase-order reads, plus ONE write - BWN Views saves the column layout through Umbrava's own putUserPreference, the same preference the column chooser writes; everything else is offline. Toggle modules in BWN_MODULES below.
@@ -12329,7 +12329,8 @@
       var aiFresh = !!status.ai.ver && !!status.core.ts && Math.abs((status.core.ts || 0) - (status.ai.ts || 0)) < 60000;
       kv('AI script', status.ai.ver ? ('v' + status.ai.ver + (aiFresh ? '' : ' · stale (not loaded this session)')) : 'not loaded');
       if (aiFresh) {
-        kv('Anthropic key', status.ai.anthropic ? 'set' : 'not set', status.ai.anthropic ? 'ok' : 'no');
+        // status.ai.anthropic now mirrors the AI script's ingest key (per-user Anthropic key retired, TASK-014).
+        kv('AI drafting (SWA key)', status.ai.anthropic ? 'set' : 'not set', status.ai.anthropic ? 'ok' : 'no');
         kv('Google Places key', status.ai.places ? 'set' : 'not set', status.ai.places ? 'ok' : 'no');
       }
 
@@ -12554,7 +12555,7 @@
       body.appendChild(reportBtn);
 
       var keyNote = document.createElement('div'); keyNote.className = 'bwn-ops-note';
-      keyNote.textContent = 'Set API keys from the Tampermonkey menu (AI script): "Set Anthropic API key" / "Set Google Places key".';
+      keyNote.textContent = 'Set keys from the Tampermonkey menu (AI script): "Set SWA ingest key" / "Set Google Places key". AI drafting uses the SWA key - there is no per-user Anthropic key.';
       body.appendChild(keyNote);
 
       // Footer + lifecycle
