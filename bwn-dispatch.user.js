@@ -1,10 +1,10 @@
 // ==UserScript==
 // @name         BWN Dispatch (Broadway National)
 // @namespace    broadwaynational.bwn
-// @version      0.13.0
+// @version      0.14.0
 // @downloadURL  https://raw.githubusercontent.com/Intermu/userscripts/main/bwn-dispatch.user.js
 // @updateURL    https://raw.githubusercontent.com/Intermu/userscripts/main/bwn-dispatch.user.js
-// @description  One-click Dispatch for a work order - replaces manually typing a row into Dispatch_Notifications.xlsx. The Dispatch launcher shows only on a WO that is in "Pending Dispatch". It opens a confirm modal prefilled from the BWN Ops Suite bus (Tracking) and a same-origin Umbrava GraphQL read (Location as the site NUMBER, Priority, and the coordinator to ping): it uses the person this WO is assigned to (whoever a supervisor/manager assigned it to, read live when you open it), and when that is a team or blank it falls back to the coordinator from the most recent work order(s) at the same location. The coordinator name + email are editable before you send. On submit it POSTs the 5 typed fields plus the WO number (read from the URL, never typed - the flow needs it to deep-link the card, because Tracking is the CLIENT's tracking number and points at the wrong record) to the broadway-internal-ops SWA proxy (x-bwn-key gated) which forwards to the HTTP-triggered "Dispatch HTTP" Power Automate flow - the flow adds the row to Dispatch_Notifications.xlsx AND dispatches it (posts a Teams adaptive card to the coordinator and waits for their accept). Dispatching is a coordinator action, so there is no role gate (the x-bwn-key is the boundary). The assignee's email is not on the WO record (Umbrava exposes the coordinator NAME only), so it is resolved from a per-user name->email roster you maintain (seeded with you, and it remembers each coordinator you dispatch to); for a coordinator the roster has never met it falls back to a GUESS derived from the house name pattern and the signed-in user's own domain, shown with a "check it before you send" warning and always editable - never a silent send to an address nobody confirmed. The flow's secret URL stays server-side; nothing sensitive lives in this script. As of 0.10.0 the modal also writes the WO RECORD directly via the same-origin Umbrava GraphQL patchWorkOrder mutation (the write kanban proved live) - an operator-picked target status, an operator-picked assignee (a real Umbrava user, so the assign carries a proper GUID and the card name/email come from the record), and an auto priority-scaled Expected Completion Date - behind a confirm that spells out each write and warns that a status change resets the time-in-status clock. Writes run first and atomically; the Teams card is posted only if the record change succeeds. Registers a single "Dispatch" launcher into the shared dock (bwn:dock:*) - the dock tab is the only launcher; no floating fallback button.
+// @description  One-click Dispatch for a work order - replaces manually typing a row into Dispatch_Notifications.xlsx. The Dispatch launcher shows on a WO that is in "Pending Dispatch", and (0.14.0) on any WO that carries Umbrava's open auto-dispatch task "Purchase Order created, call vendor to confirm receipt" - an auto-dispatched WO lands in Pending Schedule on Team T, so you no longer flip it back to Pending Dispatch (which made Umbrava add a second task). On such a WO the modal offers to move that task to the person you assign (default on, editTask full-replace with a fresh re-read before and a verified read-back after; a failed move never blocks the card and is reported). It opens a confirm modal prefilled from the BWN Ops Suite bus (Tracking) and a same-origin Umbrava GraphQL read (Location as the site NUMBER, Priority, and the coordinator to ping): it uses the person this WO is assigned to (whoever a supervisor/manager assigned it to, read live when you open it), and when that is a team or blank it falls back to the coordinator from the most recent work order(s) at the same location. The coordinator name + email are editable before you send. On submit it POSTs the 5 typed fields plus the WO number (read from the URL, never typed - the flow needs it to deep-link the card, because Tracking is the CLIENT's tracking number and points at the wrong record) to the broadway-internal-ops SWA proxy (x-bwn-key gated) which forwards to the HTTP-triggered "Dispatch HTTP" Power Automate flow - the flow adds the row to Dispatch_Notifications.xlsx AND dispatches it (posts a Teams adaptive card to the coordinator and waits for their accept). Dispatching is a coordinator action, so there is no role gate (the x-bwn-key is the boundary). The assignee's email is not on the WO record (Umbrava exposes the coordinator NAME only), so it is resolved from a per-user name->email roster you maintain (seeded with you, and it remembers each coordinator you dispatch to); for a coordinator the roster has never met it falls back to a GUESS derived from the house name pattern and the signed-in user's own domain, shown with a "check it before you send" warning and always editable - never a silent send to an address nobody confirmed. The flow's secret URL stays server-side; nothing sensitive lives in this script. As of 0.10.0 the modal also writes the WO RECORD directly via the same-origin Umbrava GraphQL patchWorkOrder mutation (the write kanban proved live) - an operator-picked target status, an operator-picked assignee (a real Umbrava user, so the assign carries a proper GUID and the card name/email come from the record), and an auto priority-scaled Expected Completion Date - behind a confirm that spells out each write and warns that a status change resets the time-in-status clock. Writes run first and atomically; the Teams card is posted only if the record change succeeds. Registers a single "Dispatch" launcher into the shared dock (bwn:dock:*) - the dock tab is the only launcher; no floating fallback button.
 // @match        https://app.umbrava.com/*
 // @run-at       document-idle
 // @noframes
@@ -18,7 +18,7 @@
 (function () {
   'use strict';
 
-  var VER = '0.13.0';   // keep in step with @version - this is what the console banner reports
+  var VER = '0.14.0';   // keep in step with @version - this is what the console banner reports
   var FONT = "-apple-system,BlinkMacSystemFont,'Segoe UI','Helvetica Neue',Arial,sans-serif";
   var GREEN = '#0d3d26';          // BWN Ops Suite brand green - matches CC Request / WO Audit
   var SWA_BASE = 'https://green-stone-0717dab0f.7.azurestaticapps.net';
@@ -55,6 +55,8 @@
     userList:         { key: 'userList',         name: 'Users list (picker)',      transport: 'graphql',   method: 'POST', endpoint: '/api/graphql', operation: 'users',              const: 'USERS_Q',   payload: '{}',             kind: 'read',         required: false, stage: 'prefill',    after: null,             timeoutMs: 0,     retry: 'none', safeRetry: true,  fail: 'user-list' },
     schemaIntrospect: { key: 'schemaIntrospect', name: 'Loc-field discovery',      transport: 'graphql',   method: 'POST', endpoint: '/api/graphql', operation: '__schema/__type',    const: null,        payload: '{ t?:String }',  kind: 'fallback',     required: false, stage: 'prefill',    after: null,             timeoutMs: 0,     retry: 'none', safeRetry: true,  fail: 'introspect' },
     locationRoster:   { key: 'locationRoster',   name: 'Location-history roster',  transport: 'graphql',   method: 'POST', endpoint: '/api/graphql', operation: '(discovered field)', const: 'ROSTER_SEL', payload: '{ loc:ID!|Int! }', kind: 'fallback',   required: false, stage: 'prefill',    after: 'schemaIntrospect', timeoutMs: 0,   retry: 'none', safeRetry: true,  fail: 'roster' },
+    autoTaskRead:     { key: 'autoTaskRead',     name: 'Auto-dispatch task read',  transport: 'graphql',   method: 'POST', endpoint: '/api/graphql', operation: 'tasksByEntityTypeAndId', const: 'AUTO_TASK_Q', payload: '{ id:String }', kind: 'read',      required: false, stage: 'prefill',    after: null,             timeoutMs: 0,     retry: 'none', safeRetry: true,  fail: 'task-read' },
+    editTask:         { key: 'editTask',         name: 'Auto-dispatch task move',  transport: 'graphql',   method: 'POST', endpoint: '/api/graphql', operation: 'editTask',           const: 'EDIT_TASK_M', payload: '{ data:EditTaskInput }', kind: 'write', required: false, stage: 'write-gate', after: 'patchWorkOrder', timeoutMs: 0,     retry: 'none', safeRetry: false, fail: 'task-write' },
     patchWorkOrder:   { key: 'patchWorkOrder',   name: 'WO record write',          transport: 'graphql',   method: 'POST', endpoint: '/api/graphql', operation: 'patchWorkOrder',     const: 'PATCH_M',   payload: '{ data:PatchWorkOrderInput }', kind: 'write', required: true,  stage: 'write-gate', after: null,        timeoutMs: 0,     retry: 'none', safeRetry: false, fail: 'wo-write' },
     dispatchNotify:   { key: 'dispatchNotify',   name: 'SWA dispatch card POST',   transport: 'swa-proxy', method: 'POST', endpoint: '/api/dispatch', operation: 'dispatch',          const: 'PROXY_URL', payload: '5 fields + WONumber + actor',  kind: 'notification', required: true, stage: 'notify', after: 'patchWorkOrder', timeoutMs: 30000, retry: 'none', safeRetry: false, fail: 'notify' }
   });
@@ -341,7 +343,11 @@
   try { document.addEventListener('bwn:gov', function () { bwnApplyGov(); }); } catch (e) { }
   var BWN_OPS = {
     patchWorkOrder: { kind: 'write', perm: bwnPermsForPatch, target: 'workOrder', risk: 'high', idempotent: false, retry: 'none',
-      ok: 'Work order updated.', fail: 'The work order was not updated.' }
+      ok: 'Work order updated.', fail: 'The work order was not updated.' },
+    // FULL REPLACE of the task (Core's bulkTask capture 2026-09-29): send the fresh record back with
+    // only assignedTo changed. Same classification as Core's editTask row.
+    editTask: { kind: 'write', perm: 'Task.EditTask', target: 'task', risk: 'high', idempotent: false, retry: 'none',
+      ok: 'Task updated.', fail: 'The task was not updated.' }
   };
   // ===== BWN-OPS-WRAP START v3 (paste-identical across adopters; SHA-gated by scripts/test-bwn-ops.js) =====
   // v3 (2026-09-02) adds the Umbrava permission gate (G7 below). It closes over bwnCan/bwnCanAll
@@ -723,6 +729,89 @@
     return DISPATCH_STATUS_RE.test(status);
   }
 
+  // ---- Umbrava auto-dispatch task ------------------------------------------------
+  // When a Create WO auto-dispatches (Pilot, 2026-10), Umbrava assigns the vendor, moves the WO to
+  // Pending Schedule (so the Pending-Dispatch gate above hid this launcher) and drops an OPEN task on
+  // Team T: "Purchase Order created, call vendor to confirm receipt" (created by Umbrava Automation,
+  // live on W-401152). That task is the signal: while it is open the launcher shows whatever the
+  // status, and the modal offers to move it to the person you assign. Flipping the WO back to
+  // Pending Dispatch is no longer needed - which also stopped Umbrava adding its second
+  // "Please dispatch a vendor" task.
+  var AUTO_TASK_RE = /purchase order created,?\s*call vendor to confirm receipt/i;
+  var AUTO_TASK_Q = 'query DispAutoTask($id: String!) { tasksByEntityTypeAndId(entityType: 1, entityId: $id, includeComplete: false, take: 100) { total tasks { id entityId entityType description targetStartDate assignedTo metadata categoryId isComplete flag priorityStatus } } }';
+  var EDIT_TASK_M = 'mutation EditTask($data: EditTaskInput!) { editTask(data: $data) { success message } }';
+  var TASK_DATE_RE = /^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}(:\d{2}(\.\d{1,3})?)?(Z|[+-]\d{2}:\d{2})$/;
+  // -> the open auto-dispatch task (optionally a specific id), null when there is none. Rejects on a
+  // failed / short read so "unknown" is never mistaken for "no task".
+  // ===== AUTO-TASK-ENGINE START (pure; sliced by scripts/test-dispatch-autotask.js) =====
+  function findAutoTask(woId, taskId) {
+    return gql(AUTO_TASK_Q, { id: String(woId) }).then(function (d) {
+      var r = d && d.tasksByEntityTypeAndId;
+      if (!r || !Array.isArray(r.tasks) || (typeof r.total === 'number' && r.total > r.tasks.length)) throw new Error('task read failed');
+      return r.tasks.filter(function (t) {
+        return t && t.isComplete === false && t.entityId === String(woId) && (taskId ? t.id === taskId : AUTO_TASK_RE.test(t.description || ''));
+      })[0] || null;
+    });
+  }
+  // Can this task be rewritten safely? EditTask is a FULL REPLACE, so every field it carries must be
+  // present and round-trippable. Flagged / categorised tasks are refused (same ceiling as Core's
+  // bulkTask: the live capture was an unflagged, uncategorised task). '' = ok, else the reason.
+  function autoTaskBlocker(t) {
+    if (!t || !t.id || !t.entityId || t.entityType !== 1 || typeof t.description !== 'string' || typeof t.metadata !== 'string' || !t.metadata) return 'task record incomplete';
+    if (typeof t.targetStartDate !== 'string' || !TASK_DATE_RE.test(t.targetStartDate) || !isFinite(Date.parse(t.targetStartDate))) return 'task date not round-trippable';
+    if (t.flag === true || t.categoryId != null) return 'flagged or categorised task - move it by hand';
+    return '';
+  }
+  function sameAutoTask(a, b) {
+    return !!a && !!b && a.id === b.id && a.entityId === b.entityId && a.description === b.description && a.metadata === b.metadata &&
+      Date.parse(a.targetStartDate) === Date.parse(b.targetStartDate) && (a.assignedTo || null) === (b.assignedTo || null) &&
+      a.flag === b.flag && a.priorityStatus === b.priorityStatus && (a.categoryId == null) === (b.categoryId == null);
+  }
+  // EditTask variables in the SPA's captured order, from a FRESH record, only assignedTo changed.
+  function autoTaskPayload(t, targetId) {
+    return { data: { id: t.id, entityId: t.entityId, entityType: t.entityType, description: t.description,
+      targetStartDate: new Date(Date.parse(t.targetStartDate)).toISOString(), assignedTo: targetId, metadata: t.metadata } };
+  }
+  // Move the task. Never rejects: resolves '' when a read-back VERIFIES the move, else the reason.
+  // Re-reads first (refuse if it changed since the modal opened), writes once (no retry - EditTask is
+  // not idempotent), then re-reads; a write that errored but landed is called out, never called ok.
+  function moveAutoTask(woId, snap, targetId) {
+    return findAutoTask(woId, snap.id).then(function (fresh) {
+      if (!fresh) return 'task is no longer open';
+      if (!sameAutoTask(fresh, snap)) return 'task changed since the drawer opened';
+      var why = autoTaskBlocker(fresh); if (why) return why;
+      var sendErr = null;
+      return bwnGqlOp('editTask', EDIT_TASK_M, autoTaskPayload(fresh, targetId), {
+        feature: 'dispatch', confirmed: true, ids: { wo: parseInt(woId, 10), task: fresh.id },
+        before: { assignedTo: fresh.assignedTo || null }, after: { assignedTo: targetId },
+        validate: function (v) {
+          var d = v && v.data;
+          if (!d || d.id !== fresh.id || d.entityId !== fresh.entityId || d.entityType !== 1) return 'identity mismatch';
+          if (d.description !== fresh.description || d.metadata !== fresh.metadata || 'categoryId' in d) return 'protected field mismatch';
+          if (Date.parse(d.targetStartDate) !== Date.parse(fresh.targetStartDate)) return 'date mismatch';
+          if (typeof d.assignedTo !== 'string' || !d.assignedTo || d.assignedTo !== targetId) return 'bad assignee';
+          return true;
+        }
+      }).then(null, function (e) { sendErr = e; }).then(function () {
+        return findAutoTask(woId, fresh.id).then(function (post) {
+          var landed = !!post && post.assignedTo === targetId;
+          if (sendErr) return 'write failed' + (landed ? ' - but the read-back shows it moved, check the task' : '');
+          if (!landed) return 'read-back does not show the new assignee';
+          if (post.description !== fresh.description || post.metadata !== fresh.metadata || Date.parse(post.targetStartDate) !== Date.parse(fresh.targetStartDate)) return 'task fields changed on write - check the task';
+          return '';
+        }, function () { return sendErr ? 'write failed (read-back also failed)' : 'read-back failed - check the task'; });
+      });
+    }, function () { return 'task re-read failed'; }).then(null, function () { return 'internal error - check the task'; });
+  }
+  // ===== AUTO-TASK-ENGINE END =====
+  // Gate side: does this WO carry the open auto-dispatch task? Cached per WO once known; a failed
+  // read is not cached (and reads as "no" - the status gate still fails open on its own unknowns).
+  var _autoTaskCache = {};
+  function hasAutoTask(woId) {
+    if (woId in _autoTaskCache) return Promise.resolve(_autoTaskCache[woId]);
+    return findAutoTask(woId).then(function (t) { _autoTaskCache[woId] = !!t; return !!t; }, function () { return false; });
+  }
+
   // ---- Location-history coordinator (Phase 1.5 location roster, reused) -----
   // When the WO's own live assignee is a team / blank, the best default is the coordinator
   // who most recently handled THIS location. Umbrava's "work orders at a location" field/arg
@@ -942,6 +1031,7 @@
   // closeModal. _woRead = DISP_WO_Q's result (priority / serviceLevelAgreementId / current status +
   // assignee) so submit builds the ECD write without a second read. _ecdIso = the auto ECD to write.
   var statusSel = null, assigneeSel = null, ecdEl = null, _woRead = null, _ecdIso = null, _ecdBasis = '';
+  var autoTaskBox = null, _autoTask = null;   // the open auto-dispatch task (snapshot) + its 'move it too' checkbox
   // Suite drawer exit, per the contract in Core's ensureStyle. Core's stylesheet owns the fade;
   // sandboxes cannot share the helper, so these five lines are duplicated in every drawer module.
   // --- bwnFocusTrap: shared a11y focus manager for the BWN drawer-modal family (RM-B3 / ACC1) ---
@@ -1010,7 +1100,7 @@
   }
   // Listeners come off before the fade starts - the node outlives the tool by 170ms and must
   // not answer a key or a bus event on its way out.
-  function closeModal() { if (openEl) { document.removeEventListener('keydown', onKey); drawerDismiss(openEl); openEl = null; emailGuessEl = null; statusSel = null; assigneeSel = null; ecdEl = null; _woRead = null; _ecdIso = null; _ecdBasis = ''; } }
+  function closeModal() { if (openEl) { document.removeEventListener('keydown', onKey); drawerDismiss(openEl); openEl = null; emailGuessEl = null; statusSel = null; assigneeSel = null; ecdEl = null; _woRead = null; _ecdIso = null; _ecdBasis = ''; autoTaskBox = null; _autoTask = null; } }
   function onKey(e) { if (e.key === 'Escape') closeModal(); }
 
   function buildModal() {
@@ -1173,6 +1263,14 @@
       assigneeSel.innerHTML = '<option value="">(loading users…)</option>';
       assigneeSel.addEventListener('change', onAssigneePick);
       awrap.appendChild(albl); awrap.appendChild(assigneeSel); wsec.appendChild(awrap);
+      // Filled by hydrateFromUmbrava when the WO carries the open auto-dispatch task. Moves that task to
+      // the person picked above (default ON - that is the point of the auto-dispatch flow).
+      if (bwnCan('Task.EditTask')) {
+        var twrap = document.createElement('label'); twrap.style.cssText = 'display:none;gap:8px;align-items:flex-start;font-size:12.5px;color:#33473d;margin:-4px 0 13px;cursor:pointer;';
+        autoTaskBox = document.createElement('input'); autoTaskBox.type = 'checkbox'; autoTaskBox.checked = true; autoTaskBox.style.marginTop = '2px';
+        var ttxt = document.createElement('span'); ttxt.textContent = 'Also move the auto-dispatch task "Purchase Order created, call vendor to confirm receipt" to this person';
+        twrap.appendChild(autoTaskBox); twrap.appendChild(ttxt); wsec.appendChild(twrap);
+      }
     }
 
     if (bwnCan('WorkOrderField.Status')) {
@@ -1271,6 +1369,9 @@
       };
       var data = (woId && (sel.statusId || sel.assignedTo || sel.ecd)) ? buildPatchData(sel) : null;
       var hasWrites = !!(data && Object.keys(data).length > 1);
+      // The auto-dispatch task follows the assignee pick. Snapshot taken at modal open; moveAutoTask
+      // re-reads and refuses if it changed. Runs AFTER the WO patch and never blocks the card.
+      var moveTask = !!(sel.assignedTo && _autoTask && autoTaskBox && autoTaskBox.checked && _autoTask.assignedTo !== sel.assignedTo);
 
       // Confirm - the writes are named explicitly (status change is called out as clock-resetting),
       // so nothing is written silently. ECD is included whenever a basis exists (Mike's "auto").
@@ -1278,6 +1379,7 @@
       if (hasWrites) {
         if (sel.statusId) { var so = statusSel.options[statusSel.selectedIndex]; wlines.push('  • Status → ' + (so ? so.text.replace(/ - current$/, '') : sel.statusId) + '   (RESETS the time-in-status clock)'); }
         if (sel.assignedTo) { var ao = assigneeSel.options[assigneeSel.selectedIndex]; wlines.push('  • Assign → ' + (ao ? (ao.getAttribute('data-name') || ao.text) : sel.assignedTo)); }
+        if (moveTask) wlines.push('  • Task "' + _autoTask.description + '" → the same person');
         if (sel.ecd) wlines.push('  • Expected completion → ' + fmtEcd(sel.ecd) + '   (auto, ' + _ecdBasis + ')');
       }
       var confirmMsg = hasWrites
@@ -1313,7 +1415,8 @@
       // The card POST leg (the existing behaviour). Threads `hasWrites` so a card failure AFTER a
       // successful write tells the operator the record already changed - re-running would re-write
       // (and re-reset the clock), so the message says to re-send the card only.
-      function postCard() {
+      function postCard(taskNote) {
+        taskNote = taskNote || '';
         perf.proxyStart = perfNow();
         return gmPost(PROXY_URL, { 'Content-Type': 'application/json', 'x-bwn-key': key }, payload, DISPATCH_API.dispatchNotify.timeoutMs)
           .then(function (r) {
@@ -1321,11 +1424,11 @@
               emitTimings('success');
               rosterRemember(payload.AssignedToName, payload.AssigneeEmail);   // learn this coordinator for next time
               closeModal();
-              toast((hasWrites ? 'WO updated + dispatched ✓  ' : 'Dispatched ✓  ') + payload.AssignedToName + ' will get a Teams card to accept (Tracking ' + payload.Tracking + ').', 7000);
+              toast((hasWrites ? 'WO updated + dispatched ✓  ' : 'Dispatched ✓  ') + payload.AssignedToName + ' will get a Teams card to accept (Tracking ' + payload.Tracking + ').' + taskNote, /NOT moved/.test(taskNote) ? 14000 : 7000);
             } else {
               emitTimings('card-rejected');
               reenable();
-              var tail = hasWrites ? '  NOTE: the WO record WAS already updated - re-send the card only, do not re-run the writes.' : '';
+              var tail = (hasWrites ? '  NOTE: the WO record WAS already updated - re-send the card only, do not re-run the writes.' : '') + taskNote;
               if (r.status === 400) msg.textContent = 'Card rejected (400)' + (r.json && r.json.error ? ': ' + r.json.error : ' - check the fields') + '.' + tail;
               else if (r.status === 403) msg.textContent = 'Card rejected (403): the SWA ingest key is missing or wrong. Re-set it via the Tampermonkey menu.' + tail;
               else if (r.status === 429) msg.textContent = 'Too many dispatches in a row - wait a moment and try the card again.' + tail;
@@ -1336,7 +1439,7 @@
           .catch(function (err) {
             emitTimings('proxy-error');
             reenable();
-            msg.textContent = ((err && err.message) ? err.message : 'could not reach the proxy') + '.' + (hasWrites ? '  NOTE: the WO record WAS already updated; re-send the card only.' : '');
+            msg.textContent = ((err && err.message) ? err.message : 'could not reach the proxy') + '.' + (hasWrites ? '  NOTE: the WO record WAS already updated; re-send the card only.' : '') + taskNote;
           });
       }
 
@@ -1350,9 +1453,13 @@
         after: { statusId: sel.statusId || null, assignedTo: sel.assignedTo || null, ecd: sel.ecd || null }
       }) : Promise.resolve(true);
       writeStep.then(function () {
+        if (!moveTask) return '';
+        submit.textContent = 'Moving task…';
+        return moveAutoTask(woId, _autoTask, sel.assignedTo).then(function (why) { return why ? '  Auto-dispatch task NOT moved: ' + why + '.' : '  Auto-dispatch task moved.'; });
+      }).then(function (taskNote) {
         perf.writeEnd = perfNow();   // required-write gate resolved; the proxy POST starts only now
         if (hasWrites) submit.textContent = 'Dispatching…';
-        return postCard();
+        return postCard(taskNote);
       }).catch(function (err) {
         // A failed required write aborts BEFORE any card is sent. Record the gate timing for the log;
         // proxyStart stays 0 so proxyMs reads 0 (the POST never ran) - the fail-closed gate, timed.
@@ -1437,6 +1544,12 @@
       _woRead = wo;
       fetchStatuses().then(function (list) { fillStatusOptions(list, wo.statusId); });
       fetchUsers().then(function (list) { fillAssigneeOptions(list, wo.assignedTo); });
+      if (autoTaskBox) findAutoTask(woId).then(function (t) {
+        if (!t || !autoTaskBox) return;
+        _autoTask = t; autoTaskBox.parentNode.style.display = 'flex';
+        var why = autoTaskBlocker(t);
+        if (why) { autoTaskBox.checked = false; autoTaskBox.disabled = true; autoTaskBox.nextSibling.textContent += ' (' + why + ')'; }
+      }, function () { /* unreadable: the checkbox stays hidden, nothing is moved */ });
       showEcd(wo.priority);
       setTracking(wo.trackingNumber);
       trackingFallback();
@@ -1584,7 +1697,8 @@
     var myTok = ++_navToken;
     resolveStatus(woId).then(function (st) {
       if (myTok !== _navToken) return;              // navigated away meanwhile
-      applyPresence(isDispatchable(st));
+      if (isDispatchable(st)) { applyPresence(true); return; }
+      return hasAutoTask(woId).then(function (yes) { if (myTok === _navToken) applyPresence(yes); });
     });
   }
   function onDockHost() {

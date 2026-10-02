@@ -1,10 +1,10 @@
 // ==UserScript==
 // @name         BWN WO Intake (Broadway National)
 // @namespace    broadwaynational.bwn
-// @version      0.9.32
+// @version      0.10.0
 // @downloadURL  https://raw.githubusercontent.com/Intermu/userscripts/main/bwn-wo-intake.user.js
 // @updateURL    https://raw.githubusercontent.com/Intermu/userscripts/main/bwn-wo-intake.user.js
-// @description  Drop a client PO/WO email (.msg or .eml) onto the Create Work Order modal and it prefills the fields. Pilot Travel Centers: from the email body - the store number is read whether it leads or follows the word "store" in the subject ("258 store Painting" as well as "Store 399, ...") and becomes the Umbrava location "PFJ 0258"; when the email carries no Asset Name the Trade is taken from the subject's own wording; and the Scope drops a bare-name salutation ("Ronny/Mike,") and stops at the Outlook signature table. Caleres (Famous Footwear / Corrigo): reads the attached WO PDF on-device for Trade, Scope, Priority, Due-By, Store, NTE. If a Caleres request has no WO PDF (image-only), it reads Store, City/State and Trade from the subject and the scope from the body (NTE + Priority stay manual - they live only in the images). Amazon (Fairmarkit RFQ): the buyer is Amazon.com, Inc. but the sender is the Fairmarkit e-bidding platform - reads the RFQ body (no PDF) for Site (matched by the Amazon site code e.g. PIT2/STL3, else the shipping address), RFQ #, Trade, Scope + line items; NTE and Priority stay manual because an RFQ carries no ceiling yet (we are the quoting supplier). The email carries no attachment - the full scope / any 'see attached file' lives on the Fairmarkit bid page - so it surfaces that RFQ link and warns you when the body defers to it. Per Amazon: Source PO # is set to the literal "Quote Request", Source Job # is set to the RFQ ID suffixed " (FM-AMZ)" (e.g. 2956102 (FM-AMZ)), Client DNE is set to 0.00, and WO Type is selected as Proposal in the create modal - all filled in the one pass (no post-Create tracking-number step). Selects Client, Location (address-verified), Trade and Priority by clicking the real dropdown option; fills Client DNE, Source Job # and Source PO #; warns you if the WO PDF shows a cancel/flag note. CW-Amazon (Cushman & Wakefield / FAMIS 360, from amazon@ilrs.360facility.net - a separate feed from Fairmarkit, so the client is "CW-Amazon"): reads the plain-text Case Summary for Site (matched by the exact site code = Umbrava locationNumber), Request ID (-> Source Job #; Source PO # is left blank per the client convention), Trade, Scope, Client DNE (from the PO/NTE amount in the Statement of Work, else 0.00) and Priority (the FAMIS P-code -> the client's "P<n> - ..." priority, or Scheduled PPM); it sets WO Type from the Type|Sub-Type line - a Request for Proposal -> Proposal, a preventive/PPM job -> Preventative, everything else -> Reactive. Then, after you Create the WO, it hands the email and its real attachments to BWN Drop Upload to attach them to the new WO's Documents - the sender's HTML signature graphics (logo, social icons) are left behind, identified by their MAPI hidden / MHTML-reference marks, or (new Outlook) by a Content-ID the body cites as <img src="cid:...">, rather than by size or filename. JLL-Amazon (Jones Lang LaSalle / CorrigoPro, from alerts@am.corrigopro.com - a separate feed again, so the client is "JLL-Amazon"): reads the "WORK ORDER #..." body for Site (matched by the exact property/site code = Umbrava locationNumber, e.g. BNA12/ATL11/DEN17), the CorrigoPro WO number (set as BOTH Source Job # and Source PO # per the client convention), Scope, Client DNE (the NTE, else 0.00) and Priority (the email's priority IS the Umbrava label - a PM job is "PM (Scheduled)"); it sets WO Type from the job kind - a PM (Scheduled) job -> Preventative, everything else -> Reactive. CW-Amazon via CorrigoPro (C&W Services on the CorrigoPro network, from alerts@am.corrigopro.com with subject "...received from C&W Services" - the SAME CorrigoPro format as JLL-Amazon but a different brand, so the client is still "CW-Amazon"): reads the "WORK ORDER #..." body for Site (the code in "Requested By: AMAZON <code>", e.g. IFM-JFK8 = Umbrava locationNumber), the CorrigoPro WO number (BOTH Source Job # and Source PO #), Scope (the Problem block), Trade (from the Problem "<Area> > <Issue>" head), Client DNE (the NTE, else 0.00), WO Type (a PM/preventive job -> Preventative, a proposal -> Proposal, else Reactive - the CorrigoPro Details "Type:" line is a ridealong and is ignored) and Priority (the Details "Priority:" value - "PM" -> "Scheduled PPM"). Transform SR Brands LLC (TransformCo / Sears / Kmart, sender @transformco.com): reads the free-text dispatch/quote email body for Location (the store number in the subject = the Umbrava locationNumber), the TransformCo WO/PO reference number (set as BOTH Source Job # and Source PO #), Client DNE (the NTE, with $1K/$2K shorthand expanded), Scope (the request body) and a best-effort Trade; WO Type is set to Reactive and Priority is left blank (the client's SLA tier is a manual coordinator pick). Reads everything in the browser; nothing is uploaded to any server. Best-effort: review every field before you click Create.
+// @description  Drop a client PO/WO email (.msg or .eml) onto the Create Work Order modal and it prefills the fields. Pilot Travel Centers: from the email body - the store number is read whether it leads or follows the word "store" in the subject ("258 store Painting" as well as "Store 399, ...") and becomes the Umbrava location "PFJ 0258"; when the email carries no Asset Name the Trade is taken from the subject's own wording; and the Scope drops a bare-name salutation ("Ronny/Mike,") and stops at the Outlook signature table. Caleres (Famous Footwear / Corrigo): reads the attached WO PDF on-device for Trade, Scope, Priority, Due-By, Store, NTE. If a Caleres request has no WO PDF (image-only), it reads Store, City/State and Trade from the subject and the scope from the body (NTE + Priority stay manual - they live only in the images). Amazon (Fairmarkit RFQ): the buyer is Amazon.com, Inc. but the sender is the Fairmarkit e-bidding platform - reads the RFQ body (no PDF) for Site (matched by the Amazon site code e.g. PIT2/STL3, else the shipping address), RFQ #, Trade, Scope + line items; NTE and Priority stay manual because an RFQ carries no ceiling yet (we are the quoting supplier). The email carries no attachment - the full scope / any 'see attached file' lives on the Fairmarkit bid page - so it surfaces that RFQ link and warns you when the body defers to it. Per Amazon: Source PO # is set to the literal "Quote Request", Source Job # is set to the RFQ ID suffixed " (FM-AMZ)" (e.g. 2956102 (FM-AMZ)), Client DNE is set to 0.00, and WO Type is selected as Proposal in the create modal - all filled in the one pass (no post-Create tracking-number step). Selects Client, Location (address-verified), Trade and Priority by clicking the real dropdown option; fills Client DNE, Source Job # and Source PO #; warns you if the WO PDF shows a cancel/flag note. CW-Amazon (Cushman & Wakefield / FAMIS 360, from amazon@ilrs.360facility.net - a separate feed from Fairmarkit, so the client is "CW-Amazon"): reads the plain-text Case Summary for Site (matched by the exact site code = Umbrava locationNumber), Request ID (-> Source Job #; Source PO # is left blank per the client convention), Trade, Scope, Client DNE (from the PO/NTE amount in the Statement of Work, else 0.00) and Priority (the FAMIS P-code -> the client's "P<n> - ..." priority, or Scheduled PPM); it sets WO Type from the Type|Sub-Type line - a Request for Proposal -> Proposal, a preventive/PPM job -> Preventative, everything else -> Reactive. Then, after you Create the WO, it hands the email and its real attachments to BWN Drop Upload to attach them to the new WO's Documents - the sender's HTML signature graphics (logo, social icons) are left behind, identified by their MAPI hidden / MHTML-reference marks, or (new Outlook) by a Content-ID the body cites as <img src="cid:...">, rather than by size or filename. JLL-Amazon (Jones Lang LaSalle / CorrigoPro, from alerts@am.corrigopro.com - a separate feed again, so the client is "JLL-Amazon"): reads the "WORK ORDER #..." body for Site (matched by the exact property/site code = Umbrava locationNumber, e.g. BNA12/ATL11/DEN17), the CorrigoPro WO number (set as BOTH Source Job # and Source PO # per the client convention), Scope, Client DNE (the NTE, else 0.00) and Priority (the email's priority IS the Umbrava label - a PM job is "PM (Scheduled)"); it sets WO Type from the job kind - a PM (Scheduled) job -> Preventative, everything else -> Reactive. CW-Amazon via CorrigoPro (C&W Services on the CorrigoPro network, from alerts@am.corrigopro.com with subject "...received from C&W Services" - the SAME CorrigoPro format as JLL-Amazon but a different brand, so the client is still "CW-Amazon"): reads the "WORK ORDER #..." body for Site (the code in "Requested By: AMAZON <code>", e.g. IFM-JFK8 = Umbrava locationNumber), the CorrigoPro WO number (BOTH Source Job # and Source PO #), Scope (the Problem block), Trade (from the Problem "<Area> > <Issue>" head), Client DNE (the NTE, else 0.00), WO Type (a PM/preventive job -> Preventative, a proposal -> Proposal, else Reactive - the CorrigoPro Details "Type:" line is a ridealong and is ignored) and Priority (the Details "Priority:" value - "PM" -> "Scheduled PPM"). Transform SR Brands LLC (TransformCo / Sears / Kmart, sender @transformco.com): reads the free-text dispatch/quote email body for Location (the store number in the subject = the Umbrava locationNumber), the TransformCo WO/PO reference number (set as BOTH Source Job # and Source PO #), Client DNE (the NTE, with $1K/$2K shorthand expanded), Scope (the request body) and a best-effort Trade; WO Type is set to Reactive and Priority is left blank (the client's SLA tier is a manual coordinator pick). Reads everything in the browser; nothing is uploaded to any server. Pilot auto-dispatch: for Pilot Travel Centers a sub-trade (e.g. Exterior Lighting) is selected as its MAIN trade (Lighting) so the Auto-Dispatch vendor shows, and whenever an Auto-Dispatch vendor is shown its required Vendor NTE is filled at ~34% GP on the Client DNE (floored to whole dollars; follows a later DNE edit, never overwrites a number you typed). Best-effort: review every field before you click Create.
 // @match        https://app.umbrava.com/*
 // @run-at       document-idle
 // @noframes
@@ -13,7 +13,7 @@
 
 (function () {
   'use strict';
-  var VER = '0.9.32';
+  var VER = '0.10.0';
   var FONT = "-apple-system,BlinkMacSystemFont,'Segoe UI','Helvetica Neue',Arial,sans-serif";
   console.info('[BWN WO INTAKE] v' + VER + ' - drop a PO / Amazon RFQ email (.msg/.eml) on Create Work Order to prefill + auto-attach to the new WO Documents (via Drop Upload); reads locally, nothing leaves the browser');
 
@@ -1218,7 +1218,13 @@
   // is network-fetched and can take >1.5s, and a stray/transient option may flash first - so we must
   // wait for a real match, not resolve on the first option that appears. Returns
   // 'selected' | 'typed' | 'disabled' | 'skip'.
-  function selectAC(el, searchTerm, matchTarget) {
+  // mainTrade (Trade only): climb a sub-trade to its MAIN trade before clicking. Pilot's auto-dispatch
+  // rules sit on main trades only (Electrical / Lighting / Signage...), so a sub-trade pick ("Exterior
+  // Lighting") left the Auto-Dispatch panel empty. Umbrava renders a sub-trade option as its parent,
+  // a <br>, then its own name (live 2026-10-01: "Electrical<br>Exterior Electrical"); a main trade
+  // has no <br>. So the parent is the option's first line - Umbrava's own tree, no map to keep.
+  // selectAC.last = the trade actually clicked, for the toast.
+  function selectAC(el, searchTerm, matchTarget, mainTrade) {
     return new Promise(function (resolve) {
       if (!el) return resolve('skip');
       if (el.disabled || el.getAttribute('aria-disabled') === 'true') return resolve('disabled');
@@ -1226,8 +1232,11 @@
       el.dispatchEvent(new MouseEvent('mousedown', { bubbles: true, cancelable: true, view: window }));
       if (searchTerm) acType(el, searchTerm);
       var target = matchTarget || searchTerm, t0 = Date.now();
+      selectAC.last = target;
       (function poll() {
         var pick = bestOption([].slice.call(document.querySelectorAll('[role="option"]')), target);
+        var parent = (pick && mainTrade && pick.querySelector('br')) ? normText(String(pick.innerText || '').split('\n')[0]) : '';
+        if (parent) { mainTrade = false; target = parent; selectAC.last = parent; acType(el, parent); setTimeout(poll, 70); return; }
         if (pick) {
           ['pointerdown', 'mousedown', 'mouseup', 'click'].forEach(function (t) { pick.dispatchEvent(new MouseEvent(t, { bubbles: true, cancelable: true, view: window })); });
           return resolve('selected');
@@ -1420,8 +1429,8 @@
         }
       }
       if (wo.trade) {
-        var rt = await selectAC(root.querySelector('input#trades'), wo.trade, wo.trade);
-        if (rt === 'selected') picked.push('Trade "' + wo.trade + '"'); else hint.push('Trade: ' + wo.trade + ' (pick the closest)');
+        var rt = await selectAC(root.querySelector('input#trades'), wo.trade, wo.trade, wo.client === 'Pilot Travel Centers');
+        if (rt === 'selected') picked.push('Trade "' + selectAC.last + '"' + (selectAC.last !== wo.trade ? ' (main trade of ' + wo.trade + ', for auto-dispatch)' : '')); else hint.push('Trade: ' + wo.trade + ' (pick the closest)');
       }
       if (wo.priorityLevel) {
         var rp = await selectAC(inputByLabel(root, /^priority/i), wo.priorityLevel, wo.priorityLevel);
@@ -1766,12 +1775,36 @@
     }
   }
 
+  // ---- Auto-Dispatch vendor NTE from the Client DNE ----------------------------
+  // When Umbrava shows an Auto-Dispatch vendor, its "#N Vendor NTE" is required and blank. Fill it at
+  // ~34% GP on the Client DNE (Mike 2026-10-01: target 33-35%), floored to whole dollars so GP never
+  // lands under 34% ($1,500 DNE -> $990). Inputs are react-aria, named autoDispatches[N].vendorNotToExceed
+  // (live 2026-10-01, PFJ 0460 Electrical -> GSS SIGN & DESIGN). Runs on every modal tick, so it also
+  // covers a trade picked by hand after the drop and a DNE edited later: a value WE wrote follows the
+  // DNE, a value the operator typed is never touched.
+  var AUTO_DISPATCH_GP = 0.34;
+  function vendorNteFor(dne) { return String(Math.floor(Math.round(dne * (1 - AUTO_DISPATCH_GP) * 100) / 100)); }   // round to cents first: 1500 * 0.66 is 989.999...
+  function fillAutoDispatchNte() {
+    var root = woModal(); if (!root) return;
+    var dneEl = inputByLabel(root, /^client dne/i);
+    var dne = dneEl ? parseFloat(String(dneEl.value).replace(/[^\d.]/g, '')) : NaN;
+    if (!(dne > 0)) return;
+    var want = vendorNteFor(dne);
+    [].forEach.call(root.querySelectorAll('input[name^="autoDispatches["][name$="].vendorNotToExceed"]'), function (el) {
+      if (el.value && el.value !== el.getAttribute('data-bwn-nte')) return;   // operator's own number
+      if (el.value === want) return;
+      setNativeValue(el, want);
+      el.setAttribute('data-bwn-nte', want);
+    });
+  }
+  function modalTick() { injectDropZone(); fillAutoDispatchNte(); }
+
   // Trailing debounce (RM-B5): coalesce the SPA re-render bursts instead of firing on every mutation.
   var dzT = null;
-  var obs = new MutationObserver(function () { clearTimeout(dzT); dzT = setTimeout(injectDropZone, 300); });
+  var obs = new MutationObserver(function () { clearTimeout(dzT); dzT = setTimeout(modalTick, 300); });
   obs.observe(document.body, { childList: true, subtree: true });
-  setInterval(injectDropZone, 900);
-  injectDropZone();
+  setInterval(modalTick, 900);
+  modalTick();
   // Stage-2 consumer: on SPA path change to a new WO, and on direct load/reload onto one.
   var _lastPath = location.pathname;
   setInterval(function () { if (location.pathname !== _lastPath) { _lastPath = location.pathname; maybeConsumePending(); } }, 700);
