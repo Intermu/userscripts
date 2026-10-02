@@ -20,6 +20,8 @@ function slice(start, end) {
 var consts = slice('  var SEND_URL = ', '  var STATUS_URL') + slice('  var SUPPRESS_URL', '  // ---- Umbrava in-page');
 var parse = slice('  function parseEmails(', '  // ---- Vendor-facing scrub');
 var block = slice('  // ---- Vendor-facing scrub', '  // ---- end vendor-facing scrub');
+var builders = slice('  function buildBidEmail(', '  function openDraft(') + slice('  var BID_TEMPLATE =', '  // One-click send via') +
+slice('  function esc(s)', String.fromCharCode(10)) + slice('  function hvacMoney(', String.fromCharCode(10)) + slice('  function hvacXlsxAvailable', String.fromCharCode(10));
 
 function load(netImpl) {
   var calls = [];
@@ -28,12 +30,15 @@ function load(netImpl) {
     GM_getValue: function (k) { return k === 'ingest_key' ? 'KEY' : ''; },
     authToken: function () { return 'TOK'; },
     gmPost: function (url, headers, body) { calls.push({ url: url, headers: headers, body: JSON.parse(JSON.stringify(body)) }); return netImpl(url, body); },
+    actor: function () { return { name: 'Me', email: 'me@bwn.com' }; },
+    hvacPriceLineText: function () { return ''; }, hvacFullListText: function () { return ''; },
+    COMPANY_ADDR: 'BWN', COMPANY_PHONE: '1', LOGO_SRC: 'x', XLSX: undefined,
     Promise: Promise, Array: Array, JSON: JSON
   };
   ctx._calls = calls;
   vm.createContext(ctx);
   // suppressedSet is a top-level var in the slice; expose it via a getter on the context.
-  vm.runInContext(consts + parse + block, ctx);
+  vm.runInContext(consts + parse + block + builders, ctx);
   return ctx;
 }
 
@@ -62,8 +67,24 @@ var WO = { address: { addressLine1: '1234 Interstate Dr', city: 'Dallas', state:
   A.eq('no wo safe', c.scrubVendorText('Flying J', null), '[site]');
 
   // ---- both bodies are scrubbed (structural: builders call scrubVendorText on the scope)
-  A.ok('plain-text builder scrubs scope', src.indexOf("L.push('Scope: ' + scrubVendorText(req.scope || wo.scopeOfWork || '', wo))") > -1);
-  A.ok('HTML builder scrubs scope', src.indexOf("nl2br(scrubVendorText(req.scope || wo.scopeOfWork || '', wo))") > -1);
+  // every vendor-facing free-text field, in BOTH bodies + the subject (real builders, run in the vm)
+  var NL = String.fromCharCode(10);
+  var BAD = ['Flying J sign', 'CALL NEXREV 866-601-5520 now', 'keep this line'].join(NL);
+  var wo2 = { trackingNumber: 'T1', scopeOfWork: BAD, serviceInstructions: BAD, priority: null,
+    trades: [{ name: 'Electrical Flying J' }], address: WO.address };
+  var req = { scope: BAD, addl: BAD, asset: BAD, history: BAD, subject: 'Pricing for Pilot Flying J (Ref #T1)', include: {} };
+  var txt = c.buildBidEmail(wo2, [{ email: 'a@x.com' }], req);
+  var html = c.buildBidHtml(wo2, req, 'me@bwn.com');
+  A.ok('plain text: no brand / NexRev in any field', !/flyings*j|nexrev|866-601/i.test(txt.body), txt.body);
+  A.ok('HTML: no brand / NexRev in any field', !/flyings*j|nexrev|866-601/i.test(html));
+  A.ok('both bodies keep the clean line in each field', (txt.body.match(/keep this line/g) || []).length >= 5 && (html.match(/keep this line/g) || []).length >= 5);
+  A.eq('subject scrubbed, reads naturally', txt.subject, 'Pricing for [site] (Ref #T1)');
+  A.ok('default subject built from trade name is scrubbed', !/flying/i.test(c.bidSubject(wo2, { include: {} })) && c.bidSubject(wo2, { include: {} }).indexOf('Electrical [site]') > -1);
+  A.ok('caller req not mutated (raw text kept for the editor)', req.addl === BAD);
+  A.ok('send-time subject edit is scrubbed', src.indexOf('mail.subject = scrubVendorText(s.trim(), wo) || mail.subject') > -1);
+  A.ok('textareas default to scrubbed text', ['history', 'asset', 'addl'].every(function (k) { return src.indexOf('esc(scrubVendorText(openState.' + k + ', wo))') > -1; }));
+  A.ok('net-new outcome dropdown DNC also calls suppressAdd', /if \(status === 'do-not-contact'\) \{[^}]*suppressAdd\(l\.email\)/.test(src));
+  A.eq('street removal leaves no stray comma (screenshot style)', c.scrubVendorText('Light out at 1234 Interstate Dr, Dallas, TX 75201 near gate', WO), 'Light out at Dallas, TX near gate');
   A.ok('Scope default is scrubbed', src.indexOf("openState.scope = scrubVendorText(wo.scopeOfWork || '', wo)") > -1);
   A.ok('send handler re-checks then rebuilds html', /suppressCheck\(mail\.bcc\)[\s\S]*function doSend\(\) \{\s*var html = htmlFor\(from\);/.test(src));
   A.ok('scope note present', src.indexOf('Client names, street address and internal instructions are removed before sending.') > -1);

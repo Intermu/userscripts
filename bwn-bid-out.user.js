@@ -142,14 +142,25 @@
     var a = (wo && wo.address) || {};
     var street = String(a.addressLine1 || a.street || a.line1 || '').trim();
     if (street.length >= 4) {
-      s = s.replace(new RegExp(street.replace(/[.*+?^${}()|[\]\\]/g, '\\$&').replace(/\s+/g, '\\s+'), 'gi'), '');
+      s = s.replace(new RegExp(street.replace(/[.*+?^${}()|[\]\\]/g, '\\$&').replace(/\s+/g, '\\s+') + '[,\\s]*', 'gi'), '');
     }
     var zip = String(a.postalCode || a.zip || '').split('-')[0].trim();
-    if (/^\d{5}$/.test(zip)) s = s.replace(new RegExp('\\b' + zip + '(?:-\\d{4})?\\b', 'g'), '');
+    if (/^\d{5}$/.test(zip)) s = s.replace(new RegExp('\\s*\\b' + zip + '(?:-\\d{4})?\\b', 'g'), '');
     s = s.split('\n').map(function (ln) {
       return ln.replace(/[ \t]{2,}/g, ' ').replace(/\s+,/g, ',').replace(/,(\s*,)+/g, ',').replace(/^[,;:\s]+/, '').trim();
     }).join('\n');
     return s.replace(/\n{3,}/g, '\n\n').trim();
+  }
+
+  // Every free-text field that reaches a vendor, scrubbed in one place. Both body builders call this
+  // first, so HTML and plain text cannot diverge; returns a copy (never mutates openState's raw text).
+  function scrubReq(req, wo) {
+    var r = {};
+    Object.keys(req).forEach(function (k) { r[k] = req[k]; });
+    ['scope', 'addl', 'asset', 'history', 'subject', 'contactName'].forEach(function (k) {
+      if (typeof r[k] === 'string') r[k] = scrubVendorText(r[k], wo);
+    });
+    return r;
   }
 
   // Recipient list from the three sources. A do-not-contact address (flagged prospect OR in the
@@ -637,11 +648,12 @@
   // Plain-text fallback body (Outlook draft). Mirrors the HTML: honors the include toggles
   // + additional info, city/state only (NO client name or street address - hard rule).
   function buildBidEmail(wo, recipients, req) {
+    req = scrubReq(req, wo);
     var me = actor();
     var inc = req.include || {};
-    var tradeLbl = (wo.trades || []).map(function (t) { return t.name; }).join(', ') || 'Service';
+    var tradeLbl = scrubVendorText((wo.trades || []).map(function (t) { return t.name; }).join(', '), wo) || 'Service';
     var cityState = wo.address ? ((wo.address.city || '') + (wo.address.state ? ', ' + wo.address.state : '')) : '';
-    var subject = req.subject || bidSubject(wo, req);
+    var subject = scrubVendorText(req.subject || bidSubject(wo, req), wo);
     var L = [];
     L.push('Hello,');
     L.push('');
@@ -657,13 +669,14 @@
     if (inc.travel !== false && req.travelRate) L.push('Travel Rate: $' + req.travelRate + ' / hr');
     if (inc.rate !== false && req.rate) L.push('Rate: $' + req.rate + ' / hr');
     if (inc.reference !== false) L.push('Reference: Tracking #' + (wo.trackingNumber || ''));
-    L.push('Scope: ' + scrubVendorText(req.scope || wo.scopeOfWork || '', wo));
+    L.push('Scope: ' + (req.scope || scrubVendorText(wo.scopeOfWork || '', wo)));
     if ((req.asset || '').trim()) { L.push(''); L.push('Asset / equipment: ' + req.asset.trim()); }
     if (req.benchmark && req.benchmark.annual != null) { L.push(''); L.push(hvacPriceLineText(req.benchmark)); }
     if ((req.history || '').trim()) { L.push(''); L.push('Site / service history: ' + req.history.trim()); }
     var addl = (req.addl || '').trim();
     if (addl) { L.push(''); L.push('Additional information: ' + addl); }
-    if (inc.service !== false && (wo.serviceInstructions || '').trim()) { L.push(''); L.push('Service instructions: ' + wo.serviceInstructions.trim()); }
+    var svcT = scrubVendorText(wo.serviceInstructions || '', wo);
+    if (inc.service !== false && svcT) { L.push(''); L.push('Service instructions: ' + svcT); }
     if (req.benchmark && req.benchmark.list && req.benchmark.list.length) { L.push(''); L.push(hvacFullListText(req.benchmark)); }
     if (req.rateOffer) { L.push(''); L.push('Please include your current rate offer (labor + trip rates).'); }
     L.push('');
@@ -765,16 +778,17 @@
     var bits = [];
     if (inc.trades !== false && tl) bits.push(tl);
     if (inc.location !== false && cs) bits.push(cs);
-    return 'Request for Pricing' + (bits.length ? ': ' + bits.join(' - ') : '') + ' (Ref #' + (wo.trackingNumber || '') + ')';
+    return scrubVendorText('Request for Pricing' + (bits.length ? ': ' + bits.join(' - ') : '') + ' (Ref #' + (wo.trackingNumber || '') + ')', wo);
   }
 
   // Fill the template. EVERY interpolated value is HTML-escaped (esc/nl2br). The detail
   // grid, subject, and sections reflect ONLY the fields the coordinator chose to include,
   // plus any free-text "Additional information".
   function buildBidHtml(wo, req, fromEmail) {
+    req = scrubReq(req, wo);
     var me = actor();
     var inc = req.include || {};
-    var tradeLbl = (wo.trades || []).map(function (t) { return t.name; }).join(', ') || 'Service';
+    var tradeLbl = scrubVendorText((wo.trades || []).map(function (t) { return t.name; }).join(', '), wo) || 'Service';
     var cityState = wo.address ? ((wo.address.city || '') + (wo.address.state ? ', ' + wo.address.state : '')) : '';
     var pairs = [];
     if (inc.priority !== false && wo.priority && wo.priority.label) pairs.push({ label: 'Priority', value: wo.priority.label });
@@ -798,7 +812,7 @@
         '<td bgcolor="#e8f3ed" style="background:#e8f3ed;border:1px solid #cfe6da;border-radius:8px;padding:11px 14px;color:#0d3d26;font-size:14px;font-weight:400;line-height:1.5;">' +
         'Please include your current rate offer (labor + trip rates).</td></tr></table></td></tr>'
       : '';
-    var svc = (wo.serviceInstructions || '').trim();
+    var svc = scrubVendorText(wo.serviceInstructions || '', wo);
     var svcBlock = (inc.service !== false && svc)
       ? '<tr><td style="padding:0 24px 4px;"><div style="color:#0d3d26;font-size:14px;font-weight:500;">Service Instructions</div>' +
         '<div style="color:#5a6b62;font-size:12px;font-weight:400;margin-top:4px;line-height:1.5;">' + nl2br(svc) + '</div></td></tr>'
@@ -834,7 +848,7 @@
       .replace(/\{\{LOGO_SRC\}\}/g, function () { return LOGO_SRC; })
       .replace(/\{\{TRACKING\}\}/g, function () { return esc(wo.trackingNumber || ''); })
       .replace(/\{\{DETAILS\}\}/g, function () { return details; })
-      .replace(/\{\{SCOPE\}\}/g, function () { return nl2br(scrubVendorText(req.scope || wo.scopeOfWork || '', wo)) || '-'; })
+      .replace(/\{\{SCOPE\}\}/g, function () { return nl2br(req.scope || scrubVendorText(wo.scopeOfWork || '', wo)) || '-'; })
       .replace(/\{\{ASSET_BLOCK\}\}/g, function () { return assetBlock; })
       .replace(/\{\{BENCHMARK_BLOCK\}\}/g, function () { return benchmarkBlock; })
       .replace(/\{\{FULLLIST_BLOCK\}\}/g, function () { return fullListBlock; })
@@ -1649,12 +1663,12 @@
         // Section order (per request): Site/service history, then Asset (with the benchmark drop
         // zone directly under the Asset field), then Additional information.
         '<div class="bwn-bo-row"><label>Site / service history (optional)</label></div>' +
-        '<textarea id="bo-history" rows="2" placeholder="Prior work or recurring issues at this site: last PM date, open deficiencies, warranty status, what a previous vendor found.">' + esc(openState.history) + '</textarea>' +
+        '<textarea id="bo-history" rows="2" placeholder="Prior work or recurring issues at this site: last PM date, open deficiencies, warranty status, what a previous vendor found.">' + esc(scrubVendorText(openState.history, wo)) + '</textarea>' +
         '<div class="bwn-bo-row"><label>Asset / equipment (optional)</label></div>' +
-        '<textarea id="bo-asset" rows="2" placeholder="Make, model, and spec vendors need to bid accurately - e.g. Bohn condenser, refrigerant R448A (not R22), 3-ton RTU, panel amperage.">' + esc(openState.asset) + '</textarea>' +
+        '<textarea id="bo-asset" rows="2" placeholder="Make, model, and spec vendors need to bid accurately - e.g. Bohn condenser, refrigerant R448A (not R22), 3-ton RTU, panel amperage.">' + esc(scrubVendorText(openState.asset, wo)) + '</textarea>' +
         hvacBarHtml() +
         '<div class="bwn-bo-row"><label>Additional information (optional)</label></div>' +
-        '<textarea id="bo-addl" rows="2" placeholder="Anything pertinent to include: access hours, # of units, parking, on-site contact, equipment make/model, etc.">' + esc(openState.addl) + '</textarea>' +
+        '<textarea id="bo-addl" rows="2" placeholder="Anything pertinent to include: access hours, # of units, parking, on-site contact, equipment make/model, etc.">' + esc(scrubVendorText(openState.addl, wo)) + '</textarea>' +
         attachBarHtml() +
         '<div class="bwn-bo-row"><label>Include in request</label></div>' +
         // Core WO fields always offered; the entered bid fields appear as toggles once they have
@@ -1760,7 +1774,11 @@
               return prospectsOutcomes([{ key: l.key || ziKey(l), status: status, wo: String(woNumber() || ''), note: note }]);
             });
             l.lastOutcome = { status: status, ts: Date.now(), wo: String(woNumber() || ''), note: note };
-            if (status === 'do-not-contact') { l.dnc = true; if (l.email) openState.picked[l.email.toLowerCase()] = false; }
+            if (status === 'do-not-contact') {
+              l.dnc = true; if (l.email) openState.picked[l.email.toLowerCase()] = false;
+              // one suppression list: also write bid-suppress, not just the vendor-prospects outcome
+              if (l.email) suppressAdd(l.email).then(function (ok) { if (!ok) toast('Saved to the prospect pipeline, but the shared do-not-contact list is unavailable for ' + l.email + '.'); });
+            }
             renderNetNew(); refreshCount();
           });
         });
@@ -1975,7 +1993,7 @@
         '<button id="bo-back">← Back</button>' +
         '<button id="bo-draft"' + draftDis + '>Outlook draft instead</button>' +
         '<button class="pri" id="bo-send">⚡ Send now (' + mail.bcc.length + ')</button>');
-      function syncSubject() { var s = (document.getElementById('bo-subj') || {}).value; if (s != null && s.trim()) { mail.subject = s.trim(); openState.subject = s.trim(); } }
+      function syncSubject() { var s = (document.getElementById('bo-subj') || {}).value; if (s != null && s.trim()) { mail.subject = scrubVendorText(s.trim(), wo) || mail.subject; openState.subject = mail.subject; } }
       pft.querySelector('#bo-back').addEventListener('click', function () {
         var f = val('bo-from'); if (f !== undefined) openState.fromEmail = f.trim();
         var sj = val('bo-subj'); if (sj !== undefined && sj.trim()) openState.subject = sj.trim();   // persist an edited subject like From
