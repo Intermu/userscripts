@@ -13,7 +13,7 @@
 //     assignedTo, and passes the engine's own validate();
 //   - moveAutoTask refuses a task that changed since the snapshot, a flagged task, and reports a
 //     read-back that does not show the move - it only returns '' on a verified read-back;
-//   - vendorNteFor floors DNE x 0.66 to whole dollars ($1,500 -> 990, GP >= 34%).
+//   - vendorNteFor floors DNE x 0.66 to whole dollars as dollars.cents ($1,500 -> 990.00, GP >= 34%).
 // WHAT IT DOES NOT PROVE: the live editTask on this exact task. Core's bulkTask capture
 // (2026-09-29) is the wire proof for the shape; the first real dispatch is the live check.
 //
@@ -115,9 +115,9 @@ function harness(opts) {
   var ictx = { Math: Math, String: String };
   vm.createContext(ictx);
   vm.runInContext(slice(intake, '  var AUTO_DISPATCH_GP =', '  function fillAutoDispatchNte(') + '\nthis.vendorNteFor=vendorNteFor;', ictx);
-  A.eq('$1,500 DNE -> 990', ictx.vendorNteFor(1500), '990');
-  A.eq('$800 DNE -> 528', ictx.vendorNteFor(800), '528');
-  A.eq('$1,234.56 DNE -> 814 (floored)', ictx.vendorNteFor(1234.56), '814');
+  A.eq('$1,500 DNE -> 990.00', ictx.vendorNteFor(1500), '990.00');
+  A.eq('$800 DNE -> 528.00', ictx.vendorNteFor(800), '528.00');
+  A.eq('$1,234.56 DNE -> 814.00 (floored)', ictx.vendorNteFor(1234.56), '814.00');
   [350, 800, 1500, 2725.5].forEach(function (d) {
     var gp = Math.round((1 - Number(ictx.vendorNteFor(d)) / d) * 1e6) / 1e6;
     A.ok('GP at $' + d + ' within 34-35% (' + (gp * 100).toFixed(2) + '%)', gp >= 0.34 && gp < 0.35);
