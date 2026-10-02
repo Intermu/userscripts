@@ -130,19 +130,38 @@
   // HARD RULE: vendor-facing content is city/state only - no client name, street address or zip.
   // scrubVendorText is applied by BOTH body builders on every call, so the preview render and the
   // send payload are each built from a freshly scrubbed scope (never cached preview HTML).
+  // Brand matching tolerates separator variants: a word break (or a camelCase break) in a term matches
+  // zero or more of whitespace / nbsp / hyphen / unicode dashes / underscore, so "FlyingJ", "Flying-J",
+  // "Pilot-Flying-J", "Cross-America", "Nex Rev" all hit. A bare word ("flying", "pilot") never does.
+  var BID_JOIN = '[\\s_\\-' + String.fromCharCode(0xa0, 0x2010) + '-' + String.fromCharCode(0x2015) + ']*';
+  function brandAlt(terms) {
+    return terms.slice().sort(function (a, b) { return b.length - a.length; }).map(function (t) {
+      return t.replace(/([a-z])([A-Z])/g, '$1 $2').split(/\s+/).map(function (w) { return w.replace(/[.*+?^${}()|[\]\\]/g, '\\$&'); }).join(BID_JOIN);
+    }).join('|');
+  }
+  // Replace every brand term (whole-word, case-insensitive, longest first) with `repl`.
+  function scrubBrands(s, repl) {
+    return String(s == null ? '' : s).replace(new RegExp('(^|[^A-Za-z0-9])(?:' + brandAlt(BID_BRAND_TERMS) + ')(?![A-Za-z0-9])', 'gi'),
+      function (m, pre) { return pre + repl; });
+  }
+  var BID_NEXREV_RE = new RegExp(brandAlt(['NexRev']), 'i');
   function scrubVendorText(text, wo) {
     var s = String(text == null ? '' : text).replace(/\r\n?/g, '\n');
-    var lines = s.split('\n').filter(function (ln) {
-      return !/nexrev/i.test(ln) && !/\b(to\s+)?override\b.*\bcall\b/i.test(ln);
+    // Internal-instruction lines: any NexRev variant, or override + call (either order). A wrapped
+    // instruction (override on one line, the call/NexRev on the next) drops both lines.
+    var src = s.split('\n'), drop = [];
+    function ov(l) { return /\boverride\b/i.test(l); }
+    function cl(l) { return /\bcall\b/i.test(l); }
+    src.forEach(function (ln, i) {
+      if (BID_NEXREV_RE.test(ln) || (ov(ln) && cl(ln))) drop[i] = true;
+      if (ov(ln) && i + 1 < src.length && (cl(src[i + 1]) || BID_NEXREV_RE.test(src[i + 1]))) { drop[i] = true; drop[i + 1] = true; }
     });
-    s = lines.join('\n');
-    var terms = BID_BRAND_TERMS.slice().sort(function (a, b) { return b.length - a.length; })
-      .map(function (t) { return t.replace(/[.*+?^${}()|[\]\\]/g, '\\$&').replace(/\s+/g, '\\s+'); });
-    s = s.replace(new RegExp('\\b(?:' + terms.join('|') + ')\\b', 'gi'), '[site]');
+    s = src.filter(function (ln, i) { return !drop[i]; }).join('\n');
+    s = scrubBrands(s, '[site]');
     var a = (wo && wo.address) || {};
     var street = String(a.addressLine1 || a.street || a.line1 || '').trim();
     if (street.length >= 4) {
-      s = s.replace(new RegExp(street.replace(/[.*+?^${}()|[\]\\]/g, '\\$&').replace(/\s+/g, '\\s+') + '[,\\s]*', 'gi'), '');
+      s = s.replace(new RegExp(street.replace(/[.*+?^${}()|[\]\\]/g, '\\$&').replace(/\s+/g, '\\s+') + '[, \\t]*', 'gi'), '');
     }
     var zip = String(a.postalCode || a.zip || '').split('-')[0].trim();
     if (/^\d{5}$/.test(zip)) s = s.replace(new RegExp('\\s*\\b' + zip + '(?:-\\d{4})?\\b', 'g'), '');
@@ -194,13 +213,18 @@
     });
   }
   // -> array of suppressed addresses (lowercase); [] on any error/404. Also records them locally.
-  function suppressCheck(emails) {
-    if (!emails || !emails.length) return Promise.resolve([]);
+  function suppressCheck(emails) { return suppressVerify(emails).then(function (r) { return r.suppressed; }); }
+  // Same call, but says whether the list was actually consulted: { ok, suppressed }. A path the server
+  // cannot backstop (the mailto Outlook draft) uses ok === false to fail CLOSED.
+  function suppressVerify(emails) {
+    if (!emails || !emails.length) return Promise.resolve({ ok: true, suppressed: [] });
     return suppressCall({ action: 'check', emails: emails }).then(function (j) {
-      var arr = (j && Array.isArray(j.suppressed)) ? j.suppressed : [];
-      return noteSuppressed(arr);
+      var good = !!(j && Array.isArray(j.suppressed));
+      return { ok: good, suppressed: noteSuppressed(good ? j.suppressed : []) };
     });
   }
+  // Drop every address in the local suppressed set (case-insensitive) from a bcc array.
+  function dropSuppressed(bcc) { return (bcc || []).filter(function (e) { return !suppressedSet[String(e).toLowerCase()]; }); }
   function noteSuppressed(arr) {
     var out = [];
     (arr || []).forEach(function (e) { var k = String(e || '').toLowerCase(); if (k) { suppressedSet[k] = 1; out.push(k); } });
@@ -625,7 +649,8 @@
   function attachExtOf(name) { var m = /\.([A-Za-z0-9]{1,8})$/.exec(String(name || '')); return m ? m[1].toLowerCase() : ''; }
   function attachSafeName(name) {
     var ext = attachExtOf(name);
-    var base = String(name || '').replace(/\.[A-Za-z0-9]{1,8}$/, '').replace(/[^A-Za-z0-9 ._()\-]/g, '_').replace(/\s+/g, ' ').trim() || 'attachment';
+    var base = String(name || '').replace(/\.[A-Za-z0-9]{1,8}$/, '').replace(/[^A-Za-z0-9 ._()\-]/g, '_').replace(/\s+/g, ' ').trim();
+    base = scrubBrands(base, 'site').trim() || 'attachment';   // the filename reaches the vendor too
     return base + '.' + ext;
   }
   function attachHumanSize(n) { n = +n || 0; return n >= 1000000 ? (Math.round(n / 100000) / 10 + ' MB') : (Math.max(1, Math.round(n / 1000)) + ' KB'); }
@@ -1478,7 +1503,7 @@
     }
     function tradeChipsHtml() {
       return (wo.trades || []).length
-        ? (wo.trades || []).map(function (t) { return '<span class="bwn-bo-chip">' + esc(t.name) + '</span>'; }).join('')
+        ? (wo.trades || []).map(function (t) { return '<span class="bwn-bo-chip">' + esc(scrubVendorText(t.name, wo)) + '</span>'; }).join('')
         : '<span class="bwn-bo-chip">Service</span>';
     }
     function stepperHtml() {
@@ -1892,12 +1917,14 @@
         var recips = collectRecipients();
         if (!recips.length) { toast('Select at least one vendor, or add an outside email.'); return; }
         // Do-not-contact check over the full list as the review opens (404/error = no client filter).
+        var nextBtn = ft.querySelector('#bo-next'); nextBtn.disabled = true;
         suppressCheck(recips.map(function (x) { return x.email; })).then(function () {
+          nextBtn.disabled = false;
           recips = collectRecipients();
           if (!recips.length) { toast('All recipients are on the do-not-contact list - nothing to send.'); draw(); return; }
           if (recips.length > MAX_BCC) { toast('Too many (' + recips.length + '); cap is ' + MAX_BCC + ' per blast.'); return; }
           openState.step = 3; draw();
-        });
+        }).catch(function () { nextBtn.disabled = false; });
       });
       refreshCount();
     }
@@ -2001,6 +2028,20 @@
       });
       pft.querySelector('#bo-draft').addEventListener('click', function () {
         syncSubject();
+        var draftEl = document.getElementById('bo-draft');
+        if (draftEl) draftEl.disabled = true;
+        // A mailto draft has no server backstop, so re-check now and FAIL CLOSED if we cannot verify.
+        suppressVerify(mail.bcc).then(function (v) {
+          if (draftEl) draftEl.disabled = !!openState.draftBlocked;
+          if (!v.ok) { toast('Can’t verify the do-not-contact list - use Send instead. Draft not opened.'); return; }
+          mail.bcc = dropSuppressed(mail.bcc);
+          if (!mail.bcc.length) { toast('All recipients are on the do-not-contact list - nothing sent.'); return; }
+          doDraft();
+        }).catch(function () {
+          if (draftEl) draftEl.disabled = !!openState.draftBlocked;
+          toast('Can’t verify the do-not-contact list - use Send instead. Draft not opened.');
+        });
+        function doDraft() {
         var nAtt = (openState.attachments || []).length + (req.benchmark && req.benchmark.list && req.benchmark.list.length ? 1 : 0);
         openDraft(mail);
         // Flip: opening the Outlook draft is the coordinator's send channel, so record a (softer)
@@ -2011,6 +2052,7 @@
           (nAtt ? ' Note: attachments (' + nAtt + ') are NOT carried into an Outlook draft - use one-click Send for those, or attach them manually.' : ''));
         openState.sentInfo = { rec: drec, sent: mail.bcc.length, from: fromDefault, channel: 'draft' };
         openState.step = 4; draw();
+        }   // end doDraft
       });
       pft.querySelector('#bo-send').addEventListener('click', function () {
         var from = (fromEl.value || '').trim();
@@ -2022,13 +2064,13 @@
         // Re-check do-not-contact immediately before send (a stale list must not go out), and rebuild
         // the HTML from the freshly scrubbed scope - never from the preview's cached markup.
         suppressCheck(mail.bcc).then(function () {
-          mail.bcc = mail.bcc.filter(function (e) { return !suppressedSet[String(e).toLowerCase()]; });
+          mail.bcc = dropSuppressed(mail.bcc);
           if (!mail.bcc.length) {
             sendBtn.disabled = false; sendBtn.textContent = '⚡ Send now (0)';
             toast('All recipients are on the do-not-contact list - nothing sent.'); return;
           }
           doSend();
-        });
+        }).catch(function () { sendBtn.disabled = false; sendBtn.textContent = '⚡ Send now (' + mail.bcc.length + ')'; });
         function doSend() {
         var html = htmlFor(from);
         // Idempotency key derived PURELY from the bid content (from + sorted recipients +
@@ -2065,6 +2107,7 @@
             // future search near here shows who was already asked (and their reply outcome).
             try {
               var sentSet = {}; (mail.bcc || []).forEach(function (e2) { sentSet[String(e2).toLowerCase()] = 1; });
+              (r.suppressed || []).forEach(function (e2) { delete sentSet[String(e2).toLowerCase()]; });   // skipped server-side: not "bid-sent"
               var outs = (openState.netNew || []).filter(function (l) { return l.email && sentSet[l.email.toLowerCase()]; })
                 .map(function (l) { return { key: l.key || ziKey(l), status: 'bid-sent', wo: String(woNumber() || '') }; });
               (openState.upsertP || Promise.resolve()).then(function () { return prospectsOutcomes(outs); });   // after the upsert lands

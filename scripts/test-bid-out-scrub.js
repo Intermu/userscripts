@@ -21,7 +21,8 @@ var consts = slice('  var SEND_URL = ', '  var STATUS_URL') + slice('  var SUPPR
 var parse = slice('  function parseEmails(', '  // ---- Vendor-facing scrub');
 var block = slice('  // ---- Vendor-facing scrub', '  // ---- end vendor-facing scrub');
 var builders = slice('  function buildBidEmail(', '  function openDraft(') + slice('  var BID_TEMPLATE =', '  // One-click send via') +
-slice('  function esc(s)', String.fromCharCode(10)) + slice('  function hvacMoney(', String.fromCharCode(10)) + slice('  function hvacXlsxAvailable', String.fromCharCode(10));
+slice('  function esc(s)', String.fromCharCode(10)) + slice('  function hvacMoney(', String.fromCharCode(10)) + slice('  function hvacXlsxAvailable', String.fromCharCode(10)) +
+  slice('  function attachExtOf(', '  function attachHumanSize');
 
 function load(netImpl) {
   var calls = [];
@@ -123,6 +124,51 @@ var WO = { address: { addressLine1: '1234 Interstate Dr', city: 'Dallas', state:
   A.eq('added address is excluded', emails(c4.recipientList({ inviteText: 'z@x.com y@x.com' }, vm.runInContext('suppressedSet', c4))), ['y@x.com']);
   A.ok('add body shape', c4._calls[0].body.action === 'add' && c4._calls[0].body.note === 'marked in Bid-Out' && c4._calls[0].body.emails[0] === 'Z@x.com');
   A.ok('add on 404 -> false, not suppressed locally', (await c.suppressAdd('q@x.com')) === false && !vm.runInContext('suppressedSet', c)['q@x.com']);
+
+  // ---- review round: brand variants (each one scrubbed, bare words untouched)
+  var NBSP = String.fromCharCode(0xa0), EN = String.fromCharCode(0x2013), HY = String.fromCharCode(0x2010);
+  ['FlyingJ', 'Flying-J', 'Flying' + NBSP + 'J', 'Flying' + EN + 'J', 'Flying' + HY + 'J', 'FLYING   J', 'flying_j'].forEach(function (v) {
+    A.eq('variant scrubbed: ' + JSON.stringify(v), c.scrubVendorText('at ' + v + ' #9', WO), 'at [site] #9');
+  });
+  A.eq('Pilot-Flying-J once', c.scrubVendorText('Pilot-Flying-J', WO), '[site]');
+  A.eq('PilotFlyingJ once', c.scrubVendorText('PilotFlyingJ', WO), '[site]');
+  A.eq('Cross-America', c.scrubVendorText('Cross-America Partners store', WO), '[site] store');
+  A.eq('Cross America', c.scrubVendorText('Cross America store', WO), '[site] store');
+  A.eq('bare flying / pilot untouched', c.scrubVendorText('flying debris near pilot light, Flying Jack', WO), 'flying debris near pilot light, Flying Jack');
+  ['NexRev', 'NEXREV', 'Nex Rev', 'Nex-Rev', 'nex' + NBSP + 'rev'].forEach(function (v) {
+    A.eq('NexRev line dropped: ' + JSON.stringify(v), c.scrubVendorText('keep\nphone ' + v + ' 866-601-5520\nkeep2', WO), 'keep\nkeep2');
+  });
+
+  // ---- override rule: either order, and wrapped across two lines
+  A.eq('CALL ... TO OVERRIDE dropped', c.scrubVendorText('ok\nPLEASE CALL DISPATCH TO OVERRIDE LIGHTING\nok2', WO), 'ok\nok2');
+  A.eq('wrapped override instruction dropped', c.scrubVendorText('ok\nTO OVERRIDE EXTERIOR\nLIGHTING PLEASE CALL 866-601-5520\nok2', WO), 'ok\nok2');
+  A.eq('override alone kept', c.scrubVendorText('manual override switch', WO), 'manual override switch');
+  A.eq('call alone kept', c.scrubVendorText('call before arrival', WO), 'call before arrival');
+
+  // ---- street removal does not eat newlines
+  A.eq('multi-line street removal keeps the next line', c.scrubVendorText('Light out at 1234 Interstate Dr,\nDallas, TX 75201\nnext line', WO), 'Light out at\nDallas, TX\nnext line');
+
+  // ---- attachment filenames
+  A.eq('attachment name scrubbed, ext kept', c.attachSafeName('Flying J store 12 photos.PDF'), 'site store 12 photos.pdf');
+  A.eq('attachment underscore variant', c.attachSafeName('Pilot_Flying_J_site.jpg'), 'site_site.jpg');
+  A.eq('attachment clean name untouched', c.attachSafeName('pilot light.png'), 'pilot light.png');
+  A.eq('attachment empty base -> attachment', c.attachSafeName('.pdf'), 'attachment.pdf');
+
+  // ---- draft-path filtering + fail-closed signal
+  var c5 = load(function () { return Promise.resolve({ status: 200, json: { suppressed: ['Bad@x.com'] } }); });
+  var v5 = await c5.suppressVerify(['bad@x.com', 'good@x.com']);
+  A.ok('verify ok when list consulted', v5.ok === true && v5.suppressed[0] === 'bad@x.com');
+  A.eq('dropSuppressed filters bcc after verify', c5.dropSuppressed(['Bad@x.com', 'good@x.com']), ['good@x.com']);
+  var v404 = await c.suppressVerify(['a@x.com']);
+  A.ok('verify NOT ok on 404 (draft path fails closed)', v404.ok === false);
+  var vNet = await c3.suppressVerify(['a@x.com']);
+  A.ok('verify NOT ok on network error', vNet.ok === false);
+  A.ok('draft handler fails closed + filters before opening',
+    /suppressVerify\(mail\.bcc\)[\s\S]*if \(!v\.ok\) \{ toast\([^\n]*use Send instead[^\n]*return; \}[\s\S]*dropSuppressed\(mail\.bcc\)[\s\S]*doDraft\(\);/.test(src));
+  A.ok('Next disabled during check, re-enabled on catch', /nextBtn\.disabled = true;[\s\S]*\.catch\(function \(\) \{ nextBtn\.disabled = false; \}\)/.test(src));
+  A.ok('send re-enabled on check failure', /\.catch\(function \(\) \{ sendBtn\.disabled = false;/.test(src));
+  A.ok('bid-sent outcomes skip server-suppressed', src.indexOf('delete sentSet[String(e2).toLowerCase()]') > -1);
+  A.ok('trade chips preview scrubbed', src.indexOf('esc(scrubVendorText(t.name, wo))') > -1);
 
   A.finish();
 })();
