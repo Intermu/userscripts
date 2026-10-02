@@ -569,7 +569,8 @@
     // PD = Property Damage. Uppercase-only "PD" so a word like "upd" or "pd" in prose never trips it.
     if (/(^|[^A-Za-z])PD([^A-Za-z]|$)/.test(t) || /property damage/i.test(t)) out.push(PILOT_PD);
     if (/\bwi-?\s?fi\b|access points?\b/i.test(t)) out.push(PILOT_WIFI);
-    if (/\b(high|mid|low)[\s-]?rise\b|\bmonument\b|\bpric(e|er|es|ing)\b|\bsunshine\b/i.test(t) || /pricer/i.test(a)) out.push(PILOT_PRICER);
+    // "high rise light poles" are lot lights, not a price sign (PFJ 460, PO 170101449226).
+    if (/\b(high|mid|low)[\s-]?rise\b(?!\s*(light|lamp|pole|fixture))|\bmonument\b|\bpric(e|er|es|ing)\b|\bsunshine\b/i.test(t) || /pricer/i.test(a)) out.push(PILOT_PRICER);
     var outdoor = /LIGHTING OUT ?SIDE|CANOPY|SIGN|PRICER/i.test(a) || /\b(canopy|canopies|poles?|pole ?heads?|lot|parking|wall ?packs?|flood|stadium|exterior|outside|building|entrance|entry|exit|signs?|logo|panaflex|pricer)\b/i.test(t);
     var dark = /\blight(s|ing)?\b|\blit\b|illuminat|\bdark\b|\bdim\b|\bbulbs?\b|\blamps?\b/i.test(t) || (/\b(signs?|logo|panaflex)\b/i.test(t) && /\b(out|not working)\b/i.test(t));
     if (outdoor && dark) out.push(pilotLights(store));
