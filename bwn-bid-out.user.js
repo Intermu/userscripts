@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         BWN Bid-Out (Broadway National)
 // @namespace    broadwaynational.bwn
-// @version      0.28.0
+// @version      0.28.2
 // @downloadURL  https://raw.githubusercontent.com/Intermu/userscripts/main/bwn-bid-out.user.js
 // @updateURL    https://raw.githubusercontent.com/Intermu/userscripts/main/bwn-bid-out.user.js
 // @description  Email RFP to outside / net-new vendors, launched from a caret on Umbrava's own "See Who Is Available" button (network-vendor bidding stays native - no separate Bid-Out button). The caret menu opens the tracked email RFP wizard: finds net-new vendors nearby through Google Places, looks up their emails via the BWN scrape-contacts function, takes pasted outside addresses, and can still include assignable Umbrava vendors in the same email. You pick who's included, then review the exact recipient list and the rendered email before anything sends. Send from your own mailbox via the SWA send-bid function (Microsoft Graph), or open a plain Outlook draft. Vendors are BCC'd; nothing sends until you click Send. Network access is limited to Umbrava (same-origin), Google Places, and your SWA host.
@@ -20,7 +20,7 @@
 (function () {
   'use strict';
 
-  var VER = '0.28.0';
+  var VER = '0.28.2';
   console.info('[BWN BID-OUT] v' + VER + ' - Build Requests wizard (WO details -> select vendors -> review -> sent) · Umbrava vendors + Places net-new discovery + email scrape · one-click Graph send via SWA (Outlook-draft fallback) · sent-state flip persists bid-sent + GM baseline per WO');
 
   var COMPANY_ADDR = 'Broadway National Group, 100 Davids Dr, Hauppauge, NY 11788';
@@ -186,7 +186,7 @@
     var key = GM_getValue('ingest_key', '');
     if (!key) return Promise.resolve({ map: {}, skipped: true });
     if (!urls.length) return Promise.resolve({ map: {}, skipped: false });
-    return gmPost(SCRAPE_URL, { 'Content-Type': 'application/json', 'x-bwn-key': key }, { urls: urls }, 90000).then(function (r) {
+    return gmPost(SCRAPE_URL, { 'Content-Type': 'application/json', 'x-bwn-key': key }, { urls: urls, userToken: authToken() }, 90000).then(function (r) {
       if (r.status < 200 || r.status >= 300 || !r.json || !r.json.ok) return { map: {}, skipped: false, err: (r.json && r.json.error) || ('HTTP ' + r.status) };
       var map = {}, res = r.json.results || {};
       Object.keys(res).forEach(function (u) { map[u] = (res[u].emails || [])[0] || ''; });
@@ -201,7 +201,7 @@
   function enrichContacts(companies) {
     var key = GM_getValue('ingest_key', '');
     if (!key || !companies.length) return Promise.resolve({ map: {}, note: '' });
-    return gmPost(ENRICH_URL, { 'Content-Type': 'application/json', 'x-bwn-key': key }, { companies: companies }, 90000).then(function (r) {
+    return gmPost(ENRICH_URL, { 'Content-Type': 'application/json', 'x-bwn-key': key }, { companies: companies, userToken: authToken() }, 90000).then(function (r) {
       if (r.status === 503 && r.json && r.json.code === 'ZI_UNCONFIGURED') return { map: {}, note: 'ZoomInfo enrichment pending credentials (ask the ZoomInfo admin).' };
       if (r.status < 200 || r.status >= 300 || !r.json || !r.json.ok) return { map: {}, note: '' };
       var map = {}, res = r.json.results || {};
@@ -267,7 +267,7 @@
     });
     var chunks = []; for (var i = 0; i < recs.length; i += 40) chunks.push(recs.slice(i, i + 40));
     return chunks.reduce(function (p, chunk) {
-      return p.then(function () { return gmPost(PROSPECTS_URL, { 'Content-Type': 'application/json', 'x-bwn-key': key }, { upsert: chunk }, 30000).catch(function () { }); });
+      return p.then(function () { return gmPost(PROSPECTS_URL, { 'Content-Type': 'application/json', 'x-bwn-key': key }, { upsert: chunk, userToken: authToken() }, 30000).catch(function () { }); });
     }, Promise.resolve());
   }
   function prospectsOutcomes(list) {   // [{key, status, wo, note}] - fire-and-forget, batched
@@ -275,7 +275,7 @@
     if (!key || !list.length) return Promise.resolve();
     var me = actor();
     var outs = list.slice(0, 60).map(function (o) { return { key: o.key, status: o.status, wo: o.wo || '', note: o.note || '', by: me.email || me.name || '' }; });
-    return gmPost(PROSPECTS_URL, { 'Content-Type': 'application/json', 'x-bwn-key': key }, { outcomes: outs }, 30000).catch(function () { });
+    return gmPost(PROSPECTS_URL, { 'Content-Type': 'application/json', 'x-bwn-key': key }, { outcomes: outs, userToken: authToken() }, 30000).catch(function () { });
   }
   function outcomeBadge(l) {
     var o = l.lastOutcome; if (!o) return '';
@@ -787,7 +787,7 @@
           return { ok: true, sent: r.json.sent, tracked: !!r.json.tracked, sendId: r.json.sendId || null, failed: r.json.failed || 0, duplicate: !!r.json.duplicate };
         }
         if (r.status === 409) return { ok: false, code: 'IN_PROGRESS' };   // our 409 always means in-flight, even if the body didn't parse
-        return { ok: false, code: r.status, msg: (r.json && r.json.error) || ('HTTP ' + r.status) };
+        return { ok: false, code: r.status, srvCode: (r.json && r.json.code) || null, msg: (r.json && r.json.error) || ('HTTP ' + r.status) };
       })
       .catch(function (e) { return { ok: false, code: 'NET', msg: e.message }; });
   }
@@ -1786,7 +1786,9 @@
       req.subject = openState.subject || bidSubject(wo, req);   // keep a coordinator-edited subject across Back/Next
       var recips = collectRecipients();
       var mail = buildBidEmail(wo, recips, req);
-      var fromDefault = openState.contactEmail || GM_getValue('send_from', '') || me.email || '';
+      // From must be the user's own mailbox (or an approved shared one) - the server rejects anything else.
+      // Contact Email is NOT a From source; it only feeds the body / Reply-To.
+      var fromDefault = openState.fromEmail || me.email || GM_getValue('send_from', '') || '';
       function htmlFor(from) { return buildBidHtml(wo, req, from); }
 
       function sfld(k, v) { return '<div class="bwn-bo-sumfld"><div class="k">' + esc(k) + '</div><div class="v">' + esc(v) + '</div></div>'; }
@@ -1826,6 +1828,7 @@
           : '<div class="bwn-bo-wo">Review - nothing has been sent yet</div>') +
         sum +
         '<div class="bwn-bo-meta"><span>From</span><input id="bo-from" type="email" value="' + esc(fromDefault) + '" placeholder="you@broadwaynational.com"></div>' +
+        '<div class="bwn-bo-sub">Must be your own email or an approved shared mailbox.</div>' +
         '<div class="bwn-bo-meta"><span>Subject</span><input id="bo-subj" type="text" value="' + esc(mail.subject) + '" style="flex:1;min-width:300px;"></div>' +
         '<div class="bwn-bo-meta"><span>BCC - ' + mail.bcc.length + ' vendor' + (mail.bcc.length === 1 ? '' : 's') + ' (they can’t see each other)</span></div>' +
         '<div class="bwn-bo-bcc">' + mail.bcc.map(esc).join(' · ') + '</div>' +
@@ -1848,7 +1851,7 @@
         '<button class="pri" id="bo-send">⚡ Send now (' + mail.bcc.length + ')</button>');
       function syncSubject() { var s = (document.getElementById('bo-subj') || {}).value; if (s != null && s.trim()) { mail.subject = s.trim(); openState.subject = s.trim(); } }
       pft.querySelector('#bo-back').addEventListener('click', function () {
-        var f = val('bo-from'); if (f !== undefined) openState.contactEmail = f.trim();
+        var f = val('bo-from'); if (f !== undefined) openState.fromEmail = f.trim();
         var sj = val('bo-subj'); if (sj !== undefined && sj.trim()) openState.subject = sj.trim();   // persist an edited subject like From
         openState.step = 2; draw();
       });
@@ -1932,6 +1935,7 @@
             toast('The send may have already gone out (server was slow or the connection dropped). Check "📊 Who opened" before resending. A server resend of the unchanged bid is de-duplicated; the Outlook draft is not, so it’s disabled.'); return;
           }
           if (r.code === 503 && /awaiting/i.test(r.msg || '')) { toast('One-click send isn’t live yet - the Graph app registration is still pending with IT. Use "Outlook draft instead" for now.'); return; }
+          if (r.code === 403 && r.srvCode === 'FROM_NOT_PERMITTED') { toast(r.msg); return; }
           if (r.code === 403 && /allowlist/i.test(r.msg || '')) { toast('That send-from address isn’t on the server allowlist - ask IT/admin to add it (BID_FROM_ALLOWED).'); return; }
           if (r.code === 429) { toast('Daily send ceiling reached - try again tomorrow or use the Outlook draft.'); return; }
           toast('Send failed: ' + (r.msg || 'unknown error') + ' - you can still use "Outlook draft instead".');
