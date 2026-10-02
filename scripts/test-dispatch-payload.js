@@ -112,7 +112,6 @@ function build(src) {
     fillAssigneeOptions: function () {},
     showEcd: function () {},
     ecdEl: null,
-    authToken: function () { return 'tok'; },
     EMAIL_RE: /^[^\s@]+@[^\s@]+\.[^\s@]+$/,
   };
   vm.createContext(sandbox);
@@ -527,6 +526,13 @@ function redUnder(name, mutated, probe, useSource) {
 
 // Snapshot the REAL-source result before the controls run, since the controls deliberately
 // register failing assertions into the same counters.
+// ---- userToken: read fresh in postCard (after the writes), never at confirm time ---------------
+// postCard lives inside the click handler (not sliceable), so this is a source-level pin.
+A.ok('userToken: buildPayload does not read the token (no stale confirm-time copy)', p.userToken === undefined);
+A.ok('userToken: postCard sets payload.userToken = authToken() BEFORE the gmPost',
+  /function postCard\(taskNote\) \{\n\s+payload\.userToken = authToken\(\);[^\n]*\n[\s\S]*?return gmPost\(PROXY_URL/.test(full));
+A.eq('userToken: assigned in exactly one place', full.split('userToken').length - 1 >= 1 && (full.match(/payload\.userToken = authToken\(\)/g) || []).length, 1);
+
 var REAL = A.counts();
 
 console.log('\nnegative controls (each reverts one fix; failures below are EXPECTED):');

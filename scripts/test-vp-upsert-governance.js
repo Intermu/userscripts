@@ -64,7 +64,7 @@ function load(engineSrc, opts) {
     GM_xmlhttpRequest: function (cfg) { posts.push(cfg); if (cfg.onload) cfg.onload({ status: 200, responseText: '{"ok":true}' }); },
     vpKey: function () { return (opts.key === undefined) ? 'KEY' : opts.key; },
     connectorEnabled: function () { return opts.connector !== false; },
-    authToken: function () { return 'tok'; },
+    authToken: function () { return opts.token === undefined ? 'tok' : opts.token; },
     PROSPECTS_URL: 'https://swa.example/api/vendor-prospects',
     // a deterministic stand-in for the real vpKeyOf (its keying is proven elsewhere); enough for the sig.
     vpKeyOf: function (r) { return String((r && (r.site || r.name)) || '').toLowerCase(); },
@@ -104,6 +104,18 @@ console.log('\n-- happy path: a paid search saves the batch AND audits it (PII-f
   var blob = JSON.stringify(e);
   A.ok('the audit entry leaks NO prospect name', blob.indexOf('V0') === -1 && blob.indexOf('V1') === -1, blob);
   A.ok('the audit entry leaks NO website / phone / address', blob.indexOf('.example') === -1 && blob.indexOf('555-') === -1 && blob.indexOf('Main St') === -1, blob);
+})();
+
+// ---- 1b. userToken rides every upsert POST; an empty session still sends, with '' ----
+console.log('\n-- userToken: sent fresh on each batch POST; empty session still posts --');
+(function () {
+  var S = load(S_SLICE);
+  S.vpUpsert(mkList(3), MODE, 'HVAC');
+  A.eq('the upsert body carries the stub userToken', JSON.parse(S.posts[0].data).userToken, 'tok');
+  var E = load(S_SLICE, { token: '' });
+  E.vpUpsert(mkList(2), MODE, 'HVAC');
+  A.eq('empty session: the POST is still sent', E.posts.length, 1);
+  A.eq('empty session: userToken is the empty string', JSON.parse(E.posts[0].data).userToken, '');
 })();
 
 // ---- 2. kill switch: connector off -> no POST, audited denied ----

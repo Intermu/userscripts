@@ -64,4 +64,31 @@ A.ok("throttled via a wq_catalog_ts stamp", /GM_getValue\("wq_catalog_ts", 0\)/.
 A.ok("a menu command force-refreshes the catalogs", /refresh Umbrava catalogs now/.test(full));
 A.ok("@version and runtime VER are both 0.6.1", /@version\s+0\.6\.1/.test(full) && /VER = "0\.6\.1"/.test(full));
 
-A.finish();
+
+// ---- wqPushCatalogs: the body carries userToken, read fresh; empty session sends nothing (guarded) ----
+function pushHarness(token) {
+  var a = full.indexOf("  function wqPushCatalogs(force){");
+  var b = full.indexOf("\n  }\n", a);
+  if (a === -1 || b === -1) throw new Error("wqPushCatalogs not found");
+  var posted = [];
+  var sb = {
+    ingestKey: function () { return "k"; }, authToken: function () { return token; },
+    GM_getValue: function () { return 0; }, GM_setValue: function () {}, Date: Date, Promise: Promise,
+    CAT_TTL_MS: 1, CAT_STATUS_Q: "s", CAT_USERS_Q: "u", CLIENT: "pilot", CATALOG_URL: "https://swa.example/api/catalog-ingest",
+    gql: function (q) { return Promise.resolve(q === "s" ? { workOrderStatuses: [{ id: 1, name: "Open", isActive: true }] } : { users: [] }); },
+    wqMapStatus: function (s) { return { id: s.id, name: s.name, isActive: true }; }, wqMapUser: function () { return null; },
+    gmPost: function (url, headers, body) { posted.push(body); return Promise.resolve({ json: { ok: true } }); }
+  };
+  vm.createContext(sb);
+  vm.runInContext(full.slice(a, b + 4) + "\nthis.wqPushCatalogs = wqPushCatalogs;", sb);
+  sb.wqPushCatalogs(true);
+  return new Promise(function (res) { setTimeout(function () { res(posted); }, 20); });
+}
+pushHarness("tok").then(function (posted) {
+  A.eq("catalog push: one POST", posted.length, 1);
+  A.eq("catalog push: body.userToken is the live token", posted[0] && posted[0].userToken, "tok");
+  return pushHarness("");
+}).then(function (posted) {
+  A.eq("catalog push: empty session is guarded (no POST; the route needs a live session)", posted.length, 0);
+  A.finish();
+});

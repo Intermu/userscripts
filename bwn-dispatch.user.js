@@ -1338,7 +1338,7 @@
       var key = GM_getValue('ingest_key', '');
       if (!key) { msg.textContent = 'Set the SWA ingest key first: Tampermonkey menu -> "Set SWA ingest key".'; return; }
 
-      var payload = { actor: me.email || me.name || 'unknown', userToken: authToken() };
+      var payload = { actor: me.email || me.name || 'unknown' };
       var missing = [];
       FIELDS.forEach(function (f) {
         var v = (inputs[f.key].value || '').trim();
@@ -1416,6 +1416,7 @@
       // successful write tells the operator the record already changed - re-running would re-write
       // (and re-reset the clock), so the message says to re-send the card only.
       function postCard(taskNote) {
+        payload.userToken = authToken();   // fresh: patchWorkOrder/editTask above can outlive the token read at confirm time
         taskNote = taskNote || '';
         perf.proxyStart = perfNow();
         return gmPost(PROXY_URL, { 'Content-Type': 'application/json', 'x-bwn-key': key }, payload, DISPATCH_API.dispatchNotify.timeoutMs)
