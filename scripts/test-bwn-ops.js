@@ -57,7 +57,7 @@ var S_OPS = slice('  // ===== BWN-OPS START v1', '  // ===== BWN-OPS END v1 ====
 // so the REAL reader block goes into every sandbox rather than a stub - the gate is then driven by
 // the same localStorage slot the shipped code reads. Ledgered separately by
 // scripts/test-perm-block-ledger.js; here it is just the dependency the wrapper needs.
-var S_PERM = slice('  // ===== BWN-PERM START v1', '  // ===== BWN-PERM END v1 =====', 'BWN-PERM block');
+var S_PERM = slice('  // ===== BWN-PERM START v2', '  // ===== BWN-PERM END v2 =====', 'BWN-PERM block');
 
 function mutate(src, from, to) {
   var i = src.indexOf(from);
@@ -73,14 +73,25 @@ function mutate(src, from, to) {
 // perms (optional): { groups: [...], granted: [...] } planted in the slot BEFORE the block loads,
 // so the reader memoizes a decoded user. Omitted = no slot at all = every permission unknown =
 // fail-open, which is what every pre-gate case below expects.
+// BWN-PERM v2 reads a slot only when it is stamped with the signed-in user's Auth0 sub, resolved from
+// the Umbrava API token in the SDK cache. Every sandbox here is signed in as PERM_SUB and seeds its slot
+// with the same sub, so a seeded grant list is read (not silently dropped into the unknown fallback).
+var PERM_SUB = 'auth0|test-user';
+var PERM_TOKEN_KEY = '@@auth0spajs@@::client::https://app.umbrava.com/api::openid profile email';
+function permTokenEntry() {
+  var p = { iss: 'https://login.umbrava.com/', sub: PERM_SUB, exp: Math.floor(Date.now() / 1000) + 3600 };
+  return JSON.stringify({ body: { access_token: 'h.' + Buffer.from(JSON.stringify(p)).toString('base64url') + '.s' } });
+}
+function permAtob(s) { return Buffer.from(s, 'base64').toString('binary'); }
 function makeOps(opsSrc, modules, perms) {
   var store = Object.create(null);
-  if (perms) store['bwn:perm:last'] = JSON.stringify({ v: 1, ts: Date.now(), ver: 'test', groups: perms.groups, granted: perms.granted });
-  var localStorage = {
-    getItem: function (k) { return (k in store) ? store[k] : null; },
-    setItem: function (k, v) { store[k] = String(v); },
-    removeItem: function (k) { delete store[k]; }
-  };
+  store[PERM_TOKEN_KEY] = permTokenEntry();
+  if (perms) store['bwn:perm:last'] = JSON.stringify({ v: 2, ts: Date.now(), ver: 'test', sub: PERM_SUB, groups: perms.groups, granted: perms.granted });
+  // Methods are non-enumerable so Object.keys(localStorage) lists exactly the stored keys, as in a browser.
+  var localStorage = store;
+  Object.defineProperty(store, 'getItem', { value: function (k) { return Object.prototype.hasOwnProperty.call(store, k) ? store[k] : null; } });
+  Object.defineProperty(store, 'setItem', { value: function (k, v) { store[k] = String(v); } });
+  Object.defineProperty(store, 'removeItem', { value: function (k) { delete store[k]; } });
   var env = { calls: [], plan: [], store: store };
   var sandbox = {
     Object: Object, Array: Array, Number: Number, String: String, JSON: JSON,
@@ -90,6 +101,7 @@ function makeOps(opsSrc, modules, perms) {
     // dispatches one, so an inert listener sink is enough.
     document: { addEventListener: function () { } },
     localStorage: localStorage,
+    atob: permAtob,
     setTimeout: function (fn) { return setTimeout(fn, 0); },
     BWN_VER: '1.78.28',
     BWN_MODULES: modules || { launcher: true, dispatch: true, woAssist: true },

@@ -47,7 +47,7 @@ function mutate(src, from, to) {
 // localStorage slot planted in these sandboxes every permission reads as unknown, which fails
 // OPEN - so every case below runs against the same behaviour it had before the gate existed.
 // (The gate itself is proven in scripts/test-bwn-ops.js and scripts/test-perm-block-ledger.js.)
-var S_PERM = slice('  // ===== BWN-PERM START v1', '  // ===== BWN-PERM END v1 =====', 'BWN-PERM block');
+var S_PERM = slice('  // ===== BWN-PERM START v2', '  // ===== BWN-PERM END v2 =====', 'BWN-PERM block');
 var S_OPS = S_PERM + "\n" + slice('  // ===== BWN-OPS START v1', '  // ===== BWN-OPS END v1 =====', 'BWN-OPS block');
 var S_WA = slice('    // ===== WA-WRITES START v1', '    // ===== WA-WRITES END v1 =====', 'WA-WRITES block');
 

@@ -41,7 +41,7 @@ var GPLABEL = sliceBetween("// ===== PA-GPLABEL START", "// ===== PA-GPLABEL END
 // BWN-PERM reader block (bwnCan / bwnCanAll / bwnPermsForPatch) rather than a stub. No slot is
 // planted, so every permission reads as unknown and fails OPEN - the pre-gate behaviour these
 // cases were written against. The gate itself is proven in scripts/test-bwn-ops.js.
-var PERMBLK = sliceBetween("// ===== BWN-PERM START v1", "// ===== BWN-PERM END v1 =====");
+var PERMBLK = sliceBetween("// ===== BWN-PERM START v2", "// ===== BWN-PERM END v2 =====");
 function loadGpLabel(src) { var box = { console: console }; vm.createContext(box); vm.runInContext(src, box); return box; }
 
 function mutate(src, from, to) {
@@ -224,7 +224,7 @@ function callsOf(g, op) { return g.calls.filter(function (c) { return c.op === o
   A.ok("every write still honors DRY_RUN", (full.match(/\[PA DRY_RUN\]/g) || []).length >= 5);
   var mV = full.match(/@version\s+([0-9.]+)/), mR = full.match(/VER\s*=\s*'([0-9.]+)'/);
   A.ok("@version and runtime VER agree", !!(mV && mR && mV[1] === mR[1]));
-  A.eq("shipped at 0.7.14", mV && mV[1], "0.7.14");
+  A.eq("shipped at 0.7.15", mV && mV[1], "0.7.15");
 
   // ---- WO-note dedup is scoped to THIS run, not the WO's whole history ------------------------
   // W-390980: a 9/09 TSP note with the same GP + total made the next TSP review skip its WO note.

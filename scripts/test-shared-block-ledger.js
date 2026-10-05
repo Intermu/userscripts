@@ -88,6 +88,20 @@ function stripNotesApi(src) {
   if (b === -1) return src;
   return src.slice(0, a) + src.slice(b + NOTES_END.length);
 }
+// BWN-PERM v2 (2026-10-05) is the third sanctioned region, on the same terms. Its bwnPermSub reads
+// the access-token slot ONLY to learn which user the cached permission slot belongs to (the `sub`
+// claim; it never returns or sends the token), and the block must stay self-contained because two
+// of its adopters (kanban, notes) carry no BWN-SHARED block. Its bytes are gated by
+// scripts/test-perm-block-ledger.js (11-way identical), so it is stripped here like bwnNotesApi.
+var PERM_BEGIN = '  // ===== BWN-PERM START v2';
+var PERM_END = '  // ===== BWN-PERM END v2 =====';
+function stripPermBlock(src) {
+  var a = src.indexOf(PERM_BEGIN);
+  if (a === -1) return src;
+  var b = src.indexOf(PERM_END, a);
+  if (b === -1) return src;
+  return src.slice(0, a) + src.slice(b + PERM_END.length);
+}
 function sha(s) { return crypto.createHash('sha256').update(s).digest('hex'); }
 function pickerDecls(src) { return (src.match(PICKER_DECL) || []).length; }
 
@@ -100,7 +114,7 @@ function judge(src, status) {
     if (!fb.present) return { ok: false, why: fb.malformed ? 'START marker without a matching END' : 'ledger says ADOPTED but the block is MISSING' };
     if (fb.dup) return { ok: false, why: 'a second BWN-SHARED START - the block is duplicated' };
     if (sha(fb.text) !== CANON_SHA) return { ok: false, why: 'block SHA != canonical (a byte drifted: reject the paste, do not re-pin)' };
-    var outside = stripNotesApi(stripBlock(src));   // exclude the shared block AND the sanctioned bwnNotesApi block (its bwnNotesToken slot read is gated by test-notes-api.js, not here)
+    var outside = stripPermBlock(stripNotesApi(stripBlock(src)));   // exclude the shared block AND the sanctioned bwnNotesApi + BWN-PERM blocks (their slot reads are gated by test-notes-api.js / test-perm-block-ledger.js, not here)
     if (pickerDecls(outside) !== 0) return { ok: false, why: 'a rival picker declaration survives OUTSIDE the block' };
     if (SLOT_BODY.test(outside)) return { ok: false, why: 'a rival picker BODY (Auth0 slot read) survives outside the block' };
     return { ok: true, why: 'canonical block present, no rival outside it' };
@@ -250,9 +264,19 @@ A.ok('C8: with the notes block exempt, a rival picker elsewhere is still caught'
 // C9: the exemption is LOAD-BEARING, not a no-op. The sanctioned bwnNotesApi block genuinely carries
 // the Auth0 slot read (SLOT_BODY sees it after only stripBlock), and stripNotesApi is exactly what
 // removes it - so a mega script is green ONLY because the exemption fires.
-var c9core = SRC['bwn-suite-core.user.js'];
+// The BWN-PERM region is stripped first so C9 still isolates the notes block alone.
+var c9core = stripPermBlock(SRC['bwn-suite-core.user.js']);
 A.ok('C9a: the notes-block slot body is present after stripBlock alone', SLOT_BODY.test(stripBlock(c9core)) === true);
 A.ok('C9b: and stripNotesApi is what clears it', SLOT_BODY.test(stripNotesApi(stripBlock(c9core))) === false);
+
+// C10: the BWN-PERM exemption is load-bearing too, and does not blind the guard. On an adopter with
+// no notes block, the perm block's slot read is what SLOT_BODY sees after stripBlock, and
+// stripPermBlock is exactly what clears it; a rogue slot read pasted after the block is still caught.
+var c10 = SRC['bwn-dispatch.user.js'];
+A.ok('C10a: the BWN-PERM slot body is present after stripBlock alone', SLOT_BODY.test(stripNotesApi(stripBlock(c10))) === true);
+A.ok('C10b: and stripPermBlock is what clears it', SLOT_BODY.test(stripPermBlock(stripNotesApi(stripBlock(c10)))) === false);
+var c10c = c10 + "\n  var _sneak = /@@auth0spajs@@::.*::https:\\/\\/app\\.umbrava\\.com\\/api::/;\n";
+A.ok('C10c: with the perm block exempt, a slot read elsewhere is still caught', judge(c10c, 'ADOPTED').ok === false);
 
 console.log('\n(ledger: ' + onDisk.length + ' scripts, one canonical token-picker block. Green == the recorded US-1');
 console.log(' step-1 scope; a red here is drift from it, named by script, never a silent duplicate.)');
