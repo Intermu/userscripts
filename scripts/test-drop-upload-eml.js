@@ -296,4 +296,42 @@ var BS = String.fromCharCode(92);
 A.eq('LZFu spec sample decompresses', rapi.rtfDecompress(SPEC),
   '{' + BS + 'rtf1' + BS + 'ansi' + BS + 'ansicpg1252' + BS + 'pard hello world}\r\n');
 
+// ---- .msg: a reply carrying the earlier email as an attachment keeps ITS OWN sender ----------
+// Real Pilot .msg (2026-10-05): our reply embedded the vendor's prior email as an attachment, whose
+// sender/subject/recipients live in a NESTED storage. parseMsg scanned every CFB entry, so the nested
+// props won and the note read "Bench Office: <our reply text>". Only the root's direct children count.
+// parseCFB is stubbed with a hand-built directory tree: root -> [subject, sender, recip, attach],
+// attach -> [3701000D storage] -> [nested subject, nested sender, nested recip].
+var MSG = slice('function parseMsg(', '// Is this .msg attachment', 'parseMsg');
+function u16(s) { return new Uint8Array(Buffer.from(s, 'utf16le')); }
+var N = 0xFFFFFFFF;
+// [name, type(1 storage / 2 stream), left, right, child, data]
+var E = [
+  ['Root Entry', 5, N, N, 1],
+  ['__substg1.0_0037001F', 2, N, 2, N, 'RE: Job 1'],
+  ['__substg1.0_0C1A001F', 2, N, 3, N, 'Our Coordinator'],
+  ['__recip_version1.0_#00000000', 1, N, 4, 5],
+  ['__attach_version1.0_#00000000', 1, N, N, 7],
+  ['__substg1.0_3001001F', 2, N, 6, N, 'Vendor Office'],
+  ['__substg1.0_39FE001F', 2, N, N, N, 'office@vendor.example'],
+  ['__substg1.0_3701000D', 1, N, N, 8],
+  ['__substg1.0_0037001F', 2, N, 9, N, 'Job 1'],
+  ['__substg1.0_0C1A001F', 2, N, 10, N, 'Vendor Office'],
+  ['__recip_version1.0_#00000000', 1, N, N, 11],
+  ['__substg1.0_3001001F', 2, N, N, N, 'Our Coordinator']
+].map(function (r) { return { name: r[0], type: r[1], left: r[2], right: r[3], child: r[4], data: r[5] }; });
+var mctx = {
+  Uint8Array: Uint8Array, DataView: DataView, String: String, Date: Date,
+  parseCFB: function () { return { entries: E, readStream: function (e) { return e.data ? u16(e.data) : new Uint8Array(0); } }; },
+  utf16le: function (u8) { return Buffer.from(u8).toString('utf16le'); },
+  asciiStr: function (u8) { return Buffer.from(u8).toString('latin1'); },
+  msgHtmlText: function () { return ''; }, attName: function (n) { return n; },
+  isInlineAttach: function () { return false; }, rtfDecompress: function () { return ''; }
+};
+vm.runInNewContext(MSG + '\n;this.parseMsg=parseMsg;', mctx);
+var pm = mctx.parseMsg(null);
+A.eq('embedded email: sender is the outer message\'s', pm.fromName, 'Our Coordinator');
+A.eq('embedded email: subject is the outer message\'s', pm.subject, 'RE: Job 1');
+A.eq('embedded email: nested recipients do not leak into To', JSON.stringify(pm.to.map(function (r) { return r.name; })), '["Vendor Office"]');
+
 A.finish();
