@@ -34,7 +34,7 @@ A.ok("the retirement tombstone is in place", full.indexOf("// ==== BWN-BULK-CONS
 A.ok("the modal's operator functions do NOT return", full.indexOf("function openBulkConsole") === -1 && full.indexOf("var bulkUI") === -1 && full.indexOf("function bulkRunBatch") === -1);
 A.ok("the bulkConsole flag menu commands are GONE", full.indexOf("open Bulk Operations Console") === -1 && full.indexOf("ENABLE bulk console live writes") === -1 && full.indexOf("bulkSetFlag(\"bulkConsole\"") === -1);
 A.ok("the DRAIN executor (BWN-WQ EXEC) is KEPT", full.indexOf("// ==== BWN-WQ EXEC START") !== -1 && full.indexOf("// ==== BWN-WQ EXEC END ====") !== -1);
-A.ok("write-queue is bumped to 0.6.1 (@version + runtime VER in lockstep)", /@version\s+0\.6\.1/.test(full) && /VER = "0\.6\.1"/.test(full));
+A.ok("write-queue is bumped to 0.6.2 (@version + runtime VER in lockstep)", /@version\s+0\.6\.2/.test(full) && /VER = "0\.6\.2"/.test(full));
 
 // ================= 2. FOLDED EXECUTOR COVERAGE: dry-run = ZERO writes =========================
 // Slice the EXEC block ALONE and drive executeCommand({dryRun:true}) directly (the modal that used to

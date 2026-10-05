@@ -45,7 +45,7 @@ function mutate(src, from, to) {
   if (src.indexOf(from, i + 1) !== -1) throw new Error('MUTATION TARGET NOT UNIQUE: ' + JSON.stringify(from.slice(0, 70)));
   return src.slice(0, i) + to + src.slice(i + from.length);
 }
-var S_OPS = slice('  // ===== BWN-PERM START v1', '  // ===== BWN-PERM END v1 =====', 'BWN-PERM') + '\n' +
+var S_OPS = slice('  // ===== BWN-PERM START v2', '  // ===== BWN-PERM END v2 =====', 'BWN-PERM') + '\n' +
   slice('  // ===== BWN-OPS START v1', '  // ===== BWN-OPS END v1 =====', 'BWN-OPS');
 var S_ENG = slice('    // ===== BULK-TASK-ENGINE START v1', '    // ===== BULK-TASK-ENGINE END v1 =====', 'BULK-TASK-ENGINE');
 
