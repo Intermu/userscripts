@@ -34,7 +34,8 @@ function load(netImpl) {
     actor: function () { return { name: 'Me', email: 'me@bwn.com' }; },
     hvacPriceLineText: function () { return ''; }, hvacFullListText: function () { return ''; },
     COMPANY_ADDR: 'BWN', COMPANY_PHONE: '1', LOGO_SRC: 'x', XLSX: undefined,
-    Promise: Promise, Array: Array, JSON: JSON
+    Promise: Promise, Array: Array, JSON: JSON,
+    URL: URL   // browser-native in the TM sandbox; not an ECMAScript built-in, so a vm needs it passed in
   };
   ctx._calls = calls;
   vm.createContext(ctx);
@@ -163,6 +164,75 @@ var WO = { address: { addressLine1: '1234 Interstate Dr', city: 'Dallas', state:
   A.ok('verify NOT ok on 404 (draft path fails closed)', v404.ok === false);
   var vNet = await c3.suppressVerify(['a@x.com']);
   A.ok('verify NOT ok on network error', vNet.ok === false);
+  // ---- canonical matching (0.29.3): the server returns NORMALIZED addresses (trim + NFC + lowercase +
+  // punycode domain - api/shared/bid-suppress.js normEmail). The client must match them against the
+  // RAW recipient however it is spelled, or a suppressed address survives into the mailto draft.
+  // Non-ASCII built via fromCharCode so no editor round-trip can rewrite the bytes.
+  var e_ACUTE = String.fromCharCode(0xe9), u_UML = String.fromCharCode(0xfc), COMB_ACUTE = String.fromCharCode(0x301);
+  var CANON = [
+    ['ASCII baseline', 'Vendor@Example.COM', 'vendor@example.com'],
+    ['NFC local part (raw NFD)', 'vendor-e' + COMB_ACUTE + '@example.com', 'vendor-' + e_ACUTE + '@example.com'],
+    ['IDN Unicode domain', 'vendor@b' + u_UML + 'cher.de', 'vendor@xn--bcher-kva.de'],
+    ['already punycoded domain', 'vendor@xn--bcher-kva.de', 'vendor@xn--bcher-kva.de'],
+    ['whitespace', '  Vendor@Example.COM  ', 'vendor@example.com']
+  ];
+  CANON.forEach(function (t) { A.eq('canonEmail ' + t[0], c.canonEmail(t[1]), t[2]); });
+  for (var ci = 0; ci < CANON.length; ci++) {
+    var t = CANON[ci];
+    var cx = load(function () { return Promise.resolve({ status: 200, json: { ok: true, suppressed: [t[2]], details: {} } }); });
+    var vx = await cx.suppressVerify([t[1], 'keep@example.com']);
+    A.ok('verify ok: ' + t[0], vx.ok === true);
+    A.eq('draft drop removes ' + t[0], cx.dropSuppressed([t[1], 'keep@example.com']), ['keep@example.com']);
+    A.eq('recipientList excludes ' + t[0], emails(cx.recipientList({ rowVendors: [{ email: t[1] }, { email: 'keep@example.com' }] }, vm.runInContext('suppressedSet', cx))), ['keep@example.com']);
+  }
+  // The server's canonical form must be what canonEmail produces - checked against the backend's own
+  // algorithm (Node url.domainToASCII), not a copy of the client helper.
+  var nodeUrl = require('url');
+  function serverNorm(v) { var s = String(v).trim().normalize('NFC').toLowerCase(); var i = s.lastIndexOf('@'); return i > 0 ? s.slice(0, i + 1) + nodeUrl.domainToASCII(s.slice(i + 1)) : s; }
+  CANON.forEach(function (t) { A.eq('server normEmail agrees: ' + t[0], serverNorm(t[1]), t[2]); });
+
+  // ---- non-removal + safety
+  var cs = load(function () { return Promise.resolve({ status: 200, json: { ok: true, suppressed: ['vendor@xn--bcher-kva.de'], details: {} } }); });
+  await cs.suppressVerify(['vendor@b' + u_UML + 'cher.de']);
+  var rawU = 'Other@B' + u_UML + 'cher.DE';
+  A.eq('different valid address (same IDN domain) kept, raw spelling untouched', cs.dropSuppressed(['vendor@b' + u_UML + 'cher.de', rawU, 'Mixed.Case@Example.com']), [rawU, 'Mixed.Case@Example.com']);
+  // Contract-robust: if a reply ever carries a NON-canonical spelling (older backend, a Send-path
+  // r.suppressed echo), noteSuppressed must still key it canonically.
+  var cn = load(function () { return Promise.resolve({ status: 200, json: { ok: true, suppressed: [' Vendor@B' + u_UML + 'CHER.de '], details: {} } }); });
+  await cn.suppressVerify(['vendor@xn--bcher-kva.de']);
+  A.eq('non-canonical server spelling still suppresses the punycoded raw', cn.dropSuppressed(['vendor@xn--bcher-kva.de', 'k@x.com']), ['k@x.com']);
+  A.eq('Unicode-domain raw cannot survive a punycoded server entry', cs.dropSuppressed(['VENDOR@B' + u_UML.toUpperCase() + 'CHER.de']), []);
+  [null, undefined, 42, {}, '', '   ', 'no-at-sign', '@example.com', 'a@', 'a@ex.com:80', 'a@ex.com/p', 'a@ex.com?q', 'a@ex.com#f', 'a@[1.2.3.4]', 'a@ex com', 'a@ex%41.com', 'a@ex.com:', 'a@ex.com' + String.fromCharCode(92) + 'x'].forEach(function (bad) {
+    var r; try { r = cs.canonEmail(bad); } catch (e) { r = 'THREW ' + e.message; }
+    A.eq('canonEmail rejects ' + JSON.stringify(bad) + ' with the empty sentinel', r, '');
+  });
+  var badIn = ['no-at-sign', 'a@ex.com:80', 'x@'];
+  var outBad;
+  try { outBad = cs.dropSuppressed(badIn); } catch (e) { outBad = 'THREW'; }
+  A.eq('malformed addresses do not throw and are passed through unchanged (nothing added)', outBad, badIn);
+  A.eq('recipientList adds nothing for malformed input beyond what was given',
+    emails(cs.recipientList({ rowVendors: [{ email: 'a@ex.com:80' }, { email: 'a@ex.com:80' }] }, vm.runInContext('suppressedSet', cs))), ['a@ex.com:80']);
+  var cAdd = load(function () { return Promise.resolve({ status: 200, json: { ok: true, added: 1, already: 0, invalid: 0 } }); });
+  A.ok('suppressAdd (Unicode domain) ok', (await cAdd.suppressAdd('Z@B' + u_UML + 'cher.de')) === true);
+  A.eq('a just-marked Unicode address is excluded however it is spelled', emails(cAdd.recipientList({ rowVendors: [{ email: 'z@xn--bcher-kva.de' }, { email: 'y@x.com' }] }, vm.runInContext('suppressedSet', cAdd))), ['y@x.com']);
+
+  // ---- existing behavior
+  var cEmpty = load(function () { return Promise.resolve({ status: 200, json: { ok: true, suppressed: [], details: {} } }); });
+  var vEmpty = await cEmpty.suppressVerify(['a@x.com', 'b@x.com']);
+  A.ok('valid empty list: verify ok, nothing suppressed', vEmpty.ok === true && vEmpty.suppressed.length === 0);
+  A.eq('valid empty list changes nothing', cEmpty.dropSuppressed(['a@x.com', 'B@x.com']), ['a@x.com', 'B@x.com']);
+
+  // ---- draft toast removed-count phrase
+  A.eq('no removed phrase at 0', cs.draftRemovedNote(0), '');
+  A.eq('singular at 1', cs.draftRemovedNote(1), '; 1 suppressed address removed');
+  A.eq('plural at 3', cs.draftRemovedNote(3), '; 3 suppressed addresses removed');
+  A.ok('draft toast carries the removed phrase in the SAME toast',
+    /toast\('Draft opened for ' \+ mail\.bcc\.length \+ ' recipient' \+ \(mail\.bcc\.length === 1 \? '' : 's'\) \+ ' \(BCC\)' \+ draftRemovedNote\(removedN\) \+ '\. Review/.test(src));
+  A.ok('removed count measured around the draft-time drop', /var preN = mail\.bcc\.length;\s*mail\.bcc = dropSuppressed\(mail\.bcc\);\s*removedN = preN - mail\.bcc\.length;/.test(src));
+  A.ok('all-suppressed draft message unchanged and distinct',
+    src.indexOf("if (!mail.bcc.length) { toast('All recipients are on the do-not-contact list - nothing sent.'); return; }\n          doDraft();") > -1);
+  A.ok('removed phrase never names an address', !/draftRemovedNote\([^)]*bcc\[/.test(src) && cs.draftRemovedNote(2).indexOf('@') === -1);
+
   A.ok('draft handler fails closed + filters before opening',
     /suppressVerify\(mail\.bcc\)[\s\S]*if \(!v\.ok\) \{ toast\([^\n]*use Send instead[^\n]*return; \}[\s\S]*dropSuppressed\(mail\.bcc\)[\s\S]*doDraft\(\);/.test(src));
   A.ok('Next disabled during check, re-enabled on catch', /nextBtn\.disabled = true;[\s\S]*\.catch\(function \(\) \{ nextBtn\.disabled = false; \}\)/.test(src));
