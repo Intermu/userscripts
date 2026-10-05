@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         BWN Bid-Out (Broadway National)
 // @namespace    broadwaynational.bwn
-// @version      0.29.2
+// @version      0.29.3
 // @downloadURL  https://raw.githubusercontent.com/Intermu/userscripts/main/bwn-bid-out.user.js
 // @updateURL    https://raw.githubusercontent.com/Intermu/userscripts/main/bwn-bid-out.user.js
 // @description  Email RFP to outside / net-new vendors, launched from a caret on Umbrava's own "See Who Is Available" button (network-vendor bidding stays native - no separate Bid-Out button). The caret menu opens the tracked email RFP wizard: finds net-new vendors nearby through Google Places, looks up their emails via the BWN scrape-contacts function, takes pasted outside addresses, and can still include assignable Umbrava vendors in the same email. You pick who's included, then review the exact recipient list and the rendered email before anything sends. Send from your own mailbox via the SWA send-bid function (Microsoft Graph), or open a plain Outlook draft. Vendors are BCC'd; nothing sends until you click Send. Network access is limited to Umbrava (same-origin), Google Places, and your SWA host.
@@ -20,7 +20,7 @@
 (function () {
   'use strict';
 
-  var VER = '0.29.2';
+  var VER = '0.29.3';
   console.info('[BWN BID-OUT] v' + VER + ' - Build Requests wizard (WO details -> select vendors -> review -> sent) · Umbrava vendors + Places net-new discovery + email scrape · one-click Graph send via SWA (Outlook-draft fallback) · sent-state flip persists bid-sent + GM baseline per WO');
 
   var COMPANY_ADDR = 'Broadway National Group, 100 Davids Dr, Hauppauge, NY 11788';
@@ -182,6 +182,26 @@
     return r;
   }
 
+  // Suppression COMPARISON key, mirroring the server's normEmail (api/shared/bid-suppress.js): trim,
+  // NFC, lowercase, domain to ASCII (punycode) - the list and check results are stored in that form, so
+  // a raw "x@bücher.de" must key as "x@xn--bcher-kva.de" or it slips past into a mailto draft. Keys
+  // only: the raw address is what goes to the recipient. Browser-native (String#normalize + URL host
+  // parse, the same WHATWG algorithm as Node's url.domainToASCII). '' for anything that is not a plain
+  // local@domain (port/path/query/fragment/IP-literal/percent/unparseable) - never throws.
+  function canonEmail(v) {
+    if (typeof v !== 'string') return '';
+    var s = v.trim().normalize('NFC').toLowerCase(), i = s.lastIndexOf('@'), d = s.slice(i + 1);
+    // URL syntax in the domain (port, path, query, fragment, IP-literal, space) is not a mail domain.
+    // Checked on the RAW domain: URL silently drops a default port (":80"), so u.port cannot be trusted.
+    if (i < 1 || !d || /[\s:\/?#\\\[\]%]/.test(d)) return '';
+    try { var h = new URL('http://' + d).hostname; return h ? s.slice(0, i + 1) + h : ''; }
+    catch (e) { return ''; }
+  }
+  // Preserve legacy comparison behavior for malformed values the server never stores.
+  function supKey(e) { return canonEmail(e) || String(e == null ? '' : e).toLowerCase(); }
+  // Draft toast tail: how many recipients the draft-time re-check removed. A count only, never addresses.
+  function draftRemovedNote(n) { return n > 0 ? '; ' + n + ' suppressed address' + (n === 1 ? '' : 'es') + ' removed' : ''; }
+
   // Recipient list from the three sources. A do-not-contact address (flagged prospect OR in the
   // local `sup` set filled from bid-suppress check/add) is NEVER a recipient, whatever the source.
   function recipientList(state, sup) {
@@ -189,7 +209,7 @@
     sup = sup || {};
     function picked(email) { var k = email.toLowerCase(); return (k in (state.picked || {})) ? state.picked[k] : true; }
     function add(email) {
-      if (!email) return; var k = email.toLowerCase();
+      if (!email) return; var k = supKey(email);
       if (sup[k] || seen[k]) return; seen[k] = 1; recips.push({ email: email });
     }
     (state.rowVendors || []).forEach(function (v) { if (v.email && picked(v.email)) add(v.email); });
@@ -198,7 +218,7 @@
     return recips;
   }
 
-  var suppressedSet = {};   // email(lc) -> 1; filled from bid-suppress check/add results
+  var suppressedSet = {};   // supKey(email) -> 1; filled from bid-suppress check/add results
   function suppressCall(body) {
     var key = GM_getValue('ingest_key', '');
     if (!key) return Promise.resolve(null);
@@ -223,17 +243,17 @@
       return { ok: good, suppressed: noteSuppressed(good ? j.suppressed : []) };
     });
   }
-  // Drop every address in the local suppressed set (case-insensitive) from a bcc array.
-  function dropSuppressed(bcc) { return (bcc || []).filter(function (e) { return !suppressedSet[String(e).toLowerCase()]; }); }
+  // Drop every address in the local suppressed set (canonical match) from a bcc array. Raw entries kept as-is.
+  function dropSuppressed(bcc) { return (bcc || []).filter(function (e) { return !suppressedSet[supKey(e)]; }); }
   function noteSuppressed(arr) {
     var out = [];
-    (arr || []).forEach(function (e) { var k = String(e || '').toLowerCase(); if (k) { suppressedSet[k] = 1; out.push(k); } });
+    (arr || []).forEach(function (e) { var k = e ? supKey(e) : ''; if (k) { suppressedSet[k] = 1; out.push(k); } });
     return out;
   }
   function suppressAdd(addr) {
     return suppressCall({ action: 'add', emails: [addr], note: 'marked in Bid-Out' }).then(function (j) {
       if (!j) return false;
-      suppressedSet[String(addr).toLowerCase()] = 1; return true;
+      suppressedSet[supKey(addr)] = 1; return true;
     });
   }
   // ---- end vendor-facing scrub + do-not-contact
@@ -2057,11 +2077,14 @@
         syncSubject();
         var draftEl = document.getElementById('bo-draft');
         if (draftEl) draftEl.disabled = true;
+        var removedN = 0;
         // A mailto draft has no server backstop, so re-check now and FAIL CLOSED if we cannot verify.
         suppressVerify(mail.bcc).then(function (v) {
           if (draftEl) draftEl.disabled = !!openState.draftBlocked;
           if (!v.ok) { toast('Can’t verify the do-not-contact list - use Send instead. Draft not opened.'); return; }
+          var preN = mail.bcc.length;
           mail.bcc = dropSuppressed(mail.bcc);
+          removedN = preN - mail.bcc.length;
           if (!mail.bcc.length) { toast('All recipients are on the do-not-contact list - nothing sent.'); return; }
           doDraft();
         }).catch(function () {
@@ -2075,7 +2098,7 @@
         // 'draft-opened' bid state and land on the Sent confirmation. The channel marks it distinct
         // from a Graph send (an Outlook draft is not de-duped and is not open-tracked).
         var drec = markBidSent(wo, { sent: mail.bcc.length, from: fromDefault, channel: 'draft', benchmark: openState.benchmark });
-        toast('Draft opened for ' + mail.bcc.length + ' recipient' + (mail.bcc.length === 1 ? '' : 's') + ' (BCC). Review + send in your mail client. Body also copied to clipboard.' +
+        toast('Draft opened for ' + mail.bcc.length + ' recipient' + (mail.bcc.length === 1 ? '' : 's') + ' (BCC)' + draftRemovedNote(removedN) + '. Review + send in your mail client. Body also copied to clipboard.' +
           (nAtt ? ' Note: attachments (' + nAtt + ') are NOT carried into an Outlook draft - use one-click Send for those, or attach them manually.' : ''));
         openState.sentInfo = { rec: drec, sent: mail.bcc.length, from: fromDefault, channel: 'draft' };
         openState.step = 4; draw();
