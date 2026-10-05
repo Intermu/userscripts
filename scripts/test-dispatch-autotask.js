@@ -86,8 +86,14 @@ function harness(opts) {
   A.ok('categoryId omitted (not null)', !('categoryId' in p));
   A.eq('assignedTo = target', p.assignedTo, 'mike');
 
+  // Live shape (W-401899, 2026-10-05): Automation-created tasks carry 7 fractional digits.
+  var TICKS = Object.assign(clone(TASK), { targetStartDate: '2026-10-05T16:02:14.5499616+00:00' });
+  A.eq('7-digit fractional date is movable (not "not round-trippable")', h.autoTaskBlocker(TICKS), '');
+  var hT = harness({ tasks: function (n) { return n === 1 ? [clone(TICKS)] : [Object.assign(clone(TICKS), { assignedTo: 'mike' })]; } });
+  A.eq('7-digit task: move verified', await hT.moveAutoTask('401152', clone(TICKS), 'mike'), '');
+
   console.log('\n# moveAutoTask');
-  var moved = Object.assign(clone(TASK), { assignedTo: 'mike' });
+  var moved =Object.assign(clone(TASK), { assignedTo: 'mike' });
   h = harness({ tasks: function (n) { return n === 1 ? [clone(TASK)] : [moved]; } });
   A.eq('verified read-back -> ""', await h.moveAutoTask('401152', clone(TASK), 'mike'), '');
   A.eq('one editTask sent, validate passed', h.sent.length + ':' + h.sent[0].validate + ':' + h.sent[0].op, '1:true:editTask');
