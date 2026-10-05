@@ -124,11 +124,13 @@ function checkD(files, regs) {
       v.push('D2: [' + f + '] line ' + d.line + ': anonymous mutation document not passed straight to bwnGqlOp');
     });
     Object.keys(fieldsByName).forEach(function (name) {
+      // Full RegExp escape (names are identifiers today, so only `$` occurs - but escape everything).
+      var safe = name.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
       // Bare identifier uses only: a quoted 'PATCH_M' (dispatch's DISPATCH_API `const:` label) is data, not a send.
-      var re = new RegExp('(?<![\'"\\w$])' + name.replace(/\$/g, '\\$') + '(?![\\w$\'"])', 'g');
+      var re = new RegExp('(?<![\'"\\w$])' + safe + '(?![\\w$\'"])', 'g');
       var total = (src.match(re) || []).length;
-      var decls = (src.match(new RegExp('(?:var|let|const)\\s+' + name.replace(/\$/g, '\\$') + '\\s*=', 'g')) || []).length;
-      var sendRe = new RegExp("bwnGqlOp\\(\\s*'([A-Za-z_$][\\w$]*)'\\s*,\\s*" + name.replace(/\$/g, '\\$') + '\\b', 'g'), s, sends = 0;
+      var decls = (src.match(new RegExp('(?:var|let|const)\\s+' + safe + '\\s*=', 'g')) || []).length;
+      var sendRe = new RegExp("bwnGqlOp\\(\\s*'([A-Za-z_$][\\w$]*)'\\s*,\\s*" + safe + '\\b', 'g'), s, sends = 0;
       while ((s = sendRe.exec(src)) !== null) { sends++; checkOp(f, s[1], fieldsByName[name], name); }
       // D2: every use of the document constant other than its declaration is a bwnGqlOp send.
       if (sends === 0 || total - decls !== sends) {
