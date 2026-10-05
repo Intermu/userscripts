@@ -4,8 +4,8 @@
 // (promise shape) and drives it against a stubbed GM_xmlhttpRequest. Asserts per helper:
 //   - first request is POST to the url WITHOUT a query string, Content-Type + x-bwn-key kept,
 //     body { op:'read', userToken, query:{string values} } matching the old GET params
-//   - 404 / 405 / 400-without-recognizable-body / network error => ONE retry as the old GET
-//   - 401 / 403 / 500 / recognizable 400 => no retry, surfaced to the caller as-is
+//   - 404 / 405 / any 400 (incl. the deployed server's JSON 400s) / network error => ONE retry as the old GET
+//   - 401 / 403 / 500 / timeout => no retry, surfaced to the caller as-is
 // Then structural asserts over the full files: every changed read goes through swaRead and the
 // governance reads stay plain GETs.
 // Run: node scripts/test-swa-reads-post.js
@@ -62,10 +62,10 @@ function aiRun(respond, query) {
     r.calls[1].onload({ status: 200, responseText: '{}' });
     A.eq('ai: GET answer reaches caller', r.out.loads.length, 1);
   });
-  var b400 = aiRun(function (p) { p.onload({ status: 400, responseText: '<html>bad</html>' }); });
-  A.eq('ai: 400 unrecognizable body falls back', b400.calls.length, 2);
-  var j400 = aiRun(function (p) { p.onload({ status: 400, responseText: '{"ok":false,"error":"bad query"}' }); });
-  A.eq('ai: 400 with JSON body surfaces, no fallback', [j400.calls.length, j400.out.loads.length], [1, 1]);
+  ['<html>bad</html>', '{"error":"no events"}', '{"error":"upsert[] or outcome{} required"}'].forEach(function (body) {
+    var b = aiRun(function (p) { p.onload({ status: 400, responseText: body }); });
+    A.eq('ai: 400 ' + body + ' falls back to GET', [b.calls.length, b.calls[1].method], [2, 'GET']);
+  });
   var ne = aiRun(function (p) { p.onerror(); });
   A.eq('ai: network error falls back to GET', [ne.calls.length, ne.calls[1].method, ne.out.errs], [2, 'GET', 0]);
   ne.calls[1].onerror();
@@ -87,7 +87,7 @@ function bidCase(name, plan, query, getUrl, check) {
     GM_xmlhttpRequest: function (o) {
       calls.push(o);
       var step = plan[calls.length - 1] || { status: 200, body: '{}' };
-      if (step.err) o.onerror(); else o.onload({ status: step.status, responseText: step.body });
+      if (step.err) o.onerror(); else if (step.to) o.ontimeout(); else o.onload({ status: step.status, responseText: step.body });
     }
   };
   vm.createContext(ctx);
@@ -110,11 +110,19 @@ bidCase('200', [{ status: 200, body: '{"ok":true,"sends":[]}' }], { tracking: '9
     A.eq('bid: GET result returned', r.status, 200);
   });
 });
-bidCase('400 bare', [{ status: 400, body: 'nope' }, { status: 200, body: '{}' }], { tracking: '1' }, null, function (c) {
-  A.eq('bid: 400 unrecognizable falls back', c.length, 2);
+['nope', '{"error":"no events"}', '{"error":"upsert[] or outcome{} required"}'].forEach(function (body) {
+  bidCase('400 ' + body, [{ status: 400, body: body }, { status: 200, body: '{}' }], { tracking: '1' }, null, function (c, r) {
+    A.eq('bid: 400 ' + body + ' falls back to GET', [c.length, c[1].method, r.status], [2, 'GET', 200]);
+  });
 });
-bidCase('400 json', [{ status: 400, body: '{"error":"x"}' }], { tracking: '1' }, null, function (c, r) {
-  A.eq('bid: 400 JSON surfaces', [c.length, r.status], [1, 400]);
+bidCase('400 twice', [{ status: 400, body: '{"error":"x"}' }, { status: 400, body: '{"error":"x"}' }], { tracking: '1' }, null, function (c, r) {
+  A.eq('bid: genuine 400 repeats as one GET then surfaces', [c.length, r.status], [2, 400]);
+});
+bidCase('500', [{ status: 500, body: '{}' }], { tracking: '1' }, null, function (c, r) {
+  A.eq('bid: 500 NOT retried', [c.length, r.status], [1, 500]);
+});
+bidCase('timeout', [{ to: true }], { tracking: '1' }, null, function (c, r, e) {
+  A.eq('bid: timeout NOT retried, rejects', [c.length, !!e && e.message], [1, 'timed out']);
 });
 bidCase('net', [{ err: true }, { status: 200, body: '{"ok":true}' }], { tracking: '1' }, null, function (c, r) {
   A.eq('bid: network error falls back to GET', [c.length, c[1].method, r.status], [2, 'GET', 200]);

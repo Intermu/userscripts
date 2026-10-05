@@ -272,16 +272,17 @@
     });
   }
   // Vouched read: POST { op:'read', userToken, query } to the same url (no query string); response is
-  // identical to the GET's. Until the SWA ships that variant, a 404 / 405 / unrecognizable-400 /
-  // network error on the POST retries ONCE as the old GET (getUrl, or url + ?query). 401/403 and
-  // every other status are returned as-is (auth answers are never retried). Resolves { status, json }.
+  // identical to the GET's. Until the SWA ships that variant, a 404 / 405 / ANY 400 /
+  // network error on the POST retries ONCE as the old GET (getUrl, or url + ?query); the deployed
+  // server answers an unknown POST with a JSON 400. 401/403/500 and every other status are
+  // returned as-is (auth answers are never retried). Resolves { status, json }.
   function swaRead(url, query, headers, timeoutMs, getUrl) {
     var q = {}; var qs = Object.keys(query).map(function (k) { q[k] = String(query[k]); return k + '=' + encodeURIComponent(query[k]); }).join('&');
     var hd = {}; Object.keys(headers || {}).forEach(function (k) { hd[k] = headers[k]; });
     hd['Content-Type'] = 'application/json';
     function viaGet() { return gmGet(getUrl || (url + '?' + qs), headers, timeoutMs); }
     return gmPost(url, hd, { op: 'read', userToken: authToken(), query: q }, timeoutMs).then(function (r) {
-      if (r.status === 404 || r.status === 405 || (r.status === 400 && !(r.json && typeof r.json === 'object'))) return viaGet();
+      if (r.status === 404 || r.status === 405 || r.status === 400) return viaGet();
       return r;
     }, function (e) {
       if (e && e.message === 'network error') return viaGet();

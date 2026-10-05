@@ -1288,8 +1288,9 @@
   }
   // Vouched read: the key-gated SWA GET reads (wo-ingest / vendor-prospects) now go as POST
   // { op:'read', userToken, query } to the SAME url (no query string); the response is identical.
-  // Until the SWA ships that variant, a 404 / 405 / unrecognizable-400 / network error on the POST
-  // retries ONCE as the old GET. 401/403 are auth answers and are NEVER retried. Same callback shape
+  // Until the SWA ships that variant, a 404 / 405 / ANY 400 / network error on the POST
+  // retries ONCE as the old GET (the deployed server answers an unknown POST with a JSON 400).
+  // 401/403/500/timeout are NEVER retried. Same callback shape
   // as GM_xmlhttpRequest: opts = { headers, timeout, onload, onerror, ontimeout }. opts.getUrl
   // overrides the rebuilt GET url. The token goes only to this SWA host (same url as the GET).
   function swaRead(url, query, opts) {
@@ -1305,8 +1306,7 @@
       method: 'POST', url: url, headers: hd, timeout: opts.timeout,
       data: JSON.stringify({ op: 'read', userToken: authToken(), query: q }),
       onload: function (r) {
-        var j = null; try { j = JSON.parse(r.responseText); } catch (e) { }
-        if (r.status === 404 || r.status === 405 || (r.status === 400 && !(j && typeof j === 'object'))) { viaGet(); return; }
+        if (r.status === 404 || r.status === 405 || r.status === 400) { viaGet(); return; }
         opts.onload(r);
       },
       onerror: viaGet,
