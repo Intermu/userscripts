@@ -916,6 +916,21 @@ jobs:
       - name: US-0 installed self-check (export fixtures + no-egress/no-write guarantee)
         run: node scripts/test-selfcheck-installed.js
 
+      # Harnesses that existed and passed locally but were never wired into CI, so a regression in
+      # what they pin shipped silently (found 2026-10-05 by diffing scripts/test-*.js against this file).
+      - name: Ask slash-command harness
+        run: node scripts/test-ask-commands.js
+      - name: Ask output-escaping harness
+        run: node scripts/test-ask-escape.js
+      - name: Ask render harness
+        run: node scripts/test-ask-render.js
+      - name: Ingest key-presence beacon harness
+        run: node scripts/test-ingest-key-presence.js
+      - name: Note composer hop harness
+        run: node scripts/test-note-composer-hop.js
+      - name: Recovery SLA harness
+        run: node scripts/test-recovery-sla.js
+
   lint:
     name: Lint
     runs-on: ubuntu-latest
