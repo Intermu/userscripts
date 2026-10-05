@@ -143,7 +143,7 @@ A.ok('timings are logged with op keys', /logDispatchTimings\(/.test(full) && ful
 
 // ---- 8. gql() empty-body / non-JSON / status diagnostics ------------------------------------
 function loadGql(src) {
-  var body = src.slice(src.indexOf('  function gqlErrText(j) {'), src.indexOf('  var GATE_Q ='));
+  var body = src.slice(src.indexOf('  function gqlErrText(j) {'), src.indexOf('  // !! `assignedToMemberName` DOES NOT EXIST'));
   var sandbox = { console: console, authToken: function () { return ''; }, fetch: null, Object: Object, Error: Error, JSON: JSON, Promise: Promise, performance: { now: function () { return 0; } } };
   vm.createContext(sandbox);
   vm.runInContext(body + '\nthis.gql = gql; this.gqlErrText = gqlErrText;', sandbox);

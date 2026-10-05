@@ -108,6 +108,7 @@ function build(src) {
     fetchStatuses: function () { return { then: function () { return { then: function () {} }; } }; },
     fetchUsers: function () { return { then: function () { return { then: function () {} }; } }; },
     fillStatusOptions: function () {},
+    woInfoEl: null,          // 0.15.0: no info panel here -> showWoInfo is a no-op
     autoTaskBox: null,       // 0.14.0: no Task.EditTask checkbox here -> hydrate skips the auto-task read
     fillAssigneeOptions: function () {},
     showEcd: function () {},

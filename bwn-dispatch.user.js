@@ -1,10 +1,10 @@
 // ==UserScript==
 // @name         BWN Dispatch (Broadway National)
 // @namespace    broadwaynational.bwn
-// @version      0.14.1
+// @version      0.15.0
 // @downloadURL  https://raw.githubusercontent.com/Intermu/userscripts/main/bwn-dispatch.user.js
 // @updateURL    https://raw.githubusercontent.com/Intermu/userscripts/main/bwn-dispatch.user.js
-// @description  One-click Dispatch for a work order - replaces manually typing a row into Dispatch_Notifications.xlsx. The Dispatch launcher shows on a WO that is in "Pending Dispatch", and (0.14.0) on any WO that carries Umbrava's open auto-dispatch task "Purchase Order created, call vendor to confirm receipt" - an auto-dispatched WO lands in Pending Schedule on Team T, so you no longer flip it back to Pending Dispatch (which made Umbrava add a second task). On such a WO the modal offers to move that task to the person you assign (default on, editTask full-replace with a fresh re-read before and a verified read-back after; a failed move never blocks the card and is reported). It opens a confirm modal prefilled from the BWN Ops Suite bus (Tracking) and a same-origin Umbrava GraphQL read (Location as the site NUMBER, Priority, and the coordinator to ping): it uses the person this WO is assigned to (whoever a supervisor/manager assigned it to, read live when you open it), and when that is a team or blank it falls back to the coordinator from the most recent work order(s) at the same location. The coordinator name + email are editable before you send. On submit it POSTs the 5 typed fields plus the WO number (read from the URL, never typed - the flow needs it to deep-link the card, because Tracking is the CLIENT's tracking number and points at the wrong record) to the broadway-internal-ops SWA proxy (x-bwn-key gated) which forwards to the HTTP-triggered "Dispatch HTTP" Power Automate flow - the flow adds the row to Dispatch_Notifications.xlsx AND dispatches it (posts a Teams adaptive card to the coordinator and waits for their accept). Dispatching is a coordinator action, so there is no role gate (the x-bwn-key is the boundary). The assignee's email is not on the WO record (Umbrava exposes the coordinator NAME only), so it is resolved from a per-user name->email roster you maintain (seeded with you, and it remembers each coordinator you dispatch to); for a coordinator the roster has never met it falls back to a GUESS derived from the house name pattern and the signed-in user's own domain, shown with a "check it before you send" warning and always editable - never a silent send to an address nobody confirmed. The flow's secret URL stays server-side; nothing sensitive lives in this script. As of 0.10.0 the modal also writes the WO RECORD directly via the same-origin Umbrava GraphQL patchWorkOrder mutation (the write kanban proved live) - an operator-picked target status, an operator-picked assignee (a real Umbrava user, so the assign carries a proper GUID and the card name/email come from the record), and an auto priority-scaled Expected Completion Date - behind a confirm that spells out each write and warns that a status change resets the time-in-status clock. Writes run first and atomically; the Teams card is posted only if the record change succeeds. Registers a single "Dispatch" launcher into the shared dock (bwn:dock:*) - the dock tab is the only launcher; no floating fallback button.
+// @description  One-click Dispatch for a work order - replaces manually typing a row into Dispatch_Notifications.xlsx. The Dispatch launcher shows on every work order page (0.15.0 - the old Pending-Dispatch / auto-task gate cached a miss and hid it on freshly auto-dispatched WOs, so you no longer flip a WO back to Pending Dispatch and reload). The drawer shows the WO at a glance from live reads: site name + address, trade(s), vendor(s) on the POs, and the scope. On a WO that carries Umbrava's open auto-dispatch task "Purchase Order created, call vendor to confirm receipt" the modal offers to move that task to the person you assign (default on, editTask full-replace with a fresh re-read before and a verified read-back after; a failed move never blocks the card and is reported). It opens a confirm modal prefilled from the BWN Ops Suite bus (Tracking) and a same-origin Umbrava GraphQL read (Location as the site NUMBER, Priority, and the coordinator to ping): it uses the person this WO is assigned to (whoever a supervisor/manager assigned it to, read live when you open it), and when that is a team or blank it falls back to the coordinator from the most recent work order(s) at the same location. The coordinator name + email are editable before you send. On submit it POSTs the 5 typed fields plus the WO number (read from the URL, never typed - the flow needs it to deep-link the card, because Tracking is the CLIENT's tracking number and points at the wrong record) to the broadway-internal-ops SWA proxy (x-bwn-key gated) which forwards to the HTTP-triggered "Dispatch HTTP" Power Automate flow - the flow adds the row to Dispatch_Notifications.xlsx AND dispatches it (posts a Teams adaptive card to the coordinator and waits for their accept). Dispatching is a coordinator action, so there is no role gate (the x-bwn-key is the boundary). The assignee's email is not on the WO record (Umbrava exposes the coordinator NAME only), so it is resolved from a per-user name->email roster you maintain (seeded with you, and it remembers each coordinator you dispatch to); for a coordinator the roster has never met it falls back to a GUESS derived from the house name pattern and the signed-in user's own domain, shown with a "check it before you send" warning and always editable - never a silent send to an address nobody confirmed. The flow's secret URL stays server-side; nothing sensitive lives in this script. As of 0.10.0 the modal also writes the WO RECORD directly via the same-origin Umbrava GraphQL patchWorkOrder mutation (the write kanban proved live) - an operator-picked target status, an operator-picked assignee (a real Umbrava user, so the assign carries a proper GUID and the card name/email come from the record), and an auto priority-scaled Expected Completion Date - behind a confirm that spells out each write and warns that a status change resets the time-in-status clock. Writes run first and atomically; the Teams card is posted only if the record change succeeds. Registers a single "Dispatch" launcher into the shared dock (bwn:dock:*) - the dock tab is the only launcher; no floating fallback button.
 // @match        https://app.umbrava.com/*
 // @run-at       document-idle
 // @noframes
@@ -18,17 +18,12 @@
 (function () {
   'use strict';
 
-  var VER = '0.14.1';   // keep in step with @version - this is what the console banner reports
+  var VER = '0.15.0';   // keep in step with @version - this is what the console banner reports
   var FONT = "-apple-system,BlinkMacSystemFont,'Segoe UI','Helvetica Neue',Arial,sans-serif";
   var GREEN = '#0d3d26';          // BWN Ops Suite brand green - matches CC Request / WO Audit
   var SWA_BASE = 'https://green-stone-0717dab0f.7.azurestaticapps.net';
   var PROXY_URL = SWA_BASE + '/api/dispatch';
-  // The dispatchable status. Live recon 2026-07-24: freshly-created WOs sit in
-  // statusName "Pending Dispatch" (statusId 41); that is the state this button is for.
-  // Lenient match (substring, case-insensitive) so minor header/API formatting drift
-  // does not hide the launcher.
-  var DISPATCH_STATUS_RE = /pending\s+dispatch/i;
-  console.info('[BWN DISPATCH] v' + VER + ' - Pending-Dispatch-gated launcher -> confirm modal (bus + live GraphQL prefill, name->email roster) -> direct patchWorkOrder writes (status/assign/ECD) + SWA /api/dispatch (x-bwn-key) -> Dispatch HTTP flow -> Dispatch_Notifications.xlsx + Teams card. Registers into the shared dock (bwn:dock:*); no floating fallback button.');
+  console.info('[BWN DISPATCH] v' + VER + ' - WO-page launcher -> confirm modal (bus + live GraphQL prefill, name->email roster) -> direct patchWorkOrder writes (status/assign/ECD) + SWA /api/dispatch (x-bwn-key) -> Dispatch HTTP flow -> Dispatch_Notifications.xlsx + Teams card. Registers into the shared dock (bwn:dock:*); no floating fallback button.');
 
   // ---- DISPATCH_API: the authoritative inventory of every network op this feature can run ----
   // One entry per operation the dispatch path can execute - the DIRECT reads AND the indirect
@@ -48,9 +43,9 @@
   //              the time-in-status clock).
   //   fail       stable failure category for logs - never the raw server text (that carries input echo).
   var DISPATCH_API = Object.freeze({
-    gateStatusRead:   { key: 'gateStatusRead',   name: 'WO status (dispatch gate)', transport: 'graphql',   method: 'POST', endpoint: '/api/graphql', operation: 'workOrder.statusName', const: 'GATE_Q',    payload: '{ n:Int }',      kind: 'read',         required: false, stage: 'prefill',    after: null,             timeoutMs: 0,     retry: 'none', safeRetry: true,  fail: 'gate-read' },
-    workOrderRead:    { key: 'workOrderRead',    name: 'WO hydration read',        transport: 'graphql',   method: 'POST', endpoint: '/api/graphql', operation: 'workOrder',          const: 'DISP_WO_Q', payload: '{ n:Int }',      kind: 'read',         required: false, stage: 'prefill',    after: null,             timeoutMs: 0,     retry: 'none', safeRetry: true,  fail: 'wo-read' },
-    userRead:         { key: 'userRead',         name: 'Assignee GUID -> person',  transport: 'graphql',   method: 'POST', endpoint: '/api/graphql', operation: 'user',               const: 'USER_Q',    payload: '{ id:ID! }',     kind: 'read',         required: false, stage: 'prefill',    after: 'workOrderRead',  timeoutMs: 0,     retry: 'none', safeRetry: true,  fail: 'user-read' },
+    workOrderRead:   { key: 'workOrderRead',    name: 'WO hydration read',        transport: 'graphql',   method: 'POST', endpoint: '/api/graphql', operation: 'workOrder',          const: 'DISP_WO_Q', payload: '{ n:Int }',      kind: 'read',         required: false, stage: 'prefill',    after: null,             timeoutMs: 0,     retry: 'none', safeRetry: true,  fail: 'wo-read' },
+    vendorRead:       { key: 'vendorRead',       name: 'WO vendors (info panel)',  transport: 'graphql',   method: 'POST', endpoint: '/api/graphql', operation: 'purchaseOrders',     const: 'VENDOR_Q',  payload: '{ n:Int }',      kind: 'read',         required: false, stage: 'prefill',    after: null,             timeoutMs: 0,     retry: 'none', safeRetry: true,  fail: 'vendor-read' },
+    userRead:         { key: 'userRead',        name: 'Assignee GUID -> person',  transport: 'graphql',   method: 'POST', endpoint: '/api/graphql', operation: 'user',               const: 'USER_Q',    payload: '{ id:ID! }',     kind: 'read',         required: false, stage: 'prefill',    after: 'workOrderRead',  timeoutMs: 0,     retry: 'none', safeRetry: true,  fail: 'user-read' },
     statusList:       { key: 'statusList',       name: 'WO status list (picker)',  transport: 'graphql',   method: 'POST', endpoint: '/api/graphql', operation: 'workOrderStatuses',  const: 'STATUS_Q',  payload: '{}',             kind: 'read',         required: false, stage: 'prefill',    after: null,             timeoutMs: 0,     retry: 'none', safeRetry: true,  fail: 'status-list' },
     userList:         { key: 'userList',         name: 'Users list (picker)',      transport: 'graphql',   method: 'POST', endpoint: '/api/graphql', operation: 'users',              const: 'USERS_Q',   payload: '{}',             kind: 'read',         required: false, stage: 'prefill',    after: null,             timeoutMs: 0,     retry: 'none', safeRetry: true,  fail: 'user-list' },
     schemaIntrospect: { key: 'schemaIntrospect', name: 'Loc-field discovery',      transport: 'graphql',   method: 'POST', endpoint: '/api/graphql', operation: '__schema/__type',    const: null,        payload: '{ t?:String }',  kind: 'fallback',     required: false, stage: 'prefill',    after: null,             timeoutMs: 0,     retry: 'none', safeRetry: true,  fail: 'introspect' },
@@ -286,9 +281,6 @@
         return j.data;
       });
   }
-  // All selectors proven live (bwn-ask CORE_Q / STATUS_Q / COORD_Q). Isolated queries -
-  // an error just falls back to the bus / fail-open gating.
-  var GATE_Q = 'query($n:Int!){ workOrder(workOrderNumber:$n){ statusName } }';
   // !! `assignedToMemberName` DOES NOT EXIST on type WorkOrder. It was in this query until
   // 2026-08-03, and because ONE invalid field rejects the WHOLE GraphQL document with a 400, the
   // dispatch modal's live read had never returned - Location, Priority, the coordinator name and
@@ -306,7 +298,12 @@
   // the other priority fields get blanked. See [[umbrava-graphql-operations]] patchWorkOrder contract.
   // NOTE the read/write name flip: the READ field is `hasPriorityOverride`; the INPUT field is
   // `hasOverridePriority`. Do not confuse them.
-  var DISP_WO_Q = 'query($n:Int!){ workOrder(workOrderNumber:$n){ trackingNumber locationId locationNumber locationName assignedTo statusId statusName serviceLevelAgreementId priority{ label responseMinutes firstTripDate serviceLevelAgreementMinutes expirationMinutes expectedCompletionDate hasPriorityOverride category skipWeekends } } }';
+  // 0.15.0 adds the drawer's WO-info panel fields: scopeOfWork + trades{name} (proven by
+  // proposal-pricing's Q_WO) and address (proven by proposal-copy's Q_PROPOSAL_WO).
+  var DISP_WO_Q = 'query($n:Int!){ workOrder(workOrderNumber:$n){ trackingNumber locationId locationNumber locationName assignedTo statusId statusName serviceLevelAgreementId scopeOfWork trades{ name } address{ addressLine1 city state postalCode } priority{ label responseMinutes firstTripDate serviceLevelAgreementMinutes expirationMinutes expectedCompletionDate hasPriorityOverride category skipWeekends } } }';
+  // The vendor(s) on the WO, for the info panel. Root purchaseOrders(workOrderNumber) - same field +
+  // selectors as Core's PO_API_Q. Its own query so a miss never takes down the hydration read above.
+  var VENDOR_Q = 'query($n:Int!){ purchaseOrders(workOrderNumber:$n){ formattedPurchaseOrderNumber vendorName statusName state } }';
   // The assignee, resolved from the GUID above. `emailAddress` is the WO assignee's REAL address:
   // the 2026-07-24 recon concluded no email was readable anywhere, but that was the REST
   // `search_members` endpoint - GraphQL `user(id:)` carries it. That makes the derived guess a
@@ -706,29 +703,6 @@
   function isTeamName(name) { return /^\s*team\b/i.test(String(name || '')); }
   function isPerson(name) { name = String(name || '').trim(); return !!name && !isTeamName(name); }
 
-  // ---- Status gate ---------------------------------------------------------
-  // Decide, per WO, whether it is dispatchable ("Pending Dispatch"). Bus first (sync,
-  // free - the common case when WO Assist has run), live GraphQL as the fallback.
-  // Cached per WO for the session; a null (unreadable) result is NOT cached so a later
-  // bus publish can retry. isDispatchable fails OPEN on an unknown status (show the
-  // launcher; the confirm modal is still the gate) so a read hiccup never hides it.
-  var _statusCache = {};
-  function resolveStatus(woId) {
-    if (!woId) return Promise.resolve(null);
-    if (_statusCache[woId]) return Promise.resolve(_statusCache[woId]);
-    var bus = busGet(woId, 12 * 3600000);
-    if (bus && bus.status) { _statusCache[woId] = String(bus.status); return Promise.resolve(_statusCache[woId]); }
-    return gql(GATE_Q, { n: parseInt(woId, 10) }).then(function (d) {
-      var s = d && d.workOrder && d.workOrder.statusName ? String(d.workOrder.statusName) : '';
-      if (s) { _statusCache[woId] = s; return s; }
-      return null;
-    }, function () { return null; });
-  }
-  function isDispatchable(status) {
-    if (status == null || status === '') return true;   // unknown -> fail open
-    return DISPATCH_STATUS_RE.test(status);
-  }
-
   // ---- Umbrava auto-dispatch task ------------------------------------------------
   // When a Create WO auto-dispatches (Pilot, 2026-10), Umbrava assigns the vendor, moves the WO to
   // Pending Schedule (so the Pending-Dispatch gate above hid this launcher) and drops an OPEN task on
@@ -778,6 +752,9 @@
   function moveAutoTask(woId, snap, targetId) {
     return findAutoTask(woId, snap.id).then(function (fresh) {
       if (!fresh) return 'task is no longer open';
+      // Already on the target (the WO assign that just ran can carry its open tasks along): that IS
+      // the move - report it done, write nothing, instead of the "changed since" refusal below.
+      if (fresh.assignedTo === targetId) return '';
       if (!sameAutoTask(fresh, snap)) return 'task changed since the drawer opened';
       var why = autoTaskBlocker(fresh); if (why) return why;
       var sendErr = null;
@@ -804,14 +781,6 @@
     }, function () { return 'task re-read failed'; }).then(null, function () { return 'internal error - check the task'; });
   }
   // ===== AUTO-TASK-ENGINE END =====
-  // Gate side: does this WO carry the open auto-dispatch task? Cached per WO once known; a failed
-  // read is not cached (and reads as "no" - the status gate still fails open on its own unknowns).
-  var _autoTaskCache = {};
-  function hasAutoTask(woId) {
-    if (woId in _autoTaskCache) return Promise.resolve(_autoTaskCache[woId]);
-    return findAutoTask(woId).then(function (t) { _autoTaskCache[woId] = !!t; return !!t; }, function () { return false; });
-  }
-
   // ---- Location-history coordinator (Phase 1.5 location roster, reused) -----
   // When the WO's own live assignee is a team / blank, the best default is the coordinator
   // who most recently handled THIS location. Umbrava's "work orders at a location" field/arg
@@ -1031,6 +1000,7 @@
   // closeModal. _woRead = DISP_WO_Q's result (priority / serviceLevelAgreementId / current status +
   // assignee) so submit builds the ECD write without a second read. _ecdIso = the auto ECD to write.
   var statusSel = null, assigneeSel = null, ecdEl = null, _woRead = null, _ecdIso = null, _ecdBasis = '';
+  var woInfoEl = null;   // the read-only WO-at-a-glance panel, filled by hydrateFromUmbrava
   var autoTaskBox = null, _autoTask = null;   // the open auto-dispatch task (snapshot) + its 'move it too' checkbox
   // Suite drawer exit, per the contract in Core's ensureStyle. Core's stylesheet owns the fade;
   // sandboxes cannot share the helper, so these five lines are duplicated in every drawer module.
@@ -1100,7 +1070,7 @@
   }
   // Listeners come off before the fade starts - the node outlives the tool by 170ms and must
   // not answer a key or a bus event on its way out.
-  function closeModal() { if (openEl) { document.removeEventListener('keydown', onKey); drawerDismiss(openEl); openEl = null; emailGuessEl = null; statusSel = null; assigneeSel = null; ecdEl = null; _woRead = null; _ecdIso = null; _ecdBasis = ''; autoTaskBox = null; _autoTask = null; } }
+  function closeModal() { if (openEl) { document.removeEventListener('keydown', onKey); drawerDismiss(openEl); openEl = null; emailGuessEl = null; statusSel = null; assigneeSel = null; ecdEl = null; _woRead = null; _ecdIso = null; _ecdBasis = ''; autoTaskBox = null; _autoTask = null; woInfoEl = null; } }
   function onKey(e) { if (e.key === 'Escape') closeModal(); }
 
   function buildModal() {
@@ -1165,6 +1135,14 @@
     who.style.cssText = 'font-size:12.5px;color:#33473d;background:#eef4f0;border:1px solid #cfe0d7;border-radius:8px;padding:8px 11px;margin-bottom:14px;line-height:1.45;';
     who.textContent = 'Sends a Teams "New Dispatch Work Order" card to the coordinator below, who accepts it. Prefilled from who this WO is assigned to - if that is a team, set the individual coordinator before sending.';
     form.appendChild(who);
+
+    // WO at a glance (read-only, live reads only - never sent on the card): site, trade, vendor, scope.
+    if (woId) {
+      woInfoEl = document.createElement('div');
+      woInfoEl.style.cssText = 'font-size:12.5px;color:#33473d;border:1px solid #dbe6e0;border-radius:8px;padding:8px 11px;margin-bottom:14px;line-height:1.45;white-space:pre-line;';
+      woInfoEl.textContent = 'Reading work order ' + woId + '…';
+      form.appendChild(woInfoEl);
+    }
 
     var inputs = {};
     var touched = {};
@@ -1543,6 +1521,7 @@
       // populate the direct-write controls: status list (current annotated), assignee picker (current
       // shown), auto ECD. fetchStatuses/fetchUsers resolve to [] on failure, so no reject leg needed.
       _woRead = wo;
+      showWoInfo(n, wo);
       fetchStatuses().then(function (list) { fillStatusOptions(list, wo.statusId); });
       fetchUsers().then(function (list) { fillAssigneeOptions(list, wo.assignedTo); });
       if (autoTaskBox) findAutoTask(woId).then(function (t) {
@@ -1579,6 +1558,7 @@
       /* GraphQL unavailable - bus prefill stands. Still offer the pickers (they read independently)
          but ECD cannot be computed without the priority, so it is not written. */
       trackingFallback();
+      if (woInfoEl) woInfoEl.textContent = 'Work order details unavailable (read failed).';
       fetchStatuses().then(function (list) { fillStatusOptions(list, null); });
       fetchUsers().then(function (list) { fillAssigneeOptions(list, null); });
       _ecdIso = null; _ecdBasis = '';
@@ -1663,17 +1643,43 @@
     ecdEl.innerHTML = 'Expected completion date → <strong>' + esc(fmtEcd(_ecdIso)) + '</strong><br><span style="color:#5b7367;font-size:11.5px;">auto: ' + esc(_ecdBasis) + '</span>';
   }
 
+  // WO-at-a-glance panel. textContent only (scope/vendor text is free user input). The vendor line
+  // fills in from its own read; a miss there leaves the rest of the panel standing.
+  function showWoInfo(n, wo) {
+    if (!woInfoEl) return;
+    var el = woInfoEl;
+    var a = wo.address || {};
+    var addr = [a.addressLine1, [a.city, a.state].filter(Boolean).join(', '), a.postalCode].filter(Boolean).join(' ');
+    var trades = (wo.trades || []).map(function (t) { return t && t.name; }).filter(Boolean).join(', ');
+    var scope = String(wo.scopeOfWork || '').replace(/\s+/g, ' ').trim();
+    if (scope.length > 280) scope = scope.slice(0, 277) + '...';
+    function render(vendors) {
+      if (el !== woInfoEl) return;   // drawer closed / reopened meanwhile
+      el.textContent = [
+        'Site: ' + ([wo.locationNumber, wo.locationName].filter(Boolean).join(' - ') || '?') + (addr ? '\n' + addr : ''),
+        'Trade: ' + (trades || '?'),
+        'Vendor: ' + vendors,
+        scope ? 'Scope: ' + scope : ''
+      ].filter(Boolean).join('\n');
+    }
+    render('(reading…)');
+    gql(VENDOR_Q, { n: n }).then(function (d) {
+      var pos = (d && d.purchaseOrders) || [];
+      var v = pos.filter(function (p) { return p && p.vendorName; }).map(function (p) {
+        return p.vendorName + (p.formattedPurchaseOrderNumber ? ' (' + p.formattedPurchaseOrderNumber + (p.statusName ? ', ' + p.statusName : '') + ')' : '');
+      });
+      render(v.length ? v.join('; ') : 'none assigned');
+    }, function () { render('unavailable'); });
+  }
+
   // ---- Shared launcher dock (bwn:dock:*) -----------------------------------
   // bwn-suite-core's Launcher hosts the shared dock ([[bwn-launcher-dock]]). Dispatch is a
-  // WO-level action shown ONLY on a work order in "Pending Dispatch", so we register the
-  // 'dispatch' entry when the current WO is dispatchable and unregister otherwise (Umbrava
-  // is a SPA - we reconcile on nav, on the host heartbeat, and when the bus updates).
-  // detail.key carries the entry id (detail.id is the bwn:evt event name). If no host
-  // announces within a few seconds we fall back to a self-drawn floating button (same gate).
+  // WO-level action, so we register the 'dispatch' entry on a work order page and unregister
+  // elsewhere (Umbrava is a SPA - we reconcile on nav and on the host heartbeat).
+  // detail.key carries the entry id (detail.id is the bwn:evt event name).
   var DOCK_KEY = 'dispatch';
   var _hostSeen = false;
   var _registered = false;
-  var _navToken = 0;
   function dockRegister() {
     try {
       document.dispatchEvent(new CustomEvent('bwn:evt', { detail: {
@@ -1691,17 +1697,12 @@
     if (show && !_registered) { dockRegister(); _registered = true; }
     else if (!show && _registered) { dockUnregister(); _registered = false; }
   }
-  // Reconcile: gate on WO page AND dispatchable status (async, race-guarded by _navToken).
-  function reeval() {
-    var woId = woIdFromUrl();
-    if (!woId) { applyPresence(false); return; }
-    var myTok = ++_navToken;
-    resolveStatus(woId).then(function (st) {
-      if (myTok !== _navToken) return;              // navigated away meanwhile
-      if (isDispatchable(st)) { applyPresence(true); return; }
-      return hasAutoTask(woId).then(function (yes) { if (myTok === _navToken) applyPresence(yes); });
-    });
-  }
+  // Reconcile: shown on EVERY work order page (0.15.0). The old gate (status "Pending Dispatch", or
+  // the open auto-dispatch task) cached its answer per WO for the session, and Umbrava drops the
+  // auto-dispatch task ~3s AFTER the WO is created (W-401798: WO 12:49:59, task 12:50:02) - so a WO
+  // opened straight from Create read "no task", cached it, and hid Dispatch until the coordinator
+  // flipped the status to Pending Dispatch and reloaded. The confirm modal is the real gate.
+  function reeval() { applyPresence(!!woIdFromUrl()); }
   function onDockHost() {
     _hostSeen = true;
     _registered = false;      // force a fresh register for this (possibly newly-elected) host
@@ -1713,9 +1714,6 @@
     if (d.id === 'bwn:dock:open' && d.key === DOCK_KEY) buildModal();
     if (d.id === 'bwn:drawer:open' && d.key !== DOCK_KEY) closeModal();   // another tool took the slot
   });
-  // The suite bus (bwn:wo:{id}) landing can flip a WO to a known "Pending Dispatch" status
-  // after our first (bus-less) check - re-reconcile when it publishes.
-  document.addEventListener('bwn:update', function () { reeval(); });
   // Post-WO-Intake / cross-script opener hook: any suite script can request the modal with
   // bwn:cmd {id:'dispatch:open'} (e.g. WO Intake could fire it after Create - see
   // wo-dispatch-button.md). This opener bypasses the status gate on purpose (explicit ask).
