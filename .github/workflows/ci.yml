@@ -932,6 +932,8 @@ jobs:
         run: node scripts/test-recovery-sla.js
       - name: bwn modules blob parse harness (six consumers, booleans only, no load-time crash)
         run: node scripts/test-modules-parse.js
+      - name: Endpoint error surfacing harness (Bid-Out reads, Write Queue claim, Dispatch card line)
+        run: node scripts/test-endpoint-errors.js
 
   lint:
     name: Lint
