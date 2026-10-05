@@ -930,6 +930,8 @@ jobs:
         run: node scripts/test-note-composer-hop.js
       - name: Recovery SLA harness
         run: node scripts/test-recovery-sla.js
+      - name: bwn modules blob parse harness (six consumers, booleans only, no load-time crash)
+        run: node scripts/test-modules-parse.js
 
   lint:
     name: Lint
