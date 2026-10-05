@@ -93,6 +93,10 @@ function harness(opts) {
   A.eq('one editTask sent, validate passed', h.sent.length + ':' + h.sent[0].validate + ':' + h.sent[0].op, '1:true:editTask');
   A.eq('routed under the dispatch kill switch', h.sent[0].feature, 'dispatch');
 
+  // The WO assign that runs first can carry the open task along with it - already there = moved.
+  h = harness({ tasks: function () { return [Object.assign(clone(TASK), { assignedTo: 'mike' })]; } });
+  A.eq('already on the target -> "" (done), nothing sent', (await h.moveAutoTask('401152', clone(TASK), 'mike')) + ':' + h.sent.length, ':0');
+
   var changed = Object.assign(clone(TASK), { assignedTo: 'someone-else' });
   h = harness({ tasks: function () { return [changed]; } });
   A.eq('changed since snapshot -> refused, nothing sent', (await h.moveAutoTask('401152', clone(TASK), 'mike')) + ':' + h.sent.length, 'task changed since the drawer opened:0');
