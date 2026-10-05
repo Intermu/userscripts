@@ -119,9 +119,9 @@ function harness(opts) {
   var ictx = { Math: Math, String: String };
   vm.createContext(ictx);
   vm.runInContext(slice(intake, '  var AUTO_DISPATCH_GP =', '  function fillAutoDispatchNte(') + '\nthis.vendorNteFor=vendorNteFor;', ictx);
-  A.eq('$1,500 DNE -> 990', ictx.vendorNteFor(1500), '990');
-  A.eq('$800 DNE -> 528', ictx.vendorNteFor(800), '528');
-  A.eq('$1,234.56 DNE -> 814 (floored)', ictx.vendorNteFor(1234.56), '814');
+  A.eq('$1,500 DNE -> 990.00', ictx.vendorNteFor(1500), '990.00');
+  A.eq('$800 DNE -> 528.00', ictx.vendorNteFor(800), '528.00');
+  A.eq('$1,234.56 DNE -> 814.00 (floored)', ictx.vendorNteFor(1234.56), '814.00');
   [350, 800, 1500, 2725.5].forEach(function (d) {
     var gp = Math.round((1 - Number(ictx.vendorNteFor(d)) / d) * 1e6) / 1e6;
     A.ok('GP at $' + d + ' within 34-35% (' + (gp * 100).toFixed(2) + '%)', gp >= 0.34 && gp < 0.35);
