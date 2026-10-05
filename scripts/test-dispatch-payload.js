@@ -228,24 +228,6 @@ function checkHydrate(S, label) {
 }
 checkHydrate(S, 'hydrate');
 
-// 0.15.1: the auto-dispatch task lands a few seconds after Create, so hydrate re-reads until it shows.
-(function checkTaskPoll() {
-  var P = build(full);
-  var label = { style: {} }, txt = { textContent: '' };
-  var box = { parentNode: label, nextSibling: txt, checked: true, disabled: false };
-  var reads = 0, waits = 0, TASK = { id: 't1', description: 'Purchase Order created, call vendor to confirm receipt' };
-  P.autoTaskBox = box;
-  // sync thenable, like the gql stub: the pass/fail summary at the bottom runs synchronously
-  P.findAutoTask = function () { reads++; var v = reads < 3 ? null : TASK; return { then: function (ok) { ok(v); } }; };
-  P.autoTaskBlocker = function () { return ''; };
-  P.setTimeout = function (fn) { waits++; fn(); };
-  P.gqlFail = false; P.gqlUserFail = false; P.gqlResult = woFixture(); P.gqlUser = null;
-  P.hydrateFromUmbrava('383449', inputsFor({}), {});
-  A.eq('task poll: re-read until the task landed (3 reads, 2 waits)', reads + ':' + waits, '3:2');
-  A.eq('task poll: checkbox shown once it landed', label.style.display, 'flex');
-  A.eq('task poll: snapshot taken for the move', P._autoTask && P._autoTask.id, 't1');
-})();
-
 // siteNumberOf is deliberately conservative: derive only when it is unambiguous, because a wrong
 // key makes the flow's `Lookup site` miss SILENTLY while an empty required field cannot.
 function checkSiteNumber(S, label) {

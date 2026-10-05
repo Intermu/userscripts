@@ -1,10 +1,10 @@
 // ==UserScript==
 // @name         BWN Dispatch (Broadway National)
 // @namespace    broadwaynational.bwn
-// @version      0.15.1
+// @version      0.15.0
 // @downloadURL  https://raw.githubusercontent.com/Intermu/userscripts/main/bwn-dispatch.user.js
 // @updateURL    https://raw.githubusercontent.com/Intermu/userscripts/main/bwn-dispatch.user.js
-// @description  One-click Dispatch for a work order - replaces manually typing a row into Dispatch_Notifications.xlsx. The Dispatch launcher shows on every work order page (0.15.1 - the old Pending-Dispatch / auto-task gate cached a miss and hid it on freshly auto-dispatched WOs, so you no longer flip a WO back to Pending Dispatch and reload). The drawer shows the WO at a glance from live reads: site name + address, trade(s), vendor(s) on the POs, and the scope. On a WO that carries Umbrava's open auto-dispatch task "Purchase Order created, call vendor to confirm receipt" the modal offers to move that task to the person you assign (default on, editTask full-replace with a fresh re-read before and a verified read-back after; a failed move never blocks the card and is reported). It opens a confirm modal prefilled from the BWN Ops Suite bus (Tracking) and a same-origin Umbrava GraphQL read (Location as the site NUMBER, Priority, and the coordinator to ping): it uses the person this WO is assigned to (whoever a supervisor/manager assigned it to, read live when you open it), and when that is a team or blank it falls back to the coordinator from the most recent work order(s) at the same location. The coordinator name + email are editable before you send. On submit it POSTs the 5 typed fields plus the WO number (read from the URL, never typed - the flow needs it to deep-link the card, because Tracking is the CLIENT's tracking number and points at the wrong record) to the broadway-internal-ops SWA proxy (x-bwn-key gated) which forwards to the HTTP-triggered "Dispatch HTTP" Power Automate flow - the flow adds the row to Dispatch_Notifications.xlsx AND dispatches it (posts a Teams adaptive card to the coordinator and waits for their accept). Dispatching is a coordinator action, so there is no role gate (the x-bwn-key is the boundary). The assignee's email is not on the WO record (Umbrava exposes the coordinator NAME only), so it is resolved from a per-user name->email roster you maintain (seeded with you, and it remembers each coordinator you dispatch to); for a coordinator the roster has never met it falls back to a GUESS derived from the house name pattern and the signed-in user's own domain, shown with a "check it before you send" warning and always editable - never a silent send to an address nobody confirmed. The flow's secret URL stays server-side; nothing sensitive lives in this script. As of 0.10.0 the modal also writes the WO RECORD directly via the same-origin Umbrava GraphQL patchWorkOrder mutation (the write kanban proved live) - an operator-picked target status, an operator-picked assignee (a real Umbrava user, so the assign carries a proper GUID and the card name/email come from the record), and an auto priority-scaled Expected Completion Date - behind a confirm that spells out each write and warns that a status change resets the time-in-status clock. Writes run first and atomically; the Teams card is posted only if the record change succeeds. Registers a single "Dispatch" launcher into the shared dock (bwn:dock:*) - the dock tab is the only launcher; no floating fallback button.
+// @description  One-click Dispatch for a work order - replaces manually typing a row into Dispatch_Notifications.xlsx. The Dispatch launcher shows on every work order page (0.15.0 - the old Pending-Dispatch / auto-task gate cached a miss and hid it on freshly auto-dispatched WOs, so you no longer flip a WO back to Pending Dispatch and reload). The drawer shows the WO at a glance from live reads: site name + address, trade(s), vendor(s) on the POs, and the scope. On a WO that carries Umbrava's open auto-dispatch task "Purchase Order created, call vendor to confirm receipt" the modal offers to move that task to the person you assign (default on, editTask full-replace with a fresh re-read before and a verified read-back after; a failed move never blocks the card and is reported). It opens a confirm modal prefilled from the BWN Ops Suite bus (Tracking) and a same-origin Umbrava GraphQL read (Location as the site NUMBER, Priority, and the coordinator to ping): it uses the person this WO is assigned to (whoever a supervisor/manager assigned it to, read live when you open it), and when that is a team or blank it falls back to the coordinator from the most recent work order(s) at the same location. The coordinator name + email are editable before you send. On submit it POSTs the 5 typed fields plus the WO number (read from the URL, never typed - the flow needs it to deep-link the card, because Tracking is the CLIENT's tracking number and points at the wrong record) to the broadway-internal-ops SWA proxy (x-bwn-key gated) which forwards to the HTTP-triggered "Dispatch HTTP" Power Automate flow - the flow adds the row to Dispatch_Notifications.xlsx AND dispatches it (posts a Teams adaptive card to the coordinator and waits for their accept). Dispatching is a coordinator action, so there is no role gate (the x-bwn-key is the boundary). The assignee's email is not on the WO record (Umbrava exposes the coordinator NAME only), so it is resolved from a per-user name->email roster you maintain (seeded with you, and it remembers each coordinator you dispatch to); for a coordinator the roster has never met it falls back to a GUESS derived from the house name pattern and the signed-in user's own domain, shown with a "check it before you send" warning and always editable - never a silent send to an address nobody confirmed. The flow's secret URL stays server-side; nothing sensitive lives in this script. As of 0.10.0 the modal also writes the WO RECORD directly via the same-origin Umbrava GraphQL patchWorkOrder mutation (the write kanban proved live) - an operator-picked target status, an operator-picked assignee (a real Umbrava user, so the assign carries a proper GUID and the card name/email come from the record), and an auto priority-scaled Expected Completion Date - behind a confirm that spells out each write and warns that a status change resets the time-in-status clock. Writes run first and atomically; the Teams card is posted only if the record change succeeds. Registers a single "Dispatch" launcher into the shared dock (bwn:dock:*) - the dock tab is the only launcher; no floating fallback button.
 // @match        https://app.umbrava.com/*
 // @run-at       document-idle
 // @noframes
@@ -18,7 +18,7 @@
 (function () {
   'use strict';
 
-  var VER = '0.15.1';   // keep in step with @version - this is what the console banner reports
+  var VER = '0.15.0';   // keep in step with @version - this is what the console banner reports
   var FONT = "-apple-system,BlinkMacSystemFont,'Segoe UI','Helvetica Neue',Arial,sans-serif";
   var GREEN = '#0d3d26';          // BWN Ops Suite brand green - matches CC Request / WO Audit
   var SWA_BASE = 'https://green-stone-0717dab0f.7.azurestaticapps.net';
@@ -1524,21 +1524,12 @@
       showWoInfo(n, wo);
       fetchStatuses().then(function (list) { fillStatusOptions(list, wo.statusId); });
       fetchUsers().then(function (list) { fillAssigneeOptions(list, wo.assignedTo); });
-      // Umbrava Automation adds the auto-dispatch task a few seconds AFTER the WO is created, so a
-      // drawer opened straight from Create finds nothing on the first read. Re-read every 3s while
-      // this drawer is open (up to ~45s) and show the checkbox the moment the task lands.
-      // ponytail: fixed poll window; a WO whose task lands later than ~45s needs the drawer reopened.
-      var box = autoTaskBox, tries = 0;
-      (function lookForTask() {
-        if (!box || box !== autoTaskBox) return;   // drawer closed / reopened
-        findAutoTask(woId).then(function (t) {
-          if (box !== autoTaskBox) return;
-          if (!t) { if (++tries < 15) setTimeout(lookForTask, 3000); return; }
-          _autoTask = t; box.parentNode.style.display = 'flex';
-          var why = autoTaskBlocker(t);
-          if (why) { box.checked = false; box.disabled = true; box.nextSibling.textContent += ' (' + why + ')'; }
-        }, function () { if (box === autoTaskBox && ++tries < 15) setTimeout(lookForTask, 3000); });
-      })();
+      if (autoTaskBox) findAutoTask(woId).then(function (t) {
+        if (!t || !autoTaskBox) return;
+        _autoTask = t; autoTaskBox.parentNode.style.display = 'flex';
+        var why = autoTaskBlocker(t);
+        if (why) { autoTaskBox.checked = false; autoTaskBox.disabled = true; autoTaskBox.nextSibling.textContent += ' (' + why + ')'; }
+      }, function () { /* unreadable: the checkbox stays hidden, nothing is moved */ });
       showEcd(wo.priority);
       setTracking(wo.trackingNumber);
       trackingFallback();
