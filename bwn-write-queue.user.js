@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         BWN Write Queue (Broadway National)
 // @namespace    broadwaynational.bwn
-// @version      0.6.2
+// @version      0.6.3
 // @downloadURL  https://raw.githubusercontent.com/Intermu/userscripts/main/bwn-write-queue.user.js
 // @updateURL    https://raw.githubusercontent.com/Intermu/userscripts/main/bwn-write-queue.user.js
 // @description  Drains the Track C write-back queue: claims THIS coordinator's own queued Umbrava write commands from the SWA, confirms each irreversible write, executes it via patchWorkOrder/addEditJobNote, and reports the result. Self-drain; every write is human-confirmed; disabled until you turn it on. v0.5 RETIRES this script's Bulk Operations Console modal - Core (bwn-suite-core, flag bulkOps) is now the single Safe Bulk Operations Console; the drain executor stays here as Track C infrastructure.
@@ -38,7 +38,7 @@
 
 (function () {
   "use strict";
-  var VER = "0.6.2";   // keep in lockstep with @version (TM compares versions, not contents)
+  var VER = "0.6.3";   // keep in lockstep with @version (TM compares versions, not contents)
 
   var SWA_BASE = "https://green-stone-0717dab0f.7.azurestaticapps.net";
   var PROXY_URL = SWA_BASE + "/api/wo-write-queue";
@@ -653,11 +653,57 @@
     });
   }
 
+  // WQ-CLAIM-BEGIN (sliced by scripts/test-endpoint-errors.js)
+  // null means ONLY "the queue answered and holds nothing for you". Every other outcome - 401, 403,
+  // another HTTP failure, an HTML page / ok:false, a network error - REJECTS with a classified error
+  // so pollTick can say the queue is unavailable instead of looking idle. No new retries: the
+  // existing poll timer is the only re-try there is.
+  function wqClaimErr(r) {
+    var s = r ? (Number(r.status) || 0) : 0, cls, msg;
+    if (!r) { cls = "network"; msg = "network error"; }
+    else if (s === 401) { cls = "session"; msg = "session verification failed. Reload the tab and try again"; }
+    else if (s === 403) { cls = "denied"; msg = "access denied. Check your access, then try again"; }
+    else if (s < 200 || s >= 300) { cls = "http:" + s; msg = "request failed (HTTP " + s + ")"; }
+    else { cls = "invalid"; msg = "invalid response"; }
+    var e = new Error("Write Queue is unavailable: " + msg + ".");
+    e.wqClass = cls;
+    return e;
+  }
   function claimOnce(tok) {
     return gmPost(PROXY_URL, { "Content-Type": "application/json", "x-bwn-key": ingestKey() },
       { op: "claim", userToken: tok, client: CLIENT, capabilities: { dedupAppend: true } }, 20000)
-      .then(function (r) { return (r.json && r.json.ok) ? (r.json.command || null) : null; });
+      .then(function (r) {
+        if (r && r.status >= 200 && r.status < 300 && r.json && r.json.ok) return r.json.command || null;
+        throw wqClaimErr(r);
+      }, function () { throw wqClaimErr(null); });
   }
+  // A small strip in the confirmStrip style, shown only when the failure CLASS changes (a dead
+  // route polled every 20s must not re-announce itself) and removed by the next good claim.
+  var claimProblemEl = null, claimProblemClass = "";
+  function wqClaimStatus(err) {
+    var cls = err ? err.wqClass : "";
+    if (cls === claimProblemClass) return;
+    claimProblemClass = cls;
+    if (claimProblemEl && claimProblemEl.parentNode) claimProblemEl.parentNode.removeChild(claimProblemEl);
+    claimProblemEl = null;
+    if (!err) return;
+    var wrap = document.createElement("div");
+    wrap.setAttribute("data-bwn-wq-ui", "1");
+    wrap.setAttribute("role", "status");
+    wrap.style.cssText = "position:fixed;right:16px;bottom:16px;z-index:2147483000;max-width:380px;background:#111827;color:#f9fafb;border:1px solid #7f1d1d;border-radius:10px;box-shadow:0 8px 30px rgba(0,0,0,.4);font:13px/1.45 system-ui,sans-serif;padding:12px 14px;";
+    var body = document.createElement("div");
+    body.style.cssText = "margin-bottom:8px;white-space:normal;word-break:break-word;";
+    body.textContent = err.message;
+    var close = document.createElement("button");
+    close.textContent = "Dismiss";
+    close.style.cssText = "padding:4px 10px;border-radius:6px;border:1px solid #4b5563;background:transparent;color:#e5e7eb;cursor:pointer;";
+    // Dismiss hides this one; the class stays remembered, so the same failure stays quiet.
+    close.addEventListener("click", function () { if (wrap.parentNode) wrap.parentNode.removeChild(wrap); if (claimProblemEl === wrap) claimProblemEl = null; });
+    wrap.appendChild(body); wrap.appendChild(close);
+    document.body.appendChild(wrap);
+    claimProblemEl = wrap;
+  }
+  // WQ-CLAIM-END
   function reportResult(tok, id, outcome, result, error, retryable) {
     return gmPost(PROXY_URL, { "Content-Type": "application/json", "x-bwn-key": ingestKey() },
       { op: "report", userToken: tok, client: CLIENT, id: id, outcome: outcome, result: result || null, error: error || "", retryable: !!retryable }, 20000)
@@ -705,6 +751,7 @@
     if (!tok || !ingestKey()) return;
     busy = true;
     claimOnce(tok).then(function (cmd) {
+      wqClaimStatus(null);                 // the queue answered: clear any "unavailable" strip
       if (!cmd) { busy = false; return; }
       return confirmStrip(cmd).then(function (choice) {
         if (choice !== "approve") {
@@ -717,7 +764,10 @@
           return reportResult(tok, cmd.id, "failed", null, (err && err.message) || String(err), classifyError(err)).then(function () { busy = false; });
         });
       });
-    }).catch(function () { busy = false; });
+    }).catch(function (err) {
+      if (err && err.wqClass) wqClaimStatus(err);   // only CLAIM failures; later-stage errors stay as before
+      busy = false;
+    });
   }
 
   // ---- SWA ingest key presence beacon ---------------------------------------
