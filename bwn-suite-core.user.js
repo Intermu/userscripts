@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         BWN Suite - Core (Broadway National)
 // @namespace    broadwaynational.bwn
-// @version      1.94.2
+// @version      1.94.3
 // @downloadURL  https://raw.githubusercontent.com/Intermu/userscripts/main/bwn-suite-core.user.js
 // @updateURL    https://raw.githubusercontent.com/Intermu/userscripts/main/bwn-suite-core.user.js
 // @description  Runs several Umbrava helpers for BWN coordinators, in the browser with no privileged grants. Includes: PO Approval + ETA Builder; WO Assist (GP/ETA, a stall watchdog, DNE calculator, and a next-action playbook); Email Leak Guard (checks recipients against vendor names, PO amounts, and client budget references before an outbound email sends); WO List Heat (a triage overlay + My Day strip on the work-order list, with an optional same-origin Umbrava API scan for deterministic full-board coverage); and the BWN Launcher (opens the Azure Static Web App tools with the current WO's context). Modules share state through sessionStorage/localStorage. The only network calls are same-origin Umbrava GraphQL requests (app.umbrava.com/api/graphql, the app's own session): List Heat's full-board scan and WO Assist's work-order / trip / clock-in / document / purchase-order reads, plus ONE write - BWN Views saves the column layout through Umbrava's own putUserPreference, the same preference the column chooser writes; everything else is offline. Toggle modules in BWN_MODULES below.
@@ -392,6 +392,13 @@
       setter.call(el, value);
       el.dispatchEvent(new Event('input', { bubbles: true }));
       el.dispatchEvent(new Event('change', { bubbles: true }));
+      // React 17+ wires onBlur to `focusout`, and react-aria NumberFields only commit typed text into
+      // the form on a REAL focus -> blur (useFocusWithin checks activeElement), so a synthetic 'blur'
+      // left the field showing a value the form never held (wo-intake 0.10.3). Focus/blur for real,
+      // then hand focus back. Never blur the field the operator is in.
+      var prev = document.activeElement;
+      if (prev === el) return;
+      try { el.focus(); el.blur(); if (prev && prev !== document.body && prev.focus) prev.focus(); } catch (e) { }
     }
 
     // ---- Brand tokens + gradient ----------------------------------------------

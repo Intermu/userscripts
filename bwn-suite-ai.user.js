@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         BWN Suite - AI (Broadway National)
 // @namespace    broadwaynational.bwn
-// @version      1.48.3
+// @version      1.48.4
 // @downloadURL  https://raw.githubusercontent.com/Intermu/userscripts/main/bwn-suite-ai.user.js
 // @updateURL    https://raw.githubusercontent.com/Intermu/userscripts/main/bwn-suite-ai.user.js
 // @description  The Umbrava tools that call outside APIs, kept separate from the zero-egress Core script. Client Update and WO Audit drafts (Anthropic Claude; draft-only, scrubbed before sending, you review before posting); Find Techs / Find Suppliers (Google Places; vendor leads near a WO); and Job View (opens the Ops-Dashboard job card on the WO page - WO details from Umbrava plus the authored case file and next actions, read-only). Network access is limited by the browser to the declared API hosts and the BWN Static Web App. API keys are stored in Tampermonkey's storage via the menu commands and never enter the page. Toggle modules in BWN_MODULES below.
@@ -343,6 +343,13 @@
       setter.call(el, value);
       el.dispatchEvent(new Event('input', { bubbles: true }));
       el.dispatchEvent(new Event('change', { bubbles: true }));
+      // React 17+ wires onBlur to `focusout`, and react-aria NumberFields only commit typed text into
+      // the form on a REAL focus -> blur (useFocusWithin checks activeElement), so a synthetic 'blur'
+      // left the field showing a value the form never held (wo-intake 0.10.3). Focus/blur for real,
+      // then hand focus back. Never blur the field the operator is in.
+      var prev = document.activeElement;
+      if (prev === el) return;
+      try { el.focus(); el.blur(); if (prev && prev !== document.body && prev.focus) prev.focus(); } catch (e) { }
     }
 
     // ---- Brand tokens + gradient ----------------------------------------------
