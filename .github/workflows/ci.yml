@@ -817,6 +817,9 @@ jobs:
       - name: Bid-out vendor-text scrub + do-not-contact harness (client names, address, NexRev line; all recipient sources)
         run: node scripts/test-bid-out-scrub.js
 
+      - name: SWA key-gated reads go out as vouched POST with GET fallback (suite-ai + bid-out)
+        run: node scripts/test-swa-reads-post.js
+
       - name: Drop Upload party/label classifier harness (broker is not a vendor)
         run: node scripts/test-drop-upload-classify.js
 

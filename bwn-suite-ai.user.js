@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         BWN Suite - AI (Broadway National)
 // @namespace    broadwaynational.bwn
-// @version      1.50.0
+// @version      1.50.1
 // @downloadURL  https://raw.githubusercontent.com/Intermu/userscripts/main/bwn-suite-ai.user.js
 // @updateURL    https://raw.githubusercontent.com/Intermu/userscripts/main/bwn-suite-ai.user.js
 // @description  The Umbrava tools that call outside APIs, kept separate from the zero-egress Core script. Client Update and WO Audit drafts (Anthropic Claude; draft-only, scrubbed before sending, you review before posting); Find Techs / Find Suppliers (Google Places; vendor leads near a WO); and Job View (opens the Ops-Dashboard job card on the WO page - WO details from Umbrava plus the authored case file and next actions, read-only). Network access is limited by the browser to the declared API hosts and the BWN Static Web App. API keys are stored in Tampermonkey's storage via the menu commands and never enter the page. Toggle modules in BWN_MODULES below.
@@ -1286,6 +1286,33 @@
     var el = document.querySelector('[data-testid="work-order-header-tracking-number"]');
     return el ? (el.textContent || '').replace(/\D+/g, '') : '';
   }
+  // Vouched read: the key-gated SWA GET reads (wo-ingest / vendor-prospects) now go as POST
+  // { op:'read', userToken, query } to the SAME url (no query string); the response is identical.
+  // Until the SWA ships that variant, a 404 / 405 / unrecognizable-400 / network error on the POST
+  // retries ONCE as the old GET. 401/403 are auth answers and are NEVER retried. Same callback shape
+  // as GM_xmlhttpRequest: opts = { headers, timeout, onload, onerror, ontimeout }. opts.getUrl
+  // overrides the rebuilt GET url. The token goes only to this SWA host (same url as the GET).
+  function swaRead(url, query, opts) {
+    var qs = Object.keys(query).map(function (k) { return k + '=' + encodeURIComponent(query[k]); }).join('&');
+    var q = {}; Object.keys(query).forEach(function (k) { q[k] = String(query[k]); });
+    function viaGet() {
+      GM_xmlhttpRequest({ method: 'GET', url: opts.getUrl || (url + '?' + qs), headers: opts.headers, timeout: opts.timeout,
+        onload: opts.onload, onerror: opts.onerror, ontimeout: opts.ontimeout });
+    }
+    var hd = {}; Object.keys(opts.headers || {}).forEach(function (k) { hd[k] = opts.headers[k]; });
+    hd['Content-Type'] = 'application/json';
+    GM_xmlhttpRequest({
+      method: 'POST', url: url, headers: hd, timeout: opts.timeout,
+      data: JSON.stringify({ op: 'read', userToken: authToken(), query: q }),
+      onload: function (r) {
+        var j = null; try { j = JSON.parse(r.responseText); } catch (e) { }
+        if (r.status === 404 || r.status === 405 || (r.status === 400 && !(j && typeof j === 'object'))) { viaGet(); return; }
+        opts.onload(r);
+      },
+      onerror: viaGet,
+      ontimeout: opts.ontimeout
+    });
+  }
   function swaSync() {
     if (swaBusy) return;
     if (!connectorEnabled()) return;                      // kill-switch: Ops Suite toggle
@@ -1296,9 +1323,7 @@
     var cur = BWN.ssGetJSON('bwn:swa:' + tr, null);
     if (cur && cur.ts && Date.now() - cur.ts < SWA_TTL) return;   // fresh (a null record is cached too - absent case files aren't re-fetched every tick)
     swaBusy = true;
-    GM_xmlhttpRequest({
-      method: 'GET',
-      url: INGEST_URL + '?client=' + INGEST_CLIENT + '&target=' + encodeURIComponent(tr),
+    swaRead(INGEST_URL, { client: INGEST_CLIENT, target: tr }, {
       headers: { 'x-bwn-key': key },
       timeout: 15000,
       onload: function (r) {
@@ -4277,9 +4302,7 @@
             });
             return;
           }
-          GM_xmlhttpRequest({
-            method: 'GET',
-            url: INGEST_URL + '?client=' + INGEST_CLIENT + '&o30=' + encodeURIComponent(targets.slice(off, off + GET_CH).join(',')),
+          swaRead(INGEST_URL, { client: INGEST_CLIENT, o30: targets.slice(off, off + GET_CH).join(',') }, {
             headers: { 'x-bwn-key': key }, timeout: 15000,
             onload: function (r) {
               if (cancelled) return;
@@ -4708,9 +4731,7 @@ if (BWN_MODULES.jobView) BWN.safeModule('jobView', function () {
         if (!key || !digits) { resolve(out); return; }
         var pending = 2;
         function done() { if (--pending <= 0) resolve(out); }
-        GM_xmlhttpRequest({
-          method: 'GET',
-          url: INGEST_URL + '?client=' + INGEST_CLIENT + '&target=' + encodeURIComponent(digits),
+        swaRead(INGEST_URL, { client: INGEST_CLIENT, target: digits }, {
           headers: { 'x-bwn-key': key }, timeout: 15000,
           onload: function (r) {
             try {
@@ -4723,9 +4744,7 @@ if (BWN_MODULES.jobView) BWN.safeModule('jobView', function () {
           },
           onerror: function () { done(); }, ontimeout: function () { done(); }
         });
-        GM_xmlhttpRequest({
-          method: 'GET',
-          url: INGEST_URL + '?client=' + INGEST_CLIENT + '&o30=' + encodeURIComponent(digits),
+        swaRead(INGEST_URL, { client: INGEST_CLIENT, o30: digits }, {
           headers: { 'x-bwn-key': key }, timeout: 15000,
           onload: function (r) {
             try {
@@ -6798,9 +6817,8 @@ if (BWN_MODULES.jobView) BWN.safeModule('jobView', function () {
     }
     function vpFetchCity(cs, kind, cb) {
       var k = vpKey(); if (!k || !cs) { cb([]); return; }
-      GM_xmlhttpRequest({
-        method: 'GET', timeout: 25000,
-        url: PROSPECTS_URL + '?city=' + encodeURIComponent(cs.city) + '&state=' + encodeURIComponent(cs.state) + '&kind=' + kind,
+      swaRead(PROSPECTS_URL, { city: cs.city, state: cs.state, kind: kind }, {
+        timeout: 25000,
         headers: { 'x-bwn-key': k },
         onload: function (r) { var j = null; try { j = JSON.parse(r.responseText); } catch (e) { } cb((j && j.ok && j.prospects) || []); },
         onerror: function () { cb([]); }, ontimeout: function () { cb([]); }

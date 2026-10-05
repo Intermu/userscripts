@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         BWN Bid-Out (Broadway National)
 // @namespace    broadwaynational.bwn
-// @version      0.29.3
+// @version      0.29.4
 // @downloadURL  https://raw.githubusercontent.com/Intermu/userscripts/main/bwn-bid-out.user.js
 // @updateURL    https://raw.githubusercontent.com/Intermu/userscripts/main/bwn-bid-out.user.js
 // @description  Email RFP to outside / net-new vendors, launched from a caret on Umbrava's own "See Who Is Available" button (network-vendor bidding stays native - no separate Bid-Out button). The caret menu opens the tracked email RFP wizard: finds net-new vendors nearby through Google Places, looks up their emails via the BWN scrape-contacts function, takes pasted outside addresses, and can still include assignable Umbrava vendors in the same email. You pick who's included, then review the exact recipient list and the rendered email before anything sends. Send from your own mailbox via the SWA send-bid function (Microsoft Graph), or open a plain Outlook draft. Vendors are BCC'd; nothing sends until you click Send. Network access is limited to Umbrava (same-origin), Google Places, and your SWA host.
@@ -20,7 +20,7 @@
 (function () {
   'use strict';
 
-  var VER = '0.29.3';
+  var VER = '0.29.4';
   console.info('[BWN BID-OUT] v' + VER + ' - Build Requests wizard (WO details -> select vendors -> review -> sent) · Umbrava vendors + Places net-new discovery + email scrape · one-click Graph send via SWA (Outlook-draft fallback) · sent-state flip persists bid-sent + GM baseline per WO');
 
   var COMPANY_ADDR = 'Broadway National Group, 100 Davids Dr, Hauppauge, NY 11788';
@@ -271,6 +271,23 @@
       } catch (e) { reject(e); }
     });
   }
+  // Vouched read: POST { op:'read', userToken, query } to the same url (no query string); response is
+  // identical to the GET's. Until the SWA ships that variant, a 404 / 405 / unrecognizable-400 /
+  // network error on the POST retries ONCE as the old GET (getUrl, or url + ?query). 401/403 and
+  // every other status are returned as-is (auth answers are never retried). Resolves { status, json }.
+  function swaRead(url, query, headers, timeoutMs, getUrl) {
+    var q = {}; var qs = Object.keys(query).map(function (k) { q[k] = String(query[k]); return k + '=' + encodeURIComponent(query[k]); }).join('&');
+    var hd = {}; Object.keys(headers || {}).forEach(function (k) { hd[k] = headers[k]; });
+    hd['Content-Type'] = 'application/json';
+    function viaGet() { return gmGet(getUrl || (url + '?' + qs), headers, timeoutMs); }
+    return gmPost(url, hd, { op: 'read', userToken: authToken(), query: q }, timeoutMs).then(function (r) {
+      if (r.status === 404 || r.status === 405 || (r.status === 400 && !(r.json && typeof r.json === 'object'))) return viaGet();
+      return r;
+    }, function (e) {
+      if (e && e.message === 'network error') return viaGet();
+      throw e;
+    });
+  }
   function gmGet(url, headers, timeoutMs) {
     return new Promise(function (resolve, reject) {
       try {
@@ -394,10 +411,11 @@
   function pipelineFetch(wo, miles) {
     var key = GM_getValue('ingest_key', '');
     if (!key || !wo.address || typeof wo.address.latitude !== 'number') return Promise.resolve([]);
-    var url = PROSPECTS_URL + '?near=' + wo.address.latitude + ',' + wo.address.longitude + '&mi=' + (miles || 50) + '&kind=contractor';
+    var near = wo.address.latitude + ',' + wo.address.longitude;
+    var url = PROSPECTS_URL + '?near=' + near + '&mi=' + (miles || 50) + '&kind=contractor';
     // A failed read REJECTS (pipelineFail) instead of answering [] - an empty list means "nothing
     // known near here", and the caller must be able to tell the coordinator the lookup failed.
-    return gmGet(url, { 'x-bwn-key': key }, 30000).then(function (r) {
+    return swaRead(PROSPECTS_URL, { near: near, mi: miles || 50, kind: 'contractor' }, { 'x-bwn-key': key }, 30000, url).then(function (r) {
       if (r.status < 200 || r.status >= 300 || !r.json || !r.json.ok) throw pipelineFail(r);
       return (r.json.prospects || []).map(function (p) {
         return { name: p.name, phone: p.phone || '', website: p.website || '', rating: p.rating, ratingCount: p.ratingCount,
@@ -961,7 +979,7 @@
     var key = GM_getValue('ingest_key', '');
     if (!key) return Promise.resolve({ ok: false, code: 'NO_KEY' });
     if (!tracking) return Promise.resolve({ ok: true, sends: [] });
-    return gmGet(STATUS_URL + '?tracking=' + encodeURIComponent(tracking), { 'x-bwn-key': key }, 30000)
+    return swaRead(STATUS_URL, { tracking: tracking }, { 'x-bwn-key': key }, 30000)
       .then(function (r) {
         if (r.status === 200 && r.json && r.json.ok) return { ok: true, sends: r.json.sends || [] };
         if (r.status === 404) return { ok: true, sends: [] };
