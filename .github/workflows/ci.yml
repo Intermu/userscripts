@@ -165,6 +165,13 @@ jobs:
       - name: WO Audit evidence gate + key normalization + status coverage (0.13.0)
         run: node scripts/test-wo-audit-evidence.js
 
+      # WO Audit 0.19.0: Client Update Reply. Slices the pure CLIENT REPLY block and pins paste parsing
+      # (FM table, reply thread, UPDATE NEEDED template, incident hold), the FM rule (audit FM, else the
+      # Client Open POs owner, conflicts surfaced), FM grouping, the deterministic client wording, the
+      # client draft gate, reply escaping, and parity of WOA_CLIENT_SYSTEM with bwn-suite-ai.
+      - name: WO Audit client update reply (0.19.0)
+        run: node scripts/test-wo-audit-client-reply.js
+
       # WO Audit 0.17.0: the Operations Action List engine (deriveAction) + the sheet builder. Slices
       # the pure BWN WO-AUDIT ACTIONS block and pins the deterministic manager layer that sits on top
       # of deriveState - one action bucket per phase, the P0/P1/P2/Monitor priority model (safety and
@@ -441,6 +448,15 @@ jobs:
       # Team-name filter, and warn-on-failure.
       - name: AI coordinator-read harness (assignedTo + user(id:) two-step)
         run: node scripts/test-ai-coordinator-read.js
+
+      # Client Update client-safety pipeline (CLIENT_MODE, v1.48): the deterministic spine
+      # that decides what a client may see - structured appointment beats a note-inferred
+      # date, a target ECD is never rendered as a confirmed appointment, prohibited internal
+      # content (vendors, rates, NTE, approvals, call activity, sourcing difficulty) is caught
+      # before display without over-sanitizing legitimate technical language, and the fallback
+      # is always safe and invents nothing. Three mutation controls each turn it red.
+      - name: Client Update client-safety pipeline harness
+        run: node scripts/test-client-pipeline.js
 
       # next-actions-overhaul: the priority clock, intake gate and tiered escalation were
       # all shipped in WO Assist 2.68 but had no dedicated harness for their decision
