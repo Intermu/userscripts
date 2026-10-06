@@ -25,7 +25,7 @@ function load(code) {
   vm.runInNewContext(code + '\nthis.L={routeOf:routeOf,esc:esc,moneyToCents:moneyToCents,gqlCents:gqlCents,rowsFromGrid:rowsFromGrid,gridFromRows:gridFromRows,' +
     'preflight:preflight,recommendedLines:recommendedLines,parseRanges:parseRanges,buildPrompt:buildPrompt,promptState:promptState,' +
     'opNameOf:opNameOf,errorsOf:errorsOf,payloadOf:payloadOf,checkPreview:checkPreview,installTap:installTap,PROMPT_MAX:PROMPT_MAX,' +
-    'propStatus:propStatus,tripStatuses:tripStatuses,tripPlan:tripPlan,tripPrefill:tripPrefill,lineSummary:lineSummary,contextFindings:contextFindings,firstSentence:firstSentence};', ctx);
+    'propStatus:propStatus,tripStatuses:tripStatuses,tripPlan:tripPlan,tripPrefill:tripPrefill,lineSummary:lineSummary,contextFindings:contextFindings,firstSentence:firstSentence,rateCheck:rateCheck,parseDraft:parseDraft,notesForAi:notesForAi};', ctx);
   return ctx.L;
 }
 var L = load(LOGIC);
@@ -217,6 +217,63 @@ A.ok('ctx: a canceled client proposal is not flagged', !has(cfx, 'warn', /#2 alr
 A.ok('ctx: a lumped vendor line gets the earlier split, marked as inference', has(cfx, 'warn', /priced it as: 3 Man \$5000\.00; Concrete \$2500\.00\. That split is an inference/));
 A.ok('ctx: no lump hint when the vendor lines are already split', !has(L.contextFindings(CX, LUMP.concat(LUMP).map(function (r, i) { return { category: i ? 'Material' : 'Labor', item: 'x' }; })), 'warn', /Lumped/));
 A.eq('ctx: issue prefill is the first sentence of the WO scope', L.firstSentence('Just had a storm and the pole fell.  It was fine before.'), 'Just had a storm and the pole fell.');
+// ---- 4d. rate card check, AI draft parsing, notes (0.4.0) ---------------------------------------
+function M(c) { return { amount: c, precision: 2 }; }
+var LAB = { id: 10, name: 'Labor' }, MAT = { id: 11, name: 'Material' }, TRV = { id: 14, name: 'Travel' };
+var RATES = [
+  { item: '3 Man', categoryObject: LAB, locationId: null, unitCost: M(30000) },
+  { item: '3 Man', categoryObject: LAB, locationId: 77, unitCost: M(27000) },
+  { item: '1 Man Travel', categoryObject: TRV, locationId: null, unitCost: M(9000) }
+];
+var QL = [
+  { item: '3 man', categoryObject: LAB, unitCost: M(28000) },
+  { item: '1 Man Travel', categoryObject: TRV, unitCost: M(8500) },
+  { item: 'Anchor bolts', categoryObject: MAT, unitCost: M(4000) },
+  { item: '', categoryObject: LAB, unitCost: M(750000) }
+];
+var rc = L.rateCheck(QL, RATES, 77);
+A.ok('rates: a location-specific rate beats the general one, and below cost fails', rc[0].level === 'fail' && rc[0].rate === 27000 && /below vendor cost \$280\.00/.test(rc[0].msg));
+A.ok('rates: matched at or above cost passes', rc[1].level === 'pass' && rc[1].rate === 9000);
+A.ok('rates: no rate in the category warns that the AI will mark it up', rc[2].level === 'warn' && /no client rate card match/.test(rc[2].msg));
+A.ok('rates: a blank vendor item name never matches', rc[3].level === 'warn' && /\(no item name\)/.test(rc[3].msg));
+A.ok('rates: another location\'s rate is ignored', L.rateCheck([QL[0]], [RATES[1]], 5)[0].level === 'warn');
+var DR = 'Here you go:\n```json\n{"issue": "Storm knocked the lot light pole backward.", "trips": [{"label": "Trip 1", "status": "Incurred", "steps": "Checked in; assessed pole"}, {"label": "Trip 3-4", "status": "Proposed", "steps": "Pour base; reset pole"}]}\n```';
+A.eq('ai: draft parsed through a code fence into builder lines', L.parseDraft(DR), { issue: 'Storm knocked the lot light pole backward.', trips: ['Trip 1 (Incurred): Checked in; assessed pole', 'Trip 3-4 (Proposed): Pour base; reset pole'] });
+A.eq('ai: unreadable reply -> null (nothing is changed)', [L.parseDraft(''), L.parseDraft('no json here'), L.parseDraft('{bad json')], [null, null, null]);
+var NOTES = [{ content: '<p>old</p>', createdDate: '2026-09-01T00:00:00Z' }, { content: '<b>Tech</b> reset   pole', createdDate: '2026-10-01T00:00:00Z' }, { content: '', createdDate: '2026-10-02' }];
+A.eq('ai: notes newest first, html stripped, empty dropped', L.notesForAi(NOTES), [{ date: '2026-10-01', text: 'Tech reset pole' }, { date: '2026-09-01', text: 'old' }]);
+A.eq('ai: at most 15 notes sent', L.notesForAi(new Array(40).join('x').split('').map(function (c, i) { return { content: 'n' + i, createdDate: '2026-01-' + (10 + (i % 18)) }; })).length, 15);
+
+// ---- 4e. the bwn-suite-ai bridge that runs the draft (sliced from the shipped suite-ai) -------------
+var AI = lf2(fs.readFileSync(path.join(__dirname, '..', 'bwn-suite-ai.user.js'), 'utf8'));
+function lf2(x) { return x.replace(/\r\n/g, '\n'); }
+var bS = AI.indexOf('  // ---- AI proposal-draft bridge'), bE = AI.indexOf('  }, false);', bS);
+A.ok('bridge: present in bwn-suite-ai', bS > 0 && bE > bS);
+(function () {
+  var listeners = [], sent = [], calls = [];
+  var doc = { addEventListener: function (t, fn) { if (t === 'bwn:cmd') listeners.push(fn); }, dispatchEvent: function (ev) { sent.push(ev.detail); } };
+  function CE(t, o) { this.type = t; this.detail = o.detail; }
+  var answer = Promise.resolve('{"issue":"x","trips":[]}');
+  var ctx = { document: doc, CustomEvent: CE, bwnAI: function (o) { calls.push(o); return answer; } };
+  vm.runInNewContext(AI.slice(bS, bE + '  }, false);'.length), ctx);
+  listeners[0]({ detail: { id: 'ai:summarize', rid: 1, text: 'x' } });
+  listeners[0]({ detail: { id: 'ai:apaDraft', rid: 'r1', facts: { woScope: 'pole down', notes: [] } } });
+  answer.then(function () {
+    return new Promise(function (r) { setTimeout(r, 5); });
+  }).then(function () {
+    A.eq('bridge: ignores other ids, sends one proposal task', calls.length, 1);
+    var c = calls[0] || {};
+    A.ok('bridge: task proposal, proxy only (no on-device fallback), coordinator floor', c.task === 'proposal' && c.tier === 'proxy' && Array.isArray(c.fallback) && c.fallback.length === 0 && c.minRank === 1);
+    A.ok('bridge: sends the facts as JSON and NO system prompt (the server owns it)', c.prompt === JSON.stringify({ woScope: 'pole down', notes: [] }) && c.system === undefined);
+    A.eq('bridge: replies on the bus with the same rid', sent[0], { id: 'ai:apaDrafted', rid: 'r1', text: '{"issue":"x","trips":[]}' });
+    answer = Promise.reject(new Error('down'));
+    listeners[0]({ detail: { id: 'ai:apaDraft', rid: 'r2', facts: {} } });
+    return new Promise(function (r) { setTimeout(r, 5); });
+  }).then(function () {
+    A.eq('bridge: a failure still replies, with empty text', sent[1], { id: 'ai:apaDrafted', rid: 'r2', text: '' });
+  });
+})();
+
 // ---- 5. passive tap ---------------------------------------------------------------------------
 (function () {
   var sent = [], seen = [], original = { clone: function () { return { json: function () { return Promise.resolve({ data: { x: { success: true } } }); } }; } };
@@ -261,7 +318,7 @@ function statics() {
   var qS = SRC.indexOf('  var QUERIES = Object.freeze({'), qE = SRC.indexOf('  // The single request path.');
   var Q = {}; vm.runInNewContext(SRC.slice(qS, qE) + '\nthis.QUERIES = QUERIES; this.checkDocument = checkDocument;', Q);
   var ops = Object.keys(Q.QUERIES);
-  A.eq('reads: the allowlist is exactly the four APA_ reads', ops.sort(), ['APA_ClientProposal', 'APA_ClientProposals', 'APA_Trips', 'APA_WorkOrder']);
+  A.eq('reads: the allowlist is exactly the eight APA_ reads', ops.sort(), ['APA_ClientProposal', 'APA_ClientProposals', 'APA_ClientRates', 'APA_Notes', 'APA_POs', 'APA_Quotes', 'APA_Trips', 'APA_WorkOrder']);
   A.ok('reads: every allowlisted document is a named query, no mutation', ops.every(function (op) {
     return Q.QUERIES[op].indexOf('query ' + op + '(') === 0 && !/mutation|subscription/i.test(Q.QUERIES[op]);
   }));

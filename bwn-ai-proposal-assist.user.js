@@ -1,8 +1,8 @@
 // ==UserScript==
 // @name         BWN AI Proposal Assist (Broadway National)
 // @namespace    broadwaynational.bwn
-// @version      0.3.0
-// @description  Read-only helper around Umbrava's AI client-proposal generator. Opens from an "AI Proposal" row in the BWN Suite dock (bwn:dock:*, needs bwn-suite-core 1.94.5+) that appears only on a vendor proposal page and the AI preview Generate leads to - there is no floating button. Three opt-in sections, all OFF until switched on: (1) Pre-flight on a vendor proposal's details page reads the line grid by header text and flags line shapes the AI cannot fix later - travel/labor not named "N Man Travel" / "N Man", one line covering several trips, a single lumped Material line, equipment or removal filed under Material/Other, missing $0 Shipping and Disposal, blank Trip #, numeric UOM, vendor total over the client NTE - with a recommended-lines table; (2) a prompt builder that assembles the Generate prompt from form fields in a fixed order with a live 1,000-character hard stop, Copy and Insert (armed before the Generate modal opens, because the modal makes the rest of the page inert), and saved per-client templates; (3) a post-generate checker that passively reads the GenerateAIProposalPreview / ReworkAIProposal responses the app already receives and shows pass/fail (charge below cost, negative or >35% materials markup, travel quantity, non-rate-card ranges, total vs NTE, banned headings, verbatim lines, Materials/Equipment section) plus the server's validationErrors text when Generate fails. With "Work order context" on (0.3.0) it READS four fixed, named Umbrava GraphQL queries (the work order, its client proposals, the latest client proposal's lines, and the PO trips) through one guarded same-origin path, to add the client NTE, existing client proposals, the earlier split and each trip's Incurred/Proposed status; it never sends a mutation. It never reads the app's request headers, never edits the grid, never clicks anything it did not create, never saves, submits or approves.
+// @version      0.4.0
+// @description  Read-only helper around Umbrava's AI client-proposal generator. Opens from an "AI Proposal" row in the BWN Suite dock (bwn:dock:*, needs bwn-suite-core 1.94.5+) that appears only on a vendor proposal page and the AI preview Generate leads to - there is no floating button. Three opt-in sections, all OFF until switched on: (1) Pre-flight on a vendor proposal's details page reads the line grid by header text and flags line shapes the AI cannot fix later - travel/labor not named "N Man Travel" / "N Man", one line covering several trips, a single lumped Material line, equipment or removal filed under Material/Other, missing $0 Shipping and Disposal, blank Trip #, numeric UOM, vendor total over the client NTE - with a recommended-lines table; (2) a prompt builder that assembles the Generate prompt from form fields in a fixed order with a live 1,000-character hard stop, Copy and Insert (armed before the Generate modal opens, because the modal makes the rest of the page inert), and saved per-client templates; (3) a post-generate checker that passively reads the GenerateAIProposalPreview / ReworkAIProposal responses the app already receives and shows pass/fail (charge below cost, negative or >35% materials markup, travel quantity, non-rate-card ranges, total vs NTE, banned headings, verbatim lines, Materials/Equipment section) plus the server's validationErrors text when Generate fails. With "Work order context" on (0.3.0) it READS eight fixed, named Umbrava GraphQL queries (the work order, its client proposals, the latest client proposal's lines, the PO trips, the POs and their quotes to find this vendor quote by id, the client's active rate card, and the WO notes) through one guarded same-origin path, to add the client NTE, existing client proposals, the earlier split and each trip's Incurred/Proposed status; it never sends a mutation. 0.4.0 adds a rate-card check of the vendor quote lines and a "Draft with AI" button that hands the read facts to bwn-suite-ai 1.50.0+ over the page bus (task 'proposal', server-owned prompt) to write the issue line and per-trip steps, which you review before Copy/Insert. It never reads the app's request headers, never edits the grid, never clicks anything it did not create, never saves, submits or approves.
 // @downloadURL  https://raw.githubusercontent.com/Intermu/userscripts/main/bwn-ai-proposal-assist.user.js
 // @updateURL    https://raw.githubusercontent.com/Intermu/userscripts/main/bwn-ai-proposal-assist.user.js
 // @match        https://app.umbrava.com/*
@@ -27,7 +27,7 @@
 (function () {
   'use strict';
 
-  var VER = '0.3.0';   // keep in step with @version
+  var VER = '0.4.0';   // keep in step with @version
   // Duplicate-init guard: @grant none shares the page window, so a second install (two copies, a
   // reinstall without reload) sees the first one's stamp and stands down instead of double-tapping.
   if (window.__bwnApaInit) { console.warn('[BWN APA] already initialised (v' + window.__bwnApaInit + ') - second copy inert'); return; }
@@ -449,6 +449,47 @@
     return out;
   }
 
+  // Vendor quote lines vs the CLIENT rate card (listClientRates). Same category id; a location-specific
+  // rate beats a general one; item matched by normalised name, exact first, then containment.
+  // -> [{item, category, cost, rate, level, msg}] (cents). The rate card overrides prompt guardrails,
+  // so a rate below vendor cost prices the line under water whatever the prompt says.
+  function normItem(x) { return String(x || '').toLowerCase().replace(/[^a-z0-9]+/g, ' ').trim(); }
+  function rateCheck(qLines, rates, locationId) {
+    return (qLines || []).map(function (l) {
+      var cat = l.categoryObject || {}, name = normItem(l.item), cost = gqlCents(l.unitCost);
+      var pool = (rates || []).filter(function (r) {
+        return r.categoryObject && r.categoryObject.id === cat.id && (r.locationId == null || r.locationId === locationId);
+      }).sort(function (a, b) { return (b.locationId === locationId) - (a.locationId === locationId); });
+      var hit = name && (pool.filter(function (r) { return normItem(r.item) === name; })[0] ||
+        pool.filter(function (r) { var n = normItem(r.item); return n && (n.indexOf(name) >= 0 || name.indexOf(n) >= 0); })[0]);
+      var label = (l.item || '(no item name)') + ' [' + (cat.name || 'category ' + l.category) + ']';
+      var o = { item: l.item, category: cat.name, cost: cost, rate: hit ? gqlCents(hit.unitCost) : null };
+      if (!hit) { o.level = 'warn'; o.msg = label + ': no client rate card match - the AI will mark it up toward the GP target instead of a contract rate.'; }
+      else if (cost != null && o.rate != null && o.rate < cost) { o.level = 'fail'; o.msg = label + ': client rate ' + fmt(o.rate) + ' is below vendor cost ' + fmt(cost) + ' - this line will price under water; the rate card overrides the prompt.'; }
+      else { o.level = 'pass'; o.msg = label + ': client rate ' + fmt(o.rate) + (cost != null ? ' vs vendor cost ' + fmt(cost) : '') + '.'; }
+      return o;
+    });
+  }
+
+  // The server's draft is a JSON object; tolerate a code fence or prose around it. -> {issue, trips[]} | null
+  function parseDraft(text) {
+    var m = /\{[\s\S]*\}/.exec(String(text || ''));
+    if (!m) return null;
+    try {
+      var j = JSON.parse(m[0]);
+      if (!j || typeof j !== 'object') return null;
+      var trips = Array.isArray(j.trips) ? j.trips.filter(function (t) { return t && t.label && t.steps; }) : [];
+      return { issue: norm(j.issue), trips: trips.map(function (t) { return norm(t.label) + ' (' + norm(t.status || 'Proposed') + '): ' + norm(t.steps); }) };
+    } catch (e) { return null; }
+  }
+
+  // Notes for the AI: newest first, text only, capped (notes carry the tech's own trip narrative).
+  function notesForAi(notes) {
+    return (notes || []).filter(function (n) { return n && n.content; })
+      .sort(function (a, b) { return String(b.createdDate).localeCompare(String(a.createdDate)); }).slice(0, 15)
+      .map(function (n) { return { date: String(n.createdDate || '').slice(0, 10), text: norm(String(n.content).replace(/<[^>]*>/g, ' ')).slice(0, 300) }; });
+  }
+
   // First sentence of the WO scope, for the builder's issue line.
   function firstSentence(t) { var m = /^[\s\S]*?[.!?](\s|$)/.exec(norm(t)); return (m ? m[0] : norm(t)).trim().slice(0, 160); }
   // ===== APA-LOGIC END =====
@@ -485,10 +526,16 @@
   // ===== BWN-SHARED END v1 =====
 
   var QUERIES = Object.freeze({
-    APA_WorkOrder: 'query APA_WorkOrder($n: Int!) { workOrder(workOrderNumber: $n) { id number clientName locationName locationNumber address { city state } priority { label } doNotExceed { amount precision } totalNTE { amount precision } scopeOfWork statusName } }',
+    APA_WorkOrder: 'query APA_WorkOrder($n: Int!) { workOrder(workOrderNumber: $n) { id number clientId locationId clientName locationName locationNumber address { city state } priority { label } doNotExceed { amount precision } totalNTE { amount precision } scopeOfWork statusName } }',
     APA_ClientProposals: 'query APA_ClientProposals($j: Int!) { listClientProposals(jobId: $j, page: { skip: 0, take: 50 }, sortBy: [{ columnName: "id", direction: DESC }]) { items { id number created submittedDate approvedDate rejectedDate canceledDate total { amount precision } grossProfitPercent } } }',
-    APA_ClientProposal: 'query APA_ClientProposal($p: Int!) { proposal(id: $p) { id number proposalLineItems { category tripLabel item quantity chargeQuantity unitOfMeasurement markUpPercent rateId unitCost { amount precision } unitCharge { amount precision } } } }',
-    APA_Trips: 'query APA_Trips($j: Int!) { purchaseOrderTrips(jobId: $j) { number vendorName trips { number completedDate canceledDate status } } }'
+    APA_ClientProposal: 'query APA_ClientProposal($p: Int!) { proposal(id: $p) { id number scopeOfWork proposalLineItems { category tripLabel item quantity chargeQuantity unitOfMeasurement markUpPercent rateId unitCost { amount precision } unitCharge { amount precision } } } }',
+    APA_Trips: 'query APA_Trips($j: Int!) { purchaseOrderTrips(jobId: $j) { number vendorName trips { number completedDate canceledDate status } } }',
+    // Quote by id = this WO's POs, then their quotes, filtered to the route's quoteId (PosForPricing + QuotesForPricing).
+    APA_POs: 'query APA_POs($n: Int) { purchaseOrders(workOrderNumber: $n) { id number vendorName } }',
+    APA_Quotes: 'query APA_Quotes($ids: [Int!]) { quotes(purchaseOrderIds: $ids, includeLineItems: true) { id number vendorName purchaseOrderId aggregateRateDiscrepancy scopeOfWork total { amount precision } quoteLineItems { id category item quantity unitOfMeasurement rateId rateDiscrepancy categoryObject { id name } unitCost { amount precision } totalCost { amount precision } } } }',
+    // Client rate card (ListClientRatesForPricing); sortBy is required server-side, inlined so no paging VARIABLES.
+    APA_ClientRates: 'query APA_ClientRates($t: ID!) { listClientRates(targetTenantId: $t, page: { skip: 0, take: 200 }, sortBy: [{ columnName: "category", direction: ASC }], isActive: true) { items { id category item unitOfMeasurement locationId categoryObject { id name } unitCost { amount precision } } } }',
+    APA_Notes: 'query APA_Notes($n: Int!) { workOrderNotes(workOrderNumber: $n, includeDeleted: false) { id content createdDate } }'
   });
   function checkDocument(op, doc) {
     if (!Object.prototype.hasOwnProperty.call(QUERIES, op)) throw new Error('blocked: ' + op);
@@ -523,7 +570,7 @@
   // failed read is shown as failed - never as "this WO has none" (the suite-ai trips bug, 2026-08-06).
   var wctx = null;
   function loadContext(rt) {
-    var me = wctx = { wo: rt.wo, state: 'loading', wo_: null, proposals: null, prior: null, trips: null, errs: {} };
+    var me = wctx = { wo: rt.wo, state: 'loading', wo_: null, proposals: null, prior: null, trips: null, quote: null, rates: null, notes: null, errs: {} };
     function done() { if (wctx === me) { me.state = 'done'; logAction('context read'); onContext(); render(); } }
     function fail(part) { return function (e) { me.errs[part] = String((e && e.message) || e).slice(0, 120); }; }
     apaGql('APA_WorkOrder', { n: Number(rt.wo) }).then(function (d) {
@@ -538,10 +585,21 @@
           var live = me.proposals.filter(function (p) { return p.status === 'Submitted' || p.status === 'Approved'; })[0] ||
             me.proposals.filter(function (p) { return p.status !== 'Canceled' && p.status !== 'Rejected'; })[0];
           return live && apaGql('APA_ClientProposal', { p: live.id }).then(function (d3) {
-            me.prior = { number: live.number, lines: (d3.proposal && d3.proposal.proposalLineItems) || [] };
+            me.prior = { number: live.number, scope: (d3.proposal && d3.proposal.scopeOfWork) || '', lines: (d3.proposal && d3.proposal.proposalLineItems) || [] };
           }, fail('prior'));
         }, fail('proposals')),
-        apaGql('APA_Trips', { j: j }).then(function (d4) { me.trips = d4.purchaseOrderTrips || []; }, fail('trips'))
+        apaGql('APA_Trips', { j: j }).then(function (d4) { me.trips = d4.purchaseOrderTrips || []; }, fail('trips')),
+        apaGql('APA_POs', { n: Number(rt.wo) }).then(function (d5) {
+          var ids = (d5.purchaseOrders || []).map(function (p) { return Number(p.id); });
+          if (!ids.length) throw new Error('no POs on this WO');
+          return apaGql('APA_Quotes', { ids: ids }).then(function (d6) {
+            me.quote = (d6.quotes || []).filter(function (q) { return String(q.id) === String(rt.quoteId); })[0] || null;
+            if (!me.quote) throw new Error('quote ' + rt.quoteId + ' not found on this WO\'s POs');
+          });
+        }).catch(fail('quote')),
+        me.wo_.clientId ? apaGql('APA_ClientRates', { t: me.wo_.clientId }).then(function (d7) { me.rates = (d7.listClientRates && d7.listClientRates.items) || []; }, fail('rates'))
+          : Promise.resolve(fail('rates')(new Error('no clientId on the work order'))),
+        apaGql('APA_Notes', { n: Number(rt.wo) }).then(function (d8) { me.notes = d8.workOrderNotes || []; }, fail('notes'))
       ]);
     }, fail('workOrder')).then(done, done);
   }
@@ -560,6 +618,44 @@
       wctx.prior.lines.filter(function (li) { return (li.category === 1 || li.category === 2) && li.item && have.indexOf(li.item.toLowerCase()) < 0; })
         .forEach(function (li) { form.materials = (norm(form.materials) ? form.materials + '\n' : '') + li.item; have.push(li.item.toLowerCase()); });
     }
+  }
+
+  // ---- AI draft (0.4.0): facts out over the page bus to bwn-suite-ai, JSON draft back ---------------
+  // Only on a click. Sends the read facts (no prices) for task 'proposal'; fills the issue line and the
+  // trip lines for the user to review. Overwrites those two fields only, and says so.
+  var aiBusy = false, aiMsg = '';
+  function aiFacts() {
+    var w = wctx && wctx.wo_, q = wctx && wctx.quote, rows = routeOf(location.pathname) && readGrid();
+    return {
+      woScope: w ? norm(w.scopeOfWork).slice(0, 1500) : '',
+      vendorScope: q ? norm(q.scopeOfWork).slice(0, 1500) : '',
+      priorProposalScope: wctx && wctx.prior ? norm(String(wctx.prior.scope).replace(/<[^>]*>/g, ' ')).slice(0, 2000) : '',
+      priorLines: wctx && wctx.prior ? wctx.prior.lines.map(function (li) { return { trip: li.tripLabel, category: CAT_LABEL[li.category] || li.category, item: li.item }; }) : [],
+      trips: wctx ? tripPlan(wctx.trips, wctx.prior && wctx.prior.lines).map(function (t) { return { label: t.label, status: t.status }; }) : [],
+      vendorLines: (rows || []).map(function (r) { return { category: r.category, item: r.item, trip: r.trip }; }),
+      notes: notesForAi(wctx && wctx.notes)
+    };
+  }
+  function aiDraft() {
+    if (aiBusy || !form) return;
+    if (!on('context') || !wctx || wctx.state !== 'done') { aiMsg = 'Turn on Work order context and let it load first - the draft is written from those facts.'; render(); return; }
+    var rid = 'apa' + Date.now() + Math.random().toString(36).slice(2), timer = null;
+    aiBusy = true; aiMsg = ''; logAction('ai draft requested'); render();
+    function finish(msg) { document.removeEventListener('bwn:evt', onEvt); clearTimeout(timer); aiBusy = false; aiMsg = msg; render(); }
+    function onEvt(e) {
+      var d = e && e.detail;
+      if (!d || d.id !== 'ai:apaDrafted' || d.rid !== rid) return;
+      var dr = parseDraft(d.text);
+      if (!dr || (!dr.issue && !dr.trips.length)) { finish(d.text ? 'The AI reply could not be read - nothing was changed.' : 'The AI returned nothing (no AI key in BWN Suite AI, rank not allowed, or the service failed) - nothing was changed.'); return; }
+      if (dr.issue) form.issue = dr.issue;
+      if (dr.trips.length) form.trips = dr.trips.join('\n');
+      logAction('ai draft filled');
+      finish('AI draft filled the issue line and trip steps - check every step against what actually happened before you Insert.');
+    }
+    document.addEventListener('bwn:evt', onEvt);
+    timer = setTimeout(function () { finish('No answer from BWN Suite AI - it needs bwn-suite-ai 1.50.0+ installed with its AI key set.'); }, 50000);
+    try { document.dispatchEvent(new CustomEvent('bwn:cmd', { detail: { id: 'ai:apaDraft', rid: rid, facts: aiFacts() } })); }
+    catch (e) { finish('Could not reach BWN Suite AI.'); }
   }
 
   // ---- storage (localStorage: @grant none) ----------------------------------------------------
@@ -775,6 +871,14 @@
           return '<tr><td>' + esc(li.tripLabel || '') + '</td><td>' + esc(CAT_LABEL[li.category] || li.category) + '</td><td>' + esc(li.item || '') + '</td><td>' + esc(lineSummary(li).replace(/^.* (?=-?\$)/, '')) + '</td></tr>';
         }).join('') + '</table></details>';
     }
+    if (wctx.quote) {
+      var q = wctx.quote;
+      out += '<p>Vendor quote #' + esc(q.number) + ' - ' + esc(q.vendorName || '') + ', ' + esc(fmt(gqlCents(q.total))) + '</p>';
+      if (wctx.rates) {
+        out += '<h4>Rate card check</h4>' + list(rateCheck(q.quoteLineItems, wctx.rates, wctx.wo_ && wctx.wo_.locationId)) +
+          '<p class="off">' + esc(wctx.rates.length) + ' active client rates read. A match below vendor cost cannot be fixed by the prompt - change the line or the rate first.</p>';
+      }
+    }
     if (errs.length) out += list(errs.map(function (k) { return { level: 'fail', msg: 'Read failed (' + k + '): ' + wctx.errs[k] + ' - this part is missing, not empty.' }; }));
     return out + '<div class="row"><button data-act="ctx-reload">Reload context</button></div>';
   }
@@ -833,6 +937,8 @@
       field('pricingRules', 'Pricing rules', true) +
       field('ranges', 'Non-rate-card ranges (one per line: Item: 50-120)', true) +
       field('scopeLine', 'Scope style line', false) +
+      '<div class="row"><button data-act="ai-draft"' + (aiBusy ? ' disabled' : '') + '>' + (aiBusy ? 'Drafting...' : 'Draft issue + trip text with AI') + '</button></div>' +
+      (aiMsg ? '<p class="off" aria-live="polite">' + esc(aiMsg) + '</p>' : '') +
       field('issue', '1. Issue sentence', false) +
       field('verbatim', '2. Required verbatim lines (one per line; save NEXREV override wording in the template)', true) +
       field('materials', '3. Materials/Equipment (one per line; Shipping, Disposal are added)', true) +
@@ -928,6 +1034,7 @@
     var act = b.dataset.act;
     if (act === 'close') { closePanel(); return; }
     if (act === 'ctx-reload') { wctx = null; render(); return; }
+    if (act === 'ai-draft') { aiDraft(); return; }
     if (!form) return;
     var text = buildPrompt(form);
     if (act === 'copy' && !promptState(text).over) {

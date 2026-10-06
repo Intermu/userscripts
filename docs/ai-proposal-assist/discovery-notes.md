@@ -144,3 +144,34 @@ panel can see what a side-loaded Claude sees.
 - The POs record only Trip 1, as completed. The earlier proposal labels its lines 1, 2 and 3/4.
 - The plan merges both sources: a trip completed on a PO is Incurred. A trip only the proposal names
   is Proposed and flagged "assumed - check". `3/4` becomes "Trip 3-4".
+
+## 0.4.0 quote, rate card, notes, AI draft (2026-10-06)
+
+**Quote by id.** There is no single-quote query. The script reads `purchaseOrders(workOrderNumber)`,
+then `quotes(purchaseOrderIds, includeLineItems)`, and keeps the one whose id is the route's
+quoteId. Live on WO 396190 this found quote #1, Doug's Electrical Service Inc, $7,500.
+- Quote lines carry `categoryObject {id,name}`, `rateId` and `rateDiscrepancy`, but **no trip
+  field**. Trip # still comes from the line grid on the page.
+- `aggregateRateDiscrepancy` comes back as a bare number (64 on this quote). Its meaning is unknown,
+  so the panel doesn't show it.
+
+**Client rate card.** `listClientRates(targetTenantId: clientId, isActive: true)`.
+- Pilot has 44 active rates, every one **location-specific**. The same "1 Man /hr" appears once per
+  site.
+- Item names follow the house pattern: Labor "1 Man" / "3 Man" per hr, Travel "1 Man" / "2 Man
+  Travel" each, plus some Material drivers and batteries.
+- The check matches on category id, prefers this WO's location, and compares item names exactly,
+  then by containment. A match below vendor cost fails: the rate card overrides the prompt, so the
+  line will price under water. No match gives a warning that the AI will apply markup instead.
+
+**WO notes.** `workOrderNotes(workOrderNumber)`. The 15 newest are sent to the AI as text only, each
+capped at 300 characters, because notes carry the tech's account of each trip.
+
+**AI draft.** On a click, the facts go over the page bus as `bwn:cmd ai:apaDraft` to
+bwn-suite-ai 1.50.0+, which holds the AI key.
+- Facts sent: WO scope, vendor scope, the earlier proposal's scope and lines, the trip plan, the
+  vendor lines and the notes. No prices.
+- bwn-suite-ai calls `/api/ai` with task `proposal`. The prompt and rank floor belong to the SWA
+  (`BWN_PROPOSAL_MIN_RANK`, default coordinator); a caller-supplied prompt is ignored.
+- The JSON reply fills the issue line and the trip lines for review.
+- If the reply is unreadable or missing, nothing is changed and the panel says why.
