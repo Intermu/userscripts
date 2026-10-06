@@ -278,9 +278,13 @@
   function payloadOf(json) {
     var d = json && json.data;
     if (!d || typeof d !== 'object') return null;
-    var k = Object.keys(d)[0];
+    // Live 2026-10-06: data.__typename is the FIRST key, so skip it.
+    var k = Object.keys(d).filter(function (x) { return x !== '__typename'; })[0];
     return k ? d[k] : null;
   }
+
+  // markUpPercent / chargeQuantity / estimatedGrossProfitPercent arrive as decimal STRINGS (live 2026-10-06).
+  function num(v) { return v == null || v === '' ? null : Number(v); }
 
   // ctx: {nte (cents|null), ranges:[{name,min,max}], verbatim:[str], trips (int|null)}
   // -> [{level:'pass'|'fail'|'warn', msg}]
@@ -297,18 +301,18 @@
     if (below.length) below.forEach(function (li) { r('fail', '"' + li.item + '" charges ' + fmt(gqlCents(li.unitCharge)) + ', below cost ' + fmt(gqlCents(li.unitCost)) + '.'); });
     else r('pass', 'No line charges below cost.');
 
-    var neg = items.filter(function (li) { return typeof li.markUpPercent === 'number' && li.markUpPercent < 0; });
+    var neg = items.filter(function (li) { return num(li.markUpPercent) < 0; });
     neg.forEach(function (li) { r('fail', '"' + li.item + '" has negative markup ' + li.markUpPercent + '%.'); });
 
     var travel = items.filter(function (li) { return RX_TRAVEL.test(li.item || '') || RX_TRAVEL.test(li.categoryName || ''); });
     if (travel.length) {
-      var q = travel.reduce(function (s, li) { return s + (+li.chargeQuantity || 0); }, 0);
+      var q = travel.reduce(function (s, li) { return s + (num(li.chargeQuantity) || 0); }, 0);
       var want = ctx.trips || travel.length;
       if (q !== want) r('fail', 'Travel charge quantity totals ' + q + ' for ' + want + ' trip(s) / ' + travel.length + ' travel line(s).');
       else r('pass', 'Travel charge quantity matches ' + want + ' trip(s).');
     }
 
-    var hi = items.filter(function (li) { return /material/i.test(li.categoryName || '') && li.markUpPercent > MATERIAL_MARKUP_MAX; });
+    var hi = items.filter(function (li) { return /material/i.test(li.categoryName || '') && num(li.markUpPercent) > MATERIAL_MARKUP_MAX; });
     if (hi.length) hi.forEach(function (li) { r('fail', 'Material "' + li.item + '" markup ' + li.markUpPercent + '% is over ' + MATERIAL_MARKUP_MAX + '%.'); });
     else r('pass', 'Materials markup within ' + MATERIAL_MARKUP_MAX + '%.');
 
@@ -411,9 +415,9 @@
   try {
     installTap(window, function (op, json) {
       var rt = routeOf(location.pathname);
-      if (!on('checker') || !rt || rt.kind !== 'ai') return;
+      if (!on('checker') || !rt) return;   // Generate fires from the vendor proposal modal
       logAction('checker: ' + op + ' response read');
-      lastCheck = { op: op, json: json, quoteId: rt.quoteId };
+      lastCheck = { op: op, json: json, wo: rt.wo };
       render();
     });
   } catch (e) { console.warn('[BWN APA] response tap failed to install:', e); }
@@ -472,7 +476,9 @@
   function readPoNte() { return stripMoney(/^po\s+nte\b/i); }
   function readVendorTotal() { return stripMoney(/^total vendor cost\b/i); }
 
-  // The Generate prompt textarea: the one textarea sharing a close ancestor with a "Generate" button.
+  // The Generate prompt box: the one text field sharing a close ancestor with a "Generate" button.
+  // Live 2026-10-06: it is an <input type=text> ("Anything else you would like?") inside the react-aria
+  // "Generate Client Proposal" modal on the VENDOR PROPOSAL page, not a textarea on ai-preview.
   function findPromptBox() {
     var btns = Array.prototype.filter.call(document.querySelectorAll('button'), function (b) {
       return !inPanel(b) && /^\s*generate\b/i.test(b.textContent || '');
@@ -480,7 +486,7 @@
     for (var i = 0; i < btns.length; i++) {
       var el = btns[i];
       for (var d = 0; d < 6 && el; d++, el = el.parentElement) {
-        var tas = Array.prototype.filter.call(el.querySelectorAll('textarea'), function (t) { return !inPanel(t); });
+        var tas = Array.prototype.filter.call(el.querySelectorAll('textarea, input[type="text"], input:not([type])'), function (t) { return !inPanel(t); });
         if (tas.length === 1) return tas[0];
         if (tas.length > 1) break;
       }
@@ -516,6 +522,18 @@
 
   var form = null;          // builder field values survive re-renders within a page
   var gridSig = '';
+  // Insert armed by a click while the Generate modal is closed. react-aria marks everything outside an
+  // open modal inert (live 2026-10-06), so the panel cannot be clicked once the modal is up: the click
+  // happens first, and the text lands once when the modal's prompt box appears. Never presses Generate.
+  var armed = null;
+
+  function fillBox(ta, text) {
+    // React tracks the value through the prototype setter; a plain .value= is overwritten on the next render.
+    // A single-line <input> (the live Generate box) drops newlines, so join sections with a space.
+    if (ta.tagName !== 'TEXTAREA') text = text.split(String.fromCharCode(10)).join(' ');
+    Object.getOwnPropertyDescriptor((ta.tagName === 'TEXTAREA' ? HTMLTextAreaElement : HTMLInputElement).prototype, 'value').set.call(ta, text);
+    ta.dispatchEvent(new Event('input', { bubbles: true }));
+  }
 
   function ensurePanel() {
     var p = panelEl();
@@ -558,7 +576,7 @@
     var nte = readNte(), vt = readVendorTotal();
     var trips = distinctTrips(rows);
     var prev = ctxGet(rt.wo);
-    var items = rows.filter(function (r) { return !isTravel(r) && !isLabor(r) && !/shipping|disposal/i.test(r.item); }).map(function (r) { return r.item; });
+    var items = materialItems(rows);
     if (JSON.stringify(prev.items) !== JSON.stringify(items) || prev.nte !== nte || prev.trips !== trips.length) {
       ctxSet(rt.wo, { items: items, nte: nte, trips: trips.length });
       logAction('pre-flight run');
@@ -571,8 +589,13 @@
       }).join('') + '</table><p class="off">Guidance only - edit the vendor proposal yourself; this panel never changes the grid.</p>';
   }
 
+  function materialItems(rows) {
+    return rows.filter(function (r) { return r.item && !isTravel(r) && !isLabor(r) && !/shipping|disposal/i.test(r.item); }).map(function (r) { return r.item; });
+  }
+
   function defaultForm(rt) {
     var t = templates()[0], c = ctxGet(rt.wo);
+    if (!c.items && rt.kind === 'vp') { var g = readGrid(); c.items = g ? materialItems(g) : []; }   // pre-flight off: read the grid here
     return {
       tpl: t.name, pricingRules: t.pricingRules, ranges: t.ranges, scopeLine: t.scopeLine, verbatim: t.verbatim,
       issue: '', materials: (c.items || []).join('\n'), trip1Status: 'Incurred', trip1: '', trip2: ''
@@ -588,8 +611,10 @@
 
   function builderHtml(rt) {
     if (!on('builder')) return '';
-    if (!form || form.quoteId !== rt.quoteId) { form = defaultForm(rt); form.quoteId = rt.quoteId; }
-    var compat = findPromptBox() ? '' : '<p class="off">Generate prompt box: layout not recognised — disabled. Copy still works.</p>';
+    if (!form || form.wo !== rt.wo) { form = defaultForm(rt); form.wo = rt.wo; }
+    var compat = findPromptBox() ? ''
+      : rt.kind === 'vp' ? '<p class="off">' + (armed ? 'Insert armed - open Generate Client Proposal and the prompt box is filled once.' : 'Fill this in first, click Insert, then open Generate Client Proposal (the panel cannot be clicked while that modal is open).') + '</p>'
+      : '<p class="off">Generate prompt box: layout not recognised — disabled. Copy still works.</p>';
     return '<h4>Prompt builder</h4>' + compat +
       '<label for="bwn-apa-tpl">Client template</label><select id="bwn-apa-tpl" data-tpl="1">' +
       templates().map(function (t) { return '<option' + (t.name === form.tpl ? ' selected' : '') + '>' + esc(t.name) + '</option>'; }).join('') +
@@ -605,7 +630,7 @@
       field('trip1', 'Trip 1 steps (one per line)', true) +
       field('trip2', '5. Trip 2 steps (one per line)', true) +
       '<pre id="bwn-apa-out" aria-label="Assembled prompt"></pre>' +
-      '<div class="row"><button class="p" data-act="copy">Copy</button><button data-act="insert"' + (compat ? ' disabled' : '') + '>Insert</button>' +
+      '<div class="row"><button class="p" data-act="copy">Copy</button><button data-act="insert">' + (armed ? 'Armed' : 'Insert') + '</button>' +
       '<span class="ctr mono" id="bwn-apa-ctr" aria-live="polite"></span></div>';
   }
 
@@ -618,12 +643,13 @@
     ctr.className = 'ctr mono' + (st.over ? ' over' : st.warn ? ' warn' : '');
     var p = panelEl();
     p.querySelector('[data-act="copy"]').disabled = st.over;
-    p.querySelector('[data-act="insert"]').disabled = st.over || !findPromptBox();
+    var rt = routeOf(location.pathname);
+    p.querySelector('[data-act="insert"]').disabled = st.over || (!findPromptBox() && !(rt && rt.kind === 'vp'));
   }
 
   function checkerHtml(rt) {
     if (!on('checker')) return '';
-    if (!lastCheck || lastCheck.quoteId !== rt.quoteId) return '<h4>Post-generate check</h4><p class="off">Waiting for Generate or Revise - nothing is sent by this panel.</p>';
+    if (!lastCheck || lastCheck.wo !== rt.wo) return '<h4>Post-generate check</h4><p class="off">Waiting for Generate or Revise - nothing is sent by this panel.</p>';
     var j = lastCheck.json, pl = payloadOf(j), errs = errorsOf(j);
     var pv = pl && (pl.preview || pl.result || (pl.lineItems ? pl : null));
     var h = '<h4>Post-generate check (' + esc(lastCheck.op) + ')</h4>';
@@ -642,12 +668,17 @@
     if (!rt || !document.body) { removePanel(); return; }
     var p = ensurePanel();
     var open = settings.open === true;
-    var body = rt.kind === 'vp' ? preflightHtml(rt) : builderHtml(rt) + checkerHtml(rt);
+    var body = rt.kind === 'vp'
+      ? preflightHtml(rt) + builderHtml(rt) + checkerHtml(rt)
+      : builderHtml(rt) + checkerHtml(rt);
     var focusId = document.activeElement && inPanel(document.activeElement) ? document.activeElement.id : null;
+    var oldB = p.querySelector('.b'), scroll = oldB ? oldB.scrollTop : 0;   // keep the reader's place across re-renders
     p.innerHTML = '<div class="h"><b>AI Proposal Assist</b><span class="mono">v' + esc(VER) + '</span>' +
       '<button data-act="toggle" aria-expanded="' + open + '">' + (open ? 'Hide' : 'Show') + '</button></div>' +
       (open ? '<div class="b">' + (body || '<p class="off">No feature on for this page.</p>') + toggles() + '</div>' : '');
     updatePrompt();
+    var newB = p.querySelector('.b');
+    if (newB) newB.scrollTop = scroll;
     if (focusId) { var f = document.getElementById(focusId); if (f) f.focus(); }
   }
 
@@ -665,6 +696,7 @@
       render();
     } else if (t.dataset.f && form) {
       form[t.dataset.f] = t.value;
+      if (armed) armed = promptState(buildPrompt(form)).over ? null : buildPrompt(form);   // armed text follows edits
       updatePrompt();
     }
   }
@@ -690,12 +722,8 @@
       copyText(text).then(function () { b.textContent = 'Copied'; logAction('prompt copied'); }, function () { b.textContent = 'Copy failed'; });
     } else if (act === 'insert' && !promptState(text).over) {
       var ta = findPromptBox();
-      if (!ta) { render(); return; }
-      // React tracks the value through the prototype setter; a plain .value= is overwritten on the next render.
-      Object.getOwnPropertyDescriptor(HTMLTextAreaElement.prototype, 'value').set.call(ta, text);
-      ta.dispatchEvent(new Event('input', { bubbles: true }));
-      b.textContent = 'Inserted';
-      logAction('prompt inserted');
+      if (ta) { fillBox(ta, text); b.textContent = 'Inserted'; logAction('prompt inserted'); }
+      else { armed = text; logAction('prompt insert armed'); render(); }
     } else if (act === 'tpl-save') {
       var name = window.prompt('Template name', form.tpl || '');
       if (!name) return;
@@ -719,6 +747,7 @@
     var rt = routeOf(location.pathname);
     if (mo) { mo.disconnect(); mo = null; }
     gridSig = '';
+    armed = null;
     if (!rt) { removePanel(); return; }
     render();
     if (rt.kind === 'vp' || rt.kind === 'ai') {
@@ -727,7 +756,9 @@
         if (muts.every(function (m) { return inPanel(m.target); })) return;
         clearTimeout(moTimer);
         moTimer = setTimeout(function () {
-          var g = rt.kind === 'vp' ? JSON.stringify(readGrid()) + readNte() : String(!!findPromptBox());
+          var g = (rt.kind === 'vp' ? JSON.stringify(readGrid()) + readNte() : '') + !!findPromptBox();
+          var box = armed && findPromptBox();
+          if (box) { fillBox(box, armed); armed = null; logAction('prompt inserted (armed)'); }
           if (g !== gridSig || !panelEl()) { gridSig = g; render(); }
         }, 300);
       });

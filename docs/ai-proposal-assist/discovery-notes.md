@@ -43,22 +43,49 @@ These were read-only DOM checks with 0.1.1 loaded by eval. No graphql requests c
 - **On the WO page, Client DNE is a labelled `<input>`, not text.** `readNte` reads a labelled
   input first. The WO page is not a script route, so this only helps if the AI preview page uses
   the same field.
-- **The `ai-preview` URL with the vendor quoteId shows "No data available".** The AI preview id is
-  not the vendor quoteId. Cross-page context is now keyed on the WO number, which is in both URLs.
+- **Generate lives in a modal on the vendor proposal page, not on `ai-preview`.** "Generate Client
+  Proposal" is a react-aria dialog. Its prompt box is a single-line `<input type="text">` with
+  placeholder "keep labor markup under 30%" and no `maxlength`. After Generate, the app navigates
+  to `/work-orders/{wo}/proposals/{vendor quoteId}/ai-preview`, which uses the same id. Opening that
+  URL directly with no fresh preview shows "No data available".
+  - **Effect on Insert:** while the modal is open, react-aria sets `inert` on every other child of
+    `<body>`, including the panel, so the panel can't be clicked. 0.1.1 arms Insert instead: click
+    Insert before opening the modal, and the text is filled once when the modal's box appears.
+  - **Effect on the prompt text:** the single-line input drops newlines, so Insert joins the
+    sections with a space.
+  - **Effect on the checker:** it accepts the response on either route. Cross-page context is keyed
+    on the WO number.
+- **Response shape, confirmed by capturing keys and types only (no values):**
+  `data = { __typename, generateAIProposalPreview: { __typename, success:boolean, message:string,
+  preview: { scopeOfWork, reasoning, estimatedGrossProfit:Money, estimatedGrossProfitPercent:string,
+  estimatedTotal:Money, estimatedVendorCost:Money, lineItems:[...] } } }`, plus
+  `extensions.traceId`. `Money = { __typename, amount:number, currency, precision:number }`.
+- **Line item fields:** `categoryId:number, categoryName, item, unitOfMeasurement,
+  sourceLineItemId:number, isGenerated:boolean, revisedDescription:null, rateId:string,
+  unitCost:Money, unitCharge:Money, markUpPercent:string, chargeQuantity:string`.
+- **Two 0.1.0 checker bugs this exposed, both fixed:**
+  - `data.__typename` is the **first** key, so "first field of data" returned the typename.
+    `payloadOf` now skips it.
+  - `markUpPercent` and `chargeQuantity` are decimal **strings**, so the negative-markup test
+    (`typeof === 'number'`) never fired. Both are now parsed as numbers.
+- **The script sent nothing.** A test-only logger wrapped `fetch` outside the script and recorded
+  every graphql call through two Generates and the page loads: 31 calls, all from the app, none
+  from the script. The app calls `window.fetch` at call time, so a document-start tap sees
+  Generate.
 
 ## Inferred (verify live)
 
-1. **Response field name.** The script reads `data.<first field>` and doesn't hard-code
+1. **Response field name.** CONFIRMED `generateAIProposalPreview` (see live findings). The script reads `data.<first field>` and doesn't hard-code
    `generateAIProposalPreview`.
 2. **Rework response shape.** Assumed to be the same `{success, message, preview}` envelope. If
    `preview` is missing, the script falls back to `result`, and then to the payload itself when it
    has `lineItems`.
 3. **Where `validationErrors` lives.** The script collects it from any depth (payload,
    `errors[].extensions`), plus `errors[].message` and a `success:false` `message`.
-4. **`unitCharge` format.** Assumed to be a bare number in cents. A `{amount, precision}` object is
+4. **`unitCharge` format.** CONFIRMED Money object. Assumed to be a bare number in cents. A `{amount, precision}` object is
    also accepted.
-5. **`markUpPercent` units.** Assumed to be a whole percent (35, not 0.35).
-6. **Transport.** Apollo is assumed to use `fetch`. XHR is tapped too, as a backup. A `Request`
+5. **`markUpPercent` units.** CONFIRMED a decimal string; units (35 vs 0.35) still to check against a known line. Assumed to be a whole percent (35, not 0.35).
+6. **Transport.** CONFIRMED `window.fetch` at call time. Apollo is assumed to use `fetch`. XHR is tapped too, as a backup. A `Request`
    object passed as `input` with its body inside isn't read (`ponytail:` ceiling: add
    `input.clone().text()` if the live app does that).
 7. **Grid DOM.** CONFIRMED <table> 2026-10-06 (see live findings).

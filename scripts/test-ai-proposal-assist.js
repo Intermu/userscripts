@@ -154,6 +154,33 @@ A.ok('success:false message surfaced', ve.indexOf('Validation failed') >= 0);
 A.ok('top-level errors surfaced', L.errorsOf({ errors: [{ message: 'boom', extensions: { validationErrors: ['x too long'] } }] }).join('|') === 'boom|x too long');
 A.ok('clean response -> no errors', L.errorsOf({ data: { a: { success: true, preview: {} } } }).length === 0);
 
+// ---- 4b. the LIVE response shape (captured 2026-10-06 as keys + types only; values synthetic) ----
+// data.__typename comes FIRST (0.1.0 took data's first key and found no preview), money is
+// {amount, precision} objects, and markUpPercent / chargeQuantity / estimatedGrossProfitPercent
+// are decimal STRINGS (0.1.0's negative-markup check required typeof number and never fired).
+function m(c) { return { __typename: 'Money', amount: c, currency: 'USD', precision: 2 }; }
+function line(id, item, cat, cost, charge, mu, qty) {
+  return { __typename: 'L', item: item, categoryName: cat, categoryId: 1, sourceLineItemId: id, unitOfMeasurement: 'Each',
+    isGenerated: false, revisedDescription: null, unitCost: m(cost), unitCharge: m(charge), markUpPercent: mu, chargeQuantity: qty, rateId: String(70 + id) };
+}
+var LIVE_RESP = { data: { __typename: 'Mutation', generateAIProposalPreview: { __typename: 'X', success: true, message: '', preview: {
+  __typename: 'P', scopeOfWork: 'Reset pole.', reasoning: 'r', estimatedGrossProfitPercent: '12.5',
+  estimatedGrossProfit: m(100), estimatedTotal: m(90000), estimatedVendorCost: m(80000),
+  lineItems: [
+    line(1, '1 Man Travel', 'Travel', 8500, 9000, '5.88', '1'),
+    line(2, 'Anchor bolts', 'Material', 4000, 3000, '-25', '2'),
+    line(3, 'Pole gasket', 'Material', 1000, 1400, '40', '1')
+  ] } } }, extensions: { traceId: 't' } };
+var lp = L.payloadOf(LIVE_RESP);
+A.ok('live: payload found past data.__typename', !!(lp && lp.preview));
+A.eq('live: success response has no errors', L.errorsOf(LIVE_RESP), []);
+var lck = L.checkPreview(lp.preview, { nte: 150000, ranges: [], verbatim: [], trips: 1 });
+A.ok('live: negative markup as a string is caught', has(lck, 'fail', /"Anchor bolts" has negative markup -25%/));
+A.ok('live: materials markup as a string over 35% is caught', has(lck, 'fail', /"Pole gasket" markup 40% is over 35%/));
+A.ok('live: below cost from money objects', has(lck, 'fail', /"Anchor bolts" charges \$30\.00, below cost \$40\.00/));
+A.ok('live: travel quantity as a string', has(lck, 'pass', /Travel charge quantity matches 1 trip/));
+A.ok('live: total from a money object', has(lck, 'pass', /Estimated total \$900\.00 within NTE/));
+
 // ---- 5. passive tap ---------------------------------------------------------------------------
 (function () {
   var sent = [], seen = [], original = { clone: function () { return { json: function () { return Promise.resolve({ data: { x: { success: true } } }); } }; } };
@@ -201,7 +228,7 @@ function statics() {
   A.ok('NEG: dropping below-cost check goes red', !has(M1.checkPreview(PV, CTX), 'fail', /below cost/));
   var M2 = mutated('over: n > PROMPT_MAX', 'over: n > PROMPT_MAX + 1');
   A.ok('NEG: off-by-one limit goes red', M2.promptState(new Array(1002).join('x')).over === false);
-  var M3 = mutated("li.markUpPercent < 0; });", "li.markUpPercent < -100; });");
+  var M3 = mutated('num(li.markUpPercent) < 0;', 'num(li.markUpPercent) < -100;');
   A.ok('NEG: weakened negative-markup check goes red', !has(M3.checkPreview(PV, CTX), 'fail', /negative markup/));
   A.finish();
 }
