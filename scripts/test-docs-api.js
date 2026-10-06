@@ -179,7 +179,7 @@ function runCases(readerSrc, gateSrc) {
     return tick();
   }).then(function () {
     var empty = e.readDocs();
-    eq('an empty document list is a CONFIDENT zero, not unknown', empty, { count: 0, docs: [] });
+    eq('an empty document list is a CONFIDENT zero, not unknown', empty, { count: 0, docs: [], byLabel: {} });
 
     // --- gate semantics, against the real gate block
     eq('docs:none fires on a confident zero at confirm-complete', gate('confirmcomplete', empty), 1);
@@ -200,7 +200,7 @@ function runCases(readerSrc, gateSrc) {
     e.fetches[3].resolve({ jobDocuments: [{ id: 'd9', isArchived: false }] });
     return tick();
   }).then(function () {
-    eq('the retry lands normally', e.readDocs(), { count: 1, docs: [{ id: 'd9', isArchived: false }] });
+    eq('the retry lands normally', e.readDocs(), { count: 1, docs: [{ id: 'd9', isArchived: false }], byLabel: {} });
 
     // --- a rejected fetch is unknown, NEVER empty. This is the one that matters:
     //     a failed read that read as "no documents" would nag every coordinator on
@@ -226,7 +226,7 @@ var MUTATIONS = [
   { what: 'archived documents counted as live',
     reader: function (s) { return mutate(s, 'return r && !r.isArchived;', 'return r && r.isArchived;'); } },
   { what: 'the count hardcoded to zero',
-    reader: function (s) { return mutate(s, 'DOCS_CACHE[woNum] = { count: live.length, docs: live };', 'DOCS_CACHE[woNum] = { count: 0, docs: live };'); } },
+    reader: function (s) { return mutate(s, 'DOCS_CACHE[woNum] = { count: live.length, docs: live, byLabel: byLabel };', 'DOCS_CACHE[woNum] = { count: 0, docs: live, byLabel: byLabel };'); } },
   { what: 'the query keyed by jobId instead of workOrderNumber',
     reader: function (s) { return mutate(s, 'jobDocuments(workOrderNumber: $n', 'jobDocuments(jobId: $n'); } },
   { what: 'the WO number sent as the raw string',

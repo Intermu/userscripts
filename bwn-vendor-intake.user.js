@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         BWN Vendor Intake (Broadway National)
 // @namespace    broadwaynational.bwn
-// @version      0.9.8
+// @version      0.9.9
 // @downloadURL  https://raw.githubusercontent.com/Intermu/userscripts/main/bwn-vendor-intake.user.js
 // @updateURL    https://raw.githubusercontent.com/Intermu/userscripts/main/bwn-vendor-intake.user.js
 // @description  Prefills Umbrava's Create Vendor form (and the detail-page Tax ID) from a Prospect Set-Up Form or a W-9. Fillable PDFs are read straight from their form fields; SCANNED W-9s are read by on-device OCR (Tesseract + pdf.js, fetched once at install, run entirely in the browser). The document and its tax ID never leave your machine. Adds a "Prefill from document" button; every extracted field is a suggestion to review before saving - the TIN especially, since OCR can misread digits.
@@ -21,7 +21,7 @@
 (function () {
   'use strict';
 
-  var VER = '0.9.8';
+  var VER = '0.9.9';
   // v0.9.7 - merges two vendor-intake Tax ID fixes that shipped as separate 0.9.6 branches: the
   // fillable-path SECURITY fix (F1) and the scanned-path comb-crop pass. Both detailed below.
   // v0.9.6 - SECURITY (audit F1): the fillable Tax ID is now read from pdf.js getFieldObjects(),
@@ -1038,7 +1038,13 @@
     setter.call(el, val);
     el.dispatchEvent(new Event('input', { bubbles: true }));
     el.dispatchEvent(new Event('change', { bubbles: true }));
-    el.dispatchEvent(new Event('blur', { bubbles: true }));
+    // React 17+ wires onBlur to `focusout`, and react-aria NumberFields only commit typed text into
+    // the form on a REAL focus -> blur (useFocusWithin checks activeElement), so a synthetic 'blur'
+    // left the field showing a value the form never held (wo-intake 0.10.3). Focus/blur for real,
+    // then hand focus back. Never blur the field the operator is in.
+    var prev = document.activeElement;
+    if (prev === el) return;
+    try { el.focus(); el.blur(); if (prev && prev !== document.body && prev.focus) prev.focus(); } catch (e) { }
   }
   function modalRoot() {
     var c = document.querySelector('input[name="details.companyName"]');

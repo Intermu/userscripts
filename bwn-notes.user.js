@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         BWN Suite - Note Templates (Broadway National)
 // @namespace    broadwaynational.bwn
-// @version      0.10.0
+// @version      0.11.2
 // @description  Canned dispatch-note templates in a "Templates" dropdown beside the "+ Add" note button in the Umbrava Dispatch Board's work-order detail panel (Notes tab). Picking a template opens Umbrava's own Add Note composer and DRAFTS the note into it (signed with your first name, ______ blanks left for you to fill) - it is NEVER auto-posted; you review, set the Type, and click Save. STANDALONE: carries its own tiptap/ProseMirror inserter, so in-house techs install this one script alone - no drop-upload dependency. Still prefers drop-upload's hook (window.__bwnFillNoteEditor) when that script is also installed, so coordinator machines keep a single live-tested fill path. Also, on the regular WO page, a "Spoke with" button stamps a [Spoke with: <Vendor>] tag at the TOP of a note (vendor picked from your recent vendors or typed) so you can record which of several WO vendors you spoke with - same human-gated draft, never auto-posted. @grant none, zero egress.
 // @match        https://app.umbrava.com/*
 // @run-at       document-idle
@@ -12,7 +12,7 @@
 (function () {
   'use strict';
 
-  // ===== BWN-PERM START v1 (paste-identical; pinned by scripts/test-perm-block-ledger.js) =====
+  // ===== BWN-PERM START v2 (paste-identical; pinned by scripts/test-perm-block-ledger.js) =====
   // Umbrava's own per-user permission checkboxes, as the one question a control has:
   //   bwnCan('WorkOrderNote.AddNew') -> true | false
   // Umbrava returns me.permissions as a JSON STRING of {"<Type>Permissions": "<bitmask>"} - one
@@ -26,15 +26,56 @@
   // unreadable cache must never strand a coordinator mid-shift. Fail-CLOSED only on a
   // positively-known missing bit. localStorage is per-origin, so this answers "unknown" (and
   // therefore allows) anywhere but app.umbrava.com - by design.
+  //
+  // v2 binds the slot to the Auth0 `sub` of the Umbrava API token it was decoded under. A slot that
+  // is not provably the CURRENT user's - another user's (account switch in the same browser
+  // profile), a v1 slot, or a page whose token store names no single user - reads exactly like
+  // "nothing decoded yet", so user A's grants AND denials never apply to user B. Identity
+  // isolation only: the fail-open fallback above is unchanged and the server stays the boundary.
   var BWN_PERM_KEY = 'bwn:perm:last';
   var BWN_PERM_TTL_MS = 24 * 3600 * 1000;
-  var _bwnPermSlot = null;      // memoized parse; invalidated by the bwn:perm listener below
+  var _bwnPermSlot = null;      // memoized parse; re-validated (sub + TTL) on every read
+  // The signed-in user's Auth0 subject, from the unexpired Umbrava-issued API token(s) in the SDK
+  // cache, or null when there is none or they name more than one user. Payload only, no signature
+  // check (nothing here is trusted beyond "which user is this page"); the token is never kept.
+  function bwnPermSub() {
+    var found = null;
+    try {
+      var keys = Object.keys(localStorage);
+      for (var i = 0; i < keys.length; i++) {
+        if (!/@@auth0spajs@@::.*::https:\/\/app\.umbrava\.com\/api::/.test(keys[i])) continue;
+        var sub = null;
+        try {
+          var body = (JSON.parse(localStorage.getItem(keys[i])) || {}).body;
+          var t = JSON.parse(atob(String(body && body.access_token).split('.')[1].replace(/-/g, '+').replace(/_/g, '/')));
+          var iss = String(t.iss || '').replace(/\/+$/, '');
+          if ((iss === 'https://login.umbrava.com' || iss === 'https://umbrava.us.auth0.com') &&
+            !(typeof t.exp === 'number' && (Date.now() / 1000) > t.exp) &&
+            typeof t.sub === 'string' && t.sub) sub = t.sub;
+        } catch (e) { /* an unreadable entry is not a candidate */ }
+        if (!sub) continue;
+        if (found && found !== sub) return null;                 // two users' tokens -> ambiguous
+        found = sub;
+      }
+    } catch (e) { return null; }
+    return found;
+  }
+  function bwnPermOwn(p, sub) {
+    var now = Date.now();
+    return !!(p && typeof p === 'object' && !Array.isArray(p) && p.v === 2 &&
+      typeof p.sub === 'string' && p.sub !== '' && p.sub === sub &&
+      typeof p.ts === 'number' && isFinite(p.ts) && p.ts <= now && (now - p.ts) < BWN_PERM_TTL_MS &&
+      Array.isArray(p.groups) && Array.isArray(p.granted));
+  }
   function bwnPermSlot() {
-    if (_bwnPermSlot) return _bwnPermSlot;
+    // Re-resolve sub on every read so a same-page account switch cannot reuse cached grants.
+    var sub = bwnPermSub();
+    if (!sub) return null;
+    if (bwnPermOwn(_bwnPermSlot, sub)) return _bwnPermSlot;
+    _bwnPermSlot = null;
     try {
       var p = JSON.parse(localStorage.getItem(BWN_PERM_KEY) || 'null');
-      if (p && p.ts && (Date.now() - p.ts) < BWN_PERM_TTL_MS &&
-        Array.isArray(p.groups) && Array.isArray(p.granted)) _bwnPermSlot = p;
+      if (bwnPermOwn(p, sub)) _bwnPermSlot = p;
     } catch (e) { /* an unreadable cache reads as unknown, which fails open */ }
     return _bwnPermSlot;
   }
@@ -82,13 +123,24 @@
       if (d && d.id === 'bwn:perm') _bwnPermSlot = null;          // a fresh decode landed
     });
   } catch (e) { }
-  // ===== BWN-PERM END v1 =====
+  // ===== BWN-PERM END v2 =====
 
   var GREEN = 'linear-gradient(135deg,#2ECC71,#1a5f3e)';   // Broadway green (Core's --bwn-green/-dk, inlined for a standalone script)
 
   // Suite module flags (kill switches), read from the shared bwn:modules blob the Ops panel writes.
   // Only routeHelper is consulted here (RM-B4 route-helper adoption below); default-off, fail-safe.
-  var BWN_MODULES = (function () { try { return JSON.parse(localStorage.getItem('bwn:modules') || '{}') || {}; } catch (e) { return {}; } })();
+  var BWN_MODULES = (function () {
+    var out = {};
+    try {
+      var p = JSON.parse(localStorage.getItem('bwn:modules') || '{}');
+      if (p && typeof p === 'object' && !Array.isArray(p)) {
+        Object.keys(p).forEach(function (k) {
+          if (typeof p[k] === 'boolean') out[k] = p[k];
+        });
+      }
+    } catch (e) {}
+    return out;
+  })();
 
   // ===== Pure logic (sliced + unit-tested by scripts/test-notes-templates.js) ==============
   // BWN-NOTES-SLICE-START
@@ -133,6 +185,9 @@
   // The dispatchers' most-used notes, grouped. `body` is verbatim; the signature is appended
   // dynamically (buildNote) so it is always the CURRENT user, never a baked-in name. `signed:false`
   // notes (call-outs) carry no signature, as written. Blanks (______) are left for the user to fill.
+  // Umbrava client tenant GUIDs (WorkOrder.clientId), verified live 2026-09-29: Tesla = client #20441,
+  // CROCS, Inc. = client #20386. Lowercase; tplVisible lowercases the WO's id before matching.
+  var SIGNOFF_CLIENTS = ['602e081c-a1b2-4b51-b158-ea077e330458', '52b7f542-6b66-4fd8-8dd3-8edbdb48558a'];
   var TEMPLATES = [
     { group: 'Call outs', items: [
       { label: 'Tech called out - redirect (week full)', signed: false,
@@ -163,8 +218,32 @@
         body: 'Hi team,\n\nThank you for the approval, this is back on schedule for ______.\n' },
       { label: 'Approved - ordering material, lead time to follow', signed: true,
         body: 'Hi team,\n\nThank you for the approval, we will order material and follow up with a lead time\n' }
+    ] },
+    // Client-scoped: shown only on a WO whose verified client is listed in `clients` (see tplVisible).
+    // Text only, like every template - drafting one never posts, moves status, or marks signoff received.
+    { group: 'Signoff (Tesla / Crocs)', items: [
+      { label: 'Signoff Required', signed: true, clients: SIGNOFF_CLIENTS,
+        body: 'Tesla/Crocs signoff is required before billing can proceed. Please provide the signed work-order approval or confirm the approved signoff location.\n' },
+      { label: 'Signoff Pending', signed: true, clients: SIGNOFF_CLIENTS,
+        body: 'Work is complete and the work order is pending required signoff. Billing should remain on hold until signed approval is received and attached.\n' },
+      { label: 'Signoff Received', signed: true, clients: SIGNOFF_CLIENTS,
+        body: 'Required signoff has been received and attached to the work order. The work order is ready for the next billing review step.\n' }
     ] }
   ];
+
+  // An item with `clients` shows only when the active WO's client tenant GUID is listed; items
+  // without it stay global. No verified client id (unknown / not loaded) -> scoped items hidden.
+  function tplVisible(t, clientId) {
+    return !t.clients || (!!clientId && t.clients.indexOf(String(clientId).toLowerCase()) !== -1);
+  }
+  // TEMPLATES filtered for one client, keeping each item's original "group:item" index as its id so
+  // a pick resolves the same template whatever was hidden. Groups left empty drop out.
+  function visibleGroups(clientId) {
+    return TEMPLATES.map(function (g, gi) {
+      return { group: g.group, items: g.items.map(function (t, ii) { return { id: gi + ':' + ii, tpl: t }; })
+        .filter(function (x) { return tplVisible(x.tpl, clientId); }) };
+    }).filter(function (g) { return g.items.length; });
+  }
 
   // Compose the note text: body verbatim, plus a "-<FirstName>" signature for signed templates.
   // When no first name resolves, leave a "-______" blank rather than a bare dash.
@@ -411,19 +490,37 @@
   // req also tells us an AI script is present and will render the merged "Draft", so we stand our own
   // WO-page button down (aiWantsMerge) to avoid a double button.
   var aiWantsMerge = false;
+  // Active WO's client tenant GUID, from Core's bwn:wo:<n> bus slot (Core publishes it off its
+  // WorkOrderHeader API read - never the header name text). '' off a WO page, without Core, or
+  // before the read lands, which hides client-scoped templates (fail-closed).
+  // ponytail: the dispatch-board panel has no verified client id (no bus slot), so scoped templates
+  // never show there. Add one if the board needs them.
+  function activeClientId() {
+    var m = location.pathname.match(/work-orders\/(\d+)/);
+    if (!m) return '';
+    try {
+      var d = JSON.parse(sessionStorage.getItem('bwn:wo:' + m[1]) || 'null');
+      return (d && d.v === 1 && d.clientId) ? String(d.clientId).toLowerCase() : '';
+    } catch (e) { return ''; }
+  }
   function tplList() {
-    return TEMPLATES.map(function (g, gi) {
-      return { group: g.group, items: g.items.map(function (t, ii) { return { id: gi + ':' + ii, label: t.label, date: t.date || null }; }) };
+    return visibleGroups(activeClientId()).map(function (g) {
+      return { group: g.group, items: g.items.map(function (x) { return { id: x.id, label: x.tpl.label, date: x.tpl.date || null }; }) };
     });
   }
   function tplById(id) {
     var p = String(id).split(':'), g = TEMPLATES[+p[0]];
-    return g ? g.items[+p[1]] : null;
+    var t = g ? g.items[+p[1]] : null;
+    return (t && tplVisible(t, activeClientId())) ? t : null;   // a stale flyout can't draft a hidden one
   }
   // Only broadcast the template list to the AI script for a rostered user - this is what makes the
   // merged Draft button's "Template" flyout appear only for the roster, without the AI script needing
   // its own roster copy.
-  function announceTpl() { if (!templateRosterAllowed()) return; try { document.dispatchEvent(new CustomEvent('bwn:evt', { detail: { id: 'notes:tpl:list', groups: tplList() } })); } catch (e) { } }
+  var lastTplSig = null;
+  function announceTpl() { if (!templateRosterAllowed()) return; var groups = tplList(); lastTplSig = JSON.stringify(groups); try { document.dispatchEvent(new CustomEvent('bwn:evt', { detail: { id: 'notes:tpl:list', groups: groups } })); } catch (e) { } }
+  // Core's bus publish can land after our load-time broadcast (or the user moves to another WO);
+  // re-announce only when the visible set actually changed, so the AI flyout isn't remounted per refresh.
+  document.addEventListener('bwn:update', function () { if (JSON.stringify(tplList()) !== lastTplSig) announceTpl(); });
   document.addEventListener('bwn:cmd', function (e) {
     var d = e && e.detail; if (!d) return;
     if (d.id === 'notes:tpl:req') {
@@ -431,7 +528,7 @@
       var own = document.getElementById(WO_BTN_ID); if (own) own.remove();   // AI owns the merged Draft
       announceTpl();
     } else if (d.id === 'notes:tpl:pick') {
-      var t = tplById(d.tplId); if (t) pickTemplate(t);
+      var t = tplById(d.tplId); if (t) pickTemplate(t); else { try { console.info('[BWN NOTES] template ' + d.tplId + ' is not available on this work order'); } catch (e) { } }
     }
   });
   announceTpl();   // broadcast once on load too, for an AI script that mounted before it could ask
@@ -618,7 +715,7 @@
       menu.setAttribute('role', 'menu');
       menu.setAttribute('aria-label', 'Note template groups');
       menu.style.cssText = 'position:fixed;z-index:99998;min-width:220px;max-height:80vh;overflow:auto;background:#fff;border:1px solid #e2e8f0;border-radius:10px;box-shadow:0 10px 30px rgba(0,0,0,.18);padding:6px;font-family:-apple-system,BlinkMacSystemFont,"Segoe UI",Arial,sans-serif;';
-      TEMPLATES.forEach(function (grp) {
+      visibleGroups(activeClientId()).map(function (g) { return { group: g.group, items: g.items.map(function (x) { return x.tpl; }) }; }).forEach(function (grp) {
         var row = document.createElement('button');
         row.type = 'button'; row.setAttribute('role', 'menuitem'); row.tabIndex = -1;
         row.setAttribute('aria-haspopup', 'menu'); row.setAttribute('aria-expanded', 'false');

@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         BWN Proposal Copy (Broadway National)
 // @namespace    broadwaynational.bwn
-// @version      0.4.0
+// @version      0.5.4
 // @downloadURL  https://raw.githubusercontent.com/Intermu/userscripts/main/bwn-proposal-copy.user.js
 // @updateURL    https://raw.githubusercontent.com/Intermu/userscripts/main/bwn-proposal-copy.user.js
 // @description  Copy a client proposal from an aged-out work order onto a chosen replacement WO as an un-submitted Draft, in one confirmed action. Replays Umbrava's own createDraftProposal + editProposal mutations (line items copied verbatim); never submits, deletes, or retries. Manager-gated visibility. @grant none.
@@ -15,7 +15,7 @@
 (function () {
   'use strict';
 
-  var VER = '0.4.0';   // keep in step with @version
+  var VER = '0.5.4';   // keep in step with @version
   var DRY_RUN = false; // when true, the two WRITE mutations are logged, not sent
   var FONT = "-apple-system,BlinkMacSystemFont,'Segoe UI','Helvetica Neue',Arial,sans-serif";
   var GREEN = '#0d3d26';
@@ -122,7 +122,7 @@
   }
   // ===== BWN-SHARED END v1 =====
 
-  // ===== BWN-PERM START v1 (paste-identical; pinned by scripts/test-perm-block-ledger.js) =====
+  // ===== BWN-PERM START v2 (paste-identical; pinned by scripts/test-perm-block-ledger.js) =====
   // Umbrava's own per-user permission checkboxes, as the one question a control has:
   //   bwnCan('WorkOrderNote.AddNew') -> true | false
   // Umbrava returns me.permissions as a JSON STRING of {"<Type>Permissions": "<bitmask>"} - one
@@ -136,15 +136,56 @@
   // unreadable cache must never strand a coordinator mid-shift. Fail-CLOSED only on a
   // positively-known missing bit. localStorage is per-origin, so this answers "unknown" (and
   // therefore allows) anywhere but app.umbrava.com - by design.
+  //
+  // v2 binds the slot to the Auth0 `sub` of the Umbrava API token it was decoded under. A slot that
+  // is not provably the CURRENT user's - another user's (account switch in the same browser
+  // profile), a v1 slot, or a page whose token store names no single user - reads exactly like
+  // "nothing decoded yet", so user A's grants AND denials never apply to user B. Identity
+  // isolation only: the fail-open fallback above is unchanged and the server stays the boundary.
   var BWN_PERM_KEY = 'bwn:perm:last';
   var BWN_PERM_TTL_MS = 24 * 3600 * 1000;
-  var _bwnPermSlot = null;      // memoized parse; invalidated by the bwn:perm listener below
+  var _bwnPermSlot = null;      // memoized parse; re-validated (sub + TTL) on every read
+  // The signed-in user's Auth0 subject, from the unexpired Umbrava-issued API token(s) in the SDK
+  // cache, or null when there is none or they name more than one user. Payload only, no signature
+  // check (nothing here is trusted beyond "which user is this page"); the token is never kept.
+  function bwnPermSub() {
+    var found = null;
+    try {
+      var keys = Object.keys(localStorage);
+      for (var i = 0; i < keys.length; i++) {
+        if (!/@@auth0spajs@@::.*::https:\/\/app\.umbrava\.com\/api::/.test(keys[i])) continue;
+        var sub = null;
+        try {
+          var body = (JSON.parse(localStorage.getItem(keys[i])) || {}).body;
+          var t = JSON.parse(atob(String(body && body.access_token).split('.')[1].replace(/-/g, '+').replace(/_/g, '/')));
+          var iss = String(t.iss || '').replace(/\/+$/, '');
+          if ((iss === 'https://login.umbrava.com' || iss === 'https://umbrava.us.auth0.com') &&
+            !(typeof t.exp === 'number' && (Date.now() / 1000) > t.exp) &&
+            typeof t.sub === 'string' && t.sub) sub = t.sub;
+        } catch (e) { /* an unreadable entry is not a candidate */ }
+        if (!sub) continue;
+        if (found && found !== sub) return null;                 // two users' tokens -> ambiguous
+        found = sub;
+      }
+    } catch (e) { return null; }
+    return found;
+  }
+  function bwnPermOwn(p, sub) {
+    var now = Date.now();
+    return !!(p && typeof p === 'object' && !Array.isArray(p) && p.v === 2 &&
+      typeof p.sub === 'string' && p.sub !== '' && p.sub === sub &&
+      typeof p.ts === 'number' && isFinite(p.ts) && p.ts <= now && (now - p.ts) < BWN_PERM_TTL_MS &&
+      Array.isArray(p.groups) && Array.isArray(p.granted));
+  }
   function bwnPermSlot() {
-    if (_bwnPermSlot) return _bwnPermSlot;
+    // Re-resolve sub on every read so a same-page account switch cannot reuse cached grants.
+    var sub = bwnPermSub();
+    if (!sub) return null;
+    if (bwnPermOwn(_bwnPermSlot, sub)) return _bwnPermSlot;
+    _bwnPermSlot = null;
     try {
       var p = JSON.parse(localStorage.getItem(BWN_PERM_KEY) || 'null');
-      if (p && p.ts && (Date.now() - p.ts) < BWN_PERM_TTL_MS &&
-        Array.isArray(p.groups) && Array.isArray(p.granted)) _bwnPermSlot = p;
+      if (bwnPermOwn(p, sub)) _bwnPermSlot = p;
     } catch (e) { /* an unreadable cache reads as unknown, which fails open */ }
     return _bwnPermSlot;
   }
@@ -192,7 +233,7 @@
       if (d && d.id === 'bwn:perm') _bwnPermSlot = null;          // a fresh decode landed
     });
   } catch (e) { }
-  // ===== BWN-PERM END v1 =====
+  // ===== BWN-PERM END v2 =====
   function pcGql(op, query, variables) {
     var tok = authToken();
     if (!tok) return Promise.reject(new Error('no-umbrava-token'));
@@ -225,7 +266,18 @@
     return pcGql(q.slice(i, j) || null, query, variables);
   };
   var BWN_VER = (typeof VER !== 'undefined') ? VER : '0.1.12';
-  var BWN_MODULES = (function () { try { return JSON.parse(localStorage.getItem('bwn:modules') || '{}') || {}; } catch (e) { return {}; } })();
+  var BWN_MODULES = (function () {
+    var out = {};
+    try {
+      var p = JSON.parse(localStorage.getItem('bwn:modules') || '{}');
+      if (p && typeof p === 'object' && !Array.isArray(p)) {
+        Object.keys(p).forEach(function (k) {
+          if (typeof p[k] === 'boolean') out[k] = p[k];
+        });
+      }
+    } catch (e) {}
+    return out;
+  })();
   var BWN_OPS = {
     createDraftProposal: { kind: 'write', perm: 'WorkOrderProposal.AddNew', target: 'proposal', risk: 'high', idempotent: false, retry: 'none',
       ok: 'Draft proposal created.', fail: 'The draft proposal was not created.' },
@@ -482,7 +534,7 @@
   // Shape verified from [[umbrava-graphql-operations]] (listClientProposals, introspected): keys off
   // jobId (== ProposalWO's job.id), jobType enum literal WorkOrder. Selects only what the dup panel
   // shows - number, description, type, state, status, subtotal - never line items or PII.
-  var Q_LIST_CLIENT_PROPOSALS = 'query ListClientProposals($jobId: Int, $page: PageInput!) { listClientProposals(jobId: $jobId, jobType: WorkOrder, page: $page) { rowCount items { id number description state type { id name } status { id name } subtotal { amount currency precision } } } }';
+  var Q_LIST_CLIENT_PROPOSALS = 'query ListClientProposals($jobId: Int, $page: PageInput!) { listClientProposals(jobId: $jobId, jobType: WorkOrder, page: $page, sortBy: [{ columnName: "id", direction: DESC }]) { rowCount items { id number description state type { id name } status { id name } subtotal { amount currency precision } } } }';
 
   // ===== copy engine ========================================================
   // (mapLineItem, buildCreateVars, buildEditVars, copyProposal land here in
@@ -557,8 +609,9 @@
       description: source.description,
       disclaimer: source.disclaimer,
       timeFrameDays: source.timeFrameDays && (source.timeFrameDays.value != null)
-        ? { value: source.timeFrameDays.value } : null,
-      clientPurchaseOrderNumber: source.formattedClientPurchaseOrderNumber || null
+        ? { value: source.timeFrameDays.value } : null
+      // formattedClientPurchaseOrderNumber (W-<wo>-<seq>) is NOT a client PO: Umbrava stamps its own
+      // on every new proposal (vendor PO line numbering), so it is never copied or compared.
     } };
   }
   function buildEditVars(newProposalId, source) {
@@ -619,16 +672,8 @@
           var newN = nu && Array.isArray(nu.proposalLineItems) ? nu.proposalLineItems.length : -1;
           var srcSub = source.subtotal ? source.subtotal.amount : null;
           var newSub = nu && nu.subtotal ? nu.subtotal.amount : null;
-          // EditProposalInput has NO clientPurchaseOrderNumber field (confirmed against the pinned
-          // schema), so editProposal can never resend the PO that createDraftProposal set. If the
-          // server does a whole-object replace on edit, that PO could be silently nulled out - compare
-          // it here so the drop is visible instead of passing as a clean match. Two null/absent POs
-          // (neither side ever had one) still agree.
-          var srcPO = source.formattedClientPurchaseOrderNumber || null;
-          var newPO = (nu && nu.formattedClientPurchaseOrderNumber) || null;
-          var poMatch = srcPO === newPO;
-          var match = (newN === srcN) && (srcSub == null || newSub === srcSub) && poMatch;
-          return { ok: true, newProposalId: newId, created: true, filled: true, readBack: { sourceItems: srcN, newItems: newN, sourceSubtotal: srcSub, newSubtotal: newSub, sourcePO: srcPO, newPO: newPO, match: match } };
+          var match = (newN === srcN) && (srcSub == null || newSub === srcSub);
+          return { ok: true, newProposalId: newId, created: true, filled: true, readBack: { sourceItems: srcN, newItems: newN, sourceSubtotal: srcSub, newSubtotal: newSub, match: match } };
         });
       })
       .then(function (r) {
@@ -904,7 +949,7 @@
       '.bcp-ov{position:fixed;inset:0;z-index:2147483000;display:flex;align-items:center;justify-content:center;padding:24px;box-sizing:border-box;background:rgba(9,24,18,.5);opacity:0;transition:opacity .16s ease;font-family:' + FONT + ';}',
       '.bcp-ov.bcp-in{opacity:1;}',
       '.bcp-ov.bcp-closing{opacity:0;}',
-      '.bcp-modal{width:760px;max-width:100%;max-height:88vh;display:flex;flex-direction:column;background:#f4f6f5;border-radius:12px;overflow:hidden;box-shadow:0 18px 60px rgba(0,0,0,.35);transform:translateY(8px);opacity:0;transition:transform .18s cubic-bezier(.23,1,.32,1),opacity .18s ease;color:#1f2a24;box-sizing:border-box;}',
+      '.bcp-modal{width:1180px;max-width:100%;max-height:88vh;display:flex;flex-direction:column;background:#f4f6f5;border-radius:12px;overflow:hidden;box-shadow:0 18px 60px rgba(0,0,0,.35);transform:translateY(8px);opacity:0;transition:transform .18s cubic-bezier(.23,1,.32,1),opacity .18s ease;color:#1f2a24;box-sizing:border-box;}',
       '.bcp-ov.bcp-in .bcp-modal{transform:none;opacity:1;}',
       '.bcp-hd{background:#0d3d26;color:#fff;padding:16px 20px;display:flex;align-items:flex-start;gap:14px;}',
       '.bcp-hd-main{flex:1;min-width:0;}',
@@ -929,7 +974,7 @@
       '.bcp-step-l{font:600 12px ' + FONT + ';white-space:nowrap;}',
       '.bcp-step-bar{flex:1;height:1.5px;background:rgba(255,255,255,.25);margin:0 12px;min-width:14px;}',
       '.bcp-body{flex:1;overflow:auto;padding:16px 20px;display:flex;flex-direction:column;gap:16px;}',
-      '.bcp-card{background:#fff;border:1px solid #e3e9e5;border-radius:10px;box-shadow:0 1px 2px rgba(16,40,28,.05);overflow:hidden;}',
+      '.bcp-card{flex:none;background:#fff;border:1px solid #e3e9e5;border-radius:10px;box-shadow:0 1px 2px rgba(16,40,28,.05);overflow:hidden;}',
       '.bcp-card.accent{border-color:#cfe6d8;box-shadow:0 1px 2px rgba(16,40,28,.05),0 0 0 1px rgba(21,121,74,.08);}',
       '.bcp-card-hd{display:flex;align-items:center;gap:9px;padding:11px 14px;border-bottom:1px solid #eef2ef;}',
       '.bcp-card-hd .bcp-ic{color:#15794a;flex:none;}',
@@ -951,12 +996,20 @@
       '.bcp-note.warn{background:#fff4e5;color:#8a5a00;}',
       '.bcp-note.err{background:#fdecea;color:#8b1a1a;}',
       '.bcp-note.ok{background:#e8f3ed;color:#0d3d26;}',
-      '.bcp-scroll{max-height:250px;overflow:auto;border:1px solid #eef2ef;border-radius:8px;}',
+      '.bcp-scroll{max-height:320px;overflow:auto;border:1px solid #eef2ef;border-radius:8px;}',
       '.bcp-tbl{width:100%;border-collapse:collapse;font:400 12px ' + FONT + ';}',
       '.bcp-tbl th{position:sticky;top:0;background:#f3f6f4;color:#5a6b62;font-weight:600;text-align:left;padding:7px 10px;border-bottom:1px solid #e3e9e5;z-index:1;}',
       '.bcp-tbl td{padding:7px 10px;border-bottom:1px solid #f0f3f1;vertical-align:top;}',
       '.bcp-tbl tr:last-child td{border-bottom:none;}',
       '.bcp-tbl .num{text-align:right;white-space:nowrap;font-variant-numeric:tabular-nums;}',
+      '.bcp-tbl th{white-space:nowrap;}',
+      '.bcp-tbl tr.grp th{top:0;height:28px;padding-top:0;padding-bottom:0;border-left:1px solid #e3e9e5;}',
+      '.bcp-tbl tr.cols th{top:28px;}',
+      '.bcp-tbl td.item{min-width:150px;}',
+      '.bcp-tbl .b{font-weight:600;}',
+      '.bcp-tbl tfoot td{position:sticky;bottom:0;background:#f3f6f4;border-top:1px solid #e3e9e5;padding:7px 10px;}',
+      '.bcp-tbl td{white-space:nowrap;}',
+      '.bcp-tbl td.item{white-space:normal;}',
       '.bcp-tbl .zero{color:#8a5a00;font-weight:600;}',
       '.bcp-linkbtn{background:none;border:none;color:#15794a;font:600 12px ' + FONT + ';cursor:pointer;padding:0;text-decoration:underline;}',
       '.bcp-linkbtn:focus-visible{outline:2px solid #15794a;outline-offset:2px;}',
@@ -1167,9 +1220,21 @@
     // source.subtotal (markup/tax/freight live at the proposal level), which we never recompute -
     // extended is shown per row for scanability and blanks to "-" when the quantity is not numeric.
     function qtyOf(li) { var v = (li.chargeQuantity != null ? li.chargeQuantity : li.quantity); var n = Number(v); return isFinite(n) ? n : null; }
-    function extMoney(li) {
-      var q = qtyOf(li); if (q == null || !li.unitCharge || li.unitCharge.amount == null) return null;
-      return { amount: Number(li.unitCharge.amount) * q, currency: li.unitCharge.currency, precision: li.unitCharge.precision };
+    // Per-line figures mirror Umbrava's full-proposal grid. Money fields are minor units + precision;
+    // subtotal / tax / total are DISPLAY ONLY (round-half-up to cents per row, like the grid) - the
+    // authoritative value stays source.subtotal, which we never recompute.
+    function dollars(m) { return (m && m.amount != null) ? Number(m.amount) / Math.pow(10, m.precision != null ? m.precision : 2) : null; }
+    function r2(n) { return Math.round(n * 100) / 100; }
+    function money(n) { return n == null ? '-' : (n < 0 ? '-$' : '$') + Math.abs(n).toFixed(2).replace(/\B(?=(\d{3})+\.)/g, ','); }
+    // Rates arrive as FRACTIONS (live 2026-09-28: taxRate 0.059 renders 5.9% in Umbrava's grid).
+    function pct(v) { var n = Number(v); return (v == null || v === '' || !isFinite(n)) ? '-' : String(r2(n * 100)) + '%'; }
+    function num(v) { var n = Number(v); return (v == null || v === '' || !isFinite(n)) ? '-' : String(n); }
+    function lineCalc(li) {
+      var cq = Number(li.quantity), uc = dollars(li.unitCost), q = qtyOf(li), up = dollars(li.unitCharge);
+      var costTot = (uc != null && isFinite(cq)) ? r2(uc * cq) : null;
+      var sub = (up != null && q != null) ? r2(up * q) : null;
+      var tax = (sub != null && li.isTaxable) ? r2(sub * Number(li.taxRate || 0)) : (sub != null ? 0 : null);
+      return { uc: uc, up: up, costTot: costTot, sub: sub, tax: tax, tot: sub != null ? r2(sub + tax) : null };
     }
     var anyZeroQty = items.some(function (li) { return qtyOf(li) === 0; });
     var qtySum = 0, qtyKnown = true;
@@ -1217,17 +1282,40 @@
       var shown = showAll ? items : items.slice(0, 5);
       var scroll = document.createElement('div'); scroll.className = 'bcp-scroll';
       var t = document.createElement('table'); t.className = 'bcp-tbl';
-      t.innerHTML = '<thead><tr><th>Description</th><th class="num">Qty</th><th class="num">Unit charge</th><th class="num">Extended</th></tr></thead>';
+      t.innerHTML = '<thead><tr class="grp"><th colspan="5">Details</th><th colspan="3">Cost</th><th colspan="4">Charge</th><th colspan="3">Tax</th><th></th></tr>' +
+        '<tr class="cols"><th>Private</th><th>Category</th><th>Item</th><th class="num">Trip #</th><th>UOM</th>' +
+        '<th class="num">Qty</th><th class="num">Unit Cost</th><th class="num">Total Cost</th>' +
+        '<th class="num">Qty</th><th class="num">Mark Up %</th><th class="num">Unit Charge</th><th class="num">Subtotal</th>' +
+        '<th>Taxable</th><th class="num">Tax %</th><th class="num">Tax Amount</th><th class="num">Total Charge</th></tr></thead>';
       var tb = document.createElement('tbody');
       shown.forEach(function (li) {
-        var q = qtyOf(li), ext = extMoney(li), tr = document.createElement('tr');
+        var q = qtyOf(li), c = lineCalc(li), tr = document.createElement('tr');
         tr.innerHTML =
-          '<td>' + escapeHtml(li.description || li.item || '-') + '</td>' +
+          '<td>' + (li.isPrivate ? 'Private' : 'Visible') + '</td>' +
+          '<td>' + escapeHtml(li.category || '-') + '</td>' +
+          '<td class="item">' + escapeHtml(li.description || li.item || '-') + '</td>' +
+          '<td class="num">' + escapeHtml(num(li.tripLabel)) + '</td>' +
+          '<td>' + escapeHtml(li.unitOfMeasurement || '--') + '</td>' +
+          '<td class="num">' + escapeHtml(num(li.quantity)) + '</td>' +
+          '<td class="num">' + money(c.uc) + '</td>' +
+          '<td class="num b">' + money(c.costTot) + '</td>' +
           '<td class="' + (q === 0 ? 'num zero' : 'num') + '">' + escapeHtml(q == null ? '-' : String(q)) + '</td>' +
-          '<td class="num">' + escapeHtml(fmtMoney(li.unitCharge)) + '</td>' +
-          '<td class="num">' + (ext ? escapeHtml(fmtMoney(ext)) : '-') + '</td>';
+          '<td class="num">' + escapeHtml(pct(li.markUpPercent)) + '</td>' +
+          '<td class="num">' + money(c.up) + '</td>' +
+          '<td class="num b">' + money(c.sub) + '</td>' +
+          '<td>' + (li.isTaxable ? 'Yes' : 'No') + '</td>' +
+          '<td class="num">' + escapeHtml(pct(li.taxRate)) + '</td>' +
+          '<td class="num">' + money(c.tax) + '</td>' +
+          '<td class="num b">' + money(c.tot) + '</td>';
         tb.appendChild(tr);
       });
+      // Footer totals over ALL items (not just the collapsed preview), like the full-proposal grid.
+      var tot = { costTot: 0, sub: 0, tax: 0, tot: 0 };
+      items.forEach(function (li) { var c = lineCalc(li); ['costTot', 'sub', 'tax', 'tot'].forEach(function (k) { tot[k] += c[k] || 0; }); });
+      var tf = document.createElement('tfoot');
+      tf.innerHTML = '<tr><td colspan="7"></td><td class="num b">' + money(r2(tot.costTot)) + '</td><td colspan="3"></td><td class="num b">' + money(r2(tot.sub)) +
+        '</td><td colspan="2"></td><td class="num b">' + money(r2(tot.tax)) + '</td><td class="num b">' + money(r2(tot.tot)) + '</td></tr>';
+      t.appendChild(tf);
       t.appendChild(tb); scroll.appendChild(t); liBd.appendChild(scroll);
       if (!showAll) {
         var more = document.createElement('button'); more.className = 'bcp-linkbtn'; more.type = 'button'; more.style.marginTop = '9px';
@@ -1477,7 +1565,6 @@
       if (mismatch) {
         if (rb.newItems !== rb.sourceItems) diffs.push('line items ' + rb.sourceItems + ' → ' + rb.newItems);
         if (rb.sourceSubtotal != null && rb.newSubtotal !== rb.sourceSubtotal) diffs.push('subtotal changed');
-        if (rb.sourcePO !== rb.newPO) diffs.push('client PO ' + (rb.sourcePO || 'none') + ' → ' + (rb.newPO || 'none'));
         console.warn('[BWN PROPOSAL COPY] read-back did NOT match the source on the new Draft', rb);
         reportFail({ level: 'warn', tag: 'proposalCopy.readback.mismatch', feature: 'proposalCopy', ids: { proposal: pid, wo: Number(tnum) }, code: 'readback-mismatch' });
       }
@@ -1493,11 +1580,10 @@
         (r.newProposalId != null ? '<div><strong>New draft id:</strong> #' + escapeHtml(r.newProposalId) + '</div>' : '') +
         '<div><strong>Target WO:</strong> W-' + escapeHtml(tnum) + (loc ? ' · ' + escapeHtml(loc) : '') + '</div>' +
         '<div><strong>Lines copied:</strong> ' + escapeHtml(rb.newItems != null ? rb.newItems : items.length) + '</div>' +
-        '<div><strong>Total copied:</strong> ' + escapeHtml(fmtMoney(source.subtotal)) + '</div>' +
-        (rb.newPO ? '<div><strong>Client PO:</strong> ' + escapeHtml(rb.newPO) + '</div>' : '');
+        '<div><strong>Total copied:</strong> ' + escapeHtml(fmtMoney(source.subtotal)) + '</div>';
       bd.appendChild(meta);
       var note = document.createElement('div');
-      if (mismatch) { note.className = 'bcp-note warn'; note.innerHTML = bcpIcon('warning') + '<span></span>'; note.querySelector('span').textContent = 'The draft was created, but the read-back did not match the source (' + (diffs.join('; ') || 'read-back differs') + '). Open the target work order and check its line items, total and client PO.'; }
+      if (mismatch) { note.className = 'bcp-note warn'; note.innerHTML = bcpIcon('warning') + '<span></span>'; note.querySelector('span').textContent = 'The draft was created, but the read-back did not match the source (' + (diffs.join('; ') || 'read-back differs') + '). Open the target work order and check its line items and total.'; }
       else { note.className = 'bcp-note ok'; note.innerHTML = bcpIcon('check') + '<span>The draft is on the target work order’s Proposals tab. Review and submit it through the normal proposal workflow.</span>'; }
       bd.appendChild(note);
       card.appendChild(bd); M.body.appendChild(card);

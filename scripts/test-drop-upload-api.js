@@ -178,8 +178,12 @@ function runCases(src) {
   eq('an unknown note type is null', probeNoCache.noteTypeId('Bogus'), null);
 
   // ---- textToHtml
-  eq('blank line starts a new <p>, single newline is a <br>', probe.textToHtml('a\n\nb\nc'), '<p>a</p><p>b<br>c</p>');
-  eq('html is escaped', probe.textToHtml('x < y & z'), '<p>x &lt; y &amp; z</p>');
+  // Umbrava's own editor shape (measured on W-355083): one <p> per line, a blank line is an EMPTY <p>.
+  var P = '<p style="font-size: 14px; line-height: 1.4">';
+  eq('one <p> per line, a blank line is an empty <p>', probe.textToHtml('a\n\nb\nc'), P + 'a</p>' + P + '</p>' + P + 'b</p>' + P + 'c</p>');
+  eq('two blank lines stay two empty <p>', probe.textToHtml('a\n\n\nb'), P + 'a</p>' + P + '</p>' + P + '</p>' + P + 'b</p>');
+  eq('CRLF is one line break, not two', probe.textToHtml('a\r\nb'), P + 'a</p>' + P + 'b</p>');
+  eq('html is escaped', probe.textToHtml('x < y & z'), P + 'x &lt; y &amp; z</p>');
 
   // ---- note post: one AddEditWONote with the captured variable shape
   var e1 = makeEnv({ noteCache: noteCache, replies: { AddEditWONote: { addEditJobNote: { success: true, message: '', note: { id: 'n1', type: 55 } } } } });
@@ -191,7 +195,7 @@ function runCases(src) {
     eq('workOrderNumber goes out as a NUMBER', inp && inp.workOrderNumber, WO);
     eq('the note type is the numeric Client id (55), not the name', inp && inp.type, 55);
     eq('content is the plain text', inp && inp.content, 'Line one\n\nLine two');
-    ok('contentHtml is paragraph-wrapped', /^<p>Line one<\/p><p>Line two<\/p>$/.test(inp && inp.contentHtml), inp && inp.contentHtml);
+    eq('contentHtml keeps the blank line as an empty <p>', inp && inp.contentHtml, P + 'Line one</p>' + P + '</p>' + P + 'Line two</p>');
     eq('the not-a-completion / not-invoice / not-pinned flags are sent false', [inp.isCompletion, inp.isInvoice, inp.isPinned], [false, false, false]);
     eq('targetPurchaseOrderNumbers is an empty array', inp && inp.targetPurchaseOrderNumbers, []);
     ok('the Authorization header carries a bearer', /^Bearer /.test(c[0].headers.Authorization), c[0].headers.Authorization);
@@ -288,8 +292,8 @@ var MUTATIONS = [
     m: function (s) { return mutate(s, 'type: typeId,', 'type: 0,'); } },
   { what: 'the note content replaced',
     m: function (s) { return mutate(s, 'content: String(text),', "content: 'X',"); } },
-  { what: 'contentHtml sent flat (no paragraph split)',
-    m: function (s) { return mutate(s, "split(/\\n{2,}/)\n      .map", "split(/\\nNEVER/)\n      .map"); } },
+  { what: 'contentHtml grouped into paragraphs again (blank lines lost)',
+    m: function (s) { return mutate(s, "split('\\n')\n      .map", "split(/\\n{2,}/)\n      .map"); } },
   { what: 'the note write bypasses the bwnGqlOp registry (unregistered op)',
     m: function (s) { return mutate(s, "bwnGqlOp('addEditJobNote'", "bwnGqlOp('addEditJobNoteX'"); } },
   { what: 'the doc label hardcoded wrong',

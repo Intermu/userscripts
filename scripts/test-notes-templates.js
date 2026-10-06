@@ -2,7 +2,8 @@
 //
 // Slices the pure block (firstNameFromUser / TEMPLATES / buildNote) out of the SHIPPED
 // bwn-notes.user.js bytes and runs it in a vm. Proves:
-//   - the 3 groups + 9 templates are intact (Call outs 2, Completed work 3, New work 4);
+//   - the 5 groups + 14 templates are intact (Call outs 2, Completed work 3, New work 4, Approvals 2,
+//     Signoff 3), and the Signoff group is visible only on a Tesla / Crocs WO (client tenant GUID);
 //   - firstNameFromUser reads given_name first, else the first token of the display name;
 //   - buildNote appends "-<FirstName>" to signed templates only, "-______" when no name resolves,
 //     and NOTHING to unsigned (call-out) templates;
@@ -38,7 +39,7 @@ var SRC = slice(readLF(path.join(__dirname, '..', 'bwn-notes.user.js')),
 
 function build(src) {
   var ctx = vm.createContext({ console: console });
-  vm.runInContext(src + '\nthis.firstNameFromUser = firstNameFromUser; this.TEMPLATES = TEMPLATES; this.buildNote = buildNote; this.fmtDay = fmtDay; this.fmtWeekOf = fmtWeekOf; this.applyDate = applyDate; this.spokeTag = spokeTag; this.prependSpokeTag = prependSpokeTag; this.mruAdd = mruAdd; this.ntTemplateAllowed = ntTemplateAllowed; this.ntFullNameFromUser = ntFullNameFromUser; this.ntNormName = ntNormName; this.TEMPLATE_ROSTER = TEMPLATE_ROSTER;', ctx);
+  vm.runInContext(src + '\nthis.firstNameFromUser = firstNameFromUser; this.TEMPLATES = TEMPLATES; this.buildNote = buildNote; this.fmtDay = fmtDay; this.fmtWeekOf = fmtWeekOf; this.applyDate = applyDate; this.spokeTag = spokeTag; this.prependSpokeTag = prependSpokeTag; this.mruAdd = mruAdd; this.ntTemplateAllowed = ntTemplateAllowed; this.ntFullNameFromUser = ntFullNameFromUser; this.ntNormName = ntNormName; this.TEMPLATE_ROSTER = TEMPLATE_ROSTER; this.tplVisible = tplVisible; this.visibleGroups = visibleGroups; this.SIGNOFF_CLIENTS = SIGNOFF_CLIENTS;', ctx);
   return ctx;
 }
 var env = build(SRC);
@@ -48,13 +49,14 @@ var spokeTag = env.spokeTag, prependSpokeTag = env.prependSpokeTag, mruAdd = env
 function allItems(t) { return t.reduce(function (a, g) { return a.concat(g.items); }, []); }
 
 // ---- groups + templates intact -----------------------------------------------------------
-A.eq('4 groups', TEMPLATES.length, 4);
-A.eq('group titles', TEMPLATES.map(function (g) { return g.group; }).join(' | '), 'Call outs | Completed work | New work to schedule | Approvals');
+A.eq('5 groups', TEMPLATES.length, 5);
+A.eq('group titles', TEMPLATES.map(function (g) { return g.group; }).join(' | '), 'Call outs | Completed work | New work to schedule | Approvals | Signoff (Tesla / Crocs)');
 A.eq('Call outs = 2', TEMPLATES[0].items.length, 2);
 A.eq('Completed work = 3', TEMPLATES[1].items.length, 3);
 A.eq('New work to schedule = 4', TEMPLATES[2].items.length, 4);
 A.eq('Approvals = 2', TEMPLATES[3].items.length, 2);
-A.eq('11 templates total', allItems(TEMPLATES).length, 11);
+A.eq('Signoff = 3', TEMPLATES[4].items.length, 3);
+A.eq('14 templates total', allItems(TEMPLATES).length, 14);
 A.ok('every template has a label and a body', allItems(TEMPLATES).every(function (t) { return t.label && t.body && typeof t.signed === 'boolean'; }));
 A.ok('call-outs are unsigned', TEMPLATES[0].items.every(function (t) { return t.signed === false; }));
 A.ok('completed + new-work + approvals are signed', TEMPLATES[1].items.concat(TEMPLATES[2].items).concat(TEMPLATES[3].items).every(function (t) { return t.signed === true; }));
@@ -155,5 +157,28 @@ A.eq('given+family beats a stale name claim', env.ntFullNameFromUser({ given_nam
 var g3 = build(mutate(SRC, 'return !!n && TEMPLATE_ROSTER.indexOf(n) !== -1;', 'return !!n && TEMPLATE_ROSTER.indexOf(n) === -1;'));
 A.ok('[neg] an inverted membership test would admit a non-roster user and deny a rostered one',
   g3.ntTemplateAllowed({ name: 'Daniel Russell' }) && !g3.ntTemplateAllowed({ name: 'Alyssa Phelps' }));
+
+// ---- client-scoped templates (Tesla / Crocs signoff) -------------------------------------
+var TESLA = '602e081c-a1b2-4b51-b158-ea077e330458', CROCS = '52b7f542-6b66-4fd8-8dd3-8edbdb48558a', LIDL = 'e88f4b3b-429a-4c34-b42e-afeeb1e2ac77';
+function titles(cid) { return env.visibleGroups(cid).map(function (g) { return g.group; }).join(' | '); }
+var GLOBAL4 = 'Call outs | Completed work | New work to schedule | Approvals';
+A.ok('only the signoff group is client-scoped; every other template has no clients filter', TEMPLATES.slice(0, 4).every(function (g) { return g.items.every(function (t) { return !t.clients; }); }) && TEMPLATES[4].items.every(function (t) { return t.clients === env.SIGNOFF_CLIENTS; }));
+A.eq('scoped to exactly Tesla + Crocs', env.SIGNOFF_CLIENTS.join(','), TESLA + ',' + CROCS);
+A.eq('Tesla WO sees the signoff group', titles(TESLA), GLOBAL4 + ' | Signoff (Tesla / Crocs)');
+A.eq('Crocs WO sees the signoff group (id match is case-insensitive)', titles(CROCS.toUpperCase()), GLOBAL4 + ' | Signoff (Tesla / Crocs)');
+A.eq('an unrelated client (LIDL) sees only the global groups', titles(LIDL), GLOBAL4);
+A.eq('no verified client id fails closed to the global groups', titles(''), GLOBAL4);
+A.ok('a client NAME never matches (ids only)', !env.tplVisible(TEMPLATES[4].items[0], 'Tesla'));
+A.eq('global templates keep identical visibility with no client id (11)', env.visibleGroups('').reduce(function (n, g) { return n + g.items.length; }, 0), 11);
+A.eq('ids keep the original group:item index when groups are hidden', env.visibleGroups(TESLA)[4].items.map(function (x) { return x.id; }).join(','), '4:0,4:1,4:2');
+A.eq('signoff labels', TEMPLATES[4].items.map(function (t) { return t.label; }).join(' | '), 'Signoff Required | Signoff Pending | Signoff Received');
+A.ok('signoff templates are signed, text-only drafts', TEMPLATES[4].items.every(function (t) { return t.signed === true && !t.date; }));
+A.eq('Signoff Required text verbatim', TEMPLATES[4].items[0].body.trim(), 'Tesla/Crocs signoff is required before billing can proceed. Please provide the signed work-order approval or confirm the approved signoff location.');
+A.eq('Signoff Pending text verbatim (billing stays on hold; no status-change claim)', TEMPLATES[4].items[1].body.trim(), 'Work is complete and the work order is pending required signoff. Billing should remain on hold until signed approval is received and attached.');
+A.eq('Signoff Received text verbatim', TEMPLATES[4].items[2].body.trim(), 'Required signoff has been received and attached to the work order. The work order is ready for the next billing review step.');
+
+// ---- negative control: drop the clients gate, assert an unrelated client sees signoff -----
+var g4 = build(mutate(SRC, 'return !t.clients || (!!clientId && t.clients.indexOf(String(clientId).toLowerCase()) !== -1);', 'return true;'));
+A.ok('[neg] without the clients gate, a LIDL WO would see the signoff group', g4.visibleGroups(LIDL).length === 5);
 
 A.finish();

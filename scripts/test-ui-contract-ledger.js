@@ -106,8 +106,9 @@ var CONTRACTS = {
 // Every bwn-*.user.js in the repo root MUST appear here (Section 1 enforces both directions). Adding
 // a script forces a row; the CI step then keeps that row honest.
 var LEDGER = {
+  'bwn-ai-proposal-assist.user.js': { drawer: 'NA', toast: 'NA', rmotion: 'NA', rail: 'NA'  },
   'bwn-ask.user.js':           { drawer: 'DIVERGENT', toast: 'NA',        rmotion: 'NA',  rail: 'NA'  },
-  'bwn-bid-out.user.js':       { drawer: 'NA',        toast: 'DIVERGENT', rmotion: 'NA',  rail: 'HAS' },
+  'bwn-bid-out.user.js':       { drawer: 'NA',        toast: 'DIVERGENT', rmotion: 'HAS', rail: 'HAS' },
   'bwn-cc-auth.user.js':       { drawer: 'HAS',       toast: 'HAS',       rmotion: 'NA',  rail: 'NA'  },
   'bwn-cc-purchase.user.js':   { drawer: 'HAS',       toast: 'HAS',       rmotion: 'NA',  rail: 'NA'  },
   'bwn-dispatch.user.js':      { drawer: 'HAS',       toast: 'HAS',       rmotion: 'NA',  rail: 'NA'  },
@@ -118,6 +119,9 @@ var LEDGER = {
   // remove (closePanel), no shared drawerDismiss, no toast(), no animation:, no --bwn-dock-shift.
   // Carries NONE of the four SHARED primitives.
   'bwn-low-gp.user.js':        { drawer: 'NA',        toast: 'NA',        rmotion: 'NA',  rail: 'NA'  },
+  // Read-only report modal (own .bwn-nr-* overlay, own CSS, closes by [hidden]); status line instead
+  // of a toast, no animation, no --bwn-dock-shift. NONE of the four SHARED primitives.
+  'bwn-note-report.user.js':   { drawer: 'NA',        toast: 'NA',        rmotion: 'NA',  rail: 'NA'  },
   'bwn-notes.user.js':         { drawer: 'NA',        toast: 'NA',        rmotion: 'NA',  rail: 'NA'  },
   // Own #bwn-pa-card overlay/menu + own paToast (the same private-toast pattern as proposal-copy,
   // NOT the shared function toast()); no drawer, animation, or rail. NONE of the four SHARED primitives.
@@ -129,6 +133,8 @@ var LEDGER = {
   // property -> rmotion NA. Does not read `--bwn-dock-shift` -> rail NA. It KEEPS bwnFocusTrap, so it
   // stays in the focus-trap FAMILY in test-a11y-focus.js (that is a separate contract from these four).
   'bwn-proposal-copy.user.js': { drawer: 'NA',        toast: 'NA',        rmotion: 'NA',  rail: 'NA'  },
+  // Proposal Pricing 0.2.0: read-only side panel, no shared drawer/toast/animation/rail.
+  'bwn-proposal-pricing.user.js': { drawer: 'NA',        toast: 'NA',        rmotion: 'NA',  rail: 'NA'  },
   'bwn-suite-ai.user.js':      { drawer: 'NA',        toast: 'DIVERGENT', rmotion: 'HAS', rail: 'HAS' },
   'bwn-suite-core.user.js':    { drawer: 'HAS',       toast: 'DIVERGENT', rmotion: 'HAS', rail: 'HAS' },
   // Own inline panel inside the PO dialog (#bwn-tv-panel) + own body-modal fallback; closes by plain

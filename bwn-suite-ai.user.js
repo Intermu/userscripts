@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         BWN Suite - AI (Broadway National)
 // @namespace    broadwaynational.bwn
-// @version      1.49.0
+// @version      1.48.4
 // @downloadURL  https://raw.githubusercontent.com/Intermu/userscripts/main/bwn-suite-ai.user.js
 // @updateURL    https://raw.githubusercontent.com/Intermu/userscripts/main/bwn-suite-ai.user.js
 // @description  The Umbrava tools that call outside APIs, kept separate from the zero-egress Core script. Client Update and WO Audit drafts (Anthropic Claude; draft-only, scrubbed before sending, you review before posting); Find Techs / Find Suppliers (Google Places; vendor leads near a WO); and Job View (opens the Ops-Dashboard job card on the WO page - WO details from Umbrava plus the authored case file and next actions, read-only). Network access is limited by the browser to the declared API hosts and the BWN Static Web App. API keys are stored in Tampermonkey's storage via the menu commands and never enter the page. Toggle modules in BWN_MODULES below.
@@ -218,7 +218,18 @@
       requiredStatuses: [],
       closeout: { docs: ['signed ticket', 'sign-in/out', 'before/after photos'], enforce: true },
       refFields: { sourceJob: false, sourcePo: false },
-      cadenceDays: null
+      cadenceDays: null,
+      // Integer, top-level, stamped on EVERY compliance score (result.rulesVersion) so a stored
+      // or pushed score is always traceable to the rule set that produced it. Bump when the check
+      // catalogue's meaning changes; a per-client override may raise it for that client only.
+      rulesVersion: 1,
+      // Documentation-compliance config (read by computeCompliance via bwnClientProfile). Only the
+      // keys a client actually differs on need overriding; deepMerge keeps the rest. `checks` is a
+      // sparse per-id override table over DOC_CHECK_CATALOGUE - each id may set required (bool),
+      // appliesToTrades (array of trade names; empty/absent = all), and weight (number). Absent id
+      // = catalogue default. ponytail: per-program required sets / photo-by-worktype / cadence
+      // values are DEFERRED - this is the flat per-client layer only.
+      compliance: { checks: {} }
     };
     // Seed profiles keyed by alpha-only-lowercased client name (bwnClientKey). clientId is
     // recorded for cross-checking against the live clientTenantProfileId; the resolver still
@@ -228,12 +239,18 @@
       'cwamazon': { clientId: '20432', refFields: { sourceJob: true, sourcePo: false } },
       'jllamazon': { clientId: '20394', refFields: { sourceJob: true } },
       'caleresinc': { clientId: null },
-      'transformsrbrandsllc': { clientId: '23914', refFields: { sourceJob: true, sourcePo: true } }
+      'transformsrbrandsllc': { clientId: '23914', refFields: { sourceJob: true, sourcePo: true } },
+      // Signoff clients: billing is disputed without a signed approval tied to the WO. deepMerge
+      // replaces closeout.docs wholesale, so each row repeats the three defaults + 'signoff'
+      // (matches the drop-upload 'Signoff' document label). Advisory only, like every docs row.
+      // Separate rows on purpose - the two clients' rules may diverge.
+      'tesla': { clientId: '20441', closeout: { docs: ['signed ticket', 'sign-in/out', 'before/after photos', 'signoff'] } },
+      'crocsinc': { clientId: '20386', closeout: { docs: ['signed ticket', 'sign-in/out', 'before/after photos', 'signoff'] } }
     };
-    // Shallow merge with ONE level of depth over the two nested config objects (closeout,
-    // refFields) so a partial override (e.g. {refFields:{sourceJob:true}}) keeps its sibling
-    // defaults. Every other key is replaced wholesale. Nested objects are cloned so a merge
-    // never mutates CLIENT_DEFAULTS_SEED.
+    // Shallow merge with ONE level of depth over the nested config objects (closeout, refFields,
+    // compliance) so a partial override (e.g. {refFields:{sourceJob:true}} or {compliance:{checks:
+    // {receipt:{required:true}}}}) keeps its sibling defaults. Every other key is replaced
+    // wholesale. Nested objects are cloned so a merge never mutates CLIENT_DEFAULTS_SEED.
     function deepMerge() {
       var out = {};
       for (var i = 0; i < arguments.length; i++) {
@@ -241,7 +258,7 @@
         if (!src || typeof src !== 'object') continue;
         Object.keys(src).forEach(function (k) {
           var v = src[k];
-          if ((k === 'closeout' || k === 'refFields') && v && typeof v === 'object') {
+          if ((k === 'closeout' || k === 'refFields' || k === 'compliance') && v && typeof v === 'object') {
             out[k] = Object.assign({}, out[k] || {}, v);
           } else {
             out[k] = v;
@@ -326,6 +343,13 @@
       setter.call(el, value);
       el.dispatchEvent(new Event('input', { bubbles: true }));
       el.dispatchEvent(new Event('change', { bubbles: true }));
+      // React 17+ wires onBlur to `focusout`, and react-aria NumberFields only commit typed text into
+      // the form on a REAL focus -> blur (useFocusWithin checks activeElement), so a synthetic 'blur'
+      // left the field showing a value the form never held (wo-intake 0.10.3). Focus/blur for real,
+      // then hand focus back. Never blur the field the operator is in.
+      var prev = document.activeElement;
+      if (prev === el) return;
+      try { el.focus(); el.blur(); if (prev && prev !== document.body && prev.focus) prev.focus(); } catch (e) { }
     }
 
     // ---- Brand tokens + gradient ----------------------------------------------
@@ -1102,7 +1126,7 @@
     var batch = sendable.slice(0, 50);
     var sent = {}; batch.forEach(function (e) { sent[e.id] = 1; });
     var body;
-    try { body = JSON.stringify({ actor: ingestActor(), events: batch }); }
+    try { body = JSON.stringify({ actor: ingestActor(), userToken: authToken(), events: batch }); }
     catch (e) { return; }                                 // couldn't serialize → do NOT set the busy flag (would wedge the drain)
     // Clear by EVENT ID, not by position: Core's 200-cap can trim the front mid-POST, so a
     // positional slice would drop unsent events. Re-read so items Core queued during the
@@ -1158,7 +1182,7 @@
     var batch = Object.keys(byTarget).map(function (t) { return byTarget[t]; }).slice(0, 20);
     var sentIds = {}, sentTargets = {}; batch.forEach(function (e) { if (e.id) sentIds[e.id] = 1; sentTargets[e.target] = e.h || null; });
     var body;
-    try { body = JSON.stringify({ actor: ingestActor(), plans: batch.map(function (e) { return { target: e.target, items: e.items, src: e.src || 'note' }; }) }); }
+    try { body = JSON.stringify({ actor: ingestActor(), userToken: authToken(), plans: batch.map(function (e) { return { target: e.target, items: e.items, src: e.src || 'note' }; }) }); }
     catch (e) { return; }   // couldn't serialize → don't set busy (would wedge the drain)
     // Terminal result (2xx ok, or 400 = invalid/non-retryable): drop the entries we sent
     // AND any same-CONTENT duplicate for those targets (a stale dup must not survive and
@@ -1218,7 +1242,7 @@
     var batch = Object.keys(byKey).map(function (k) { return byKey[k]; }).slice(0, 20);
     var sentIds = {}, sentKeys = {}; batch.forEach(function (e) { if (e.id) sentIds[e.id] = 1; sentKeys[e.key] = e.h || null; });
     var body;
-    try { body = JSON.stringify({ actor: ingestActor(), acts: batch.map(function (e) { return { target: e.target || '', wo: e.wo || '', over: e.over }; }) }); }
+    try { body = JSON.stringify({ actor: ingestActor(), userToken: authToken(), acts: batch.map(function (e) { return { target: e.target || '', wo: e.wo || '', over: e.over }; }) }); }
     catch (e) { return; }   // couldn't serialize -> don't set busy (would wedge the drain)
     function settle() {
       var cur = BWN.lsGetJSON('bwn:actsq', []); if (!Array.isArray(cur)) cur = [];
@@ -1311,7 +1335,7 @@
     GM_xmlhttpRequest({
       method: 'POST', url: INGEST_URL + '?client=' + INGEST_CLIENT,
       headers: { 'Content-Type': 'application/json', 'x-bwn-key': key },
-      data: JSON.stringify({ actor: ingestActor(), snapshot: { date: latest, over30: s.over30 || 0, open: s.open || 0, bad: s.bad || 0, warn: s.warn || 0 } }),
+      data: JSON.stringify({ actor: ingestActor(), userToken: authToken(), snapshot: { date: latest, over30: s.over30 || 0, open: s.open || 0, bad: s.bad || 0, warn: s.warn || 0 } }),
       timeout: 15000,
       onload: function (r) {
         var d = null; try { d = JSON.parse(r.responseText); } catch (e) { }
@@ -1339,7 +1363,7 @@
     if (!ds || !Array.isArray(ds.rows) || !ds.rows.length || !ds.generatedAt) return;
     if (!force && localStorage.getItem('bwn:datasetsent') === ds.generatedAt) return;   // this board already sent
     var body;
-    try { body = JSON.stringify({ actor: ingestActor(), source: 'board-push', dataset: { generatedAt: ds.generatedAt, rows: ds.rows } }); }
+    try { body = JSON.stringify({ actor: ingestActor(), userToken: authToken(), source: 'board-push', dataset: { generatedAt: ds.generatedAt, rows: ds.rows } }); }
     catch (e) { return; }                                 // couldn't serialize → don't set busy (would wedge the drain)
     datasetBusy = true;
     GM_xmlhttpRequest({
@@ -1391,7 +1415,7 @@
     if (!ds || !Array.isArray(ds.rows) || !ds.rows.length || !ds.generatedAt) return;
     if (!force && localStorage.getItem('bwn:dispatchsent') === ds.generatedAt) return;   // this scan already sent
     var body;
-    try { body = JSON.stringify({ actor: ingestActor(), source: 'dispatch-scan', dataset: { generatedAt: ds.generatedAt, rows: ds.rows } }); }
+    try { body = JSON.stringify({ actor: ingestActor(), userToken: authToken(), source: 'dispatch-scan', dataset: { generatedAt: ds.generatedAt, rows: ds.rows } }); }
     catch (e) { return; }                                 // couldn't serialize -> don't set busy (would wedge the drain)
     dispatchBusy = true;
     GM_xmlhttpRequest({
@@ -4132,7 +4156,7 @@
           GM_xmlhttpRequest({
             method: 'POST', url: INGEST_URL + '?client=' + INGEST_CLIENT,
             headers: { 'Content-Type': 'application/json', 'x-bwn-key': key },
-            data: JSON.stringify({ actor: ingestActor(), o30lines: part }), timeout: 20000,
+            data: JSON.stringify({ actor: ingestActor(), userToken: authToken(), o30lines: part }), timeout: 20000,
             onload: function (r) {
               var d = null; try { d = JSON.parse(r.responseText); } catch (e) { }
               if (r.status >= 200 && r.status < 300 && d && d.ok === true) { accepted += (+d.lines || 0); push(off + SYNC_CH); }
@@ -5774,7 +5798,7 @@ if (BWN_MODULES.jobView) BWN.safeModule('jobView', function () {
       var key=GM_getValue('ingest_key',''); if(!key){ if(cb) cb(false,'no key'); return; }
       GM_xmlhttpRequest({ method:'POST', url:INGEST_URL+'?client='+INGEST_CLIENT,
         headers:{'Content-Type':'application/json','x-bwn-key':key},
-        data:JSON.stringify(Object.assign({actor:ingestActor()},bodyObj)), timeout:20000,
+        data:JSON.stringify(Object.assign({actor:ingestActor(),userToken:authToken()},bodyObj)), timeout:20000,
         onload:function(r){ var ok=r.status>=200&&r.status<300; if(cb) cb(ok, ok?'':('HTTP '+r.status)); },
         onerror:function(){ if(cb) cb(false,'network'); }, ontimeout:function(){ if(cb) cb(false,'timeout'); } });
     } catch(e){ if(cb) cb(false,e.message); }
@@ -5833,6 +5857,11 @@ if (BWN_MODULES.jobView) BWN.safeModule('jobView', function () {
     // stay stable. Absent => null => omitted.
     var openTasks = null;
     try { var _tk = BWN.lsGetJSON('bwn:tasks:' + (job.wo||job.woNumber||''), null); if(_tk && typeof _tk.open === 'number') openTasks = _tk.open; } catch(e){}
+    // Doc-compliance: Core (on the WO page, docCompliance flag ON) writes the confident score to
+    // bwn:compliance:<wo>; carry score + rulesVersion. Absent (flag off, or WO never opened) => null
+    // => omitted by wo-ingest + the overlay, never a guessed 0. Keyed by WO # like bwn:docs.
+    var complianceScore = null, complianceRulesVersion = null;
+    try { var _cp = BWN.lsGetJSON('bwn:compliance:' + (job.wo||job.woNumber||''), null); if(_cp && typeof _cp.score === 'number'){ complianceScore = _cp.score; if(typeof _cp.rulesVersion === 'number') complianceRulesVersion = _cp.rulesVersion; } } catch(e){}
     jvPost({ jobFacts:{ target:target, status:job.status, coordinator:job.coordinator, location:job.location,
       priority:job.priority, fm:job.fm, trades:job.trades, vendors:job.vendors, amount:job.amount, aged:job.aged,
       statusHrs:job.statusHrs, daysSinceUpdate:job.daysSinceUpdate, lastUpdated:iso(job.lastUpdated), woDate:iso(job.woDate),
@@ -5841,7 +5870,8 @@ if (BWN_MODULES.jobView) BWN.safeModule('jobView', function () {
       city:job.city, state:job.state, client:job.client, sourcePo:job.po, vendorNte:job.totalVendorNte, docCount:docCount,
       noShowDays:noShowDays, noShowVendor:noShowVendor, gpPct:gpPct, openProposals:openProposals,
       noteCount:noteCount, clientNoteDays:clientNoteDays, openTasks:openTasks,
-      laborHours:laborHours, travelHours:travelHours } });
+      laborHours:laborHours, travelHours:travelHours,
+      complianceScore:complianceScore, complianceRulesVersion:complianceRulesVersion } });
   }
   // Freshen the CURRENT WO on the dashboard when the connector records WO actions
   // (debounced per WO). Exposed on window so the top-level connector drain can call it.
@@ -6780,7 +6810,7 @@ if (BWN_MODULES.jobView) BWN.safeModule('jobView', function () {
         GM_xmlhttpRequest({
           method: 'POST', timeout: 30000, url: PROSPECTS_URL,
           headers: { 'Content-Type': 'application/json', 'x-bwn-key': k },
-          data: JSON.stringify({ upsert: recs.slice(i, i + 40) }),
+          data: JSON.stringify({ userToken: authToken(), upsert: recs.slice(i, i + 40) }),
           onload: function () { send(i + 40); }, onerror: function () { }, ontimeout: function () { }
         });
       })(0);
@@ -6801,7 +6831,7 @@ if (BWN_MODULES.jobView) BWN.safeModule('jobView', function () {
         GM_xmlhttpRequest({
           method: 'POST', timeout: 30000, url: PROSPECTS_URL,
           headers: { 'Content-Type': 'application/json', 'x-bwn-key': k },
-          data: JSON.stringify({ outcomes: [{ key: key, status: status, wo: wo || '', note: note || '' }] }),
+          data: JSON.stringify({ userToken: authToken(), outcomes: [{ key: key, status: status, wo: wo || '', note: note || '' }] }),
           onload: function (r) { var j = null; try { j = JSON.parse(r.responseText); } catch (e) { } if (j && j.ok && j.applied) { if (cb) cb(null, key); } else { if (cb) cb(new Error((j && j.error) || ('HTTP ' + r.status))); } },
           onerror: function () { if (cb) cb(new Error('network error')); }, ontimeout: function () { if (cb) cb(new Error('timed out')); }
         });
@@ -6809,7 +6839,7 @@ if (BWN_MODULES.jobView) BWN.safeModule('jobView', function () {
       GM_xmlhttpRequest({   // ensure the record exists (idempotent) BEFORE appending the outcome
         method: 'POST', timeout: 30000, url: PROSPECTS_URL,
         headers: { 'Content-Type': 'application/json', 'x-bwn-key': k },
-        data: JSON.stringify({ upsert: [rec] }),
+        data: JSON.stringify({ userToken: authToken(), upsert: [rec] }),
         onload: postOutcome, onerror: postOutcome, ontimeout: postOutcome
       });
     }

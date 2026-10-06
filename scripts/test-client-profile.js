@@ -47,6 +47,10 @@ var S_ALPHA = slice('    function alphaOnly(s)', '    // Longest common substrin
 var S_CFGBLOCK = slice('    var CFG_DEFAULTS = {', '    // ---- Per-client status/closeout config layer (T10)', 'CFG_DEFAULTS + cfg + cfgSave');
 var S_T10 = slice('    // ---- Per-client status/closeout config layer (T10)', '    // ---- Money / date / vendor-name parsing', 'client-profile seeds + resolver');
 var S_GATE = slice("      if (woPhase === 'confirmcomplete' || woPhase === 'costreview') {", '      // ---- Closure auto-advance:', 'closeout gate');
+// The doc-label id->name helpers the advisory now resolves through (real shipped bytes, sliced from
+// the DOC-COMPLIANCE block). Prepended to the gate function so the numeric-label fix runs for real
+// instead of against a stub.
+var S_LABELS = slice('    var DOC_LABEL_IDS = {', '    // The default check catalogue.', 'doc-label id<->name helpers');
 
 // ---- Resolver harness -------------------------------------------------------
 // The real cfg()/cfgSave over a localStorage stub, plus the T10 seeds + resolver.
@@ -81,9 +85,10 @@ function buildGate(mutations) {
     '(function (woPhase, docs, profile) {\n' +
     '  var acts = [], ref = "W-1", ACT_SIGNALS = { stall: "stall" };\n' +
     '  var state = { docs: docs };\n' +
+    S_LABELS + '\n' +
     g + '\n' +
     '  return acts;\n})',
-    { String: String, Array: Array, Object: Object }, { filename: 'closeout-gate.js' });
+    { String: String, Array: Array, Object: Object, Number: Number, isFinite: isFinite }, { filename: 'closeout-gate.js' });
 }
 
 function runResolverCases(mutations) {
@@ -113,6 +118,16 @@ function runResolverCases(mutations) {
   ok('the client key ignores case and punctuation', api.bwnClientKey('Transform SR Brands, LLC') === 'transformsrbrandsllc', api.bwnClientKey('Transform SR Brands, LLC'));
   ok('and that keys the SR seed (both source refs required)',
     api.bwnClientProfile({ hd: { client: 'Transform SR Brands LLC' } }).refFields.sourcePo === true, 'sr sourcePo');
+
+  // signoff clients: defaults kept + 'signoff' appended, enforce inherited, rows separate
+  var DEF_DOCS = api.CLIENT_DEFAULTS_SEED.closeout.docs;
+  [['Tesla', '20441'], ['CROCS, Inc.', '20386']].forEach(function (p) {
+    var pr = api.bwnClientProfile({ hd: { client: p[0] } });
+    ok(p[0] + ' carries its clientId', pr.clientId === p[1], JSON.stringify(pr));
+    eqJSON(p[0] + ' keeps all three default closeout docs and adds signoff', pr.closeout.docs, DEF_DOCS.concat(['signoff']));
+    ok(p[0] + ' inherits enforce from the defaults', pr.closeout.enforce === true, JSON.stringify(pr.closeout));
+  });
+  ok('Tesla and Crocs are separate seed rows', api.CLIENT_PROFILE_SEED.tesla !== api.CLIENT_PROFILE_SEED.crocsinc, 'same object');
 
   // SAFETY: an EMPTY clients table disables the seed entirely -> defaults, byte-identical engine
   api.cfgSave({ clients: {} });
@@ -180,6 +195,13 @@ function runGateCases(mutations) {
   eq('empty closeout.docs never advises on present docs', gate('confirmcomplete', { count: 2, docs: [{ label: 'x' }] }, EMPTY).length, 0);
   eq('empty closeout.docs still blocks on a confident zero', gate('confirmcomplete', { count: 0, docs: [] }, EMPTY).length, 1);
 
+  // signoff profile: a package with the three defaults but no Signoff doc advises 'signoff' only
+  var SIGN = { closeout: { docs: ['signed ticket', 'sign-in/out', 'before/after photos', 'signoff'], enforce: true } };
+  var noSign = gate('costreview', { count: 3, docs: [{ label: 'signed ticket' }, { label: 'sign-in/out' }, { label: 'before/after photos' }] }, SIGN);
+  eq('a signoff client missing a Signoff doc gets one advisory', noSign.length, 1);
+  eq('naming only signoff', noSign[0] && noSign[0].key, 'docsverify:signoff');
+  eq('a Signoff-labelled doc satisfies it', gate('confirmcomplete', { count: 4, docs: [{ label: 'signed ticket' }, { label: 'sign-in/out' }, { label: 'before/after photos' }, { label: 'Signoff', displayFileName: 'x.pdf' }] }, SIGN).length, 0);
+
   // never outside the closing phases
   eq('the whole gate is silent outside confirm-complete / cost-review', gate('intake', { count: 0, docs: [] }, SEED).length, 0);
 
@@ -192,7 +214,7 @@ function runGateCases(mutations) {
 // ---- Negative controls ------------------------------------------------------
 var RESOLVER_MUTATIONS = [
   { what: 'deepMerge replacing (wiping) a nested object instead of merging one level',
-    m: ["if ((k === 'closeout' || k === 'refFields') && v && typeof v === 'object') {", 'if (false) {'] },
+    m: ["if ((k === 'closeout' || k === 'refFields' || k === 'compliance') && v && typeof v === 'object') {", 'if (false) {'] },
   { what: 'the resolver ignoring the stored clients table (always the seed)',
     m: ['var table = c.clients || CLIENT_PROFILE_SEED;', 'var table = CLIENT_PROFILE_SEED;'] },
   { what: 'the client-key case-fold dropped (seed rows never match a real name)',

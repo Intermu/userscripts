@@ -108,6 +108,8 @@ function build(src) {
     fetchStatuses: function () { return { then: function () { return { then: function () {} }; } }; },
     fetchUsers: function () { return { then: function () { return { then: function () {} }; } }; },
     fillStatusOptions: function () {},
+    woInfoEl: null,          // 0.15.0: no info panel here -> showWoInfo is a no-op
+    autoTaskBox: null,       // 0.14.0: no Task.EditTask checkbox here -> hydrate skips the auto-task read
     fillAssigneeOptions: function () {},
     showEcd: function () {},
     ecdEl: null,
@@ -225,6 +227,24 @@ function checkHydrate(S, label) {
   return inputs;
 }
 checkHydrate(S, 'hydrate');
+
+// 0.15.1: the auto-dispatch task lands a few seconds after Create, so hydrate re-reads until it shows.
+(function checkTaskPoll() {
+  var P = build(full);
+  var label = { style: {} }, txt = { textContent: '' };
+  var box = { parentNode: label, nextSibling: txt, checked: true, disabled: false };
+  var reads = 0, waits = 0, TASK = { id: 't1', description: 'Purchase Order created, call vendor to confirm receipt' };
+  P.autoTaskBox = box;
+  // sync thenable, like the gql stub: the pass/fail summary at the bottom runs synchronously
+  P.findAutoTask = function () { reads++; var v = reads < 3 ? null : TASK; return { then: function (ok) { ok(v); } }; };
+  P.autoTaskBlocker = function () { return ''; };
+  P.setTimeout = function (fn) { waits++; fn(); };
+  P.gqlFail = false; P.gqlUserFail = false; P.gqlResult = woFixture(); P.gqlUser = null;
+  P.hydrateFromUmbrava('383449', inputsFor({}), {});
+  A.eq('task poll: re-read until the task landed (3 reads, 2 waits)', reads + ':' + waits, '3:2');
+  A.eq('task poll: checkbox shown once it landed', label.style.display, 'flex');
+  A.eq('task poll: snapshot taken for the move', P._autoTask && P._autoTask.id, 't1');
+})();
 
 // siteNumberOf is deliberately conservative: derive only when it is unambiguous, because a wrong
 // key makes the flow's `Lookup site` miss SILENTLY while an empty required field cannot.
@@ -525,6 +545,13 @@ function redUnder(name, mutated, probe, useSource) {
 
 // Snapshot the REAL-source result before the controls run, since the controls deliberately
 // register failing assertions into the same counters.
+// ---- userToken: read fresh in postCard (after the writes), never at confirm time ---------------
+// postCard lives inside the click handler (not sliceable), so this is a source-level pin.
+A.ok('userToken: buildPayload does not read the token (no stale confirm-time copy)', p.userToken === undefined);
+A.ok('userToken: postCard sets payload.userToken = authToken() BEFORE the gmPost',
+  /function postCard\(taskNote\) \{\n\s+payload\.userToken = authToken\(\);[^\n]*\n[\s\S]*?return gmPost\(PROXY_URL/.test(full));
+A.eq('userToken: assigned in exactly one place', full.split('userToken').length - 1 >= 1 && (full.match(/payload\.userToken = authToken\(\)/g) || []).length, 1);
+
 var REAL = A.counts();
 
 console.log('\nnegative controls (each reverts one fix; failures below are EXPECTED):');

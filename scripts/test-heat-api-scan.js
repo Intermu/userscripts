@@ -1336,7 +1336,7 @@ console.log('\n-- the shipped call site --');
   // run its body at document-start, with no document.body - the exact failure this
   // restructure exists to avoid, and one that shows up as a module silently not mounting.
   var dispatch = core.match(/^  bwnBoot\('\w+', BWN_MODULES\.\w+, function \(\) \{$/gm) || [];
-  A.eq('all 14 modules are registered through bwnBoot', dispatch.length, 14);   // +domHandle (phase 4), +bulkOps (Bulk Operations Console), +bulkSource (Bulk Source Job#)
+  A.eq('all 16 modules are registered through bwnBoot', dispatch.length, 16);   // +domHandle (phase 4), +bulkOps (Bulk Operations Console), +bulkSource (Bulk Source Job#), +bulkTask (Bulk Task Reassign), +hideHelp (Help button toggle)
   A.eq('and none is dispatched inline', (core.match(/^  if \(BWN_MODULES\.\w+\) BWN\.safeModule\(/gm) || []).length, 0);
   // Cheap proof the ids still line up with their kill switches after a bulk rewrite.
   var mismatched = dispatch.filter(function (d) {
@@ -1344,6 +1344,62 @@ console.log('\n-- the shipped call site --');
     return !m || m[1] !== m[2];
   });
   A.eq('each module id matches its own kill switch', mismatched, []);
+})();
+
+// Core 1.94.2: heatGql is the ONE replay choke point and must refuse any non-query document
+// (a captured paging-shaped mutation would otherwise be re-sent unaudited) WITHOUT touching the
+// network. Drives the real shipped heatGql slice against a counting fetch stub.
+var SRC_HEATGQL = slice(core,
+  '    function heatGql(query, variables) {',
+  '    // A row "looks like a WO" if it carries a numeric WO number key.',
+  'heatGql');
+function heatGqlQueryOnly() {
+  console.log('\n-- heatGql replays queries only (Core 1.94.2) --');
+  var calls = [];
+  var sb = {
+    authToken: function () { return 't'; }, heatNoteOwnBody: function () { },
+    fetch: function (u, o) { calls.push(o.body); return Promise.resolve({ json: function () { return { data: { ok: 1 } }; } }); },
+    Promise: Promise, JSON: JSON, Error: Error
+  };
+  vm.runInNewContext(SRC_HEATGQL + '\nthis.heatGql = heatGql;', sb, { filename: 'heatgql-slice.js' });
+  function sends(doc) {
+    var before = calls.length;
+    return sb.heatGql(doc, {}).then(function () { return true; }, function () { return false; })
+      .then(function (resolved) { return { resolved: resolved, sent: calls.length - before }; });
+  }
+  var CASES = [
+    ['the pinned seed query', HEAT_SEED_HEAD, true],
+    ['an anonymous query(...) literal', 'query($id:ID!){ user(id:$id){ firstName } }', true],
+    ['the { } shorthand', '{ workOrders { id } }', true],
+    ['a query under # comment lines', '# captured\n  # by List Heat\nquery Q { workOrders { id } }', true],
+    ['a mutation', 'mutation PatchWorkOrder($data: X!) { patchWorkOrder(data: $data) { success } }', false],
+    ['a mutation behind # comments', '# looks harmless\nmutation M { patchWorkOrder(data: {}) { success } }', false],
+    ['a subscription', 'subscription S { workOrderChanged { id } }', false],
+    ['an empty document', '', false],
+    ['a non-string document', null, false],
+    ['a document that only mentions query later', 'mutation X { query }', false]
+  ];
+  return CASES.reduce(function (p, c) {
+    return p.then(function () {
+      return sends(c[1]).then(function (r) {
+        A.eq((c[2] ? 'sends ' : 'refuses, with no request: ') + c[0], r, { resolved: c[2], sent: c[2] ? 1 : 0 });
+      });
+    });
+  }, Promise.resolve()).then(function () {
+    // Control: with the guard removed the same mutation IS sent, so the cases above can go red.
+    var nb = { authToken: sb.authToken, heatNoteOwnBody: sb.heatNoteOwnBody, fetch: sb.fetch, Promise: Promise, JSON: JSON, Error: Error };
+    vm.runInNewContext(mutate(SRC_HEATGQL, "if (typeof query !== 'string' ||", 'if (false &&') + '\nthis.heatGql = heatGql;', nb, { filename: 'heatgql-mut.js' });
+    var before = calls.length;
+    return nb.heatGql('mutation M { patchWorkOrder(data: {}) { success } }', {}).then(function () {
+      A.eq('CONTROL: without the guard a mutation reaches fetch', calls.length - before, 1);
+    });
+  });
+}
+// The real pinned seed's opening line, so a seed rewrite that stops starting with `query` fails here.
+var HEAT_SEED_HEAD = (function () {
+  var m = /var HEAT_DEFAULT_QUERY = \[\n\s*'([^']+)'/.exec(core);
+  if (!m) throw new Error('HEAT_DEFAULT_QUERY not found');
+  return m[1] + ' workOrders { id } }';
 })();
 
 function main() {
@@ -1850,7 +1906,7 @@ function main() {
       });
       });
     });
-  }).then(function () {
+  }).then(heatGqlQueryOnly).then(function () {
     A.finish();
   }, function (err) {
     console.log('HARNESS ERROR: ' + (err && err.stack || err));

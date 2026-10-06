@@ -58,6 +58,11 @@ function coreCtx(over) {
     JSON: JSON, Math: Math, String: String, Number: Number, Array: Array, Object: Object, Date: { now: function () { return 1755300000000; } },
     ingestSeq: 0,
     authoredKeyHash: function (s) { var h = 0, i; for (i = 0; i < String(s).length; i++) { h = (h * 31 + String(s).charCodeAt(i)) | 0; } return 'h' + (h >>> 0).toString(36); },
+    // Recovery Playbooks: the overlay calls these file-level fns (proven by test-recovery-sla.js)
+    // to precompute the SLA countdown for the engine-less case file. Stubbed here so the WIRING is
+    // exercised - the overlay must carry exactly what they return.
+    slaCountdown: function () { return { level: 'warn', badHrs: 120 }; },
+    breachPredict: function () { return { willBreach: true, dueDays: 4 }; },
     BWN: {
       lsGetJSON: function (k, d) { return Object.prototype.hasOwnProperty.call(ls, k) ? JSON.parse(ls[k]) : d; },
       lsSetJSON: function (k, v) { ls[k] = JSON.stringify(v); }
@@ -91,7 +96,8 @@ console.log('-- stageActsPush: the overlay, keyed by tracking AND wo --');
   A.eq('the overlay carries the live PO rows', e.over.pos.length, 1);
   A.eq('and the detail-page-only signals', [!!e.over.stall, e.over.openTasks.count, e.over.noteCount], [true, 1, 3]);
   A.ok('the overlay only carries known fields (no state internals leaked)',
-    Object.keys(e.over).every(function (k) { return ['pos', 'stall', 'noShow', 'docs', 'openTasks', 'gpPct', 'nte', 'vendorTotal', 'noteCount', 'lastClientNoteDays', 'staleDays', 'eta'].indexOf(k) !== -1; }));
+    Object.keys(e.over).every(function (k) { return ['pos', 'stall', 'noShow', 'docs', 'openTasks', 'gpPct', 'nte', 'vendorTotal', 'noteCount', 'lastClientNoteDays', 'staleDays', 'eta', 'slaCountdown', 'breachPredict'].indexOf(k) !== -1; }));
+  A.eq('the overlay carries the precomputed SLA countdown (for the engine-less case file)', [e.over.slaCountdown.level, e.over.breachPredict.willBreach], ['warn', true]);
   A.eq('nothing was written outside bwn:actsq (zero-egress, localStorage only)',
     Object.keys(ctx.__ls).filter(function (k) { return k !== 'bwn:actsq'; }), []);
 })();
@@ -140,7 +146,7 @@ function drainCtx(seedQueue, opts) {
   var sandbox = {
     JSON: JSON, Math: Math, String: String, Number: Number, Array: Array, Object: Object,
     connectorEnabled: function () { return opts.connector !== false; },
-    ingestActor: function () { return 'tester'; },
+    ingestActor: function () { return 'tester'; }, authToken: function () { return 'tok'; },
     GM_getValue: function () { return opts.key === undefined ? 'test-key' : opts.key; },
     INGEST_URL: 'https://swa.example/api/wo-ingest', INGEST_CLIENT: 'pilot',
     connOk: function () {}, connFail: function () {},
@@ -165,6 +171,7 @@ console.log('\n-- actsDrain: the POST contract the route expects --');
   var p = ctx.__posted[0];
   A.eq('to the wo-ingest endpoint with the client', p.url, 'https://swa.example/api/wo-ingest?client=pilot');
   A.eq('key-gated on x-bwn-key', p.headers['x-bwn-key'], 'test-key');
+  A.eq('the body carries the fresh userToken', JSON.parse(p.data).userToken, 'tok');
   var body = JSON.parse(p.data);
   A.eq('the body is { actor, acts: [...] }', [typeof body.actor, Array.isArray(body.acts)], ['string', true]);
   A.eq('each act carries target + wo + over', { target: body.acts[0].target, wo: body.acts[0].wo, pos: body.acts[0].over.pos.length }, { target: '1120182', wo: '344409', pos: 1 });
@@ -196,7 +203,7 @@ console.log('\n-- mutation controls --');
   // MC2: drop the wo from the drain body -> the dual-key join loses its WO-# half.
   var drainNoWo = mutate(SRC_DRAIN, 'return { target: e.target || \'\', wo: e.wo || \'\', over: e.over };', 'return { target: e.target || \'\', wo: \'\', over: e.over };');
   var ls2 = {}; ls2['bwn:actsq'] = JSON.stringify([QENTRY]); var posted = [];
-  var sb2 = { JSON: JSON, Math: Math, String: String, Number: Number, Array: Array, Object: Object, connectorEnabled: function () { return true; }, ingestActor: function () { return 't'; }, GM_getValue: function () { return 'k'; }, INGEST_URL: 'u', INGEST_CLIENT: 'pilot', connOk: function () {}, connFail: function () {}, BWN: { guard: function (f) { return f; }, lsGetJSON: function (k, d) { return Object.prototype.hasOwnProperty.call(ls2, k) ? JSON.parse(ls2[k]) : d; }, lsSetJSON: function (k, v) { ls2[k] = JSON.stringify(v); } }, GM_xmlhttpRequest: function (o) { posted.push(o); } };
+  var sb2 = { JSON: JSON, Math: Math, String: String, Number: Number, Array: Array, Object: Object, connectorEnabled: function () { return true; }, ingestActor: function () { return 't'; }, authToken: function () { return 'tok'; }, GM_getValue: function () { return 'k'; }, INGEST_URL: 'u', INGEST_CLIENT: 'pilot', connOk: function () {}, connFail: function () {}, BWN: { guard: function (f) { return f; }, lsGetJSON: function (k, d) { return Object.prototype.hasOwnProperty.call(ls2, k) ? JSON.parse(ls2[k]) : d; }, lsSetJSON: function (k, v) { ls2[k] = JSON.stringify(v); } }, GM_xmlhttpRequest: function (o) { posted.push(o); } };
   vm.runInNewContext(drainNoWo + '\nthis.actsDrain = actsDrain;', sb2, { filename: 'mc2.js' });
   sb2.actsDrain();
   A.eq('MC2: with the mutation the WO # is dropped from the payload', JSON.parse(posted[0].data).acts[0].wo, '');

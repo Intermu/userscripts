@@ -41,7 +41,7 @@ var GPLABEL = sliceBetween("// ===== PA-GPLABEL START", "// ===== PA-GPLABEL END
 // BWN-PERM reader block (bwnCan / bwnCanAll / bwnPermsForPatch) rather than a stub. No slot is
 // planted, so every permission reads as unknown and fails OPEN - the pre-gate behaviour these
 // cases were written against. The gate itself is proven in scripts/test-bwn-ops.js.
-var PERMBLK = sliceBetween("// ===== BWN-PERM START v1", "// ===== BWN-PERM END v1 =====");
+var PERMBLK = sliceBetween("// ===== BWN-PERM START v2", "// ===== BWN-PERM END v2 =====");
 function loadGpLabel(src) { var box = { console: console }; vm.createContext(box); vm.runInContext(src, box); return box; }
 
 function mutate(src, from, to) {
@@ -86,7 +86,7 @@ function load(engineSrc, gql) {
       setItem: function (k, v) { store[k] = String(v); },
       removeItem: function (k) { delete store[k]; }
     },
-    VER: "0.6.1",
+    VER: "0.6.2",
     paGql: gql,
     DRY_RUN: false,
     NOTE_TYPE_INTERNAL: 13,
@@ -224,7 +224,32 @@ function callsOf(g, op) { return g.calls.filter(function (c) { return c.op === o
   A.ok("every write still honors DRY_RUN", (full.match(/\[PA DRY_RUN\]/g) || []).length >= 5);
   var mV = full.match(/@version\s+([0-9.]+)/), mR = full.match(/VER\s*=\s*'([0-9.]+)'/);
   A.ok("@version and runtime VER agree", !!(mV && mR && mV[1] === mR[1]));
-  A.eq("shipped at 0.6.1", mV && mV[1], "0.6.1");
+  A.eq("shipped at 0.7.15", mV && mV[1], "0.7.15");
+
+  // ---- WO-note dedup is scoped to THIS run, not the WO's whole history ------------------------
+  // W-390980: a 9/09 TSP note with the same GP + total made the next TSP review skip its WO note.
+  var WONOTE = sliceBetween("// ===== PA-WONOTE START", "// ===== PA-WONOTE END");
+  function loadWONote(src, existing) {
+    var box = { posted: [], notes: existing.slice(), bwnCan: function () { return true; } };
+    box.readWONotes = function () { return Promise.resolve(box.notes.slice()); };
+    box.addWONote = function (n, t) { box.posted.push(t); box.notes.push({ content: t, isDeleted: false }); return Promise.resolve(true); };
+    vm.createContext(box); vm.runInContext(src, box); return box;
+  }
+  var TXT = ["TSP Review - 25% - Summary", "Total", "$1,000.00"].join(String.fromCharCode(10));
+  var W1 = loadWONote(WONOTE, [{ content: TXT, isDeleted: false }]);
+  await W1.buildWONoteStep({ n: 390980 }).run(TXT);
+  A.eq("WO note: an identical OLDER note does not suppress this run's post", W1.posted.length, 1);
+  var W2 = loadWONote(WONOTE, []);
+  var st2 = W2.buildWONoteStep({ n: 1 });
+  W2.addWONote = function (n, t) { W2.notes.push({ content: t, isDeleted: false }); return Promise.reject(new Error("net")); };
+  await st2.run(TXT).catch(function () {});
+  W2.addWONote = function (n, t) { W2.posted.push(t); return Promise.resolve(true); };
+  await st2.run(TXT);
+  A.eq("WO note: Retry after a landed-but-errored post does not duplicate", W2.posted.length, 0);
+  var MUT4 = mutate(WONOTE, "if (baseline != null && have > baseline) return true;", "if (have > 0) return true;");
+  var W4 = loadWONote(MUT4, [{ content: TXT, isDeleted: false }]);
+  await W4.buildWONoteStep({ n: 390980 }).run(TXT);
+  A.eq("CONTROL: history-wide dedup (the old bug) skips the post", W4.posted.length, 0);
 
   A.finish();
 })().catch(function (e) { console.error(e); process.exit(1); });

@@ -104,6 +104,9 @@ jobs:
       - name: Launcher dock latent-fix harness
         run: node scripts/test-dock-latent-fixes.js
 
+      - name: Launcher dock duplicate-key harness
+        run: node scripts/test-dock-dup-key.js
+
       - name: W-9 TIN region harness
         run: node scripts/test-w9-tin-region.js
 
@@ -173,6 +176,18 @@ jobs:
       - name: WO Audit operations action list engine (0.17.0)
         run: node scripts/test-wo-audit-actions.js
 
+      # WO Audit 0.18.0: the operational WORK-QUEUE model layered on the action engine. Slices the
+      # pure BWN WO-AUDIT ACTIONS block and drives deriveAction end to end plus the model functions
+      # (isOnsiteDateExpected / isEcdExpected / evaluateWaitingState / evaluateContradictions /
+      # calculateOperationalRisk / calculateActionability / classifyActionQueue) and the queue-grouped
+      # sheet builder. Covers all 13 spec scenarios - onsite-blocked P0, valid client-approval wait,
+      # overdue external commitment, future visit not P0-by-age, closeout-evidence-missing,
+      # meaningful-update-missing, proposed-no-decision-date, scheduled-no-visit, pending-schedule-
+      # no-vendor, action-undefined triage, no-false-unscheduled, no-false-ECD, and valid-waiting
+      # rank suppression - each with a negative control.
+      - name: WO Audit operational work queue (0.18.0)
+        run: node scripts/test-wo-audit-queue.js
+
       # WO Audit 0.17.0 Commit 2: the Dashboard + Audit Rules sheet builders and the workbook
       # header-alias mapping. Slices the pure BWN WO-AUDIT DASHBOARD block (deterministic counts,
       # owner/FM/bucket/priority rollups sorted count-desc, the manager-review top-20 sort+cap, the
@@ -216,6 +231,14 @@ jobs:
 
       - name: Bid-out dock registration + ACT_TOOL harness
         run: node scripts/test-bidout-dock.js
+
+      # Phase 1 read-only Vendor Snapshot card (bwn-bid-out.user.js). Slices the BWN-VENDOR-SNAPSHOT
+      # block and drives the real functions: governance fail-closed, the count-gated rating (no
+      # zero-sample scores), never-impute metric guard, distance-ranked explainable recommendation,
+      # the render states, the two gate integrations (rank ladder + vendorIntel flag), and a SCHEMA
+      # PIN on VEND_Q + the slim vendorAssignmentJobMetrics read - with 5 negative-control mutations.
+      - name: Vendor snapshot (Phase 1) render/guard/schema-pin harness
+        run: node scripts/test-vendor-snapshot.js
 
       # Cross-script: Drop Upload has no egress, so the client-response item only exists if the
       # bwn:assist:track / :tracked handshake holds. Nothing else checks across those two files.
@@ -266,6 +289,25 @@ jobs:
       - name: dispatch GraphQL error-envelope harness (three envelopes, not just errors[0].message)
         run: node scripts/test-dispatch-gql-errors.js
 
+      # bwn-dispatch 0.13.0: DISPATCH_API is the authoritative inventory of every network op the
+      # feature can run (direct reads + the two best-effort fallbacks + the WO write + the SWA notify
+      # POST), as metadata that never copies a selector. Slices DISPATCH_API and gqlErrText+gql from
+      # the shipped bytes and pins: the metadata contract on every entry; the UNREGISTERED-OP GUARD
+      # (every named GraphQL constant in source has an entry, so a new op cannot enter the dispatch
+      # path unregistered); the notify POST registered with its timeout sourced from the registry;
+      # the confirm->notify fail-closed ordering + stage timings; and gql() naming empty-body /
+      # non-JSON HTTP failures by status instead of a parser error. Two synthetic controls prove the
+      # guard and the empty-body handling can go red.
+      - name: dispatch API inventory + gql diagnostics harness (DISPATCH_API + empty-body 400)
+        run: node scripts/test-dispatch-api.js
+
+      # bwn-dispatch 0.14.0 + bwn-wo-intake 0.10.0 (Pilot auto-dispatch). Dispatch shows on a WO with
+      # Umbrava's open "Purchase Order created, call vendor to confirm receipt" task and can move that
+      # task via editTask (a FULL replace): pins the task match, the verbatim payload, the refuse-if-
+      # changed / flagged rules and the verified read-back. Also pins Intake's Vendor NTE at ~34% GP.
+      - name: dispatch auto-dispatch task + intake vendor NTE harness
+        run: node scripts/test-dispatch-autotask.js
+
       # temp-vendor 0.3.0: the vendor activate/deactivate writes routed through bwnGqlOp. Slices the
       # real write block (real bwnGqlOp runs, not a stub) and pins: activate resolves the reason id by
       # NAME then fires activateVendor with an audit entry (high-risk, confirmed:true from its panel);
@@ -287,6 +329,17 @@ jobs:
       # in "Clocked Out: Complete" and muted 19 live rows in five counts at once.
       - name: List Heat open-count harness (phase beats the status name)
         run: node scripts/test-heat-open-count.js
+
+      # Core 1.90.1: the NEXT ACTIONS card's own "OPEN TASKS (n)" strip won the Open Tasks
+      # anchor search, so every other refresh re-inserted the card inside its detached self and
+      # the notes pane above it grew and shrank in a loop.
+      - name: Next Actions anchor harness (never anchors inside its own card)
+        run: node scripts/test-acts-anchor-self.js
+
+      # Core 1.91.0: Suite settings toggles are real module keys, and the live WO Assist
+      # sub-feature toggles (Next Actions card, ECD auto-prompt, close-out preflight) gate their calls.
+      - name: Suite settings feature-toggle harness
+        run: node scripts/test-feature-toggles.js
       - name: Job-acts producer harness (Core stager + AI drain, board item 42)
         run: node scripts/test-acts-push.js
 
@@ -323,6 +376,21 @@ jobs:
       # workOrder{purchaseOrders}) drifting or regressing.
       - name: PO API harness (purchaseOrders reader + parity log)
         run: node scripts/test-po-api.js
+
+      # bwnVendorTokens / bwnVendorMatch - the distinctive-token vendor matcher Leak Guard and PO
+      # Approval share. Characterizes current rules on synthetic data; sliced by declaration, no markers.
+      - name: Leak Guard vendor-matcher harness (distinctive-token rules)
+        run: node scripts/test-leak-guard-matcher.js
+
+      # PO Approval poll lifecycle - schedule() / stopPoll() single-timer guard, stop on modal gone or
+      # buttons mounted, and the page-lifetime document.body observer. Characterizes current behavior.
+      - name: PO Approval poll-lifecycle harness (single timer + page-lifetime observer)
+        run: node scripts/test-po-approval-poll-lifecycle.js
+
+      # PO Approval v1.14 - the NTE comes from the PO row whose "..." menu opened the Send PO modal
+      # (10-minute window, same-vendor check), before recipient matching. Negative controls included.
+      - name: PO Approval clicked-row NTE harness
+        run: node scripts/test-po-approval-clicked-row.js
 
       # bwnGqlRead() - the classified GraphQL read envelope (kind / status / codes, never rejects) that
       # the PO shadow reader's give-up warn uses to tell auth-empty from schema drift from a dead
@@ -407,6 +475,33 @@ jobs:
       # do not rot in confirm-complete. Mirror of docs:none; a suggestion, never auto-advances.
       - name: Next Actions closure auto-advance harness (WO Assist 2.69)
         run: node scripts/test-assist-advance-gate.js
+
+      # Coordinator Action Queue (WO Assist 2.75): a PURE classification + partition + ranking
+      # layer over the engine's output. Three harnesses slice the real COORD-QUEUE block and run
+      # it in a vm (nothing restates the logic), each with negative controls.
+      #  - classify: ownership / readiness / urgency (off the shared clock) / friction, plus the
+      #    plain-language reason/doneWhen and the conservative unknown-clock handling.
+      - name: Coordinator Action Queue classification harness (WO Assist 2.75)
+        run: node scripts/test-coord-classify.js
+
+      #  - queue: the DO-NOW attention gate, the 3-item cap with overflow, the section precedence
+      #    and counts, and the coordinatorScore ordering (ready+due beats a higher-base waiting item;
+      #    critical beats due; low friction is only a bounded tie-break).
+      - name: Coordinator Action Queue partition + ranking harness (WO Assist 2.75)
+        run: node scripts/test-coord-queue.js
+
+      #  - waits: the waiting/revisit foundation - a valid wait suppresses before revisitAt, expires
+      #    and re-enters after, invalidates on a state-fingerprint change, and NEVER suppresses on
+      #    malformed/unknown storage (fail-open to visible).
+      - name: Coordinator Action Queue waiting/revisit harness (WO Assist 2.75)
+        run: node scripts/test-coord-waits.js
+
+      #  - render (WO Assist 2.76, BWN ODS pass): pins the render-layer contracts - semantic colour
+      #    (no white-on-amber, no green on Upcoming/One-click), real <button> header / nav label,
+      #    no prompt() in Mark waiting, honest error fallback, focus restore across rebuilds - each
+      #    probe with a negative control that reintroduces the old defect.
+      - name: Coordinator Action Queue render-contract harness (WO Assist 2.76)
+        run: node scripts/test-coord-render.js
 
       # UI-contract completeness ledger: names every bwn-*.user.js and forces each into a classified
       # row per shared UI contract (drawer exit / toast motion / reduced-motion / rail anchor), tied
@@ -572,6 +667,18 @@ jobs:
       - name: Proposal Actions write harness (addClientProposalNote / addTask / completeTask)
         run: node scripts/test-proposal-actions.js
 
+      # Proposal Pricing (bwn-proposal-pricing.user.js): slices the PP-ENGINE block and pins the
+      # money / GP / contracted-rate math. MONEY code - any change to a money path must turn it red.
+      - name: Proposal Pricing engine harness
+        run: node scripts/test-proposal-pricing.js
+
+      # Proposal Actions "Margin check" (flag marginGuardrail, default OFF, read-only): one margin
+      # target (default = the shared 33% GP threshold), a verdict that compares the displayed 1-decimal
+      # percent, and panel markup that escapes every Umbrava value. Seven controls each turn it red.
+      # (Added in #164; the step was lost in that PR's web conflict merge, restored here.)
+      - name: Proposal Actions margin-check harness
+        run: node scripts/test-margin-guardrail.js
+
       # RM-A3 / R3: bwn-proposal-actions de-hardcodes the STATUS_FALLBACK status-id map and the
       # RONNY_GUID TSP assignee. Both now resolve LIVE and FAIL CLOSED when they cannot (no write on a
       # stale id), with a bwn:modules.paLegacyFallback rollback flag reinstating the constants. Slices
@@ -580,6 +687,23 @@ jobs:
       # refusal is pinned in test-proposal-actions.js.)
       - name: "Proposal Actions live-resolve harness (RM-A3: status id + TSP assignee, fail-closed)"
         run: node scripts/test-pa-live-resolve.js
+
+      # Multiple proposals per job (bwn-proposal-actions 0.7.0): slices PA-SIBLINGS + readTotals and pins
+      # the sibling read (extended fields, fallback to the live-proven set, sortBy on both), canceled =
+      # not an option, the acknowledgement rule (several options / id missing / truncated / unreadable),
+      # and that readTotals never borrows a sibling's total. 0.7.1 adds the browser-local action history
+      # (one record per completed run via the real runSteps, dedup, retention, corrupt/blocked storage,
+      # Local record rendering, non-blocking confirm warning). Negative controls turn it red.
+      - name: Proposal Actions multi-proposal harness (sibling read, acknowledgement, no sibling total)
+        run: node scripts/test-pa-multi-proposal.js
+
+      # Kickback reliability (bwn-proposal-actions 0.7.12): slices PA-KICKBACK and pins one isolated,
+      # disposed AI session per draft, a failed proposal-context read never shown to the AI as an empty
+      # proposal (while a real empty scope / no lines is), and the reason gate (Summary / Total block,
+      # change-since-review line and placeholders are not a reason; any other wording is). The Confirm
+      # wiring is pinned in test-pa-multi-proposal.js. Negative controls turn it red.
+      - name: Proposal Actions kickback reliability harness (isolated AI session, context read, reason gate)
+        run: node scripts/test-pa-kickback.js
 
       # Track C write-back DRAIN half (bwn-write-queue.user.js): the coordinator's-tab executor that
       # claims a queued command from /api/wo-write-queue, confirms it, and turns it into a real
@@ -636,7 +760,13 @@ jobs:
       - name: WO Assist B2 status-write harness (patchWorkOrder confirm gate + statusId alone)
         run: node scripts/test-b2-statuswrite.js
 
-      - name: Bulk Operations Console engine harness (batch writes through the audit ring)
+      # THE single Safe Bulk Operations Console (Core bwn-suite-core, flag bulkOps default OFF). v2
+      # converge: status/assign (patchWorkOrder, HIGH, behind bulkOpsDestructive) + escalation-task
+      # (addTask) + request-missing-docs (addEditJobNote), the F4-DEEP armed per-batch confirm (no bare
+      # confirmed:true on the bulk path), the advisory fail-closed rank gate, mid-batch kill, PII-safe
+      # export, and negative controls that each redden. Slices the BULK-OPS-ENGINE + BWN-OPS blocks and
+      # drives the write path end to end through the real audit ring + confirm gate.
+      - name: Bulk Operations Console engine harness (converged ops + F4-deep armed confirm + kill/PII)
         run: node scripts/test-bulk-ops.js
 
       # Bulk Source Job# engine: the Q/R / RF shorthand -> sourceJobNumber value, the single-scalar
@@ -644,11 +774,27 @@ jobs:
       # cap, and the feature:'bulkSource' kill switch - driven end to end through the real audit ring.
       - name: Bulk Source Job# engine harness (Q/R/RF shorthand + blanks-only patchWorkOrder)
         run: node scripts/test-bulk-source.js
-      - name: "RM-C1 bulk console harness (bwn-write-queue: preview / dry-run / pause-cancel / threshold / CSV+JSON export; flag bulkConsole default OFF)"
+      - name: Bulk Task Reassign engine harness (preview / APPLY n / full-replace EditTask / read-back verify, flag bulkTask default OFF)
+        run: node scripts/test-bulk-task.js
+      # Converge ruling 2026-09-01: bwn-write-queue's operator MODAL is RETIRED (Core is the one console).
+      # This harness is now a RETIREMENT TRIPWIRE - it fails if the modal, its engine, or the bulkConsole
+      # flag menu creep back - and folds the one still-relevant executor guarantee that lived here: the
+      # kept BWN-WQ EXEC executeCommand dry-run path routes ZERO writes (with a control on each dry guard).
+      - name: "Bulk console retirement tripwire + BWN-WQ EXEC dry-run 0-write (write-queue)"
         run: node scripts/test-bulk-console.js
 
       - name: Per-client profile resolver harness (T10 defaults + empty-table inert safety)
         run: node scripts/test-client-profile.js
+
+      # Documentation-compliance engine (Core, flag docCompliance, default OFF, read-only): slices the
+      # BWN DOC-COMPLIANCE block and pins the score with an injected clock, UNKNOWN-vs-MISS (a failed or
+      # pending read is never a miss), per-client overrides, rulesVersion stamping, and label bucketing.
+      # A negative control (dropping a required label must flip it to miss) turns it red.
+      - name: Documentation-compliance engine harness (unknown never scored as a miss)
+        run: node scripts/test-doc-compliance.js
+
+      - name: WO Assist open-task attribution harness (read-only created-by / assigned-to strip)
+        run: node scripts/test-task-attribution.js
 
       - name: Next Actions ECD-risk composite rule harness (T8-A1, self-clearing)
         run: node scripts/test-ecdrisk.js
@@ -658,6 +804,9 @@ jobs:
 
       - name: Bid-out sent-state flip harness (confirmed-send gate + GM baseline)
         run: node scripts/test-bidout-sent-flip.js
+
+      - name: Bid-out vendor-text scrub + do-not-contact harness (client names, address, NexRev line; all recipient sources)
+        run: node scripts/test-bid-out-scrub.js
 
       - name: Drop Upload party/label classifier harness (broker is not a vendor)
         run: node scripts/test-drop-upload-classify.js
@@ -724,6 +873,13 @@ jobs:
       - name: Route helper harness (BWN.onRoute foundation + kanban migration + negative controls)
         run: node scripts/test-route-helper.js
 
+      # bwn-ai-proposal-assist: the pure pre-flight / prompt-builder / post-generate-check logic sliced
+      # from the shipped bytes and run in a vm (1,000-char boundary, negative markup, validationErrors,
+      # passive tap passes the request through untouched), plus the read-only contract asserted
+      # statically (no own requests, no .click(), no auth read, @grant none) and three negative controls.
+      - name: AI Proposal Assist harness (read-only checks + prompt limit + negative controls)
+        run: node scripts/test-ai-proposal-assist.js
+
       # RM-B2: Core's shared error reporter (BWN.report / window.bwnReport). Slices the shipped
       # reporter and drives it against a fake localStorage + fake toast: one toast + one bounded,
       # PII-free bwn:errlog entry per failure, the bwn:audit ring untouched, flag-OFF fail-safe (toast
@@ -775,6 +931,25 @@ jobs:
       # source contains no egress primitive, no write and no bwn:audit path.
       - name: US-0 installed self-check (export fixtures + no-egress/no-write guarantee)
         run: node scripts/test-selfcheck-installed.js
+
+      # Harnesses that existed and passed locally but were never wired into CI, so a regression in
+      # what they pin shipped silently (found 2026-10-05 by diffing scripts/test-*.js against this file).
+      - name: Ask slash-command harness
+        run: node scripts/test-ask-commands.js
+      - name: Ask output-escaping harness
+        run: node scripts/test-ask-escape.js
+      - name: Ask render harness
+        run: node scripts/test-ask-render.js
+      - name: Ingest key-presence beacon harness
+        run: node scripts/test-ingest-key-presence.js
+      - name: Note composer hop harness
+        run: node scripts/test-note-composer-hop.js
+      - name: Recovery SLA harness
+        run: node scripts/test-recovery-sla.js
+      - name: bwn modules blob parse harness (six consumers, booleans only, no load-time crash)
+        run: node scripts/test-modules-parse.js
+      - name: Endpoint error surfacing harness (Bid-Out reads, Write Queue claim, Dispatch card line)
+        run: node scripts/test-endpoint-errors.js
 
   lint:
     name: Lint

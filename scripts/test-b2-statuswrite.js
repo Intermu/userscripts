@@ -48,7 +48,7 @@ function mutate(src, from, to) {
 // localStorage slot planted in these sandboxes every permission reads as unknown, which fails
 // OPEN - so every case below runs against the same behaviour it had before the gate existed.
 // (The gate itself is proven in scripts/test-bwn-ops.js and scripts/test-perm-block-ledger.js.)
-var S_PERM = slice('  // ===== BWN-PERM START v1', '  // ===== BWN-PERM END v1 =====', 'BWN-PERM block');
+var S_PERM = slice('  // ===== BWN-PERM START v2', '  // ===== BWN-PERM END v2 =====', 'BWN-PERM block');
 var S_OPS = S_PERM + "\n" + slice('  // ===== BWN-OPS START v1', '  // ===== BWN-OPS END v1 =====', 'BWN-OPS block');
 var S_WA = slice('    // ===== WA-WRITES START v1', '    // ===== WA-WRITES END v1 =====', 'WA-WRITES block');
 
@@ -68,24 +68,29 @@ var DEFAULT_WO_READ = {
     hasPriorityOverride: true, category: 'Standard', skipWeekends: false
   }
 };
+var PERM_SUB = 'auth0|test-user';
+var PERM_TOKEN_KEY = '@@auth0spajs@@::client::https://app.umbrava.com/api::openid profile email';
 function makeEnv(opts, waSrc) {
   opts = opts || {};
   var store = Object.create(null);
+  // BWN-PERM v2 reads a slot only when it carries the signed-in user's Auth0 sub, resolved from the
+  // Umbrava API token in the SDK cache - so the sandbox is signed in, and setPerm stamps the same sub.
+  store[PERM_TOKEN_KEY] = JSON.stringify({ body: { access_token: 'h.' + Buffer.from(JSON.stringify({ iss: 'https://login.umbrava.com/', sub: PERM_SUB, exp: Math.floor(Date.now() / 1000) + 3600 })).toString('base64url') + '.s' } });
+  Object.defineProperty(store, 'getItem', { value: function (k) { return Object.prototype.hasOwnProperty.call(store, k) ? store[k] : null; } });
+  Object.defineProperty(store, 'setItem', { value: function (k, v) { store[k] = String(v); } });
+  Object.defineProperty(store, 'removeItem', { value: function (k) { delete store[k]; } });
   var env = { calls: [] };
   // The BWN-PERM block reads the decoded grant list out of localStorage. Seeding it here is how
   // a probe models 'this user does not hold that checkbox'; absent = unknown = fails OPEN.
   env.setPerm = function (groups, granted) {
-    store['bwn:perm:last'] = JSON.stringify({ v: 1, ts: Date.now(), ver: 'test', groups: groups, granted: granted });
+    store['bwn:perm:last'] = JSON.stringify({ v: 2, ts: Date.now(), ver: 'test', sub: PERM_SUB, groups: groups, granted: granted });
   };
   var sandbox = {
     Object: Object, Array: Array, Number: Number, String: String, JSON: JSON,
     Promise: Promise, Error: Error, RegExp: RegExp, Math: Math, Date: Date, console: console,
     window: {},                                   // no crypto -> corrId uses the timestamp form
-    localStorage: {
-      getItem: function (k) { return (k in store) ? store[k] : null; },
-      setItem: function (k, v) { store[k] = String(v); },
-      removeItem: function (k) { delete store[k]; }
-    },
+    localStorage: store,                          // methods non-enumerable: Object.keys = stored keys
+    atob: function (s) { return Buffer.from(s, 'base64').toString('binary'); },
     setTimeout: function (fn) { return setTimeout(fn, 0); },
     BWN_VER: '0.0.0-test',
     BWN_MODULES: opts.modules || { woAssist: true },
