@@ -3,6 +3,7 @@
   "_schemaVersion": 1,
   "expectedRawBase": "https://raw.githubusercontent.com/Intermu/userscripts/main/",
   "scripts": {
+    "bwn-ai-proposal-assist.user.js": { "expectedInstalled": false },
     "bwn-ask.user.js": {
       "expectedInstalled": true,
       "waived": {

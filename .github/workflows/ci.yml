@@ -864,6 +864,13 @@ jobs:
       - name: Route helper harness (BWN.onRoute foundation + kanban migration + negative controls)
         run: node scripts/test-route-helper.js
 
+      # bwn-ai-proposal-assist: the pure pre-flight / prompt-builder / post-generate-check logic sliced
+      # from the shipped bytes and run in a vm (1,000-char boundary, negative markup, validationErrors,
+      # passive tap passes the request through untouched), plus the read-only contract asserted
+      # statically (no own requests, no .click(), no auth read, @grant none) and three negative controls.
+      - name: AI Proposal Assist harness (read-only checks + prompt limit + negative controls)
+        run: node scripts/test-ai-proposal-assist.js
+
       # RM-B2: Core's shared error reporter (BWN.report / window.bwnReport). Slices the shipped
       # reporter and drives it against a fake localStorage + fake toast: one toast + one bounded,
       # PII-free bwn:errlog entry per failure, the bwn:audit ring untouched, flag-OFF fail-safe (toast
