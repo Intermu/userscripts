@@ -611,6 +611,12 @@ jobs:
       - name: Field-map conformance harness (board producer keys vs shared map)
         run: node scripts/test-field-map-conformance.js
 
+      # Job View write-back (AI jvPost): success needs 2xx AND a JSON object with ok===true, so a
+      # 200 HTML redirect or {ok:false} never toasts "note saved". Runs the shipped jvPost/saveJvNote/
+      # pushJobFacts bytes in a vm, with a red control against the old status-only predicate.
+      - name: Job View write-back success harness (jvPost ok===true gate)
+        run: node scripts/test-ai-jvpost.js
+
       # Track A docs-closure: Core publishes the confident jobDocuments count to bwn:docs:<wo>
       # (confident reads only - unknown stays absent), AI's pushJobFacts carries it as docCount
       # to the live-jobs slot, the Dashboard surfaces "Docs on file". Runs the shipped lookup bytes.

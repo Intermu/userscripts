@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         BWN Suite - AI (Broadway National)
 // @namespace    broadwaynational.bwn
-// @version      1.50.1
+// @version      1.50.2
 // @downloadURL  https://raw.githubusercontent.com/Intermu/userscripts/main/bwn-suite-ai.user.js
 // @updateURL    https://raw.githubusercontent.com/Intermu/userscripts/main/bwn-suite-ai.user.js
 // @description  The Umbrava tools that call outside APIs, kept separate from the zero-egress Core script. Client Update and WO Audit drafts (Anthropic Claude; draft-only, scrubbed before sending, you review before posting); Find Techs / Find Suppliers (Google Places; vendor leads near a WO); and Job View (opens the Ops-Dashboard job card on the WO page - WO details from Umbrava plus the authored case file and next actions, read-only). Network access is limited by the browser to the declared API hosts and the BWN Static Web App. API keys are stored in Tampermonkey's storage via the menu commands and never enter the page. Toggle modules in BWN_MODULES below.
@@ -5888,7 +5888,14 @@ if (BWN_MODULES.jobView) BWN.safeModule('jobView', function () {
       GM_xmlhttpRequest({ method:'POST', url:INGEST_URL+'?client='+INGEST_CLIENT,
         headers:{'Content-Type':'application/json','x-bwn-key':key},
         data:JSON.stringify(Object.assign({actor:ingestActor(),userToken:authToken()},bodyObj)), timeout:20000,
-        onload:function(r){ var ok=r.status>=200&&r.status<300; if(cb) cb(ok, ok?'':('HTTP '+r.status)); },
+        onload:function(r){
+          // Success = 2xx AND a parsed JSON object with ok===true. A 2xx alone is not enough: an AAD
+          // redirect lands as 200 HTML and {ok:false} is a refused write - neither may read as saved.
+          // Messages carry the status only, never the response body.
+          var two=r.status>=200&&r.status<300, d=null;
+          try { d=JSON.parse(r.responseText); } catch(e){}
+          var ok=two && d!==null && typeof d==='object' && !Array.isArray(d) && d.ok===true;
+          if(cb) cb(ok, ok?'':(two?'unexpected response':('HTTP '+r.status))); },
         onerror:function(){ if(cb) cb(false,'network'); }, ontimeout:function(){ if(cb) cb(false,'timeout'); } });
     } catch(e){ if(cb) cb(false,e.message); }
   }
