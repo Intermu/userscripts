@@ -41,3 +41,36 @@ the in-app browser against a local 127.0.0.1 fixture page (fake grid, fake Gener
 
 Record which inferred items in `discovery-notes.md` were confirmed or corrected, with the date.
 For row 10, write an explicit line: "Confirmed: script issued no request to Umbrava."
+
+### 2026-10-06, Chrome, WO 396190 / vendor proposal 566726
+
+The build under test was loaded by eval from 127.0.0.1, not through Tampermonkey. Generate was
+pressed by Mike, twice.
+
+**Results by row:**
+- **Row 1, SPA navigation:** PASS. The panel was removed off-route and came back on return.
+  Generate's own navigation to `ai-preview` kept the panel.
+- **Row 2, missing grid:** not hit live, because the grid was present.
+- **Row 4, 1,000-char boundary:** PASS. Over the limit, Copy and Insert were disabled.
+- **Row 5, validation error:** not hit live, because no over-limit prompt was sent. Covered by the
+  harness.
+- **Row 6, negative markup:** FOUND BUG. Live `markUpPercent` is a string, so the check could never
+  fire. Fixed, and the harness now uses the live shape.
+- **Row 10, wrote nothing:** PASS. A test-only outer `fetch` logger recorded 31 graphql calls
+  through page loads and two Generates. All 31 came from the app, none from the script.
+
+**Confirmed:** script issued no request to Umbrava.
+
+**Also found and fixed:**
+- The 3-row grid header.
+- `--` shown for blank cells.
+- The Generate modal makes the panel inert, so Insert is now armed before the modal opens.
+- The single-line input drops newlines.
+- `data.__typename` is the first key in the response.
+- The panel's scroll position reset on every re-render.
+
+**Still open:**
+- Edge (row 9).
+- A real Tampermonkey install at document-start.
+- Re-run the checker against a live Generate on this build.
+- Confirm the `markUpPercent` units against a known line.
