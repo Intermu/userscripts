@@ -167,9 +167,11 @@ jobs:
 
       # WO Audit 0.19.0: Client Update Reply. Slices the pure CLIENT REPLY block and pins paste parsing
       # (FM table, reply thread, UPDATE NEEDED template, incident hold), the FM rule (audit FM, else the
-      # Client Open POs owner, conflicts surfaced), FM grouping, the deterministic client wording, the
-      # client draft gate, reply escaping, and parity of WOA_CLIENT_SYSTEM with bwn-suite-ai.
-      - name: WO Audit client update reply (0.19.0)
+      # Client Open POs owner, conflicts surfaced), FM grouping, reply escaping, and - since 0.20.0 - the
+      # Client Update pipeline glue (status sentences pass cuSafetyCheck, scrub, safe fallback, final
+      # check) plus byte-parity of the pasted CU-TRIPS / CU-PIPELINE blocks and stage prompts with
+      # bwn-suite-ai, so a suite pipeline change that is not re-pasted fails here.
+      - name: WO Audit client update reply (0.19.0, pipeline 0.20.0)
         run: node scripts/test-wo-audit-client-reply.js
 
       # WO Audit 0.17.0: the Operations Action List engine (deriveAction) + the sheet builder. Slices

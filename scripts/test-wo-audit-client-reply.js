@@ -1,15 +1,19 @@
-// test-wo-audit-client-reply.js - node harness for the 0.19.0 Client Update Reply.
+// test-wo-audit-client-reply.js - node harness for the WO Audit Client Update Reply (0.19.0, 0.20.0).
 //
 // Pilot FMs (FM = Store Analyst = the Pilot PO owner) email a list of POs asking for updates. The
-// pure CLIENT REPLY block turns that paste into one reviewed reply table per FM. This drives the
-// SHIPPED bytes (sliced TIMELINE + STATE + CLIENT REPLY + MAP) and covers:
+// pure CLIENT REPLY block turns that paste into one reviewed reply table per FM; since 0.20.0 each
+// update runs through the Ops Suite Client Update pipeline. This drives the SHIPPED bytes (sliced
+// TIMELINE + STATE + CU PIPELINE + CLIENT REPLY + MAP) and covers:
 //   1. paste parsing - the FM's tab table (Outlook wraps cells onto new lines), a reply thread that
 //      repeats its PO, the "UPDATE NEEDED" template, and the safety/incident hold,
 //   2. the FM rule - audit FM column, else Client Open POs owner, conflicts and gaps surfaced,
-//   3. grouping by FM (Unassigned last), deterministic client wording, the client draft gate,
-//   4. reply table escaping, and
-//   5. PARITY: WOA_CLIENT_SYSTEM must equal bwn-suite-ai's SYSTEM_PROMPT_CLIENT, the client-facing
-//      note rules of record.
+//   3. grouping by FM (Unassigned last),
+//   4. the pipeline glue - status sentences (each must pass cuSafetyCheck with no appointment),
+//      note scrubbing, the safe fallback led by the live status, and the final check (cuSafetyCheck
+//      plus lapsed / ungrounded dates and internal wording),
+//   5. reply table escaping and line breaks, and
+//   6. PARITY: the CU-TRIPS / CU-PIPELINE blocks and the four stage prompts are byte-identical to
+//      bwn-suite-ai.user.js, the client pipeline of record.
 // Fixtures are SYNTHETIC (made-up names and POs in the real Pilot shapes); no client data is stored.
 // The clock is injected. Every rejecting rule has a negative control.
 //
@@ -30,6 +34,7 @@ function slice(startMark, endMark) {
 var SECTION =
   slice('// ===== BWN WO-AUDIT TIMELINE START', '// ===== BWN WO-AUDIT TIMELINE END') + '\n' +
   slice('// ===== BWN WO-AUDIT STATE START', '// ===== BWN WO-AUDIT STATE END') + '\n' +
+  slice('// ===== BWN WO-AUDIT CU PIPELINE START', '// ===== BWN WO-AUDIT CU PIPELINE END') + '\n' +
   slice('// ===== BWN WO-AUDIT CLIENT REPLY START', '// ===== BWN WO-AUDIT CLIENT REPLY END') + '\n' +
   slice('// ===== BWN WO-AUDIT MAP START', '// ===== BWN WO-AUDIT MAP END');
 
@@ -39,10 +44,10 @@ function auditCfg(key, def) { return def; }
 var STALE_DAYS = 7;
 var T = (new Function('MS_DAY', '_date', 'auditCfg', 'STALE_DAYS', 'XLSX',
   SECTION + '\n;return { curParsePaste: curParsePaste, curBuildIndex: curBuildIndex, curResolve: curResolve,' +
-  ' curGroup: curGroup, curComposeClientNote: curComposeClientNote, curBuildClientInput: curBuildClientInput,' +
-  ' curValidateClientNote: curValidateClientNote, curReplyHtml: curReplyHtml, curReplyTsv: curReplyTsv,' +
-  ' curFmtDate: curFmtDate, deriveState: deriveState, CUR_STAGE: CUR_STAGE, CUR_UNASSIGNED: CUR_UNASSIGNED,' +
-  ' WOA_CLIENT_SYSTEM: WOA_CLIENT_SYSTEM };'))(MS_DAY, _date, auditCfg, STALE_DAYS, null);
+  ' curGroup: curGroup, curStatusSentence: curStatusSentence, curScrub: curScrub, curPipelineNotes: curPipelineNotes,' +
+  ' curFallbackDraft: curFallbackDraft, curTarget: curTarget, curFinalCheck: curFinalCheck, curReplyHtml: curReplyHtml, curReplyTsv: curReplyTsv,' +
+  ' curFmtDate: curFmtDate, deriveState: deriveState, CUR_STAGE: CUR_STAGE, CUR_PARTS: CUR_PARTS, CUR_UNASSIGNED: CUR_UNASSIGNED,' +
+  ' cuSafetyCheck: cuSafetyCheck, cuMergeFacts: cuMergeFacts, cuBuildExtractionInput: cuBuildExtractionInput };'))(MS_DAY, _date, auditCfg, STALE_DAYS, null);
 
 // Local noon on 10/5/2026 - "today" is 10/5 in any US time zone.
 var NOW = new Date(2026, 9, 5, 12, 0, 0).getTime();
@@ -119,70 +124,115 @@ A.eq('group: FMs alphabetical, Unassigned last', G.map(function (g) { return g.f
 A.eq('date: Excel serial -> M/D/YYYY', T.curFmtDate(46297.38), '10/2/2026');
 A.eq('date: text keeps its date part', T.curFmtDate('10/2/2026 9:21'), '10/2/2026');
 
-// ---- 4. deterministic client wording -------------------------------------------------------------
-function note(f, h) { return T.curComposeClientNote(f, h, NOW); }
-A.eq('wording: materials with no visit states the gap plainly (rule 2)',
-  note({ phase: 'materials', ecdText: 'TBD' }, { statusName: 'Material Ordered' }),
-  'Parts/materials for this repair are on order. No confirmed scheduling date yet as of 10/5. An expected completion date is not yet confirmed.');
-A.eq('wording: a backorder blocker is named in client terms',
-  note({ phase: 'materials', primaryBlocker: 'parts on backorder', ecdText: '10/20' }, { statusName: 'Need Material' }),
-  'Parts for this repair are on backorder. No confirmed scheduling date yet as of 10/5. Expected completion is 10/20.');
-A.eq('wording: scheduled with a future visit gives the date',
-  note({ phase: 'scheduled', ecdText: 'TBD' }, { statusName: 'Scheduled', nextOnsiteDate: '2026-10-09T14:00:00' }),
-  'Service is scheduled for 10/9. An expected completion date is not yet confirmed.');
-A.eq('wording: a past visit date is not promised', /scheduled for/.test(note({ phase: 'scheduled', ecdText: 'TBD' }, { statusName: 'Scheduled', nextOnsiteDate: '2026-09-01T14:00:00' })), false);
-A.eq('wording: proposal sent', note({ phase: 'proposal-sent', ecdText: 'TBD' }, { statusName: 'Proposed' }), 'A proposal has been submitted and is awaiting approval.');
-A.eq('wording: cancelled is not "complete"', note({ phase: 'terminal' }, { statusName: 'Canceled' }), 'This work order has been cancelled.');
-A.eq('wording: closed', note({ phase: 'terminal' }, { statusName: 'Invoiced' }), 'The work is complete.');
-A.eq('wording: unmapped status -> nothing invented', note({ phase: null }, { statusName: 'Some New Status' }), '');
-A.eq('wording: no live record -> nothing invented', note({ phase: 'materials' }, null), '');
-// Every phase's fallback must itself be clean under the client rules - no owners, money or jargon.
-Object.keys(T.CUR_STAGE).forEach(function (ph) {
-  var s = note({ phase: ph, ecdText: '10/20' }, { statusName: 'x' });
-  A.ok('wording: ' + ph + ' fallback carries no internal wording', s && !/coordinator|vendor|purchase order|PO\b|\$|GP|margin/i.test(s), s);
+// ---- 4. pipeline glue ------------------------------------------------------------------------------
+function st(f, h) { return T.curStatusSentence(f, h); }
+A.eq('status: materials', st({ phase: 'materials' }, { statusName: 'Material Ordered' }), 'Parts/materials for this repair are on order.');
+A.eq('status: a backorder blocker is named in client terms', st({ phase: 'materials', primaryBlocker: 'parts on backorder' }, { statusName: 'Need Material' }), 'Parts for this repair are on backorder.');
+A.eq('status: cancelled is not "complete"', st({ phase: 'terminal' }, { statusName: 'Canceled' }), 'This work order has been cancelled.');
+A.eq('status: closed', st({ phase: 'terminal' }, { statusName: 'Invoiced' }), 'The work is complete.');
+A.eq('status: unmapped status -> nothing invented', st({ phase: null }, { statusName: 'Some New Status' }), '');
+A.eq('status: no live record -> nothing invented', st({ phase: 'materials' }, null), '');
+// Every status sentence must pass the suite's blocking checker WITHOUT a confirmed appointment:
+// only a trip record may say "service is scheduled", and "awaiting approval" reads as internal.
+[].concat(Object.keys(T.CUR_STAGE).map(function (k) { return T.CUR_STAGE[k]; }),
+  Object.keys(T.CUR_PARTS).map(function (k) { return T.CUR_PARTS[k]; }),
+  ['This work order has been cancelled.', 'The work is complete.']).forEach(function (s) {
+  var c = T.cuSafetyCheck(s, [], false);
+  A.ok('status: passes cuSafetyCheck with no appointment - "' + s + '"', c.safe, c.violations.join(', '));
 });
-// End to end through deriveState: the live header drives the phase.
 var fLive = T.deriveState({ statusName: 'Pending Materials Supplier', priority: {} }, [], NOW);
-A.ok('wording: live header -> materials wording', /^Parts\/materials for this repair are on order\./.test(note(fLive, { statusName: 'Pending Materials Supplier' })));
+A.eq('status: live header -> materials wording', st(fLive, { statusName: 'Pending Materials Supplier' }), 'Parts/materials for this repair are on order.');
 
-// ---- 5. the client draft gate ---------------------------------------------------------------------
-var f = { phase: 'materials', currentStage: 'Materials pending', ecdText: 'TBD', terminal: false };
-var ground = T.curBuildClientInput({ statusName: 'Material Ordered' }, [{ content: 'Supplier confirmed the compressor ships 10/8.', createdDate: '2026-10-03T10:00:00' }], f, NOW);
-var GOOD = 'Parts for this repair are on order and are expected to ship 10/8. No confirmed scheduling date yet as of 10/5.';
-A.eq('gate: a grounded, clean update passes (negative control)', T.curValidateClientNote(GOOD, f, ground), '');
-A.ok('gate: prompt carries today for rule 2', /^Today: 10\/5/.test(ground));
-A.ok('gate: prompt never carries the assignee', !/Assigned/i.test(ground));
+// Scrub: nothing internal leaves the browser in the extraction input.
+var SCRUBBED = T.curScrub('ACME Signs quoted $1,350.00 - call 631-555-0100 or ops@example.com', ['ACME Signs']);
+A.eq('scrub: amount, phone, email and vendor name redacted', SCRUBBED, '[vendor] quoted [redacted] - call [phone] or [contact]');
+var PN = T.curPipelineNotes([{ content: 'Tech onsite, ACME Signs needs a lift. $900 quote.', createdDate: '2026-10-03T10:00:00' }], ['ACME Signs']);
+A.eq('scrub: notes shaped for the pipeline', PN, [{ ts: '10/3', body: 'Tech onsite, [vendor] needs a lift. [redacted] quote.' }]);
+var XIN = T.cuBuildExtractionInput({ wo: 1, status: 'Material Ordered', confirmedAppointment: null }, PN);
+A.ok('scrub: the extraction input carries no vendor name or amount', !/ACME|\$\d/.test(XIN));
+
+// Safe fallback: led by the live status, date line from the structured context only.
+var CTX_T = { targetCompletionDate: 'October 20, 2026' };
+var FB = T.curFallbackDraft(null, CTX_T, 'Parts/materials for this repair are on order.', []);
+A.ok('fallback: leads with the live status', /^Parts\/materials for this repair are on order\./.test(FB), FB);
+A.ok('fallback: a target date is labelled a target, never a booking', /target completion date of October 20, 2026/.test(FB) && !/scheduled for/i.test(FB), FB);
+A.ok('fallback: passes cuSafetyCheck', T.cuSafetyCheck(FB, [], false).safe);
+var FB_A = T.curFallbackDraft(null, { confirmedAppointment: { date: '2026-10-09T14:00:00.000Z', startTime: null }, completedTrip: false }, 'The service visit is being finalized.', []);
+A.ok('fallback: a trip-record appointment may say "scheduled"', /Service is scheduled for October 9, 2026\./.test(FB_A), FB_A);
+var FB_N = T.curFallbackDraft(null, {}, '', []);
+A.ok('fallback: no status, no date -> the neutral lines', /We are actively managing/.test(FB_N) && /finalizing the required service arrangements/.test(FB_N), FB_N);
+// Facts that would leak are dropped for the facts-free version.
+var LEAKY = { currentStatusPlain: 'ACME Signs declined the job.', verifiedFindings: [], completedActions: [], remainingScope: [], accessOrSafetyRequirements: [], materialsOrDependencies: [], clientSafeCurrentActions: [] };
+var FB_L = T.curFallbackDraft(LEAKY, CTX_T, 'Parts/materials for this repair are on order.', ['ACME Signs']);
+A.ok('fallback: a fact that trips the checker is not shipped', !/ACME|declined/.test(FB_L) && T.cuSafetyCheck(FB_L, ['ACME Signs'], false).safe, FB_L);
+
+// Final check on a rendered draft: cuSafetyCheck + the batch extras.
+var ground = 'NOTES <<<[10/3] Parts confirmed, compressor ships 10/8. Tech onsite 10/3.>>> Today 10/5';
+var GOOD = 'Parts for this repair are on order and are expected to ship 10/8.\n\nWe are finalizing the required service arrangements and will provide the confirmed service date once it is available.';
+A.eq('final: a grounded, clean render passes (negative control)', T.curFinalCheck(GOOD, [], false, ground, NOW), '');
 [
   ['dollar amount', 'Parts are on order; the repair is approved at $1,350.00 total.'],
-  ['email address', 'Parts are on order. Questions to ops@example.com please.'],
-  ['phone number', 'Parts are on order. Call 631-555-0100 for details today.'],
-  ['internal wording', 'Parts are on order; the coordinator is chasing the supplier.'],
-  ['vague filler', 'Parts are on order and this is being handled right now.'],
-  ['ungrounded date', 'Parts are on order and the visit is set for 10/12 this month.']
+  ['vendor reference', 'Parts are on order and the contractor will return to finish the work.'],
+  ['vendor name', 'Parts are on order and Acme Signs will return to finish the work.'],
+  ['unconfirmed appointment', 'Parts are on order. Service is scheduled for 10/8 at the site.'],
+  ['internal approval', 'Parts are on order pending internal approval of the repair.'],
+  ['internal wording', 'Parts are on order; the coordinator is tracking the delivery.'],
+  ['ungrounded date', 'Parts are on order and the visit is set for 10/12 this month.'],
+  ['ordinal ungrounded date', 'Parts are on order and the visit is on October 12th this month.']
 ].forEach(function (c) {
-  A.ok('gate: rejects ' + c[0], T.curValidateClientNote(c[1], f, ground) !== '', c[1]);
+  A.ok('final: rejects ' + c[0], T.curFinalCheck(c[1], ['ACME Signs'], false, ground, NOW) !== '', c[1]);
 });
-A.ok('gate: rejects an empty draft', T.curValidateClientNote('   ', f, ground) !== '');
-
-// A lapsed promise (the 10/06 live run: "expected to arrive by October 5th" shipped on 10/6). The
-// date IS grounded, so only the clock can catch it. NOW is 10/5; the evidence carries 10/3 and 10/8.
-var groundPast = ground + '\nNote: parts were due 10/3; tech onsite 10/3.';
-A.eq('gate: an upcoming grounded date passes with the clock (negative control)',
-  T.curValidateClientNote(GOOD, f, groundPast, NOW), '');
-A.ok('gate: a past date written as upcoming is rejected',
-  /past date \(10\/3\) as upcoming/.test(T.curValidateClientNote('Parts for this repair are expected to arrive by October 3rd. No visit is booked yet.', f, groundPast, NOW)));
-A.eq('gate: a past date stated as past is fine',
-  T.curValidateClientNote('A technician was on site 10/3 and confirmed parts are needed. No confirmed scheduling date yet as of 10/5.', f, groundPast, NOW), '');
+// 10/06 third run: a note-inferred visit with no trip record ("scheduled to begin on Monday").
+A.ok('final: rejects a note-inferred visit with no trip record',
+  /no trip record/.test(T.curFinalCheck('Lift access is scheduled to begin on Monday to start the lighting work.', [], false, ground, NOW, fMat)));
+A.ok('final: rejects a bare weekday with no trip record',
+  /no trip record/.test(T.curFinalCheck('Parts are on order and the crew returns Thursday to finish the repair.', [], false, ground, NOW, fMat)));
+A.eq('final: the same wording is fine WITH a trip record (negative control)',
+  T.curFinalCheck('Technicians are scheduled to return on Thursday to finish the repair.', [], true, ground, NOW, fMat), '');
+A.eq('final: a confirmed appointment may say "scheduled for" (negative control)',
+  T.curFinalCheck('Parts have arrived. Service is scheduled for 10/8 at the site.', [], true, ground, NOW), '');
+// 10/06 pipeline live run: billing words and a client-contact claim got past the suite checker.
+var fMat = { phase: 'materials', currentStage: 'Materials pending', terminal: false };
+[
+  ['"invoiced"', 'The work order has been invoiced and closed with no outstanding actions.'],
+  ['"billing"', 'The work order was confirmed complete and is being prepared for billing.'],
+  ['a client-contact claim with no evidence', 'Troubleshooting is complete and the client has been informed of the progress.']
+].forEach(function (c) {
+  A.ok('final: rejects ' + c[0], T.curFinalCheck(c[1], [], false, ground, NOW, fMat) !== '', c[1]);
+});
+A.eq('final: the clean render still passes with live facts (negative control)', T.curFinalCheck(GOOD, [], false, ground, NOW, fMat), '');
+A.ok('final: a past date written as upcoming is rejected',
+  /past date \(10\/3\) as upcoming/.test(T.curFinalCheck('Parts for this repair are expected to arrive by October 3rd at the site.', [], false, ground, NOW)));
+A.eq('final: a past date stated as past is fine',
+  T.curFinalCheck('A technician was on site 10/3 and confirmed parts are needed for the repair.', [], false, ground, NOW), '');
 var JAN4 = new Date(2027, 0, 4, 12).getTime(), groundJan = ground + ' 1/8 12/30';
-A.eq('gate: across New Year, 1/8 is upcoming', T.curValidateClientNote('Parts for this repair are expected to arrive 1/8.', f, groundJan, JAN4), '');
-A.ok('gate: across New Year, 12/30 is last year - rejected as upcoming',
-  /past date \(12\/30\)/.test(T.curValidateClientNote('Parts for this repair are expected to arrive 12/30.', f, groundJan, JAN4)));
-A.eq('gate: a clause without future wording is not judged by its neighbour',
-  T.curValidateClientNote('The proposal was submitted 10/3; work will follow approval.', f, groundPast, NOW), '');
-A.ok('gate: an ordinal date is still grounding-checked',
-  T.curValidateClientNote('Parts were confirmed and the visit is on October 12th this month.', f, ground, NOW) !== '');
+A.eq('final: across New Year, 1/8 is upcoming', T.curFinalCheck('Parts for this repair are expected to arrive 1/8.', [], false, groundJan, JAN4), '');
+A.ok('final: across New Year, 12/30 is last year - rejected as upcoming',
+  /past date \(12\/30\)/.test(T.curFinalCheck('Parts for this repair are expected to arrive 12/30.', [], false, groundJan, JAN4)));
+A.eq('final: a clause without future wording is not judged by its neighbour',
+  T.curFinalCheck('The repair plan was set 10/3; work will follow once parts arrive.', [], false, ground, NOW), '');
 
-// ---- 6. reply table ---------------------------------------------------------------------------------
+// A finished job gets no target date (the render would say "remains in scheduling").
+var HDR = { priority: { expectedCompletionDate: '2026-10-10T12:00:00' } };
+A.eq('target: an open job keeps its unlapsed ECD as the target', T.curTarget({ phase: 'materials', ecdSource: 'wo.expectedCompletionDate' }, HDR), '2026-10-10T12:00:00');
+['terminal', 'confirmcomplete', 'costreview'].forEach(function (ph) {
+  A.eq('target: none once the work is done (' + ph + ')', T.curTarget({ phase: ph, ecdSource: 'wo.expectedCompletionDate' }, HDR), null);
+});
+A.eq('target: a lapsed ECD is not offered', T.curTarget({ phase: 'materials', ecdSource: 'wo.expectedCompletionDate.expired' }, HDR), null);
+var FB_DONE = T.curFallbackDraft(null, { targetCompletionDate: null }, 'The work is complete.', []);
+A.ok('target: a finished job fallback never says "remains in scheduling"', /^The work is complete\./.test(FB_DONE) && !/remains in scheduling/.test(FB_DONE), FB_DONE);
+
+// 10/06 re-run: two finished jobs fell back to "completed and invoiced" + "coordinating the
+// resources to complete the work" + a scheduling line.
+var DONE_FACTS = { currentStatusPlain: 'The work order has been completed and invoiced.', verifiedFindings: [], completedActions: [], remainingScope: [], accessOrSafetyRequirements: [], materialsOrDependencies: [], clientSafeCurrentActions: [] };
+['terminal', 'confirmcomplete', 'costreview'].forEach(function (ph) {
+  A.eq('fallback: finished work (' + ph + ') is the status sentence alone', T.curFallbackDraft(DONE_FACTS, {}, 'The work is complete.', [], ph), 'The work is complete.');
+});
+var FB_BILL = T.curFallbackDraft(DONE_FACTS, CTX_T, 'Parts/materials for this repair are on order.', [], 'materials');
+A.ok('fallback: a billing word in an extracted fact is not shipped', !/invoic|billing/i.test(FB_BILL) && /^Parts\/materials/.test(FB_BILL), FB_BILL);
+A.ok('fallback: an open job still gets the pipeline fallback (negative control)', /target completion date/.test(FB_BILL), FB_BILL);
+
+// ---- 5. reply table ---------------------------------------------------------------------------------
 var row = { rowNo: '7', fm: 'Fm Alpha', po: '170101000001', store: '101-Travel Center', city: 'Towna', state: 'Statea', date: '7/16/2026', update: 'Scheduled <b>10/9</b>\tline2\nline3' };
 // The shipped `esc` lives in the modal closure and is pinned by test-esc-canonical.js; an
 // equivalent stand-in here proves curReplyHtml routes every cell through it.
@@ -190,18 +240,24 @@ function esc(v) { return String(v == null ? '' : v).replace(/[&<>"']/g, function
 var html = T.curReplyHtml([row], esc);
 A.ok('reply: header row in the FM column order + Update', /<th[^>]*>#<\/th><th[^>]*>FM<\/th><th[^>]*>PO<\/th>.*<th[^>]*>Update<\/th>/.test(html));
 A.ok('reply: update text is escaped', /Scheduled &lt;b&gt;10\/9&lt;\/b&gt;/.test(html) && !/<b>10/.test(html));
+A.ok('reply: paragraph breaks survive into the email table', /line2<br>line3/.test(html));
 var tsv = T.curReplyTsv([row]).split('\n');
 A.eq('reply: TSV is one line per row, tabs/newlines flattened', [tsv.length, tsv[1].split('\t').length], [2, 8]);
 
-// ---- 7. PARITY with the Ops Suite Client Update rules ------------------------------------------------
-function promptOf(src, name) {
-  var a = src.indexOf('var ' + name + ' = [');
-  var b = src.indexOf('].join(', a);
-  if (a === -1 || b === -1) throw new Error(name + ' not found');
-  return (new Function('return [' + src.slice(src.indexOf('[', a) + 1, b) + '].join("\\n");'))();
-}
+// ---- 6. PARITY with the Ops Suite Client Update pipeline ---------------------------------------------
 var AI = read('bwn-suite-ai.user.js');
-A.eq('parity: WOA_CLIENT_SYSTEM == bwn-suite-ai SYSTEM_PROMPT_CLIENT', T.WOA_CLIENT_SYSTEM, promptOf(AI, 'SYSTEM_PROMPT_CLIENT'));
-A.ok('parity: the rules really are the client rules', /Never output dollar amounts/.test(T.WOA_CLIENT_SYSTEM));
+function block(src, a, b) {
+  var i = src.indexOf(a), j = src.indexOf(b, i);
+  if (i === -1 || j === -1) throw new Error(a + ' not found');
+  return src.slice(i, j + b.length);
+}
+[
+  ['CU-TRIPS', '// ===== CU-TRIPS:START =====', '// ===== CU-TRIPS:END ====='],
+  ['CU-PIPELINE', '// ===== CU-PIPELINE:START =====', '// ===== CU-PIPELINE:END ====='],
+  ['stage prompts', 'var SYSTEM_PROMPT_EXTRACT = [', "Keep only approved, client-safe facts.';"]
+].forEach(function (p) {
+  A.ok('parity: ' + p[0] + ' is byte-identical to bwn-suite-ai', block(TEXT, p[1], p[2]) === block(AI, p[1], p[2]));
+});
+A.ok('parity: the pipeline really is the client pipeline', /function cuSafetyCheck\(/.test(TEXT) && /Write a concise client-facing work-order update/.test(TEXT));
 
 A.finish();
