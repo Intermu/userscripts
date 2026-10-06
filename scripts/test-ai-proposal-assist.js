@@ -22,7 +22,7 @@ A.ok('logic block sliced', SRC.indexOf(START) > 0 && LOGIC.length > 1000);
 
 function load(code) {
   var ctx = {};
-  vm.runInNewContext(code + '\nthis.L={routeOf:routeOf,esc:esc,moneyToCents:moneyToCents,gqlCents:gqlCents,rowsFromGrid:rowsFromGrid,' +
+  vm.runInNewContext(code + '\nthis.L={routeOf:routeOf,esc:esc,moneyToCents:moneyToCents,gqlCents:gqlCents,rowsFromGrid:rowsFromGrid,gridFromRows:gridFromRows,' +
     'preflight:preflight,recommendedLines:recommendedLines,parseRanges:parseRanges,buildPrompt:buildPrompt,promptState:promptState,' +
     'opNameOf:opNameOf,errorsOf:errorsOf,payloadOf:payloadOf,checkPreview:checkPreview,installTap:installTap,PROMPT_MAX:PROMPT_MAX};', ctx);
   return ctx.L;
@@ -31,8 +31,8 @@ var L = load(LOGIC);
 function has(list, level, rx) { return list.some(function (o) { return o.level === level && rx.test(o.msg); }); }
 
 // ---- 1. routes --------------------------------------------------------------------------------
-A.eq('vp route', L.routeOf('/work-orders/W1/proposals/vendor-proposals/Q9/details'), { kind: 'vp', quoteId: 'Q9' });
-A.eq('ai route', L.routeOf('/work-orders/W1/proposals/Q9/ai-preview'), { kind: 'ai', quoteId: 'Q9' });
+A.eq('vp route', L.routeOf('/work-orders/W1/proposals/vendor-proposals/Q9/details'), { kind: 'vp', wo: 'W1', quoteId: 'Q9' });
+A.eq('ai route', L.routeOf('/work-orders/W1/proposals/Q9/ai-preview'), { kind: 'ai', wo: 'W1', quoteId: 'Q9' });
 A.eq('other route inert', L.routeOf('/work-orders/W1'), null);
 A.eq('deny-listed route inert', L.routeOf('/company/users/5/permissions'), null);
 A.eq('vp details sub-path not matched', L.routeOf('/work-orders/W1/proposals/vendor-proposals/Q9/details/x'), null);
@@ -77,6 +77,25 @@ A.ok('recommends one travel + labor per trip', rec.filter(function (r) { return 
 A.ok('recommends $0 Shipping and Disposal', rec.some(function (r) { return r.item === 'Shipping' && r.note === '$0'; }) && rec.some(function (r) { return r.item === 'Disposal'; }));
 A.ok('recommends equipment out of Material', rec.some(function (r) { return r.item === 'Lift rental' && r.category === 'Equipment'; }));
 
+
+// ---- 2b. the LIVE vendor grid shape (captured 2026-10-06, values replaced) -----------------------
+// Three header rows: a Details/Cost/Tax group row ABOVE the column row (colspans expanded), and a
+// blank row below it. Empty Trip # / UOM render as "--". 0.1.0 read headers from all three rows as
+// one list and mapped every column after the group row to the wrong cell.
+var LIVE = [
+  ['', 'Details', '', '', '', '', '', '', 'Cost', '', '', 'Tax', '', '', '', ''],
+  ['', '', 'Category', 'Trade', 'Item', '', 'Trip #', 'UOM', 'Quantity', 'Unit Cost', 'Total Cost', 'Taxable', 'Tax %', 'Tax Amount', 'Total Charge', ''],
+  ['', '', '', '', '', '', '', '', '', '', '', '', '', '', '', ''],
+  ['', '', 'Travel', 'Exterior Lighting', '', '', '--', '--', '0', '$0.00', '$0.00', 'No', '0%', '$0.00', '$0.00', ''],
+  ['', '', 'Labor', 'Exterior Lighting', '', '', '--', '--', '1', '$7,500.00', '$7,500.00', 'No', '0%', '$0.00', '$7,500.00', '']
+];
+var lg = L.gridFromRows(LIVE);
+A.eq('live grid: header row found under the group row', lg && lg.length, 2);
+A.eq('live grid: columns land on the right cells', lg && [lg[1].category, lg[1].qty, lg[1].unitCost, lg[1].totalCost], ['Labor', 1, 750000, 750000]);
+A.eq('live grid: "--" read as blank', lg && [lg[0].trip, lg[0].uom], ['', '']);
+A.ok('live grid: blank Trip # flagged', has(L.preflight(lg, null, null, null), 'fail', /blank Trip #/));
+A.ok('vendor total over PO NTE warns', has(L.preflight(lg, null, 750000, 20000), 'warn', /over the vendor PO NTE \$200\.00/));
+A.eq('no needed header row -> null', L.gridFromRows([['a', 'b'], ['c', 'd']]), null);
 // ---- 3. prompt builder ----------------------------------------------------------------------
 var F = { pricingRules: 'Pricing: rate card first.', ranges: 'Lift rental: 200-300', scopeLine: '', issue: 'RTU 3 not cooling.',
   verbatim: 'NEXREV override line', materials: 'Contactor\nShipping', trip1Status: 'Incurred', trip1: 'Diagnosed\nReplaced contactor', trip2: 'Return to verify' };
@@ -135,6 +154,33 @@ A.ok('success:false message surfaced', ve.indexOf('Validation failed') >= 0);
 A.ok('top-level errors surfaced', L.errorsOf({ errors: [{ message: 'boom', extensions: { validationErrors: ['x too long'] } }] }).join('|') === 'boom|x too long');
 A.ok('clean response -> no errors', L.errorsOf({ data: { a: { success: true, preview: {} } } }).length === 0);
 
+// ---- 4b. the LIVE response shape (captured 2026-10-06 as keys + types only; values synthetic) ----
+// data.__typename comes FIRST (0.1.0 took data's first key and found no preview), money is
+// {amount, precision} objects, and markUpPercent / chargeQuantity / estimatedGrossProfitPercent
+// are decimal STRINGS (0.1.0's negative-markup check required typeof number and never fired).
+function m(c) { return { __typename: 'Money', amount: c, currency: 'USD', precision: 2 }; }
+function line(id, item, cat, cost, charge, mu, qty) {
+  return { __typename: 'L', item: item, categoryName: cat, categoryId: 1, sourceLineItemId: id, unitOfMeasurement: 'Each',
+    isGenerated: false, revisedDescription: null, unitCost: m(cost), unitCharge: m(charge), markUpPercent: mu, chargeQuantity: qty, rateId: String(70 + id) };
+}
+var LIVE_RESP = { data: { __typename: 'Mutation', generateAIProposalPreview: { __typename: 'X', success: true, message: '', preview: {
+  __typename: 'P', scopeOfWork: 'Reset pole.', reasoning: 'r', estimatedGrossProfitPercent: '12.5',
+  estimatedGrossProfit: m(100), estimatedTotal: m(90000), estimatedVendorCost: m(80000),
+  lineItems: [
+    line(1, '1 Man Travel', 'Travel', 8500, 9000, '5.88', '1'),
+    line(2, 'Anchor bolts', 'Material', 4000, 3000, '-25', '2'),
+    line(3, 'Pole gasket', 'Material', 1000, 1400, '40', '1')
+  ] } } }, extensions: { traceId: 't' } };
+var lp = L.payloadOf(LIVE_RESP);
+A.ok('live: payload found past data.__typename', !!(lp && lp.preview));
+A.eq('live: success response has no errors', L.errorsOf(LIVE_RESP), []);
+var lck = L.checkPreview(lp.preview, { nte: 150000, ranges: [], verbatim: [], trips: 1 });
+A.ok('live: negative markup as a string is caught', has(lck, 'fail', /"Anchor bolts" has negative markup -25%/));
+A.ok('live: materials markup as a string over 35% is caught', has(lck, 'fail', /"Pole gasket" markup 40% is over 35%/));
+A.ok('live: below cost from money objects', has(lck, 'fail', /"Anchor bolts" charges \$30\.00, below cost \$40\.00/));
+A.ok('live: travel quantity as a string', has(lck, 'pass', /Travel charge quantity matches 1 trip/));
+A.ok('live: total from a money object', has(lck, 'pass', /Estimated total \$900\.00 within NTE/));
+
 // ---- 5. passive tap ---------------------------------------------------------------------------
 (function () {
   var sent = [], seen = [], original = { clone: function () { return { json: function () { return Promise.resolve({ data: { x: { success: true } } }); } }; } };
@@ -174,6 +220,13 @@ function statics() {
   var verLine = (meta.match(/@version\s+(\S+)/) || [])[1];
   A.ok('@version == VER', SRC.indexOf("var VER = '" + verLine + "'") > 0);
 
+  // dock launcher (0.2.0): row only on the two routes, no floating fallback, Core classifies the key
+  A.ok('dock: registers key ai-proposal', /id: 'bwn:dock:register', key: DOCK_KEY/.test(SRC) && /var DOCK_KEY = 'ai-proposal';/.test(SRC));
+  A.ok('dock: unregisters off-route', /dockPresence\(!!rt\);/.test(SRC) && /id: 'bwn:dock:unregister', key: DOCK_KEY/.test(SRC));
+  A.ok('dock: panel renders only while opened from the dock', /if \(!rt \|\| !document\.body \|\| !isOpen\) \{ removePanel\(\); return; \}/.test(SRC));
+  A.ok('dock: no Show/Hide anchored header left', !/data-act="toggle"/.test(SRC));
+  var CORE = fs.readFileSync(path.join(__dirname, '..', 'bwn-suite-core.user.js'), 'utf8');
+  A.ok('dock: Core policy classifies ai-proposal (fail-closed dock would hide it)', /BWN_DOCK_POLICY\['ai-proposal'\] = \{ minRank: 1, perms: \[\] \}/.test(CORE));
   function mutated(from, to) {
     if (LOGIC.split(from).length !== 2) throw new Error('mutation target not unique: ' + from);
     return load(LOGIC.replace(from, to));
@@ -182,7 +235,7 @@ function statics() {
   A.ok('NEG: dropping below-cost check goes red', !has(M1.checkPreview(PV, CTX), 'fail', /below cost/));
   var M2 = mutated('over: n > PROMPT_MAX', 'over: n > PROMPT_MAX + 1');
   A.ok('NEG: off-by-one limit goes red', M2.promptState(new Array(1002).join('x')).over === false);
-  var M3 = mutated("li.markUpPercent < 0; });", "li.markUpPercent < -100; });");
+  var M3 = mutated('num(li.markUpPercent) < 0;', 'num(li.markUpPercent) < -100;');
   A.ok('NEG: weakened negative-markup check goes red', !has(M3.checkPreview(PV, CTX), 'fail', /negative markup/));
   A.finish();
 }

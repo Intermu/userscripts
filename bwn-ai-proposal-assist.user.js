@@ -1,8 +1,8 @@
 // ==UserScript==
 // @name         BWN AI Proposal Assist (Broadway National)
 // @namespace    broadwaynational.bwn
-// @version      0.1.0
-// @description  Read-only helper around Umbrava's AI client-proposal generator. Three opt-in panels, all OFF until switched on: (1) Pre-flight on a vendor proposal's details page reads the line grid by header text and flags line shapes the AI cannot fix later - travel/labor not named "N Man Travel" / "N Man", one line covering several trips, a single lumped Material line, equipment or removal filed under Material/Other, missing $0 Shipping and Disposal, blank Trip #, numeric UOM, vendor total over the client NTE - with a recommended-lines table; (2) a prompt builder on the AI preview page that assembles the Generate prompt from form fields in a fixed order with a live 1,000-character hard stop, Copy and Insert buttons, and saved per-client templates; (3) a post-generate checker that passively reads the GenerateAIProposalPreview / ReworkAIProposal responses the app already receives and shows pass/fail (charge below cost, negative or >35% materials markup, travel quantity, non-rate-card ranges, total vs NTE, banned headings, verbatim lines, Materials/Equipment section) plus the server's validationErrors text when Generate fails. Never calls the API itself, never reads auth headers, never edits the grid, never clicks anything it did not create, never saves, submits or approves.
+// @version      0.2.0
+// @description  Read-only helper around Umbrava's AI client-proposal generator. Opens from an "AI Proposal" row in the BWN Suite dock (bwn:dock:*, needs bwn-suite-core 1.94.5+) that appears only on a vendor proposal page and the AI preview Generate leads to - there is no floating button. Three opt-in sections, all OFF until switched on: (1) Pre-flight on a vendor proposal's details page reads the line grid by header text and flags line shapes the AI cannot fix later - travel/labor not named "N Man Travel" / "N Man", one line covering several trips, a single lumped Material line, equipment or removal filed under Material/Other, missing $0 Shipping and Disposal, blank Trip #, numeric UOM, vendor total over the client NTE - with a recommended-lines table; (2) a prompt builder that assembles the Generate prompt from form fields in a fixed order with a live 1,000-character hard stop, Copy and Insert (armed before the Generate modal opens, because the modal makes the rest of the page inert), and saved per-client templates; (3) a post-generate checker that passively reads the GenerateAIProposalPreview / ReworkAIProposal responses the app already receives and shows pass/fail (charge below cost, negative or >35% materials markup, travel quantity, non-rate-card ranges, total vs NTE, banned headings, verbatim lines, Materials/Equipment section) plus the server's validationErrors text when Generate fails. Never calls the API itself, never reads auth headers, never edits the grid, never clicks anything it did not create, never saves, submits or approves.
 // @downloadURL  https://raw.githubusercontent.com/Intermu/userscripts/main/bwn-ai-proposal-assist.user.js
 // @updateURL    https://raw.githubusercontent.com/Intermu/userscripts/main/bwn-ai-proposal-assist.user.js
 // @match        https://app.umbrava.com/*
@@ -27,7 +27,7 @@
 (function () {
   'use strict';
 
-  var VER = '0.1.0';   // keep in step with @version
+  var VER = '0.2.0';   // keep in step with @version
   // Duplicate-init guard: @grant none shares the page window, so a second install (two copies, a
   // reinstall without reload) sees the first one's stamp and stands down instead of double-tapping.
   if (window.__bwnApaInit) { console.warn('[BWN APA] already initialised (v' + window.__bwnApaInit + ') - second copy inert'); return; }
@@ -38,8 +38,10 @@
   var PROMPT_WARN = 950;
   var MATERIAL_MARKUP_MAX = 35;
   var WATCH_OPS = { GenerateAIProposalPreview: 1, ReworkAIProposal: 1 };
-  var RX_VP = /^\/work-orders\/[^/]+\/proposals\/vendor-proposals\/([^/]+)\/details\/?$/;
-  var RX_AI = /^\/work-orders\/[^/]+\/proposals\/([^/]+)\/ai-preview\/?$/;
+  // {wo} is the WO number. The AI preview's id is NOT the vendor quoteId (the vendor quoteId in the
+  // ai-preview URL shows "No data available", live 2026-10-06), so cross-page context keys on the WO.
+  var RX_VP = /^\/work-orders\/([^/]+)\/proposals\/vendor-proposals\/([^/]+)\/details\/?$/;
+  var RX_AI = /^\/work-orders\/([^/]+)\/proposals\/([^/]+)\/ai-preview\/?$/;
   // Deny-list first, allow-list second: anything account/admin/auth shaped is inert even if a
   // future route happened to match the allow patterns.
   var DENY = [/^\/(login|logout|callback|signup|account|settings|company|admin|billing|users?)(\/|$)/i, /permission/i];
@@ -50,9 +52,9 @@
     path = String(path || '');
     for (var i = 0; i < DENY.length; i++) if (DENY[i].test(path)) return null;
     var m = RX_VP.exec(path);
-    if (m) return { kind: 'vp', quoteId: m[1] };
+    if (m) return { kind: 'vp', wo: m[1], quoteId: m[2] };
     m = RX_AI.exec(path);
-    if (m) return { kind: 'ai', quoteId: m[1] };
+    if (m) return { kind: 'ai', wo: m[1], quoteId: m[2] };
     return null;
   }
 
@@ -93,7 +95,8 @@
     var idx = {};
     headers.forEach(function (h, i) { var k = norm(h).toLowerCase(); if (!(k in idx)) idx[k] = i; });
     for (var n = 0; n < NEEDED_HEADERS.length; n++) if (!(NEEDED_HEADERS[n] in idx)) return null;
-    function get(r, k) { return k in idx ? norm(r[idx[k]]) : ''; }
+    // Umbrava renders an empty Trip # / UOM as "--" (live, 2026-10-06).
+    function get(r, k) { var v = k in idx ? norm(r[idx[k]]) : ''; return /^-+$/.test(v) ? '' : v; }
     return cells.map(function (r) {
       return {
         category: get(r, 'category'), trade: get(r, 'trade'), item: get(r, 'item'),
@@ -101,6 +104,17 @@
         unitCost: moneyToCents(get(r, 'unit cost')), totalCost: moneyToCents(get(r, 'total cost'))
       };
     }).filter(function (r) { return r.item || r.category; });
+  }
+
+  // rows: every table row as an array of cell texts, colspans already expanded. The real
+  // vendor grid has a group-header row (Details/Cost/Tax) ABOVE the column row and a blank row
+  // below it (live, 2026-10-06), so the header row is found by content, and data is what follows.
+  function gridFromRows(rows) {
+    for (var h = 0; h < rows.length; h++) {
+      var low = rows[h].map(function (c) { return norm(c).toLowerCase(); });
+      if (NEEDED_HEADERS.every(function (n) { return low.indexOf(n) >= 0; })) return rowsFromGrid(rows[h], rows.slice(h + 1));
+    }
+    return null;
   }
 
   var RX_TRAVEL = /travel|trip charge|mileage/i;
@@ -117,7 +131,9 @@
   }
 
   // -> [{level:'fail'|'warn'|'ok', msg}]
-  function preflight(rows, nte, vendorTotal) {
+  function preflight(rows, nte, vendorTotal, poNte) {
+    // A blank Item cell is real (live 2026-10-06): name the row by its category instead of printing "".
+    function nm(r) { return r.item ? '"' + r.item + '"' :'(' + (r.category || 'row') + ' line, no item name)'; }
     var out = [];
     function f(level, msg) { out.push({ level: level, msg: msg }); }
     var trips = distinctTrips(rows), nTrips = Math.max(trips.length, 1);
@@ -126,23 +142,23 @@
     var mats = rows.filter(function (r) { return isMaterial(r) && !RX_EQUIP.test(r.item) && !/shipping|disposal/i.test(r.item); });
 
     travel.forEach(function (r) {
-      if (!/^\d+\s*man travel$/i.test(r.item)) f('fail', 'Travel line "' + r.item + '" is not named "N Man Travel".');
-      if (r.qty > 1) f('warn', 'Travel line "' + r.item + '" has quantity ' + r.qty + ' - one line per trip.');
+      if (!/^\d+\s*man travel$/i.test(r.item)) f('fail', 'Travel line ' + nm(r) + ' is not named "N Man Travel".');
+      if (r.qty > 1) f('warn', 'Travel line ' + nm(r) + ' has quantity ' + r.qty + ' - one line per trip.');
     });
     if (travel.length && travel.length < nTrips) f('fail', travel.length + ' travel line(s) cover ' + nTrips + ' trips - one travel line per trip.');
 
     labor.forEach(function (r) {
-      if (!/^\d+\s*man$/i.test(r.item)) f('fail', 'Labor line "' + r.item + '" is not named "N Man".');
-      if (!/^(hr|hrs|hour|hours)$/i.test(r.uom)) f('fail', 'Labor line "' + r.item + '" UOM is "' + r.uom + '", not per hour.');
+      if (!/^\d+\s*man$/i.test(r.item)) f('fail', 'Labor line ' + nm(r) + ' is not named "N Man".');
+      if (!/^(hr|hrs|hour|hours)$/i.test(r.uom)) f('fail', 'Labor line ' + nm(r) + ' UOM is "' + r.uom + '", not per hour.');
     });
     if (labor.length && labor.length < nTrips) f('fail', labor.length + ' labor line(s) cover ' + nTrips + ' trips - one labor line per trip.');
 
     if (mats.length === 1 && (RX_GENERIC_MAT.test(mats[0].item) || /^(lot|ls|lump sum)$/i.test(mats[0].uom)))
-      f('fail', 'Single lumped Material line "' + mats[0].item + '" - itemise each material.');
+      f('fail', 'Single lumped Material line ' + nm(mats[0]) + ' - itemise each material.');
 
     rows.forEach(function (r) {
       if (/material|other/i.test(r.category) && RX_EQUIP.test(r.item))
-        f('warn', '"' + r.item + '" is filed under ' + r.category + ' - equipment/removal belongs in its own category.');
+        f('warn', '' + nm(r) + ' is filed under ' + r.category + ' - equipment/removal belongs in its own category.');
     });
 
     var ship = rows.some(function (r) { return /shipping/i.test(r.item); });
@@ -151,8 +167,8 @@
     if (!disp) f('fail', 'No Disposal line - add a $0 Disposal line.');
 
     rows.forEach(function (r) {
-      if (!r.trip) f('fail', '"' + r.item + '" has a blank Trip #.');
-      if (/^\d+(\.\d+)?$/.test(r.uom)) f('fail', '"' + r.item + '" has a numeric UOM "' + r.uom + '".');
+      if (!r.trip) f('fail', '' + nm(r) + ' has a blank Trip #.');
+      if (/^\d+(\.\d+)?$/.test(r.uom)) f('fail', '' + nm(r) + ' has a numeric UOM "' + r.uom + '".');
     });
 
     var total = vendorTotal;
@@ -160,6 +176,7 @@
     if (nte == null) f('warn', 'Client NTE not found on the page - total not compared.');
     else if (total > nte) f('fail', 'Vendor total ' + fmt(total) + ' is over the client NTE ' + fmt(nte) + '.');
     else f('ok', 'Vendor total ' + fmt(total) + ' is within the client NTE ' + fmt(nte) + '.');
+    if (poNte != null && total > poNte) f('warn', 'Vendor total ' + fmt(total) + ' is over the vendor PO NTE ' + fmt(poNte) + '.');
 
     if (!out.some(function (o) { return o.level === 'fail'; })) f('ok', 'No line-shape problems found.');
     return out;
@@ -261,9 +278,13 @@
   function payloadOf(json) {
     var d = json && json.data;
     if (!d || typeof d !== 'object') return null;
-    var k = Object.keys(d)[0];
+    // Live 2026-10-06: data.__typename is the FIRST key, so skip it.
+    var k = Object.keys(d).filter(function (x) { return x !== '__typename'; })[0];
     return k ? d[k] : null;
   }
+
+  // markUpPercent / chargeQuantity / estimatedGrossProfitPercent arrive as decimal STRINGS (live 2026-10-06).
+  function num(v) { return v == null || v === '' ? null : Number(v); }
 
   // ctx: {nte (cents|null), ranges:[{name,min,max}], verbatim:[str], trips (int|null)}
   // -> [{level:'pass'|'fail'|'warn', msg}]
@@ -280,18 +301,18 @@
     if (below.length) below.forEach(function (li) { r('fail', '"' + li.item + '" charges ' + fmt(gqlCents(li.unitCharge)) + ', below cost ' + fmt(gqlCents(li.unitCost)) + '.'); });
     else r('pass', 'No line charges below cost.');
 
-    var neg = items.filter(function (li) { return typeof li.markUpPercent === 'number' && li.markUpPercent < 0; });
+    var neg = items.filter(function (li) { return num(li.markUpPercent) < 0; });
     neg.forEach(function (li) { r('fail', '"' + li.item + '" has negative markup ' + li.markUpPercent + '%.'); });
 
     var travel = items.filter(function (li) { return RX_TRAVEL.test(li.item || '') || RX_TRAVEL.test(li.categoryName || ''); });
     if (travel.length) {
-      var q = travel.reduce(function (s, li) { return s + (+li.chargeQuantity || 0); }, 0);
+      var q = travel.reduce(function (s, li) { return s + (num(li.chargeQuantity) || 0); }, 0);
       var want = ctx.trips || travel.length;
       if (q !== want) r('fail', 'Travel charge quantity totals ' + q + ' for ' + want + ' trip(s) / ' + travel.length + ' travel line(s).');
       else r('pass', 'Travel charge quantity matches ' + want + ' trip(s).');
     }
 
-    var hi = items.filter(function (li) { return /material/i.test(li.categoryName || '') && li.markUpPercent > MATERIAL_MARKUP_MAX; });
+    var hi = items.filter(function (li) { return /material/i.test(li.categoryName || '') && num(li.markUpPercent) > MATERIAL_MARKUP_MAX; });
     if (hi.length) hi.forEach(function (li) { r('fail', 'Material "' + li.item + '" markup ' + li.markUpPercent + '% is over ' + MATERIAL_MARKUP_MAX + '%.'); });
     else r('pass', 'Materials markup within ' + MATERIAL_MARKUP_MAX + '%.');
 
@@ -384,7 +405,7 @@
     return t;
   }
 
-  // Per-quote context carried from the vendor-proposal page to the AI preview page (same tab).
+  // Per-WO context carried from the vendor-proposal page to the AI preview page (same tab).
   // Item names + trip count + NTE only; sessionStorage so it dies with the tab.
   function ctxGet(q) { return lsGet(SS_CTX + q, {}, sessionStorage); }
   function ctxSet(q, v) { lsSet(SS_CTX + q, v, sessionStorage); }
@@ -394,9 +415,11 @@
   try {
     installTap(window, function (op, json) {
       var rt = routeOf(location.pathname);
-      if (!on('checker') || !rt || rt.kind !== 'ai') return;
+      if (!on('checker') || !rt) return;   // Generate fires from the vendor proposal modal
       logAction('checker: ' + op + ' response read');
-      lastCheck = { op: op, json: json, quoteId: rt.quoteId };
+      lastCheck = { op: op, json: json, wo: rt.wo };
+      var cr = checkResult(rt);
+      dockBadge(cr.res ? String(cr.res.filter(function (o) { return o.level === 'fail'; }).length || '✓') : '!');
       render();
     });
   } catch (e) { console.warn('[BWN APA] response tap failed to install:', e); }
@@ -413,17 +436,15 @@
     for (var i = 0; i < boxes.length; i++) {
       var box = boxes[i];
       if (inPanel(box)) continue;
-      var hs = Array.prototype.map.call(box.querySelectorAll('th, [role="columnheader"]'), txt);
-      var low = hs.map(function (h) { return h.toLowerCase(); });
-      if (NEEDED_HEADERS.some(function (h) { return low.indexOf(h) < 0; })) continue;
-      var rowEls = box.querySelectorAll('tbody tr, [role="row"]');
-      var cells = [];
-      Array.prototype.forEach.call(rowEls, function (tr) {
-        if (tr.querySelector('th, [role="columnheader"]')) return;
-        var cs = tr.querySelectorAll('td, [role="cell"], [role="gridcell"]');
-        if (cs.length) cells.push(Array.prototype.map.call(cs, txt));
+      var rows = Array.prototype.map.call(box.querySelectorAll('tr, [role="row"]'), function (tr) {
+        var out = [];
+        Array.prototype.forEach.call(tr.children, function (c) {
+          for (var s = 0; s < (c.colSpan || 1); s++) out.push(s ? '' : txt(c));
+        });
+        return out;
       });
-      return rowsFromGrid(hs, cells);
+      var g = gridFromRows(rows);
+      if (g) return g;
     }
     return null;
   }
@@ -442,10 +463,24 @@
     }
     return null;
   }
-  function readNte() { return stripMoney(/^client\s+dne\b|^nte\b/i); }
+  // A form field's value by its <label> text. On the WO page Client DNE is an input (live, 2026-10-06).
+  function labeledMoney(labelRx) {
+    var ls = document.querySelectorAll('label');
+    for (var i = 0; i < ls.length; i++) {
+      if (inPanel(ls[i]) || !labelRx.test(txt(ls[i]))) continue;
+      var inp = ls[i].htmlFor ? document.getElementById(ls[i].htmlFor) : ls[i].parentElement && ls[i].parentElement.querySelector('input');
+      if (inp && inp.value) return moneyToCents(inp.value);
+    }
+    return null;
+  }
+  function readNte() { var v = labeledMoney(/^client\s+dne\b/i); return v != null ? v : stripMoney(/^client\s+dne\b/i); }
+  // Vendor proposal header shows the vendor's PO NTE, not the client DNE (live, 2026-10-06).
+  function readPoNte() { return stripMoney(/^po\s+nte\b/i); }
   function readVendorTotal() { return stripMoney(/^total vendor cost\b/i); }
 
-  // The Generate prompt textarea: the one textarea sharing a close ancestor with a "Generate" button.
+  // The Generate prompt box: the one text field sharing a close ancestor with a "Generate" button.
+  // Live 2026-10-06: it is an <input type=text> ("Anything else you would like?") inside the react-aria
+  // "Generate Client Proposal" modal on the VENDOR PROPOSAL page, not a textarea on ai-preview.
   function findPromptBox() {
     var btns = Array.prototype.filter.call(document.querySelectorAll('button'), function (b) {
       return !inPanel(b) && /^\s*generate\b/i.test(b.textContent || '');
@@ -453,7 +488,7 @@
     for (var i = 0; i < btns.length; i++) {
       var el = btns[i];
       for (var d = 0; d < 6 && el; d++, el = el.parentElement) {
-        var tas = Array.prototype.filter.call(el.querySelectorAll('textarea'), function (t) { return !inPanel(t); });
+        var tas = Array.prototype.filter.call(el.querySelectorAll('textarea, input[type="text"], input:not([type])'), function (t) { return !inPanel(t); });
         if (tas.length === 1) return tas[0];
         if (tas.length > 1) break;
       }
@@ -489,6 +524,18 @@
 
   var form = null;          // builder field values survive re-renders within a page
   var gridSig = '';
+  // Insert armed by a click while the Generate modal is closed. react-aria marks everything outside an
+  // open modal inert (live 2026-10-06), so the panel cannot be clicked once the modal is up: the click
+  // happens first, and the text lands once when the modal's prompt box appears. Never presses Generate.
+  var armed = null;
+
+  function fillBox(ta, text) {
+    // React tracks the value through the prototype setter; a plain .value= is overwritten on the next render.
+    // A single-line <input> (the live Generate box) drops newlines, so join sections with a space.
+    if (ta.tagName !== 'TEXTAREA') text = text.split(String.fromCharCode(10)).join(' ');
+    Object.getOwnPropertyDescriptor((ta.tagName === 'TEXTAREA' ? HTMLTextAreaElement : HTMLInputElement).prototype, 'value').set.call(ta, text);
+    ta.dispatchEvent(new Event('input', { bubbles: true }));
+  }
 
   function ensurePanel() {
     var p = panelEl();
@@ -530,22 +577,27 @@
     if (!rows) return '<h4>Pre-flight</h4><p class="off">Line grid layout not recognised — disabled.</p>';
     var nte = readNte(), vt = readVendorTotal();
     var trips = distinctTrips(rows);
-    var prev = ctxGet(rt.quoteId);
-    var items = rows.filter(function (r) { return !isTravel(r) && !isLabor(r) && !/shipping|disposal/i.test(r.item); }).map(function (r) { return r.item; });
+    var prev = ctxGet(rt.wo);
+    var items = materialItems(rows);
     if (JSON.stringify(prev.items) !== JSON.stringify(items) || prev.nte !== nte || prev.trips !== trips.length) {
-      ctxSet(rt.quoteId, { items: items, nte: nte, trips: trips.length });
+      ctxSet(rt.wo, { items: items, nte: nte, trips: trips.length });
       logAction('pre-flight run');
     }
     var rec = recommendedLines(rows);
-    return '<h4>Pre-flight</h4>' + list(preflight(rows, nte, vt)) +
+    return '<h4>Pre-flight</h4>' + list(preflight(rows, nte, vt, readPoNte())) +
       '<h4>Recommended lines</h4><table><tr><th>Category</th><th>Item</th><th>Trip #</th><th>UOM</th><th>Qty</th></tr>' +
       rec.map(function (r) {
         return '<tr><td>' + esc(r.category) + '</td><td>' + esc(r.item) + (r.note ? ' <span class="mono">' + esc(r.note) + '</span>' : '') + '</td><td>' + esc(r.trip) + '</td><td>' + esc(r.uom) + '</td><td>' + esc(r.qty) + '</td></tr>';
       }).join('') + '</table><p class="off">Guidance only - edit the vendor proposal yourself; this panel never changes the grid.</p>';
   }
 
+  function materialItems(rows) {
+    return rows.filter(function (r) { return r.item && !isTravel(r) && !isLabor(r) && !/shipping|disposal/i.test(r.item); }).map(function (r) { return r.item; });
+  }
+
   function defaultForm(rt) {
-    var t = templates()[0], c = ctxGet(rt.quoteId);
+    var t = templates()[0], c = ctxGet(rt.wo);
+    if (!c.items && rt.kind === 'vp') { var g = readGrid(); c.items = g ? materialItems(g) : []; }   // pre-flight off: read the grid here
     return {
       tpl: t.name, pricingRules: t.pricingRules, ranges: t.ranges, scopeLine: t.scopeLine, verbatim: t.verbatim,
       issue: '', materials: (c.items || []).join('\n'), trip1Status: 'Incurred', trip1: '', trip2: ''
@@ -561,8 +613,10 @@
 
   function builderHtml(rt) {
     if (!on('builder')) return '';
-    if (!form || form.quoteId !== rt.quoteId) { form = defaultForm(rt); form.quoteId = rt.quoteId; }
-    var compat = findPromptBox() ? '' : '<p class="off">Generate prompt box: layout not recognised — disabled. Copy still works.</p>';
+    if (!form || form.wo !== rt.wo) { form = defaultForm(rt); form.wo = rt.wo; }
+    var compat = findPromptBox() ? ''
+      : rt.kind === 'vp' ? '<p class="off">' + (armed ? 'Insert armed - open Generate Client Proposal and the prompt box is filled once.' : 'Fill this in first, click Insert, then open Generate Client Proposal (the panel cannot be clicked while that modal is open).') + '</p>'
+      : '<p class="off">Generate prompt box: layout not recognised — disabled. Copy still works.</p>';
     return '<h4>Prompt builder</h4>' + compat +
       '<label for="bwn-apa-tpl">Client template</label><select id="bwn-apa-tpl" data-tpl="1">' +
       templates().map(function (t) { return '<option' + (t.name === form.tpl ? ' selected' : '') + '>' + esc(t.name) + '</option>'; }).join('') +
@@ -578,7 +632,7 @@
       field('trip1', 'Trip 1 steps (one per line)', true) +
       field('trip2', '5. Trip 2 steps (one per line)', true) +
       '<pre id="bwn-apa-out" aria-label="Assembled prompt"></pre>' +
-      '<div class="row"><button class="p" data-act="copy">Copy</button><button data-act="insert"' + (compat ? ' disabled' : '') + '>Insert</button>' +
+      '<div class="row"><button class="p" data-act="copy">Copy</button><button data-act="insert">' + (armed ? 'Armed' : 'Insert') + '</button>' +
       '<span class="ctr mono" id="bwn-apa-ctr" aria-live="polite"></span></div>';
   }
 
@@ -591,36 +645,46 @@
     ctr.className = 'ctr mono' + (st.over ? ' over' : st.warn ? ' warn' : '');
     var p = panelEl();
     p.querySelector('[data-act="copy"]').disabled = st.over;
-    p.querySelector('[data-act="insert"]').disabled = st.over || !findPromptBox();
+    var rt = routeOf(location.pathname);
+    p.querySelector('[data-act="insert"]').disabled = st.over || (!findPromptBox() && !(rt && rt.kind === 'vp'));
+  }
+
+  // -> {errs, pv, res}; res is null when the response carried no preview.
+  function checkResult(rt) {
+    var j = lastCheck.json, pl = payloadOf(j), errs = errorsOf(j);
+    var pv = pl && (pl.preview || pl.result || (pl.lineItems ? pl : null));
+    if (errs.length || !pv) return { errs: errs, pv: null, res: null };
+    var c = ctxGet(rt.wo), f = form || {};
+    return { errs: errs, pv: pv, res: checkPreview(pv, {
+      nte: readNte() != null ? readNte() : (c.nte == null ? null : c.nte),
+      ranges: parseRanges(f.ranges), verbatim: lines(f.verbatim), trips: c.trips || null
+    }) };
   }
 
   function checkerHtml(rt) {
     if (!on('checker')) return '';
-    if (!lastCheck || lastCheck.quoteId !== rt.quoteId) return '<h4>Post-generate check</h4><p class="off">Waiting for Generate or Revise - nothing is sent by this panel.</p>';
-    var j = lastCheck.json, pl = payloadOf(j), errs = errorsOf(j);
-    var pv = pl && (pl.preview || pl.result || (pl.lineItems ? pl : null));
-    var h = '<h4>Post-generate check (' + esc(lastCheck.op) + ')</h4>';
-    if (errs.length || !pv) return h + list([{ level: 'fail', msg: 'Generate failed. Server said:' }].concat(
-      (errs.length ? errs : ['(no error text in the response)']).map(function (e) { return { level: 'warn', msg: e }; })));
-    var c = ctxGet(rt.quoteId), f = form || {};
-    var res = checkPreview(pv, {
-      nte: readNte() != null ? readNte() : (c.nte == null ? null : c.nte),
-      ranges: parseRanges(f.ranges), verbatim: lines(f.verbatim), trips: c.trips || null
-    });
-    return h + list(res) + (pv.reasoning ? '<details><summary>AI reasoning</summary><pre>' + esc(pv.reasoning) + '</pre></details>' : '');
+    if (!lastCheck || lastCheck.wo !== rt.wo) return '<h4>Post-generate check</h4><p class="off">Waiting for Generate or Revise - nothing is sent by this panel.</p>';
+    var cr = checkResult(rt), h = '<h4>Post-generate check (' + esc(lastCheck.op) + ')</h4>';
+    if (!cr.res) return h + list([{ level: 'fail', msg: 'Generate failed. Server said:' }].concat(
+      (cr.errs.length ? cr.errs : ['(no error text in the response)']).map(function (e) { return { level: 'warn', msg: e }; })));
+    return h + list(cr.res) + (cr.pv.reasoning ? '<details><summary>AI reasoning</summary><pre>' + esc(cr.pv.reasoning) + '</pre></details>' : '');
   }
 
   function render() {
     var rt = routeOf(location.pathname);
-    if (!rt || !document.body) { removePanel(); return; }
+    if (!rt || !document.body || !isOpen) { removePanel(); return; }
     var p = ensurePanel();
-    var open = settings.open === true;
-    var body = rt.kind === 'vp' ? preflightHtml(rt) : builderHtml(rt) + checkerHtml(rt);
+    var body = rt.kind === 'vp'
+      ? preflightHtml(rt) + builderHtml(rt) + checkerHtml(rt)
+      : builderHtml(rt) + checkerHtml(rt);
     var focusId = document.activeElement && inPanel(document.activeElement) ? document.activeElement.id : null;
+    var oldB = p.querySelector('.b'), scroll = oldB ? oldB.scrollTop : 0;   // keep the reader's place across re-renders
     p.innerHTML = '<div class="h"><b>AI Proposal Assist</b><span class="mono">v' + esc(VER) + '</span>' +
-      '<button data-act="toggle" aria-expanded="' + open + '">' + (open ? 'Hide' : 'Show') + '</button></div>' +
-      (open ? '<div class="b">' + (body || '<p class="off">No feature on for this page.</p>') + toggles() + '</div>' : '');
+      '<button data-act="close" aria-label="Close AI Proposal Assist">×</button></div>' +
+      '<div class="b">' + (body || '<p class="off">No feature on for this page.</p>') + toggles() + '</div>';
     updatePrompt();
+    var newB = p.querySelector('.b');
+    if (newB) newB.scrollTop = scroll;
     if (focusId) { var f = document.getElementById(focusId); if (f) f.focus(); }
   }
 
@@ -638,6 +702,7 @@
       render();
     } else if (t.dataset.f && form) {
       form[t.dataset.f] = t.value;
+      if (armed) armed = promptState(buildPrompt(form)).over ? null : buildPrompt(form);   // armed text follows edits
       updatePrompt();
     }
   }
@@ -656,19 +721,15 @@
     var b = ev.target.closest && ev.target.closest('button[data-act]');
     if (!b || b.disabled) return;
     var act = b.dataset.act;
-    if (act === 'toggle') { settings.open = !(settings.open === true); lsSet(LS_SET, settings); render(); return; }
+    if (act === 'close') { closePanel(); return; }
     if (!form) return;
     var text = buildPrompt(form);
     if (act === 'copy' && !promptState(text).over) {
       copyText(text).then(function () { b.textContent = 'Copied'; logAction('prompt copied'); }, function () { b.textContent = 'Copy failed'; });
     } else if (act === 'insert' && !promptState(text).over) {
       var ta = findPromptBox();
-      if (!ta) { render(); return; }
-      // React tracks the value through the prototype setter; a plain .value= is overwritten on the next render.
-      Object.getOwnPropertyDescriptor(HTMLTextAreaElement.prototype, 'value').set.call(ta, text);
-      ta.dispatchEvent(new Event('input', { bubbles: true }));
-      b.textContent = 'Inserted';
-      logAction('prompt inserted');
+      if (ta) { fillBox(ta, text); b.textContent = 'Inserted'; logAction('prompt inserted'); }
+      else { armed = text; logAction('prompt insert armed'); render(); }
     } else if (act === 'tpl-save') {
       var name = window.prompt('Template name', form.tpl || '');
       if (!name) return;
@@ -686,13 +747,46 @@
     }
   }
 
+  // ---- launcher: a row in the BWN Suite dock (bwn:dock:* host in bwn-suite-core) ---------------
+  // Registered only on the vendor proposal page and the ai-preview page Generate lands on; gone
+  // everywhere else (same reconcile as bwn-dispatch). No floating fallback: without Core there is no
+  // launcher. Core's BWN_DOCK_POLICY must carry DOCK_KEY or the row stays hidden (fail-closed).
+  var DOCK_KEY = 'ai-proposal';
+  var isOpen = false, dockOn = false;
+  function bus(detail) { try { document.dispatchEvent(new CustomEvent('bwn:evt', { detail: detail })); } catch (e) { /* no bus */ } }
+  function dockPresence(show, force) {
+    if (show && (!dockOn || force)) bus({ id: 'bwn:dock:register', key: DOCK_KEY, label: 'AI Proposal', icon: '✨', weight: 30,
+      title: 'Pre-flight, prompt builder and post-generate check for the AI client proposal' });
+    else if (!show && dockOn) bus({ id: 'bwn:dock:unregister', key: DOCK_KEY });
+    dockOn = show;
+  }
+  function dockBadge(b) { if (dockOn) bus({ id: 'bwn:dock:update', key: DOCK_KEY, badge: b }); }
+  function openPanel() {
+    if (!routeOf(location.pathname)) return;
+    bus({ id: 'bwn:drawer:open', key: DOCK_KEY });
+    isOpen = true;
+    dockBadge('');
+    render();
+  }
+  function closePanel() { isOpen = false; removePanel(); }
+  document.addEventListener('bwn:evt', function (e) {
+    var d = e && e.detail;
+    if (!d) return;
+    if (d.id === 'bwn:dock:host' || d.id === 'bwn:dock:ping') dockPresence(!!routeOf(location.pathname), true);
+    if (d.id === 'bwn:dock:open' && d.key === DOCK_KEY) { if (isOpen) closePanel(); else openPanel(); }
+    if (d.id === 'bwn:drawer:open' && d.key !== DOCK_KEY && isOpen) closePanel();   // another tool took the slot
+  });
+  document.addEventListener('keydown', function (e) { if (e.key === 'Escape' && isOpen) closePanel(); });
+
   // ---- lifecycle: route check on init and on every SPA route change; grid via observer --------
   var mo = null, moTimer = null;
   function onRoute() {
     var rt = routeOf(location.pathname);
     if (mo) { mo.disconnect(); mo = null; }
     gridSig = '';
-    if (!rt) { removePanel(); return; }
+    armed = null;
+    dockPresence(!!rt);
+    if (!rt) { closePanel(); return; }
     render();
     if (rt.kind === 'vp' || rt.kind === 'ai') {
       // The grid / Generate box mount after the route; re-render when the page (not our panel) changes.
@@ -700,7 +794,9 @@
         if (muts.every(function (m) { return inPanel(m.target); })) return;
         clearTimeout(moTimer);
         moTimer = setTimeout(function () {
-          var g = rt.kind === 'vp' ? JSON.stringify(readGrid()) + readNte() : String(!!findPromptBox());
+          var g = (rt.kind === 'vp' ? JSON.stringify(readGrid()) + readNte() : '') + !!findPromptBox();
+          var box = armed && findPromptBox();
+          if (box) { fillBox(box, armed); armed = null; logAction('prompt inserted (armed)'); }
           if (g !== gridSig || !panelEl()) { gridSig = g; render(); }
         }, 300);
       });
@@ -720,7 +816,7 @@
     onRoute();
   }
 
-  console.info('[BWN APA] v' + VER + ' - read-only AI proposal assist; features off until enabled in the panel');
+  console.info('[BWN APA] v' + VER + ' - read-only AI proposal assist; dock row on vendor proposal pages; features off until enabled in the panel');
   if (document.readyState === 'loading') document.addEventListener('DOMContentLoaded', boot);
   else boot();
 })();
