@@ -332,6 +332,10 @@ A.ok('  EMS Honeywell store 559 -> Honeywell 1-800-845-3785', api.pilotVerbiage(
 A.ok('  EMS None store 67 -> photocell / timer / bypass contactor', /NO EMS AT THIS SITE.*PHOTOCELLS OR TIMERS.*BYPASS THE CONTACTOR/.test(api.pilotVerbiage(LIT, LA, '67')));
 A.ok('  EMS Trane 105 / Dencor 405 / Emerson 1021 -> their support lines', api.pilotVerbiage(LIT, LA, '105').indexOf('TRANE 1-833-298-3493') !== -1 && api.pilotVerbiage(LIT, LA, '405').indexOf('DENCOR (303) 922-1888') !== -1 && api.pilotVerbiage(LIT, LA, '1021').indexOf('EMERSON (APPLETON) 1-800-621-1506') !== -1);
 A.ok('  store not on the list -> NexRev default', api.pilotVerbiage(LIT, LA, '99999').indexOf('NEXREV') !== -1);
+A.ok('  non-NexRev EMS (Gridpoint 605, None 67) -> try NexRev first, then their own line',
+  /^PLEASE TRY NEXREV FIRST AT 866-601-5520[^\n]*\nTO OVERRIDE EXTERIOR LIGHTING PLEASE CALL GRIDPOINT/m.test(api.pilotVerbiage(LIT, LA, '605')) &&
+  /TRY NEXREV FIRST[^\n]*\nNO EMS AT THIS SITE/.test(api.pilotVerbiage(LIT, LA, '67')));
+A.ok('  NexRev store 258 -> no try-NexRev-first blurb', api.pilotVerbiage(LIT, LA, '258').indexOf('TRY NEXREV FIRST') === -1);
 A.ok('  extractWo passes the PFJ store through (PFJ 0605 -> GridPoint)',
   api.extractWo('Purchase Order: 170101999101 PFJ Store: 605-Travel Center', pfjBody('LIGHTING OUT SIDE STATIC - STATIC', '', '', 'lot light out').replace('PFJ#: 258', 'PFJ#: 605'), SENDER)._verbiage.indexOf('GRIDPOINT') !== -1);
 A.ok('  verbiage rides on _verbiage, NOT scope (sanitizeWo would strip its phone numbers)',
