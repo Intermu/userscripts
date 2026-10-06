@@ -165,6 +165,13 @@ jobs:
       - name: WO Audit evidence gate + key normalization + status coverage (0.13.0)
         run: node scripts/test-wo-audit-evidence.js
 
+      # WO Audit 0.19.0: Client Update Reply. Slices the pure CLIENT REPLY block and pins paste parsing
+      # (FM table, reply thread, UPDATE NEEDED template, incident hold), the FM rule (audit FM, else the
+      # Client Open POs owner, conflicts surfaced), FM grouping, the deterministic client wording, the
+      # client draft gate, reply escaping, and parity of WOA_CLIENT_SYSTEM with bwn-suite-ai.
+      - name: WO Audit client update reply (0.19.0)
+        run: node scripts/test-wo-audit-client-reply.js
+
       # WO Audit 0.17.0: the Operations Action List engine (deriveAction) + the sheet builder. Slices
       # the pure BWN WO-AUDIT ACTIONS block and pins the deterministic manager layer that sits on top
       # of deriveState - one action bucket per phase, the P0/P1/P2/Monitor priority model (safety and
