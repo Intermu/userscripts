@@ -156,6 +156,6 @@ A.eq('bid: 2 call sites + 1 def use swaRead', count(BID, 'swaRead('), 3);
 A.ok('bid: pipelineFetch + bidStatus via swaRead',
   /swaRead\(PROSPECTS_URL, \{ near: near/.test(BID) && /swaRead\(STATUS_URL, \{ tracking: tracking \}/.test(BID));
 A.ok('bid: vsGovernance left alone', /gmGet\(GOV_URL/.test(BID));
-A.ok('versions bumped', /@version\s+1\.48\.4/.test(AI) && /@version\s+0\.29\.2/.test(BID) && BID.indexOf("var VER = '0.29.4'") > 0);
+A.ok('versions bumped', /@version\s+1\.50\.1/.test(AI) && /@version\s+0\.29\.4/.test(BID) && BID.indexOf("var VER = '0.29.4'") > 0);
 
 Promise.all(jobs).then(function () { A.finish(); });

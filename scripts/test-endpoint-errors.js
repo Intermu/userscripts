@@ -1,7 +1,7 @@
 // test-endpoint-errors.js - a failed SWA call must never pass for "nothing found" / "queue empty".
 //
 // Pins the endpoint error-surfacing batch (2026-10-05) against the REAL shipped bytes:
-//   Bid-Out   pipelineFetch (vendor-prospects GET) + enrichContacts (enrich-contacts POST)
+//   Bid-Out   pipelineFetch (vendor-prospects read via swaRead) + enrichContacts (enrich-contacts POST)
 //   Write Q   claimOnce + wqClaimStatus + pollTick (wo-write-queue claim)
 //   Dispatch  dispatchCardFailMsg (the card leg's failure line)
 // Each block is sliced between its markers and run in a vm with a programmable fake transport.
@@ -49,7 +49,7 @@ var BO_READS = between(BO, '  // BO-SWA-READS-BEGIN', '  // BO-SWA-READS-END', '
 function boCtx(answer) {
   var ctx = {
     GM_getValue: function () { return 'ingest-key'; }, authToken: function () { return SECRET; },
-    gmPost: transport(answer), gmGet: transport(answer),
+    gmPost: transport(answer), gmGet: transport(answer), swaRead: transport(answer),
     ENRICH_URL: 'https://swa/api/enrich-contacts', PROSPECTS_URL: 'https://swa/api/vendor-prospects',
     domainOf: function (u) { return String(u || '').replace(/^https?:\/\/(www\.)?/, '').split('/')[0]; },
     normName: function (s) { return String(s || '').toLowerCase().replace(/[^a-z0-9]+/g, ''); },
