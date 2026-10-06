@@ -220,6 +220,13 @@ function statics() {
   var verLine = (meta.match(/@version\s+(\S+)/) || [])[1];
   A.ok('@version == VER', SRC.indexOf("var VER = '" + verLine + "'") > 0);
 
+  // dock launcher (0.2.0): row only on the two routes, no floating fallback, Core classifies the key
+  A.ok('dock: registers key ai-proposal', /id: 'bwn:dock:register', key: DOCK_KEY/.test(SRC) && /var DOCK_KEY = 'ai-proposal';/.test(SRC));
+  A.ok('dock: unregisters off-route', /dockPresence\(!!rt\);/.test(SRC) && /id: 'bwn:dock:unregister', key: DOCK_KEY/.test(SRC));
+  A.ok('dock: panel renders only while opened from the dock', /if \(!rt \|\| !document\.body \|\| !isOpen\) \{ removePanel\(\); return; \}/.test(SRC));
+  A.ok('dock: no Show/Hide anchored header left', !/data-act="toggle"/.test(SRC));
+  var CORE = fs.readFileSync(path.join(__dirname, '..', 'bwn-suite-core.user.js'), 'utf8');
+  A.ok('dock: Core policy classifies ai-proposal (fail-closed dock would hide it)', /BWN_DOCK_POLICY\['ai-proposal'\] = \{ minRank: 1, perms: \[\] \}/.test(CORE));
   function mutated(from, to) {
     if (LOGIC.split(from).length !== 2) throw new Error('mutation target not unique: ' + from);
     return load(LOGIC.replace(from, to));

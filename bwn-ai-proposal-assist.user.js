@@ -1,8 +1,8 @@
 // ==UserScript==
 // @name         BWN AI Proposal Assist (Broadway National)
 // @namespace    broadwaynational.bwn
-// @version      0.1.1
-// @description  Read-only helper around Umbrava's AI client-proposal generator. Three opt-in panels, all OFF until switched on: (1) Pre-flight on a vendor proposal's details page reads the line grid by header text and flags line shapes the AI cannot fix later - travel/labor not named "N Man Travel" / "N Man", one line covering several trips, a single lumped Material line, equipment or removal filed under Material/Other, missing $0 Shipping and Disposal, blank Trip #, numeric UOM, vendor total over the client NTE - with a recommended-lines table; (2) a prompt builder on the AI preview page that assembles the Generate prompt from form fields in a fixed order with a live 1,000-character hard stop, Copy and Insert buttons, and saved per-client templates; (3) a post-generate checker that passively reads the GenerateAIProposalPreview / ReworkAIProposal responses the app already receives and shows pass/fail (charge below cost, negative or >35% materials markup, travel quantity, non-rate-card ranges, total vs NTE, banned headings, verbatim lines, Materials/Equipment section) plus the server's validationErrors text when Generate fails. Never calls the API itself, never reads auth headers, never edits the grid, never clicks anything it did not create, never saves, submits or approves.
+// @version      0.2.0
+// @description  Read-only helper around Umbrava's AI client-proposal generator. Opens from an "AI Proposal" row in the BWN Suite dock (bwn:dock:*, needs bwn-suite-core 1.94.5+) that appears only on a vendor proposal page and the AI preview Generate leads to - there is no floating button. Three opt-in sections, all OFF until switched on: (1) Pre-flight on a vendor proposal's details page reads the line grid by header text and flags line shapes the AI cannot fix later - travel/labor not named "N Man Travel" / "N Man", one line covering several trips, a single lumped Material line, equipment or removal filed under Material/Other, missing $0 Shipping and Disposal, blank Trip #, numeric UOM, vendor total over the client NTE - with a recommended-lines table; (2) a prompt builder that assembles the Generate prompt from form fields in a fixed order with a live 1,000-character hard stop, Copy and Insert (armed before the Generate modal opens, because the modal makes the rest of the page inert), and saved per-client templates; (3) a post-generate checker that passively reads the GenerateAIProposalPreview / ReworkAIProposal responses the app already receives and shows pass/fail (charge below cost, negative or >35% materials markup, travel quantity, non-rate-card ranges, total vs NTE, banned headings, verbatim lines, Materials/Equipment section) plus the server's validationErrors text when Generate fails. Never calls the API itself, never reads auth headers, never edits the grid, never clicks anything it did not create, never saves, submits or approves.
 // @downloadURL  https://raw.githubusercontent.com/Intermu/userscripts/main/bwn-ai-proposal-assist.user.js
 // @updateURL    https://raw.githubusercontent.com/Intermu/userscripts/main/bwn-ai-proposal-assist.user.js
 // @match        https://app.umbrava.com/*
@@ -27,7 +27,7 @@
 (function () {
   'use strict';
 
-  var VER = '0.1.1';   // keep in step with @version
+  var VER = '0.2.0';   // keep in step with @version
   // Duplicate-init guard: @grant none shares the page window, so a second install (two copies, a
   // reinstall without reload) sees the first one's stamp and stands down instead of double-tapping.
   if (window.__bwnApaInit) { console.warn('[BWN APA] already initialised (v' + window.__bwnApaInit + ') - second copy inert'); return; }
@@ -418,6 +418,8 @@
       if (!on('checker') || !rt) return;   // Generate fires from the vendor proposal modal
       logAction('checker: ' + op + ' response read');
       lastCheck = { op: op, json: json, wo: rt.wo };
+      var cr = checkResult(rt);
+      dockBadge(cr.res ? String(cr.res.filter(function (o) { return o.level === 'fail'; }).length || '✓') : '!');
       render();
     });
   } catch (e) { console.warn('[BWN APA] response tap failed to install:', e); }
@@ -647,35 +649,39 @@
     p.querySelector('[data-act="insert"]').disabled = st.over || (!findPromptBox() && !(rt && rt.kind === 'vp'));
   }
 
+  // -> {errs, pv, res}; res is null when the response carried no preview.
+  function checkResult(rt) {
+    var j = lastCheck.json, pl = payloadOf(j), errs = errorsOf(j);
+    var pv = pl && (pl.preview || pl.result || (pl.lineItems ? pl : null));
+    if (errs.length || !pv) return { errs: errs, pv: null, res: null };
+    var c = ctxGet(rt.wo), f = form || {};
+    return { errs: errs, pv: pv, res: checkPreview(pv, {
+      nte: readNte() != null ? readNte() : (c.nte == null ? null : c.nte),
+      ranges: parseRanges(f.ranges), verbatim: lines(f.verbatim), trips: c.trips || null
+    }) };
+  }
+
   function checkerHtml(rt) {
     if (!on('checker')) return '';
     if (!lastCheck || lastCheck.wo !== rt.wo) return '<h4>Post-generate check</h4><p class="off">Waiting for Generate or Revise - nothing is sent by this panel.</p>';
-    var j = lastCheck.json, pl = payloadOf(j), errs = errorsOf(j);
-    var pv = pl && (pl.preview || pl.result || (pl.lineItems ? pl : null));
-    var h = '<h4>Post-generate check (' + esc(lastCheck.op) + ')</h4>';
-    if (errs.length || !pv) return h + list([{ level: 'fail', msg: 'Generate failed. Server said:' }].concat(
-      (errs.length ? errs : ['(no error text in the response)']).map(function (e) { return { level: 'warn', msg: e }; })));
-    var c = ctxGet(rt.wo), f = form || {};
-    var res = checkPreview(pv, {
-      nte: readNte() != null ? readNte() : (c.nte == null ? null : c.nte),
-      ranges: parseRanges(f.ranges), verbatim: lines(f.verbatim), trips: c.trips || null
-    });
-    return h + list(res) + (pv.reasoning ? '<details><summary>AI reasoning</summary><pre>' + esc(pv.reasoning) + '</pre></details>' : '');
+    var cr = checkResult(rt), h = '<h4>Post-generate check (' + esc(lastCheck.op) + ')</h4>';
+    if (!cr.res) return h + list([{ level: 'fail', msg: 'Generate failed. Server said:' }].concat(
+      (cr.errs.length ? cr.errs : ['(no error text in the response)']).map(function (e) { return { level: 'warn', msg: e }; })));
+    return h + list(cr.res) + (cr.pv.reasoning ? '<details><summary>AI reasoning</summary><pre>' + esc(cr.pv.reasoning) + '</pre></details>' : '');
   }
 
   function render() {
     var rt = routeOf(location.pathname);
-    if (!rt || !document.body) { removePanel(); return; }
+    if (!rt || !document.body || !isOpen) { removePanel(); return; }
     var p = ensurePanel();
-    var open = settings.open === true;
     var body = rt.kind === 'vp'
       ? preflightHtml(rt) + builderHtml(rt) + checkerHtml(rt)
       : builderHtml(rt) + checkerHtml(rt);
     var focusId = document.activeElement && inPanel(document.activeElement) ? document.activeElement.id : null;
     var oldB = p.querySelector('.b'), scroll = oldB ? oldB.scrollTop : 0;   // keep the reader's place across re-renders
     p.innerHTML = '<div class="h"><b>AI Proposal Assist</b><span class="mono">v' + esc(VER) + '</span>' +
-      '<button data-act="toggle" aria-expanded="' + open + '">' + (open ? 'Hide' : 'Show') + '</button></div>' +
-      (open ? '<div class="b">' + (body || '<p class="off">No feature on for this page.</p>') + toggles() + '</div>' : '');
+      '<button data-act="close" aria-label="Close AI Proposal Assist">×</button></div>' +
+      '<div class="b">' + (body || '<p class="off">No feature on for this page.</p>') + toggles() + '</div>';
     updatePrompt();
     var newB = p.querySelector('.b');
     if (newB) newB.scrollTop = scroll;
@@ -715,7 +721,7 @@
     var b = ev.target.closest && ev.target.closest('button[data-act]');
     if (!b || b.disabled) return;
     var act = b.dataset.act;
-    if (act === 'toggle') { settings.open = !(settings.open === true); lsSet(LS_SET, settings); render(); return; }
+    if (act === 'close') { closePanel(); return; }
     if (!form) return;
     var text = buildPrompt(form);
     if (act === 'copy' && !promptState(text).over) {
@@ -741,6 +747,37 @@
     }
   }
 
+  // ---- launcher: a row in the BWN Suite dock (bwn:dock:* host in bwn-suite-core) ---------------
+  // Registered only on the vendor proposal page and the ai-preview page Generate lands on; gone
+  // everywhere else (same reconcile as bwn-dispatch). No floating fallback: without Core there is no
+  // launcher. Core's BWN_DOCK_POLICY must carry DOCK_KEY or the row stays hidden (fail-closed).
+  var DOCK_KEY = 'ai-proposal';
+  var isOpen = false, dockOn = false;
+  function bus(detail) { try { document.dispatchEvent(new CustomEvent('bwn:evt', { detail: detail })); } catch (e) { /* no bus */ } }
+  function dockPresence(show, force) {
+    if (show && (!dockOn || force)) bus({ id: 'bwn:dock:register', key: DOCK_KEY, label: 'AI Proposal', icon: '✨', weight: 30,
+      title: 'Pre-flight, prompt builder and post-generate check for the AI client proposal' });
+    else if (!show && dockOn) bus({ id: 'bwn:dock:unregister', key: DOCK_KEY });
+    dockOn = show;
+  }
+  function dockBadge(b) { if (dockOn) bus({ id: 'bwn:dock:update', key: DOCK_KEY, badge: b }); }
+  function openPanel() {
+    if (!routeOf(location.pathname)) return;
+    bus({ id: 'bwn:drawer:open', key: DOCK_KEY });
+    isOpen = true;
+    dockBadge('');
+    render();
+  }
+  function closePanel() { isOpen = false; removePanel(); }
+  document.addEventListener('bwn:evt', function (e) {
+    var d = e && e.detail;
+    if (!d) return;
+    if (d.id === 'bwn:dock:host' || d.id === 'bwn:dock:ping') dockPresence(!!routeOf(location.pathname), true);
+    if (d.id === 'bwn:dock:open' && d.key === DOCK_KEY) { if (isOpen) closePanel(); else openPanel(); }
+    if (d.id === 'bwn:drawer:open' && d.key !== DOCK_KEY && isOpen) closePanel();   // another tool took the slot
+  });
+  document.addEventListener('keydown', function (e) { if (e.key === 'Escape' && isOpen) closePanel(); });
+
   // ---- lifecycle: route check on init and on every SPA route change; grid via observer --------
   var mo = null, moTimer = null;
   function onRoute() {
@@ -748,7 +785,8 @@
     if (mo) { mo.disconnect(); mo = null; }
     gridSig = '';
     armed = null;
-    if (!rt) { removePanel(); return; }
+    dockPresence(!!rt);
+    if (!rt) { closePanel(); return; }
     render();
     if (rt.kind === 'vp' || rt.kind === 'ai') {
       // The grid / Generate box mount after the route; re-render when the page (not our panel) changes.
@@ -778,7 +816,7 @@
     onRoute();
   }
 
-  console.info('[BWN APA] v' + VER + ' - read-only AI proposal assist; features off until enabled in the panel');
+  console.info('[BWN APA] v' + VER + ' - read-only AI proposal assist; dock row on vendor proposal pages; features off until enabled in the panel');
   if (document.readyState === 'loading') document.addEventListener('DOMContentLoaded', boot);
   else boot();
 })();

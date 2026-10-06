@@ -33,13 +33,26 @@ If the grid headers or the Generate textarea aren't found, the panel shows "layo
 The activity log keeps action labels and ISO timestamps only, capped at 50. It never stores
 prompt text, amounts, ids or names.
 
+## Launcher (0.2.0)
+
+The panel opens from an "AI Proposal" row in the BWN Suite dock (key `ai-proposal`, sparkle
+icon). The row exists only on the vendor proposal details route and on the `ai-preview` route
+that Generate navigates to. Everywhere else the row is unregistered, using the same reconcile as
+bwn-dispatch.
+
+- **Closing:** the panel closes on ×, on Esc, or when another dock tool opens.
+- **Badge:** a checker result that arrives while the panel is closed badges the row. The badge
+  shows the fail count, a check mark when nothing failed, or `!` when Generate failed.
+- **No fallback:** there is no floating button, so without Core there is no launcher.
+- **Core dependency:** Core's dock is fail-closed. The row stays hidden until the user's Core
+  carries `BWN_DOCK_POLICY['ai-proposal']`, which ships in Core 1.94.5. Tell users to update Core
+  along with this script.
+
 ## Out of scope for v1
 
 - Revise automation. Field testing showed Revise rewrites the whole scope and ignores "do not
   change".
 - Any API call of its own, any read of auth headers, any grid edit, any save/submit/approve.
-- A Core dock row. The panel is self-contained, so no Core release is needed (see the
-  `new-dock-row-needs-core-update` memory). Fold it into the dock later if it graduates.
 
 ## Rollout
 
