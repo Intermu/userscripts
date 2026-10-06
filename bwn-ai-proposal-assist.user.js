@@ -646,7 +646,7 @@
       var d = e && e.detail;
       if (!d || d.id !== 'ai:apaDrafted' || d.rid !== rid) return;
       var dr = parseDraft(d.text);
-      if (!dr || (!dr.issue && !dr.trips.length)) { finish(d.text ? 'The AI reply could not be read - nothing was changed.' : 'The AI returned nothing (no AI key in BWN Suite AI, rank not allowed, or the service failed) - nothing was changed.'); return; }
+      if (!dr || (!dr.issue && !dr.trips.length)) { finish(d.text ? 'The AI reply could not be read - nothing was changed.' : 'The AI returned nothing - no AI key in BWN Suite AI, rank not allowed, the service failed, or the draft failed the server checks (it must be one issue line plus one step line per trip, no prices). Nothing was changed.'); return; }
       if (dr.issue) form.issue = dr.issue;
       if (dr.trips.length) form.trips = dr.trips.join('\n');
       logAction('ai draft filled');
