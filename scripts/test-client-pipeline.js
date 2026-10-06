@@ -8,6 +8,8 @@
 //                  non-canceled onSiteDate => confirmed appointment).
 //   CU-PIPELINE  - cuParseFacts / cuMergeFacts / cuBuildExtractionInput / cuBuildRenderInput /
 //                  cuSafetyCheck / cuFallbackDraft.
+//   CU-DRAFTCACHE / CU-SHOWRESULT / CU-REFINE - run together (stubbed modal + transport) to prove
+//                  a client Refine is blocked by the same validator and only validated text is restored.
 //
 // It CANNOT prove the LLM stages (extraction/render) - those need a live model. It proves the
 // guarantees that must hold regardless of what the model returns: a target completion date is
@@ -275,6 +277,170 @@ CTRL.forEach(function (c) {
     if (c.ok) fired = c.ok();
     else { var fns = mergeFrom(c.f(PIPE)); fired = c.check(fns); }
   } catch (e) { fired = true; }   // a mutation that throws is also "caught"
+  A.ok('CONTROL fires: ' + c.what, fired, 'mutation produced no observable change - the control proves nothing');
+});
+
+// ---------------------------------------------------------------------------
+console.log('-- Refine gate: a client refinement passes the same blocking check (real showResult + refine) --');
+// The REAL draft cache + pipeline helpers + showResult + cuRefineRestore/refineRun run together in
+// one sandbox (one page instance). Only the modal, transport and page are stubbed. generate()
+// answers synchronously from a fixture queue, exactly as the stream-complete callback would, so
+// every assertion below is a real state transition, not a helper's return value.
+var SHOWRESULT = slice('// ===== CU-SHOWRESULT:START =====', '// ===== CU-SHOWRESULT:END =====', 'showResult block');
+var REFINEB = slice('// ===== CU-REFINE:START =====', '// ===== CU-REFINE:END =====', 'refine block');
+var CU = { name: 'Client Update', pipeline: true, scrub: true, maxTokens: 1500 };
+var AUDIT = { name: 'WO Audit', scrub: false, maxTokens: 6000 };
+var STATS = { used: 3, total: 5 };
+var noop = function () {};
+
+function loadRefine(opts) {
+  opts = opts || {};
+  var log = { results: [], errors: [], info: [] };
+  var queue = [];
+  var sandbox = { Date: Date, String: String, Array: Array, Object: Object, JSON: JSON, RegExp: RegExp, Math: Math, Error: Error,
+    console: { info: function () { log.info.push([].slice.call(arguments).join(' ')); }, warn: noop },
+    bwnWOId: function () { return 'W-1'; }, location: { pathname: '/wo' }, PROMPT_V: 4,
+    mode: opts.mode || CU, vendors: ['Acme Electric'], h: { completeBy: '10/20/2026' }, runWO: 'W-1',
+    REFINE: { shorter: { label: 'Shorter', directive: 'Make it shorter.' } },
+    outputLeakCheck: function () { return []; },
+    m: {
+      // m.result is the ONLY way text reaches the textarea, and Copy reads that textarea.
+      result: function (text, stats, regen, note) { log.results.push({ text: text, note: note }); },
+      error: function (msg) { log.errors.push(msg); },
+      loading: noop, estimate: noop, finishProgress: noop, streamProgress: noop
+    },
+    generate: function (sys, input, maxT, cb) { var next = queue.shift(); if (next instanceof Error) cb(next); else cb(null, next); }
+  };
+  vm.createContext(sandbox);
+  var api = vm.runInContext('(function(){\n' + DRAFTCACHE + '\n' + PIPE + '\n' + (opts.show || SHOWRESULT) + '\n' + (opts.refine || REFINEB) + '\n' +
+    'return { showResult: showResult, refineRun: refineRun, cacheSet: draftCacheSet, cacheGet: function () { return draftCacheGet(mode); } };\n})()',
+    sandbox, { filename: 'cu-refine.js' });
+  api.log = log;
+  api.last = function () { return log.results[log.results.length - 1] || null; };
+  api.refine = function (out) { queue.push(out); var l = api.last(); api.refineRun('shorter', l ? l.text : 'draft', STATS, 'base note', noop); };
+  api.shown = function (text) { return log.results.some(function (r) { return r.text === text; }); };
+  return api;
+}
+function seeded(text, hasAppt, opts) {
+  var r = loadRefine(opts);
+  r.showResult(text, STATS, 'base note', noop, undefined, { hasAppt: !!hasAppt });
+  return r;
+}
+
+var SAFE_A = 'We confirmed the light fixture needs a replacement driver. The work order remains in scheduling, with a current target completion date of October 20, 2026.';
+var SAFE_B = 'The replacement driver has been identified. The work order remains in scheduling, with a current target completion date of October 20, 2026.';
+var SCHED = 'Service is scheduled for October 9, 2026 between 8 AM and 12 PM.';
+var SCHED_B = 'Service is scheduled for October 9, 2026. The crew will bring a lift for the high fixture.';
+var UNSAFE = {
+  rate: 'The technician will return at an hourly rate to finish the work.',
+  vendor: 'Acme Electric will return to finish the work.',
+  nte: 'The repair stays within the NTE for this work order.',
+  appt: 'Service is scheduled for October 9, 2026.'
+};
+var MSG_WITHHELD = 'Refinement withheld; previous safe draft restored. Unsaved edits were not retained.';
+var MSG_FAILED = 'Refinement failed; previous safe draft restored. Unsaved edits were not retained.';
+var MSG_WITHHELD_FB = 'Refinement withheld; safe fallback shown. Unsaved edits were not retained.';
+var MSG_FAILED_FB = 'Refinement failed; safe fallback shown. Unsaved edits were not retained.';
+
+// Fixture sanity: the safe drafts really are safe, and each unsafe one really is flagged.
+A.ok('fixture: SAFE_A passes the validator', P.cuSafetyCheck(SAFE_A, ['Acme Electric'], false).safe);
+A.ok('fixture: SAFE_B passes the validator', P.cuSafetyCheck(SAFE_B, ['Acme Electric'], false).safe);
+Object.keys(UNSAFE).forEach(function (k) { A.ok('fixture: ' + k + ' is flagged', !P.cuSafetyCheck(UNSAFE[k], ['Acme Electric'], false).safe); });
+
+// 1. Safe refinement displays and becomes the validated draft.
+var r1 = seeded(SAFE_A, false);
+r1.refine(SAFE_B);
+A.eq('safe refinement is displayed', r1.last().text, SAFE_B);
+A.eq('safe refinement becomes the cached draft', r1.cacheGet().text, SAFE_B);
+A.ok('...with a validation record', !!r1.cacheGet().safe);
+A.eq('safe refinement raises no error', r1.log.errors.length, 0);
+
+// 2. Each unsafe refinement is withheld: never displayed, never cached, prior safe draft restored.
+Object.keys(UNSAFE).forEach(function (k) {
+  var r = seeded(SAFE_A, false);
+  r.refine(UNSAFE[k]);
+  A.ok('unsafe (' + k + ') never reaches display / Copy', !r.shown(UNSAFE[k]));
+  A.ok('unsafe (' + k + ') never reaches the cache', r.cacheGet().text !== UNSAFE[k]);
+  A.eq('unsafe (' + k + ') restores the prior validated draft', r.last().text, SAFE_A);
+  A.eq('unsafe (' + k + ') shows the fixed withheld message', r.last().note, MSG_WITHHELD);
+  A.eq('unsafe (' + k + ') raises no modal error', r.log.errors.length, 0);
+  A.ok('unsafe (' + k + ') logs labels, never the generated text', r.log.info.some(function (l) { return /refinement withheld:/.test(l); }) && !r.log.info.some(function (l) { return l.indexOf(UNSAFE[k]) !== -1; }));
+});
+
+// 3. A failed request never calls m.error in pipeline mode and never shows the raw error.
+var r3 = seeded(SAFE_A, false);
+r3.refine(new Error('HTTP 529 upstream overloaded: raw body'));
+A.eq('failed refinement: no m.error in pipeline mode', r3.log.errors.length, 0);
+A.eq('failed refinement restores the prior validated draft', r3.last().text, SAFE_A);
+A.eq('failed refinement shows the fixed failure message', r3.last().note, MSG_FAILED);
+A.ok('the raw error text is never displayed', !r3.log.results.some(function (x) { return String(x.note).indexOf('529') !== -1 || String(x.text).indexOf('529') !== -1; }));
+
+// 4. Restoration never trusts an unchecked cache entry: an unsafe cached fixture is rechecked
+//    and refused, and the validated deterministic fallback is shown instead.
+var r4 = loadRefine();
+r4.cacheSet(CU, UNSAFE.vendor, STATS, 'injected');   // cached with NO validation record
+r4.refine(UNSAFE.rate);
+A.ok('an unsafe cached fixture is never restored', !r4.shown(UNSAFE.vendor));
+A.eq('...the safe fallback is shown instead', r4.last().note, MSG_WITHHELD_FB);
+A.ok('...and the fallback itself passes the validator', P.cuSafetyCheck(r4.last().text, ['Acme Electric'], false).safe);
+A.ok('...built only from the target completion date (invents nothing)', /target completion date of October 20, 2026/.test(r4.last().text));
+
+// 5. No validated state at all: failure and withholding both land on the validated fallback.
+var r5 = loadRefine();
+r5.refine(new Error('network'));
+A.eq('missing state + failure -> safe fallback', r5.last().note, MSG_FAILED_FB);
+var r5b = loadRefine();
+r5b.refine(UNSAFE.nte);
+A.eq('missing state + unsafe -> safe fallback', r5b.last().note, MSG_WITHHELD_FB);
+A.ok('missing state: the unsafe text is never shown', !r5b.shown(UNSAFE.nte));
+
+// 6. A validated appointment context survives the reopen fast-path and stays usable.
+var r6 = seeded(SCHED, true);
+var c6 = r6.cacheGet();
+r6.showResult(c6.text, c6.stats, c6.note, noop, 'saved draft', c6.safe);   // == the reopen fast-path
+A.ok('reopen keeps the validated appointment context', !!r6.cacheGet().safe && r6.cacheGet().safe.hasAppt === true);
+r6.refine(SCHED_B);
+A.eq('a confirmed-appointment refinement is allowed after reopen', r6.last().text, SCHED_B);
+r6.refine(new Error('timeout'));
+A.eq('a later failure restores the validated scheduled draft', r6.last().text, SCHED_B);
+A.eq('...with the restored message', r6.last().note, MSG_FAILED);
+// Contrast: the same scheduled text cached WITHOUT a validation record fails closed.
+var r6b = loadRefine();
+r6b.cacheSet(CU, SCHED, STATS, 'injected');
+r6b.refine(new Error('timeout'));
+A.ok('an unverified scheduled draft is not restored (fails closed)', !r6b.shown(SCHED) && r6b.last().note === MSG_FAILED_FB);
+
+// 7. Non-pipeline modes are unchanged: unsafe text still displays (advisory only), errors still raw.
+var r7 = seeded('Internal audit text.', false, { mode: AUDIT });
+r7.refine(UNSAFE.vendor);
+A.eq('non-pipeline refine output is shown as before', r7.last().text, UNSAFE.vendor);
+var r7b = seeded('Internal audit text.', false, { mode: AUDIT });
+r7b.refine(new Error('boom'));
+A.eq('non-pipeline refine error still goes to m.error(err.message)', r7b.log.errors, ['boom']);
+
+// 8. The initial pipeline hands over validation records only after a passing check.
+A.ok('pipeline success records its validated appointment context', /if \(chk\.safe\) \{ m\.finishProgress\(\); showResult\(text, stats, displayNote, regenFn, undefined, \{ hasAppt: hasAppt \}\); return; \}/.test(SRC));
+A.ok('pipeline fallback is validated before it is recorded', /var fchk = cuSafetyCheck\(text, vendors, hasAppt\);/.test(SRC) && /fchk\.safe \? \{ hasAppt: hasAppt \} : null\);/.test(SRC));
+A.ok('reopen fast-path carries the cached record, granting no new trust', /startCollect, disp, cached\.safe\);/.test(SRC));
+A.ok('the refine block makes no web-storage call', !/(sessionStorage|localStorage)\.\w/.test(REFINEB + SHOWRESULT));
+A.eq('the refine block adds no LLM call of its own', (REFINEB.match(/generate\(/g) || []).length, 1);
+
+console.log('-- Refine gate negative controls: each mutant must turn a case above red --');
+var RCTRL = [
+  { what: 'removing the refine gate lets an unsafe refinement display',
+    ok: function () { var r = loadRefine({ refine: mutate(REFINEB, 'var chk = cuSafetyCheck(text, vendors, hasAppt);', 'var chk = { safe: true, violations: [] };') }); r.showResult(SAFE_A, STATS, 'n', noop, undefined, { hasAppt: false }); r.refine(UNSAFE.vendor); return r.shown(UNSAFE.vendor); } },
+  { what: 'showing the text on the unsafe branch instead of restoring',
+    ok: function () { var r = loadRefine({ refine: mutate(REFINEB, "cuRefineRestore(stats, note, regenFn, 'withheld', chk.violations);", 'showResult(text, stats, note, regenFn);') }); r.showResult(SAFE_A, STATS, 'n', noop, undefined, { hasAppt: false }); r.refine(UNSAFE.rate); return r.shown(UNSAFE.rate); } },
+  { what: 'restoring a cache entry without rechecking it',
+    ok: function () { var r = loadRefine({ refine: mutate(REFINEB, 'if (cuSafetyCheck(prev.text, vendors, pAppt).safe) {', 'if (true) {') }); r.cacheSet(CU, UNSAFE.vendor, STATS, 'x'); r.refine(UNSAFE.rate); return r.shown(UNSAFE.vendor); } },
+  { what: 'sending a pipeline refine failure back to the raw m.error',
+    ok: function () { var r = loadRefine({ refine: mutate(REFINEB, "if (err) { cuRefineRestore(stats, note, regenFn, 'failed', null); return; }", 'if (err) { m.error(err.message); return; }') }); r.showResult(SAFE_A, STATS, 'n', noop, undefined, { hasAppt: false }); r.refine(new Error('raw')); return r.log.errors.length > 0; } },
+  { what: 'recording a validation record for unvalidated text',
+    ok: function () { var r = loadRefine({ show: mutate(SHOWRESULT, 'draftCacheSet(mode, text, stats, note, safe);', 'draftCacheSet(mode, text, stats, note, { hasAppt: true });') }); r.showResult(SCHED, STATS, 'n', noop); r.refine(new Error('x')); return r.last().text === SCHED; } }
+];
+RCTRL.forEach(function (c) {
+  var fired;
+  try { fired = c.ok(); } catch (e) { fired = !/MUTATION TARGET/.test(String(e && e.message)); }   // a missing anchor is a broken control, not a catch
   A.ok('CONTROL fires: ' + c.what, fired, 'mutation produced no observable change - the control proves nothing');
 });
 

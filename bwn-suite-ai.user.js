@@ -3421,8 +3421,11 @@
       var id = bwnWOId() || location.pathname;
       return 'bwn_draft_' + id + '_' + mode.name.replace(/\s+/g, '');
     }
-    function draftCacheSet(mode, text, stats, note) {
-      cuDraftMem[draftCacheKey(mode)] = { text: text, stats: stats, note: note || '', ts: Date.now(), promptV: PROMPT_V };
+    // `safe` is passed ONLY by a caller that has just run cuSafetyCheck on exactly this text; it
+    // records the appointment context that check used. An entry cached without it is unverified
+    // and must be rechecked before it is ever restored (cuRefineRestore). Memory only, as above.
+    function draftCacheSet(mode, text, stats, note, safe) {
+      cuDraftMem[draftCacheKey(mode)] = { text: text, stats: stats, note: note || '', ts: Date.now(), promptV: PROMPT_V, safe: safe ? { hasAppt: !!safe.hasAppt } : null };
     }
     function draftCacheGet(mode) {
       var d = cuDraftMem[draftCacheKey(mode)];
@@ -3660,7 +3663,9 @@
       // Render the draft, (re)cache it, and wire the Refine actions. refineFn re-prompts
       // on the CURRENT (possibly hand-edited) text \u2014 one quick pass, no re-collect. The
       // BASE note is cached; displayNote (with the "saved draft" stamp) is shown only.
-      function showResult(text, stats, note, regenFn, displayNote) {
+      // ===== CU-SHOWRESULT:START =====
+      // `safe` (optional): { hasAppt } from a cuSafetyCheck that just passed on this exact text.
+      function showResult(text, stats, note, regenFn, displayNote, safe) {
         // The API stream can outlive a navigation: draftCacheKey derives the WO id
         // at WRITE time, so a draft finishing after a WO switch would cache WO A's
         // text under WO B. Never cache or present a draft under a different WO.
@@ -3668,7 +3673,7 @@
           m.error('The page changed while drafting - this draft belonged to a different work order and was discarded. Reopen AI Draft on the WO you want.');
           return;
         }
-        draftCacheSet(mode, text, stats, note);
+        draftCacheSet(mode, text, stats, note, safe);
         // Belt-and-braces review banner on EVERY display path (fresh, cached, refined). For the
         // client pipeline this is the same validator that gates generation (hasConfirmedAppt is
         // passed true here - an unconfirmed-appointment claim was already blocked upstream, so
@@ -3677,6 +3682,7 @@
           : mode.scrub ? outputLeakCheck(text, vendors) : [];
         m.result(text, stats, regenFn, displayNote || note, function (key, cur) { refineRun(key, cur, stats, note, regenFn); }, warns);
       }
+      // ===== CU-SHOWRESULT:END =====
 
       // ---- Client-safety pipeline runner (CLIENT_MODE) ---------------------
       // Stage 1 extract (JSON) -> deterministic merge -> Stage 2 render -> blocking safety
@@ -3701,7 +3707,8 @@
             var merged = cuMergeFacts(null, ctx);
             var text = cuFallbackDraft(merged);
             m.finishProgress();
-            showResult(text, stats, (displayNote ? displayNote + ' · ' : '') + 'safe fallback \u2014 AI draft withheld', regenFn);
+            var fchk = cuSafetyCheck(text, vendors, hasAppt);
+            showResult(text, stats, (displayNote ? displayNote + ' · ' : '') + 'safe fallback \u2014 AI draft withheld', regenFn, undefined, fchk.safe ? { hasAppt: hasAppt } : null);
           }
 
           function render(merged, attempt) {
@@ -3714,7 +3721,7 @@
             generate(sys, input, mode.renderTokens, function (err, text) {
               if (err) { fail('render error'); return; }
               var chk = cuSafetyCheck(text, vendors, hasAppt);
-              if (chk.safe) { m.finishProgress(); showResult(text, stats, displayNote, regenFn); return; }
+              if (chk.safe) { m.finishProgress(); showResult(text, stats, displayNote, regenFn, undefined, { hasAppt: hasAppt }); return; }
               if (!attempt) { render(merged, { n: 1, flagged: chk.violations }); return; }   // one stricter regen
               fail('output still unsafe after a stricter regen: ' + chk.violations.join(', '));   // never show unsafe text
             });
@@ -3737,8 +3744,34 @@
           // tripCtxP never rejects, but stay defensive.
           var merged = cuMergeFacts(null, { targetCompletionDate: cuFriendlyDate(h.completeBy || null) });
           m.finishProgress();
-          showResult(cuFallbackDraft(merged), stats, 'safe fallback \u2014 context unavailable', regenFn);
+          var fbText = cuFallbackDraft(merged);
+          showResult(fbText, stats, 'safe fallback \u2014 context unavailable', regenFn, undefined, cuSafetyCheck(fbText, vendors, false).safe ? { hasAppt: false } : null);
         });
+      }
+
+      // ===== CU-REFINE:START =====
+      // Client pipeline only: a withheld or failed refinement never shows its own text or a raw
+      // error. It restores the last draft that passes cuSafetyCheck NOW (rechecked here, so an
+      // entry cached without a validation record is never restored unchecked), else the
+      // deterministic fallback. Fixed ASCII messages; violation labels are logged, never text.
+      function cuRefineRestore(stats, note, regenFn, kind, violations) {
+        if (violations) console.info('[BWN CU] refinement withheld:', violations.join(', '));
+        else console.info('[BWN CU] refinement request failed');
+        var lead = kind === 'withheld' ? 'Refinement withheld' : 'Refinement failed';
+        var prev = draftCacheGet(mode);
+        if (prev) {
+          var pAppt = !!(prev.safe && prev.safe.hasAppt);
+          if (cuSafetyCheck(prev.text, vendors, pAppt).safe) {
+            showResult(prev.text, prev.stats, prev.note, regenFn, lead + '; previous safe draft restored. Unsaved edits were not retained.', { hasAppt: pAppt });
+            return;
+          }
+        }
+        var fb = cuFallbackDraft(cuMergeFacts(null, { targetCompletionDate: cuFriendlyDate(h.completeBy || null) }));
+        if (cuSafetyCheck(fb, vendors, false).safe) {
+          showResult(fb, stats, note, regenFn, lead + '; safe fallback shown. Unsaved edits were not retained.', { hasAppt: false });
+          return;
+        }
+        m.error(lead + '. Close this window and regenerate the draft.');
       }
 
       function refineRun(key, cur, stats, note, regenFn) {
@@ -3752,14 +3785,28 @@
         var maxT = (key === 'longer') ? Math.round(mode.maxTokens * 1.4) : mode.maxTokens;   // Longer needs headroom or it truncates against the same cap
         var expChars = Math.max(400, maxT * 3.5);
         generate(sys, 'DRAFT TO REVISE:\n\n' + cur, maxT, function (err, text) {
-          if (err) { m.error(err.message); return; }
+          if (!mode.pipeline) {
+            if (err) { m.error(err.message); return; }
+            m.finishProgress();
+            showResult(text, stats, note, regenFn);
+            return;
+          }
+          // A refinement is client-facing output too: the SAME blocking check as the initial
+          // render runs BEFORE it can be displayed, cached or copied. Appointment context comes
+          // from the validated draft being refined; unknown context fails closed (false).
           m.finishProgress();
-          showResult(text, stats, note, regenFn);
+          if (err) { cuRefineRestore(stats, note, regenFn, 'failed', null); return; }
+          var prev = draftCacheGet(mode);
+          var hasAppt = !!(prev && prev.safe && prev.safe.hasAppt);
+          var chk = cuSafetyCheck(text, vendors, hasAppt);
+          if (chk.safe) { showResult(text, stats, note, regenFn, undefined, { hasAppt: hasAppt }); return; }
+          cuRefineRestore(stats, note, regenFn, 'withheld', chk.violations);
         }, function (soFar) {
           var words = (soFar.trim().match(/\S+/g) || []).length;
           m.streamProgress(Math.min(95, 20 + 75 * soFar.length / expChars), words + ' words\u2026');
         });
       }
+      // ===== CU-REFINE:END =====
 
       function startCollect(forceFresh) {
         m.loading('Collecting the full note history\u2026', 'one API read - scroll sweep only if that fails');
@@ -3834,7 +3881,7 @@
       var cached = draftCacheGet(mode);
       if (cached) {
         var disp = (cached.note ? cached.note + ' \u00b7 ' : '') + 'saved draft (' + draftAge(cached.ts) + ') \u2014 Regenerate for a fresh one';
-        showResult(cached.text, cached.stats, cached.note, startCollect, disp);   // instant; Regenerate runs a fresh collect + draft
+        showResult(cached.text, cached.stats, cached.note, startCollect, disp, cached.safe);   // instant; Regenerate runs a fresh collect + draft
       } else startCollect();
     }
 
