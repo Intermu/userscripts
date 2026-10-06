@@ -1,10 +1,10 @@
 // ==UserScript==
 // @name         BWN WO Audit (Broadway National)
 // @namespace    broadwaynational.bwn
-// @version      0.18.1
+// @version      0.19.0
 // @downloadURL  https://raw.githubusercontent.com/Intermu/userscripts/main/bwn-wo-audit.user.js
 // @updateURL    https://raw.githubusercontent.com/Intermu/userscripts/main/bwn-wo-audit.user.js
-// @description  Batch WO-audit tool. Upload a WO audit .xlsx; for each work order this reads its two most recent notes DIRECTLY from Umbrava's GraphQL API in-page (using your live Umbrava session - the same read the BWN Ops Suite AI drafts use), then asks the broadway-internal-ops SWA summarize route (x-bwn-key gated, Anthropic key server-side) to write a status note - for jobs aged over 30 days a dated "Over 30 - trade - event timeline - ECD" chain built from the WO's FULL note history (with a PAST/needs-ECD flag when the committed date has lapsed), otherwise a 1-3 sentence client-ready status note. Fills the audit's notes column and downloads the workbook, preserving every other cell and formula. It also reads each WO's live header (status, phase, priority, GP, DNE/NTE, PO/vendor, schedule) in the same call and writes a deterministic Audit Flags column (OVERDUE, NEG/LOW GP, NTE>DNE, NO VENDOR, UNSCHEDULED, STALE) computed with no AI - so the exception audit survives an AI outage. Runs entirely in the app.umbrava.com page so it inherits your Umbrava auth - no MCP, no pasted keys, nothing sensitive in this script. This replaces the old standalone WO_Audit_Automation.html SWA tool, whose server-side MCP path could not authenticate to Umbrava. After a run drafts its notes, the coordinator can post each drafted note as an INTERNAL Umbrava note onto its aged (>30d) work order - one explicit click per note (human-gated, idempotent), routed through the governed bwnGqlOp write path with its permission gate and audit trail. 0.17.0 adds an Operations Action List layer on top of the existing deterministic pipeline: three output modes (Detailed WO Audit / Operations Action List / Hybrid, default), a rules-based action engine that turns each WO into a prioritized (P0/P1/P2/Monitor) manager action with bucket, internal owner, external escalation, an operational-target due label, short risk flags, evidence and rule IDs, 16 structured audit columns appended to the source sheet, and a separate "WO Action List - YYYY.MM.DD" worksheet of the actionable rows - all deterministic, no AI opinions, source data never overwritten. 0.18.0 redesigns the Action List into an operational WORK QUEUE: two separate scores (Operational Risk vs Actionability), six queues (Immediate Intervention / Execute Today / Follow Up Today / Upcoming Watch / Blocked-Waiting / Closeout-Billing) plus an Action Undefined / Needs Triage exception, an explainable P0-P3 priority, a transparent Daily Rank (actionability first, risk second, age last), a valid-waiting-state test, meaningful-update / ECD / onsite-expected gating, and structured contradiction detection. The Action List worksheet is now grouped by queue with per-section counts; a flat filterable "Action Diagnostics" sheet carries the score components and evidence; the legacy audit/bucket columns and Dashboard/Rules sheets are preserved as the management layer.
+// @description  Batch WO-audit tool. Upload a WO audit .xlsx; for each work order this reads its two most recent notes DIRECTLY from Umbrava's GraphQL API in-page (using your live Umbrava session - the same read the BWN Ops Suite AI drafts use), then asks the broadway-internal-ops SWA summarize route (x-bwn-key gated, Anthropic key server-side) to write a status note - for jobs aged over 30 days a dated "Over 30 - trade - event timeline - ECD" chain built from the WO's FULL note history (with a PAST/needs-ECD flag when the committed date has lapsed), otherwise a 1-3 sentence client-ready status note. Fills the audit's notes column and downloads the workbook, preserving every other cell and formula. It also reads each WO's live header (status, phase, priority, GP, DNE/NTE, PO/vendor, schedule) in the same call and writes a deterministic Audit Flags column (OVERDUE, NEG/LOW GP, NTE>DNE, NO VENDOR, UNSCHEDULED, STALE) computed with no AI - so the exception audit survives an AI outage. Runs entirely in the app.umbrava.com page so it inherits your Umbrava auth - no MCP, no pasted keys, nothing sensitive in this script. This replaces the old standalone WO_Audit_Automation.html SWA tool, whose server-side MCP path could not authenticate to Umbrava. After a run drafts its notes, the coordinator can post each drafted note as an INTERNAL Umbrava note onto its aged (>30d) work order - one explicit click per note (human-gated, idempotent), routed through the governed bwnGqlOp write path with its permission gate and audit trail. 0.17.0 adds an Operations Action List layer on top of the existing deterministic pipeline: three output modes (Detailed WO Audit / Operations Action List / Hybrid, default), a rules-based action engine that turns each WO into a prioritized (P0/P1/P2/Monitor) manager action with bucket, internal owner, external escalation, an operational-target due label, short risk flags, evidence and rule IDs, 16 structured audit columns appended to the source sheet, and a separate "WO Action List - YYYY.MM.DD" worksheet of the actionable rows - all deterministic, no AI opinions, source data never overwritten. 0.18.0 redesigns the Action List into an operational WORK QUEUE: two separate scores (Operational Risk vs Actionability), six queues (Immediate Intervention / Execute Today / Follow Up Today / Upcoming Watch / Blocked-Waiting / Closeout-Billing) plus an Action Undefined / Needs Triage exception, an explainable P0-P3 priority, a transparent Daily Rank (actionability first, risk second, age last), a valid-waiting-state test, meaningful-update / ECD / onsite-expected gating, and structured contradiction detection. The Action List worksheet is now grouped by queue with per-section counts; a flat filterable "Action Diagnostics" sheet carries the score components and evidence; the legacy audit/bucket columns and Dashboard/Rules sheets are preserved as the management layer. 0.19.0 adds Client Update Reply: paste a Pilot FM's update request (their PO table or the email text) and each PO is matched to the loaded audit workbook - FM from its FM column, else the Client Open POs owner, conflicts shown - read live from Umbrava, and given a client-facing update under the Ops Suite Client Update rules (parity-pinned), with an output gate that rejects amounts, contacts, internal wording, filler and ungrounded dates and falls back to fixed client wording. One reply table per FM in the FM's own column order plus Update; every row must be ticked reviewed before it can be copied; safety/incident wording is flagged for a personal answer. Nothing is sent or stored.
 // @match        https://app.umbrava.com/*
 // @run-at       document-idle
 // @noframes
@@ -19,7 +19,7 @@
 (function () {
   'use strict';
 
-  var VER = '0.18.1';
+  var VER = '0.19.0';
   var FONT = "-apple-system,BlinkMacSystemFont,'Segoe UI','Helvetica Neue',Arial,sans-serif";
   // Inline SVG icons (no external image/font). 18px, stroke=currentColor so they take card color.
   function _svg(p, o) { return '<svg class="woa-i" viewBox="0 0 24 24" width="18" height="18" fill="none" stroke="currentColor" stroke-width="1.9" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"' + (o || '') + '>' + p + '</svg>'; }
@@ -1841,6 +1841,288 @@
   }
   // ===== BWN WO-AUDIT STATE END ==================================================================
 
+  // ===== BWN WO-AUDIT CLIENT REPLY START (pure; sliced by scripts/test-wo-audit-client-reply.js) ===
+  // Client Update Reply (0.19.0). Pilot FMs (the FM IS the Store Analyst: the Pilot PO owner) email a
+  // list of POs asking where each job is. This turns that pasted request into one reply table per
+  // FM. Each PO resolves through the loaded audit workbook - FM from its FM column, else the Client
+  // Open POs sheet's "WO / PO Owner" (the two agree on 206 of 208 shared POs, measured 10/02) - the
+  // WO is read live from Umbrava, and the update is held to the SAME client-facing rules as the Ops
+  // Suite Client Update draft. Nothing is sent and nothing is stored: every row is reviewed by a
+  // person before it is copied into a reply.
+
+  // PARITY-PINNED to bwn-suite-ai.user.js SYSTEM_PROMPT_CLIENT by scripts/test-wo-audit-client-reply.js.
+  // These are the client-facing note rules of record - edit both or the harness fails.
+  var WOA_CLIENT_SYSTEM = [
+    'You write brief, client-facing status updates for facilities maintenance work orders, sent by Broadway National to an external client.',
+    'RULES:',
+    '1. Use ONLY facts present in the provided data and notes. Never infer or invent status, dates, or progress.',
+    '2. If there is no confirmed scheduling date or next step in the notes, SAY SO PLAINLY (e.g., "No confirmed scheduling date yet as of [latest note date]."). Do not soften gaps or imply progress that is not stated.',
+    '3. Never output dollar amounts, pricing, markup, margin, vendor/contractor company names, personal contacts, or any internal commentary, even if present in the input.',
+    '3b. Notes may contain forwarded email threads (From/To/Sent headers, names, emails, phone numbers). Summarize only the operational substance - what happened on site, scheduling, progress, what is being awaited - and never reproduce names, email addresses, phone numbers, or pricing from them.',
+    '3c. Input notes come from mixed sources (Client, Vendor, Internal, Billing, Email). Use them ALL as factual background to determine the true current state, but the OUTPUT must read as a clean external update: never reference internal processes, note labels, vendor coordination chatter, approvals, or billing mechanics. Translate internal facts into client-appropriate status (e.g., a vendor confirming Friday becomes "service is scheduled for Friday").',
+    '4. Professional, concise, plain language. Lead with the current status, then the next step or what is being awaited.',
+    '5. Output ONLY the update text - no greeting, sign-off, or subject line. Default to concise (a few sentences). Expand only when the work order genuinely warrants it - a long or complex history may need more, a simple one should stay short. Use plain prose for straightforward updates, or a few short bullets if the WO has multiple distinct threads worth separating. Length should match what the situation actually requires, never padded.'
+  ].join('\n');
+
+  // Pilot PO numbers are 12 digits beginning 17010 (every PO in the 10/02 Client Open POs export).
+  // ponytail: Pilot-only shape; another client's PO format needs its own pattern here.
+  var CUR_PO_RE = /\b17010\d{7}\b/g;
+  // Wording that must reach a person, never a drafted reply (the store 43 "condition of the
+  // technician involved in the incident" email is the observed case).
+  var CUR_HOLD_RE = /\b(incident|injur(?:y|ies|ed)|accident|hospital|ambulance|first aid|osha|police)\b/i;
+  function curPoKey(v) { var m = /17010\d{7}/.exec(String(v == null ? '' : v)); return m ? m[0] : ''; }
+  function curCell(aoa, r, c) {
+    if (c == null || c < 0 || !aoa || !aoa[r]) return '';
+    var v = aoa[r][c];
+    return v == null ? '' : String(v).trim();
+  }
+  function curNameKey(s) { return String(s || '').toLowerCase().replace(/\s+/g, ' ').trim(); }
+  function curTodayMD(nowMs) { var d = new Date(nowMs); return (d.getMonth() + 1) + '/' + d.getDate(); }
+  // An Excel date cell arrives as a serial day count with raw:true; a text cell passes through.
+  function curFmtDate(v) {
+    if (typeof v === 'number' && isFinite(v) && v > 20000) {
+      var d = new Date(Math.round((v - 25569) * 86400000));
+      return (d.getUTCMonth() + 1) + '/' + d.getUTCDate() + '/' + d.getUTCFullYear();
+    }
+    var m = /^(\d{1,2}\/\d{1,2}\/\d{2,4})/.exec(String(v == null ? '' : v).trim());
+    return m ? m[1] : String(v == null ? '' : v).trim();
+  }
+
+  // The pasted request -> unique POs in the order the FM listed them. The FM's own table is
+  // "<row #> TAB <FM> TAB <PO> TAB <store> ..." when copied out of Outlook; the row # and name are
+  // kept so the reply lines up with the FM's list. A pasted email thread repeats its PO in every
+  // quoted header, so repeats collapse to one row.
+  function curParsePaste(text) {
+    var s = String(text || '').replace(/\r\n?/g, '\n');
+    var meta = {}, m;
+    var rowRe = /(?:^|\n)[ \t]*(\d{1,4})\t+([^\t\n]+?)\t+(17010\d{7})\b/g;
+    while ((m = rowRe.exec(s))) if (!meta[m[3]]) meta[m[3]] = { rowNo: m[1], fmName: m[2].trim() };
+    var out = [], seen = {}, re = new RegExp(CUR_PO_RE.source, 'g');
+    while ((m = re.exec(s))) {
+      if (seen[m[0]]) continue;
+      seen[m[0]] = true;
+      out.push({ po: m[0], rowNo: meta[m[0]] ? meta[m[0]].rowNo : '', fmName: meta[m[0]] ? meta[m[0]].fmName : '' });
+    }
+    var hold = CUR_HOLD_RE.exec(s);
+    return { pos: out, hold: hold ? hold[0] : '' };
+  }
+
+  // PO -> { audit row, client row }. `amap` is mapSheet()'s map of the audit sheet; the Client Open
+  // POs sheet is located by its own header (first 5 rows) since it is a raw client export.
+  function curBuildIndex(auditAoa, amap, clientAoa) {
+    var idx = {};
+    function slot(po) { return idx[po] || (idx[po] = { audit: null, client: null, auditRows: 0 }); }
+    if (auditAoa && amap && amap.po > -1) {
+      for (var r = amap.headerRow + 1; r < auditAoa.length; r++) {
+        var po = curPoKey(curCell(auditAoa, r, amap.po));
+        if (!po) continue;
+        var s = slot(po);
+        s.auditRows++;
+        if (s.audit) continue;   // first row wins; the duplicate is surfaced by curResolve
+        s.audit = {
+          row: r + 1, wo: curCell(auditAoa, r, amap.key), fm: curCell(auditAoa, r, amap.fm),
+          location: curCell(auditAoa, r, amap.location), city: curCell(auditAoa, r, amap.city), state: curCell(auditAoa, r, amap.state)
+        };
+      }
+    }
+    if (clientAoa && clientAoa.length) {
+      var hr = -1, c = null;
+      for (var h = 0; h < Math.min(5, clientAoa.length) && hr === -1; h++) {
+        var hdr = (clientAoa[h] || []).map(function (x) { return String(x == null ? '' : x); });
+        var poc = findCol(hdr, [/^po\s*#?$/i]);
+        if (poc === -1) continue;
+        hr = h;
+        c = {
+          po: poc, owner: findCol(hdr, [/po\s*owner/i, /^owner$/i]), account: findCol(hdr, [/^account$/i, /^store$/i]),
+          city: findCol(hdr, [/store\s*city/i, /^city$/i]), state: findCol(hdr, [/store\s*state/i, /^state$/i]),
+          created: findCol(hdr, [/created\s*date/i])
+        };
+      }
+      for (var cr = hr + 1; hr > -1 && cr < clientAoa.length; cr++) {
+        var cpo = curPoKey(curCell(clientAoa, cr, c.po));
+        if (!cpo || slot(cpo).client) continue;
+        slot(cpo).client = {
+          row: cr + 1, owner: curCell(clientAoa, cr, c.owner), account: curCell(clientAoa, cr, c.account),
+          city: curCell(clientAoa, cr, c.city), state: curCell(clientAoa, cr, c.state),
+          created: c.created > -1 && clientAoa[cr] ? curFmtDate(clientAoa[cr][c.created]) : ''
+        };
+      }
+    }
+    return idx;
+  }
+
+  // The FM rule, agreed 10/02: the audit's FM column, else the client list's PO owner, else
+  // "Unassigned". A disagreement is shown, never silently resolved. Every reason lands in `review`.
+  var CUR_UNASSIGNED = 'Unassigned - needs FM';
+  function curResolve(item, idx) {
+    var s = idx[item.po] || {}, a = s.audit, c = s.client, review = [];
+    var fm = (a && a.fm) || (c && c.owner) || '';
+    if (!a) review.push(c ? 'PO is not in the audit workbook - no BWN work order to read; write this update by hand'
+      : 'PO is in neither the audit nor the Client Open POs sheet');
+    if (a && !a.fm && c && c.owner) review.push('FM is blank in the audit; taken from the Client Open POs owner');
+    if (a && a.fm && c && c.owner && curNameKey(a.fm) !== curNameKey(c.owner)) review.push('FM conflict: audit says ' + a.fm + ', Client Open POs says ' + c.owner);
+    if (s.auditRows > 1) review.push('PO is on ' + s.auditRows + ' audit rows - audit row ' + a.row + ' used');
+    if (!fm) review.push('no FM found for this PO');
+    return {
+      po: item.po, rowNo: item.rowNo || '', fm: fm || CUR_UNASSIGNED, fmSource: (a && a.fm) ? 'audit' : (fm ? 'client list' : ''),
+      wo: a ? a.wo : '', auditRow: a ? a.row : null, clientRow: c ? c.row : null,
+      store: (c && c.account) || (a && a.location) || '', city: (c && c.city) || (a && a.city) || '',
+      state: (c && c.state) || (a && a.state) || '', date: c ? c.created : '', review: review
+    };
+  }
+
+  // One group per FM, the FMs alphabetical with Unassigned last, rows in the FM's own order.
+  function curGroup(rows) {
+    var by = {}, order = [];
+    rows.forEach(function (r) { if (!by[r.fm]) { by[r.fm] = []; order.push(r.fm); } by[r.fm].push(r); });
+    order.sort(function (x, y) {
+      if (x === CUR_UNASSIGNED) return 1;
+      if (y === CUR_UNASSIGNED) return -1;
+      return x.toLowerCase() < y.toLowerCase() ? -1 : x.toLowerCase() > y.toLowerCase() ? 1 : 0;
+    });
+    return order.map(function (fm) { return { fm: fm, rows: by[fm] }; });
+  }
+
+  // Deterministic client wording per phase - the fallback when the AI draft is unavailable or fails
+  // the gate. Rule 3c: internal stages are TRANSLATED, never quoted ("Pending Materials Supplier"
+  // reads "Parts/materials for this repair are on order"); no owner, coordinator, vendor or cost.
+  var CUR_STAGE = {
+    intake: 'This request has been received and is being dispatched.',
+    schedule: 'We are scheduling the service visit.',
+    accept: 'We are scheduling the service visit.',
+    proposal: 'A proposal for this work is being prepared.',
+    'proposal-sent': 'A proposal has been submitted and is awaiting approval.',
+    'proposal-approved': 'The proposal is approved and the work is being scheduled.',
+    materials: 'Parts/materials for this repair are on order.',
+    'materials-client': 'We are waiting on the client-supplied materials.',
+    scheduled: 'Service is scheduled.',
+    onsite: 'A technician is on site.',
+    inprogress: 'Service is in progress.',
+    client: 'We are awaiting your direction on this work order.',
+    onhold: 'This work order is on hold.',
+    confirmcomplete: 'The work has been completed and closeout is in progress.',
+    costreview: 'The work has been completed and closeout is in progress.',
+    recall: 'This work order has been reopened for follow-up.'
+  };
+  var CUR_PARTS = {
+    'parts on backorder': 'Parts for this repair are on backorder.',
+    'parts in transit, not yet delivered': 'Parts for this repair are in transit.',
+    'parts still in fabrication/lead time': 'Parts for this repair are in fabrication.'
+  };
+  // Phases where the next thing owed is a visit: rule 2 says a missing date is stated plainly.
+  var CUR_NEEDS_DATE = { schedule: 1, accept: 1, 'proposal-approved': 1, materials: 1, 'materials-client': 1, recall: 1 };
+  var CUR_WORK_PHASES = { materials: 1, 'materials-client': 1, scheduled: 1, onsite: 1, inprogress: 1, recall: 1 };
+  function curFutureOnsite(h, nowMs) {
+    var d = _date(h && h.nextOnsiteDate);
+    return d && +d >= nowMs - MS_DAY ? fmtMD(h.nextOnsiteDate) : '';
+  }
+  // '' when there is no honest client wording (no live record, or an unmapped status) - the row
+  // then has to be written by hand, which the caller flags.
+  function curComposeClientNote(f, h, nowMs) {
+    f = f || {};
+    if (!h) return '';
+    var status = String(h.statusName || '').toLowerCase();
+    if (f.phase === 'terminal') {
+      return /cancel|declin|revok/.test(status) ? 'This work order has been cancelled.' : 'The work is complete.';
+    }
+    var stage = CUR_PARTS[f.primaryBlocker] || CUR_STAGE[f.phase];
+    if (!stage) return '';
+    var parts = [stage];
+    var onsite = curFutureOnsite(h, nowMs);
+    if (onsite) parts[0] = f.phase === 'scheduled' ? 'Service is scheduled for ' + onsite + '.' : parts[0] + ' The next visit is scheduled for ' + onsite + '.';
+    else if (CUR_NEEDS_DATE[f.phase]) parts.push('No confirmed scheduling date yet as of ' + curTodayMD(nowMs) + '.');
+    if (f.ecdText && f.ecdText !== 'TBD') parts.push('Expected completion is ' + f.ecdText + '.');
+    else if (CUR_WORK_PHASES[f.phase]) parts.push('An expected completion date is not yet confirmed.');
+    return parts.join(' ');
+  }
+
+  // The client prompt input. Header facts the client may see, the derived stage, and the filtered
+  // note evidence (quoted email stripped). No assignee, no money, no vendor - the model cannot leak
+  // what it is never shown. "Today" grounds rule 2's "as of [date]".
+  function curBuildClientInput(h, evidenceNotes, f, nowMs) {
+    f = f || {};
+    var notes = (evidenceNotes || []).slice(0, 5).map(function (n, i) {
+      n = n || {};
+      var when = String(n.createdDate || '').trim().slice(0, 40);
+      return 'Note ' + (i + 1) + (when ? ' (' + when + ')' : '') + ':\n' + (woaStripQuotedEmail(n.content).slice(0, 3000) || '(empty)');
+    });
+    var onsite = curFutureOnsite(h, nowMs);
+    return [
+      'Today: ' + curTodayMD(nowMs),
+      'Work order status (internal label - translate, do not quote): ' + ((h && h.statusName) || '(unknown)'),
+      'Current stage: ' + (f.currentStage || '(unknown)'),
+      'Next scheduled on-site visit: ' + (onsite || 'none on file'),
+      'Expected completion date: ' + (f.ecdText && f.ecdText !== 'TBD' ? f.ecdText : 'not confirmed'),
+      '',
+      'Notes (newest first):',
+      notes.length ? notes.join('\n\n') : '(no notes on file)',
+      '',
+      'Write ONLY the client update for this work order.'
+    ].join('\n');
+  }
+
+  // The client draft gate: everything rule 3 forbids, checked on the OUTPUT, then the audit's own
+  // claim gate (completion/approval/financial/blame/internal wording/closed-WO contradictions) and
+  // date grounding. Returns '' when usable, else the reason the row records.
+  var CUR_INTERNAL = /\b(coordinator|gross profit|margin|markup|\bGP\b|vendor cost|internal note|po\/approval)\b/i;
+  // Forward-looking wording. A date in such a sentence that is already behind `nowMs` is a lapsed
+  // promise read as a live one - the 10/06 live run shipped "parts expected to arrive by October
+  // 5th" on 10/6, grounded (the note said 10/5) but no longer true.
+  var CUR_FUTURE = /\b(expect(?:ed|s)?|will|scheduled for|planned|anticipated|eta|due)\b/i;
+  function curPastPromise(s, nowMs) {
+    if (typeof nowMs !== 'number') return '';
+    var today = new Date(nowMs); today.setHours(0, 0, 0, 0);
+    var sentences = String(s).split(/[.!?;\n]+/);
+    for (var i = 0; i < sentences.length; i++) {
+      if (!CUR_FUTURE.test(sentences[i])) continue;
+      var toks = woaGroundTokens(sentences[i]);
+      for (var j = 0; j < toks.length; j++) {
+        var md = toks[j].split('/');
+        var d = new Date(today.getFullYear(), +md[0] - 1, +md[1]);
+        // ponytail: year-less M/D; one more than ~6 months ahead is read as last year's.
+        if (d - today > 183 * MS_DAY) d.setFullYear(d.getFullYear() - 1);
+        if (d < today) return 'AI draft presented a past date (' + toks[j] + ') as upcoming';
+      }
+    }
+    return '';
+  }
+  function curValidateClientNote(note, f, groundText, nowMs) {
+    var s = String(note == null ? '' : note).trim();
+    if (!s) return 'empty AI draft';
+    if (s.length < 20) return 'AI draft too short to be a status';
+    if (s.length > 900) return 'AI draft too long for a reply row';
+    if (/\$\s?\d/.test(s)) return 'AI draft printed a dollar amount';
+    if (/[\w.+-]+@[\w-]+\.[\w.]+/.test(s)) return 'AI draft printed an email address';
+    if (/\(?\b\d{3}\)?[\s.\-\u2011]\d{3}[\s.\-\u2011]\d{4}\b/.test(s)) return 'AI draft printed a phone number';
+    if (CUR_INTERNAL.test(s)) return 'AI draft used internal wording';
+    if (WOA_VAGUE.test(s)) return 'AI draft used vague filler wording';
+    var claim = woaClaimIssue(s, f, String(groundText || ''));
+    if (claim) return 'AI draft ' + claim;
+    // The date tokenizer reads "October 5" but not "October 5th", and the model writes ordinals:
+    // without this an ordinal date escaped BOTH date checks on the 10/06 live run.
+    var sd = s.replace(/\b(\d{1,2})(st|nd|rd|th)\b/gi, '$1');
+    return curPastPromise(sd, nowMs) || ungroundedDates(sd, String(groundText || ''));
+  }
+
+  // The reply table, in the FM's own column order plus Update. HTML for the email, TSV as the
+  // plain-text clipboard twin. Values are escaped (an update is free text) by the caller's `esc`,
+  // the file's one canonical escaper (pinned by scripts/test-esc-canonical.js).
+  var CUR_COLS = ['#', 'FM', 'PO', 'Store', 'City', 'State', 'Date', 'Update'];
+  function curRowCells(r) { return [r.rowNo, r.fm, r.po, r.store, r.city, r.state, r.date, r.update]; }
+  function curReplyHtml(rows, esc) {
+    var td = 'style="border:1px solid #999;padding:4px 8px;vertical-align:top"';
+    return '<table style="border-collapse:collapse;font-family:Calibri,Arial,sans-serif;font-size:11pt">' +
+      '<tr>' + CUR_COLS.map(function (c) { return '<th ' + td + '>' + c + '</th>'; }).join('') + '</tr>' +
+      rows.map(function (r) { return '<tr>' + curRowCells(r).map(function (v) { return '<td ' + td + '>' + esc(v) + '</td>'; }).join('') + '</tr>'; }).join('') +
+      '</table>';
+  }
+  function curReplyTsv(rows) {
+    return [CUR_COLS.join('\t')].concat(rows.map(function (r) {
+      return curRowCells(r).map(function (v) { return String(v == null ? '' : v).replace(/[\t\r\n]+/g, ' '); }).join('\t');
+    })).join('\n');
+  }
+  // ===== BWN WO-AUDIT CLIENT REPLY END ===========================================================
+
   // ===== BWN WO-AUDIT ACTIONS START (pure; sliced by scripts/test-wo-audit-actions.js) ============
   // The Operations Action List layer (0.17.0). A DETERMINISTIC post-processing pass over deriveState's
   // fact set plus the deterministic flags (computeFlags/applyChecks). It assigns one management action
@@ -3162,6 +3444,37 @@
   }
 
   // ---- Bounded-concurrency runner ----
+  // Client Update Reply: one live WO -> a client-facing update. The AI draft (same transport and
+  // tier as summarize, client rules as the system prompt) must pass curValidateClientNote; on a miss
+  // or a rejection the deterministic wording is used and the reason is kept for the reviewer.
+  // Always resolves. The update text is never logged.
+  function draftClientUpdate(data, model) {
+    var now = Date.now(), h = data.header;
+    var f = deriveState(h, data.notes, now);
+    var prompt = curBuildClientInput(h, meaningfulNotes(data.notes, now), f, now);
+    var review = [];
+    if (data.matchReason) review.push(data.matchReason);
+    if (!h) review.push('the live work order could not be read');
+    function rules(why) {
+      var text = curComposeClientNote(f, h, now);
+      if (why) review.push(why + (text ? ' - rules-based wording used' : ''));
+      if (!text) review.push(h ? 'status "' + (h.statusName || '?') + '" has no client wording - write this update by hand' : 'write this update by hand');
+      return { text: text, source: text ? 'rules' : '', review: review };
+    }
+    // No live record = nothing true to say; the notes alone are not a current status.
+    if (!h) return Promise.resolve(rules(''));
+    return bwnAI({
+      task: 'summarize', tier: 'proxy', minRank: 1, prompt: prompt, system: WOA_CLIENT_SYSTEM,
+      oneLine: false, maxChars: 1500, timeoutMs: AI_ROUTER_TIMEOUT_MS, fallback: [],
+      proxySend: function (p) { p.model = model; return aiProxySend(p, {}); }
+    }).then(function (note) {
+      note = String(note || '').trim();
+      if (!note) return rules('AI draft unavailable');
+      var bad = curValidateClientNote(note, f, prompt, now);
+      return bad ? rules(bad) : { text: note, source: 'AI draft', review: review };
+    }, function () { return rules('AI draft failed'); });
+  }
+
   function runPool(items, worker, concurrency, onProgress, shouldStop) {
     return new Promise(function (resolve) {
       var i = 0, done = 0, results = new Array(items.length);
@@ -3577,6 +3890,17 @@
       P + '.woa-disc>summary::-webkit-details-marker{display:none}',
       P + '.woa-disc[open]>summary{border-bottom:1px solid #eef2f0}',
       P + '.woa-disc-b{padding:11px 13px;font-size:12px;color:#4a5852;line-height:1.55}',
+      P + '.woa-cup-in{width:100%;box-sizing:border-box;margin-top:8px;font:12px/1.4 ui-monospace,Consolas,monospace;border:1px solid #cfd8d3;border-radius:7px;padding:8px}',
+      P + '.woa-cup-bar{display:flex;align-items:center;gap:10px;margin:8px 0;flex-wrap:wrap}',
+      P + '.woa-cup-grp{overflow-x:auto;margin-top:12px;border-top:1px solid #eef2f0;padding-top:8px}',
+      P + '.woa-cup-grp h4{margin:0 0 6px;font-size:13px;display:flex;align-items:center;gap:10px;flex-wrap:wrap}',
+      P + '.woa-cup-t{width:100%;border-collapse:collapse;font-size:12px}',
+      P + '.woa-cup-t th,' + P + '.woa-cup-t td{border:1px solid #e3e9e5;padding:4px 6px;vertical-align:top;text-align:left}',
+      // Update is the column the reviewer actually reads: give it the width, let the box grow.
+      P + '.woa-cup-t td:nth-child(8){width:45%;min-width:320px}',
+      P + '.woa-cup-t textarea{width:100%;box-sizing:border-box;font:12px/1.4 inherit;border:1px solid #cfd8d3;border-radius:5px;padding:4px;resize:vertical}',
+      P + '.woa-cup-why{color:' + AMBER + ';font-size:11px;margin-top:3px}',
+      P + '.woa-cup-src{color:#6b7a73;font-size:11px}',
       P + '.woa-disc-b ul{margin:0;padding-left:18px}',
       P + '.woa-disc-b li{margin:3px 0}',
       // ---- run diagnostics + post section (renderDiagnostics / renderPostSection) ----
@@ -3750,6 +4074,14 @@
         '</ul></div></details>' +
         // Run diagnostics: unmapped live statuses + review-required rows, populated when a run
         // finishes (quality 0.13.0). Read-only, in-memory, copyable - never written to bwn:audit.
+        // Client Update Reply (0.19.0): FM update requests -> one reviewed reply table per FM.
+        '<details class="woa-disc" id="woa-cup"><summary>' + ICON.file + 'Client update reply (FM update requests)</summary><div class="woa-disc-b">' +
+          '<div class="woa-help">Load the WO Audit workbook above, then paste the FM\'s request - their PO table or the email text. Each PO is matched to the workbook (FM from the FM column, else the Client Open POs owner), read live from Umbrava, and given a client-facing update under the Client Update rules. Nothing is sent or saved: review every row, then copy each FM\'s reply table.</div>' +
+          '<textarea id="woa-cup-in" class="woa-cup-in" rows="6" aria-label="Pasted FM update request"></textarea>' +
+          '<div class="woa-cup-bar"><button type="button" id="woa-cup-go" class="woa-btn woa-btn-primary">' + ICON.play + '<span>Build updates</span></button>' +
+          '<span id="woa-cup-msg" class="woa-help" role="status" aria-live="polite"></span></div>' +
+          '<div id="woa-cup-out"></div>' +
+        '</div></details>' +
         '<div id="bwn-woaudit-diag"></div>' +
         '<div id="bwn-woaudit-post"></div>' +
         '<div id="bwn-woaudit-mapinfo"></div>' +
@@ -4891,6 +5223,102 @@
       });
       host.appendChild(wrap);
     }
+
+    // ---- Client Update Reply (0.19.0) ---------------------------------------
+    // Paste -> PO list -> FM + WO from the loaded workbook -> live read -> client update -> one
+    // reviewed reply table per FM. Read-only against Umbrava; the paste and the drafts live only in
+    // this closure (never storage, never the log), and nothing leaves except via the user's copy.
+    var _cupBusy = false, _cupRows = [];
+    function cupMsg(s) { var m = $('woa-cup-msg'); if (m) m.textContent = s; }
+    function cupRender(hold) {
+      var out = $('woa-cup-out');
+      if (!out) return;
+      var html = hold ? '<div class="woa-banner is-warn">' + ICON.warn + '<span>The pasted text mentions "' + esc(hold) + '". Answer that part personally - it is not covered by these drafted updates.</span></div>' : '';
+      curGroup(_cupRows).forEach(function (g, gi) {
+        var done = g.rows.filter(function (r) { return r.reviewed; }).length;
+        html += '<div class="woa-cup-grp"><h4><span>FM: ' + esc(g.fm) + '</span><span class="woa-cup-src">' + done + ' of ' + g.rows.length + ' reviewed</span>' +
+          '<button type="button" class="woa-btn woa-btn-ghost" data-cup-copy="' + gi + '"' + (done ? '' : ' disabled') + '>' + ICON.copy + '<span>Copy reply table</span></button></h4>' +
+          '<table class="woa-cup-t"><tr>' + CUR_COLS.map(function (c) { return '<th>' + c + '</th>'; }).join('') + '<th>Reviewed</th></tr>';
+        g.rows.forEach(function (r) {
+          var i = _cupRows.indexOf(r);
+          var trace = ['PO ' + r.po, r.wo ? 'WO ' + r.wo : 'no BWN WO', r.auditRow ? 'audit row ' + r.auditRow : '', r.clientRow ? 'Client Open POs row ' + r.clientRow : '',
+            r.fmSource ? 'FM from ' + r.fmSource : '', r.source ? 'update: ' + r.source : ''].filter(Boolean).join(' \u00b7 ');
+          html += '<tr><td>' + esc(r.rowNo) + '</td><td>' + esc(r.fm) + '</td><td>' + esc(r.po) + '</td><td>' + esc(r.store) + '</td><td>' + esc(r.city) + '</td><td>' + esc(r.state) + '</td><td>' + esc(r.date) + '</td>' +
+            '<td><textarea rows="' + Math.min(10, Math.max(3, Math.ceil(r.update.length / 55) + 1)) + '" data-cup-text="' + i + '" aria-label="Update for PO ' + esc(r.po) + '">' + esc(r.update) + '</textarea>' +
+            '<div class="woa-cup-src">' + esc(trace) + '</div>' +
+            r.review.map(function (w) { return '<div class="woa-cup-why">' + ICON.warn + ' ' + esc(w) + '</div>'; }).join('') + '</td>' +
+            '<td><input type="checkbox" data-cup-ok="' + i + '"' + (r.reviewed ? ' checked' : '') + (r.update.trim() ? '' : ' disabled') + ' aria-label="Reviewed PO ' + esc(r.po) + '"></td></tr>';
+        });
+        html += '</table></div>';
+      });
+      out.innerHTML = html;
+      out.querySelectorAll('[data-cup-text]').forEach(function (ta) {
+        ta.oninput = function () {
+          var r = _cupRows[+ta.getAttribute('data-cup-text')];
+          r.update = ta.value;
+          var cb = out.querySelector('[data-cup-ok="' + _cupRows.indexOf(r) + '"]');
+          if (cb) { cb.disabled = !ta.value.trim(); if (cb.disabled) { cb.checked = false; r.reviewed = false; } }
+        };
+      });
+      out.querySelectorAll('[data-cup-ok]').forEach(function (cb) {
+        cb.onchange = function () { _cupRows[+cb.getAttribute('data-cup-ok')].reviewed = cb.checked; cupRender(hold); };
+      });
+      out.querySelectorAll('[data-cup-copy]').forEach(function (b) {
+        b.onclick = function () {
+          var g = curGroup(_cupRows)[+b.getAttribute('data-cup-copy')];
+          var ok = g.rows.filter(function (r) { return r.reviewed && r.update.trim(); });
+          var html = curReplyHtml(ok, esc), tsv = curReplyTsv(ok);
+          var p = (window.ClipboardItem && navigator.clipboard && navigator.clipboard.write)
+            ? navigator.clipboard.write([new ClipboardItem({ 'text/html': new Blob([html], { type: 'text/html' }), 'text/plain': new Blob([tsv], { type: 'text/plain' }) })])
+            : navigator.clipboard.writeText(tsv);
+          p.then(function () {
+            var left = g.rows.length - ok.length;
+            toast('Copied ' + ok.length + ' row(s) for ' + g.fm + (left ? ' - ' + left + ' not reviewed, left out' : ''));
+          }, function () { toast('Copy failed - the browser blocked clipboard access'); });
+        };
+      });
+    }
+    function cupBuild() {
+      if (_cupBusy) return;
+      if (_running) { cupMsg('An audit run is in progress - wait for it to finish.'); return; }
+      if (!loaded) { cupMsg('Load the WO Audit workbook first (step 1).'); return; }
+      var parsed = curParsePaste(($('woa-cup-in') || {}).value);
+      if (!parsed.pos.length) { cupMsg('No Pilot PO numbers (17010...) found in the pasted text.'); return; }
+      var amap, auditAoa, clientAoa = null;
+      try {
+        var ws = loaded.wb.Sheets[currentSheet()];
+        amap = mapSheet(ws); auditAoa = amap.aoa;
+        var cname = loaded.wb.SheetNames.filter(function (n) { return /client\s*open\s*po/i.test(n); })[0];
+        if (cname) clientAoa = XLSX.utils.sheet_to_json(loaded.wb.Sheets[cname], { header: 1, raw: true, blankrows: false });
+      } catch (e) { cupMsg('Could not read the workbook: ' + ((e && e.message) || e)); return; }
+      if (amap.po === -1 || amap.fm === -1) { cupMsg('The selected worksheet has no ' + (amap.po === -1 ? '"Source PO #"' : '"FM"') + ' column - pick the WO Audit sheet in step 1.'); return; }
+      var idx = curBuildIndex(auditAoa, amap, clientAoa);
+      _cupRows = parsed.pos.map(function (it) {
+        var r = curResolve(it, idx);
+        if (!clientAoa) r.review.push('no "Client Open POs" sheet in this workbook - store/date and the FM fallback are unavailable');
+        r.update = ''; r.source = ''; r.reviewed = false;
+        return r;
+      });
+      _cupBusy = true;
+      var go = $('woa-cup-go'); if (go) go.disabled = true;
+      var model = '';   // empty -> api/ai picks the model server-side, as the audit run does
+      runPool(_cupRows, function (r) {
+        if (!r.wo) return null;
+        return woFetch(r.wo).then(function (data) { return draftClientUpdate(data, model); });
+      }, 3, function (d, n) { cupMsg('Reading work orders ' + d + ' / ' + n + '...'); }).then(function (res) {
+        res.forEach(function (x, i) {
+          var r = _cupRows[i];
+          if (!x) return;
+          if (x.error) { r.review.push('live read failed: ' + x.error + ' - write this update by hand'); return; }
+          r.update = x.text; r.source = x.source; r.review = r.review.concat(x.review);
+        });
+        var held = _cupRows.filter(function (r) { return r.review.length; }).length;
+        cupMsg(_cupRows.length + ' PO(s), ' + curGroup(_cupRows).length + ' FM(s)' + (held ? ', ' + held + ' flagged for a closer look' : '') + '. Review each row before copying.');
+        cupRender(parsed.hold);
+      }).catch(function (e) { cupMsg('Could not build the updates: ' + ((e && e.message) || e)); })
+        .then(function () { _cupBusy = false; if (go) go.disabled = false; });
+    }
+    var cupGo = $('woa-cup-go'); if (cupGo) cupGo.onclick = cupBuild;
 
     function downloadResult() {
       if (!session) return;
