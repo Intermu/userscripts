@@ -136,6 +136,7 @@ function judge(src, status) {
 // Every bwn-*.user.js in the repo root MUST appear here (Section 1 enforces both directions). Adding
 // a script forces a row; CI then keeps that row honest.
 var LEDGER = {
+  'bwn-ai-proposal-assist.user.js': { status: 'NA' },
   'bwn-ask.user.js':              { status: 'ADOPTED' },
   'bwn-bid-out.user.js':          { status: 'ADOPTED' },
   'bwn-cc-auth.user.js':          { status: 'ADOPTED' },
@@ -203,7 +204,7 @@ onDisk.slice().sort().forEach(function (f) {
 console.log('\n-- 3. aggregate counts + one canonical SHA --');
 A.ok('ADOPTED count is 18', ledgerWith('ADOPTED').length === 18, 'got ' + ledgerWith('ADOPTED').length);
 A.ok('PENDING count is 0', ledgerWith('PENDING').length === 0, 'got ' + ledgerWith('PENDING').length);
-A.ok('NA count is 6', ledgerWith('NA').length === 6, 'got ' + ledgerWith('NA').length);
+A.ok('NA count is 7', ledgerWith('NA').length === 7, 'got ' + ledgerWith('NA').length);
 A.ok('PENDING is empty (both mega scripts folded in US-1 1b)',
   ledgerWith('PENDING').length === 0,
   ledgerWith('PENDING').join(','));

@@ -106,6 +106,7 @@ var CONTRACTS = {
 // Every bwn-*.user.js in the repo root MUST appear here (Section 1 enforces both directions). Adding
 // a script forces a row; the CI step then keeps that row honest.
 var LEDGER = {
+  'bwn-ai-proposal-assist.user.js': { drawer: 'NA', toast: 'NA', rmotion: 'NA', rail: 'NA'  },
   'bwn-ask.user.js':           { drawer: 'DIVERGENT', toast: 'NA',        rmotion: 'NA',  rail: 'NA'  },
   'bwn-bid-out.user.js':       { drawer: 'NA',        toast: 'DIVERGENT', rmotion: 'HAS', rail: 'HAS' },
   'bwn-cc-auth.user.js':       { drawer: 'HAS',       toast: 'HAS',       rmotion: 'NA',  rail: 'NA'  },

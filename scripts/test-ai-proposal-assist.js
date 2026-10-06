@@ -1,0 +1,188 @@
+// test-ai-proposal-assist.js - node harness for bwn-ai-proposal-assist.user.js.
+//
+// WHAT THIS PROVES, against the REAL shipped bytes:
+//   - the pure APA-LOGIC block (sliced by marker, run in a vm): route allow/deny, grid keyed by
+//     header text (column order shuffled), every pre-flight rule, prompt template order and the
+//     1,000-char boundary, every post-generate check incl. negative markup, validationErrors
+//     surfacing, and the passive fetch tap (request untouched, app gets the original response).
+//   - the read-only contract statically: @match umbrava only, @grant none, no @connect, no
+//     .click(), no polling timer, no auth header read, no request of its own, duplicate-init guard.
+//   - negative controls: mutated copies of the logic must turn the key checks red.
+//
+// Fixtures are synthetic. Run: "/c/Program Files/Adobe/Adobe Creative Cloud Experience/libs/node.exe" scripts/test-ai-proposal-assist.js
+var fs = require('fs');
+var path = require('path');
+var vm = require('vm');
+var A = require('./assert.js');
+
+var SRC = fs.readFileSync(path.join(__dirname, '..', 'bwn-ai-proposal-assist.user.js'), 'utf8').replace(/\r\n/g, '\n');
+var START = '// ===== APA-LOGIC START', END = '// ===== APA-LOGIC END =====';
+var LOGIC = SRC.slice(SRC.indexOf(START), SRC.indexOf(END));
+A.ok('logic block sliced', SRC.indexOf(START) > 0 && LOGIC.length > 1000);
+
+function load(code) {
+  var ctx = {};
+  vm.runInNewContext(code + '\nthis.L={routeOf:routeOf,esc:esc,moneyToCents:moneyToCents,gqlCents:gqlCents,rowsFromGrid:rowsFromGrid,' +
+    'preflight:preflight,recommendedLines:recommendedLines,parseRanges:parseRanges,buildPrompt:buildPrompt,promptState:promptState,' +
+    'opNameOf:opNameOf,errorsOf:errorsOf,payloadOf:payloadOf,checkPreview:checkPreview,installTap:installTap,PROMPT_MAX:PROMPT_MAX};', ctx);
+  return ctx.L;
+}
+var L = load(LOGIC);
+function has(list, level, rx) { return list.some(function (o) { return o.level === level && rx.test(o.msg); }); }
+
+// ---- 1. routes --------------------------------------------------------------------------------
+A.eq('vp route', L.routeOf('/work-orders/W1/proposals/vendor-proposals/Q9/details'), { kind: 'vp', quoteId: 'Q9' });
+A.eq('ai route', L.routeOf('/work-orders/W1/proposals/Q9/ai-preview'), { kind: 'ai', quoteId: 'Q9' });
+A.eq('other route inert', L.routeOf('/work-orders/W1'), null);
+A.eq('deny-listed route inert', L.routeOf('/company/users/5/permissions'), null);
+A.eq('vp details sub-path not matched', L.routeOf('/work-orders/W1/proposals/vendor-proposals/Q9/details/x'), null);
+
+// ---- 2. grid by header text ----------------------------------------------------------------
+var HDR = ['Total Cost', 'Unit Cost', 'Quantity', 'UOM', 'Trip #', 'Item', 'Trade', 'Category'];   // reversed order on purpose
+function row(cat, item, trip, uom, qty, unit, total) { return [total, unit, String(qty), uom, trip, item, 'HVAC', cat]; }
+var bad = L.rowsFromGrid(HDR, [
+  row('Travel', 'Trip Charge', '1', 'Trip', 2, '$85.00', '$170.00'),
+  row('Labor', 'Technician', '1', 'Each', 3, '$95.00', '$285.00'),
+  row('Material', 'Materials', '1', 'Lot', 1, '$400.00', '$400.00'),
+  row('Material', 'Lift rental', '', '2', 1, '$250.00', '$250.00'),
+  row('Labor', '1 Man', '2', 'Hr', 2, '$95.00', '$190.00')
+]);
+A.eq('grid keyed by header text', [bad[0].item, bad[0].qty, bad[0].unitCost, bad[0].trip], ['Trip Charge', 2, 8500, '1']);
+A.eq('grid missing a needed header -> null', L.rowsFromGrid(['Category', 'Item'], [['a', 'b']]), null);
+var pf = L.preflight(bad, 100000, null);
+A.ok('flags travel name', has(pf, 'fail', /Travel line "Trip Charge" is not named/));
+A.ok('flags travel covering multiple trips', has(pf, 'fail', /1 travel line\(s\) cover 2 trips/));
+A.ok('flags labor name', has(pf, 'fail', /Labor line "Technician" is not named "N Man"/));
+A.ok('flags labor not per hour', has(pf, 'fail', /UOM is "Each", not per hour/));
+A.ok('flags single lumped material', has(pf, 'fail', /Single lumped Material line "Materials"/));
+A.ok('flags equipment under Material', has(pf, 'warn', /"Lift rental" is filed under Material/));
+A.ok('flags missing shipping', has(pf, 'fail', /No Shipping line/));
+A.ok('flags missing disposal', has(pf, 'fail', /No Disposal line/));
+A.ok('flags blank trip', has(pf, 'fail', /"Lift rental" has a blank Trip #/));
+A.ok('flags numeric UOM', has(pf, 'fail', /numeric UOM "2"/));
+A.ok('vendor total over NTE', has(L.preflight(bad, 100000, 129500), 'fail', /\$1295\.00 is over the client NTE \$1000\.00/));
+A.ok('vendor total falls back to summed total cost', has(pf, 'fail', /\$1295\.00 is over/));
+var good = L.rowsFromGrid(HDR, [
+  row('Travel', '2 Man Travel', '1', 'Trip', 1, '$85.00', '$85.00'),
+  row('Labor', '2 Man', '1', 'Hr', 3, '$95.00', '$285.00'),
+  row('Material', 'Contactor', '1', 'Each', 1, '$40.00', '$40.00'),
+  row('Material', 'Shipping', '1', 'Each', 1, '$0.00', '$0.00'),
+  row('Other', 'Disposal', '1', 'Each', 1, '$0.00', '$0.00')
+]);
+var pg = L.preflight(good, 100000, null);
+A.ok('clean grid -> no fails', !pg.some(function (o) { return o.level === 'fail'; }), JSON.stringify(pg));
+A.ok('clean grid -> within NTE', has(pg, 'ok', /within the client NTE/));
+var rec = L.recommendedLines(bad);
+A.ok('recommends one travel + labor per trip', rec.filter(function (r) { return /Man Travel$/.test(r.item); }).length === 2 && rec.filter(function (r) { return /^\d+ Man$/.test(r.item); }).length === 2);
+A.ok('recommends $0 Shipping and Disposal', rec.some(function (r) { return r.item === 'Shipping' && r.note === '$0'; }) && rec.some(function (r) { return r.item === 'Disposal'; }));
+A.ok('recommends equipment out of Material', rec.some(function (r) { return r.item === 'Lift rental' && r.category === 'Equipment'; }));
+
+// ---- 3. prompt builder ----------------------------------------------------------------------
+var F = { pricingRules: 'Pricing: rate card first.', ranges: 'Lift rental: 200-300', scopeLine: '', issue: 'RTU 3 not cooling.',
+  verbatim: 'NEXREV override line', materials: 'Contactor\nShipping', trip1Status: 'Incurred', trip1: 'Diagnosed\nReplaced contactor', trip2: 'Return to verify' };
+var P = L.buildPrompt(F);
+var order = ['Pricing: rate card first.', 'Non-rate-card ranges: Lift rental $200.00-$300.00.', 'Pilot scope: plain technician text',
+  '1. RTU 3 not cooling.', '2. Include verbatim: "NEXREV override line"', '3. Materials/Equipment: Contactor, Shipping, Disposal.',
+  '4. Trip 1 (Incurred): Diagnosed; Replaced contactor.', '5. Trip 2: Return to verify.', 'Bullets under 12 words.'];
+var pos = order.map(function (s) { return P.indexOf(s); });
+A.ok('template order', pos.every(function (p, i) { return p >= 0 && (i === 0 || p > pos[i - 1]); }), P);
+A.ok('shipping not duplicated', P.split('Shipping').length === 2);
+A.eq('999 chars ok', L.promptState(new Array(1000).join('x')), { n: 999, over: false, warn: true });
+A.eq('1000 chars ok (limit inclusive)', L.promptState(new Array(1001).join('x')), { n: 1000, over: false, warn: true });
+A.eq('1001 chars hard stop', L.promptState(new Array(1002).join('x')), { n: 1001, over: true, warn: false });
+A.eq('949 chars no warn', L.promptState(new Array(950).join('x')).warn, false);
+
+// ---- 4. post-generate checker -----------------------------------------------------------------
+A.eq('op from operationName', L.opNameOf(JSON.stringify({ operationName: 'GenerateAIProposalPreview', query: 'mutation GenerateAIProposalPreview' })), 'GenerateAIProposalPreview');
+A.eq('op from query text', L.opNameOf(JSON.stringify({ query: 'mutation ReworkAIProposal($d: X) { x }' })), 'ReworkAIProposal');
+A.eq('unwatched op ignored', L.opNameOf(JSON.stringify({ operationName: 'GetAIProposalStuff' })), null);
+function money(c) { return { amount: c, precision: 2 }; }
+var PV = {
+  scopeOfWork: 'The Problem: no cooling.\nTrip 1: replaced contactor.',
+  reasoning: 'r', estimatedTotal: 150000,
+  lineItems: [
+    { item: '2 Man Travel', categoryName: 'Travel', unitCost: money(8500), unitCharge: 9000, markUpPercent: 5, chargeQuantity: 2, rateId: 'r1' },
+    { item: 'Contactor', categoryName: 'Material', unitCost: money(4000), unitCharge: 3000, markUpPercent: -25, chargeQuantity: 1, rateId: 'r2' },
+    { item: 'Fan motor', categoryName: 'Material', unitCost: money(10000), unitCharge: 14000, markUpPercent: 40, chargeQuantity: 1, rateId: 'r3' },
+    { item: 'Lift rental', categoryName: 'Equipment', unitCost: money(20000), unitCharge: 35000, markUpPercent: 75, chargeQuantity: 1, rateId: null }
+  ]
+};
+var CTX = { nte: 100000, ranges: L.parseRanges('Lift rental: 200-300'), verbatim: ['NEXREV override line'], trips: 1 };
+var ck = L.checkPreview(PV, CTX);
+A.ok('unitCharge < unitCost', has(ck, 'fail', /"Contactor" charges \$30\.00, below cost \$40\.00/));
+A.ok('negative markup', has(ck, 'fail', /"Contactor" has negative markup -25%/));
+A.ok('travel qty vs trips', has(ck, 'fail', /Travel charge quantity totals 2 for 1 trip/));
+A.ok('materials markup > 35%', has(ck, 'fail', /"Fan motor" markup 40% is over 35%/));
+A.ok('non-rate-card outside range', has(ck, 'fail', /"Lift rental" at \$350\.00 is outside \$200\.00-\$300\.00/));
+A.ok('total over NTE', has(ck, 'fail', /\$1500\.00 is over NTE \$1000\.00/));
+A.ok('Problem/Solution heading', has(ck, 'fail', /The Problem/));
+A.ok('verbatim missing', has(ck, 'fail', /Verbatim line missing/));
+A.ok('Materials/Equipment missing', has(ck, 'fail', /Materials\/Equipment section missing/));
+var PV2 = JSON.parse(JSON.stringify(PV));
+PV2.scopeOfWork = 'Replaced contactor.\nNEXREV   override line\nMaterials/Equipment: Contactor, Shipping, Disposal';
+PV2.estimatedTotal = 90000;
+PV2.lineItems = [PV.lineItems[0]];
+PV2.lineItems[0].chargeQuantity = 1;
+var ck2 = L.checkPreview(PV2, CTX);
+A.ok('clean preview -> no fails', !ck2.some(function (o) { return o.level === 'fail'; }), JSON.stringify(ck2));
+A.ok('verbatim match is whitespace-insensitive', has(ck2, 'pass', /Verbatim line present/));
+A.ok('no range -> warn', has(L.checkPreview({ lineItems: [{ item: 'Crane', rateId: null, unitCharge: 1 }] }, { ranges: [] }), 'warn', /no range set/));
+
+var VE = { data: { generateAIProposalPreview: { success: false, message: 'Validation failed', preview: null, validationErrors: [{ propertyName: 'UserPrompt', message: 'must be 1000 characters or fewer' }] } } };
+var ve = L.errorsOf(VE);
+A.ok('validationErrors surfaced', ve.indexOf('UserPrompt: must be 1000 characters or fewer') >= 0, JSON.stringify(ve));
+A.ok('success:false message surfaced', ve.indexOf('Validation failed') >= 0);
+A.ok('top-level errors surfaced', L.errorsOf({ errors: [{ message: 'boom', extensions: { validationErrors: ['x too long'] } }] }).join('|') === 'boom|x too long');
+A.ok('clean response -> no errors', L.errorsOf({ data: { a: { success: true, preview: {} } } }).length === 0);
+
+// ---- 5. passive tap ---------------------------------------------------------------------------
+(function () {
+  var sent = [], seen = [], original = { clone: function () { return { json: function () { return Promise.resolve({ data: { x: { success: true } } }); } }; } };
+  var win = { fetch: function (u, init) { sent.push([u, init]); return Promise.resolve(original); } };
+  L.installTap(win, function (op, j) { seen.push([op, j]); });
+  var body = JSON.stringify({ operationName: 'GenerateAIProposalPreview', variables: { data: { quoteId: 'Q', userPrompt: 'p' } } });
+  var init = { method: 'POST', body: body, headers: { a: 'b' } };
+  win.fetch('/api/graphql', init).then(function (res) {
+    A.ok('tap returns the original response object', res === original);
+    A.ok('tap passes the request through untouched', sent.length === 1 && sent[0][1] === init && init.body === body);
+    return win.fetch('/api/graphql', { body: JSON.stringify({ operationName: 'PagedWorkOrders' }) });
+  }).then(function () {
+    return new Promise(function (r) { setTimeout(r, 10); });
+  }).then(function () {
+    A.eq('tap fires once, for the watched op only', seen.map(function (s) { return s[0]; }), ['GenerateAIProposalPreview']);
+    A.ok('tap made no request of its own', sent.length === 2);
+    statics();
+  });
+})();
+
+// ---- 6. static read-only contract + negative controls ------------------------------------------
+function statics() {
+  var meta = SRC.slice(0, SRC.indexOf('// ==/UserScript=='));
+  var code = SRC.replace(/^\s*\/\/.*$/gm, '');
+  A.ok('@match umbrava only', (meta.match(/@match\s+\S+/g) || []).join() === '@match        https://app.umbrava.com/*');
+  A.ok('@grant none only', (meta.match(/@grant\s+\S+/g) || []).join() === '@grant        none');
+  A.ok('no @connect', !/@connect/.test(meta));
+  A.ok('no .click() anywhere', !/\.click\(/.test(code));
+  A.ok('no polling timer', !/setInterval/.test(code));
+  A.ok('no auth header / token read', !/authorization|bearer|access_token|auth0|document\.cookie/i.test(code));
+  A.ok('no request of its own (fetch only via the passthrough)', (code.match(/fetch\(/g) || []).length === 0 && !/new XMLHttpRequest|sendBeacon|\.open\(['"]/.test(code));
+  A.ok('no submit/save/approve trigger', !/requestSubmit|\.submit\(|dispatchEvent\(new (Mouse|Pointer)Event/.test(code));
+  A.ok('duplicate-init guard', /if \(window\.__bwnApaInit\)[^\n]*return;/.test(SRC) && /window\.__bwnApaInit = VER;/.test(SRC));
+  A.ok('activity log stores label + time only', /l\.unshift\(\{ a: label, t: new Date\(\)\.toISOString\(\) \}\)/.test(SRC));
+  A.ok('compat message present', SRC.indexOf('layout not recognised — disabled') > 0);
+  A.ok('no banned green', !/#39b54a/i.test(SRC));
+  var verLine = (meta.match(/@version\s+(\S+)/) || [])[1];
+  A.ok('@version == VER', SRC.indexOf("var VER = '" + verLine + "'") > 0);
+
+  function mutated(from, to) {
+    if (LOGIC.split(from).length !== 2) throw new Error('mutation target not unique: ' + from);
+    return load(LOGIC.replace(from, to));
+  }
+  var M1 = mutated('return c != null && ch != null && ch < c;', 'return false;');
+  A.ok('NEG: dropping below-cost check goes red', !has(M1.checkPreview(PV, CTX), 'fail', /below cost/));
+  var M2 = mutated('over: n > PROMPT_MAX', 'over: n > PROMPT_MAX + 1');
+  A.ok('NEG: off-by-one limit goes red', M2.promptState(new Array(1002).join('x')).over === false);
+  var M3 = mutated("li.markUpPercent < 0; });", "li.markUpPercent < -100; });");
+  A.ok('NEG: weakened negative-markup check goes red', !has(M3.checkPreview(PV, CTX), 'fail', /negative markup/));
+  A.finish();
+}
