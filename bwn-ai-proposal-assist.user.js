@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         BWN AI Proposal Assist (Broadway National)
 // @namespace    broadwaynational.bwn
-// @version      0.1.0
+// @version      0.1.1
 // @description  Read-only helper around Umbrava's AI client-proposal generator. Three opt-in panels, all OFF until switched on: (1) Pre-flight on a vendor proposal's details page reads the line grid by header text and flags line shapes the AI cannot fix later - travel/labor not named "N Man Travel" / "N Man", one line covering several trips, a single lumped Material line, equipment or removal filed under Material/Other, missing $0 Shipping and Disposal, blank Trip #, numeric UOM, vendor total over the client NTE - with a recommended-lines table; (2) a prompt builder on the AI preview page that assembles the Generate prompt from form fields in a fixed order with a live 1,000-character hard stop, Copy and Insert buttons, and saved per-client templates; (3) a post-generate checker that passively reads the GenerateAIProposalPreview / ReworkAIProposal responses the app already receives and shows pass/fail (charge below cost, negative or >35% materials markup, travel quantity, non-rate-card ranges, total vs NTE, banned headings, verbatim lines, Materials/Equipment section) plus the server's validationErrors text when Generate fails. Never calls the API itself, never reads auth headers, never edits the grid, never clicks anything it did not create, never saves, submits or approves.
 // @downloadURL  https://raw.githubusercontent.com/Intermu/userscripts/main/bwn-ai-proposal-assist.user.js
 // @updateURL    https://raw.githubusercontent.com/Intermu/userscripts/main/bwn-ai-proposal-assist.user.js
@@ -27,7 +27,7 @@
 (function () {
   'use strict';
 
-  var VER = '0.1.0';   // keep in step with @version
+  var VER = '0.1.1';   // keep in step with @version
   // Duplicate-init guard: @grant none shares the page window, so a second install (two copies, a
   // reinstall without reload) sees the first one's stamp and stands down instead of double-tapping.
   if (window.__bwnApaInit) { console.warn('[BWN APA] already initialised (v' + window.__bwnApaInit + ') - second copy inert'); return; }
@@ -38,8 +38,10 @@
   var PROMPT_WARN = 950;
   var MATERIAL_MARKUP_MAX = 35;
   var WATCH_OPS = { GenerateAIProposalPreview: 1, ReworkAIProposal: 1 };
-  var RX_VP = /^\/work-orders\/[^/]+\/proposals\/vendor-proposals\/([^/]+)\/details\/?$/;
-  var RX_AI = /^\/work-orders\/[^/]+\/proposals\/([^/]+)\/ai-preview\/?$/;
+  // {wo} is the WO number. The AI preview's id is NOT the vendor quoteId (the vendor quoteId in the
+  // ai-preview URL shows "No data available", live 2026-10-06), so cross-page context keys on the WO.
+  var RX_VP = /^\/work-orders\/([^/]+)\/proposals\/vendor-proposals\/([^/]+)\/details\/?$/;
+  var RX_AI = /^\/work-orders\/([^/]+)\/proposals\/([^/]+)\/ai-preview\/?$/;
   // Deny-list first, allow-list second: anything account/admin/auth shaped is inert even if a
   // future route happened to match the allow patterns.
   var DENY = [/^\/(login|logout|callback|signup|account|settings|company|admin|billing|users?)(\/|$)/i, /permission/i];
@@ -50,9 +52,9 @@
     path = String(path || '');
     for (var i = 0; i < DENY.length; i++) if (DENY[i].test(path)) return null;
     var m = RX_VP.exec(path);
-    if (m) return { kind: 'vp', quoteId: m[1] };
+    if (m) return { kind: 'vp', wo: m[1], quoteId: m[2] };
     m = RX_AI.exec(path);
-    if (m) return { kind: 'ai', quoteId: m[1] };
+    if (m) return { kind: 'ai', wo: m[1], quoteId: m[2] };
     return null;
   }
 
@@ -93,7 +95,8 @@
     var idx = {};
     headers.forEach(function (h, i) { var k = norm(h).toLowerCase(); if (!(k in idx)) idx[k] = i; });
     for (var n = 0; n < NEEDED_HEADERS.length; n++) if (!(NEEDED_HEADERS[n] in idx)) return null;
-    function get(r, k) { return k in idx ? norm(r[idx[k]]) : ''; }
+    // Umbrava renders an empty Trip # / UOM as "--" (live, 2026-10-06).
+    function get(r, k) { var v = k in idx ? norm(r[idx[k]]) : ''; return /^-+$/.test(v) ? '' : v; }
     return cells.map(function (r) {
       return {
         category: get(r, 'category'), trade: get(r, 'trade'), item: get(r, 'item'),
@@ -101,6 +104,17 @@
         unitCost: moneyToCents(get(r, 'unit cost')), totalCost: moneyToCents(get(r, 'total cost'))
       };
     }).filter(function (r) { return r.item || r.category; });
+  }
+
+  // rows: every table row as an array of cell texts, colspans already expanded. The real
+  // vendor grid has a group-header row (Details/Cost/Tax) ABOVE the column row and a blank row
+  // below it (live, 2026-10-06), so the header row is found by content, and data is what follows.
+  function gridFromRows(rows) {
+    for (var h = 0; h < rows.length; h++) {
+      var low = rows[h].map(function (c) { return norm(c).toLowerCase(); });
+      if (NEEDED_HEADERS.every(function (n) { return low.indexOf(n) >= 0; })) return rowsFromGrid(rows[h], rows.slice(h + 1));
+    }
+    return null;
   }
 
   var RX_TRAVEL = /travel|trip charge|mileage/i;
@@ -117,7 +131,9 @@
   }
 
   // -> [{level:'fail'|'warn'|'ok', msg}]
-  function preflight(rows, nte, vendorTotal) {
+  function preflight(rows, nte, vendorTotal, poNte) {
+    // A blank Item cell is real (live 2026-10-06): name the row by its category instead of printing "".
+    function nm(r) { return r.item ? '"' + r.item + '"' :'(' + (r.category || 'row') + ' line, no item name)'; }
     var out = [];
     function f(level, msg) { out.push({ level: level, msg: msg }); }
     var trips = distinctTrips(rows), nTrips = Math.max(trips.length, 1);
@@ -126,23 +142,23 @@
     var mats = rows.filter(function (r) { return isMaterial(r) && !RX_EQUIP.test(r.item) && !/shipping|disposal/i.test(r.item); });
 
     travel.forEach(function (r) {
-      if (!/^\d+\s*man travel$/i.test(r.item)) f('fail', 'Travel line "' + r.item + '" is not named "N Man Travel".');
-      if (r.qty > 1) f('warn', 'Travel line "' + r.item + '" has quantity ' + r.qty + ' - one line per trip.');
+      if (!/^\d+\s*man travel$/i.test(r.item)) f('fail', 'Travel line ' + nm(r) + ' is not named "N Man Travel".');
+      if (r.qty > 1) f('warn', 'Travel line ' + nm(r) + ' has quantity ' + r.qty + ' - one line per trip.');
     });
     if (travel.length && travel.length < nTrips) f('fail', travel.length + ' travel line(s) cover ' + nTrips + ' trips - one travel line per trip.');
 
     labor.forEach(function (r) {
-      if (!/^\d+\s*man$/i.test(r.item)) f('fail', 'Labor line "' + r.item + '" is not named "N Man".');
-      if (!/^(hr|hrs|hour|hours)$/i.test(r.uom)) f('fail', 'Labor line "' + r.item + '" UOM is "' + r.uom + '", not per hour.');
+      if (!/^\d+\s*man$/i.test(r.item)) f('fail', 'Labor line ' + nm(r) + ' is not named "N Man".');
+      if (!/^(hr|hrs|hour|hours)$/i.test(r.uom)) f('fail', 'Labor line ' + nm(r) + ' UOM is "' + r.uom + '", not per hour.');
     });
     if (labor.length && labor.length < nTrips) f('fail', labor.length + ' labor line(s) cover ' + nTrips + ' trips - one labor line per trip.');
 
     if (mats.length === 1 && (RX_GENERIC_MAT.test(mats[0].item) || /^(lot|ls|lump sum)$/i.test(mats[0].uom)))
-      f('fail', 'Single lumped Material line "' + mats[0].item + '" - itemise each material.');
+      f('fail', 'Single lumped Material line ' + nm(mats[0]) + ' - itemise each material.');
 
     rows.forEach(function (r) {
       if (/material|other/i.test(r.category) && RX_EQUIP.test(r.item))
-        f('warn', '"' + r.item + '" is filed under ' + r.category + ' - equipment/removal belongs in its own category.');
+        f('warn', '' + nm(r) + ' is filed under ' + r.category + ' - equipment/removal belongs in its own category.');
     });
 
     var ship = rows.some(function (r) { return /shipping/i.test(r.item); });
@@ -151,8 +167,8 @@
     if (!disp) f('fail', 'No Disposal line - add a $0 Disposal line.');
 
     rows.forEach(function (r) {
-      if (!r.trip) f('fail', '"' + r.item + '" has a blank Trip #.');
-      if (/^\d+(\.\d+)?$/.test(r.uom)) f('fail', '"' + r.item + '" has a numeric UOM "' + r.uom + '".');
+      if (!r.trip) f('fail', '' + nm(r) + ' has a blank Trip #.');
+      if (/^\d+(\.\d+)?$/.test(r.uom)) f('fail', '' + nm(r) + ' has a numeric UOM "' + r.uom + '".');
     });
 
     var total = vendorTotal;
@@ -160,6 +176,7 @@
     if (nte == null) f('warn', 'Client NTE not found on the page - total not compared.');
     else if (total > nte) f('fail', 'Vendor total ' + fmt(total) + ' is over the client NTE ' + fmt(nte) + '.');
     else f('ok', 'Vendor total ' + fmt(total) + ' is within the client NTE ' + fmt(nte) + '.');
+    if (poNte != null && total > poNte) f('warn', 'Vendor total ' + fmt(total) + ' is over the vendor PO NTE ' + fmt(poNte) + '.');
 
     if (!out.some(function (o) { return o.level === 'fail'; })) f('ok', 'No line-shape problems found.');
     return out;
@@ -384,7 +401,7 @@
     return t;
   }
 
-  // Per-quote context carried from the vendor-proposal page to the AI preview page (same tab).
+  // Per-WO context carried from the vendor-proposal page to the AI preview page (same tab).
   // Item names + trip count + NTE only; sessionStorage so it dies with the tab.
   function ctxGet(q) { return lsGet(SS_CTX + q, {}, sessionStorage); }
   function ctxSet(q, v) { lsSet(SS_CTX + q, v, sessionStorage); }
@@ -413,17 +430,15 @@
     for (var i = 0; i < boxes.length; i++) {
       var box = boxes[i];
       if (inPanel(box)) continue;
-      var hs = Array.prototype.map.call(box.querySelectorAll('th, [role="columnheader"]'), txt);
-      var low = hs.map(function (h) { return h.toLowerCase(); });
-      if (NEEDED_HEADERS.some(function (h) { return low.indexOf(h) < 0; })) continue;
-      var rowEls = box.querySelectorAll('tbody tr, [role="row"]');
-      var cells = [];
-      Array.prototype.forEach.call(rowEls, function (tr) {
-        if (tr.querySelector('th, [role="columnheader"]')) return;
-        var cs = tr.querySelectorAll('td, [role="cell"], [role="gridcell"]');
-        if (cs.length) cells.push(Array.prototype.map.call(cs, txt));
+      var rows = Array.prototype.map.call(box.querySelectorAll('tr, [role="row"]'), function (tr) {
+        var out = [];
+        Array.prototype.forEach.call(tr.children, function (c) {
+          for (var s = 0; s < (c.colSpan || 1); s++) out.push(s ? '' : txt(c));
+        });
+        return out;
       });
-      return rowsFromGrid(hs, cells);
+      var g = gridFromRows(rows);
+      if (g) return g;
     }
     return null;
   }
@@ -442,7 +457,19 @@
     }
     return null;
   }
-  function readNte() { return stripMoney(/^client\s+dne\b|^nte\b/i); }
+  // A form field's value by its <label> text. On the WO page Client DNE is an input (live, 2026-10-06).
+  function labeledMoney(labelRx) {
+    var ls = document.querySelectorAll('label');
+    for (var i = 0; i < ls.length; i++) {
+      if (inPanel(ls[i]) || !labelRx.test(txt(ls[i]))) continue;
+      var inp = ls[i].htmlFor ? document.getElementById(ls[i].htmlFor) : ls[i].parentElement && ls[i].parentElement.querySelector('input');
+      if (inp && inp.value) return moneyToCents(inp.value);
+    }
+    return null;
+  }
+  function readNte() { var v = labeledMoney(/^client\s+dne\b/i); return v != null ? v : stripMoney(/^client\s+dne\b/i); }
+  // Vendor proposal header shows the vendor's PO NTE, not the client DNE (live, 2026-10-06).
+  function readPoNte() { return stripMoney(/^po\s+nte\b/i); }
   function readVendorTotal() { return stripMoney(/^total vendor cost\b/i); }
 
   // The Generate prompt textarea: the one textarea sharing a close ancestor with a "Generate" button.
@@ -530,14 +557,14 @@
     if (!rows) return '<h4>Pre-flight</h4><p class="off">Line grid layout not recognised — disabled.</p>';
     var nte = readNte(), vt = readVendorTotal();
     var trips = distinctTrips(rows);
-    var prev = ctxGet(rt.quoteId);
+    var prev = ctxGet(rt.wo);
     var items = rows.filter(function (r) { return !isTravel(r) && !isLabor(r) && !/shipping|disposal/i.test(r.item); }).map(function (r) { return r.item; });
     if (JSON.stringify(prev.items) !== JSON.stringify(items) || prev.nte !== nte || prev.trips !== trips.length) {
-      ctxSet(rt.quoteId, { items: items, nte: nte, trips: trips.length });
+      ctxSet(rt.wo, { items: items, nte: nte, trips: trips.length });
       logAction('pre-flight run');
     }
     var rec = recommendedLines(rows);
-    return '<h4>Pre-flight</h4>' + list(preflight(rows, nte, vt)) +
+    return '<h4>Pre-flight</h4>' + list(preflight(rows, nte, vt, readPoNte())) +
       '<h4>Recommended lines</h4><table><tr><th>Category</th><th>Item</th><th>Trip #</th><th>UOM</th><th>Qty</th></tr>' +
       rec.map(function (r) {
         return '<tr><td>' + esc(r.category) + '</td><td>' + esc(r.item) + (r.note ? ' <span class="mono">' + esc(r.note) + '</span>' : '') + '</td><td>' + esc(r.trip) + '</td><td>' + esc(r.uom) + '</td><td>' + esc(r.qty) + '</td></tr>';
@@ -545,7 +572,7 @@
   }
 
   function defaultForm(rt) {
-    var t = templates()[0], c = ctxGet(rt.quoteId);
+    var t = templates()[0], c = ctxGet(rt.wo);
     return {
       tpl: t.name, pricingRules: t.pricingRules, ranges: t.ranges, scopeLine: t.scopeLine, verbatim: t.verbatim,
       issue: '', materials: (c.items || []).join('\n'), trip1Status: 'Incurred', trip1: '', trip2: ''
@@ -602,7 +629,7 @@
     var h = '<h4>Post-generate check (' + esc(lastCheck.op) + ')</h4>';
     if (errs.length || !pv) return h + list([{ level: 'fail', msg: 'Generate failed. Server said:' }].concat(
       (errs.length ? errs : ['(no error text in the response)']).map(function (e) { return { level: 'warn', msg: e }; })));
-    var c = ctxGet(rt.quoteId), f = form || {};
+    var c = ctxGet(rt.wo), f = form || {};
     var res = checkPreview(pv, {
       nte: readNte() != null ? readNte() : (c.nte == null ? null : c.nte),
       ranges: parseRanges(f.ranges), verbatim: lines(f.verbatim), trips: c.trips || null

@@ -22,7 +22,7 @@ A.ok('logic block sliced', SRC.indexOf(START) > 0 && LOGIC.length > 1000);
 
 function load(code) {
   var ctx = {};
-  vm.runInNewContext(code + '\nthis.L={routeOf:routeOf,esc:esc,moneyToCents:moneyToCents,gqlCents:gqlCents,rowsFromGrid:rowsFromGrid,' +
+  vm.runInNewContext(code + '\nthis.L={routeOf:routeOf,esc:esc,moneyToCents:moneyToCents,gqlCents:gqlCents,rowsFromGrid:rowsFromGrid,gridFromRows:gridFromRows,' +
     'preflight:preflight,recommendedLines:recommendedLines,parseRanges:parseRanges,buildPrompt:buildPrompt,promptState:promptState,' +
     'opNameOf:opNameOf,errorsOf:errorsOf,payloadOf:payloadOf,checkPreview:checkPreview,installTap:installTap,PROMPT_MAX:PROMPT_MAX};', ctx);
   return ctx.L;
@@ -31,8 +31,8 @@ var L = load(LOGIC);
 function has(list, level, rx) { return list.some(function (o) { return o.level === level && rx.test(o.msg); }); }
 
 // ---- 1. routes --------------------------------------------------------------------------------
-A.eq('vp route', L.routeOf('/work-orders/W1/proposals/vendor-proposals/Q9/details'), { kind: 'vp', quoteId: 'Q9' });
-A.eq('ai route', L.routeOf('/work-orders/W1/proposals/Q9/ai-preview'), { kind: 'ai', quoteId: 'Q9' });
+A.eq('vp route', L.routeOf('/work-orders/W1/proposals/vendor-proposals/Q9/details'), { kind: 'vp', wo: 'W1', quoteId: 'Q9' });
+A.eq('ai route', L.routeOf('/work-orders/W1/proposals/Q9/ai-preview'), { kind: 'ai', wo: 'W1', quoteId: 'Q9' });
 A.eq('other route inert', L.routeOf('/work-orders/W1'), null);
 A.eq('deny-listed route inert', L.routeOf('/company/users/5/permissions'), null);
 A.eq('vp details sub-path not matched', L.routeOf('/work-orders/W1/proposals/vendor-proposals/Q9/details/x'), null);
@@ -77,6 +77,25 @@ A.ok('recommends one travel + labor per trip', rec.filter(function (r) { return 
 A.ok('recommends $0 Shipping and Disposal', rec.some(function (r) { return r.item === 'Shipping' && r.note === '$0'; }) && rec.some(function (r) { return r.item === 'Disposal'; }));
 A.ok('recommends equipment out of Material', rec.some(function (r) { return r.item === 'Lift rental' && r.category === 'Equipment'; }));
 
+
+// ---- 2b. the LIVE vendor grid shape (captured 2026-10-06, values replaced) -----------------------
+// Three header rows: a Details/Cost/Tax group row ABOVE the column row (colspans expanded), and a
+// blank row below it. Empty Trip # / UOM render as "--". 0.1.0 read headers from all three rows as
+// one list and mapped every column after the group row to the wrong cell.
+var LIVE = [
+  ['', 'Details', '', '', '', '', '', '', 'Cost', '', '', 'Tax', '', '', '', ''],
+  ['', '', 'Category', 'Trade', 'Item', '', 'Trip #', 'UOM', 'Quantity', 'Unit Cost', 'Total Cost', 'Taxable', 'Tax %', 'Tax Amount', 'Total Charge', ''],
+  ['', '', '', '', '', '', '', '', '', '', '', '', '', '', '', ''],
+  ['', '', 'Travel', 'Exterior Lighting', '', '', '--', '--', '0', '$0.00', '$0.00', 'No', '0%', '$0.00', '$0.00', ''],
+  ['', '', 'Labor', 'Exterior Lighting', '', '', '--', '--', '1', '$7,500.00', '$7,500.00', 'No', '0%', '$0.00', '$7,500.00', '']
+];
+var lg = L.gridFromRows(LIVE);
+A.eq('live grid: header row found under the group row', lg && lg.length, 2);
+A.eq('live grid: columns land on the right cells', lg && [lg[1].category, lg[1].qty, lg[1].unitCost, lg[1].totalCost], ['Labor', 1, 750000, 750000]);
+A.eq('live grid: "--" read as blank', lg && [lg[0].trip, lg[0].uom], ['', '']);
+A.ok('live grid: blank Trip # flagged', has(L.preflight(lg, null, null, null), 'fail', /blank Trip #/));
+A.ok('vendor total over PO NTE warns', has(L.preflight(lg, null, 750000, 20000), 'warn', /over the vendor PO NTE \$200\.00/));
+A.eq('no needed header row -> null', L.gridFromRows([['a', 'b'], ['c', 'd']]), null);
 // ---- 3. prompt builder ----------------------------------------------------------------------
 var F = { pricingRules: 'Pricing: rate card first.', ranges: 'Lift rental: 200-300', scopeLine: '', issue: 'RTU 3 not cooling.',
   verbatim: 'NEXREV override line', materials: 'Contactor\nShipping', trip1Status: 'Incurred', trip1: 'Diagnosed\nReplaced contactor', trip2: 'Return to verify' };
