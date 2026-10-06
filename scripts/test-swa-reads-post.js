@@ -156,6 +156,7 @@ A.eq('bid: 2 call sites + 1 def use swaRead', count(BID, 'swaRead('), 3);
 A.ok('bid: pipelineFetch + bidStatus via swaRead',
   /swaRead\(PROSPECTS_URL, \{ near: near/.test(BID) && /swaRead\(STATUS_URL, \{ tracking: tracking \}/.test(BID));
 A.ok('bid: vsGovernance left alone', /gmGet\(GOV_URL/.test(BID));
-A.ok('versions bumped', /@version\s+1\.50\.1/.test(AI) && /@version\s+0\.29\.4/.test(BID) && BID.indexOf("var VER = '0.29.4'") > 0);
+// No exact @version pin here: a later bump of either script must not turn this test red.
+// @version / VER agreement is checked by test-manifest-ledger.js.
 
 Promise.all(jobs).then(function () { A.finish(); });
