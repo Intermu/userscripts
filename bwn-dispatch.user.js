@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         BWN Dispatch (Broadway National)
 // @namespace    broadwaynational.bwn
-// @version      0.15.5
+// @version      0.15.6
 // @downloadURL  https://raw.githubusercontent.com/Intermu/userscripts/main/bwn-dispatch.user.js
 // @updateURL    https://raw.githubusercontent.com/Intermu/userscripts/main/bwn-dispatch.user.js
 // @description  One-click Dispatch for a work order - replaces manually typing a row into Dispatch_Notifications.xlsx. The Dispatch launcher shows on every work order page (0.15.2 - the old Pending-Dispatch / auto-task gate cached a miss and hid it on freshly auto-dispatched WOs, so you no longer flip a WO back to Pending Dispatch and reload). The drawer shows the WO at a glance from live reads: site name + address, trade(s), vendor(s) on the POs, and the scope. On a WO that carries Umbrava's open auto-dispatch task "Purchase Order created, call vendor to confirm receipt" the modal offers to move that task to the person you assign (default on, editTask full-replace with a fresh re-read before and a verified read-back after; a failed move never blocks the card and is reported). It opens a confirm modal prefilled from the BWN Ops Suite bus (Tracking) and a same-origin Umbrava GraphQL read (Location as the site NUMBER, Priority, and the coordinator to ping): it uses the person this WO is assigned to (whoever a supervisor/manager assigned it to, read live when you open it), and when that is a team or blank it falls back to the coordinator from the most recent work order(s) at the same location. The coordinator name + email are editable before you send. On submit it POSTs the 5 typed fields plus the WO number (read from the URL, never typed - the flow needs it to deep-link the card, because Tracking is the CLIENT's tracking number and points at the wrong record) to the broadway-internal-ops SWA proxy (x-bwn-key gated) which forwards to the HTTP-triggered "Dispatch HTTP" Power Automate flow - the flow adds the row to Dispatch_Notifications.xlsx AND dispatches it (posts a Teams adaptive card to the coordinator and waits for their accept). Dispatching is a coordinator action, so there is no role gate (the x-bwn-key is the boundary). The assignee's email is not on the WO record (Umbrava exposes the coordinator NAME only), so it is resolved from a per-user name->email roster you maintain (seeded with you, and it remembers each coordinator you dispatch to); for a coordinator the roster has never met it falls back to a GUESS derived from the house name pattern and the signed-in user's own domain, shown with a "check it before you send" warning and always editable - never a silent send to an address nobody confirmed. The flow's secret URL stays server-side; nothing sensitive lives in this script. As of 0.10.0 the modal also writes the WO RECORD directly via the same-origin Umbrava GraphQL patchWorkOrder mutation (the write kanban proved live) - an operator-picked target status, an operator-picked assignee (a real Umbrava user, so the assign carries a proper GUID and the card name/email come from the record), and an auto priority-scaled Expected Completion Date - behind a confirm that spells out each write and warns that a status change resets the time-in-status clock. Writes run first and atomically; the Teams card is posted only if the record change succeeds. Registers a single "Dispatch" launcher into the shared dock (bwn:dock:*) - the dock tab is the only launcher; no floating fallback button.
@@ -18,7 +18,7 @@
 (function () {
   'use strict';
 
-  var VER = '0.15.5';   // keep in step with @version - this is what the console banner reports
+  var VER = '0.15.6';   // keep in step with @version - this is what the console banner reports
   var FONT = "-apple-system,BlinkMacSystemFont,'Segoe UI','Helvetica Neue',Arial,sans-serif";
   var GREEN = '#0d3d26';          // BWN Ops Suite brand green - matches CC Request / WO Audit
   var SWA_BASE = 'https://green-stone-0717dab0f.7.azurestaticapps.net';
@@ -1419,7 +1419,14 @@
       var hasWrites = !!(data && Object.keys(data).length > 1);
       // The auto-dispatch task follows the assignee pick. Snapshot taken at modal open; moveAutoTask
       // re-reads and refuses if it changed. Runs AFTER the WO patch and never blocks the card.
-      var moveTask = !!(sel.assignedTo && _autoTask && autoTaskBox && autoTaskBox.checked && _autoTask.assignedTo !== sel.assignedTo);
+      // Every skip is NAMED in the result line: W-402164 (0.15.3) showed the checkbox, reassigned the
+      // WO, and never attempted the move or said why. An already-moved task is moveAutoTask's call
+      // (it reports done without writing), so the old snapshot-equality skip is gone too.
+      var moveTask = !!(sel.assignedTo && _autoTask && autoTaskBox && autoTaskBox.checked && !autoTaskBox.disabled);
+      var taskSkip = (!_autoTask || !autoTaskBox || moveTask) ? '' :
+        autoTaskBox.disabled ? (autoTaskBlocker(_autoTask) || 'the drawer could not move this task') :
+        !autoTaskBox.checked ? 'the box was unchecked' : 'no assignee was picked above';
+      try { console.debug('[BWN DISPATCH] auto-task', { found: !!_autoTask, box: !!autoTaskBox, checked: !!(autoTaskBox && autoTaskBox.checked), disabled: !!(autoTaskBox && autoTaskBox.disabled), assignee: !!sel.assignedTo, move: moveTask }); } catch (e) { }
 
       // Confirm - the writes are named explicitly (status change is called out as clock-resetting),
       // so nothing is written silently. ECD is included whenever a basis exists (Mike's "auto").
@@ -1498,7 +1505,7 @@
         after: { statusId: sel.statusId || null, assignedTo: sel.assignedTo || null, ecd: sel.ecd || null }
       }) : Promise.resolve(true);
       writeStep.then(function () {
-        if (!moveTask) return '';
+        if (!moveTask) return taskSkip ? '  Auto-dispatch task NOT moved: ' + taskSkip + '.' : '';
         submit.textContent = 'Moving task…';
         return moveAutoTask(woId, _autoTask, sel.assignedTo).then(function (why) { return why ? '  Auto-dispatch task NOT moved: ' + why + '.' : '  Auto-dispatch task moved.'; });
       }).then(function (taskNote) {
