@@ -111,3 +111,36 @@ These were read-only DOM checks with 0.1.1 loaded by eval. No graphql requests c
   with that field empty.
 - **Pricing-rules wording.** The seeded default is "rate card first, never below vendor unit cost,
   materials markup 35% max", taken from the checker's rules. It can be edited per template.
+
+## 0.3.0 read-only context (live-checked 2026-10-06, WO 396190)
+
+The spec's "no own API calls" rule was relaxed **for reads only**, at Mike's instruction, so the
+panel can see what a side-loaded Claude sees.
+
+**How it reads:**
+- Four fixed, named queries, each copied from a proven suite read:
+  - `APA_WorkOrder`: `workOrder(workOrderNumber)`, giving client, location, priority, `doNotExceed`
+    (the client NTE), `totalNTE` and scope.
+  - `APA_ClientProposals`: `listClientProposals(jobId)`. Status is derived from the dates.
+    `grossProfitPercent` is a string fraction.
+  - `APA_ClientProposal`: `proposal(id)` line items. `tripLabel` comes back like `1`, `2` or `3/4`,
+    and `category` is an integer enum.
+  - `APA_Trips`: `purchaseOrderTrips(jobId)`.
+- One request path, `apaGql`, refuses anything that isn't on that list or isn't a single named
+  `query`.
+- The token comes from the suite's canonical BWN-SHARED picker.
+- Reads happen only while the panel is open with "Work order context" ticked.
+- If a read fails, the panel says so; it is never shown as "none".
+
+**Live result:**
+- 4 reads, 0 mutations.
+- Client NTE $1,500. The vendor total of $7,500 is 5x that, which gives one message with the
+  keep-NTE-out-of-prompt advice.
+- Client proposal #1 (Submitted 10/5, $12,628.74, 33.5% GP) is flagged.
+- **Client proposal #2 is a Draft ($4,708.80, -73.6% GP).** The earlier split is now taken from the
+  latest Submitted/Approved proposal and falls back to a draft only if none was sent.
+
+**Trips:**
+- The POs record only Trip 1, as completed. The earlier proposal labels its lines 1, 2 and 3/4.
+- The plan merges both sources: a trip completed on a PO is Incurred. A trip only the proposal names
+  is Proposed and flagged "assumed - check". `3/4` becomes "Trip 3-4".

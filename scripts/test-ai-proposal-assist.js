@@ -24,7 +24,8 @@ function load(code) {
   var ctx = {};
   vm.runInNewContext(code + '\nthis.L={routeOf:routeOf,esc:esc,moneyToCents:moneyToCents,gqlCents:gqlCents,rowsFromGrid:rowsFromGrid,gridFromRows:gridFromRows,' +
     'preflight:preflight,recommendedLines:recommendedLines,parseRanges:parseRanges,buildPrompt:buildPrompt,promptState:promptState,' +
-    'opNameOf:opNameOf,errorsOf:errorsOf,payloadOf:payloadOf,checkPreview:checkPreview,installTap:installTap,PROMPT_MAX:PROMPT_MAX};', ctx);
+    'opNameOf:opNameOf,errorsOf:errorsOf,payloadOf:payloadOf,checkPreview:checkPreview,installTap:installTap,PROMPT_MAX:PROMPT_MAX,' +
+    'propStatus:propStatus,tripStatuses:tripStatuses,tripPlan:tripPlan,tripPrefill:tripPrefill,lineSummary:lineSummary,contextFindings:contextFindings,firstSentence:firstSentence};', ctx);
   return ctx.L;
 }
 var L = load(LOGIC);
@@ -60,8 +61,8 @@ A.ok('flags missing shipping', has(pf, 'fail', /No Shipping line/));
 A.ok('flags missing disposal', has(pf, 'fail', /No Disposal line/));
 A.ok('flags blank trip', has(pf, 'fail', /"Lift rental" has a blank Trip #/));
 A.ok('flags numeric UOM', has(pf, 'fail', /numeric UOM "2"/));
-A.ok('vendor total over NTE', has(L.preflight(bad, 100000, 129500), 'fail', /\$1295\.00 is over the client NTE \$1000\.00/));
-A.ok('vendor total falls back to summed total cost', has(pf, 'fail', /\$1295\.00 is over/));
+A.ok('vendor total over NTE', has(L.preflight(bad, 100000, 129500), 'fail', /\$1295\.00 is 1\.3x the client NTE \$1000\.00/));
+A.ok('vendor total falls back to summed total cost', has(pf, 'fail', /\$1295\.00 is 1\.3x/));
 var good = L.rowsFromGrid(HDR, [
   row('Travel', '2 Man Travel', '1', 'Trip', 1, '$85.00', '$85.00'),
   row('Labor', '2 Man', '1', 'Hr', 3, '$95.00', '$285.00'),
@@ -98,13 +99,15 @@ A.ok('vendor total over PO NTE warns', has(L.preflight(lg, null, 750000, 20000),
 A.eq('no needed header row -> null', L.gridFromRows([['a', 'b'], ['c', 'd']]), null);
 // ---- 3. prompt builder ----------------------------------------------------------------------
 var F = { pricingRules: 'Pricing: rate card first.', ranges: 'Lift rental: 200-300', scopeLine: '', issue: 'RTU 3 not cooling.',
-  verbatim: 'NEXREV override line', materials: 'Contactor\nShipping', trip1Status: 'Incurred', trip1: 'Diagnosed\nReplaced contactor', trip2: 'Return to verify' };
+  verbatim: 'NEXREV override line', materials: 'Contactor\nShipping',
+  trips: 'Trip 1 (Incurred): diagnosed, replaced contactor\nTrip 2 (Proposed): return to verify\nTrip 3 (Proposed): ' };
 var P = L.buildPrompt(F);
 var order = ['Pricing: rate card first.', 'Non-rate-card ranges: Lift rental $200.00-$300.00.', 'Pilot scope: plain technician text',
-  '1. RTU 3 not cooling.', '2. Include verbatim: "NEXREV override line"', '3. Materials/Equipment: Contactor, Shipping, Disposal.',
-  '4. Trip 1 (Incurred): Diagnosed; Replaced contactor.', '5. Trip 2: Return to verify.', 'Bullets under 12 words.'];
+  '1. RTU 3 not cooling.', '2. Include verbatim: "NEXREV override line"', '3. "Materials/Equipment:" Contactor, Shipping, Disposal.',
+  '4. "Trip 1 (Incurred)": diagnosed, replaced contactor', '5. "Trip 2 (Proposed)": return to verify', 'Bullets under 12 words.'];
 var pos = order.map(function (s) { return P.indexOf(s); });
 A.ok('template order', pos.every(function (p, i) { return p >= 0 && (i === 0 || p > pos[i - 1]); }), P);
+A.ok('a prefilled trip label left empty is dropped', P.indexOf('Trip 3') < 0, P);
 A.ok('shipping not duplicated', P.split('Shipping').length === 2);
 A.eq('999 chars ok', L.promptState(new Array(1000).join('x')), { n: 999, over: false, warn: true });
 A.eq('1000 chars ok (limit inclusive)', L.promptState(new Array(1001).join('x')), { n: 1000, over: false, warn: true });
@@ -181,6 +184,39 @@ A.ok('live: below cost from money objects', has(lck, 'fail', /"Anchor bolts" cha
 A.ok('live: travel quantity as a string', has(lck, 'pass', /Travel charge quantity matches 1 trip/));
 A.ok('live: total from a money object', has(lck, 'pass', /Estimated total \$900\.00 within NTE/));
 
+// ---- 4c. work-order context (0.3.0): shaping of the four read results -------------------------
+A.eq('ctx: proposal status from dates', [L.propStatus({}), L.propStatus({ submittedDate: 'x' }), L.propStatus({ submittedDate: 'x', approvedDate: 'y' }),
+  L.propStatus({ rejectedDate: 'x' }), L.propStatus({ canceledDate: 'x', approvedDate: 'y' })], ['Draft', 'Submitted', 'Approved', 'Rejected', 'Canceled']);
+var POT = [
+  { number: 1, vendorName: 'V', trips: [{ number: 1, completedDate: '2026-09-17' }, { number: 2, completedDate: '2026-09-20' }, { number: 3 }, { number: 5, canceledDate: 'x' }] },
+  { number: 2, vendorName: 'W', trips: [{ number: 3, completedDate: '2026-09-25' }, { number: 4 }] }
+];
+A.eq('ctx: trips by number, completed=Incurred, open=Proposed, canceled dropped, any PO completing N wins',
+  L.tripStatuses(POT), [{ n: 1, status: 'Incurred' }, { n: 2, status: 'Incurred' }, { n: 3, status: 'Incurred' }, { n: 4, status: 'Proposed' }]);
+// Live shape (WO 396190, 2026-10-06): POs record only Trip 1 completed; the earlier client proposal labels 1, 2, 3/4.
+var LIVE_POT = [{ number: 1, vendorName: 'V', trips: [{ number: 1, completedDate: '2026-09-17' }] }];
+var LIVE_LINES = [{ tripLabel: '1' }, { tripLabel: '1' }, { tripLabel: '2' }, { tripLabel: '3/4' }, { tripLabel: '3/4' }];
+A.eq('ctx: trip plan merges PO status with the proposal grouping', L.tripPlan(LIVE_POT, LIVE_LINES), [
+  { label: 'Trip 1', status: 'Incurred', assumed: false }, { label: 'Trip 2', status: 'Proposed', assumed: true }, { label: 'Trip 3-4', status: 'Proposed', assumed: true }]);
+A.eq('ctx: trip prefill lines', L.tripPrefill(L.tripPlan(LIVE_POT, LIVE_LINES)), 'Trip 1 (Incurred): \nTrip 2 (Proposed): \nTrip 3-4 (Proposed): ');
+A.eq('ctx: PO trips with no earlier proposal still listed', L.tripPlan(POT, null).map(function (x) { return x.label + ' ' + x.status; }), ['Trip 1 Incurred', 'Trip 2 Incurred', 'Trip 3 Incurred', 'Trip 4 Proposed']);
+A.eq('ctx: no trips anywhere -> empty prefill', L.tripPrefill(L.tripPlan([], [])), '');
+function mny(c) { return { amount: c, precision: 2 }; }
+A.eq('ctx: line summary uses string chargeQuantity and money objects', L.lineSummary({ item: '3 Man', category: 0, unitCharge: mny(250000), chargeQuantity: '2' }), '3 Man $5000.00');
+A.eq('ctx: line summary falls back to the category name', L.lineSummary({ item: null, category: 1, unitCharge: mny(250000), chargeQuantity: '1' }), 'Material $2500.00');
+var CX = { proposals: [
+  { number: 1, status: 'Submitted', total: 1262874, gp: 0.335, submitted: '2026-10-05T14:00:00Z' },
+  { number: 2, status: 'Canceled', total: 1, gp: null, submitted: null }],
+  prior: { number: 1, lines: [{ item: '3 Man', category: 0, unitCharge: mny(500000), chargeQuantity: '1' }, { item: 'Concrete', category: 1, unitCharge: mny(250000), chargeQuantity: '1' }] } };
+var LUMP = [{ category: 'Labor And Material', item: '', trip: '', qty: 1, totalCost: 750000 }];
+var cfx = L.contextFindings(CX, LUMP);
+A.ok('ctx: vendor total vs the read client NTE: ratio + keep-NTE-out advice, said once', has(L.preflight(LUMP, 150000, 750000, null), 'fail', /\$7500\.00 is 5x the client NTE \$1500\.00 .*out of the prompt/) &&
+  L.preflight(LUMP, 150000, 750000, null).filter(function (o) { return /client NTE/.test(o.msg); }).length === 1 && !cfx.some(function (o) { return /NTE/.test(o.msg); }));
+A.ok('ctx: an existing live client proposal is flagged with total, status, date and GP', has(cfx, 'warn', /#1 already exists \(\$12628\.74, Submitted 2026-10-05, 33\.5% GP\)/));
+A.ok('ctx: a canceled client proposal is not flagged', !has(cfx, 'warn', /#2 already exists/));
+A.ok('ctx: a lumped vendor line gets the earlier split, marked as inference', has(cfx, 'warn', /priced it as: 3 Man \$5000\.00; Concrete \$2500\.00\. That split is an inference/));
+A.ok('ctx: no lump hint when the vendor lines are already split', !has(L.contextFindings(CX, LUMP.concat(LUMP).map(function (r, i) { return { category: i ? 'Material' : 'Labor', item: 'x' }; })), 'warn', /Lumped/));
+A.eq('ctx: issue prefill is the first sentence of the WO scope', L.firstSentence('Just had a storm and the pole fell.  It was fine before.'), 'Just had a storm and the pole fell.');
 // ---- 5. passive tap ---------------------------------------------------------------------------
 (function () {
   var sent = [], seen = [], original = { clone: function () { return { json: function () { return Promise.resolve({ data: { x: { success: true } } }); } }; } };
@@ -210,8 +246,31 @@ function statics() {
   A.ok('no @connect', !/@connect/.test(meta));
   A.ok('no .click() anywhere', !/\.click\(/.test(code));
   A.ok('no polling timer', !/setInterval/.test(code));
-  A.ok('no auth header / token read', !/authorization|bearer|access_token|auth0|document\.cookie/i.test(code));
-  A.ok('no request of its own (fetch only via the passthrough)', (code.match(/fetch\(/g) || []).length === 0 && !/new XMLHttpRequest|sendBeacon|\.open\(['"]/.test(code));
+  // 0.3.0 read contract: the token picker is the suite's canonical block (pinned by the shared-block
+  // ledger) and the ONLY place a token or Authorization header appears outside it is apaGql.
+  var gqlStart = code.indexOf('  function apaGql('), gqlEnd = code.indexOf('\n  }\n', gqlStart);
+  var sharedS = code.indexOf('function isUmbravaToken('), sharedE = code.indexOf('  function apaGql(');
+  var outside = code.slice(0, sharedS) + code.slice(gqlEnd);
+  A.ok('reads: token / Authorization only in the shared picker and apaGql', gqlStart > 0 && sharedS > 0 &&
+    !/authorization|bearer|access_token|auth0|document\.cookie/i.test(outside));
+  A.ok('reads: exactly one fetch( call, inside apaGql', (code.match(/fetch\(/g) || []).length === 1 &&
+    code.slice(gqlStart, gqlEnd).indexOf("fetch('/api/graphql'") > 0);
+  A.ok('reads: no other transport', !/new XMLHttpRequest|sendBeacon|\.open\(['"]|GM_xmlhttpRequest/.test(code));
+  A.ok('reads: the app request headers are never read by the tap', !/setRequestHeader|init\.headers|\.headers\.get/.test(code));
+  // Slice QUERIES + checkDocument and run them: every op is a named read query; a write is refused.
+  var qS = SRC.indexOf('  var QUERIES = Object.freeze({'), qE = SRC.indexOf('  // The single request path.');
+  var Q = {}; vm.runInNewContext(SRC.slice(qS, qE) + '\nthis.QUERIES = QUERIES; this.checkDocument = checkDocument;', Q);
+  var ops = Object.keys(Q.QUERIES);
+  A.eq('reads: the allowlist is exactly the four APA_ reads', ops.sort(), ['APA_ClientProposal', 'APA_ClientProposals', 'APA_Trips', 'APA_WorkOrder']);
+  A.ok('reads: every allowlisted document is a named query, no mutation', ops.every(function (op) {
+    return Q.QUERIES[op].indexOf('query ' + op + '(') === 0 && !/mutation|subscription/i.test(Q.QUERIES[op]);
+  }));
+  function throws(fn) { try { fn(); return false; } catch (e) { return true; } }
+  A.ok('reads: checkDocument refuses an op outside the allowlist', throws(function () { Q.checkDocument('PatchWorkOrder', 'mutation PatchWorkOrder { x }'); }));
+  A.ok('reads: checkDocument refuses a mutation smuggled under an allowlisted name',
+    throws(function () { Q.checkDocument('APA_Trips', 'query APA_Trips($j: Int!) { a } mutation X { b }'); }));
+  A.ok('reads: no page/skip/take VARIABLES (Core List Heat replays those as the board query)',
+    ops.every(function (op) { return !/\$(page|skip|take)\b/.test(Q.QUERIES[op]); }));
   A.ok('no submit/save/approve trigger', !/requestSubmit|\.submit\(|dispatchEvent\(new (Mouse|Pointer)Event/.test(code));
   A.ok('duplicate-init guard', /if \(window\.__bwnApaInit\)[^\n]*return;/.test(SRC) && /window\.__bwnApaInit = VER;/.test(SRC));
   A.ok('activity log stores label + time only', /l\.unshift\(\{ a: label, t: new Date\(\)\.toISOString\(\) \}\)/.test(SRC));
