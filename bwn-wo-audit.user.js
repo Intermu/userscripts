@@ -2281,6 +2281,14 @@
     'parts in transit, not yet delivered': 'Parts for this repair are in transit.',
     'parts still in fabrication/lead time': 'Parts for this repair are in fabrication.'
   };
+  // The WO's own ECD is a TARGET (never an appointment), only while it has not lapsed, and never
+  // once the work is done: the render turns any target into "remains in scheduling", which on the
+  // 10/06 pipeline run was appended to two completed/invoiced jobs.
+  var CUR_DONE = { terminal: 1, confirmcomplete: 1, costreview: 1 };
+  function curTarget(f, h) {
+    f = f || {};
+    return (f.ecdSource === 'wo.expectedCompletionDate' && h && h.priority && !CUR_DONE[f.phase]) ? h.priority.expectedCompletionDate : null;
+  }
   // '' when there is no honest client wording (no live record, or an unmapped status).
   function curStatusSentence(f, h) {
     f = f || {};
@@ -2312,13 +2320,17 @@
     });
   }
   // The pipeline's safe fallback, led by the live status sentence when the extractor supplied no
-  // current-status line (or never ran). Re-checked: a fallback that somehow trips cuSafetyCheck
-  // drops to the facts-free version, which always passes.
-  function curFallbackDraft(facts, ctx, status, vendors) {
+  // current-status line (or never ran). Re-checked against cuSafetyCheck AND the billing/internal
+  // words it misses: a failing one drops to the facts-free version led by the status sentence.
+  // Finished work gets the status sentence alone - cuFallbackDraft always closes with "coordinating
+  // the resources to complete the work" + a scheduling line, which the 10/06 run put on two
+  // completed/invoiced jobs.
+  function curFallbackDraft(facts, ctx, status, vendors, phase) {
+    if (CUR_DONE[phase] && status) return status;
     var merged = cuMergeFacts(facts || null, ctx);
     if (!merged.currentStatusPlain && status) merged.currentStatusPlain = status;
     var text = cuFallbackDraft(merged);
-    if (cuSafetyCheck(text, vendors, merged.dateMode === 'confirmed').safe) return text;
+    if (cuSafetyCheck(text, vendors, merged.dateMode === 'confirmed').safe && !CUR_INTERNAL.test(text)) return text;
     merged = cuMergeFacts(null, ctx);
     if (status) merged.currentStatusPlain = status;
     return cuFallbackDraft(merged);
@@ -2327,9 +2339,12 @@
   // Extra gate ON TOP of cuSafetyCheck, for what the batch setting adds: a reply goes out days
   // after the notes were written, so a forward-looking date already behind `nowMs` is a lapsed
   // promise read as a live one (the 10/06 live run shipped "parts expected to arrive by October
-  // 5th" on 10/6), and every date must be in the evidence the model was shown.
-  var CUR_INTERNAL = /\b(coordinator|gross profit|margin|markup|\bGP\b|vendor cost|internal note|po\/approval)\b/i;
+  // 5th" on 10/6), and every date must be in the evidence the model was shown. Billing words are
+  // here because the suite's checker matches "invoice"/"invoicing" but not "invoiced" or "billing" -
+  // both shipped past it on the 10/06 pipeline live run.
+  var CUR_INTERNAL = /\b(coordinator|gross profit|margin|markup|\bGP\b|vendor cost|internal note|po\/approval|invoiced|billing|billed)\b/i;
   var CUR_FUTURE = /\b(expect(?:ed|s)?|will|scheduled for|planned|anticipated|eta|due)\b/i;
+  var CUR_IMPLIED_APPT = /\bscheduled to (?:begin|start|return|arrive|be|complete|finish)\b|\b(?:monday|tuesday|wednesday|thursday|friday|saturday|sunday|tomorrow)\b/i;
   function curPastPromise(s, nowMs) {
     if (typeof nowMs !== 'number') return '';
     var today = new Date(nowMs); today.setHours(0, 0, 0, 0);
@@ -2348,13 +2363,20 @@
     return '';
   }
   // '' when the rendered draft may be shown, else the reason. cuSafetyCheck first (the suite's
-  // blocking client-safety validator, byte-identical), then the batch extras.
-  function curFinalCheck(text, vendors, hasAppt, groundText, nowMs) {
+  // blocking client-safety validator, byte-identical), then the batch extras, then the audit's
+  // claim gate against the live derived facts `f` (it caught "the client has been informed" in
+  // 0.19.0 and that line came back on the first pipeline run without it).
+  function curFinalCheck(text, vendors, hasAppt, groundText, nowMs, f) {
     var s = String(text == null ? '' : text).trim();
     if (s.length < 20) return 'draft too short to be a status';
     var chk = cuSafetyCheck(s, vendors, hasAppt);
     if (!chk.safe) return 'exposed ' + chk.violations.join(', ');
     if (CUR_INTERNAL.test(s)) return 'used internal wording';
+    // Only a trip record may put a visit on the calendar. cuSafetyCheck catches "scheduled for" /
+    // "service is scheduled" but not a note-inferred "scheduled to begin on Monday" (10/06 run).
+    if (!hasAppt && CUR_IMPLIED_APPT.test(s)) return 'implied an appointment with no trip record behind it';
+    var claim = woaClaimIssue(s, f || {}, String(groundText || ''));
+    if (claim) return claim;
     // The date tokenizer reads "October 5" but not "October 5th", and the model writes ordinals:
     // without this an ordinal date escaped BOTH date checks on the 10/06 live run.
     var sd = s.replace(/\b(\d{1,2})(st|nd|rd|th)\b/gi, '$1');
@@ -3752,8 +3774,7 @@
     var f = deriveState(h, data.notes, now);
     var status = curStatusSentence(f, h);
     if (!status) review.push('status "' + (h.statusName || '?') + '" has no fixed client wording - check the draft closely');
-    // The WO's own ECD is a TARGET (never an appointment), and only while it has not lapsed.
-    var target = (f.ecdSource === 'wo.expectedCompletionDate' && h.priority) ? h.priority.expectedCompletionDate : null;
+    var target = curTarget(f, h);
     return Promise.all([curTripCtx(data.id), curVendors(data.id)]).then(function (a) {
       var tc = a[0], vendors = a[1];
       var ctx = {
@@ -3764,7 +3785,7 @@
       var extractInput = cuBuildExtractionInput(ctx, curPipelineNotes(meaningfulNotes(data.notes, now), vendors));
       function fallback(why, facts) {
         review.push(why + ' - safe fallback wording used');
-        return { text: curFallbackDraft(facts, ctx, status, vendors), source: 'fallback', review: review };
+        return { text: curFallbackDraft(facts, ctx, status, vendors, f.phase), source: 'fallback', review: review };
       }
       return curAi(SYSTEM_PROMPT_EXTRACT, extractInput, 6000).then(function (raw) {
         if (!raw) return null;
@@ -3777,14 +3798,14 @@
           var input = flagged ? renderInput + '\n\nThe previous draft was rejected for exposing: ' + flagged + '. Remove all of these.' : renderInput;
           return curAi(flagged ? SYSTEM_PROMPT_RENDER_STRICT : SYSTEM_PROMPT_RENDER, input, 3000).then(function (text) {
             if (!text) return fallback('AI draft unavailable', facts);
-            var bad = curFinalCheck(text, vendors, hasAppt, ground, now);
+            var bad = curFinalCheck(text, vendors, hasAppt, ground, now, f);
             if (!bad) return { text: text, source: 'AI pipeline', review: review };
             return flagged ? fallback('AI draft still unsafe after a stricter pass (' + bad + ')', facts) : render(bad);
           });
         }
         return render('');
       });
-    }).then(null, function () { return { text: curFallbackDraft(null, { targetCompletionDate: cuFriendlyDate(target) }, status, []), source: 'fallback', review: review.concat('drafting failed - safe fallback wording used') }; });
+    }).then(null, function () { return { text: curFallbackDraft(null, { targetCompletionDate: cuFriendlyDate(target) }, status, [], f.phase), source: 'fallback', review: review.concat('drafting failed - safe fallback wording used') }; });
   }
 
   // ---- Bounded-concurrency runner ----

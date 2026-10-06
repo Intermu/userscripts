@@ -45,7 +45,7 @@ var STALE_DAYS = 7;
 var T = (new Function('MS_DAY', '_date', 'auditCfg', 'STALE_DAYS', 'XLSX',
   SECTION + '\n;return { curParsePaste: curParsePaste, curBuildIndex: curBuildIndex, curResolve: curResolve,' +
   ' curGroup: curGroup, curStatusSentence: curStatusSentence, curScrub: curScrub, curPipelineNotes: curPipelineNotes,' +
-  ' curFallbackDraft: curFallbackDraft, curFinalCheck: curFinalCheck, curReplyHtml: curReplyHtml, curReplyTsv: curReplyTsv,' +
+  ' curFallbackDraft: curFallbackDraft, curTarget: curTarget, curFinalCheck: curFinalCheck, curReplyHtml: curReplyHtml, curReplyTsv: curReplyTsv,' +
   ' curFmtDate: curFmtDate, deriveState: deriveState, CUR_STAGE: CUR_STAGE, CUR_PARTS: CUR_PARTS, CUR_UNASSIGNED: CUR_UNASSIGNED,' +
   ' cuSafetyCheck: cuSafetyCheck, cuMergeFacts: cuMergeFacts, cuBuildExtractionInput: cuBuildExtractionInput };'))(MS_DAY, _date, auditCfg, STALE_DAYS, null);
 
@@ -182,8 +182,25 @@ A.eq('final: a grounded, clean render passes (negative control)', T.curFinalChec
 ].forEach(function (c) {
   A.ok('final: rejects ' + c[0], T.curFinalCheck(c[1], ['ACME Signs'], false, ground, NOW) !== '', c[1]);
 });
+// 10/06 third run: a note-inferred visit with no trip record ("scheduled to begin on Monday").
+A.ok('final: rejects a note-inferred visit with no trip record',
+  /no trip record/.test(T.curFinalCheck('Lift access is scheduled to begin on Monday to start the lighting work.', [], false, ground, NOW, fMat)));
+A.ok('final: rejects a bare weekday with no trip record',
+  /no trip record/.test(T.curFinalCheck('Parts are on order and the crew returns Thursday to finish the repair.', [], false, ground, NOW, fMat)));
+A.eq('final: the same wording is fine WITH a trip record (negative control)',
+  T.curFinalCheck('Technicians are scheduled to return on Thursday to finish the repair.', [], true, ground, NOW, fMat), '');
 A.eq('final: a confirmed appointment may say "scheduled for" (negative control)',
   T.curFinalCheck('Parts have arrived. Service is scheduled for 10/8 at the site.', [], true, ground, NOW), '');
+// 10/06 pipeline live run: billing words and a client-contact claim got past the suite checker.
+var fMat = { phase: 'materials', currentStage: 'Materials pending', terminal: false };
+[
+  ['"invoiced"', 'The work order has been invoiced and closed with no outstanding actions.'],
+  ['"billing"', 'The work order was confirmed complete and is being prepared for billing.'],
+  ['a client-contact claim with no evidence', 'Troubleshooting is complete and the client has been informed of the progress.']
+].forEach(function (c) {
+  A.ok('final: rejects ' + c[0], T.curFinalCheck(c[1], [], false, ground, NOW, fMat) !== '', c[1]);
+});
+A.eq('final: the clean render still passes with live facts (negative control)', T.curFinalCheck(GOOD, [], false, ground, NOW, fMat), '');
 A.ok('final: a past date written as upcoming is rejected',
   /past date \(10\/3\) as upcoming/.test(T.curFinalCheck('Parts for this repair are expected to arrive by October 3rd at the site.', [], false, ground, NOW)));
 A.eq('final: a past date stated as past is fine',
@@ -194,6 +211,26 @@ A.ok('final: across New Year, 12/30 is last year - rejected as upcoming',
   /past date \(12\/30\)/.test(T.curFinalCheck('Parts for this repair are expected to arrive 12/30.', [], false, groundJan, JAN4)));
 A.eq('final: a clause without future wording is not judged by its neighbour',
   T.curFinalCheck('The repair plan was set 10/3; work will follow once parts arrive.', [], false, ground, NOW), '');
+
+// A finished job gets no target date (the render would say "remains in scheduling").
+var HDR = { priority: { expectedCompletionDate: '2026-10-10T12:00:00' } };
+A.eq('target: an open job keeps its unlapsed ECD as the target', T.curTarget({ phase: 'materials', ecdSource: 'wo.expectedCompletionDate' }, HDR), '2026-10-10T12:00:00');
+['terminal', 'confirmcomplete', 'costreview'].forEach(function (ph) {
+  A.eq('target: none once the work is done (' + ph + ')', T.curTarget({ phase: ph, ecdSource: 'wo.expectedCompletionDate' }, HDR), null);
+});
+A.eq('target: a lapsed ECD is not offered', T.curTarget({ phase: 'materials', ecdSource: 'wo.expectedCompletionDate.expired' }, HDR), null);
+var FB_DONE = T.curFallbackDraft(null, { targetCompletionDate: null }, 'The work is complete.', []);
+A.ok('target: a finished job fallback never says "remains in scheduling"', /^The work is complete\./.test(FB_DONE) && !/remains in scheduling/.test(FB_DONE), FB_DONE);
+
+// 10/06 re-run: two finished jobs fell back to "completed and invoiced" + "coordinating the
+// resources to complete the work" + a scheduling line.
+var DONE_FACTS = { currentStatusPlain: 'The work order has been completed and invoiced.', verifiedFindings: [], completedActions: [], remainingScope: [], accessOrSafetyRequirements: [], materialsOrDependencies: [], clientSafeCurrentActions: [] };
+['terminal', 'confirmcomplete', 'costreview'].forEach(function (ph) {
+  A.eq('fallback: finished work (' + ph + ') is the status sentence alone', T.curFallbackDraft(DONE_FACTS, {}, 'The work is complete.', [], ph), 'The work is complete.');
+});
+var FB_BILL = T.curFallbackDraft(DONE_FACTS, CTX_T, 'Parts/materials for this repair are on order.', [], 'materials');
+A.ok('fallback: a billing word in an extracted fact is not shipped', !/invoic|billing/i.test(FB_BILL) && /^Parts\/materials/.test(FB_BILL), FB_BILL);
+A.ok('fallback: an open job still gets the pipeline fallback (negative control)', /target completion date/.test(FB_BILL), FB_BILL);
 
 // ---- 5. reply table ---------------------------------------------------------------------------------
 var row = { rowNo: '7', fm: 'Fm Alpha', po: '170101000001', store: '101-Travel Center', city: 'Towna', state: 'Statea', date: '7/16/2026', update: 'Scheduled <b>10/9</b>\tline2\nline3' };
