@@ -111,3 +111,67 @@ These were read-only DOM checks with 0.1.1 loaded by eval. No graphql requests c
   with that field empty.
 - **Pricing-rules wording.** The seeded default is "rate card first, never below vendor unit cost,
   materials markup 35% max", taken from the checker's rules. It can be edited per template.
+
+## 0.3.0 read-only context (live-checked 2026-10-06, WO 396190)
+
+The spec's "no own API calls" rule was relaxed **for reads only**, at Mike's instruction, so the
+panel can see what a side-loaded Claude sees.
+
+**How it reads:**
+- Four fixed, named queries, each copied from a proven suite read:
+  - `APA_WorkOrder`: `workOrder(workOrderNumber)`, giving client, location, priority, `doNotExceed`
+    (the client NTE), `totalNTE` and scope.
+  - `APA_ClientProposals`: `listClientProposals(jobId)`. Status is derived from the dates.
+    `grossProfitPercent` is a string fraction.
+  - `APA_ClientProposal`: `proposal(id)` line items. `tripLabel` comes back like `1`, `2` or `3/4`,
+    and `category` is an integer enum.
+  - `APA_Trips`: `purchaseOrderTrips(jobId)`.
+- One request path, `apaGql`, refuses anything that isn't on that list or isn't a single named
+  `query`.
+- The token comes from the suite's canonical BWN-SHARED picker.
+- Reads happen only while the panel is open with "Work order context" ticked.
+- If a read fails, the panel says so; it is never shown as "none".
+
+**Live result:**
+- 4 reads, 0 mutations.
+- Client NTE $1,500. The vendor total of $7,500 is 5x that, which gives one message with the
+  keep-NTE-out-of-prompt advice.
+- Client proposal #1 (Submitted 10/5, $12,628.74, 33.5% GP) is flagged.
+- **Client proposal #2 is a Draft ($4,708.80, -73.6% GP).** The earlier split is now taken from the
+  latest Submitted/Approved proposal and falls back to a draft only if none was sent.
+
+**Trips:**
+- The POs record only Trip 1, as completed. The earlier proposal labels its lines 1, 2 and 3/4.
+- The plan merges both sources: a trip completed on a PO is Incurred. A trip only the proposal names
+  is Proposed and flagged "assumed - check". `3/4` becomes "Trip 3-4".
+
+## 0.4.0 quote, rate card, notes, AI draft (2026-10-06)
+
+**Quote by id.** There is no single-quote query. The script reads `purchaseOrders(workOrderNumber)`,
+then `quotes(purchaseOrderIds, includeLineItems)`, and keeps the one whose id is the route's
+quoteId. Live on WO 396190 this found quote #1, Doug's Electrical Service Inc, $7,500.
+- Quote lines carry `categoryObject {id,name}`, `rateId` and `rateDiscrepancy`, but **no trip
+  field**. Trip # still comes from the line grid on the page.
+- `aggregateRateDiscrepancy` comes back as a bare number (64 on this quote). Its meaning is unknown,
+  so the panel doesn't show it.
+
+**Client rate card.** `listClientRates(targetTenantId: clientId, isActive: true)`.
+- Pilot has 44 active rates, every one **location-specific**. The same "1 Man /hr" appears once per
+  site.
+- Item names follow the house pattern: Labor "1 Man" / "3 Man" per hr, Travel "1 Man" / "2 Man
+  Travel" each, plus some Material drivers and batteries.
+- The check matches on category id, prefers this WO's location, and compares item names exactly,
+  then by containment. A match below vendor cost fails: the rate card overrides the prompt, so the
+  line will price under water. No match gives a warning that the AI will apply markup instead.
+
+**WO notes.** `workOrderNotes(workOrderNumber)`. The 15 newest are sent to the AI as text only, each
+capped at 300 characters, because notes carry the tech's account of each trip.
+
+**AI draft.** On a click, the facts go over the page bus as `bwn:cmd ai:apaDraft` to
+bwn-suite-ai 1.50.0+, which holds the AI key.
+- Facts sent: WO scope, vendor scope, the earlier proposal's scope and lines, the trip plan, the
+  vendor lines and the notes. No prices.
+- bwn-suite-ai calls `/api/ai` with task `proposal`. The prompt and rank floor belong to the SWA
+  (`BWN_PROPOSAL_MIN_RANK`, default coordinator); a caller-supplied prompt is ignored.
+- The JSON reply fills the issue line and the trip lines for review.
+- If the reply is unreadable or missing, nothing is changed and the panel says why.

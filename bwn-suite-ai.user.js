@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         BWN Suite - AI (Broadway National)
 // @namespace    broadwaynational.bwn
-// @version      1.49.0
+// @version      1.50.0
 // @downloadURL  https://raw.githubusercontent.com/Intermu/userscripts/main/bwn-suite-ai.user.js
 // @updateURL    https://raw.githubusercontent.com/Intermu/userscripts/main/bwn-suite-ai.user.js
 // @description  The Umbrava tools that call outside APIs, kept separate from the zero-egress Core script. Client Update and WO Audit drafts (Anthropic Claude; draft-only, scrubbed before sending, you review before posting); Find Techs / Find Suppliers (Google Places; vendor leads near a WO); and Job View (opens the Ops-Dashboard job card on the WO page - WO details from Umbrava plus the authored case file and next actions, read-only). Network access is limited by the browser to the declared API hosts and the BWN Static Web App. API keys are stored in Tampermonkey's storage via the menu commands and never enter the page. Toggle modules in BWN_MODULES below.
@@ -2209,6 +2209,29 @@
         oneLine: d.oneLine !== false, maxChars: d.maxChars || 160,
         system: 'You write ONE terse line summarizing what a work-order document is and what it says, for a facilities coordinator. State the document kind (invoice, proposal, quote, report, permit, photo log, etc.) and its key facts - amount, vendor, scope, dates - if present. Max 20 words. No preamble, no label, no quotes; output only the sentence.',
         prompt: text, timeoutMs: 12000
+      }).then(reply, function () { reply(''); });
+    } catch (e3) { reply(''); }
+  }, false);
+
+  // ---- AI proposal-draft bridge (serves bwn-ai-proposal-assist, @grant none) -------------
+  // AI Proposal Assist must stay @grant none (it reads Generate's responses off the page's own
+  // fetch), so it cannot hold the ingest key; it hands its FACTS over the bus and we send them.
+  //   in   bwn:cmd  { id:'ai:apaDraft', rid, facts }
+  //   out  bwn:evt  { id:'ai:apaDrafted', rid, text }     text = the server's JSON draft, or ''
+  // Task 'proposal' has a SERVER-OWNED system prompt (the SWA ignores ours) and its own rank
+  // floor (BWN_PROPOSAL_MIN_RANK, default coordinator), so this bridge can only ever produce that
+  // one draft. Proxy only, no on-device/local fallback: a small model would invent trip steps.
+  document.addEventListener('bwn:cmd', function (e) {
+    var d = e && e.detail;
+    if (!d || d.id !== 'ai:apaDraft' || d.rid == null) return;
+    function reply(t) { try { document.dispatchEvent(new CustomEvent('bwn:evt', { detail: { id: 'ai:apaDrafted', rid: d.rid, text: String(t || '') } })); } catch (e2) { } }
+    var facts;
+    try { facts = JSON.stringify(d.facts || {}); } catch (e4) { reply(''); return; }
+    if (facts.length > 12000) facts = facts.slice(0, 12000);   // ponytail: blunt cap; the caller already trims notes
+    try {
+      bwnAI({
+        task: 'proposal', tier: 'proxy', fallback: [], minRank: 1,
+        oneLine: false, maxChars: 4000, prompt: facts, timeoutMs: 45000
       }).then(reply, function () { reply(''); });
     } catch (e3) { reply(''); }
   }, false);
