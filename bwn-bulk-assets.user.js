@@ -1,8 +1,8 @@
 // ==UserScript==
 // @name         BWN Bulk Asset Uploader (Broadway National)
 // @namespace    broadwaynational.bwn
-// @version      0.1.0
-// @description  Bulk-creates Umbrava assets across a client's locations from a CSV/XLSX (one row = one asset at one location). Opens from the shared dock (bwn:dock:*, hosted by bwn-suite-core) on /clients/<id> pages only; without Core a floating "Bulk Assets" button appears instead. Columns are matched by header name; Validate is read-only (resolves each location # once, matches trades/asset types by name, flags bad dates, in-file duplicates, and assets that already exist at the location by serial, else tag, else name). Create runs only after a confirm showing the count and number of locations, one createAsset at a time (350ms apart) through the governed bwnGqlOp path (audit ring, kill switch flag bulkAssets, high-risk confirm), with live progress and a Stop that finishes the current row. A 401/403/expired session/429 or an unsure network failure halts the run; re-running skips rows already created. Download results writes an XLSX of every row's outcome. Same-origin /api/graphql with the page's own Umbrava session token, read per request and never stored or shown. @grant none, no @connect.
+// @version      0.1.1
+// @description  Bulk-creates Umbrava assets across a client's locations from a CSV/XLSX (one row = one asset at one location). Opens from the shared dock (bwn:dock:*, hosted by bwn-suite-core) on /clients/<id> pages only; without Core a floating "Bulk Assets" button appears instead. Columns are matched by header name; Validate is read-only (loads the client's location list once and matches each location # locally, matches trades/asset types by name, flags bad dates, in-file duplicates, and assets that already exist at the location by serial, else tag, else name). Create runs only after a confirm showing the count and number of locations, one createAsset at a time (350ms apart) through the governed bwnGqlOp path (audit ring, kill switch flag bulkAssets, high-risk confirm), with live progress and a Stop that finishes the current row. A 401/403/expired session/429 or an unsure network failure halts the run; re-running skips rows already created. Download results writes an XLSX of every row's outcome. Same-origin /api/graphql with the page's own Umbrava session token, read per request and never stored or shown. @grant none, no @connect.
 // @downloadURL  https://raw.githubusercontent.com/Intermu/userscripts/main/bwn-bulk-assets.user.js
 // @updateURL    https://raw.githubusercontent.com/Intermu/userscripts/main/bwn-bulk-assets.user.js
 // @match        https://app.umbrava.com/*
@@ -15,15 +15,15 @@
 (function () {
   'use strict';
 
-  var VER = '0.1.0';
+  var VER = '0.1.1';
   var DOCK_KEY = 'bulk-assets';
   var FEATURE = 'bulkAssets';           // bwn:modules kill switch for the create write
   var DOCK_WAIT_MS = 4000;
   var CREATE_GAP_MS = 350;
   var READ_GAP_MS = 100;
   var EXPIRY_MARGIN_SEC = 120;
-  var LOCATION_PAGE = 25;
-  var LOCATION_SCAN_CAP = 500;          // ponytail: a search matching >500 locations is reported, not paged further
+  var LOCATION_PAGE = 200;
+  var LOCATION_LIST_CAP = 20000;        // ponytail: the whole client list is loaded once; past this, go back to per-row search
   var ASSET_PAGE = 500;
   var OPEN_ONLY_FILTER = { columnName: 'Status', operation: 'In', searchTerm: '["Open"]' };
 
@@ -494,23 +494,27 @@
   var M_CREATE_ASSET = 'mutation CreateAsset($newAssetData: CreateAssetInput!) { createAsset(data: $newAssetData) { success message asset { id name } } }';
 
   var umbravaApi = {
-    searchLocations: async function (clientId, search, openOnly) {
+    // The client's whole location list, loaded once per validation and matched locally. A per-row
+    // server search is a contains-match: "PFJ 0123" pages through hundreds of loose hits (~10 s a
+    // store on Pilot's 896), where this is ~5 requests for the whole file.
+    listClientLocations: async function (clientId, openOnly) {
       var items = [], skip = 0, rowCount = 0;
       do {
         var p = (await baGql(Q_LOCATIONS, {
           page: { skip: skip, take: LOCATION_PAGE },
           sortBy: [{ columnName: 'Name', direction: 'ASC' }],
-          search: search,
+          search: '',
           filters: openOnly ? [OPEN_ONLY_FILTER] : [],
           clientTenantProfileId: clientId
         })).pagedLocations || {};
         var got = p.items || [];
         rowCount = p.rowCount || 0;
+        if (rowCount > LOCATION_LIST_CAP) throw new Error('This client has ' + rowCount + ' locations - more than this tool loads at once.');
         items = items.concat(got);
         skip += LOCATION_PAGE;
         if (!got.length) break;
-      } while (items.length < rowCount && skip < LOCATION_SCAN_CAP);
-      return { items: items, truncated: items.length < rowCount };
+      } while (items.length < rowCount);
+      return items;
     },
     listTrades: async function () {
       return (await baGql(Q_TRADES, { includeHidden: false })).listTrades || [];
@@ -652,23 +656,15 @@
     return k !== '' && normKey(locationNumber) === k;
   }
 
-  async function resolveLocation(api, clientId, sheetValue, openOnly) {
+  // locations: the client's full list (api.listClientLocations). Pure.
+  function resolveLocation(locations, sheetValue, openOnly) {
     var s = cellText(sheetValue);
-    // If "pfj-0001" finds nothing, retry once with the longest digit run (server search may not
-    // ignore punctuation). The exact match rule above still decides.
-    var terms = [s];
-    var run = (s.match(/\d+/g) || []).sort(function (a, b) { return b.length - a.length; })[0];
-    if (run && run !== s) terms.push(run);
-    for (var t = 0; t < terms.length; t++) {
-      var res = await api.searchLocations(clientId, terms[t], openOnly);
-      if (res.truncated) return { error: 'Location search "' + terms[t] + '" matched too many locations to check - use the full location #' };
-      var seen = Object.create(null), hits = [];
-      res.items.forEach(function (l) { if (locationMatches(s, l.locationNumber) && !seen[l.id]) { seen[l.id] = 1; hits.push(l); } });
-      if (hits.length === 1) return { location: hits[0] };
-      if (hits.length > 1) {
-        return { error: 'Ambiguous location: ' + hits.length + ' match "' + s + '" (' +
-          hits.slice(0, 3).map(function (h) { return h.locationNumber; }).join(', ') + (hits.length > 3 ? ', ...' : '') + ')' };
-      }
+    var seen = Object.create(null), hits = [];
+    locations.forEach(function (l) { if (locationMatches(s, l.locationNumber) && !seen[l.id]) { seen[l.id] = 1; hits.push(l); } });
+    if (hits.length === 1) return { location: hits[0] };
+    if (hits.length > 1) {
+      return { error: 'Ambiguous location: ' + hits.length + ' match "' + s + '" (' +
+        hits.slice(0, 3).map(function (h) { return h.locationNumber; }).join(', ') + (hits.length > 3 ? ', ...' : '') + ')' };
     }
     return { error: 'Location "' + s + '" not found' + (openOnly ? ' among open locations' : '') };
   }
@@ -719,12 +715,13 @@
     var types = rows.some(function (r) { return cellText(r.raw.assetType); }) ? indexByName(await api.listAssetTypes(clientId)) : Object.create(null);
 
     var locByText = Object.create(null);
-    var uniqueLocs = [];
-    rows.forEach(function (r) { var t = cellText(r.raw.locationNumber); if (t && uniqueLocs.indexOf(t) === -1) uniqueLocs.push(t); });
-    for (var i = 0; i < uniqueLocs.length; i++) {
-      onProgress('Resolving location ' + (i + 1) + ' of ' + uniqueLocs.length);
-      locByText[uniqueLocs[i]] = await resolveLocation(api, clientId, uniqueLocs[i], openOnly);
-      await pause(READ_GAP_MS);
+    if (rows.some(function (r) { return cellText(r.raw.locationNumber); })) {
+      onProgress('Loading client locations');
+      var allLocs = await api.listClientLocations(clientId, openOnly);
+      rows.forEach(function (r) {
+        var t = cellText(r.raw.locationNumber);
+        if (t && !locByText[t]) locByText[t] = resolveLocation(allLocs, t, openOnly);
+      });
     }
 
     var locIds = [];
