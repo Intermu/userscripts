@@ -92,6 +92,7 @@ var LEDGER = {
   'bwn-ai-proposal-assist.user.js': { status: 'NONE' },
   'bwn-ask.user.js':              { status: 'NONE' },
   'bwn-bid-out.user.js':          { status: 'VARIANT', reason: 'toast(msg): bottom-right, "Bid-Out:" prefix, no motion - a distinct placement' },
+  'bwn-bulk-assets.user.js':      { status: 'NONE' },
   'bwn-cc-auth.user.js':          { status: 'CANONICAL' },
   'bwn-cc-purchase.user.js':      { status: 'CANONICAL' },
   'bwn-dispatch.user.js':         { status: 'CANONICAL' },
@@ -149,7 +150,7 @@ onDisk.slice().sort().forEach(function (f) {
 console.log('\n-- 3. aggregate counts + one canonical SHA --');
 A.ok('CANONICAL count is 6', ledgerWith('CANONICAL').length === 6, 'got ' + ledgerWith('CANONICAL').length);
 A.ok('VARIANT count is 6', ledgerWith('VARIANT').length === 6, 'got ' + ledgerWith('VARIANT').length);
-A.ok('NONE count is 13', ledgerWith('NONE').length === 13, 'got ' + ledgerWith('NONE').length);
+A.ok('NONE count is 14', ledgerWith('NONE').length === 14, 'got ' + ledgerWith('NONE').length);
 var shas = {};
 ledgerWith('CANONICAL').forEach(function (f) { shas[sha(sliceCanonFn(SRC[f]))] = true; });
 A.ok('all CANONICAL adopters share ONE toast SHA', Object.keys(shas).length === 1, 'distinct: ' + Object.keys(shas).join(','));

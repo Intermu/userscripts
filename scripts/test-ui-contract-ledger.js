@@ -109,6 +109,9 @@ var LEDGER = {
   'bwn-ai-proposal-assist.user.js': { drawer: 'NA', toast: 'NA', rmotion: 'NA', rail: 'NA'  },
   'bwn-ask.user.js':           { drawer: 'DIVERGENT', toast: 'NA',        rmotion: 'NA',  rail: 'NA'  },
   'bwn-bid-out.user.js':       { drawer: 'NA',        toast: 'DIVERGENT', rmotion: 'HAS', rail: 'HAS' },
+  // Bulk Asset Uploader: builds <aside class="bwn-drawer bwnba"> in Core's shared slot and closes through the
+  // canonical drawerDismiss; status line instead of a toast, no animation:, never reads --bwn-dock-shift.
+  'bwn-bulk-assets.user.js':   { drawer: 'HAS',       toast: 'NA',        rmotion: 'NA',  rail: 'NA'  },
   'bwn-cc-auth.user.js':       { drawer: 'HAS',       toast: 'HAS',       rmotion: 'NA',  rail: 'NA'  },
   'bwn-cc-purchase.user.js':   { drawer: 'HAS',       toast: 'HAS',       rmotion: 'NA',  rail: 'NA'  },
   'bwn-dispatch.user.js':      { drawer: 'HAS',       toast: 'HAS',       rmotion: 'NA',  rail: 'NA'  },

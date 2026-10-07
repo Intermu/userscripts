@@ -197,7 +197,12 @@ console.log('\n-- CHECK C: every registry WRITE declares the Umbrava permission 
 var PERM_EXEMPT = {
   // Umbrava's own column chooser writes this same preference for any user; there is no checkbox
   // for it, and gating it would break saved layouts for people who may not edit work orders.
-  putUserPreference: 'personal UI state - Umbrava has no permission for it'
+  putUserPreference: 'personal UI state - Umbrava has no permission for it',
+  // NOT "by design" like the row above: OWED. Umbrava's asset permission flags have not been read out
+  // of the SPA bundle yet, so BWN_PERM_MAP (Core) has no Asset group and any key named here would be
+  // a guess that fails OPEN anyway. Replace this exemption with the real perm once the flags are
+  // captured. Until then the server is the only gate; the dock row is rank-4-only (BWN_DOCK_POLICY).
+  createAsset: 'OWED - Umbrava asset permission flags not captured yet; server is the gate'
 };
 Object.keys(registries).forEach(function (f) {
   var reg = registries[f];

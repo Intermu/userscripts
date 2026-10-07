@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         BWN Suite - Core (Broadway National)
 // @namespace    broadwaynational.bwn
-// @version      1.94.5
+// @version      1.94.6
 // @downloadURL  https://raw.githubusercontent.com/Intermu/userscripts/main/bwn-suite-core.user.js
 // @updateURL    https://raw.githubusercontent.com/Intermu/userscripts/main/bwn-suite-core.user.js
 // @description  Runs several Umbrava helpers for BWN coordinators, in the browser with no privileged grants. Includes: PO Approval + ETA Builder; WO Assist (GP/ETA, a stall watchdog, DNE calculator, and a next-action playbook); Email Leak Guard (checks recipients against vendor names, PO amounts, and client budget references before an outbound email sends); WO List Heat (a triage overlay + My Day strip on the work-order list, with an optional same-origin Umbrava API scan for deterministic full-board coverage); and the BWN Launcher (opens the Azure Static Web App tools with the current WO's context). Modules share state through sessionStorage/localStorage. The only network calls are same-origin Umbrava GraphQL requests (app.umbrava.com/api/graphql, the app's own session): List Heat's full-board scan and WO Assist's work-order / trip / clock-in / document / purchase-order reads, plus ONE write - BWN Views saves the column layout through Umbrava's own putUserPreference, the same preference the column chooser writes; everything else is offline. Toggle modules in BWN_MODULES below.
@@ -13046,6 +13046,7 @@
     BWN_DOCK_POLICY['operate']     = { minRank: 4, perms: [] };  // AI Operate - high blast radius
     BWN_DOCK_POLICY['bulk-ops']    = { minRank: 4, perms: [] };  // Bulk Ops - mass action
     BWN_DOCK_POLICY['bulk-task']   = { minRank: 4, perms: ['Task.EditTask'] };  // Bulk task reassign - mass write, flag bulkTask
+    BWN_DOCK_POLICY['bulk-assets'] = { minRank: 4, perms: [] };  // Bulk Asset Uploader - mass createAsset across a client's locations, flag bulkAssets; registers on /clients/<id> only
     var dockPolicyWarned = Object.create(null);   // one console.warn per unclassified key
 
     function dockEmit(id, extra) {
@@ -13150,6 +13151,8 @@
       // A 3D box (📦): the front silhouette, the top edges meeting at centre, and the seam down.
       // Added WITH the bwn-inventory rail registrant, per this map's own rule (see test-dock-latent-fixes).
       inventory: ['M3 8l9-4 9 4v8l-9 4-9-4z', 'M3 8l9 4 9-4', 'M12 12v8'],
+      // Bulk Asset Uploader (bwn-bulk-assets): an upload tray - arrow up out of an open box.
+      'bulk-assets': ['M12 15V3', 'M7 8l5-5 5 5', 'M4 15v4a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2v-4'],
       tools: ['M4 6h16', 'M4 12h16', 'M4 18h16', 'M14 4v4', 'M8 10v4', 'M16 16v4'],
       // Operate: a page frame with a run mark in it. Added with the registrant rather than after
       // it - test-dock-latent-fixes caught the missing entry the moment the entry existed, which

@@ -97,6 +97,7 @@ var LEDGER = {
   'bwn-ai-proposal-assist.user.js': { status: 'NONE' },
   'bwn-ask.user.js':              { status: 'NONE' },
   'bwn-bid-out.user.js':          { status: 'NONE' },
+  'bwn-bulk-assets.user.js':      { status: 'CANONICAL' },
   'bwn-cc-auth.user.js':          { status: 'CANONICAL' },
   'bwn-cc-purchase.user.js':      { status: 'CANONICAL' },
   'bwn-dispatch.user.js':         { status: 'CANONICAL' },
@@ -153,7 +154,7 @@ onDisk.slice().sort().forEach(function (f) {
 // sequence the canonical MUST preserve (.bwn-closing + the 170ms delay).
 // =============================================================================================
 console.log('\n-- 3. aggregate counts + one canonical SHA + exit contract --');
-A.ok('CANONICAL count is 6', ledgerWith('CANONICAL').length === 6, 'got ' + ledgerWith('CANONICAL').length);
+A.ok('CANONICAL count is 7', ledgerWith('CANONICAL').length === 7, 'got ' + ledgerWith('CANONICAL').length);
 A.ok('VARIANT count is 1', ledgerWith('VARIANT').length === 1, 'got ' + ledgerWith('VARIANT').length);
 A.ok('NONE count is 18', ledgerWith('NONE').length === 18, 'got ' + ledgerWith('NONE').length);
 var shas = {};

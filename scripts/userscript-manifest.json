@@ -11,6 +11,7 @@
       }
     },
     "bwn-bid-out.user.js": { "expectedInstalled": true },
+    "bwn-bulk-assets.user.js": { "expectedInstalled": false },
     "bwn-cc-auth.user.js": { "expectedInstalled": true },
     "bwn-cc-purchase.user.js": { "expectedInstalled": true },
     "bwn-dispatch.user.js": { "expectedInstalled": true },

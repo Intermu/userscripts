@@ -36,7 +36,8 @@ var END = '  // ===== BWN-PERM END v2 =====';
 //          nobody wired shows up as drift rather than dead weight).
 // Moving a script between the two lists is a DELIBERATE edit of this file - that is the point.
 var ADOPTED = [
-  'bwn-dispatch.user.js',        // assign / status / ECD rows in the dispatch modal
+  'bwn-bulk-assets.user.js',     // carried for the bwnGqlOp wrapper; createAsset has no perm yet (OWED)
+  'bwn-dispatch.user.js',       // assign / status / ECD rows in the dispatch modal
   'bwn-drop-upload.user.js',     // document upload overlay + the note review box
   'bwn-kanban.user.js',          // card drag = a status write
   'bwn-low-gp.user.js',          // the Low GP button posts notes
