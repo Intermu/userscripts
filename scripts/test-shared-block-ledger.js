@@ -139,6 +139,7 @@ var LEDGER = {
   'bwn-ai-proposal-assist.user.js': { status: 'ADOPTED' },
   'bwn-ask.user.js':              { status: 'ADOPTED' },
   'bwn-bid-out.user.js':          { status: 'ADOPTED' },
+  'bwn-bulk-assets.user.js':      { status: 'ADOPTED' },
   'bwn-cc-auth.user.js':          { status: 'ADOPTED' },
   'bwn-cc-purchase.user.js':      { status: 'ADOPTED' },
   'bwn-dispatch.user.js':         { status: 'ADOPTED' },
@@ -202,7 +203,7 @@ onDisk.slice().sort().forEach(function (f) {
 // SAME canonical bytes (one distinct SHA across all adopters, equal to CANON_SHA).
 // =============================================================================================
 console.log('\n-- 3. aggregate counts + one canonical SHA --');
-A.ok('ADOPTED count is 19', ledgerWith('ADOPTED').length === 19, 'got ' + ledgerWith('ADOPTED').length);
+A.ok('ADOPTED count is 20', ledgerWith('ADOPTED').length === 20, 'got ' + ledgerWith('ADOPTED').length);
 A.ok('PENDING count is 0', ledgerWith('PENDING').length === 0, 'got ' + ledgerWith('PENDING').length);
 A.ok('NA count is 6', ledgerWith('NA').length === 6, 'got ' + ledgerWith('NA').length);
 A.ok('PENDING is empty (both mega scripts folded in US-1 1b)',

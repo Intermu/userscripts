@@ -969,6 +969,13 @@ jobs:
       - name: Endpoint error surfacing harness (Bid-Out reads, Write Queue claim, Dispatch card line)
         run: node scripts/test-endpoint-errors.js
 
+      # bwn-bulk-assets: the pure parse/date/location-match/validation layer against a fake API, and the
+      # one write (createAsset) against a fake fetch - halt classes (401/403/429/expired token/network/
+      # 5xx-on-write/UNAUTHENTICATED-as-500), success false as a row failure, the bulkAssets kill switch
+      # and the PII-free audit entry. Four negative controls re-run checks against mutated shipped bytes.
+      - name: Bulk Asset Uploader harness (validation + createAsset halts + kill switch)
+        run: node scripts/test-bulk-assets.js
+
   lint:
     name: Lint
     runs-on: ubuntu-latest
