@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         BWN Bulk Asset Uploader (Broadway National)
 // @namespace    broadwaynational.bwn
-// @version      0.1.1
+// @version      0.1.2
 // @description  Bulk-creates Umbrava assets across a client's locations from a CSV/XLSX (one row = one asset at one location). Opens from the shared dock (bwn:dock:*, hosted by bwn-suite-core) on /clients/<id> pages only; without Core a floating "Bulk Assets" button appears instead. Columns are matched by header name; Validate is read-only (loads the client's location list once and matches each location # locally, matches trades/asset types by name, flags bad dates, in-file duplicates, and assets that already exist at the location by serial, else tag, else name). Create runs only after a confirm showing the count and number of locations, one createAsset at a time (350ms apart) through the governed bwnGqlOp path (audit ring, kill switch flag bulkAssets, high-risk confirm), with live progress and a Stop that finishes the current row. A 401/403/expired session/429 or an unsure network failure halts the run; re-running skips rows already created. Download results writes an XLSX of every row's outcome. Same-origin /api/graphql with the page's own Umbrava session token, read per request and never stored or shown. @grant none, no @connect.
 // @downloadURL  https://raw.githubusercontent.com/Intermu/userscripts/main/bwn-bulk-assets.user.js
 // @updateURL    https://raw.githubusercontent.com/Intermu/userscripts/main/bwn-bulk-assets.user.js
@@ -15,7 +15,7 @@
 (function () {
   'use strict';
 
-  var VER = '0.1.1';
+  var VER = '0.1.2';
   var DOCK_KEY = 'bulk-assets';
   var FEATURE = 'bulkAssets';           // bwn:modules kill switch for the create write
   var DOCK_WAIT_MS = 4000;
@@ -26,6 +26,12 @@
   var LOCATION_LIST_CAP = 20000;        // ponytail: the whole client list is loaded once; past this, go back to per-row search
   var ASSET_PAGE = 500;
   var OPEN_ONLY_FILTER = { columnName: 'Status', operation: 'In', searchTerm: '["Open"]' };
+  // Umbrava's own field limits (the asset form's maxlength, 2026-10-07; the server refused a 54-char
+  // Tag ID with "must be 50 characters or fewer"). Checked in Validate so a long value is a row
+  // error before the run, not a refused create mid-run.
+  var FIELD_LIMITS = [['name', 'Asset Name', 100], ['tagId', 'Tag ID', 50], ['modelNumber', 'Model', 50],
+    ['serialNumber', 'Serial', 50], ['manufacturer', 'Manufacturer', 100], ['tagLocation', 'Tag Location', 400],
+    ['PhysicalLocation', 'Physical Location', 400]];
 
   // ===== BWN-SHARED START v1 (paste-identical; pinned by scripts/test-shared-block-ledger.js) =====
   function isUmbravaToken(tok) {
@@ -733,7 +739,7 @@
       await pause(READ_GAP_MS);
     }
 
-    var seenKey = Object.create(null);
+    var seenKey = Object.create(null), seenName = Object.create(null);
     var out = rows.map(function (r) {
       var raw = r.raw, issues = [];
       function t(k) { return cellText(raw[k]) || null; }
@@ -770,11 +776,25 @@
         tagId: t('tagId')
       };
 
+      FIELD_LIMITS.forEach(function (f) {
+        var v = input[f[0]];
+        if (v && v.length > f[2]) issues.push(f[1] + ' is ' + v.length + ' characters - Umbrava allows ' + f[2]);
+      });
+
+      var locKey = location ? location.id : 'sheet:' + normKey(locText);
       var id = identity(raw);
       if (id.key) {
-        var dupKey = (location ? location.id : 'sheet:' + normKey(locText)) + '|' + id.kind + ':' + id.key;
+        var dupKey = locKey + '|' + id.kind + ':' + id.key;
         if (seenKey[dupKey]) issues.push('Duplicate of row ' + seenKey[dupKey] + ' (same location and ' + id.kind + ')');
         else seenKey[dupKey] = r.rowNum;
+      }
+      // Umbrava refuses a second asset with the same name at one store ("Asset name [...] already in
+      // use"), whatever the serial. A name-identity row is already covered by the duplicate check above.
+      var nk = nameKey(raw.name);
+      if (nk && id.kind !== 'name') {
+        var nameDup = locKey + '|' + nk;
+        if (seenName[nameDup]) issues.push('Asset Name also used by row ' + seenName[nameDup] + ' at this store - Umbrava needs a unique name per store');
+        else seenName[nameDup] = r.rowNum;
       }
 
       var base = { rowNum: r.rowNum, raw: raw, location: location, input: input, issues: issues };
@@ -782,6 +802,11 @@
       if (issues.length) return Object.assign(base, { status: 'error' });
       var hit = location && id.key && existing[location.id][id.kind][id.key];
       if (hit) return Object.assign(base, { status: 'exists', note: 'Already at this location (' + id.kind + ' match: "' + hit.name + '")' });
+      var taken = location && nk && existing[location.id].name[nk];
+      if (taken) {
+        issues.push('Asset Name is already used at this store by an existing asset (serial ' + (taken.serialNumber || 'none') + ') - Umbrava needs a unique name per store');
+        return Object.assign(base, { status: 'error' });
+      }
       return Object.assign(base, { status: 'ready' });
     });
     return { rows: out, clientId: clientId, openOnly: openOnly };
