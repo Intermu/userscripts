@@ -104,7 +104,7 @@ async function settle(p) { try { return { value: await p }; } catch (e) { return
   var ASSETS = { L1: [{ id: 'A1', name: 'RTU-1', serialNumber: 'SER-100', tagId: 'TAG-1' }, { id: 'A2', name: 'Walk-in Cooler', serialNumber: 'N/A', tagId: '' }] };
   function fakeApi(log) {
     return {
-      searchLocations: async function (c, term) { log.push('search:' + term); return { items: LOCS.filter(function (l) { return l.locationNumber.toLowerCase().indexOf(term.toLowerCase()) !== -1; }), truncated: false }; },
+      listClientLocations: async function (c, openOnly) { log.push('list:' + c + ':' + openOnly); return LOCS; },
       listTrades: async function () { return [{ id: 'T1', name: 'HVAC' }]; },
       listAssetTypes: async function () { return []; },
       listLocationAssets: async function (id) { log.push('assets:' + id); return ASSETS[id] || []; },
@@ -136,7 +136,7 @@ async function settle(p) { try { return { value: await p }; } catch (e) { return
   }
   var V = await validated(M), out = V.by;
   A.ok('validation never writes', V.log.indexOf('WRITE') === -1);
-  A.ok('each distinct location text resolved once, digit-run fallback used', V.log.filter(function (x) { return x === 'search:PFJ 0001'; }).length === 1 && V.log.indexOf('search:0001') !== -1);
+  A.ok('client location list loaded once (open only), no per-row search', V.log.filter(function (x) { return /^list:/.test(x); }).join() === 'list:C1:true');
   A.eq('ready row carries the exact CreateAssetInput', out[2].input, {
     name: 'RTU-9', manufacturer: null, manufactureDate: null, orderDate: null, installDate: localIso(2020, 1, 15),
     modelNumber: null, serialNumber: 'SER-999', manufacturerWarrantyEnd: null, materialWarrantyEnd: null, laborWarrantyEnd: null,
@@ -199,12 +199,15 @@ async function settle(p) { try { return { value: await p }; } catch (e) { return
   A.ok('central globalKillSwitch blocks the write', (await settle(gov.M.umbravaApi.createAsset(INPUT))).error && gov.calls.length === 0);
 
   var reads = rig(function (c) {
-    if (c.body.operationName === 'PagedLocations') return reply(200, { data: { pagedLocations: { rowCount: 26, items: c.body.variables.page.skip === 0 ? new Array(25).fill(0).map(function (_, i) { return { id: 'x' + i, locationNumber: 'Z' + i }; }) : [{ id: 'L1', locationNumber: 'PFJ 0001' }] } } });
+    if (c.body.operationName === 'PagedLocations') return reply(200, { data: { pagedLocations: { rowCount: 226, items: c.body.variables.page.skip === 0 ? new Array(200).fill(0).map(function (_, i) { return { id: 'x' + i, locationNumber: 'Z' + i }; }) : new Array(26).fill(0).map(function (_, i) { return { id: 'y' + i, locationNumber: 'Y' + i }; }) } } });
     return reply(200, { data: {} });
   });
-  var pl = await reads.M.umbravaApi.searchLocations('C1', '1', true);
-  A.ok('location search pages until rowCount and sends the open-only filter', pl.items.length === 26 && !pl.truncated && reads.calls.length === 2 &&
+  var pl = await reads.M.umbravaApi.listClientLocations('C1', true);
+  A.ok('location list pages of 200 until rowCount, blank search, open-only filter', pl.length === 226 && reads.calls.length === 2 &&
+    reads.calls[0].body.variables.search === '' && reads.calls[1].body.variables.page.skip === 200 &&
     reads.calls[0].body.variables.filters[0].searchTerm === '["Open"]' && reads.calls[0].body.variables.clientTenantProfileId === 'C1');
+  var huge = rig(function () { return reply(200, { data: { pagedLocations: { rowCount: 25000, items: [{ id: 'a', locationNumber: 'A' }] } } }); });
+  A.ok('a client past the list cap fails loudly instead of loading forever', /more than this tool loads/.test(((await settle(huge.M.umbravaApi.listClientLocations('C1', true))).error || {}).message || ''));
 
   // ---- 5. Negative controls (mutated shipped bytes; each must turn its check red) ------------------
   console.log('\n-- 5. negative controls --');

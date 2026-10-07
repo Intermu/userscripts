@@ -72,7 +72,7 @@ in progress even if another tool opens.
 
 | Op | Use |
 | --- | --- |
-| `PagedLocations` | Location lookup per distinct sheet value; `clientTenantProfileId` = client id from the URL; pages of 25, error past 500 matches; open-only adds `{columnName:"Status",operation:"In",searchTerm:"[\"Open\"]"}`. Retried once with the longest digit run if the first search finds no exact match. |
+| `PagedLocations` | The client's whole location list, once per Validate (blank `search`, pages of 200; error past 20,000); `clientTenantProfileId` = client id from the URL; open-only adds `{columnName:"Status",operation:"In",searchTerm:"[\"Open\"]"}`. Each sheet value is matched locally against that list. (0.1.0 searched per row; the server's contains-search paged through hundreds of loose hits, ~10 s a store on Pilot's 896 locations.) |
 | `ListTrades` | Once, if any row has a Trade. Case-insensitive name match. |
 | `AssetTypes` | Once, if any row has an Asset Type; `tenantId` = client id. Pilot returns 0 types, so blank is normal. |
 | `ListLocationAssets` | Existing assets per resolved location, pages of 500. `isActive` omitted (assumed to include inactive - the stricter check). |
