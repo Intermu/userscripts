@@ -31,6 +31,10 @@ asset at one location. Validation is read-only; nothing is written until you con
    - `exists` - already at that location (serial match, else tag, else name). Skipped.
    - `error` - missing required value, location not found / ambiguous, unknown trade or type, bad
      date, or a duplicate of an earlier row (same location + serial/tag/name). Skipped.
+     Since 0.1.2 also: an **Asset Name already used at that store** (by an earlier row, any case, or
+     by an existing asset with a different serial - Umbrava refuses a repeated name per store), and
+     any field over Umbrava's limits: Name 100, Tag ID / Model / Serial 50, Manufacturer 100,
+     Tag Location / Physical Location 400. Both were found on the first live run (16 refused creates).
    - **Open locations only** (default on) limits the location search to open locations.
 4. **Create N assets** - a confirm shows the count and the number of locations. One create at a
    time, 350 ms apart. **Stop after current row** finishes the row in flight; Create resumes.

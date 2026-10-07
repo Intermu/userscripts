@@ -153,6 +153,28 @@ async function settle(p) { try { return { value: await p }; } catch (e) { return
   A.eq('missing required', out[10].issues, ['Missing Location #', 'Missing Asset Name']);
   A.ok('created earlier stays created (even with no id back)', out[11].status === 'created' && out[11].assetId === 'NEW1' && out[14].status === 'created');
 
+  // 0.1.2: what the live Pilot run taught - Umbrava refuses a repeated asset NAME at one store and a
+  // Tag ID over 50 characters. Both must be row errors at Validate, before anything is sent.
+  var NAME_ROWS = [
+    rw(2, { locationNumber: 'PFJ 0001', name: 'Washer', serialNumber: 'S-1' }),
+    rw(3, { locationNumber: 'PFJ 0001', name: 'washer', serialNumber: 'S-2' }),
+    rw(4, { locationNumber: 'PFJ 0002', name: 'Washer', serialNumber: 'S-3' }),
+    rw(5, { locationNumber: 'PFJ 0001', name: 'RTU-1', serialNumber: 'S-4' }),
+    rw(6, { locationNumber: 'PFJ 0001', name: 'Long tag', serialNumber: 'S-5', tagId: new Array(52).join('T') }),
+    rw(7, { locationNumber: 'PFJ 0001', name: new Array(102).join('N'), serialNumber: 'S-6' }),
+    rw(8, { locationNumber: 'PFJ 0001', name: 'Fifty tag', serialNumber: 'S-7', tagId: new Array(51).join('T') })
+  ];
+  async function nameCheck(mod) {
+    var res = await mod.validateRows(NAME_ROWS, { api: fakeApi([]), clientId: 'C1', openOnly: true, sleep: function () { } });
+    var by = {}; res.rows.forEach(function (r) { by[r.rowNum] = r; }); return by;
+  }
+  var N = await nameCheck(M);
+  A.ok('a name repeated at the same store (any case) is an error naming the first row', N[2].status === 'ready' && N[3].status === 'error' && /also used by row 2/.test(N[3].issues.join()));
+  A.ok('the same name at a different store is fine', N[4].status === 'ready');
+  A.ok('a name already on an existing asset at the store (different serial) is an error', N[5].status === 'error' && /already used at this store by an existing asset \(serial SER-100\)/.test(N[5].issues.join()));
+  A.ok('Tag ID over 50 characters is an error; exactly 50 is fine', /Tag ID is 51 characters - Umbrava allows 50/.test(N[6].issues.join()) && N[8].status === 'ready');
+  A.ok('Asset Name over 100 characters is an error', /Asset Name is 101 characters - Umbrava allows 100/.test(N[7].issues.join()));
+
   // ---- 4. Transport + the one write ---------------------------------------------------------------
   console.log('\n-- 4. transport + createAsset --');
   var INPUT = out[2].input;
@@ -214,7 +236,9 @@ async function settle(p) { try { return { value: await p }; } catch (e) { return
   var C1 = load(mutate('return digits !== \'\' && stripZeros(digits) === stripZeros(s);', 'return digits !== \'\' && digits.slice(-s.length) === s;'), { localStorage: fakeStorage() });
   A.ok('control: an endsWith matcher would match "1" to PFJ 0011', C1.locationMatches('1', 'PFJ 0011') === true);
   var C2 = load(mutate("    return { kind: 'name', key: nameKey(raw.name) };", "    return { kind: 'name', key: '' };"), { localStorage: fakeStorage() });
-  A.ok('control: without the name fallback a re-run would re-create a no-serial row', (await validated(C2)).by[8].status === 'ready');
+  // Since 0.1.2 the per-store name check backstops this (the row becomes an error, not a silent
+  // create), so the control asserts what the fallback itself guarantees: recognition as "exists".
+  A.ok('control: without the name fallback a re-run no longer recognizes a no-serial row as existing', (await validated(C2)).by[8].status !== 'exists');
   var c3store = withToken(3600); c3store.setItem('bwn:modules', JSON.stringify({ bulkAssets: false }));
   var c3calls = 0;
   var C3 = load(mutate('feature: FEATURE, confirmed: true,', 'confirmed: true,'), { localStorage: c3store, fetch: function () { c3calls++; return reply(200, { data: { createAsset: { success: true } } }); } });
@@ -222,6 +246,10 @@ async function settle(p) { try { return { value: await p }; } catch (e) { return
   A.ok('control: dropping feature: from the call lets a disabled module write', c3calls === 1);
   var C4 = load(mutate("if (res.status === 429) throw haltError(", "if (false) throw haltError("), { localStorage: withToken(3600), fetch: function () { return reply(429); } });
   A.ok('control: without the 429 branch a rate limit is not a halt', !(await settle(C4.umbravaApi.createAsset(INPUT))).error.baHalt);
+  var C5 = load(mutate("if (seenName[nameDup]) issues.push(", "if (false) issues.push("), { localStorage: fakeStorage() });
+  A.ok('control: without the per-store name check a repeated name goes out as ready', (await nameCheck(C5))[3].status === 'ready');
+  var C6 = load(mutate("['tagId', 'Tag ID', 50]", "['tagId', 'Tag ID', 500]"), { localStorage: fakeStorage() });
+  A.ok('control: a loose Tag ID limit lets a 51-char tag go out as ready', (await nameCheck(C6))[6].status === 'ready');
 
   A.finish();
 })().catch(function (e) { console.error(e); process.exit(1); });
