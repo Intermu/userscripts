@@ -1,8 +1,8 @@
 // ==UserScript==
 // @name         BWN Note Report (Broadway National)
 // @namespace    broadwaynational.bwn
-// @version      1.2.0
-// @description  Read-only note activity report for one coordinator over an Eastern-Time date range, with a four-tab Excel export - it replaces pulling each work order's notes by hand. Opens from the shared dock (bwn:dock:*, hosted by bwn-suite-core); without Core a floating "Note Report" button appears bottom-right instead. Pick a user (member-search typeahead, teams filtered out) and a date range: it scopes work orders by that user's tasks (created or completed in the range, or still open with a target start on or before its end), optionally adds WOs they coordinate whose LastNoteDate falls in the range, de-duplicates them, batch-resolves WO details, pulls every note on each WO and keeps the user's own by author id. The preview shows totals, notes per day and a sortable table; Export writes Summary, Notes, Tasks and Flags tabs (past expected completion, open task past target, task activity with no notes, gaps of 2+ business days with no note on an open WO). Read-only by construction: one guarded request path can send only five fixed, named GraphQL queries, POST to same-origin /api/graphql, with the page's own Umbrava session token used transiently and never stored; at most 4 requests in flight, retries only on 429/502/503/504, and UNAUTHENTICATED (which Umbrava returns as HTTP 500) stops the run. No @connect, no keys, nothing is written to storage, nothing leaves the browser except the downloaded workbook.
+// @version      1.3.0
+// @description  Read-only note activity report for one coordinator over an Eastern-Time date range, with a four-tab Excel export - it replaces pulling each work order's notes by hand. Opens from the shared dock (bwn:dock:*, hosted by bwn-suite-core); without Core a floating "Note Report" button appears bottom-right instead. Pick a user (member-search typeahead, teams filtered out) and a date range: it scopes work orders by that user's tasks (created or completed in the range, or still open with a target start on or before its end), optionally adds WOs they coordinate whose LastNoteDate falls in the range, de-duplicates them, batch-resolves WO details, pulls every note on each WO and keeps the user's own by author id. The preview shows totals, notes per day and a sortable table; Export writes Summary, Notes, Tasks and Flags tabs (past expected completion, open task past target, task activity with no notes, gaps of 2+ business days with no note on an open WO). Read-only by construction: one guarded request path can send only six fixed, named GraphQL queries, POST to same-origin /api/graphql, with the page's own Umbrava session token used transiently and never stored; at most 4 requests in flight, retries only on 429/502/503/504, and UNAUTHENTICATED (which Umbrava returns as HTTP 500) stops the run. No @connect, no keys, nothing is written to storage, nothing leaves the browser except the downloaded workbook.
 // @downloadURL  https://raw.githubusercontent.com/Intermu/userscripts/main/bwn-note-report.user.js
 // @updateURL    https://raw.githubusercontent.com/Intermu/userscripts/main/bwn-note-report.user.js
 // @match        https://app.umbrava.com/*
@@ -48,7 +48,9 @@
       '{ rowCount items { ' + WO_FIELDS + ' } } }',
     NrWorkOrderDetails:
       'query NrWorkOrderDetails($nrOrder: [SortInput!]!, $nrNums: [Int]) { listWorkOrdersPaginated(page: { skip: 0, take: ' + WO_PAGE + ' }, sortBy: $nrOrder, WorkOrderNumbers: $nrNums) ' +
-      '{ rowCount items { ' + WO_FIELDS + ' } } }'
+      '{ rowCount items { ' + WO_FIELDS + ' } } }',
+    NrNoteTypes:
+      'query NrNoteTypes { noteTypesV2 { id name } }'
   });
   var ALLOWED_OPS = Object.freeze(Object.keys(QUERIES));
 
@@ -63,7 +65,7 @@
     if (ALLOWED_OPS.indexOf(op) === -1) throw nrError('BLOCKED', 'Operation not allowed');
     var defs = String(doc).match(/(^|\})\s*(query|mutation|subscription|fragment)\b/g) || [];
     if (defs.length !== 1) throw nrError('BLOCKED', 'Exactly one operation is allowed');
-    if (!new RegExp('^query ' + op + '\\(').test(doc)) throw nrError('BLOCKED', 'Only a named read-only query is allowed');
+    if (!new RegExp('^query ' + op + '[ (]').test(doc)) throw nrError('BLOCKED', 'Only a named read-only query is allowed');
     if (/\b(mutation|subscription)\b/i.test(doc)) throw nrError('BLOCKED', 'Write operations are not allowed');
   }
   ALLOWED_OPS.forEach(function (op) { checkDocument(op, QUERIES[op]); });   // fail closed at load
@@ -357,6 +359,7 @@
     }));
     if (run.authFailed) throw nrError('AUTH', 'Session expired');
 
+    var typeNames = await noteTypeNames(run);
     var rows = [];
     all.forEach(function (w) {
       w.userNoteCount = 0;
@@ -372,7 +375,7 @@
           : (w.meta && sameId(n.createdBy_UserProfileId, w.meta.assignedTo) && w.meta.assignedToMemberName)
             || ('Other user (' + String(n.createdBy_UserProfileId || '?').slice(0, 8) + ')');
         rows.push({ number: w.number, wo: woLabel(w), meta: w.meta, ms: ms, key: k, time: etTimeFmt.format(new Date(ms)), minutes: etMinutes(ms),
-          type: n.type, content: String(n.content || ''), author: author, mine: mine, pinned: !!n.isPinned });
+          type: typeNames[String(n.type)] || (n.type == null ? '' : String(n.type)), content: String(n.content || ''), author: author, mine: mine, pinned: !!n.isPinned });
       });
     });
     rows.sort(function (a, b) { return a.number - b.number || a.ms - b.ms; });
@@ -381,6 +384,17 @@
       tasks: scoped, wos: all.sort(function (a, b) { return a.number - b.number; }), rows: rows };
     res.flags = buildFlags(res);
     return res;
+  }
+
+  // Note-type id -> label. Core's shared bwn:noteTypes cache first (read only, never written here),
+  // else one noteTypesV2 read. A failure degrades to the numeric code; it never drops a note.
+  async function noteTypeNames(run) {
+    try { var c = JSON.parse(localStorage.getItem('bwn:noteTypes') || 'null'); if (c && c.map) return c.map; } catch (e) { }
+    try {
+      var map = {};
+      ((await gql(run, 'NrNoteTypes', {})).noteTypesV2 || []).forEach(function (t) { if (t && t.id != null) map[String(t.id)] = String(t.name || ''); });
+      return map;
+    } catch (e) { return {}; }
   }
 
   function summarize(res) {
@@ -460,7 +474,7 @@
 
     var wn = wb.addWorksheet('Notes');
     addTable(wn, [['WO #', 'wo', 14], ['Location #', 'loc', 12], ['Client', 'client', 24], ['WO Status', 'status', 18],
-      ['Assigned Coordinator', 'coord', 22], ['Date (ET)', 'date', 12], ['Time (ET)', 'time', 10], ['Note Type', 'type', 10],
+      ['Assigned Coordinator', 'coord', 22], ['Date (ET)', 'date', 12], ['Time (ET)', 'time', 10], ['Note Type', 'type', 18],
       ['Note', 'note', 90], ['Author', 'author', 22]], []);
     res.rows.forEach(function (x) {
       var m = x.meta || {};
@@ -778,7 +792,7 @@
     ['date', 'Date (ET)', function (x) { return x.ms; }],
     ['time', 'Time (ET)', function (x) { return x.minutes; }],
     ['author', 'Author', function (x) { return x.author.toLowerCase(); }],
-    ['type', 'Type', function (x) { return Number(x.type) || 0; }],
+    ['type', 'Type', function (x) { return x.type.toLowerCase(); }],
     ['client', 'Client', function (x) { return String((x.meta && x.meta.clientName) || '').toLowerCase(); }],
     ['note', 'Note', function (x) { return x.content.toLowerCase(); }]
   ];
@@ -818,7 +832,7 @@
         h('td', { class: 'bwn-nr-mono', text: x.key }),
         h('td', { class: 'bwn-nr-mono', text: x.time }),
         h('td', { text: x.author }),
-        h('td', { class: 'bwn-nr-mono', text: String(x.type == null ? '' : x.type) }),
+        h('td', { text: x.type }),
         h('td', { text: (x.meta && x.meta.clientName) || '' }),
         h('td', { class: 'bwn-nr-note', title: x.content.length > 400 ? 'Full text is in the export' : null, text: note })
       ]);
