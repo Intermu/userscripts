@@ -56,7 +56,7 @@ person who logged it.
 
 ## Safety
 
-- **Read-only.** The script can send only five fixed, named GraphQL queries, all to the same-origin
+- **Read-only.** The script can send only six fixed, named GraphQL queries, all to the same-origin
   endpoint `https://app.umbrava.com/api/graphql`. Every request goes through one guard, which
   rejects any other operation, any mutation or subscription, and any other host.
 - **Authentication.** The script transiently uses the active Umbrava session's access token, only
@@ -73,7 +73,6 @@ person who logged it.
 
 - Umbrava has no author or date filter for notes. Each work order's notes are pulled in full and
   filtered in the browser, so work orders with long histories make runs slower.
-- Note types are shown as Umbrava's numeric codes until a label mapping is confirmed.
 - Business-day gaps skip Saturdays and Sundays only; holidays are not excluded.
 - Authors other than the selected user are named only when they are the WO's assigned coordinator.
   Anyone else shows as "Other user (id prefix)".
@@ -90,6 +89,10 @@ person who logged it.
 
 ## Change log
 
+- **1.3.0** (2026-10-07) - Note Type shows Umbrava's label (Internal, Client, Vendor...) instead
+  of the numeric code, in the preview and the Notes tab. Labels come from BWN Suite Core's shared
+  note-type cache when present, otherwise one read-only `noteTypesV2` query (the sixth allowed
+  query). If neither works, the numeric code is shown as before.
 - **1.2.0** (2026-09-30) - Moved into the BWN Suite repo as `bwn-note-report.user.js` (was
   `userscripts/note-report/umbrava-note-report.user.js` in `broadway-internal-ops`). Suite header:
   `BWN Note Report (Broadway National)`, namespace `broadwaynational.bwn`, `@downloadURL` /
