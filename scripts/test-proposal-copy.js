@@ -204,6 +204,15 @@ function loadCore(env) {
   A.ok('create fail -> ok false at stage create', rF.ok === false && rF.stage === 'create');
   A.ok('create fail -> edit NOT sent', eF.calls.filter(function (c) { return c.op === 'EditProposal'; }).length === 0);
 
+  // edit fails AFTER create -> the empty draft id is surfaced; retry with draftId fills it, no 2nd create
+  var eE = makeEnv({ replies: baseReplies({ EditProposal: function () { return { data: { editProposal: { success: false, message: 'bad line' } } }; } }) }); var apiE = loadCore(eE);
+  var rE = await apiE.copyProposal(500, 8002, { dryRun: false });
+  A.ok('edit fail -> stage edit with the orphan draft id', rE.ok === false && rE.stage === 'edit' && rE.newProposalId === 9003);
+  var eR = makeEnv({ replies: baseReplies({}) }); var apiR = loadCore(eR);
+  var rR = await apiR.copyProposal(500, 8002, { dryRun: false, draftId: 9003 });
+  A.ok('retry with draftId -> NO createDraftProposal sent', rR.ok === true && eR.calls.filter(function (c) { return c.op === 'CreateDraftProposal'; }).length === 0);
+  A.ok('retry with draftId -> edit targets the existing draft', eR.calls.filter(function (c) { return c.op === 'EditProposal'; })[0].variables.proposalData.proposalId === 9003);
+
   // read-back mismatch -> ok true but match false (warning)
   var eW = makeEnv({ replies: baseReplies({ ClientProposalDetails: function (vars) { if (vars.proposalId === 9003) return { data: { proposal: Object.assign({}, SOURCE, { proposalLineItems: [SRC_ITEM] }) } }; return detailsReply(vars); } }) }); var apiW = loadCore(eW);
   var rW = await apiW.copyProposal(500, 8002, { dryRun: false });

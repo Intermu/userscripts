@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         BWN Proposal Copy (Broadway National)
 // @namespace    broadwaynational.bwn
-// @version      0.5.4
+// @version      0.5.5
 // @downloadURL  https://raw.githubusercontent.com/Intermu/userscripts/main/bwn-proposal-copy.user.js
 // @updateURL    https://raw.githubusercontent.com/Intermu/userscripts/main/bwn-proposal-copy.user.js
 // @description  Copy a client proposal from an aged-out work order onto a chosen replacement WO as an un-submitted Draft, in one confirmed action. Replays Umbrava's own createDraftProposal + editProposal mutations (line items copied verbatim); never submits, deletes, or retries. Manager-gated visibility. @grant none.
@@ -15,7 +15,7 @@
 (function () {
   'use strict';
 
-  var VER = '0.5.4';   // keep in step with @version
+  var VER = '0.5.5';   // keep in step with @version
   var DRY_RUN = false; // when true, the two WRITE mutations are logged, not sent
   var FONT = "-apple-system,BlinkMacSystemFont,'Segoe UI','Helvetica Neue',Arial,sans-serif";
   var GREEN = '#0d3d26';
@@ -654,7 +654,12 @@
         // this copy's confirmation, so both high-risk writes pass confirmed:true. The wrapper
         // rejects a success:false envelope, so re-tag that rejection with the copy stage (create
         // vs edit) the outer catch reports to the UI.
-        return bwnGqlOp('createDraftProposal', M_CREATE_DRAFT, createVars, { confirmed: true, ids: { wo: target.number } })
+        // opts.draftId = retry after an edit-stage failure: the empty draft from the first attempt
+        // already exists, so fill THAT one instead of creating another orphan $0 draft.
+        var created = (opts.draftId != null)
+          ? Promise.resolve({ createDraftProposal: { success: true, proposal: { id: opts.draftId } } })
+          : bwnGqlOp('createDraftProposal', M_CREATE_DRAFT, createVars, { confirmed: true, ids: { wo: target.number } });
+        return created
           .catch(function (err) { throw (err && err.stage) ? err : stage('create', (err && err.message) || String(err)); })
           .then(function (r) {
           var res = r && r.createDraftProposal;
@@ -1545,7 +1550,9 @@
       setBadge(M, 'busy', 'Creating draft'); setStep(M, 2, 2);
       cancelBtn.disabled = true; resetBtn.disabled = true; updateCTA();
       var tnum = M.target.number;
-      copyProposal(pid, tnum, {}).then(function (r) {
+      copyProposal(pid, tnum, { draftId: (M.orphan && M.orphan.tnum === tnum) ? M.orphan.id : null }).then(function (r) {
+        // edit failed AFTER create: an empty draft now exists - remember it so Retry fills it, never makes another
+        M.orphan = (r && !r.ok && r.stage === 'edit' && r.newProposalId != null) ? { id: r.newProposalId, tnum: tnum } : null;
         M.busyCreate = false; modalBusy = false; cancelBtn.disabled = false; resetBtn.disabled = false;
         if (activeModal !== ov) return;
         if (r && r.ok) renderSuccess(r, tnum);
@@ -1613,12 +1620,14 @@
       card.innerHTML = '<div class="bcp-card-hd">' + bcpIcon('warning') + '<div class="bcp-card-t">Copy failed</div></div>';
       var bd = document.createElement('div'); bd.className = 'bcp-card-bd';
       var note = document.createElement('div'); note.className = 'bcp-note err'; note.innerHTML = bcpIcon('warning') + '<span></span>';
-      note.querySelector('span').textContent = 'The draft was not created (failed at: ' + stage + '). Your target selection is preserved – you can retry.';
+      note.querySelector('span').textContent = M.orphan
+        ? 'An EMPTY draft (id #' + M.orphan.id + ', $0.00) was created on W-' + tnum + ', but its line items failed to copy. Retry fills that same draft - it will not create another. If you stop here, cancel the empty draft on the target WO.'
+        : 'The draft was not created (failed at: ' + stage + '). Your target selection is preserved - you can retry.';
       bd.appendChild(note);
       var td = document.createElement('details'); td.className = 'bcp-tech'; td.innerHTML = '<summary>Technical details</summary><pre></pre>'; td.querySelector('pre').textContent = String(msg);
       bd.appendChild(td); card.appendChild(bd); confirmWrap.appendChild(card);
       updateCTA();
-      primary.innerHTML = bcpIcon('copy') + '<span>Retry create</span>'; primary.disabled = false; primary.onclick = runCreate;
+      primary.innerHTML = bcpIcon('copy') + '<span>' + (M.orphan ? 'Retry filling draft' : 'Retry create') + '</span>'; primary.disabled = false; primary.onclick = runCreate;
     }
 
     // initial paint + load the same-location open WOs for the selector
