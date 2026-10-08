@@ -202,7 +202,9 @@ var PERM_EXEMPT = {
   // of the SPA bundle yet, so BWN_PERM_MAP (Core) has no Asset group and any key named here would be
   // a guess that fails OPEN anyway. Replace this exemption with the real perm once the flags are
   // captured. Until then the server is the only gate; the dock row is rank-4-only (BWN_DOCK_POLICY).
-  createAsset: 'OWED - Umbrava asset permission flags not captured yet; server is the gate'
+  createAsset: 'OWED - Umbrava asset permission flags not captured yet; server is the gate',
+  // Same OWED gap, same tool (Bulk Assets rename by Tag ID, 0.2.0).
+  editAsset: 'OWED - Umbrava asset permission flags not captured yet; server is the gate'
 };
 Object.keys(registries).forEach(function (f) {
   var reg = registries[f];

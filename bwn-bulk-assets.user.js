@@ -1,8 +1,8 @@
 // ==UserScript==
 // @name         BWN Bulk Asset Uploader (Broadway National)
 // @namespace    broadwaynational.bwn
-// @version      0.1.3
-// @description  Bulk-creates Umbrava assets across a client's locations from a CSV/XLSX (one row = one asset at one location). Opens from the shared dock (bwn:dock:*, hosted by bwn-suite-core) on /clients/<id> pages only; without Core a floating "Bulk Assets" button appears instead. Columns are matched by header name; Validate is read-only (loads the client's location list once and matches each location # locally, matches trades/asset types by name, flags bad dates, in-file duplicates, and assets that already exist at the location by serial, else tag, else name). Create runs only after a confirm showing the count and number of locations, one createAsset at a time (350ms apart) through the governed bwnGqlOp path (audit ring, kill switch flag bulkAssets, high-risk confirm), with live progress and a Stop that finishes the current row. A 401/403/expired session/429 or an unsure network failure halts the run; re-running skips rows already created. Download results writes an XLSX of every row's outcome. Same-origin /api/graphql with the page's own Umbrava session token, read per request and never stored or shown. @grant none, no @connect.
+// @version      0.2.0
+// @description  Bulk-creates Umbrava assets across a client's locations from a CSV/XLSX (one row = one asset at one location), or bulk-renames existing assets when the file has a "New Name" column (rename by Tag ID: Location # + Tag ID find the asset, Validate shows current -> new name, each rename reads the whole asset, sends it back with only the name changed via editAsset, then re-reads it and halts if anything but the name moved). Opens from the shared dock (bwn:dock:*, hosted by bwn-suite-core) on /clients/<id> pages only; without Core a floating "Bulk Assets" button appears instead. Columns are matched by header name; Validate is read-only (loads the client's location list once and matches each location # locally, matches trades/asset types by name, flags bad dates, in-file duplicates, and assets that already exist at the location by serial, else tag, else name). Create runs only after a confirm showing the count and number of locations, one createAsset at a time (350ms apart) through the governed bwnGqlOp path (audit ring, kill switch flag bulkAssets, high-risk confirm), with live progress and a Stop that finishes the current row. A 401/403/expired session/429 or an unsure network failure halts the run; re-running skips rows already created. Download results writes an XLSX of every row's outcome. Same-origin /api/graphql with the page's own Umbrava session token, read per request and never stored or shown. @grant none, no @connect.
 // @downloadURL  https://raw.githubusercontent.com/Intermu/userscripts/main/bwn-bulk-assets.user.js
 // @updateURL    https://raw.githubusercontent.com/Intermu/userscripts/main/bwn-bulk-assets.user.js
 // @match        https://app.umbrava.com/*
@@ -15,7 +15,7 @@
 (function () {
   'use strict';
 
-  var VER = '0.1.3';
+  var VER = '0.2.0';
   var DOCK_KEY = 'bulk-assets';
   var FEATURE = 'bulkAssets';           // bwn:modules kill switch for the create write
   var DOCK_WAIT_MS = 4000;
@@ -266,9 +266,13 @@
   // createAsset: high risk because one confirm sends many writes; not idempotent, never retried.
   // No `perm` (OWED, exempted in scripts/test-registry-authoritative.js): Umbrava's asset permission
   // flags have not been captured, and a guessed key would fail OPEN anyway. The server is the gate.
+  // editAsset (rename mode): a FULL replace of the asset's 27 fields, so a field left out could be
+  // blanked - the caller always sends the whole record it just read. Same OWED perm as createAsset.
   var BWN_OPS = {
     createAsset: { kind: 'write', target: 'asset', risk: 'high', idempotent: false, retry: 'none',
-      ok: 'Asset created.', fail: 'The asset was not created.' }
+      ok: 'Asset created.', fail: 'The asset was not created.' },
+    editAsset: { kind: 'write', target: 'asset', risk: 'high', idempotent: false, retry: 'none',
+      ok: 'Asset renamed.', fail: 'The asset was not renamed.' }
   };
   // ===== BWN-OPS-WRAP START v3 (paste-identical across adopters; SHA-gated by scripts/test-bwn-ops.js) =====
   // v3 (2026-09-02) adds the Umbrava permission gate (G7 below). It closes over bwnCan/bwnCanAll
@@ -498,6 +502,14 @@
   var Q_LOCATION_ASSETS = 'query ListLocationAssets($locationId: ID!, $isActive: Boolean, $page: PageInput!, $sortBy: [SortInput!]!, $search: String, $filter: [ColumnFilterInput!]) { ' +
     'listAssets(locationId: $locationId, isActive: $isActive, page: $page, sortBy: $sortBy, search: $search, filters: $filter) { rowCount items { id name serialNumber tagId } } }';
   var M_CREATE_ASSET = 'mutation CreateAsset($newAssetData: CreateAssetInput!) { createAsset(data: $newAssetData) { success message asset { id name } } }';
+  // Captured 2026-10-08 from the Umbrava asset form's own save (EditAsset / AssetDetails). The read
+  // selects exactly the 27 EditAssetInput keys (trade as an object; tradeId is trade.id).
+  var Q_ASSET_DETAILS = 'query AssetDetails($assetId: ID!) { asset(assetId: $assetId) { id locationId name tagId isActive modelNumber usefulLife ' +
+    'physicalLocation serialNumber manufacturer tagLocation replacementThreshold owner warrantyInstructions ' +
+    'purchasePrice { amount currency precision } bookValue { amount currency precision } replacementCost { amount currency precision } ' +
+    'maintenanceCost { amount currency precision } repairCost { amount currency precision } trade { id } assetTypeId ' +
+    'orderDate installDate manufactureDate manufacturerWarrantyEnd materialWarrantyEnd laborWarrantyEnd } }';
+  var M_EDIT_ASSET = 'mutation EditAsset($assetData: EditAssetInput!) { editAsset(data: $assetData) { success message asset { id name } } }';
 
   // Skip/take paging is only safe on a unique sort key. On Pilot every location's name is "Pilot
   // Travel Center", so a Name sort reordered between pages: the right rowCount, but 181 of 896
@@ -558,6 +570,16 @@
         feature: FEATURE, confirmed: true, ids: { locationId: input.locationId }
       });
       return d.createAsset;
+    },
+    getAsset: async function (assetId) {
+      return (await baGql(Q_ASSET_DETAILS, { assetId: assetId })).asset || null;
+    },
+    // input = toEditInput(the record just read) with only the name changed.
+    editAsset: async function (input) {
+      var d = await bwnGqlOp('editAsset', M_EDIT_ASSET, { assetData: input }, {
+        feature: FEATURE, confirmed: true, ids: { assetId: input.id, locationId: input.locationId }
+      });
+      return d.editAsset;
     }
   };
 
@@ -583,8 +605,12 @@
     { key: 'installDate', label: 'Install Date', date: true, aliases: ['installation date', 'installed date'] },
     { key: 'manufacturerWarrantyEnd', label: 'Manufacturer Warranty End', date: true, aliases: ['mfr warranty end', 'manufacturer warranty'] },
     { key: 'materialWarrantyEnd', label: 'Material Warranty End', date: true, aliases: ['material warranty'] },
-    { key: 'laborWarrantyEnd', label: 'Labor Warranty End', date: true, aliases: ['labour warranty end', 'labor warranty', 'labour warranty'] }
+    { key: 'laborWarrantyEnd', label: 'Labor Warranty End', date: true, aliases: ['labour warranty end', 'labor warranty', 'labour warranty'] },
+    // Rename mode: a "New Name" column switches the file from create to rename-by-Tag-ID.
+    { key: 'newName', label: 'New Name', aliases: ['new asset name', 'rename to'] },
+    { key: 'currentName', label: 'Current Name', aliases: ['current asset name', 'old name'] }
   ];
+  var RENAME_REQUIRED = ['locationNumber', 'tagId', 'newName'];
   var ALIAS_TO_KEY = Object.create(null);
   FIELDS.forEach(function (f) { [f.label].concat(f.aliases).forEach(function (a) { ALIAS_TO_KEY[normKey(a)] = f.key; }); });
 
@@ -598,8 +624,11 @@
       else if (key in cols) duplicate.push(text);
       else cols[key] = i;
     });
-    var missing = FIELDS.filter(function (f) { return f.required && !(f.key in cols); }).map(function (f) { return f.label; });
-    return { cols: cols, ignored: ignored, duplicate: duplicate, missing: missing };
+    var mode = 'newName' in cols ? 'rename' : 'create';
+    var missing = FIELDS.filter(function (f) {
+      return (mode === 'rename' ? RENAME_REQUIRED.indexOf(f.key) !== -1 : f.required) && !(f.key in cols);
+    }).map(function (f) { return f.label; });
+    return { cols: cols, ignored: ignored, duplicate: duplicate, missing: missing, mode: mode };
   }
 
   // aoa: array of arrays, row 0 = headers. rowNum is the spreadsheet row number users see.
@@ -649,7 +678,8 @@
       manufactureDate: '01/15/2020', orderDate: '02/01/2020', installDate: '03/10/2020',
       manufacturerWarrantyEnd: '03/10/2025', materialWarrantyEnd: '03/10/2023', laborWarrantyEnd: '03/10/2021'
     };
-    return [FIELDS.map(function (f) { return f.label; }), FIELDS.map(function (f) { return example[f.key]; })];
+    var cols = FIELDS.filter(function (f) { return f.key in example; });   // the create template; rename columns stay out
+    return [cols.map(function (f) { return f.label; }), cols.map(function (f) { return example[f.key]; })];
   }
 
   // ---- Validation (pure apart from the injected api; read-only) -------------------------------
@@ -821,8 +851,120 @@
     return { rows: out, clientId: clientId, openOnly: openOnly };
   }
 
+  // ---- Rename by Tag ID (pure apart from the injected api; read-only) -------------------------
+  // rows: [{ rowNum, raw, renamed? }]. Location # + Tag ID must find exactly one asset; a "Current
+  // Name" column, when present, must still match Umbrava (the list may be stale); the new name must
+  // be free at that store. A row renamed earlier this session stays "renamed" and is never re-sent.
+  async function validateRenames(rows, o) {
+    var api = o.api, clientId = o.clientId, openOnly = o.openOnly !== false;
+    var onProgress = o.onProgress || function () { };
+    var pause = o.sleep || sleep;
+    onProgress('Loading client locations');
+    var allLocs = await api.listClientLocations(clientId, openOnly);
+    var locByText = Object.create(null), locIds = [];
+    rows.forEach(function (r) {
+      var t = cellText(r.raw.locationNumber);
+      if (!t || locByText[t]) return;
+      locByText[t] = resolveLocation(allLocs, t, openOnly);
+      var l = locByText[t].location;
+      if (l && locIds.indexOf(l.id) === -1) locIds.push(l.id);
+    });
+    var assetsAt = Object.create(null);
+    for (var j = 0; j < locIds.length; j++) {
+      onProgress('Reading assets at location ' + (j + 1) + ' of ' + locIds.length);
+      assetsAt[locIds[j]] = await api.listLocationAssets(locIds[j]);
+      await pause(READ_GAP_MS);
+    }
+    var seenAsset = Object.create(null), seenName = Object.create(null);
+    var out = rows.map(function (r) {
+      var raw = r.raw, issues = [];
+      var locText = cellText(raw.locationNumber), tag = idKey(raw.tagId), newName = cellText(raw.newName), cur = cellText(raw.currentName);
+      if (!locText) issues.push('Missing Location #');
+      if (!tag) issues.push('Missing Tag ID');
+      if (!newName) issues.push('Missing New Name');
+      else if (newName.length > 100) issues.push('New Name is ' + newName.length + ' characters - Umbrava allows 100');
+      var location = null, asset = null;
+      if (locText) { var lr = locByText[locText]; if (lr.error) issues.push(lr.error); else location = lr.location; }
+      if (location && tag) {
+        var hits = assetsAt[location.id].filter(function (a) { return idKey(a.tagId) === tag; });
+        if (!hits.length) issues.push('No asset with Tag ID "' + cellText(raw.tagId) + '" at this store');
+        else if (hits.length > 1) issues.push(hits.length + ' assets share Tag ID "' + cellText(raw.tagId) + '" at this store - rename them by hand');
+        else asset = hits[0];
+      }
+      if (asset && newName) {
+        var nk = nameKey(newName);
+        if (seenAsset[asset.id]) issues.push('Same asset as row ' + seenAsset[asset.id]);
+        else seenAsset[asset.id] = r.rowNum;
+        if (cur && nameKey(cur) !== nameKey(asset.name) && nameKey(asset.name) !== nk) {
+          issues.push('Name in Umbrava is now "' + asset.name + '", not "' + cur + '" - check the list');
+        }
+        var other = assetsAt[location.id].filter(function (a) { return a.id !== asset.id && nameKey(a.name) === nk; })[0];
+        if (other) issues.push('New Name is already used at this store by another asset (Tag ID ' + (other.tagId || 'none') + ')');
+        var nd = location.id + '|' + nk;
+        if (seenName[nd]) issues.push('New Name also used by row ' + seenName[nd] + ' at this store');
+        else seenName[nd] = r.rowNum;
+      }
+      var base = { rowNum: r.rowNum, raw: raw, location: location, issues: issues,
+        assetId: asset ? asset.id : '', currentName: asset ? cellText(asset.name) : '', newName: newName };
+      if (r.renamed) return Object.assign(base, { status: 'renamed', note: 'Renamed earlier in this session' });
+      if (issues.length) return Object.assign(base, { status: 'error' });
+      if (base.currentName === newName) return Object.assign(base, { status: 'exists', note: 'Already named "' + newName + '"' });
+      return Object.assign(base, { status: 'ready', note: '"' + base.currentName + '" -> "' + newName + '"' });
+    });
+    return { rows: out, clientId: clientId, openOnly: openOnly, mode: 'rename' };
+  }
+
+  // EditAssetInput is a full replace: every key, taken from the record just read (AssetDetails).
+  var EDIT_KEYS = ['id', 'locationId', 'name', 'tagId', 'isActive', 'modelNumber', 'usefulLife', 'physicalLocation', 'serialNumber',
+    'manufacturer', 'tagLocation', 'replacementThreshold', 'owner', 'warrantyInstructions', 'purchasePrice', 'bookValue',
+    'replacementCost', 'maintenanceCost', 'repairCost', 'tradeId', 'assetTypeId', 'orderDate', 'installDate', 'manufactureDate',
+    'manufacturerWarrantyEnd', 'materialWarrantyEnd', 'laborWarrantyEnd'];
+  var MONEY_KEYS = ['purchasePrice', 'bookValue', 'replacementCost', 'maintenanceCost', 'repairCost'];
+  var DATE_KEYS = ['orderDate', 'installDate', 'manufactureDate', 'manufacturerWarrantyEnd', 'materialWarrantyEnd', 'laborWarrantyEnd'];
+  function toEditInput(a) {
+    var o = {};
+    EDIT_KEYS.forEach(function (k) {
+      var v = k === 'tradeId' ? (a.trade ? a.trade.id : null) : a[k];
+      if (v === undefined) v = null;
+      if (MONEY_KEYS.indexOf(k) !== -1 && v) v = { amount: v.amount, currency: v.currency, precision: v.precision };
+      o[k] = v;
+    });
+    return o;
+  }
+  // Keys that moved between the read before and the read after a rename, other than the expected
+  // name. Umbrava's own form save turns an empty money field into $0 and a 04:00 time into midnight
+  // of the same day, so those compare by amount and by calendar day; anything else is real drift.
+  function editDrift(before, after, newName) {
+    var b = toEditInput(before), a = toEditInput(after), out = [];
+    EDIT_KEYS.forEach(function (k) {
+      if (k === 'name') { if (cellText(a.name) !== newName) out.push('name'); return; }
+      var x = b[k], y = a[k], same;
+      if (MONEY_KEYS.indexOf(k) !== -1) same = (x ? x.amount : 0) === (y ? y.amount : 0);
+      else if (DATE_KEYS.indexOf(k) !== -1) same = String(x || '').slice(0, 10) === String(y || '').slice(0, 10);
+      else same = JSON.stringify(x) === JSON.stringify(y);
+      if (!same) out.push(k);
+    });
+    return out;
+  }
+
+  // One rename: read the whole asset, send it back with only the name changed, read it again.
+  // -> null when only the name moved, else the list of other keys that changed (the run halts).
+  async function renameRow(r, api) {
+    var before = await api.getAsset(r.assetId);
+    if (!before || cellText(before.name) !== r.currentName) {
+      throw new Error('Name changed since Validate (now "' + (before ? before.name : 'asset missing') + '") - not renamed; Validate again');
+    }
+    var input = toEditInput(before);
+    input.name = r.newName;
+    await api.editAsset(input);
+    var after;
+    try { after = await api.getAsset(r.assetId); } catch (e) { return ['(could not re-read the asset: ' + e.message + ')']; }
+    var d = editDrift(before, after || {}, r.newName);
+    return d.length ? d : null;
+  }
+
   function summarize(rows) {
-    var c = { ready: 0, exists: 0, error: 0, created: 0, failed: 0, unknown: 0 };
+    var c = { ready: 0, exists: 0, error: 0, created: 0, renamed: 0, failed: 0, unknown: 0 };
     rows.forEach(function (r) { c[r.status] = (c[r.status] || 0) + 1; });
     return c;
   }
@@ -836,6 +978,7 @@
   if (typeof module === 'object' && module && module.exports) {
     module.exports = { FIELDS: FIELDS, mapHeaders: mapHeaders, rowsFromAoa: rowsFromAoa, parseDate: parseDate,
       templateAoa: templateAoa, locationMatches: locationMatches, resolveLocation: resolveLocation, validateRows: validateRows,
+      validateRenames: validateRenames, toEditInput: toEditInput, editDrift: editDrift, EDIT_KEYS: EDIT_KEYS, renameRow: renameRow,
       summarize: summarize, gqlErrText: gqlErrText, clientIdFromPath: clientIdFromPath, tokenExpiresSoon: tokenExpiresSoon,
       baGql: baGql, umbravaApi: umbravaApi, BWN_OPS: BWN_OPS, BWN_MODULES: BWN_MODULES };
     return;
@@ -884,7 +1027,7 @@
     '.bwnba .ba-st.ready{background:#d1f0e6;color:#1a5f3e}',
     '.bwnba .ba-st.exists{background:#e3f0fb;color:#1d5f8f}',
     '.bwnba .ba-st.error,.bwnba .ba-st.failed{background:#fdecea;color:#b03a2e}',
-    '.bwnba .ba-st.created{background:#1a5f3e;color:#fff}',
+    '.bwnba .ba-st.created,.bwnba .ba-st.renamed{background:#1a5f3e;color:#fff}',
     '.bwnba .ba-st.unknown{background:#fff4e0;color:#8a5a00}',
     '.bwnba details{font-size:12.5px;color:#64748b}',
     '.bwnba .ba-log{margin:6px 0 0;padding-left:20px;max-height:150px;overflow:auto;font:400 12px "DM Mono",ui-monospace,Consolas,monospace}',
@@ -905,7 +1048,8 @@
     '#bwnba-launch:focus-visible{outline:3px solid #2ECC71;outline-offset:2px}'
   ].join('');
 
-  var STATUS_LABEL = { pending: 'not validated', ready: 'ready', exists: 'exists', error: 'error', created: 'created', failed: 'failed', unknown: 'unknown' };
+  var STATUS_LABEL = { pending: 'not validated', ready: 'ready', exists: 'exists', error: 'error', created: 'created', renamed: 'renamed', failed: 'failed', unknown: 'unknown' };
+  function isRename() { return !!state.file && state.file.mode === 'rename'; }
 
   function h(tag, attrs, kids) {
     var el = document.createElement(tag);
@@ -1050,7 +1194,7 @@
     ui.openOnly.disabled = !idle;
     ui.validateBtn.disabled = !(idle && state.clientId && state.file);
     ui.runBtn.disabled = !(idle && v && readyCount > 0 && !state.needsRevalidate && !clientMismatch() && state.clientId);
-    ui.runBtn.textContent = 'Create ' + plural(readyCount, 'asset');
+    ui.runBtn.textContent = (isRename() ? 'Rename ' : 'Create ') + plural(readyCount, 'asset');
     ui.stopBtn.hidden = !state.running;
     ui.stopBtn.disabled = state.stopRequested;
     ui.resultsBtn.disabled = state.busy || !v;
@@ -1072,7 +1216,8 @@
     ui.mapping.hidden = !f;
     if (!f) return;
     ui.mapping.replaceChildren(
-      h('div', {}, [h('b', { text: plural(f.rows.length, 'row') }), ' from sheet "' + f.sheetName + '". Mapped columns:']),
+      h('div', {}, [h('b', { text: plural(f.rows.length, 'row') }), ' from sheet "' + f.sheetName + '". ',
+        h('b', { text: f.mode === 'rename' ? 'Mode: rename by Tag ID.' : 'Mode: create.' }), ' Mapped columns:']),
       h('div', { class: 'ba-chips' }, f.mappedLabels.map(function (l) { return h('span', { class: 'ba-chip', text: l }); })
         .concat(f.mapping.ignored.map(function (l) { return h('span', { class: 'ba-chip off', text: 'ignored: ' + l }); }))));
   }
@@ -1081,7 +1226,8 @@
     var loc = r.location ? r.location.locationNumber + ' - ' + (r.location.name || '') : '';
     var note = (r.issues || []).concat(r.note ? [r.note] : []).join('; ');
     var status = r.status || 'pending';
-    var cells = [String(r.rowNum), null, cellText(r.raw.locationNumber), loc, cellText(r.raw.name), cellText(r.raw.serialNumber), cellText(r.raw.tagId), cellText(r.raw.trade), note];
+    var name = isRename() ? cellText(r.raw.newName) : cellText(r.raw.name);
+    var cells = [String(r.rowNum), null, cellText(r.raw.locationNumber), loc, name, cellText(r.raw.serialNumber), cellText(r.raw.tagId), cellText(r.raw.trade), note];
     tr.replaceChildren.apply(tr, cells.map(function (c, i) {
       if (i === 1) return h('td', {}, [h('span', { class: 'ba-st ' + status, text: STATUS_LABEL[status] || status })]);
       return h('td', { class: i === 0 ? 'ba-num' : i === 8 ? 'ba-issues' : null, text: c });
@@ -1123,6 +1269,7 @@
       }
       if (!parsed.rows.length) throw new Error('The first sheet has headers but no data rows.');
       state.file = {
+        mode: mp.mode,
         sheetName: wb.SheetNames[0],
         date1904: !!(wb.Workbook && wb.Workbook.WBProps && wb.Workbook.WBProps.date1904),
         mapping: mp,
@@ -1132,7 +1279,7 @@
       state.validated = null;
       state.needsRevalidate = false;
       state.notice = { text: 'File loaded. Validate checks every row against Umbrava without writing anything.', kind: 'info' };
-      logLine('File loaded: ' + plural(parsed.rows.length, 'row'));
+      logLine('File loaded: ' + plural(parsed.rows.length, 'row') + (mp.mode === 'rename' ? ' (rename by Tag ID)' : ''));
       renderMapping();
       renderTable();
     } catch (e) {
@@ -1161,11 +1308,15 @@
     state.busy = true; state.notice = null; render();
     // Rows created earlier this session are carried over so they are never re-sent.
     var prior = Object.create(null);
-    (state.validated ? state.validated.rows : []).forEach(function (r) { if (r.status === 'created') prior[r.rowNum] = r.assetId || ''; });
-    var rows = state.file.rows.map(function (r) { return { rowNum: r.rowNum, raw: r.raw, created: r.rowNum in prior, assetId: prior[r.rowNum] }; });
+    (state.validated ? state.validated.rows : []).forEach(function (r) { if (r.status === 'created' || r.status === 'renamed') prior[r.rowNum] = r.assetId || ''; });
+    var rename = isRename();
+    var rows = state.file.rows.map(function (r) {
+      var done = r.rowNum in prior;
+      return { rowNum: r.rowNum, raw: r.raw, created: !rename && done, renamed: rename && done, assetId: prior[r.rowNum] };
+    });
     try {
       logLine('Validate started');
-      state.validated = await validateRows(rows, {
+      state.validated = await (rename ? validateRenames : validateRows)(rows, {
         api: umbravaApi, clientId: state.clientId, openOnly: state.openOnly, date1904: state.file.date1904,
         onProgress: function (t) { setProgress(t); }
       });
@@ -1173,10 +1324,12 @@
       var c = summarize(state.validated.rows);
       var locs = [];
       state.validated.rows.forEach(function (r) { if (r.location && locs.indexOf(r.location.id) === -1) locs.push(r.location.id); });
-      logLine('Validated: ' + c.ready + ' ready, ' + c.exists + ' exists, ' + c.error + ' errors, ' + c.created + ' created earlier; ' + plural(locs.length, 'location'));
+      var verb = rename ? 'rename' : 'create';
+      logLine('Validated: ' + c.ready + ' ready, ' + c.exists + (rename ? ' already named' : ' exists') + ', ' + c.error + ' errors, ' +
+        (rename ? c.renamed + ' renamed' : c.created + ' created') + ' earlier; ' + plural(locs.length, 'location'));
       state.notice = c.ready
-        ? { text: plural(c.ready, 'row') + ' ready to create. Rows marked error or exists will be skipped.', kind: c.error ? 'warn' : 'info' }
-        : { text: 'Nothing to create - every row is an error, already exists, or was already created.', kind: c.error ? 'warn' : 'info' };
+        ? { text: plural(c.ready, 'row') + ' ready to ' + verb + '. Rows marked error or exists will be skipped.', kind: c.error ? 'warn' : 'info' }
+        : { text: 'Nothing to ' + verb + ' - every row is an error, already done, or was done earlier this session.', kind: c.error ? 'warn' : 'info' };
       renderTable();
     } catch (e) {
       state.notice = { text: 'Validation stopped: ' + e.message, kind: 'error' };
@@ -1192,25 +1345,41 @@
     if (clientIdFromPath(location.pathname) !== v.clientId) { onRoute(); return; }
     var todo = v.rows.filter(function (r) { return r.status === 'ready'; });
     if (!todo.length) return;
+    var rename = v.mode === 'rename', Verb = rename ? 'Rename' : 'Create';
     var locs = [];
-    todo.forEach(function (r) { if (locs.indexOf(r.input.locationId) === -1) locs.push(r.input.locationId); });
-    var ok = window.confirm('Create ' + plural(todo.length, 'asset') + ' across ' + plural(locs.length, 'location') + ' in Umbrava?\n\nClient: ' + v.clientId +
-      '\n\nThis writes to Umbrava. Rows are created one at a time; Stop finishes the current row first. Keep this tab open until the run ends.');
-    if (!ok) { logLine('Create cancelled at confirm'); return; }
+    todo.forEach(function (r) { if (locs.indexOf(r.location.id) === -1) locs.push(r.location.id); });
+    var ok = window.confirm(Verb + ' ' + plural(todo.length, 'asset') + ' across ' + plural(locs.length, 'location') + ' in Umbrava?\n\nClient: ' + v.clientId +
+      '\n\nThis writes to Umbrava. Rows are ' + (rename ? 'renamed' : 'created') + ' one at a time; Stop finishes the current row first. Keep this tab open until the run ends.');
+    if (!ok) { logLine(Verb + ' cancelled at confirm'); return; }
 
     state.running = true; state.stopRequested = false; state.notice = null; render();
-    logLine('Create started: ' + plural(todo.length, 'row') + ', ' + plural(locs.length, 'location'));
+    logLine(Verb + ' started: ' + plural(todo.length, 'row') + ', ' + plural(locs.length, 'location'));
     var done = 0;
     for (var i = 0; i < todo.length; i++) {
       if (state.stopRequested) break;
       var r = todo[i];
-      setProgress('Creating ' + (done + 1) + ' of ' + todo.length + ' (row ' + r.rowNum + ')', done, todo.length);
+      setProgress((rename ? 'Renaming ' : 'Creating ') + (done + 1) + ' of ' + todo.length + ' (row ' + r.rowNum + ')', done, todo.length);
       try {
-        var res = await umbravaApi.createAsset(r.input);
-        r.status = 'created';
-        r.assetId = (res && res.asset && res.asset.id) || '';
-        r.note = r.assetId ? '' : 'Created, but Umbrava returned no asset id';
-        logLine('Row ' + r.rowNum + ': created');
+        if (rename) {
+          var drift = await renameRow(r, umbravaApi);
+          if (drift) {
+            r.status = 'failed';
+            r.note = 'Renamed, but Umbrava also changed: ' + drift.join(', ') + ' - check this asset';
+            updateRow(r);
+            state.notice = { text: 'Run halted at row ' + r.rowNum + ': fields other than the name changed. Check that asset before resuming.', kind: 'error' };
+            logLine('Run halted at row ' + r.rowNum + ' (unexpected change)');
+            break;
+          }
+          r.status = 'renamed';
+          r.note = '"' + r.currentName + '" -> "' + r.newName + '"';
+          logLine('Row ' + r.rowNum + ': renamed');
+        } else {
+          var res = await umbravaApi.createAsset(r.input);
+          r.status = 'created';
+          r.assetId = (res && res.asset && res.asset.id) || '';
+          r.note = r.assetId ? '' : 'Created, but Umbrava returned no asset id';
+          logLine('Row ' + r.rowNum + ': created');
+        }
       } catch (e) {
         if (e.baHalt) {
           if (e.baHalt === 'network') {
@@ -1239,21 +1408,22 @@
     }
     var c = summarize(v.rows);
     if (state.stopRequested) {
-      state.notice = { text: 'Stopped. ' + plural(c.ready, 'row') + ' still ready - press Create to resume.', kind: 'warn' };
+      state.notice = { text: 'Stopped. ' + plural(c.ready, 'row') + ' still ready - press ' + Verb + ' to resume.', kind: 'warn' };
       logLine('Stopped after ' + plural(done, 'row'));
     }
-    logLine('Create finished: ' + c.created + ' created, ' + c.failed + ' failed' + (c.unknown ? ', ' + c.unknown + ' unknown' : ''));
+    logLine(Verb + ' finished: ' + (rename ? c.renamed + ' renamed' : c.created + ' created') + ', ' + c.failed + ' failed' + (c.unknown ? ', ' + c.unknown + ' unknown' : ''));
     state.running = false; state.stopRequested = false; state.progress = null; render();
   }
 
   function onStop() { state.stopRequested = true; logLine('Stop requested'); render(); }
 
   function onResults() {
-    var header = ['Row', 'Status', 'Location', 'Location Name', 'Asset Name', 'Serial', 'Created Asset ID', 'Error / Note'];
+    var rename = isRename();
+    var header = ['Row', 'Status', 'Location', 'Location Name', rename ? 'New Name' : 'Asset Name', rename ? 'Tag ID' : 'Serial', 'Asset ID', 'Error / Note'];
     var lines = shownRows().map(function (r) {
       return [r.rowNum, r.status === 'pending' ? 'not validated' : r.status,
         r.location ? r.location.locationNumber : cellText(r.raw.locationNumber), r.location ? r.location.name || '' : '',
-        cellText(r.raw.name), cellText(r.raw.serialNumber), r.assetId || '',
+        cellText(rename ? r.raw.newName : r.raw.name), cellText(rename ? r.raw.tagId : r.raw.serialNumber), r.assetId || '',
         (r.issues || []).concat(r.note ? [r.note] : []).join('; ')];
     });
     var wb = XLSX.utils.book_new();
