@@ -64,7 +64,7 @@ async function settle(p) { try { return { value: await p }; } catch (e) { return
   A.ok('@match app.umbrava.com only', (head.match(/@match/g) || []).length === 1 && /@match\s+https:\/\/app\.umbrava\.com\/\*/.test(head));
   A.ok('SheetJS 0.18.5 pinned by sha384', /@require\s+https:\/\/cdnjs\.cloudflare\.com\/ajax\/libs\/xlsx\/0\.18\.5\/xlsx\.full\.min\.js#sha384=[0-9a-f]{96}/.test(head));
   A.ok('in-body VER matches @version', (/@version\s+(\S+)/.exec(head) || [])[1] === (/var VER = '([^']+)'/.exec(SRC) || [])[1]);
-  A.ok('createAsset is the only mutation document', (SRC.match(/'mutation \w+/g) || []).join() === "'mutation CreateAsset");
+  A.ok('CreateAsset + EditAsset are the only mutation documents', (SRC.match(/'mutation \w+/g) || []).join() === "'mutation CreateAsset,'mutation EditAsset");
   A.ok('no .click() on anything', !/\.click\(\)/.test(SRC));
 
   // ---- 2. Pure helpers ----------------------------------------------------------------------------
@@ -259,6 +259,109 @@ async function settle(p) { try { return { value: await p }; } catch (e) { return
   var huge = rig(function () { return reply(200, { data: { pagedLocations: { rowCount: 25000, items: [{ id: 'a', locationNumber: 'A' }] } } }); });
   A.ok('a client past the list cap fails loudly instead of loading forever', /more than this tool loads/.test(((await settle(huge.M.umbravaApi.listClientLocations('C1', true))).error || {}).message || ''));
 
+  // ---- 4b. Rename by Tag ID (0.2.0) ----------------------------------------------------------------
+  console.log('\n-- 4b. rename by Tag ID --');
+  var rh = M.mapHeaders(['Location #', 'Tag ID', 'Current Name', 'New Name', 'Check']);
+  A.ok('a "New Name" column switches to rename mode; Asset Name is not required there', rh.mode === 'rename' && rh.missing.length === 0);
+  A.eq('rename mode needs Location #, Tag ID and New Name', M.mapHeaders(['New Name']).missing, ['Location #', 'Tag ID']);
+  A.ok('a file without New Name stays in create mode', M.mapHeaders(['Location #', 'Asset Name']).mode === 'create');
+
+  var RLOCS = [{ id: 'L1', locationNumber: 'PFJ 0001', name: 'Knoxville' }, { id: 'L2', locationNumber: 'PFJ 0002', name: 'Dallas' }];
+  var RASSETS = { L1: [
+    { id: 'S1', name: '001 High-Rise', tagId: 'G077' }, { id: 'S2', name: '001 Mid-Rise', tagId: 'G078' },
+    { id: 'S3', name: 'High Rise - G079', tagId: 'G079' }, { id: 'S4', name: 'Dup A', tagId: 'X1' }, { id: 'S5', name: 'Dup B', tagId: 'x1' },
+    { id: 'S6', name: 'Taken Name', tagId: 'G080' }, { id: 'S7', name: '001 Billboard', tagId: 'G081' }, { id: 'S8', name: '001 Sign', tagId: 'G082' }] };
+  function renameApi(log) {
+    return {
+      listClientLocations: async function () { return RLOCS; },
+      listLocationAssets: async function (id) { log.push('assets:' + id); return RASSETS[id] || []; },
+      editAsset: async function () { log.push('WRITE'); throw new Error('validation must not write'); }
+    };
+  }
+  var RROWS = [
+    rw(2, { locationNumber: 'PFJ 0001', tagId: 'G077', currentName: '001 High-Rise', newName: 'High Rise - G077' }),
+    rw(3, { locationNumber: 'PFJ 0001', tagId: 'g078', newName: 'Mid Rise - G078' }),
+    rw(4, { locationNumber: 'PFJ 0001', tagId: 'G079', newName: 'High Rise - G079' }),
+    rw(5, { locationNumber: 'PFJ 0001', tagId: 'NOPE', newName: 'Ghost' }),
+    rw(6, { locationNumber: 'PFJ 0001', tagId: 'X1', newName: 'Either' }),
+    rw(7, { locationNumber: 'PFJ 0001', tagId: 'G081', currentName: '001 Monument', newName: 'Billboard - G081' }),
+    rw(8, { locationNumber: 'PFJ 0001', tagId: 'G077', newName: 'Again' }),
+    rw(9, { locationNumber: 'PFJ 0001', tagId: 'G082', newName: 'taken name' }),
+    rw(10, { locationNumber: 'PFJ 0009', tagId: 'G1', newName: 'Nowhere' }),
+    rw(11, { locationNumber: 'PFJ 0001', tagId: '', newName: '' }),
+    rw(12, { locationNumber: 'PFJ 0001', tagId: 'G080', newName: new Array(102).join('N') }),
+    rw(13, { locationNumber: 'PFJ 0001', tagId: 'G078', newName: 'Mid Rise - G078' }, { renamed: true })
+  ];
+  async function renamed(mod) {
+    var log = [];
+    var res = await mod.validateRenames(RROWS, { api: renameApi(log), clientId: 'C1', openOnly: true, sleep: function () { } });
+    var by = {}; res.rows.forEach(function (r) { by[r.rowNum] = r; });
+    return { by: by, log: log, mode: res.mode };
+  }
+  var RV = await renamed(M), ro = RV.by;
+  A.ok('rename validation never writes and reads each store once', RV.log.indexOf('WRITE') === -1 && RV.log.join() === 'assets:L1' && RV.mode === 'rename');
+  A.ok('ready row carries the asset id, current and new name', ro[2].status === 'ready' && ro[2].assetId === 'S1' && ro[2].currentName === '001 High-Rise' && ro[2].newName === 'High Rise - G077');
+  A.ok('Tag ID matches ignoring case/punctuation; Current Name column is optional', ro[3].status === 'ready' && ro[3].assetId === 'S2');
+  A.ok('already carrying the new name = exists, not re-sent', ro[4].status === 'exists' && /Already named/.test(ro[4].note));
+  A.ok('no asset with that tag at the store', ro[5].status === 'error' && /No asset with Tag ID "NOPE"/.test(ro[5].issues.join()));
+  A.ok('two assets sharing a tag are never guessed between', ro[6].status === 'error' && /2 assets share Tag ID/.test(ro[6].issues.join()));
+  A.ok('a stale Current Name is an error naming what Umbrava has', ro[7].status === 'error' && /Name in Umbrava is now "001 Billboard", not "001 Monument"/.test(ro[7].issues.join()));
+  A.ok('the same asset twice in the file', ro[8].status === 'error' && /Same asset as row 2/.test(ro[8].issues.join()));
+  A.ok('a new name already on another asset at the store (any case)', ro[9].status === 'error' && /already used at this store by another asset \(Tag ID G080\)/.test(ro[9].issues.join()));
+  A.ok('unknown store', /not found among open locations/.test(ro[10].issues.join()));
+  A.eq('missing tag + new name', ro[11].issues, ['Missing Tag ID', 'Missing New Name']);
+  A.ok('New Name over 100 characters', /New Name is 101 characters - Umbrava allows 100/.test(ro[12].issues.join()));
+  A.ok('renamed earlier this session stays renamed', ro[13].status === 'renamed');
+
+  // The record as AssetDetails returns it (live shape 2026-10-08: Money objects with __typename,
+  // a 04:00 install time, nulls in money fields).
+  var REC = { __typename: 'Asset', id: 'S1', locationId: 'L1', name: '001 High-Rise', tagId: 'G077', isActive: true, modelNumber: '', usefulLife: null,
+    physicalLocation: '6158 US 223', serialNumber: '', manufacturer: 'Sunshine', tagLocation: '', replacementThreshold: null, owner: '',
+    warrantyInstructions: '', purchasePrice: { __typename: 'Money', amount: 0, currency: 'USD', precision: 2 }, bookValue: null,
+    replacementCost: null, maintenanceCost: null, repairCost: null, trade: { __typename: 'TradeV2', id: 'T9', name: 'Signage' }, assetTypeId: null,
+    orderDate: null, installDate: '2015-10-05T04:00:00', manufactureDate: null, manufacturerWarrantyEnd: '2022-10-05T00:00:00',
+    materialWarrantyEnd: '2022-10-05T00:00:00', laborWarrantyEnd: '2022-10-05T00:00:00' };
+  var EI = M.toEditInput(REC);
+  A.eq('toEditInput sends all 27 EditAssetInput keys', Object.keys(EI).length, 27);
+  A.ok('toEditInput: tradeId from trade.id, Money without __typename, nothing extra', EI.tradeId === 'T9' && JSON.stringify(EI.purchasePrice) === '{"amount":0,"currency":"USD","precision":2}' &&
+    !('trade' in EI) && JSON.stringify(EI).indexOf('__typename') === -1 && EI.physicalLocation === '6158 US 223');
+  var SAVED = JSON.parse(JSON.stringify(REC)); SAVED.name = 'High Rise - G077'; SAVED.installDate = '2015-10-05T00:00:00';
+  SAVED.bookValue = { amount: 0, currency: 'USD', precision: 2 }; SAVED.repairCost = { amount: 0, currency: 'USD', precision: 2 };
+  A.eq('editDrift: Umbrava\'s own save normalization (null->$0, 04:00->midnight same day) is not drift', M.editDrift(REC, SAVED, 'High Rise - G077'), []);
+  var BLANKED = JSON.parse(JSON.stringify(SAVED)); BLANKED.manufacturer = ''; BLANKED.installDate = '2015-10-06T00:00:00'; BLANKED.trade = null;
+  A.eq('editDrift flags a blanked field, a moved date and a dropped trade', M.editDrift(REC, BLANKED, 'High Rise - G077'), ['manufacturer', 'tradeId', 'installDate']);
+  A.eq('editDrift flags a name that did not take', M.editDrift(REC, REC, 'High Rise - G077'), ['name']);
+
+  function rowApi(after, log) {
+    var reads = 0;
+    return {
+      getAsset: async function () { reads++; log.push('read'); return reads === 1 ? JSON.parse(JSON.stringify(REC)) : after; },
+      editAsset: async function (input) { log.push('edit:' + JSON.stringify(input)); return { success: true }; }
+    };
+  }
+  var RR = { assetId: 'S1', currentName: '001 High-Rise', newName: 'High Rise - G077' };
+  var rlog = [];
+  var rr = await settle(M.renameRow(RR, rowApi(SAVED, rlog)));
+  var sentEdit = JSON.parse((rlog.filter(function (x) { return /^edit:/.test(x); })[0] || 'edit:{}').slice(5));
+  A.ok('renameRow: read, edit, re-read; only the name differs in what is sent', rr.value === null && rlog.join().replace(/edit:.*?(,read)/, 'edit$1') === 'read,edit,read' &&
+    sentEdit.name === 'High Rise - G077' && JSON.stringify(Object.assign({}, sentEdit, { name: REC.name })) === JSON.stringify(M.toEditInput(REC)));
+  A.eq('renameRow returns the drift when another field moved', (await M.renameRow(RR, rowApi(BLANKED, []))), ['manufacturer', 'tradeId', 'installDate']);
+  var stale = []; var rs = await settle(M.renameRow({ assetId: 'S1', currentName: 'Something else', newName: 'X' }, rowApi(SAVED, stale)));
+  A.ok('renameRow refuses (no write) when the name changed since Validate', rs.error && /Name changed since Validate/.test(rs.error.message) && stale.join() === 'read');
+
+  var eok = rig(function (c) { return reply(200, { data: { editAsset: { success: true, message: null, asset: { id: 'S1', name: 'High Rise - G077' } } } }); });
+  var e1 = await settle(eok.M.umbravaApi.editAsset(EI));
+  A.ok('editAsset sends EditAsset with assetData through bwnGqlOp', e1.value && e1.value.success === true && eok.calls[0].body.operationName === 'EditAsset' &&
+    eok.calls[0].body.variables.assetData.id === 'S1');
+  var ering = JSON.parse(eok.env.localStorage.getItem('bwn:audit') || '[]');
+  A.ok('editAsset audit entry is PII-free (ids only, no names or address)', ering.length === 1 && ering[0].op === 'editAsset' && ering[0].ids.assetId === 'S1' &&
+    JSON.stringify(ering[0]).indexOf('High-Rise') === -1 && JSON.stringify(ering[0]).indexOf('6158') === -1);
+  var eref = rig(function () { return reply(200, { data: { editAsset: { success: false, message: 'Asset name already in use', asset: null } } }); });
+  A.ok('editAsset success:false is a row failure, not a halt', ((await settle(eref.M.umbravaApi.editAsset(EI))).error || {}).message === 'Asset name already in use');
+  var ekill = withToken(3600); ekill.setItem('bwn:modules', JSON.stringify({ bulkAssets: false }));
+  var ek = rig(function () { return reply(200, { data: { editAsset: { success: true } } }); }, ekill);
+  A.ok('the bulkAssets kill switch blocks renames too', (await settle(ek.M.umbravaApi.editAsset(EI))).error && ek.calls.length === 0);
+
   // ---- 5. Negative controls (mutated shipped bytes; each must turn its check red) ------------------
   console.log('\n-- 5. negative controls --');
   var C1 = load(mutate('return digits !== \'\' && stripZeros(digits) === stripZeros(s);', 'return digits !== \'\' && digits.slice(-s.length) === s;'), { localStorage: fakeStorage() });
@@ -269,7 +372,7 @@ async function settle(p) { try { return { value: await p }; } catch (e) { return
   A.ok('control: without the name fallback a re-run no longer recognizes a no-serial row as existing', (await validated(C2)).by[8].status !== 'exists');
   var c3store = withToken(3600); c3store.setItem('bwn:modules', JSON.stringify({ bulkAssets: false }));
   var c3calls = 0;
-  var C3 = load(mutate('feature: FEATURE, confirmed: true,', 'confirmed: true,'), { localStorage: c3store, fetch: function () { c3calls++; return reply(200, { data: { createAsset: { success: true } } }); } });
+  var C3 = load(mutate('feature: FEATURE, confirmed: true, ids: { locationId: input.locationId }', 'confirmed: true, ids: { locationId: input.locationId }'), { localStorage: c3store, fetch: function () { c3calls++; return reply(200, { data: { createAsset: { success: true } } }); } });
   await settle(C3.umbravaApi.createAsset(INPUT));
   A.ok('control: dropping feature: from the call lets a disabled module write', c3calls === 1);
   var C4 = load(mutate("if (res.status === 429) throw haltError(", "if (false) throw haltError("), { localStorage: withToken(3600), fetch: function () { return reply(429); } });
@@ -285,6 +388,16 @@ async function settle(p) { try { return { value: await p }; } catch (e) { return
   var C8 = load(mutate("    if (items.length !== rowCount) {", "    if (false) {"), { localStorage: withToken(3600), fetch: overlapRig(450, true).env.fetch });
   var c8 = await settle(C8.umbravaApi.listClientLocations('C1', false));
   A.ok('control: without the rowCount assert a short list goes back as if complete', c8.value && c8.value.length === 441);
+
+  var C9 = load(mutate("else if (DATE_KEYS.indexOf(k) !== -1) same = String(x || '').slice(0, 10) === String(y || '').slice(0, 10);", ''), { localStorage: fakeStorage() });
+  A.ok('control: comparing dates exactly would halt on Umbrava\'s own 04:00->midnight save', C9.editDrift(REC, SAVED, 'High Rise - G077').indexOf('installDate') !== -1);
+  var C10 = load(mutate("      if (v === undefined) v = null;\n", "      if (v === undefined) v = null;\n      if (k === 'physicalLocation') return;\n"), { localStorage: fakeStorage() });
+  A.ok('control: an input missing a key is caught by the 27-key check', Object.keys(C10.toEditInput(REC)).length !== 27);
+  var C11 = load(mutate("    if (!before || cellText(before.name) !== r.currentName) {", "    if (!before) {"), { localStorage: fakeStorage() });
+  var c11log = []; await settle(C11.renameRow({ assetId: 'S1', currentName: 'Something else', newName: 'X' }, rowApi(SAVED, c11log)));
+  A.ok('control: without the re-check a stale row would be written', c11log.some(function (x) { return /^edit:/.test(x); }));
+  var C12 = load(mutate("        if (other) issues.push(", "        if (false) issues.push("), { localStorage: fakeStorage() });
+  A.ok('control: without the store-name check a taken name goes out as ready', (await renamed(C12)).by[9].status === 'ready');
 
   A.finish();
 })().catch(function (e) { console.error(e); process.exit(1); });

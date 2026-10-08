@@ -82,6 +82,7 @@ in progress even if another tool opens.
 | `AssetTypes` | Once, if any row has an Asset Type; `tenantId` = client id. Pilot returns 0 types, so blank is normal. |
 | `ListLocationAssets` | Existing assets per resolved location, pages of 500 sorted by `Id`. `isActive` omitted (assumed to include inactive - the stricter check). |
 | `CreateAsset` | The write. `CreateAssetInput` exactly as the UI sends it, capital-P `PhysicalLocation`. |
+| `AssetDetails` / `EditAsset` | Rename mode only (0.2.0) - see below. |
 
 Matching rules:
 
@@ -101,7 +102,37 @@ Errors: 401/403 or an `UNAUTHENTICATED`-family code (Umbrava sends that as HTTP 
 429 halts as rate; a network failure or 5xx on a create halts as `unknown`; any other GraphQL error
 (including `BAD_USER_INPUT` with an empty message, reported by its code) is a row failure.
 
-Out of scope: `EditAsset`, attachments/photos (no upload call was captured).
+Out of scope: attachments/photos (no upload call was captured).
+
+## Rename by Tag ID (0.2.0)
+
+A file with a **New Name** column switches the drawer to rename mode (the mapping card says
+"Mode: rename by Tag ID"). Columns: **Location #**, **Tag ID**, **New Name** (required), **Current
+Name** (optional guard). Other columns are ignored.
+
+Validate (read-only) loads the client's locations once and each store's assets once, then per row:
+
+- Location # + Tag ID must find exactly one asset (tag compared ignoring case/punctuation). None or
+  two-plus sharing a tag is an error - never guessed.
+- **Current Name**, when given, must still match Umbrava (or already be the new name) - a stale
+  list is an error naming what Umbrava has now.
+- New Name: 100 characters max, not used by another asset at that store, not repeated for that
+  store in the file. The same asset twice in the file is an error.
+- Already carrying the new name = `exists` (skipped).
+
+**Rename N assets** confirms once, then per row, 350 ms apart:
+
+1. `AssetDetails` reads the whole asset. If its name changed since Validate the row fails, unsent.
+2. `EditAsset` sends **all 27 `EditAssetInput` fields** from that read with only `name` changed.
+   The mutation is a full replace (captured from the asset form's own save, 2026-10-08), so a field
+   left out could be blanked.
+3. `AssetDetails` reads it again. If anything but the name moved, the row is `failed` and **the run
+   halts**. Umbrava's own save turns an empty money field into $0 and a 04:00 time into midnight of
+   the same day; those are not counted as changes (the form does the same).
+
+`editAsset` goes through `bwnGqlOp` like `createAsset`: `risk: 'high'`, never retried, kill switch
+`bulkAssets`, one PII-free audit entry (assetId + locationId only). Same OWED permission gap
+(`PERM_EXEMPT`).
 
 ## Live test plan
 
