@@ -614,9 +614,21 @@
       // on every new proposal (vendor PO line numbering), so it is never copied or compared.
     } };
   }
+  // editProposal server-rejects a line with no TradeId ("'Trade Id' must not be empty", measured live
+  // 2026-10-08), but legacy source proposals can carry trade-less lines. Fill a blank only when every
+  // traded line on the proposal shares ONE trade (unambiguous); null = ambiguous or none, caller stops.
+  function soleTradeId(source) {
+    var traded = ((source && source.proposalLineItems) || []).map(function (li) { return mapLineItem(li).tradeId; })
+      .filter(function (t) { return t != null && t !== ''; });
+    return traded.length && traded.every(function (t) { return String(t) === String(traded[0]); }) ? traded[0] : null;
+  }
+  function blankTradeLines(source) {
+    return ((source && source.proposalLineItems) || []).map(mapLineItem).reduce(function (a, m, i) { if (m.tradeId == null || m.tradeId === '') a.push(i + 1); return a; }, []);
+  }
   function buildEditVars(newProposalId, source) {
     source = source || {};
-    var items = (source.proposalLineItems || []).map(mapLineItem);
+    var fill = soleTradeId(source);
+    var items = (source.proposalLineItems || []).map(mapLineItem).map(function (m) { if ((m.tradeId == null || m.tradeId === '') && fill != null) m.tradeId = fill; return m; });
     return { proposalData: {
       proposalId: newProposalId,
       typeId: source.type ? source.type.id : null,
@@ -642,6 +654,9 @@
       .then(function (d) {
         target = d && d.job;
         if (!target || target.number == null || target.id == null) throw stage('resolve-target', 'target WO not found');
+        // stop BEFORE create: a blank trade we cannot fill would fail the edit and orphan an empty draft
+        var blanks = blankTradeLines(source);
+        if (blanks.length && soleTradeId(source) == null) throw stage('trade', 'Line item' + (blanks.length > 1 ? 's ' : ' ') + blanks.join(', ') + ' on the source proposal ha' + (blanks.length > 1 ? 've' : 's') + ' no trade, and the other lines do not share one trade to fill it with. Set a trade on ' + (blanks.length > 1 ? 'those lines' : 'that line') + ' in the source proposal, then copy again.');
         var createVars = buildCreateVars(source, target);
         if (dry) {
           var editPreview = buildEditVars('<newId>', source);
@@ -1622,6 +1637,7 @@
       var note = document.createElement('div'); note.className = 'bcp-note err'; note.innerHTML = bcpIcon('warning') + '<span></span>';
       note.querySelector('span').textContent = M.orphan
         ? 'An EMPTY draft (id #' + M.orphan.id + ', $0.00) was created on W-' + tnum + ', but its line items failed to copy. Retry fills that same draft - it will not create another. If you stop here, cancel the empty draft on the target WO.'
+        : stage === 'trade' ? 'Nothing was created. ' + msg
         : 'The draft was not created (failed at: ' + stage + '). Your target selection is preserved - you can retry.';
       bd.appendChild(note);
       var td = document.createElement('details'); td.className = 'bcp-tech'; td.innerHTML = '<summary>Technical details</summary><pre></pre>'; td.querySelector('pre').textContent = String(msg);
