@@ -204,6 +204,25 @@ function loadCore(env) {
   A.ok('create fail -> ok false at stage create', rF.ok === false && rF.stage === 'create');
   A.ok('create fail -> edit NOT sent', eF.calls.filter(function (c) { return c.op === 'EditProposal'; }).length === 0);
 
+  // edit fails AFTER create -> the empty draft id is surfaced; retry with draftId fills it, no 2nd create
+  var eE = makeEnv({ replies: baseReplies({ EditProposal: function () { return { data: { editProposal: { success: false, message: 'bad line' } } }; } }) }); var apiE = loadCore(eE);
+  var rE = await apiE.copyProposal(500, 8002, { dryRun: false });
+  A.ok('edit fail -> stage edit with the orphan draft id', rE.ok === false && rE.stage === 'edit' && rE.newProposalId === 9003);
+  var eR = makeEnv({ replies: baseReplies({}) }); var apiR = loadCore(eR);
+  var rR = await apiR.copyProposal(500, 8002, { dryRun: false, draftId: 9003 });
+  A.ok('retry with draftId -> NO createDraftProposal sent', rR.ok === true && eR.calls.filter(function (c) { return c.op === 'CreateDraftProposal'; }).length === 0);
+  A.ok('retry with draftId -> edit targets the existing draft', eR.calls.filter(function (c) { return c.op === 'EditProposal'; })[0].variables.proposalData.proposalId === 9003);
+
+  // trade-less source lines: filled from the sole trade on the proposal; ambiguous -> stop before create
+  var NOTRADE = Object.assign({}, SRC_ITEM, { trade: null, tradeId: null });
+  function tradeEnv(items) { return makeEnv({ replies: baseReplies({ ClientProposalDetails: function (vars) { if (vars.proposalId === 500) return { data: { proposal: Object.assign({}, SOURCE, { proposalLineItems: items }) } }; return detailsReply(vars); } }) }); }
+  var tradeOf = function (t) { return Object.assign({}, SRC_ITEM, { trade: { id: t } }); };
+  var eT1 = tradeEnv([tradeOf(7), NOTRADE]); var rT1 = await loadCore(eT1).copyProposal(500, 8002, { dryRun: false });
+  var sent = eT1.calls.filter(function (c) { return c.op === 'EditProposal'; })[0];
+  A.ok('blank trade filled from the sole proposal trade', sent && sent.variables.proposalData.proposalLineItems.every(function (li) { return li.tradeId === 7; }));
+  var eT2 = tradeEnv([tradeOf(7), tradeOf(8), NOTRADE]); var rT2 = await loadCore(eT2).copyProposal(500, 8002, { dryRun: false });
+  A.ok('ambiguous blank trade -> stage trade, names line 3, NO write sent', rT2.ok === false && rT2.stage === 'trade' && /3/.test(rT2.error) && eT2.calls.filter(function (c) { return c.op === 'CreateDraftProposal' || c.op === 'EditProposal'; }).length === 0);
+
   // read-back mismatch -> ok true but match false (warning)
   var eW = makeEnv({ replies: baseReplies({ ClientProposalDetails: function (vars) { if (vars.proposalId === 9003) return { data: { proposal: Object.assign({}, SOURCE, { proposalLineItems: [SRC_ITEM] }) } }; return detailsReply(vars); } }) }); var apiW = loadCore(eW);
   var rW = await apiW.copyProposal(500, 8002, { dryRun: false });
