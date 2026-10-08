@@ -228,6 +228,34 @@ async function settle(p) { try { return { value: await p }; } catch (e) { return
   A.ok('location list pages of 200 until rowCount, blank search, open-only filter', pl.length === 226 && reads.calls.length === 2 &&
     reads.calls[0].body.variables.search === '' && reads.calls[1].body.variables.page.skip === 200 &&
     reads.calls[0].body.variables.filters[0].searchTerm === '["Open"]' && reads.calls[0].body.variables.clientTenantProfileId === 'C1');
+  // 0.1.3: Pilot's 896 locations share one name, so a Name sort reorders between pages. A fake that
+  // serves overlapping pages (each page repeats the previous page's tail) must still lose nothing,
+  // and a server that can never return every id must be a loud error, not a short list.
+  function overlapRig(total, lose) {
+    return rig(function (c) {
+      var v = c.body.variables, skip = v.page.skip, take = v.page.take, op = c.body.operationName;
+      var start = Math.max(0, skip - 30); // each page repeats the previous page's last 30
+      var ids = [];
+      for (var i = start; i < Math.min(total, skip + take); i++) ids.push(i);
+      if (skip === 0) ids = ids.concat([0, 1, 2]);
+      var rows = ids.filter(function (i) { return !lose || i % 50 !== 7; }).map(function (i) { return { id: 'L' + i, locationNumber: 'PFJ ' + i, name: 'Pilot Travel Center' }; });
+      if (op === 'PagedLocations') return reply(200, { data: { pagedLocations: { rowCount: total, items: rows } } });
+      return reply(200, { data: { listAssets: { rowCount: total, items: rows } } });
+    });
+  }
+  var ov = overlapRig(450, false);
+  var ovl = await ov.M.umbravaApi.listClientLocations('C1', false);
+  A.ok('overlapping pages: every location exactly once, sorted by Id', ovl.length === 450 &&
+    new Set(ovl.map(function (l) { return l.id; })).size === 450 && ov.calls.length === 3 &&
+    ov.calls.every(function (c) { return JSON.stringify(c.body.variables.sortBy) === '[{"columnName":"Id","direction":"ASC"}]'; }));
+  var ova = overlapRig(1200, false);
+  A.ok('overlapping asset pages: every asset exactly once, sorted by Id', (await ova.M.umbravaApi.listLocationAssets('L1')).length === 1200 &&
+    ova.calls.every(function (c) { return c.body.variables.sortBy.columnName === 'Id'; }));
+  var gap = await settle(overlapRig(450, true).M.umbravaApi.listClientLocations('C1', false));
+  A.ok('pages that never return some ids fail loudly naming both counts', gap.error && /reported 450 locations but paging returned 441 distinct/.test(gap.error.message));
+  var agap = await settle(overlapRig(450, true).M.umbravaApi.listLocationAssets('L1'));
+  A.ok('the same guard covers the asset list', agap.error && /reported 450 assets at this location/.test(agap.error.message));
+
   var huge = rig(function () { return reply(200, { data: { pagedLocations: { rowCount: 25000, items: [{ id: 'a', locationNumber: 'A' }] } } }); });
   A.ok('a client past the list cap fails loudly instead of loading forever', /more than this tool loads/.test(((await settle(huge.M.umbravaApi.listClientLocations('C1', true))).error || {}).message || ''));
 
@@ -250,6 +278,13 @@ async function settle(p) { try { return { value: await p }; } catch (e) { return
   A.ok('control: without the per-store name check a repeated name goes out as ready', (await nameCheck(C5))[3].status === 'ready');
   var C6 = load(mutate("['tagId', 'Tag ID', 50]", "['tagId', 'Tag ID', 500]"), { localStorage: fakeStorage() });
   A.ok('control: a loose Tag ID limit lets a 51-char tag go out as ready', (await nameCheck(C6))[6].status === 'ready');
+
+  var C7 = load(mutate("got.forEach(function (x) { if (!byId[x.id]) { byId[x.id] = 1; items.push(x); } });", "items = items.concat(got);"), { localStorage: withToken(3600), fetch: overlapRig(450, false).env.fetch });
+  var c7 = await settle(C7.umbravaApi.listClientLocations('C1', false));
+  A.ok('control: without the id dedupe overlapping pages fail the rowCount check (not a silent pass)', !!c7.error);
+  var C8 = load(mutate("    if (items.length !== rowCount) {", "    if (false) {"), { localStorage: withToken(3600), fetch: overlapRig(450, true).env.fetch });
+  var c8 = await settle(C8.umbravaApi.listClientLocations('C1', false));
+  A.ok('control: without the rowCount assert a short list goes back as if complete', c8.value && c8.value.length === 441);
 
   A.finish();
 })().catch(function (e) { console.error(e); process.exit(1); });
