@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         BWN Bulk Asset Uploader (Broadway National)
 // @namespace    broadwaynational.bwn
-// @version      0.1.2
+// @version      0.1.3
 // @description  Bulk-creates Umbrava assets across a client's locations from a CSV/XLSX (one row = one asset at one location). Opens from the shared dock (bwn:dock:*, hosted by bwn-suite-core) on /clients/<id> pages only; without Core a floating "Bulk Assets" button appears instead. Columns are matched by header name; Validate is read-only (loads the client's location list once and matches each location # locally, matches trades/asset types by name, flags bad dates, in-file duplicates, and assets that already exist at the location by serial, else tag, else name). Create runs only after a confirm showing the count and number of locations, one createAsset at a time (350ms apart) through the governed bwnGqlOp path (audit ring, kill switch flag bulkAssets, high-risk confirm), with live progress and a Stop that finishes the current row. A 401/403/expired session/429 or an unsure network failure halts the run; re-running skips rows already created. Download results writes an XLSX of every row's outcome. Same-origin /api/graphql with the page's own Umbrava session token, read per request and never stored or shown. @grant none, no @connect.
 // @downloadURL  https://raw.githubusercontent.com/Intermu/userscripts/main/bwn-bulk-assets.user.js
 // @updateURL    https://raw.githubusercontent.com/Intermu/userscripts/main/bwn-bulk-assets.user.js
@@ -15,7 +15,7 @@
 (function () {
   'use strict';
 
-  var VER = '0.1.2';
+  var VER = '0.1.3';
   var DOCK_KEY = 'bulk-assets';
   var FEATURE = 'bulkAssets';           // bwn:modules kill switch for the create write
   var DOCK_WAIT_MS = 4000;
@@ -499,28 +499,44 @@
     'listAssets(locationId: $locationId, isActive: $isActive, page: $page, sortBy: $sortBy, search: $search, filters: $filter) { rowCount items { id name serialNumber tagId } } }';
   var M_CREATE_ASSET = 'mutation CreateAsset($newAssetData: CreateAssetInput!) { createAsset(data: $newAssetData) { success message asset { id name } } }';
 
+  // Skip/take paging is only safe on a unique sort key. On Pilot every location's name is "Pilot
+  // Travel Center", so a Name sort reordered between pages: the right rowCount, but 181 of 896
+  // locations never came back (duplicates on some pages, gaps on others; 2026-10-08). Callers sort
+  // by Id; this keeps one copy per id and refuses a list that still comes up short, so a paging
+  // fault is a loud error instead of a false "Location not found".
+  async function pageAll(what, take, fetchPage) {
+    var byId = Object.create(null), items = [], skip = 0, rowCount = 0;
+    do {
+      var p = (await fetchPage(skip)) || {};
+      var got = p.items || [];
+      rowCount = p.rowCount || 0;
+      got.forEach(function (x) { if (!byId[x.id]) { byId[x.id] = 1; items.push(x); } });
+      skip += take;
+      if (!got.length) break;
+    } while (skip < rowCount);
+    if (items.length !== rowCount) {
+      throw new Error('Umbrava reported ' + rowCount + ' ' + what + ' but paging returned ' + items.length +
+        ' distinct - the list may have changed mid-load. Run Validate again.');
+    }
+    return items;
+  }
+
   var umbravaApi = {
     // The client's whole location list, loaded once per validation and matched locally. A per-row
     // server search is a contains-match: "PFJ 0123" pages through hundreds of loose hits (~10 s a
     // store on Pilot's 896), where this is ~5 requests for the whole file.
-    listClientLocations: async function (clientId, openOnly) {
-      var items = [], skip = 0, rowCount = 0;
-      do {
+    listClientLocations: function (clientId, openOnly) {
+      return pageAll('locations', LOCATION_PAGE, async function (skip) {
         var p = (await baGql(Q_LOCATIONS, {
           page: { skip: skip, take: LOCATION_PAGE },
-          sortBy: [{ columnName: 'Name', direction: 'ASC' }],
+          sortBy: [{ columnName: 'Id', direction: 'ASC' }],
           search: '',
           filters: openOnly ? [OPEN_ONLY_FILTER] : [],
           clientTenantProfileId: clientId
         })).pagedLocations || {};
-        var got = p.items || [];
-        rowCount = p.rowCount || 0;
-        if (rowCount > LOCATION_LIST_CAP) throw new Error('This client has ' + rowCount + ' locations - more than this tool loads at once.');
-        items = items.concat(got);
-        skip += LOCATION_PAGE;
-        if (!got.length) break;
-      } while (items.length < rowCount);
-      return items;
+        if (p.rowCount > LOCATION_LIST_CAP) throw new Error('This client has ' + p.rowCount + ' locations - more than this tool loads at once.');
+        return p;
+      });
     },
     listTrades: async function () {
       return (await baGql(Q_TRADES, { includeHidden: false })).listTrades || [];
@@ -528,19 +544,12 @@
     listAssetTypes: async function (clientId) {
       return (await baGql(Q_ASSET_TYPES, { tenantId: clientId, activeOnly: true })).assetTypes || [];
     },
-    listLocationAssets: async function (locationId) {
-      var items = [], skip = 0, rowCount = 0;
-      do {
-        var p = (await baGql(Q_LOCATION_ASSETS, {
-          locationId: locationId, page: { skip: skip, take: ASSET_PAGE }, sortBy: { columnName: 'name', direction: 'ASC' }
-        })).listAssets || {};
-        var got = p.items || [];
-        rowCount = p.rowCount || 0;
-        items = items.concat(got);
-        skip += ASSET_PAGE;
-        if (!got.length) break;
-      } while (items.length < rowCount);
-      return items;
+    listLocationAssets: function (locationId) {
+      return pageAll('assets at this location', ASSET_PAGE, async function (skip) {
+        return (await baGql(Q_LOCATION_ASSETS, {
+          locationId: locationId, page: { skip: skip, take: ASSET_PAGE }, sortBy: { columnName: 'Id', direction: 'ASC' }
+        })).listAssets;
+      });
     },
     // The only write. bwnGqlOp owns the audit entry, the kill switch, the high-risk confirm
     // (the caller's confirm() is the confirmation) and the success:false rejection.

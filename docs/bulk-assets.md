@@ -76,10 +76,11 @@ in progress even if another tool opens.
 
 | Op | Use |
 | --- | --- |
-| `PagedLocations` | The client's whole location list, once per Validate (blank `search`, pages of 200; error past 20,000); `clientTenantProfileId` = client id from the URL; open-only adds `{columnName:"Status",operation:"In",searchTerm:"[\"Open\"]"}`. Each sheet value is matched locally against that list. (0.1.0 searched per row; the server's contains-search paged through hundreds of loose hits, ~10 s a store on Pilot's 896 locations.) |
+| `PagedLocations` | The client's whole location list, once per Validate (blank `search`, pages of 200 sorted by `Id`; error past 20,000); `clientTenantProfileId` = client id from the URL; open-only adds `{columnName:"Status",operation:"In",searchTerm:"[\"Open\"]"}`. Each sheet value is matched locally against that list. (0.1.0 searched per row; the server's contains-search paged through hundreds of loose hits, ~10 s a store on Pilot's 896 locations.) |
+| Paging (0.1.3) | Both lists sort by `Id`: skip/take paging needs a unique sort key. A `Name` sort on Pilot (every name "Pilot Travel Center") returned 715 distinct of 896 on 2026-10-08 - a false "not found" in Validate. Results are de-duplicated by id and Validate stops with an error if the distinct count is not `rowCount`. |
 | `ListTrades` | Once, if any row has a Trade. Case-insensitive name match. |
 | `AssetTypes` | Once, if any row has an Asset Type; `tenantId` = client id. Pilot returns 0 types, so blank is normal. |
-| `ListLocationAssets` | Existing assets per resolved location, pages of 500. `isActive` omitted (assumed to include inactive - the stricter check). |
+| `ListLocationAssets` | Existing assets per resolved location, pages of 500 sorted by `Id`. `isActive` omitted (assumed to include inactive - the stricter check). |
 | `CreateAsset` | The write. `CreateAssetInput` exactly as the UI sends it, capital-P `PhysicalLocation`. |
 
 Matching rules:
