@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         BWN Bid-Out (Broadway National)
 // @namespace    broadwaynational.bwn
-// @version      0.29.4
+// @version      0.29.5
 // @downloadURL  https://raw.githubusercontent.com/Intermu/userscripts/main/bwn-bid-out.user.js
 // @updateURL    https://raw.githubusercontent.com/Intermu/userscripts/main/bwn-bid-out.user.js
 // @description  Email RFP to outside / net-new vendors, launched from a caret on Umbrava's own "See Who Is Available" button (network-vendor bidding stays native - no separate Bid-Out button). The caret menu opens the tracked email RFP wizard: finds net-new vendors nearby through Google Places, looks up their emails via the BWN scrape-contacts function, takes pasted outside addresses, and can still include assignable Umbrava vendors in the same email. You pick who's included, then review the exact recipient list and the rendered email before anything sends. Send from your own mailbox via the SWA send-bid function (Microsoft Graph), or open a plain Outlook draft. Vendors are BCC'd; nothing sends until you click Send. Network access is limited to Umbrava (same-origin), Google Places, and your SWA host.
@@ -20,7 +20,7 @@
 (function () {
   'use strict';
 
-  var VER = '0.29.4';
+  var VER = '0.29.5';
   console.info('[BWN BID-OUT] v' + VER + ' - Build Requests wizard (WO details -> select vendors -> review -> sent) · Umbrava vendors + Places net-new discovery + email scrape · one-click Graph send via SWA (Outlook-draft fallback) · sent-state flip persists bid-sent + GM baseline per WO');
 
   var COMPANY_ADDR = 'Broadway National Group, 100 Davids Dr, Hauppauge, NY 11788';
@@ -1169,11 +1169,15 @@
   //              script reads). Min view rank = supervisor (VS_MIN_RANK = 3; Mike-confirmable). A
   //              null/unknown rank is NOT a pass. This is the Umbrava ladder - deliberately NOT the
   //              ops_* AAD app-roles, which are unassigned (memory: swa-rank-roles-never-assigned).
-  //   2. flag  - governance flag `vendorIntel`, default OFF, read from /api/governance. Any non-2xx,
-  //              timeout, parse error, or absent/false flag = OFF = the card never mounts (no flash).
-  //              So the card stays dark until BOTH the endpoint returns vendorIntel:true AND the
-  //              viewer is supervisor+. (The /api/governance route ships with the governance-completion
-  //              work; until it is deployed the fetch 404s -> OFF, which is the intended default.)
+  //   2. flag  - governance flag `vendorIntel`, default OFF, read from /api/governance. The route is
+  //              key-gated (x-bwn-key = the same ingest_key every other SWA call here sends; 403
+  //              without it) and returns the flags NESTED: { v, etag, config, templates, rules,
+  //              flags:{ vendorIntel:true }, knowledgeVersion } (api/governance/index.js). Any
+  //              missing key, non-2xx, timeout, parse error, or absent/false flag = OFF = the card
+  //              never mounts (no flash). So the card stays dark until BOTH the endpoint returns
+  //              flags.vendorIntel:true AND the viewer is supervisor+.
+  //              0.29.5: until now this read `json.vendorIntel` at the top level and sent no key, so
+  //              it could never resolve ON - the card was permanently dark even with the flag set.
   //
   // ponytail: reuses bid-out's own gql()/gmGet()/esc()/FONT and the getAssignableVendors result the
   // panel ALREADY loaded (`res`) for rating/distance/name. The ONLY new network read is a slim
@@ -1205,13 +1209,16 @@
   function vsRankAllows() { var r = vsRank(); return typeof r === 'number' && r >= VS_MIN_RANK; }
 
   // --- governance flag (fail-closed OFF) ---
-  // ONLY the literal boolean true enables the feature; a missing key, non-boolean, non-2xx, or any
-  // network/parse failure resolves OFF. Cached briefly so re-draws (Back/Next) don't refetch.
-  function vsParseGovernance(json) { return !!(json && json.vendorIntel === true); }
+  // ONLY the literal boolean true under `flags` enables the feature; a missing ingest key, missing
+  // flag, non-boolean, non-2xx, or any network/parse failure resolves OFF. Cached briefly so
+  // re-draws (Back/Next) don't refetch.
+  function vsParseGovernance(json) { return !!(json && json.flags && json.flags.vendorIntel === true); }
   var _vsGov = null; // { ts, on }
   function vsGovernance() {
     if (_vsGov && (Date.now() - _vsGov.ts) < VS_GOV_TTL_MS) return Promise.resolve(_vsGov.on);
-    return gmGet(GOV_URL, { 'Accept': 'application/json' }, 5000).then(function (r) {
+    var key = GM_getValue('ingest_key', '');
+    if (!key) { _vsGov = { ts: Date.now(), on: false }; return Promise.resolve(false); }   // no key = 403 anyway; skip the round trip
+    return gmGet(GOV_URL, { 'Accept': 'application/json', 'x-bwn-key': key }, 5000).then(function (r) {
       var on = (r && r.status >= 200 && r.status < 300) ? vsParseGovernance(r.json) : false;
       _vsGov = { ts: Date.now(), on: on };
       return on;

@@ -81,7 +81,9 @@ function runBlock(src, opts) {
       getItem: function (k) { return (k in store) ? store[k] : null; }
     },
     gmGet: opts.gmGet || function () { return Promise.reject(new Error('no gmGet stub')); },
-    gql: opts.gql || function () { return Promise.reject(new Error('no gql stub')); }
+    gql: opts.gql || function () { return Promise.reject(new Error('no gql stub')); },
+    // GM store: default carries an ingest key (the normal installed state); pass gm:{} for the no-key case.
+    GM_getValue: function (k, d) { var g = opts.gm || { ingest_key: 'test-key' }; return (k in g) ? g[k] : d; }
   };
   vm.createContext(ctx);
   vm.runInContext(src, ctx);
@@ -93,12 +95,16 @@ console.log('vendor snapshot (Phase 1) - real source\n');
 var base = runBlock(BLOCK);
 
 // ---- 1. governance parse: fail closed ---------------------------------------------------------
-A.ok('gov: {vendorIntel:true} enables', base.vsParseGovernance({ vendorIntel: true }) === true);
-A.ok('gov: {vendorIntel:false} off', base.vsParseGovernance({ vendorIntel: false }) === false);
-A.ok('gov: string "true" is NOT true (non-boolean off)', base.vsParseGovernance({ vendorIntel: 'true' }) === false);
+// The route (api/governance/index.js) returns the flags NESTED under `flags`; a top-level
+// vendorIntel is NOT the bundle shape and must stay OFF (0.29.4 read it there and was dark forever).
+A.ok('gov: {flags:{vendorIntel:true}} enables', base.vsParseGovernance({ flags: { vendorIntel: true } }) === true);
+A.ok('gov: {flags:{vendorIntel:false}} off', base.vsParseGovernance({ flags: { vendorIntel: false } }) === false);
+A.ok('gov: string "true" is NOT true (non-boolean off)', base.vsParseGovernance({ flags: { vendorIntel: 'true' } }) === false);
+A.ok('gov: top-level vendorIntel (the 0.29.4 misread) is OFF', base.vsParseGovernance({ vendorIntel: true }) === false);
+A.ok('gov: {flags:{}} off', base.vsParseGovernance({ flags: {} }) === false);
 A.ok('gov: {} off', base.vsParseGovernance({}) === false);
 A.ok('gov: null off', base.vsParseGovernance(null) === false);
-A.ok('gov: unrelated key off', base.vsParseGovernance({ other: true }) === false);
+A.ok('gov: unrelated key off', base.vsParseGovernance({ flags: { other: true } }) === false);
 
 // ---- 2. rating count-gate (input-count >= 1 else no score) ------------------------------------
 var rlOk = base.vsRatingLabel(4.5, 12);
@@ -210,20 +216,36 @@ A.ok('rank: coordinator (2) is denied', runBlock(BLOCK, { store: { 'bwn:role:las
 A.ok('rank: no role slot is denied (fail-closed)', runBlock(BLOCK, {}).vsRankAllows() === false);
 A.ok('rank: a stale role record (past TTL) is denied', runBlock(BLOCK, { store: { 'bwn:role:last': JSON.stringify(STALE) } }).vsRankAllows() === false);
 
+var gmCalls = [];   // every gmGet call: { url, headers }
 function gmGetStub(status, json, reject) {
-  return function () { return reject ? Promise.reject(new Error('net')) : Promise.resolve({ status: status, json: json }); };
+  return function (url, headers) {
+    gmCalls.push({ url: url, headers: headers || {} });
+    return reject ? Promise.reject(new Error('net')) : Promise.resolve({ status: status, json: json });
+  };
 }
-var govOn = runBlock(BLOCK, { gmGet: gmGetStub(200, { vendorIntel: true }) });
-var govOff = runBlock(BLOCK, { gmGet: gmGetStub(200, { vendorIntel: false }) });
+var govOn = runBlock(BLOCK, { gmGet: gmGetStub(200, { v: 1, flags: { vendorIntel: true } }) });
+var govOff = runBlock(BLOCK, { gmGet: gmGetStub(200, { v: 1, flags: { vendorIntel: false } }) });
+var govTop = runBlock(BLOCK, { gmGet: gmGetStub(200, { vendorIntel: true }) });          // the 0.29.4 shape
+var gov403 = runBlock(BLOCK, { gmGet: gmGetStub(403, { error: 'unauthorized' }) });
 var gov404 = runBlock(BLOCK, { gmGet: gmGetStub(404, null) });
 var govErr = runBlock(BLOCK, { gmGet: gmGetStub(0, null, true) });
+var govNoKey = runBlock(BLOCK, { gm: {}, gmGet: gmGetStub(200, { v: 1, flags: { vendorIntel: true } }) });
 
 Promise.all([
-  govOn.vsGovernance().then(function (v) { A.ok('gov fetch: 200 + vendorIntel:true -> ON', v === true); }),
-  govOff.vsGovernance().then(function (v) { A.ok('gov fetch: 200 + vendorIntel:false -> OFF', v === false); }),
+  govOn.vsGovernance().then(function (v) { A.ok('gov fetch: 200 + flags.vendorIntel:true -> ON', v === true); }),
+  govOff.vsGovernance().then(function (v) { A.ok('gov fetch: 200 + flags.vendorIntel:false -> OFF', v === false); }),
+  govTop.vsGovernance().then(function (v) { A.ok('gov fetch: 200 + TOP-LEVEL vendorIntel:true -> OFF (not the bundle shape)', v === false); }),
+  gov403.vsGovernance().then(function (v) { A.ok('gov fetch: 403 (wrong key) -> OFF', v === false); }),
   gov404.vsGovernance().then(function (v) { A.ok('gov fetch: 404 -> OFF (endpoint not deployed = dark)', v === false); }),
-  govErr.vsGovernance().then(function (v) { A.ok('gov fetch: network error -> OFF (fail-closed)', v === false); })
+  govErr.vsGovernance().then(function (v) { A.ok('gov fetch: network error -> OFF (fail-closed)', v === false); }),
+  govNoKey.vsGovernance().then(function (v) { A.ok('gov fetch: no ingest_key -> OFF without a round trip', v === false); })
 ]).then(function () {
+  // the key gate: every governance call carried x-bwn-key = the stored ingest key, and the no-key
+  // context never called gmGet at all (the stub records calls; the no-key run must add none).
+  var keyed = gmCalls.filter(function (c) { return /\/api\/governance$/.test(c.url); });
+  A.ok('gov fetch: 6 keyed calls recorded (no-key run made none)', keyed.length === 6, 'calls=' + keyed.length);
+  A.ok('gov fetch: every call sent x-bwn-key = ingest_key', keyed.every(function (c) { return c.headers['x-bwn-key'] === 'test-key'; }));
+  A.ok('gov fetch: every call still sends Accept: application/json', keyed.every(function (c) { return c.headers['Accept'] === 'application/json'; }));
   // ---- mutations: revert one guard each, assert the harness reddens -----------------------------
   console.log('\nmutations (each must redden its probe)');
 
@@ -254,10 +276,21 @@ Promise.all([
   A.ok('M4 a VEND_Q that drops ratingCount fails the schema pin', norm(driftedQ) !== VEND_Q_CANON);
 
   // M5: governance parse accepts a truthy non-true - fail-closed contract broken.
-  var m5 = runBlock(mutate(BLOCK, 'json.vendorIntel === true', '!!json.vendorIntel'));
-  A.ok('M5 accepting a truthy vendorIntel breaks fail-closed (string "true" would enable)', m5.vsParseGovernance({ vendorIntel: 'true' }) === true);
+  var m5 = runBlock(mutate(BLOCK, 'json.flags.vendorIntel === true', '!!json.flags.vendorIntel'));
+  A.ok('M5 accepting a truthy vendorIntel breaks fail-closed (string "true" would enable)', m5.vsParseGovernance({ flags: { vendorIntel: 'true' } }) === true);
 
-  console.log('\n(pure render/label/guard + schema pin + gate integrations x real source, 5 mutations.');
+  // M6: regress to the 0.29.4 top-level read - the real bundle shape must then resolve OFF.
+  var m6 = runBlock(mutate(BLOCK, 'json && json.flags && json.flags.vendorIntel === true', 'json && json.vendorIntel === true'));
+  A.ok('M6 reading vendorIntel at the top level (0.29.4) never turns ON against the real bundle', m6.vsParseGovernance({ flags: { vendorIntel: true } }) === false);
+
+  // M7: drop the key header - the call must no longer carry x-bwn-key (the 0.29.4 403 path).
+  gmCalls.length = 0;
+  var m7 = runBlock(mutate(BLOCK, "{ 'Accept': 'application/json', 'x-bwn-key': key }", "{ 'Accept': 'application/json' }"), { gmGet: gmGetStub(200, { flags: { vendorIntel: true } }) });
+  return m7.vsGovernance().then(function () {
+    A.ok('M7 removing the key header is caught (call recorded without x-bwn-key)', gmCalls.length === 1 && !('x-bwn-key' in gmCalls[0].headers));
+  });
+}).then(function () {
+  console.log('\n(pure render/label/guard + schema pin + gate integrations x real source, 7 mutations.');
   console.log(' Nothing here proves the card RENDERS on a live Umbrava page - that is the live gate.)');
   A.finish();
 });
