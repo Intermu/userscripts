@@ -1,10 +1,10 @@
 // ==UserScript==
 // @name         BWN WO Audit (Broadway National)
 // @namespace    broadwaynational.bwn
-// @version      0.20.0
+// @version      0.20.1
 // @downloadURL  https://raw.githubusercontent.com/Intermu/userscripts/main/bwn-wo-audit.user.js
 // @updateURL    https://raw.githubusercontent.com/Intermu/userscripts/main/bwn-wo-audit.user.js
-// @description  Batch WO-audit tool. Upload a WO audit .xlsx; for each work order this reads its two most recent notes DIRECTLY from Umbrava's GraphQL API in-page (using your live Umbrava session - the same read the BWN Ops Suite AI drafts use), then asks the broadway-internal-ops SWA summarize route (x-bwn-key gated, Anthropic key server-side) to write a status note - for jobs aged over 30 days a dated "Over 30 - trade - event timeline - ECD" chain built from the WO's FULL note history (with a PAST/needs-ECD flag when the committed date has lapsed), otherwise a 1-3 sentence client-ready status note. Fills the audit's notes column and downloads the workbook, preserving every other cell and formula. It also reads each WO's live header (status, phase, priority, GP, DNE/NTE, PO/vendor, schedule) in the same call and writes a deterministic Audit Flags column (OVERDUE, NEG/LOW GP, NTE>DNE, NO VENDOR, UNSCHEDULED, STALE) computed with no AI - so the exception audit survives an AI outage. Runs entirely in the app.umbrava.com page so it inherits your Umbrava auth - no MCP, no pasted keys, nothing sensitive in this script. This replaces the old standalone WO_Audit_Automation.html SWA tool, whose server-side MCP path could not authenticate to Umbrava. After a run drafts its notes, the coordinator can post each drafted note as an INTERNAL Umbrava note onto its aged (>30d) work order - one explicit click per note (human-gated, idempotent), routed through the governed bwnGqlOp write path with its permission gate and audit trail. 0.17.0 adds an Operations Action List layer on top of the existing deterministic pipeline: three output modes (Detailed WO Audit / Operations Action List / Hybrid, default), a rules-based action engine that turns each WO into a prioritized (P0/P1/P2/Monitor) manager action with bucket, internal owner, external escalation, an operational-target due label, short risk flags, evidence and rule IDs, 16 structured audit columns appended to the source sheet, and a separate "WO Action List - YYYY.MM.DD" worksheet of the actionable rows - all deterministic, no AI opinions, source data never overwritten. 0.18.0 redesigns the Action List into an operational WORK QUEUE: two separate scores (Operational Risk vs Actionability), six queues (Immediate Intervention / Execute Today / Follow Up Today / Upcoming Watch / Blocked-Waiting / Closeout-Billing) plus an Action Undefined / Needs Triage exception, an explainable P0-P3 priority, a transparent Daily Rank (actionability first, risk second, age last), a valid-waiting-state test, meaningful-update / ECD / onsite-expected gating, and structured contradiction detection. The Action List worksheet is now grouped by queue with per-section counts; a flat filterable "Action Diagnostics" sheet carries the score components and evidence; the legacy audit/bucket columns and Dashboard/Rules sheets are preserved as the management layer. 0.19.0 adds Client Update Reply: paste a Pilot FM's update request (their PO table or the email text) and each PO is matched to the loaded audit workbook - FM from its FM column, else the Client Open POs owner, conflicts shown - read live from Umbrava, and given a client-facing update under the Ops Suite Client Update rules (parity-pinned), with an output gate that rejects amounts, contacts, internal wording, filler and ungrounded dates and falls back to fixed client wording. One reply table per FM in the FM's own column order plus Update; every row must be ticked reviewed before it can be copied; safety/incident wording is flagged for a personal answer. Nothing is sent or stored. 0.20.0 moves the update onto the Ops Suite Client Update pipeline (bwn-suite-ai #128, pasted byte-identical and parity-pinned): trip records as the only source of a confirmed appointment and the WO ECD as a target, Stage 1 fact extraction over scrubbed notes, Stage 2 render from approved facts only, the blocking cuSafetyCheck plus the batch checks (lapsed or ungrounded dates, internal wording), one stricter re-render, and the pipeline's safe fallback led by the live status.
+// @description  Batch WO-audit tool. Upload a WO audit .xlsx; for each work order this reads its two most recent notes DIRECTLY from Umbrava's GraphQL API in-page (using your live Umbrava session - the same read the BWN Ops Suite AI drafts use), then asks the broadway-internal-ops SWA summarize route (x-bwn-key gated, Anthropic key server-side) to write a status note - for jobs aged over 30 days a dated "Over 30 - trade - event timeline - ECD" chain built from the WO's FULL note history (with a PAST/needs-ECD flag when the committed date has lapsed), otherwise a 1-3 sentence client-ready status note. Fills the audit's notes column and downloads the workbook, preserving every other cell and formula. It also reads each WO's live header (status, phase, priority, GP, DNE/NTE, PO/vendor, schedule) in the same call and writes a deterministic Audit Flags column (OVERDUE, NEG/LOW GP, NTE>DNE, NO VENDOR, UNSCHEDULED, STALE) computed with no AI - so the exception audit survives an AI outage. Runs entirely in the app.umbrava.com page so it inherits your Umbrava auth - no MCP, no pasted keys, nothing sensitive in this script. This replaces the old standalone WO_Audit_Automation.html SWA tool, whose server-side MCP path could not authenticate to Umbrava. After a run drafts its notes, the coordinator can post each drafted note as an INTERNAL Umbrava note onto its aged (>30d) work order - one explicit click per note (human-gated, idempotent), routed through the governed bwnGqlOp write path with its permission gate and audit trail. 0.17.0 adds an Operations Action List layer on top of the existing deterministic pipeline: three output modes (Detailed WO Audit / Operations Action List / Hybrid, default), a rules-based action engine that turns each WO into a prioritized (P0/P1/P2/Monitor) manager action with bucket, internal owner, external escalation, an operational-target due label, short risk flags, evidence and rule IDs, 16 structured audit columns appended to the source sheet, and a separate "WO Action List - YYYY.MM.DD" worksheet of the actionable rows - all deterministic, no AI opinions, source data never overwritten. 0.18.0 redesigns the Action List into an operational WORK QUEUE: two separate scores (Operational Risk vs Actionability), six queues (Immediate Intervention / Execute Today / Follow Up Today / Upcoming Watch / Blocked-Waiting / Closeout-Billing) plus an Action Undefined / Needs Triage exception, an explainable P0-P3 priority, a transparent Daily Rank (actionability first, risk second, age last), a valid-waiting-state test, meaningful-update / ECD / onsite-expected gating, and structured contradiction detection. The Action List worksheet is now grouped by queue with per-section counts; a flat filterable "Action Diagnostics" sheet carries the score components and evidence; the legacy audit/bucket columns and Dashboard/Rules sheets are preserved as the management layer. 0.19.0 adds Client Update Reply: paste a Pilot FM's update request (their PO table or the email text) and each PO is matched to the loaded audit workbook - FM from its FM column, else the Client Open POs owner, conflicts shown - read live from Umbrava, and given a client-facing update under the Ops Suite Client Update rules (parity-pinned), with an output gate that rejects amounts, contacts, internal wording, filler and ungrounded dates and falls back to fixed client wording. One reply table per FM in the FM's own column order plus Update; every row must be ticked reviewed before it can be copied; safety/incident wording is flagged for a personal answer. Nothing is sent or stored. 0.20.0 moves the update onto the Ops Suite Client Update pipeline (bwn-suite-ai #128, pasted byte-identical and parity-pinned): trip records as the only source of a confirmed appointment and the WO ECD as a target, Stage 1 fact extraction over scrubbed notes, Stage 2 render from approved facts only, the blocking cuSafetyCheck plus the batch checks (lapsed or ungrounded dates, internal wording), one stricter re-render, and the pipeline's safe fallback led by the live status. 0.20.1 fixes the date grounding that rejected a note's own timestamp (Umbrava's T-suffixed createdDate was never tokenized, so "cited a date not present" fired on the latest note's date) and gives the audit note and the over-30 chain the Client Update pipeline's one stricter re-ask when the output gate rejects the first draft - the deterministic note still ships if the second draft fails too.
 // @match        https://app.umbrava.com/*
 // @run-at       document-idle
 // @noframes
@@ -19,7 +19,7 @@
 (function () {
   'use strict';
 
-  var VER = '0.20.0';
+  var VER = '0.20.1';
   var FONT = "-apple-system,BlinkMacSystemFont,'Segoe UI','Helvetica Neue',Arial,sans-serif";
   // Inline SVG icons (no external image/font). 18px, stroke=currentColor so they take card color.
   function _svg(p, o) { return '<svg class="woa-i" viewBox="0 0 24 24" width="18" height="18" fill="none" stroke="currentColor" stroke-width="1.9" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"' + (o || '') + '>' + p + '</svg>'; }
@@ -1044,12 +1044,16 @@
   // Build the user turn: the DERIVED FACTS first (so the model phrases rather than infers), then
   // the live header facts, then the note evidence. The facts block is what makes the output
   // checkable - validateAiNote holds the model to the dates and the ECD token that appear here.
+  // ===== BWN WO-AUDIT PROMPT START (pure; sliced by scripts/test-wo-audit-evidence.js) ============
   function buildAuditInput(wo, notes, facts) {
     wo = wo || {};
     var top2 = (notes || []).slice(0, 5);
     var noteLines = top2.map(function (n, i) {
       n = (n && typeof n === 'object') ? n : {};
-      var when = String(n.createdDate || '').trim().slice(0, 40);
+      // M/D, the same shape the over-30 prompt, the deterministic note and the grounding tokens
+      // all use - so "every date you write must appear verbatim" is literally satisfiable for the
+      // note's own date. The raw wire timestamp is kept only when it does not parse.
+      var when = fmtMD(n.createdDate) || String(n.createdDate || '').trim().slice(0, 40);
       var type = String(n.type || '').trim().slice(0, 40);
       // Belt and braces with meaningfulNotes, which already sanitizes: the model must never be
       // shown pasted email headers, addresses or thread bodies, because it copies them into the
@@ -1094,6 +1098,27 @@
     );
     return lines.join('\n');
   }
+
+  // One stricter re-ask when the output gate rejects the first draft - the Client Update pipeline's
+  // render -> flagged -> render(flagged) -> fallback shape, ported to the audit note and the over-30
+  // chain. The model is told exactly which rule it broke; the gate runs again on the second draft,
+  // so two rejections ship the deterministic note exactly as before. Measured 2026-10-13: four
+  // Retry Unfinished passes re-rolled the SAME prompt and the same rows kept failing the same rule.
+  // `validate` must ground against the ORIGINAL prompt (close over it) - the rejection text names
+  // the offending date, and grounding against the stricter prompt would license that very date.
+  function gatedDraft(prompt, ask, validate) {
+    return ask(prompt).then(function (first) {
+      var bad = validate(first);
+      if (!bad) return { text: first, degraded: '' };
+      var stricter = prompt + '\n\nYour previous answer was rejected: ' + bad + '. Correct exactly that - ' +
+        'use only dates and facts that appear above - and output the single line again.';
+      return ask(stricter).then(function (second) {
+        var bad2 = validate(second);
+        return bad2 ? { text: '', degraded: bad2 + ' (after a stricter re-draft)' } : { text: second, degraded: '' };
+      });
+    });
+  }
+  // ===== BWN WO-AUDIT PROMPT END ==================================================================
 
   // ===== BWN WO-AUDIT TIMELINE START (pure; sliced by scripts/test-wo-audit-timeline.js) ==========
   // The over-30 note is a dated event CHAIN the model extracts from the job's full note history,
@@ -1611,9 +1636,14 @@
     }
     // ISO first, then REMOVE it, so its inner "09-30" is not re-read as a bare hyphen date and a
     // 4-digit year cannot leak into the hyphen pass.
-    var iso = /\b(\d{4})-(\d{1,2})-(\d{1,2})\b/g;
+    // The tail is `(?!\d)`, NOT `\b`: Umbrava's createdDate is a full timestamp
+    // ("2026-09-21T20:18:42.5493634+00:00") and there is no word boundary between "21" and "T", so
+    // a `\b` tail matched a bare "2026-09-21" and silently walked past the wire form. Measured
+    // 2026-10-13: 67 of 296 rows fell back on "cited a date (10/13) not present" - the date the
+    // note header itself carried.
+    var iso = /\b(\d{4})-(\d{1,2})-(\d{1,2})(?!\d)/g;
     while ((m = iso.exec(s))) add(m[2], m[3]);
-    var rest = s.replace(/\b\d{4}-\d{1,2}-\d{1,2}\b/g, ' ');
+    var rest = s.replace(/\b\d{4}-\d{1,2}-\d{1,2}(?!\d)/g, ' ');
     var slash = /\b(\d{1,2})\/(\d{1,2})(?:\/\d{2,4})?\b/g;
     while ((m = slash.exec(rest))) add(m[1], m[2]);
     // A BARE hyphen pair is deliberately NOT a date token. Measured against the 09/18 workbook
@@ -3657,31 +3687,36 @@
     // while the sender sits in backoff.
     var ctx = { onWait: onWait };
     var prompt = buildAuditInput(woFacts, notes, facts);
-    return bwnAI({
-      task: 'summarize',
-      tier: 'proxy',
-      minRank: 1,
-      prompt: prompt,
-      system: WO_AUDIT_SYSTEM,
-      oneLine: false,
-      maxChars: 4000,
-      timeoutMs: AI_ROUTER_TIMEOUT_MS,
-      fallback: [],
-      proxySend: function (p) { p.model = model; return aiProxySend(p, ctx); }
-    }).then(function (note) {
-      note = String(note || '').trim();
-      // ctx.reason is set before the first wire call, so an unset reason now means bwnAI never
-      // reached the sender AT ALL - the router fail-closed on an unknown Umbrava rank
-      // (`bwn:role:last` unpublished, i.e. running without the Ops Suite). That is the only
-      // case the key/role hint ever described, and the run summary states it once.
-      if (!note) throw new Error(ctx.reason || 'Umbrava rank not resolved - run alongside the BWN Ops Suite');
-      // Strict output gate. An ungrounded or malformed line is DISCARDED, not shipped and not
-      // patched up: the deterministic note is always available and is never worse than a note
-      // carrying a date nobody wrote. `degraded` tells the caller to say so on the row.
-      var bad = validateAiNote(note, facts, prompt);
-      if (bad) return { note: composeAuditStatusNote(facts), degraded: bad };
-      return { note: note, degraded: '' };
-    });
+    function ask(p) {
+      return bwnAI({
+        task: 'summarize',
+        tier: 'proxy',
+        minRank: 1,
+        prompt: p,
+        system: WO_AUDIT_SYSTEM,
+        oneLine: false,
+        maxChars: 4000,
+        timeoutMs: AI_ROUTER_TIMEOUT_MS,
+        fallback: [],
+        proxySend: function (q) { q.model = model; return aiProxySend(q, ctx); }
+      }).then(function (note) {
+        note = String(note || '').trim();
+        // ctx.reason is set before the first wire call, so an unset reason now means bwnAI never
+        // reached the sender AT ALL - the router fail-closed on an unknown Umbrava rank
+        // (`bwn:role:last` unpublished, i.e. running without the Ops Suite). That is the only
+        // case the key/role hint ever described, and the run summary states it once.
+        if (!note) throw new Error(ctx.reason || 'Umbrava rank not resolved - run alongside the BWN Ops Suite');
+        return note;
+      });
+    }
+    // Strict output gate, grounded on the ORIGINAL prompt (never the stricter re-ask). An
+    // ungrounded or malformed line is DISCARDED, not shipped and not patched up: the deterministic
+    // note is always available and is never worse than a note carrying a date nobody wrote.
+    // `degraded` tells the caller to say so on the row.
+    return gatedDraft(prompt, ask, function (note) { return validateAiNote(note, facts, prompt); })
+      .then(function (r) {
+        return r.degraded ? { note: composeAuditStatusNote(facts), degraded: r.degraded } : { note: r.text, degraded: '' };
+      });
   }
 
   // Over-30 timeline note: the model extracts the dated event CHAIN from the full history; the
@@ -3690,35 +3725,41 @@
   function summarizeTimeline(woFacts, notes, header, model, onWait, facts) {
     var ctx = { onWait: onWait };
     var prompt = buildTimelineInput(woFacts, notes, facts);
-    return bwnAI({
-      task: 'summarize',
-      tier: 'proxy',
-      minRank: 1,
-      prompt: prompt,
-      system: WO_TIMELINE_SYSTEM,
-      oneLine: true,
-      maxChars: 2000,
-      timeoutMs: AI_ROUTER_TIMEOUT_MS,
-      fallback: [],
-      proxySend: function (p) { p.model = model; return aiProxySend(p, ctx); }
-    }).then(function (chain) {
-      chain = String(chain || '').trim();
-      if (!chain) throw new Error(ctx.reason || 'Umbrava rank not resolved - run alongside the BWN Ops Suite');
-      // The wrapper is unchanged and still owns both ends; the chain is still the only model-authored
-      // part. A chain that echoed an ECD token despite the instruction would put TWO ECDs on the line,
-      // so strip a trailing one - the deterministic tail stays the single source of the ECD.
-      // ANCHORED to a trailing ECD token, never greedy. An over-30 chain routinely NAMES a lapsed
-      // ECD mid-history ("... - ECD 8/15 committed - 8/20 vendor no-show - ..."), and a `[\s\S]*$`
-      // strip silently deleted every segment after the first such mention - the richest part of the
-      // note. Only a genuine trailing "- ECD <date|TBD|not set> ..." tail is removed.
-      chain = chain.replace(/\s*-\s*ECD\s+(?:\d{1,2}\/\d{1,2}(?:\/\d{2,4})?|TBD|not set)\b[^-]*$/i, '').trim();
-      // The posted path gets the FULL gate as of 0.13.0 - dates, vague filler, and every claim
-      // rule - not just the date check. This is the chain that reaches a real work order, so it is
-      // the last place an invented date OR an unevidenced claim should be allowed. The wrapper and
-      // its ECD tail are unchanged either way, so a rejected chain still ships the house format.
-      var bad = validateTimelineChain(chain, facts, prompt);
-      if (bad) return { note: composeTimelineNote(fallbackChain(facts), header, Date.now()), degraded: bad };
-      return { note: composeTimelineNote(chain, header, Date.now()), degraded: '' };
+    function ask(p) {
+      return bwnAI({
+        task: 'summarize',
+        tier: 'proxy',
+        minRank: 1,
+        prompt: p,
+        system: WO_TIMELINE_SYSTEM,
+        oneLine: true,
+        maxChars: 2000,
+        timeoutMs: AI_ROUTER_TIMEOUT_MS,
+        fallback: [],
+        proxySend: function (q) { q.model = model; return aiProxySend(q, ctx); }
+      }).then(function (chain) {
+        chain = String(chain || '').trim();
+        if (!chain) throw new Error(ctx.reason || 'Umbrava rank not resolved - run alongside the BWN Ops Suite');
+        // The wrapper is unchanged and still owns both ends; the chain is still the only model-authored
+        // part. A chain that echoed an ECD token despite the instruction would put TWO ECDs on the line,
+        // so strip a trailing one - the deterministic tail stays the single source of the ECD.
+        // ANCHORED to a trailing ECD token, never greedy. An over-30 chain routinely NAMES a lapsed
+        // ECD mid-history ("... - ECD 8/15 committed - 8/20 vendor no-show - ..."), and a `[\s\S]*$`
+        // strip silently deleted every segment after the first such mention - the richest part of the
+        // note. Only a genuine trailing "- ECD <date|TBD|not set> ..." tail is removed.
+        return chain.replace(/\s*-\s*ECD\s+(?:\d{1,2}\/\d{1,2}(?:\/\d{2,4})?|TBD|not set)\b[^-]*$/i, '').trim();
+      });
+    }
+    // The posted path gets the FULL gate as of 0.13.0 - dates, vague filler, and every claim
+    // rule - not just the date check. This is the chain that reaches a real work order, so it is
+    // the last place an invented date OR an unevidenced claim should be allowed. The wrapper and
+    // its ECD tail are unchanged either way, so a rejected chain still ships the house format.
+    // Grounded on the ORIGINAL prompt, one stricter re-ask, then the deterministic chain.
+    return gatedDraft(prompt, ask, function (chain) { return validateTimelineChain(chain, facts, prompt); })
+      .then(function (r) {
+        return r.degraded
+          ? { note: composeTimelineNote(fallbackChain(facts), header, Date.now()), degraded: r.degraded }
+          : { note: composeTimelineNote(r.text, header, Date.now()), degraded: '' };
     });
   }
 

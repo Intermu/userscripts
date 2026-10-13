@@ -33,7 +33,8 @@ function slice(startMark, endMark) {
 var SECTION =
   slice('// ===== BWN WO-AUDIT TIMELINE START', '// ===== BWN WO-AUDIT TIMELINE END') + '\n' +
   slice('// ===== BWN WO-AUDIT STATE START', '// ===== BWN WO-AUDIT STATE END') + '\n' +
-  slice('// ===== BWN WO-AUDIT POST START', '// ===== BWN WO-AUDIT POST END');
+  slice('// ===== BWN WO-AUDIT POST START', '// ===== BWN WO-AUDIT POST END') + '\n' +
+  slice('// ===== BWN WO-AUDIT PROMPT START', '// ===== BWN WO-AUDIT PROMPT END');
 
 var MS_DAY = 86400000;
 function _date(v) { if (!v) return null; var d = new Date(v); return isNaN(+d) ? null : d; }
@@ -48,7 +49,7 @@ var T = (new Function('MS_DAY', '_date', 'auditCfg', 'STALE_DAYS',
   ' woaStripQuotedEmail: woaStripQuotedEmail,' +
   ' hasPriorAuditNote: hasPriorAuditNote, postEligible: postEligible, AUDIT_MARKER: AUDIT_MARKER,' +
   ' composeTimelineNote: composeTimelineNote, fallbackChain: fallbackChain, WOA_PHASE: WOA_PHASE,' +
-  ' WOA_CLAIM_RULES: WOA_CLAIM_RULES };'
+  ' WOA_CLAIM_RULES: WOA_CLAIM_RULES, buildAuditInput: buildAuditInput, gatedDraft: gatedDraft };'
 ))(MS_DAY, _date, auditCfg, STALE_DAYS);
 
 // Fixed clock: 2026-09-17 local noon (same as test-wo-audit-state.js).
@@ -420,7 +421,7 @@ A.ok('the unmapped-status diagnostic is rendered and copyable',
 A.ok('a degraded row is still surfaced to the operator',
   /fell back to the deterministic audit note/.test(TEXT));
 A.ok('a retained row is surfaced too', /KEPT the workbook..s existing note/.test(TEXT));
-A.ok('the version was bumped (an unbumped push reaches nobody)', /@version\s+0\.20\.0/.test(TEXT));
+A.ok('the version was bumped (an unbumped push reaches nobody)', /@version\s+0\.20\.1/.test(TEXT));
 
 // ---------------------------------------------------------------------------------------------
 console.log('\n17. Quoted-email furniture never reaches a client-facing note (D3)');
@@ -527,4 +528,59 @@ console.log('  h) sanitization is idempotent (it is applied at three points)');
 var dirty = '9/17 update pending From: Bob <bob@x.com> Sent: Monday';
 A.eq('strip(strip(x)) === strip(x)', S(S(dirty)), S(dirty));
 
-A.finish();
+console.log('  i) 0.20.1 - the note\'s OWN timestamp grounds its date (Umbrava wire form), end to end');
+// The 2026-10-13 run: 67 of 296 rows fell back on "cited a date (10/13) not present" where 10/13
+// was the latest note's createdDate. The wire form is a full timestamp; a `\b` after the day
+// cannot match before "T", so the ISO pass tokenized nothing and the model's correct date was
+// refused. Same clock as the rest of the file (NOW = 2026-09-17).
+var WIRE = '2026-09-16T14:22:11.5493634+00:00';
+A.eq('wire createdDate tokenizes to M/D', T.woaGroundTokens('Note 1 (' + WIRE + ') [Internal]:'), ['9/16']);
+A.eq('...exactly one token (the inner "09-16" is not re-read)', T.woaGroundTokens(WIRE).length, 1);
+A.eq('control: a bare ISO date still tokenizes', T.woaGroundTokens('2026-09-16'), ['9/16']);
+A.eq('control: the time/zone tail alone is not a date', T.woaGroundTokens('T14:22:11.5493634+00:00'), []);
+var nWire = { content: 'Parts arriving tomorrow per the supplier.', createdDate: WIRE };
+var fWire = st(H('Material Ordered'), [nWire]);
+var pWire = T.buildAuditInput({ number: 'W-1' }, [nWire], fWire);
+A.ok('the prompt header shows the note date as M/D', /Note 1 \(9\/16\)/.test(pWire), pWire.slice(0, 160));
+A.ok('...and not the raw timestamp', pWire.indexOf('T14:22') === -1, '');
+A.eq('a line citing the note\'s own date passes the gate',
+  T.validateAiNote('Materials pending - 9/16: parts arriving per the supplier - ECD TBD', fWire, pWire), '');
+A.ok('control: a date the evidence never carried is still rejected',
+  /cited a date \(9\/20\)/.test(T.validateAiNote('Materials pending - 9/20: parts arriving - ECD TBD', fWire, pWire)), '');
+A.ok('control: an unparseable createdDate falls back to the raw string, not a blank',
+  /Note 1 \(garbage\)/.test(T.buildAuditInput({ number: 'W-1' }, [{ content: 'x', createdDate: 'garbage' }], fWire)), '');
+
+console.log('  j) 0.20.1 - one stricter re-draft, gate on the ORIGINAL prompt, then the deterministic note');
+var calls = [];
+function fakeAsk(seq) { return function (p) { calls.push(p); return Promise.resolve(seq.shift()); }; }
+var REASON = 'AI output cited a date (9/20) not present in the work order evidence';
+function gate(t) { return /bad/.test(t) ? REASON : ''; }
+var P = 'ORIGINAL PROMPT 9/16';
+Promise.resolve()
+  .then(function () { calls = []; return T.gatedDraft(P, fakeAsk(['good line']), gate); })
+  .then(function (r) {
+    A.eq('a clean first draft ships as-is', r, { text: 'good line', degraded: '' });
+    A.eq('...with ONE call', calls.length, 1);
+    calls = []; return T.gatedDraft(P, fakeAsk(['bad line', 'good line']), gate);
+  })
+  .then(function (r) {
+    A.eq('a rejected first draft is re-asked once and the second ships', r, { text: 'good line', degraded: '' });
+    A.eq('...two calls', calls.length, 2);
+    A.ok('the re-ask starts with the ORIGINAL prompt', calls[1].indexOf(P) === 0, calls[1]);
+    A.ok('...and names the rule that was broken', calls[1].indexOf('rejected: ' + REASON) !== -1, calls[1]);
+    calls = []; return T.gatedDraft(P, fakeAsk(['bad line', 'bad again']), gate);
+  })
+  .then(function (r) {
+    A.eq('two rejections degrade with the SECOND reason', r.degraded, REASON + ' (after a stricter re-draft)');
+    A.eq('...and ship no model text (caller writes the deterministic note)', r.text, '');
+    A.eq('...and never make a third call', calls.length, 2);
+    // The hazard the helper documents: the rejection text names the offending date, so grounding
+    // on the STRICTER prompt would license it. The validator closes over the original.
+    calls = [];
+    return T.gatedDraft(P, fakeAsk(['bad 9/20', 'still 9/20']), function (t) { return T.ungroundedDates(t, P); });
+  })
+  .then(function (r) {
+    A.ok('a date licensed only by the rejection text is still rejected', /9\/20/.test(r.degraded), r.degraded);
+    A.eq('control: the original prompt\'s date passes the same validator', T.ungroundedDates('line 9/16', P), '');
+    A.finish();
+  });
