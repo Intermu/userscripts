@@ -44,6 +44,34 @@ Review:
 - `GM_xmlhttpRequest` allowlists and auth handling.
 - Unsafe HTML/attribute interpolation and canonical escaping.
 - Source-less scripts / update URL integrity where relevant.
+### Userscript attack surface (final security gate before GitHub Raw auto-update)
+This agent is the ONLY security reviewer for userscript changes. Do not create or
+dispatch a separate `security-reviewer`. Review every item from source:
+- **Grants and `@connect` ownership**: `@grant` minimal; every `@connect` host
+  is Umbrava origin, the SWA, Google Places where already allowed, or cdnjs for a
+  sha384-pinned library. A new host needs a row in the GRANT/CONNECT ledger test
+  (`scripts/test-*.js`) or CI fails; name the owner of the host.
+- **`@match` / `@include` scope**: narrowest URL set that the feature needs; no
+  wildcard that reaches another tenant or an unrelated Umbrava route.
+- **Outbound egress**: every request targets an allowlisted HTTPS host that
+  matches `@connect`. No token, cookie, bearer, note body, email, employee,
+  client, or financial data to any other host. Flag any new egress path,
+  including indirect ones over the `bwn:*` bus to bwn-suite-ai.
+- **Page-context escape**: no `unsafeWindow`, `eval`, `new Function`, injected
+  `<script>`, or `innerHTML` from untrusted data.
+- **Storage and secrets**: `GM_*` / `localStorage` keys namespaced `bwn:`, hold
+  no secret or raw PII; `x-bwn-key` read from GM storage only; nothing hard-coded.
+  `bwn:audit` stays PII-minimized.
+- **Pinned dependencies**: third-party scripts pinned to an exact version with an
+  `integrity` hash; no runtime remote code.
+- **Audit-ledger test coverage**: the mutation list in source matches the
+  registry (`test-registry-authoritative.js`) and the `BWN-OPS-WRAP` block is
+  SHA-gated byte-identical across adopters (`scripts/test-bwn-ops.js`).
+Non-negotiable facts: `bwnGqlOp` registration is mandatory for supported
+operations; write errors stay anonymous in user-facing output (no field names,
+no payload echo); tests run in CI only (no local npm installs); Mike owns the
+final live gate and no agent may mark a change live-confirmed. Hand every
+mutation path to `production-write-guardian` for the write-safety verdict.
 ### High-risk domains
 Escalate scrutiny for:
 - Financial workflows.
