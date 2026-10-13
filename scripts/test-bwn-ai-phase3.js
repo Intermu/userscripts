@@ -277,7 +277,9 @@ function run() {
   chain = chain.then(function () {
     var T = loadWoAudit({ seed: roleSlot(), gmScript: [
       { status: 502, json: { ok: false, error: 'Anthropic API error (429)' } },
-      { ok: true, status: 'final', text: 'ok' },
+      // Gate-clean since 0.20.1: a rejected draft is re-asked once, so a too-short 'ok' would
+      // burn a second scripted response these backoff-only cases do not provide.
+      { ok: true, status: 'final', text: 'Scheduled - Vendor to attend the visit and report the outcome - ECD TBD' },
     ] });
     return T.summarize({ raw: '1' }, [], 'claude-sonnet-5').then(function () {
       eq('502-carrying-429 uses the THROTTLE table, not the fast one', JSON.stringify(T._slept), '[15000]');
@@ -314,7 +316,9 @@ function run() {
   chain = chain.then(function () {
     var T = loadWoAudit({ seed: roleSlot(), gmScript: [
       { status: 429, json: { ok: false }, resHeaders: 'content-type: application/json\r\nRetry-After: 30\r\n' },
-      { ok: true, status: 'final', text: 'ok' },
+      // Gate-clean since 0.20.1: a rejected draft is re-asked once, so a too-short 'ok' would
+      // burn a second scripted response these backoff-only cases do not provide.
+      { ok: true, status: 'final', text: 'Scheduled - Vendor to attend the visit and report the outcome - ECD TBD' },
     ] });
     return T.summarize({ raw: '1' }, [], 'claude-sonnet-5').then(function () {
       eq('server retry-after overrides the table', JSON.stringify(T._slept), '[30000]');
@@ -323,7 +327,9 @@ function run() {
   chain = chain.then(function () {
     var T = loadWoAudit({ seed: roleSlot(), gmScript: [
       { status: 429, json: { ok: false }, resHeaders: 'retry-after: 9999\r\n' },
-      { ok: true, status: 'final', text: 'ok' },
+      // Gate-clean since 0.20.1: a rejected draft is re-asked once, so a too-short 'ok' would
+      // burn a second scripted response these backoff-only cases do not provide.
+      { ok: true, status: 'final', text: 'Scheduled - Vendor to attend the visit and report the outcome - ECD TBD' },
     ] });
     return T.summarize({ raw: '1' }, [], 'claude-sonnet-5').then(function () {
       eq('a wild retry-after is clamped to 120s', JSON.stringify(T._slept), '[120000]');
