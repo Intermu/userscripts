@@ -11,6 +11,9 @@
 //   - a remote flags[key]===true does NOT ENABLE a locally-off module (one-way; only ever disable);
 //   - flags.globalKillSwitch===true disables EVERY module;
 //   - an absent / corrupt / flagless bundle leaves local defaults untouched (safe).
+//  Core module merge (Phase 1 PR-A, B3): the literal + BWN_WRITER_KEYS + bwn:modules merge + gov apply,
+//   run as one slice: a page-written bwn:modules blob can LOWER a writer key but never RAISE one;
+//   non-writer keys still raise or lower; bwn:gov true never raises a writer either.
 //  AI BWN-GOV-CONN (connectorEnabled, remote kill gates egress):
 //   - local toggle bwn:modules.connector===false => OFF (unchanged behavior);
 //   - remote globalKillSwitch / flags.connector===false => OFF (new);
@@ -111,6 +114,35 @@ var DEF = { poApproval: true, woAssist: true, woAssistWrites: false, listHeat: t
   var bad = mutate(CORE_APPLY, 'if (kill || f[k] === false) BWN_MODULES[k] = false;', 'BWN_MODULES[k] = f[k] === undefined ? BWN_MODULES[k] : f[k];');
   var mb = runApply({ v: 1, etag: 'x', flags: { bulkOps: true } }, DEF, bad);
   A.eq('control: two-way apply WOULD enable bulkOps (proves the one-way guard is load-bearing)', mb.bulkOps, true);
+})();
+
+// ---- Core: module merge - writer keys are lower-only (Phase 1 PR-A, B3) -----------------------
+// Slice from the BWN_MODULES literal to the end of the gov apply, so the REAL defaults, the REAL
+// BWN_WRITER_KEYS and the REAL merge run together, exactly as Core boots (no GM_info in the vm).
+var CORE_MERGE = slice(CORE, '  var BWN_MODULES = {', '  // BWN-GOV-APPLY-SLICE-END');
+function runMerge(seed, src) {
+  var f = fakeStore(seed);
+  var sb = baseSandbox(f);
+  vm.runInNewContext(src || CORE_MERGE, sb);
+  return { m: sb.BWN_MODULES, keys: sb.BWN_WRITER_KEYS };
+}
+(function () {
+  var SEVEN = ['woAssistWrites', 'woAssistEcd', 'bulkOps', 'bulkOpsDestructive', 'bulkSource', 'bulkTask', 'recoveryWrites'];
+  var r = runMerge({});
+  A.eq('merge: BWN_WRITER_KEYS is exactly the seven Core writer keys', r.keys, SEVEN);
+  A.ok('merge: every writer key ships false', SEVEN.every(function (k) { return r.m[k] === false; }), JSON.stringify(SEVEN.map(function (k) { return k + '=' + r.m[k]; })));
+  A.eq('merge: bwn:modules {"bulkSource":true} does NOT raise bulkSource', runMerge({ 'bwn:modules': { bulkSource: true } }).m.bulkSource, false);
+  A.eq('merge: bwn:modules {"woAssistEcd":true} does NOT raise woAssistEcd', runMerge({ 'bwn:modules': { woAssistEcd: true } }).m.woAssistEcd, false);
+  var all = {}; SEVEN.forEach(function (k) { all[k] = true; });
+  var ra = runMerge({ 'bwn:modules': all }).m;
+  A.ok('merge: all seven writer keys true in bwn:modules -> all stay false', SEVEN.every(function (k) { return ra[k] === false; }), JSON.stringify(ra));
+  A.eq('merge: bwn:modules {"woAssist":false} still LOWERS a non-writer', runMerge({ 'bwn:modules': { woAssist: false } }).m.woAssist, false);
+  A.eq('merge: bwn:modules {"routeHelper":true} still RAISES a non-writer', runMerge({ 'bwn:modules': { routeHelper: true } }).m.routeHelper, true);
+  A.eq('merge: bwn:gov flags.bulkSource:true does NOT raise bulkSource', runMerge({ 'bwn:gov': { v: 1, etag: 't', flags: { bulkSource: true } } }).m.bulkSource, false);
+  // CONTROL: the merge reverted to raise-or-lower for every key -> the bulkSource case goes red.
+  var reverted = mutate(CORE_MERGE, 'BWN_MODULES[k] = (BWN_WRITER_KEYS.indexOf(k) !== -1) ? (BWN_MODULES[k] && _mp[k]) : _mp[k];', 'BWN_MODULES[k] = _mp[k];');
+  A.eq('CONTROL: with the merge reverted, bwn:modules {"bulkSource":true} RAISES bulkSource (lower-only is load-bearing)',
+    runMerge({ 'bwn:modules': { bulkSource: true } }, reverted).m.bulkSource, true);
 })();
 
 // ---- AI: connectorEnabled remote-kill gate ---------------------------------

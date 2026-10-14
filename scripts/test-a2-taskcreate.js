@@ -94,7 +94,7 @@ function makeEnv(opts) {
   };
   vm.createContext(sandbox);
   env.api = vm.runInContext(
-    '(function () {\n' + S_OPS + '\n' + S_WA + '\n' +
+    '(function () {\n' + S_OPS + '\n' + (opts.wa || S_WA) + '\n' +
     'return { run: bwnGqlOp, waCreateTask: waCreateTask, waTaskSubmit: waTaskSubmit,\n' +
     '  auditAll: bwnAuditAll };\n})()',
     sandbox, { filename: 'wa-a2.js' });
@@ -163,13 +163,30 @@ function addTaskCalls(env) { return env.calls.filter(function (c) { return /addT
   A.ok('A2-validate: missing WO number is also denied', denied2);
   A.eq('A2-validate: missing-WO case sent nothing', addTaskCalls(e3b).length, 0);
 
-  // ---- feature kill switch: woAssist off -> refused before the wire -------------------------
-  var eOff = makeEnv({ modules: { woAssist: false } });
+  // ---- feature kill switch: woAssistWrites off -> refused before the wire ------------------
+  // Phase 1 PR-A (P1-02, SEC F5): addTask passes feature:'woAssistWrites' (the hard-OFF writer key),
+  // so the WRAPPER refuses while it is false - not only the hidden button. Recorded decoupling (R5):
+  // woAssist:false alone no longer makes the wrapper refuse this write (it still stops the whole
+  // module mounting at load); a Phase 2 re-enable must keep woAssist as a parent kill.
+  var eOff = makeEnv({ modules: { woAssist: true, woAssistWrites: false } });
   var offDenied = false;
   await eOff.api.waCreateTask(370534, 'guid', 'Call vendor').then(function () {}, function () { offDenied = true; });
   await tick();
-  A.ok('kill switch: woAssist:false refuses the write', offDenied);
-  A.eq('kill switch: nothing sent when the module is off', addTaskCalls(eOff).length, 0);
+  A.ok('kill switch: woAssistWrites:false refuses the write', offDenied);
+  A.eq('kill switch: nothing sent when woAssistWrites is off', addTaskCalls(eOff).length, 0);
+  A.ok('kill switch: the refusal is audited denied feature-off:woAssistWrites',
+    eOff.api.auditAll().some(function (x) { return x.outcome === 'denied' && /feature-off:woAssistWrites/.test(String(x.reason)); }), JSON.stringify(eOff.api.auditAll()));
+
+  // CONTROL (R5): swap waCreateTask's feature back to 'woAssist' -> the kill case goes red (the write
+  // sends with woAssistWrites:false), so the feature literal is load-bearing.
+  await (async function () {
+    var waBack = mutate(S_WA, "feature: 'woAssistWrites',\n        validate: function (v) { var d = v && v.data || {}; if (!d.entityId)",
+      "feature: 'woAssist',\n        validate: function (v) { var d = v && v.data || {}; if (!d.entityId)");
+    var ec = makeEnv({ modules: { woAssist: true, woAssistWrites: false }, wa: waBack });
+    await ec.api.waCreateTask(370534, 'guid', 'Call vendor').then(function () {}, function () {});
+    await tick();
+    A.eq('CONTROL: with feature:\'woAssist\' the kill case goes red (the write sends despite woAssistWrites:false)', addTaskCalls(ec).length, 1);
+  })();
 
   // ---- a success:false envelope is REJECTED, not swallowed ----------------------------------
   var eF = makeEnv({ envFalse: true });
