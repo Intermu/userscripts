@@ -33,7 +33,7 @@ var SCRIPTS = [
   { f: 'bwn-kanban.user.js', own: ['kanban'], gov: true },
   { f: 'bwn-low-gp.user.js', own: ['lowGp'], gov: true },
   { f: 'bwn-notes.user.js', own: null, gov: false },
-  { f: 'bwn-proposal-copy.user.js', own: null, gov: false }
+  { f: 'bwn-proposal-copy.user.js', own: ['proposalCopy'], gov: true }   // Phase 1 PR-A (B4): seed + one-way gov apply
 ];
 
 function parserOf(src) {
