@@ -144,7 +144,8 @@ var HARD_OFF = [
   // write-queue has no bwn:gov apply until PR-B (wq parser is followed directly by BWN_OPS), so its
   // gov case only proves the bundle is ignored; the real C4 proof is the bwn:modules case + control (R14).
   { f: 'bwn-write-queue.user.js', key: 'writeQueueCatalog', end: '  var BWN_OPS = {', govNote: ' (no gov apply in write-queue until PR-B)' },
-  { f: 'bwn-wo-audit.user.js', key: 'woAuditNotes', end: GOV_END }
+  { f: 'bwn-wo-audit.user.js', key: 'woAuditNotes', end: GOV_END },
+  { f: 'bwn-drop-upload.user.js', key: 'dropUploadLadderEscalate', end: GOV_END }
 ];
 function hardOffSlice(src, end) {
   var a = src.indexOf(START), b = src.indexOf(end, a);
