@@ -6,7 +6,8 @@
 // writes only booleans, so this needs a hand-edited or foreign value, but a dead script is a bad
 // failure for a bad cache entry.
 //
-// THE CONTRACT now shipped, byte-identical in all six: the result is always a plain object holding
+// THE CONTRACT now shipped, byte-identical in all eight consumers (the original six, plus write-queue
+// and wo-audit since Phase 1 PR-A): the result is always a plain object holding
 // only the stored object's own keys whose values are real booleans. Anything else (missing, bad
 // JSON, null, a primitive, an array, a non-boolean value) contributes nothing - never coerced.
 // Defaults, the bwn:gov one-way kill and the strict `=== false` / `=== true` readers are unchanged.
@@ -34,7 +35,8 @@ var SCRIPTS = [
   { f: 'bwn-low-gp.user.js', own: ['lowGp'], gov: true },
   { f: 'bwn-notes.user.js', own: null, gov: false },
   { f: 'bwn-proposal-copy.user.js', own: ['proposalCopy'], gov: true },   // Phase 1 PR-A (B4): seed + one-way gov apply
-  { f: 'bwn-write-queue.user.js', own: null, gov: false }               // Phase 1 PR-A (P1-06): canonical parser
+  { f: 'bwn-write-queue.user.js', own: null, gov: false },              // Phase 1 PR-A (P1-06): canonical parser
+  { f: 'bwn-wo-audit.user.js', own: null, gov: false }                  // Phase 1 PR-A (P1-07): canonical parser
 ];
 
 function parserOf(src) {
@@ -68,7 +70,7 @@ function run(code, store) {
 var SRC = {};
 SCRIPTS.forEach(function (x) { SRC[x.f] = read(x.f); });
 
-console.log('--- 1. one parser, byte-identical in all six consumers ---');
+console.log('--- 1. one parser, byte-identical in all eight consumers ---');
 var parsers = SCRIPTS.map(function (x) { return parserOf(SRC[x.f]); });
 parsers.forEach(function (p, i) {
   A.eq('identical parser: ' + SCRIPTS[i].f, p, parsers[0]);
@@ -141,7 +143,8 @@ console.log('\n--- 6. C4: hard-OFF keys stay false whatever bwn:modules / bwn:go
 var HARD_OFF = [
   // write-queue has no bwn:gov apply until PR-B (wq parser is followed directly by BWN_OPS), so its
   // gov case only proves the bundle is ignored; the real C4 proof is the bwn:modules case + control (R14).
-  { f: 'bwn-write-queue.user.js', key: 'writeQueueCatalog', end: '  var BWN_OPS = {', govNote: ' (no gov apply in write-queue until PR-B)' }
+  { f: 'bwn-write-queue.user.js', key: 'writeQueueCatalog', end: '  var BWN_OPS = {', govNote: ' (no gov apply in write-queue until PR-B)' },
+  { f: 'bwn-wo-audit.user.js', key: 'woAuditNotes', end: GOV_END }
 ];
 function hardOffSlice(src, end) {
   var a = src.indexOf(START), b = src.indexOf(end, a);
