@@ -33,7 +33,8 @@ var SCRIPTS = [
   { f: 'bwn-kanban.user.js', own: ['kanban'], gov: true },
   { f: 'bwn-low-gp.user.js', own: ['lowGp'], gov: true },
   { f: 'bwn-notes.user.js', own: null, gov: false },
-  { f: 'bwn-proposal-copy.user.js', own: ['proposalCopy'], gov: true }   // Phase 1 PR-A (B4): seed + one-way gov apply
+  { f: 'bwn-proposal-copy.user.js', own: ['proposalCopy'], gov: true },   // Phase 1 PR-A (B4): seed + one-way gov apply
+  { f: 'bwn-write-queue.user.js', own: null, gov: false }               // Phase 1 PR-A (P1-06): canonical parser
 ];
 
 function parserOf(src) {
@@ -130,5 +131,49 @@ var oldGov = OLD + dispGov.slice(parserOf(SRC['bwn-dispatch.user.js']).length);
 var crash = run(oldGov, { 'bwn:modules': '5' });
 A.ok('control: with the old parser a stored 5 throws a TypeError at load', !!crash.err && crash.err.name === 'TypeError', crash.err ? String(crash.err) : 'did not throw');
 A.ok('control: and the shipped parser is not the old one', parsers[0] !== OLD);
+
+// ---- 6. C4 (Phase 1 PR-A): hard-OFF keys cannot be raised ------------------------------------
+// Each hard-OFF key is assigned false UNCONDITIONALLY after the parser, so neither a page-written
+// bwn:modules nor a bwn:gov bundle can raise it, and a primitive blob cannot crash the load path.
+// Runs the real slice (parser .. end), per key. Control per key: the unconditional seed replaced by
+// a conditional one -> the bwn:modules true case goes red.
+console.log('\n--- 6. C4: hard-OFF keys stay false whatever bwn:modules / bwn:gov say ---');
+var HARD_OFF = [
+  // write-queue has no bwn:gov apply until PR-B (wq parser is followed directly by BWN_OPS), so its
+  // gov case only proves the bundle is ignored; the real C4 proof is the bwn:modules case + control (R14).
+  { f: 'bwn-write-queue.user.js', key: 'writeQueueCatalog', end: '  var BWN_OPS = {', govNote: ' (no gov apply in write-queue until PR-B)' }
+];
+function hardOffSlice(src, end) {
+  var a = src.indexOf(START), b = src.indexOf(end, a);
+  if (a === -1 || b === -1) throw new Error('hard-OFF slice not found');
+  return src.slice(a, b);
+}
+function hardOffCases(x, code) {
+  var out = [];
+  var k = x.key;
+  function gv(flags) { return JSON.stringify({ v: 1, etag: 't', flags: flags }); }
+  function chk(name, store) {
+    var r = run(code, store);
+    out.push({ name: x.f + ': ' + name, ok: !r.err && r.mods[k] === false, detail: r.err ? String(r.err) : JSON.stringify(r.mods[k]) });
+  }
+  chk('no storage -> ' + k + ' false', {});
+  chk('bwn:modules {"' + k + '":true} -> ' + k + ' false', { 'bwn:modules': JSON.stringify(obj(k, true)) });
+  chk('bwn:gov flags.' + k + ':true -> ' + k + ' false' + (x.govNote || ''), { 'bwn:gov': gv(obj(k, true)) });
+  chk('bwn:modules true + bwn:gov true -> ' + k + ' false', { 'bwn:modules': JSON.stringify(obj(k, true)), 'bwn:gov': gv(obj(k, true)) });
+  chk('bwn:modules = 5 -> loads, ' + k + ' false', { 'bwn:modules': '5' });
+  return out;
+}
+HARD_OFF.forEach(function (x) {
+  var code = hardOffSlice(SRC[x.f] || read(x.f), x.end);
+  hardOffCases(x, code).forEach(function (r) { A.ok(r.name, r.ok, r.detail); });
+  var seed = '  BWN_MODULES.' + x.key + ' = false;';
+  var cond = "  if (!('" + x.key + "' in BWN_MODULES)) BWN_MODULES." + x.key + ' = false;';
+  var i = code.indexOf(seed);
+  if (i === -1 || code.indexOf(seed, i + 1) !== -1) { A.ok('CONTROL ' + x.f + ': the unconditional seed is present exactly once', false); return; }
+  var mutant = code.slice(0, i) + cond + code.slice(i + seed.length);
+  var want = x.f + ': bwn:modules {"' + x.key + '":true} -> ' + x.key + ' false';
+  var reds = hardOffCases(x, mutant).filter(function (r) { return !r.ok; }).map(function (r) { return r.name; });
+  A.ok('CONTROL ' + x.f + ': a conditional seed turns "' + want + '" red', reds.indexOf(want) !== -1, reds.join(' | '));
+});
 
 A.finish();

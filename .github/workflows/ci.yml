@@ -739,11 +739,11 @@ jobs:
       - name: "vpUpsert governance harness (RM-D3: kill switch + PII-free audit + debounce)"
         run: node scripts/test-vp-upsert-governance.js
 
-      # Track C write-back phase 2: the catalog pusher in bwn-write-queue.user.js. Reads the tenant
-      # status list + user directory and pushes them to /api/catalog-ingest so the Dashboard's write-back
-      # Status/Assign pickers have real options. Slices the pure mappers (status id coerced to int; a
-      # user's first+last -> name, inactive dropped) and pins the queries, the route, the version bump,
-      # and that the push runs on load independent of draining (throttled). Inactive-drop negative control.
+      # Track C write-back phase 2: the catalog pusher in bwn-write-queue.user.js. SWITCHED OFF in Phase 1
+      # PR-A: writeQueueCatalog is hard-OFF and the gate is the first statement of wqPushCatalogs, so no
+      # status/user read and no /api/catalog-ingest POST happens. The harness pins the gate (zero reads,
+      # zero POSTs while off, with a gate-removed control), the pure mappers (status id coerced to int; a
+      # user's first+last -> name, inactive dropped), the queries, the route, and @version/VER lockstep.
       - name: Write-queue catalog push harness (status + user catalog ingest)
         run: node scripts/test-wq-catalog-push.js
 
