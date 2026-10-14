@@ -154,7 +154,15 @@ function runCases(opsSrc) {
   ok('registry classifies patchWorkOrder as a high-risk write', api.OPS.patchWorkOrder &&
     api.OPS.patchWorkOrder.kind === 'write' && api.OPS.patchWorkOrder.risk === 'high');
   ok('a read carries no risk tier', api.OPS.workOrder && api.OPS.workOrder.kind === 'read' && api.OPS.workOrder.risk === undefined);
-  ok('the console hook exposes the registry + audit', e.api.hook && e.api.hook.registry && e.api.hook.audit && typeof e.api.hook.audit.export === 'function');
+  // P1-03 (Phase 1 PR-A): the console hook is read + export only. No writer (run / setConfirm),
+  // no registry, no audit clear - a page script must not be able to send a write or erase the trail.
+  var hook = e.api.hook || {};
+  eq('hook keys exactly [audit, corrId] (no run, no registry)', Object.keys(hook).sort(), ['audit', 'corrId']);
+  ok('hook.run and hook.registry are undefined', hook.run === undefined && hook.registry === undefined);
+  eq('audit keys exactly [all, export] (no clear)', Object.keys(hook.audit || {}).sort(), ['all', 'export']);
+  ok('hook.corrId() returns a string', typeof hook.corrId === 'function' && typeof hook.corrId() === 'string');
+  ok('hook.audit.all() returns the ring (an array)', hook.audit && typeof hook.audit.all === 'function' && Array.isArray(hook.audit.all()));
+  ok('hook.audit.export() returns the export JSON', hook.audit && typeof hook.audit.export === 'function' && JSON.parse(hook.audit.export()).schema === 1);
 
   // --- corrId ---
   var c1 = api.corrId(), c2 = api.corrId();
@@ -408,7 +416,14 @@ var MUTATIONS = [
   { what: 'F3: the unrecognized-write-envelope guard removed (silent ok on a no-success response)',
     m: function (s) { return mutate(s, "if (!env || typeof env.success !== 'boolean') {", "if (false) {"); } },
   { what: 'F5: the audit reason copies the raw server message back in (PII leak)',
-    m: function (s) { return mutate(s, "writeAudit('error', { tries: tryNo, reason: 'write-refused' });", "writeAudit('error', { tries: tryNo, reason: refused.message });"); } }
+    m: function (s) { return mutate(s, "writeAudit('error', { tries: tryNo, reason: 'write-refused' });", "writeAudit('error', { tries: tryNo, reason: refused.message });"); } },
+  // P1-03 controls (Phase 1 PR-A): each names the ONE assertion it must turn red.
+  { what: 'P1-03: the console hook regains the raw writer (run: bwnGqlOp)',
+    expect: 'hook keys exactly [audit, corrId] (no run, no registry)',
+    m: function (s) { return mutate(s, '      corrId: bwnCorrId,\n', '      run: bwnGqlOp, corrId: bwnCorrId,\n'); } },
+  { what: 'P1-03: the console hook regains audit.clear',
+    expect: 'audit keys exactly [all, export] (no clear)',
+    m: function (s) { return mutate(s, 'audit: { all: bwnAuditAll, export: bwnAuditExport }', 'audit: { all: bwnAuditAll, export: bwnAuditExport, clear: bwnAuditClear }'); } }
 ];
 
 // Confirm-gate coverage for the writes newly adopted in F2. createDraftProposal + editProposal
@@ -598,6 +613,62 @@ function runPermGateCases() {
   });
 }
 
+// P1-03 allowlist (Phase 1 PR-A): every window.__bwn* / window.bwn* assignment in Core is a KNOWN
+// name, so a new page-reachable handle (a writer, a confirm bypass, a trigger) cannot appear
+// silently. Scope: dotted assignments 'window.(__bwn|bwn)<name> =' anywhere in Core. root.BWNDOM*
+// (inside the paste-identical DOM blocks) and the window.fetch wrap are outside this regex on
+// purpose. Bracket assignment (window['__bwn...'] / window["bwn..."]) and Object.defineProperty(window
+// are refused outright, and no allowlisted assignment line or object literal may mention bwnGqlOp or
+// setConfirm (so __bwnOps cannot regain run: and still pass on its name).
+// D-N residuals for PR-B (KNOWN, allowlisted, not yet governed): __bwnHeatScan (page-triggered heat
+// scan) and __bwnDispatchSyncNow (page-triggered dispatch sync).
+var BWN_WINDOW_ALLOWLIST = ['__bwnDispatchSyncNow', '__bwnHeatAck', '__bwnHeatDiag', '__bwnHeatNetHook',
+  '__bwnHeatRefresh', '__bwnHeatRows', '__bwnHeatScan', '__bwnLauncher', '__bwnOps', '__bwnPerm',
+  '__bwnPoParity', '__bwnWoHeat', 'bwnOnRoute', 'bwnReport', 'bwnToast'];
+function windowAllowlistResults(text) {
+  var out = [];
+  var re = /window\.((?:__bwn|bwn)\w*)\s*=(?!=)/g, m, names = [], writerHits = [];
+  while ((m = re.exec(text)) !== null) {
+    if (names.indexOf(m[1]) === -1) names.push(m[1]);
+    var ls = text.lastIndexOf('\n', m.index) + 1, le = text.indexOf('\n', m.index);
+    var stmt = text.slice(ls, le === -1 ? text.length : le);
+    var rest = text.slice(re.lastIndex).replace(/^\s+/, '');
+    if (rest.charAt(0) === '{') {               // object literal: take it to the balanced brace
+      var depth = 0, j = 0;
+      for (; j < rest.length; j++) {
+        if (rest.charAt(j) === '{') depth++;
+        else if (rest.charAt(j) === '}') { depth--; if (depth === 0) break; }
+      }
+      stmt += '\n' + rest.slice(0, j + 1);
+    }
+    if (/bwnGqlOp|setConfirm/.test(stmt)) writerHits.push(m[1]);
+  }
+  names.sort();
+  out.push({ name: 'window.(__bwn|bwn)* assignment names in Core equal the allowlist', ok: JSON.stringify(names) === JSON.stringify(BWN_WINDOW_ALLOWLIST), detail: 'got ' + names.join(',') });
+  out.push({ name: 'no bracket window[\'__bwn...\'] / window["bwn..."] assignment in Core', ok: !/window\[\s*['"](?:__bwn|bwn)/.test(text) });
+  out.push({ name: 'no Object.defineProperty(window ...) in Core', ok: !/Object\.defineProperty\(\s*window\b/.test(text) });
+  out.push({ name: 'no window.(__bwn|bwn)* assignment exposes bwnGqlOp or setConfirm', ok: writerHits.length === 0, detail: writerHits.join(',') });
+  return out;
+}
+function runAllowlistCases() {
+  console.log('\n-- P1-03: Core window.__bwn* / window.bwn* assignment allowlist --');
+  windowAllowlistResults(coreFull).forEach(function (r) { A.ok(r.name, r.ok, r.detail); });
+  var CONTROLS = [
+    { what: 'a new window.__bwnX = bwnGqlOp appended', expect: 'window.(__bwn|bwn)* assignment names in Core equal the allowlist',
+      t: coreFull + '\n  window.__bwnX = bwnGqlOp;\n' },
+    { what: 'a bracket assignment window[\'__bwnX\'] appended', expect: 'no bracket window[\'__bwn...\'] / window["bwn..."] assignment in Core',
+      t: coreFull + '\n  window[\'__bwnX\'] = 1;\n' },
+    { what: 'an Object.defineProperty(window, ...) appended', expect: 'no Object.defineProperty(window ...) in Core',
+      t: coreFull + '\n  Object.defineProperty(window, \'__bwnX\', { value: 1 });\n' },
+    { what: '__bwnOps regains run: bwnGqlOp (allowlisted name, writer value)', expect: 'no window.(__bwn|bwn)* assignment exposes bwnGqlOp or setConfirm',
+      t: mutate(coreFull, '      corrId: bwnCorrId,\n      audit: { all: bwnAuditAll', '      run: bwnGqlOp, corrId: bwnCorrId,\n      audit: { all: bwnAuditAll') }
+  ];
+  CONTROLS.forEach(function (c) {
+    var reds = windowAllowlistResults(c.t).filter(function (r) { return !r.ok; }).map(function (r) { return r.name; });
+    A.ok('CAUGHT: ' + c.what + ' -> "' + c.expect + '" red', reds.indexOf(c.expect) !== -1, 'reds: ' + reds.join(' | '));
+  });
+}
+
 function main() {
   console.log('\n-- the shipped BWN-OPS block --');
   return runCases(S_OPS).then(function (results) {
@@ -611,12 +682,19 @@ function main() {
         catch (err) { A.ok('CAUGHT: ' + mut.what, false, 'mutate() failed: ' + (err && err.message)); return; }
         return runCases(mutated).then(function (rs) {
           var reds = rs.filter(function (r) { return !r.ok; });
+          if (mut.expect) {
+            var named = reds.filter(function (r) { return r.name === mut.expect; });
+            A.ok('CAUGHT: ' + mut.what + ' -> "' + mut.expect + '" red', named.length === 1,
+              named.length ? '' : 'the named assertion stayed green (reds: ' + reds.map(function (r) { return r.name; }).join(' | ') + ')');
+            return;
+          }
           A.ok('CAUGHT: ' + mut.what, reds.length > 0,
             reds.length ? '' : 'mutation produced NO failing case - this control proves nothing');
         });
       });
     }, Promise.resolve());
   }).then(function () {
+    runAllowlistCases();
     // BWN-OPS-WRAP is the generic machinery, pasted byte-identical into every sandbox that
     // adopts bwnGqlOp (the registry + transport differ per file; the wrapper must not). A
     // paste has no mechanism behind it, so this gate goes red if a fix lands in one copy and

@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         BWN Suite - Core (Broadway National)
 // @namespace    broadwaynational.bwn
-// @version      1.94.6
+// @version      1.95.0
 // @downloadURL  https://raw.githubusercontent.com/Intermu/userscripts/main/bwn-suite-core.user.js
 // @updateURL    https://raw.githubusercontent.com/Intermu/userscripts/main/bwn-suite-core.user.js
 // @description  Runs several Umbrava helpers for BWN coordinators, in the browser with no privileged grants. Includes: PO Approval + ETA Builder; WO Assist (GP/ETA, a stall watchdog, DNE calculator, and a next-action playbook); Email Leak Guard (checks recipients against vendor names, PO amounts, and client budget references before an outbound email sends); WO List Heat (a triage overlay + My Day strip on the work-order list, with an optional same-origin Umbrava API scan for deterministic full-board coverage); and the BWN Launcher (opens the Azure Static Web App tools with the current WO's context). Modules share state through sessionStorage/localStorage. The only network calls are same-origin Umbrava GraphQL requests (app.umbrava.com/api/graphql, the app's own session): List Heat's full-board scan and WO Assist's work-order / trip / clock-in / document / purchase-order reads, plus ONE write - BWN Views saves the column layout through Umbrava's own putUserPreference, the same preference the column chooser writes; everything else is offline. Toggle modules in BWN_MODULES below.
@@ -1941,14 +1941,16 @@
   bwnGqlOp.setConfirm = function (fn) { _confirmFn = (typeof fn === 'function') ? fn : null; };
   // ===== BWN-OPS-WRAP END v3 =====
 
-  // Console diagnostics/export hook - lets a coordinator or admin read and export the local
-  // audit trail today, before any writer adopts the wrapper. Read-only; carries no PII beyond
-  // what a write chose to record. (Same shape as the suite's other window.__bwn* dev hooks.)
-  // Core-only: NOT part of the paste-identical WRAP block above.
+  // Console diagnostics/export hook - lets a coordinator or admin READ and EXPORT the local
+  // audit trail. Read + export only (Phase 1 PR-A, P1-03): it carries no writer (no bwnGqlOp,
+  // so no setConfirm bypass), no registry, and no audit clear, so a page script cannot use it to
+  // send a write or erase the trail. Carries no PII beyond what a write chose to record.
+  // Core-only: NOT part of the paste-identical WRAP block above. scripts/test-bwn-ops.js pins
+  // the exact key set and the allowlist of every window.__bwn* / window.bwn* assignment in Core.
   try {
     window.__bwnOps = {
-      registry: BWN_OPS, run: bwnGqlOp, corrId: bwnCorrId,
-      audit: { all: bwnAuditAll, export: bwnAuditExport, clear: bwnAuditClear }
+      corrId: bwnCorrId,
+      audit: { all: bwnAuditAll, export: bwnAuditExport }
     };
   } catch (e) { /* non-fatal */ }
   // ===== BWN-OPS END v1 =====

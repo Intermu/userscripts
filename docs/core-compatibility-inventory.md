@@ -211,7 +211,7 @@ Raw `CustomEvent` types (no `detail.id`):
 | `__bwnLauncher` | 11413 | `if (window.__bwnLauncher) return` | once-only guard for the Launcher module |
 | `__bwnWoHeat` | 8281 | once-only guard | List Heat |
 | `__bwnHeatNetHook` | 1151 | once-only guard | GraphQL tap (5.1) |
-| `__bwnOps`, `__bwnPoParity` | 1817, 3063 | none | dev hooks |
+| `__bwnOps`, `__bwnPoParity` | 1817, 3063 | none | dev hooks; `__bwnOps` is read + export of the audit ring only (`corrId`, `audit.all`, `audit.export`) - no writer, no registry, no clear (Phase 1 PR-A) |
 | `BWNDOM`, `BWNDOMC` | ~15401, ~17032 (`root.*`) | **not verified** | DOM Passport. GM-sandboxed `bwn-suite-ai` cannot see them (its comment at ~1788 says so) |
 | `window.fetch`, `XMLHttpRequest.prototype.open/send` | ~1156 | `__bwnHeatNetHook` | Core **wraps** these to observe `/api/graphql` bodies and responses |
 

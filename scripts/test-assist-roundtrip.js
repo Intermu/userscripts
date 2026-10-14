@@ -337,7 +337,9 @@ async function probeAssist(src) {
   // The assist @version and its internal `var VER` banner (shown in support triage) MUST agree.
   // VER had drifted to 0.3.0 while @version read 0.3.3; the 2026-08-18 surgical-fix pass set them
   // in lockstep at 0.3.4, and these pins keep them from drifting apart again.
-  A.ok('core @version is 1.94.6', coreFull.indexOf('// @version      1.94.6') !== -1, 'core version drift');
+  // The exact Core @version pin was deleted in Phase 1 PR-A (Core 1.95.0): Core has no in-body VER
+  // const to lockstep against, the manifest ledger parses @version, and an exact pin here only
+  // forced an unrelated edit on every Core bump.
   A.ok('core banner says WO Assist 2.76', coreFull.indexOf('WO Assist 2.76') !== -1, 'module banner drift');
   A.ok('assist @version is 0.3.7', assistFull.indexOf('// @version      0.3.7') !== -1, 'assist version drift');
   A.ok("assist VER is '0.3.7'", assistFull.indexOf("var VER = '0.3.7';") !== -1, 'assist VER drift');
