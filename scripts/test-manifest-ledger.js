@@ -175,8 +175,13 @@ function auditScript(file, src, row) {
   if (!meta) return ['META: no parseable ==UserScript== block'];
 
   var want = RAW_BASE + file;
-  if (meta.updateURL !== want) problems.push('UPDATEURL: @updateURL is ' + meta.updateURL + ', want ' + want);
-  if (meta.downloadURL !== want) problems.push('UPDATEURL: @downloadURL is ' + meta.downloadURL + ', want ' + want);
+  // Phase 1 PR-A (P1-08): a script withheld from distribution may carry @updateURL / @downloadURL
+  // 'none' (or omit them) under a waived.updateurl row - but ONLY while the roster marks it
+  // expectedInstalled:false (R9), and never for a different URL: a foreign host still goes red.
+  var urlWaived = waived(row, 'updateurl') && row.expectedInstalled === false;
+  function urlOk(v) { return v === want || (urlWaived && (v == null || v === 'none')); }
+  if (!urlOk(meta.updateURL)) problems.push('UPDATEURL: @updateURL is ' + meta.updateURL + ', want ' + want);
+  if (!urlOk(meta.downloadURL)) problems.push('UPDATEURL: @downloadURL is ' + meta.downloadURL + ', want ' + want);
 
   if (!meta.version) problems.push('META: no @version');
 
@@ -463,6 +468,26 @@ A.ok('C23 dropping a real declared host from @connect goes red on real shipped b
   aiSrc && fired(auditScript(aiFile, aiSrc.replace(/^\/\/ @connect\s+places\.googleapis\.com$/m, '// @noframes'),
     manifest.scripts[aiFile]), 'CONNECT'),
   'CONNECT guard did not fire when a hard-coded host lost its declaration');
+
+// P1-08 controls (Phase 1 PR-A): the updateurl waiver covers absent-or-'none' only, and only while the
+// script is not expected to be installed.
+var baFile = 'bwn-bulk-assets.user.js';
+var baSrc = sources[baFile];
+var baRow = manifest.scripts[baFile];
+A.ok('C25 bulk-assets ships @updateURL none and @downloadURL none',
+  /^\/\/ @updateURL\s+none$/m.test(baSrc) && /^\/\/ @downloadURL\s+none$/m.test(baSrc));
+A.ok('C26 bulk-assets with none headers and NO waiver row goes red',
+  fired(auditScript(baFile, baSrc, { expectedInstalled: false }), 'UPDATEURL'),
+  'UPDATEURL guard did not fire on none headers without a waiver');
+A.ok('C27 the updateurl waiver does not cover a foreign @updateURL',
+  fired(auditScript(baFile, baSrc.replace(/^\/\/ @updateURL\s+none$/m, '// @updateURL    https://example.com/x.user.js'), baRow), 'UPDATEURL'),
+  'the waiver silenced a real foreign URL');
+A.ok('C28 the updateurl waiver does not apply when expectedInstalled is true (R9)',
+  fired(auditScript(baFile, baSrc, { expectedInstalled: true, waived: baRow.waived }), 'UPDATEURL'),
+  'the waiver switched off auto-update for an installed-everywhere script');
+A.ok('C29 the updateurl waiver does not silence another check',
+  fired(auditScript(baFile, baSrc.replace('// @namespace    ' + CANON_NS, '// @namespace    evil.example'), baRow), 'NS'),
+  'an updateurl waiver wrongly suppressed the NS guard');
 
 A.ok('C22 a connect waiver does not silence GRANT',
   fired(auditScript(probe, probeSrc.replace(GRANT_NONE, '// @grant        GM_nonesuch'),

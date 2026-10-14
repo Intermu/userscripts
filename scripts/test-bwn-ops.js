@@ -700,21 +700,48 @@ function main() {
     // paste has no mechanism behind it, so this gate goes red if a fix lands in one copy and
     // not the other - same discipline as the bwnAI and BWN-SHARED SHA gates.
     console.log('\n-- BWN-OPS-WRAP paste-identical across adopters --');
-    var ADOPTERS = ['bwn-suite-core.user.js', 'bwn-drop-upload.user.js', 'bwn-dispatch.user.js', 'bwn-temp-vendor.user.js', 'bwn-proposal-actions.user.js', 'bwn-kanban.user.js', 'bwn-proposal-copy.user.js', 'bwn-low-gp.user.js', 'bwn-write-queue.user.js', 'bwn-wo-audit.user.js'];
-    var wraps = ADOPTERS.map(function (f) {
-      var s = fs.readFileSync(path.join(__dirname, '..', f), 'utf8').replace(/\r\n/g, '\n');
-      var a = s.indexOf('// ===== BWN-OPS-WRAP START v3');
-      var b = s.indexOf('// ===== BWN-OPS-WRAP END v3 =====');
-      return { f: f, w: (a !== -1 && b !== -1 && b > a) ? s.slice(a, b) : null };
+    // Phase 1 PR-A (P1-08): bwn-bulk-assets joins the list, and the list is checked against an
+    // AUTO-DISCOVERED set - every root bwn-*.user.js carrying a BWN-OPS-WRAP START marker at ANY
+    // version (R8) - so a new copy cannot sit outside the identity loop just because nobody listed it.
+    var ADOPTERS = ['bwn-suite-core.user.js', 'bwn-drop-upload.user.js', 'bwn-dispatch.user.js', 'bwn-temp-vendor.user.js', 'bwn-proposal-actions.user.js', 'bwn-kanban.user.js', 'bwn-proposal-copy.user.js', 'bwn-low-gp.user.js', 'bwn-write-queue.user.js', 'bwn-wo-audit.user.js', 'bwn-bulk-assets.user.js'];
+    var ROOT_DIR = path.join(__dirname, '..');
+    var TEXTS = {};
+    fs.readdirSync(ROOT_DIR).filter(function (f) { return /^bwn-.*\.user\.js$/.test(f); }).forEach(function (f) {
+      TEXTS[f] = fs.readFileSync(path.join(ROOT_DIR, f), 'utf8').replace(/\r\n/g, '\n');
     });
-    var haveAll = wraps.every(function (x) { return x.w !== null; });
-    A.ok('every listed adopter carries the BWN-OPS-WRAP block', haveAll,
-      wraps.filter(function (x) { return !x.w; }).map(function (x) { return x.f; }).join(','));
-    if (haveAll) {
-      wraps.slice(1).forEach(function (x) {
-        A.ok('BWN-OPS-WRAP is byte-identical in ' + x.f + ' (drift = a fix in one sandbox not the other)', x.w === wraps[0].w);
+    function wrapResults(listed, texts) {
+      var out = [];
+      var discovered = Object.keys(texts).filter(function (f) { return /\/\/ ===== BWN-OPS-WRAP START v\d+/.test(texts[f]); }).sort();
+      out.push({ name: 'auto-discovered WRAP carriers (any version) == the listed ADOPTERS', ok: JSON.stringify(discovered) === JSON.stringify(listed.slice().sort()),
+        detail: 'discovered ' + discovered.join(',') });
+      var wraps = listed.map(function (f) {
+        var s = texts[f] || '';
+        var a = s.indexOf('// ===== BWN-OPS-WRAP START v3');
+        var b = s.indexOf('// ===== BWN-OPS-WRAP END v3 =====');
+        return { f: f, w: (a !== -1 && b !== -1 && b > a) ? s.slice(a, b) : null };
       });
+      var haveAll = wraps.every(function (x) { return x.w !== null; });
+      out.push({ name: 'every listed adopter carries the BWN-OPS-WRAP block', ok: haveAll,
+        detail: wraps.filter(function (x) { return !x.w; }).map(function (x) { return x.f; }).join(',') });
+      if (haveAll) {
+        wraps.slice(1).forEach(function (x) {
+          out.push({ name: 'BWN-OPS-WRAP is byte-identical in ' + x.f + ' (drift = a fix in one sandbox not the other)', ok: x.w === wraps[0].w });
+        });
+      }
+      return out;
     }
+    A.eq('ADOPTERS lists 11 files incl. bwn-bulk-assets', [ADOPTERS.length, ADOPTERS.indexOf('bwn-bulk-assets.user.js') !== -1], [11, true]);
+    wrapResults(ADOPTERS, TEXTS).forEach(function (r) { A.ok(r.name, r.ok, r.detail); });
+    // CONTROL (a): the list minus bulk-assets -> "discovered == listed" goes red.
+    var minus = wrapResults(ADOPTERS.filter(function (f) { return f !== 'bwn-bulk-assets.user.js'; }), TEXTS)
+      .filter(function (r) { return !r.ok; }).map(function (r) { return r.name; });
+    A.ok('CONTROL (a): ADOPTERS minus bwn-bulk-assets -> "discovered == listed" red', minus.indexOf('auto-discovered WRAP carriers (any version) == the listed ADOPTERS') !== -1, minus.join(' | '));
+    // CONTROL (b): one byte flipped inside bulk-assets' WRAP copy (in memory) -> its identity goes red.
+    var drift = {}; Object.keys(TEXTS).forEach(function (f) { drift[f] = TEXTS[f]; });
+    drift['bwn-bulk-assets.user.js'] = mutate(drift['bwn-bulk-assets.user.js'], 'if (opts.feature && BWN_MODULES[opts.feature] === false) {', 'if (opts.feature && BWN_MODULES[opts.feature] === falsE) {');
+    var dReds = wrapResults(ADOPTERS, drift).filter(function (r) { return !r.ok; }).map(function (r) { return r.name; });
+    A.ok('CONTROL (b): a one-byte drift in the bulk-assets WRAP copy -> its identity check red',
+      dReds.indexOf('BWN-OPS-WRAP is byte-identical in bwn-bulk-assets.user.js (drift = a fix in one sandbox not the other)') !== -1, dReds.join(' | '));
     return runProposalGateCases();
   }).then(function () {
     return runUnclassifiedGateCases();

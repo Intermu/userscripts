@@ -1,10 +1,10 @@
 // ==UserScript==
 // @name         BWN Bulk Asset Uploader (Broadway National)
 // @namespace    broadwaynational.bwn
-// @version      0.2.0
-// @description  Bulk-creates Umbrava assets across a client's locations from a CSV/XLSX (one row = one asset at one location), or bulk-renames existing assets when the file has a "New Name" column (rename by Tag ID: Location # + Tag ID find the asset, Validate shows current -> new name, each rename reads the whole asset, sends it back with only the name changed via editAsset, then re-reads it and halts if anything but the name moved). Opens from the shared dock (bwn:dock:*, hosted by bwn-suite-core) on /clients/<id> pages only; without Core a floating "Bulk Assets" button appears instead. Columns are matched by header name; Validate is read-only (loads the client's location list once and matches each location # locally, matches trades/asset types by name, flags bad dates, in-file duplicates, and assets that already exist at the location by serial, else tag, else name). Create runs only after a confirm showing the count and number of locations, one createAsset at a time (350ms apart) through the governed bwnGqlOp path (audit ring, kill switch flag bulkAssets, high-risk confirm), with live progress and a Stop that finishes the current row. A 401/403/expired session/429 or an unsure network failure halts the run; re-running skips rows already created. Download results writes an XLSX of every row's outcome. Same-origin /api/graphql with the page's own Umbrava session token, read per request and never stored or shown. @grant none, no @connect.
-// @downloadURL  https://raw.githubusercontent.com/Intermu/userscripts/main/bwn-bulk-assets.user.js
-// @updateURL    https://raw.githubusercontent.com/Intermu/userscripts/main/bwn-bulk-assets.user.js
+// @version      0.2.1
+// @description  Bulk-creates Umbrava assets across a client's locations from a CSV/XLSX (one row = one asset at one location), or bulk-renames existing assets when the file has a "New Name" column (rename by Tag ID: Location # + Tag ID find the asset, Validate shows current -> new name, each rename reads the whole asset, sends it back with only the name changed via editAsset, then re-reads it and halts if anything but the name moved). Opens from the shared dock (bwn:dock:*, hosted by bwn-suite-core) on /clients/<id> pages only; without Core a floating "Bulk Assets" button appears instead. Columns are matched by header name; Validate is read-only (loads the client's location list once and matches each location # locally, matches trades/asset types by name, flags bad dates, in-file duplicates, and assets that already exist at the location by serial, else tag, else name). Create runs only after a confirm showing the count and number of locations, one createAsset at a time (350ms apart) through the governed bwnGqlOp path (audit ring, kill switch flag bulkAssets, high-risk confirm), with live progress and a Stop that finishes the current row. A 401/403/expired session/429 or an unsure network failure halts the run; re-running skips rows already created. Download results writes an XLSX of every row's outcome. Same-origin /api/graphql with the page's own Umbrava session token, read per request and never stored or shown. @grant none, no @connect. Withheld from auto-update (@updateURL/@downloadURL none) until the Phase 2 controls land; install only by hand for a governed test.
+// @downloadURL  none
+// @updateURL    none
 // @match        https://app.umbrava.com/*
 // @require      https://cdnjs.cloudflare.com/ajax/libs/xlsx/0.18.5/xlsx.full.min.js#sha384=bed8dab3289d528d245bde0ae4c5c35e7b73389a50801297984eded866b82c6d2c9134cb7818bdede1405eca9ec098f0
 // @run-at       document-idle
@@ -15,7 +15,7 @@
 (function () {
   'use strict';
 
-  var VER = '0.2.0';
+  var VER = '0.2.1';
   var DOCK_KEY = 'bulk-assets';
   var FEATURE = 'bulkAssets';           // bwn:modules kill switch for the create write
   var DOCK_WAIT_MS = 4000;
@@ -243,7 +243,7 @@
     return j.data;
   }
 
-  // ---- BWN-OPS: the one write goes through the audited wrapper -------------------------------
+  // ---- BWN-OPS: the two writes (createAsset, editAsset) go through the audited wrapper ------
   function bwnGql(query, variables) { return baGql(query, variables, /^\s*mutation\b/.test(query)); }
   var BWN_VER = VER;
   var BWN_MODULES = (function () { try { return JSON.parse(localStorage.getItem('bwn:modules') || '{}') || {}; } catch (e) { return {}; } })();
@@ -563,7 +563,7 @@
         })).listAssets;
       });
     },
-    // The only write. bwnGqlOp owns the audit entry, the kill switch, the high-risk confirm
+    // createAsset. editAsset (rename mode) is the other write. bwnGqlOp owns the audit entry, the kill switch, the high-risk confirm
     // (the caller's confirm() is the confirmation) and the success:false rejection.
     createAsset: async function (input) {
       var d = await bwnGqlOp('createAsset', M_CREATE_ASSET, { newAssetData: input }, {

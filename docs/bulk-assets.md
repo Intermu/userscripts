@@ -5,8 +5,11 @@ asset at one location. Validation is read-only; nothing is written until you con
 
 ## Install and open
 
-- Install from the raw URL (auto-updates like the rest of the suite):
-  `https://raw.githubusercontent.com/Intermu/userscripts/main/bwn-bulk-assets.user.js`
+- **Withheld from distribution (Phase 1 PR-A).** `@updateURL` and `@downloadURL` are `none`, so the
+  script does not auto-update and is not on the install list (`expectedInstalled: false` in
+  `scripts/userscript-manifest.json`). Install it only by hand, for a governed test with Mike's
+  sign-off. A copy installed before 0.2.1 takes 0.2.1 once and then never updates again; a later
+  fix needs a manual reinstall per copy.
 - Needs **bwn-suite-core 1.94.6+**, which carries the rail icon and the dock visibility rule.
 - Opens from the **Bulk Assets** row on the BWN dock rail. The row appears only on
   `/clients/<id>` pages and only for rank 4+ (`BWN_DOCK_POLICY['bulk-assets']` in Core - change
@@ -54,7 +57,7 @@ in progress even if another tool opens.
 
 ## Safety
 
-- One write: `createAsset`, sent through `bwnGqlOp` (BWN-OPS-WRAP v3): `risk: 'high'` (confirmed by
+- Two writes: `createAsset` (create mode) and `editAsset` (rename mode), both sent through `bwnGqlOp` (BWN-OPS-WRAP v3): `risk: 'high'` (confirmed by
   the run's confirm dialog), never retried, one PII-free `bwn:audit` entry per create (op, outcome,
   locationId - no field values), `success:false` rejected as a row failure.
 - **No Umbrava permission gate yet (OWED).** Umbrava's asset permission flags have not been read out
