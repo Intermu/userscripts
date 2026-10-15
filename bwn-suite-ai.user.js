@@ -1,12 +1,13 @@
 // ==UserScript==
 // @name         BWN Suite - AI (Broadway National)
 // @namespace    broadwaynational.bwn
-// @version      1.50.2
+// @version      1.51.0
 // @downloadURL  https://raw.githubusercontent.com/Intermu/userscripts/main/bwn-suite-ai.user.js
 // @updateURL    https://raw.githubusercontent.com/Intermu/userscripts/main/bwn-suite-ai.user.js
-// @description  The Umbrava tools that call outside APIs, kept separate from the zero-egress Core script. Client Update and WO Audit drafts (Anthropic Claude; draft-only, scrubbed before sending, you review before posting); Find Techs / Find Suppliers (Google Places; vendor leads near a WO); and Job View (opens the Ops-Dashboard job card on the WO page - WO details from Umbrava plus the authored case file and next actions, read-only). Network access is limited by the browser to the declared API hosts and the BWN Static Web App. API keys are stored in Tampermonkey's storage via the menu commands and never enter the page. Toggle modules in BWN_MODULES below.
+// @description  The Umbrava tools that call outside APIs, kept separate from the zero-egress Core script. Client Update and WO Audit drafts (Anthropic Claude; draft-only, scrubbed before sending, you review before posting); Find Techs / Find Suppliers (Google Places; vendor leads near a WO); and Job View (opens the Ops-Dashboard job card on the WO page - WO details from Umbrava plus the authored case file and next actions, read-only). Network access is limited by the browser to the declared API hosts and the BWN Static Web App. API keys are stored in Tampermonkey's storage via the menu commands and never enter the page. Runs in the top frame only (@noframes plus an in-code guard): inside a nested frame it starts no timers, fetches or writes. Toggle modules in BWN_MODULES below.
 // @match        https://app.umbrava.com/*
 // @run-at       document-idle
+// @noframes
 // @grant        GM_xmlhttpRequest
 // @grant        GM_getValue
 // @grant        GM_setValue
@@ -18,6 +19,13 @@
 
 (function () {
   'use strict';
+  // Top frame only (Phase 1 PR-A, P1-04 / SEC F8). @noframes keeps the manager from injecting this
+  // script into frames; this guard is the in-code backstop. It is the FIRST statement: in a nested
+  // frame nothing below runs - no timers, no governance fetch, no SWA drain, no write. A window.top
+  // read that throws (cross-origin parent) counts as nested, so the guard fails closed. It never
+  // throws, and it logs one console line when it stops so a misfire in the real top frame is visible.
+  var _bwnNested = true; try { _bwnNested = window.self !== window.top; } catch (e) { _bwnNested = true; }
+  if (_bwnNested) { try { console.info('[BWN SUITE AI] not the top frame - suite-ai does not start in this frame'); } catch (e2) { } return; }
 
   // ---- Module kill switches (edit here) ----------------------------------
   var BWN_MODULES = {

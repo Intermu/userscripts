@@ -1,10 +1,10 @@
 // ==UserScript==
 // @name         BWN WO Audit (Broadway National)
 // @namespace    broadwaynational.bwn
-// @version      0.20.1
+// @version      0.21.0
 // @downloadURL  https://raw.githubusercontent.com/Intermu/userscripts/main/bwn-wo-audit.user.js
 // @updateURL    https://raw.githubusercontent.com/Intermu/userscripts/main/bwn-wo-audit.user.js
-// @description  Batch WO-audit tool. Upload a WO audit .xlsx; for each work order this reads its two most recent notes DIRECTLY from Umbrava's GraphQL API in-page (using your live Umbrava session - the same read the BWN Ops Suite AI drafts use), then asks the broadway-internal-ops SWA summarize route (x-bwn-key gated, Anthropic key server-side) to write a status note - for jobs aged over 30 days a dated "Over 30 - trade - event timeline - ECD" chain built from the WO's FULL note history (with a PAST/needs-ECD flag when the committed date has lapsed), otherwise a 1-3 sentence client-ready status note. Fills the audit's notes column and downloads the workbook, preserving every other cell and formula. It also reads each WO's live header (status, phase, priority, GP, DNE/NTE, PO/vendor, schedule) in the same call and writes a deterministic Audit Flags column (OVERDUE, NEG/LOW GP, NTE>DNE, NO VENDOR, UNSCHEDULED, STALE) computed with no AI - so the exception audit survives an AI outage. Runs entirely in the app.umbrava.com page so it inherits your Umbrava auth - no MCP, no pasted keys, nothing sensitive in this script. This replaces the old standalone WO_Audit_Automation.html SWA tool, whose server-side MCP path could not authenticate to Umbrava. After a run drafts its notes, the coordinator can post each drafted note as an INTERNAL Umbrava note onto its aged (>30d) work order - one explicit click per note (human-gated, idempotent), routed through the governed bwnGqlOp write path with its permission gate and audit trail. 0.17.0 adds an Operations Action List layer on top of the existing deterministic pipeline: three output modes (Detailed WO Audit / Operations Action List / Hybrid, default), a rules-based action engine that turns each WO into a prioritized (P0/P1/P2/Monitor) manager action with bucket, internal owner, external escalation, an operational-target due label, short risk flags, evidence and rule IDs, 16 structured audit columns appended to the source sheet, and a separate "WO Action List - YYYY.MM.DD" worksheet of the actionable rows - all deterministic, no AI opinions, source data never overwritten. 0.18.0 redesigns the Action List into an operational WORK QUEUE: two separate scores (Operational Risk vs Actionability), six queues (Immediate Intervention / Execute Today / Follow Up Today / Upcoming Watch / Blocked-Waiting / Closeout-Billing) plus an Action Undefined / Needs Triage exception, an explainable P0-P3 priority, a transparent Daily Rank (actionability first, risk second, age last), a valid-waiting-state test, meaningful-update / ECD / onsite-expected gating, and structured contradiction detection. The Action List worksheet is now grouped by queue with per-section counts; a flat filterable "Action Diagnostics" sheet carries the score components and evidence; the legacy audit/bucket columns and Dashboard/Rules sheets are preserved as the management layer. 0.19.0 adds Client Update Reply: paste a Pilot FM's update request (their PO table or the email text) and each PO is matched to the loaded audit workbook - FM from its FM column, else the Client Open POs owner, conflicts shown - read live from Umbrava, and given a client-facing update under the Ops Suite Client Update rules (parity-pinned), with an output gate that rejects amounts, contacts, internal wording, filler and ungrounded dates and falls back to fixed client wording. One reply table per FM in the FM's own column order plus Update; every row must be ticked reviewed before it can be copied; safety/incident wording is flagged for a personal answer. Nothing is sent or stored. 0.20.0 moves the update onto the Ops Suite Client Update pipeline (bwn-suite-ai #128, pasted byte-identical and parity-pinned): trip records as the only source of a confirmed appointment and the WO ECD as a target, Stage 1 fact extraction over scrubbed notes, Stage 2 render from approved facts only, the blocking cuSafetyCheck plus the batch checks (lapsed or ungrounded dates, internal wording), one stricter re-render, and the pipeline's safe fallback led by the live status. 0.20.1 fixes the date grounding that rejected a note's own timestamp (Umbrava's T-suffixed createdDate was never tokenized, so "cited a date not present" fired on the latest note's date) and gives the audit note and the over-30 chain the Client Update pipeline's one stricter re-ask when the output gate rejects the first draft - the deterministic note still ships if the second draft fails too.
+// @description  Batch WO-audit tool. Upload a WO audit .xlsx; for each work order this reads its two most recent notes DIRECTLY from Umbrava's GraphQL API in-page (using your live Umbrava session - the same read the BWN Ops Suite AI drafts use), then asks the broadway-internal-ops SWA summarize route (x-bwn-key gated, Anthropic key server-side) to write a status note - for jobs aged over 30 days a dated "Over 30 - trade - event timeline - ECD" chain built from the WO's FULL note history (with a PAST/needs-ECD flag when the committed date has lapsed), otherwise a 1-3 sentence client-ready status note. Fills the audit's notes column and downloads the workbook, preserving every other cell and formula. It also reads each WO's live header (status, phase, priority, GP, DNE/NTE, PO/vendor, schedule) in the same call and writes a deterministic Audit Flags column (OVERDUE, NEG/LOW GP, NTE>DNE, NO VENDOR, UNSCHEDULED, STALE) computed with no AI - so the exception audit survives an AI outage. Runs entirely in the app.umbrava.com page so it inherits your Umbrava auth - no MCP, no pasted keys, nothing sensitive in this script. This replaces the old standalone WO_Audit_Automation.html SWA tool, whose server-side MCP path could not authenticate to Umbrava. Note posting is switched off in this release: every Post button is blocked until the Post path is fixed; the audit, the drafted notes and the workbook export still work (paste a note into Umbrava by hand). 0.17.0 adds an Operations Action List layer on top of the existing deterministic pipeline: three output modes (Detailed WO Audit / Operations Action List / Hybrid, default), a rules-based action engine that turns each WO into a prioritized (P0/P1/P2/Monitor) manager action with bucket, internal owner, external escalation, an operational-target due label, short risk flags, evidence and rule IDs, 16 structured audit columns appended to the source sheet, and a separate "WO Action List - YYYY.MM.DD" worksheet of the actionable rows - all deterministic, no AI opinions, source data never overwritten. 0.18.0 redesigns the Action List into an operational WORK QUEUE: two separate scores (Operational Risk vs Actionability), six queues (Immediate Intervention / Execute Today / Follow Up Today / Upcoming Watch / Blocked-Waiting / Closeout-Billing) plus an Action Undefined / Needs Triage exception, an explainable P0-P3 priority, a transparent Daily Rank (actionability first, risk second, age last), a valid-waiting-state test, meaningful-update / ECD / onsite-expected gating, and structured contradiction detection. The Action List worksheet is now grouped by queue with per-section counts; a flat filterable "Action Diagnostics" sheet carries the score components and evidence; the legacy audit/bucket columns and Dashboard/Rules sheets are preserved as the management layer. 0.19.0 adds Client Update Reply: paste a Pilot FM's update request (their PO table or the email text) and each PO is matched to the loaded audit workbook - FM from its FM column, else the Client Open POs owner, conflicts shown - read live from Umbrava, and given a client-facing update under the Ops Suite Client Update rules (parity-pinned), with an output gate that rejects amounts, contacts, internal wording, filler and ungrounded dates and falls back to fixed client wording. One reply table per FM in the FM's own column order plus Update; every row must be ticked reviewed before it can be copied; safety/incident wording is flagged for a personal answer. Nothing is sent or stored. 0.20.0 moves the update onto the Ops Suite Client Update pipeline (bwn-suite-ai #128, pasted byte-identical and parity-pinned): trip records as the only source of a confirmed appointment and the WO ECD as a target, Stage 1 fact extraction over scrubbed notes, Stage 2 render from approved facts only, the blocking cuSafetyCheck plus the batch checks (lapsed or ungrounded dates, internal wording), one stricter re-render, and the pipeline's safe fallback led by the live status. 0.20.1 fixes the date grounding that rejected a note's own timestamp (Umbrava's T-suffixed createdDate was never tokenized, so "cited a date not present" fired on the latest note's date) and gives the audit note and the over-30 chain the Client Update pipeline's one stricter re-ask when the output gate rejects the first draft - the deterministic note still ships if the second draft fails too.
 // @match        https://app.umbrava.com/*
 // @run-at       document-idle
 // @noframes
@@ -19,7 +19,7 @@
 (function () {
   'use strict';
 
-  var VER = '0.20.1';
+  var VER = '0.21.0';
   var FONT = "-apple-system,BlinkMacSystemFont,'Segoe UI','Helvetica Neue',Arial,sans-serif";
   // Inline SVG icons (no external image/font). 18px, stroke=currentColor so they take card color.
   function _svg(p, o) { return '<svg class="woa-i" viewBox="0 0 24 24" width="18" height="18" fill="none" stroke="currentColor" stroke-width="1.9" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"' + (o || '') + '>' + p + '</svg>'; }
@@ -462,15 +462,26 @@
   // (POSTs /api/graphql, resolves `data`, throws on errors[]) - the transport contract the wrapper
   // needs. Reads (header + notes) stay on gql() directly; only the WRITE goes through here.
   var bwnGql = function (query, variables) { return gql(query, variables); };
-  var BWN_VER = '0.10.0';
-  var BWN_MODULES = (function () { try { return JSON.parse(localStorage.getItem('bwn:modules') || '{}') || {}; } catch (e) { return {}; } })();
+  var BWN_VER = VER;
+  var BWN_MODULES = (function () {
+    var out = {};
+    try {
+      var p = JSON.parse(localStorage.getItem('bwn:modules') || '{}');
+      if (p && typeof p === 'object' && !Array.isArray(p)) {
+        Object.keys(p).forEach(function (k) {
+          if (typeof p[k] === 'boolean') out[k] = p[k];
+        });
+      }
+    } catch (e) {}
+    return out;
+  })();
   // Central governance (governance-sync): fold the org flags bwn-suite-ai caches to bwn:gov into
   // BWN_MODULES as ONE-WAY disables, the SAME shape as bwn-suite-core's bwnApplyGov(). A remote
-  // flags['lowGp']===false or flags.globalKillSwitch DISABLES this script's writes - the bwnGqlOp
-  // per-feature gate below reads BWN_MODULES['lowGp'] live - and can NEVER enable one. Fail-closed:
-  // an absent or corrupt bundle keeps the local defaults (last-known-good), never relaxes. Re-applies
-  // on the bwn:gov ping so a remote kill blocks new writes with no reload.
-  if (!('woAuditNotes' in BWN_MODULES)) BWN_MODULES.woAuditNotes = true;
+  // flags['woAuditNotes']===false or flags.globalKillSwitch DISABLES this script's write - the bwnGqlOp
+  // per-feature gate below reads BWN_MODULES['woAuditNotes'] live - and can NEVER enable one. In this
+  // release note posting is HARD-OFF regardless (Phase 0 decision 3): woAuditNotes is assigned false
+  // unconditionally after the parser, so neither bwn:modules nor bwn:gov can raise it.
+  BWN_MODULES.woAuditNotes = false;   // hard-OFF (Phase 0 decision 3) until the Post path is fixed
   function bwnApplyGov() {
     try {
       var g = JSON.parse(localStorage.getItem('bwn:gov') || 'null');
@@ -5460,7 +5471,7 @@
     // they make every row unpostable and a per-row reason would be misleading. Mirrors what
     // bwnGqlOp enforces; it does NOT replace it.
     function postBlockReason(r) {
-      if (BWN_MODULES.woAuditNotes === false) return 'note posting is switched off for this suite (kill switch)';
+      if (BWN_MODULES.woAuditNotes === false) return 'note posting is switched off in this release';
       if (!bwnCan('WorkOrderNote.AddNew')) return 'your Umbrava permissions do not include WorkOrderNote.AddNew';
       if (r.error) return 'the work order could not be read this run';
       if (r.noteMode === 'retained') return 'no note was drafted - the workbook\'s existing note was retained';

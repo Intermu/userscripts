@@ -151,7 +151,7 @@ function patchCalls(env) { return env.calls.filter(function (c) { return /patchW
   var e2 = makeEnv();
   var refused = false, reason = '';
   await e2.api.run('patchWorkOrder', e2.api.PATCH_M, { data: { workOrderNumber: 386473, statusId: { shouldInclude: true, value: 7 } } }, {
-    feature: 'woAssist',
+    feature: 'woAssistWrites',
     validate: function (v) { var d = v && v.data || {}; if (!d.workOrderNumber) return 'no WO number'; return true; },
     ids: { wo: 386473 }, irreversible: true
     // NOTE: no confirmed:true, and Core wires no _confirmFn
@@ -198,12 +198,13 @@ function patchCalls(env) { return env.calls.filter(function (c) { return /patchW
   A.eq('guard: exactly ONE patchWorkOrder despite two submits', patchCalls(e4).length, 1);
 
   // ---- feature kill switch + success:false rejection ---------------------------------------
-  var eOff = makeEnv({ modules: { woAssist: false } });
+  // Phase 1 PR-A (P1-02): the status patch passes feature:'woAssistWrites' (hard-OFF writer key).
+  var eOff = makeEnv({ modules: { woAssist: true, woAssistWrites: false } });
   var offDenied = false;
   await eOff.api.waChangeStatus(386473, 7, 'Invoiced', 'Work Complete', 3).then(function () {}, function () { offDenied = true; });
   await tick();
-  A.ok('kill switch: woAssist:false refuses the status write', offDenied);
-  A.eq('kill switch: nothing sent when the module is off', patchCalls(eOff).length, 0);
+  A.ok('kill switch: woAssistWrites:false refuses the status write', offDenied);
+  A.eq('kill switch: nothing sent when woAssistWrites is off', patchCalls(eOff).length, 0);
 
   var eF = makeEnv({ envFalse: true });
   var envRejected = false;
@@ -225,7 +226,7 @@ function patchCalls(env) { return env.calls.filter(function (c) { return /patchW
 
   // (2) Drop confirmed:true from waChangeStatus -> it can no longer send (gate refuses it).
   await (async function () {
-    var wa3 = mutate(S_WA, 'confirmed: true,\n        feature: \'woAssist\',', "feature: 'woAssist',");
+    var wa3 = mutate(S_WA, 'confirmed: true,\n        feature: \'woAssistWrites\',', "feature: 'woAssistWrites',");
     var e = makeEnv({}, wa3);
     var blocked = false;
     await e.api.waChangeStatus(1, 7, 'X', 'Y', 3).then(function () {}, function () { blocked = true; });
@@ -318,6 +319,55 @@ function patchCalls(env) { return env.calls.filter(function (c) { return /patchW
   await tick();
   A.eq('B3-perm: a user without WorkOrderField.CompletionSLA sends NO patch', patchCalls(e14).length, 0);
   A.ok('B3-perm: and the refusal names the permission', permDenied && /CompletionSLA/.test(permDenied.message), permDenied && permDenied.message);
+
+  // ---- Phase 1 PR-A: the ECD write is hard-OFF (woAssistEcd) ---------------------------------
+  // waSetEcd passes feature:'woAssistEcd'. With it false the read still goes out (feature:'woAssist'),
+  // but the WRAPPER refuses the patch: zero patchWorkOrder, fail callback, audit denied.
+  console.log('\n-- PR-A: ECD write refused while woAssistEcd is false --');
+  async function ecdKill(waSrc) {
+    var ek = makeEnv({ modules: { woAssist: true, woAssistEcd: false } }, waSrc);
+    var failed = null;
+    await ek.api.waEcdSubmit({ disabled: false }, 371126, '2026-09-18T03:59:00.000Z', { fail: function (e) { failed = e; } }).catch(function () { });
+    await tick();
+    return { env: ek, failed: failed };
+  }
+  var k1 = await ecdKill();
+  A.ok('ECD kill: the WO read is still sent', k1.env.calls.some(function (c) { return /workOrder\(workOrderNumber/.test(c.query); }));
+  A.eq('ECD kill: woAssistEcd:false sends ZERO patchWorkOrder', patchCalls(k1.env).length, 0);
+  A.ok('ECD kill: the fail callback fires', !!k1.failed, String(k1.failed));
+  A.ok('ECD kill: audited denied feature-off:woAssistEcd',
+    k1.env.api.auditAll().some(function (x) { return x.outcome === 'denied' && x.reason === 'feature-off:woAssistEcd'; }), JSON.stringify(k1.env.api.auditAll()));
+  // CONTROL (a): waSetEcd's feature swapped back to 'woAssist' -> the kill case goes red (the patch sends).
+  var k1c = await ecdKill(mutate(S_WA, "feature: 'woAssistEcd',", "feature: 'woAssist',"));
+  A.eq('CONTROL: with feature:\'woAssist\' on waSetEcd the ECD kill goes red (patch sent)', patchCalls(k1c.env).length, 1);
+
+  // Source-order pin: in ecdHelperOpen the woAssistEcd guard is the FIRST statement, before the notes
+  // read; the auto path (maybeAutoECD) is the only caller passing auto=true; the manual button and the
+  // core:ecd bus call it without the flag (so they toast).
+  function ecdOrderPin(text) {
+    var out = [];
+    var fi = text.indexOf('    function ecdHelperOpen(state, auto) {\n');
+    var body = fi === -1 ? '' : text.slice(fi, text.indexOf('\n    }\n', fi));
+    var gi = body.indexOf("if (BWN_MODULES.woAssistEcd !== true) {");
+    var ni = body.indexOf('fetchNotesApi(currentWOId());');
+    var firstStmt = body.split('\n')[1] || '';
+    out.push({ name: 'ecdHelperOpen(state, auto): the woAssistEcd guard is the first statement and precedes fetchNotesApi',
+      ok: fi !== -1 && gi !== -1 && ni !== -1 && gi < ni && firstStmt.indexOf('if (BWN_MODULES.woAssistEcd !== true) {') !== -1 && /return; \}$/.test(firstStmt) });
+    out.push({ name: 'ecdHelperOpen(state, true) appears exactly once (the maybeAutoECD auto path)', ok: text.split('ecdHelperOpen(state, true);').length - 1 === 1 });
+    out.push({ name: 'the manual button and core:ecd bus call ecdHelperOpen without auto',
+      ok: text.indexOf("eb.addEventListener('click', function () { ecdHelperOpen(state); });") !== -1 &&
+          text.indexOf("if (d.id === 'core:ecd') { ecdHelperOpen(compute()); return; }") !== -1 });
+    return out;
+  }
+  ecdOrderPin(coreFull).forEach(function (r) { A.ok(r.name, r.ok); });
+  // CONTROL (b): the guard moved AFTER fetchNotesApi -> the order pin goes red.
+  (function () {
+    var GUARD = "      if (BWN_MODULES.woAssistEcd !== true) { if (!auto) ecdToast('Setting the expected completion date from BWN is switched off for now. Set it in Umbrava.', 'info'); return; }\n";
+    var FLINE = '      fetchNotesApi(currentWOId());   // no-op if the engine already warmed it; arms the re-propose below otherwise\n';
+    var moved2 = mutate(mutate(coreFull, GUARD, ''), FLINE, FLINE + GUARD);
+    var r = ecdOrderPin(moved2)[0];
+    A.ok('CONTROL: guard moved after fetchNotesApi -> the order pin goes red', r.ok === false);
+  })();
 
   // ---- B3 mutations: each must redden a probe above -----------------------------------------
   console.log('\n-- B3 mutations --');

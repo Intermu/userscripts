@@ -11,7 +11,12 @@
       }
     },
     "bwn-bid-out.user.js": { "expectedInstalled": true },
-    "bwn-bulk-assets.user.js": { "expectedInstalled": false },
+    "bwn-bulk-assets.user.js": {
+      "expectedInstalled": false,
+      "waived": {
+        "updateurl": "Phase 1 PR-A (P1-08, decision 4): withheld from distribution until the Phase 2 controls land. @updateURL and @downloadURL are both 'none' (Tampermonkey's documented off switch), so an installed copy never auto-updates. The ledger honours this waiver only while expectedInstalled is false and only for an absent or 'none' header; a foreign host still goes red."
+      }
+    },
     "bwn-cc-auth.user.js": { "expectedInstalled": true },
     "bwn-cc-purchase.user.js": { "expectedInstalled": true },
     "bwn-dispatch.user.js": { "expectedInstalled": true },

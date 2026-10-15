@@ -197,4 +197,47 @@ function t(name, pr, want) { pend.push(pr.then(function (v) { A.eq(name, v, want
   A.ok('seed removed -> bwn:gov kill no longer lands (proves the seed is load-bearing)', m.dropUploadWoDedupe !== false);
 })();
 
+// ---- Phase 1 PR-A (P1-10): the bwn:cmd dropupload:files bus upload honours the dropUpload kill ----
+// WO Intake hands files over this page bus. Under a central kill (or bwn:modules {"dropUpload":false})
+// the handler must refuse BEFORE the dropupload:accepted ack and before describeDrop starts the upload.
+var BUS_START = "  document.addEventListener('bwn:cmd', function (e) {\n    var d = e && e.detail;\n    if (!d || d.id !== 'dropupload:files'";
+var BUS_SRC = (function () {
+  var i = full.indexOf(BUS_START);
+  if (i === -1 || full.indexOf(BUS_START, i + 1) !== -1) throw new Error('bus handler: start not found/unique');
+  var j = full.indexOf('\n  }, false);', i);
+  if (j === -1) throw new Error('bus handler: end not found');
+  return full.slice(i, j + '\n  }, false);'.length);
+})();
+function busRun(modules, src) {
+  var listener = null, acks = 0, described = 0;
+  var sb = {
+    BWN_MODULES: modules,
+    onWorkOrder: function () { return true; },
+    describeDrop: function () { described++; return new Promise(function () { }); },   // never settles: count only
+    CustomEvent: function (type, init) { this.type = type; this.detail = init && init.detail; },
+    document: {
+      addEventListener: function (t, fn) { if (t === 'bwn:cmd') listener = fn; },
+      dispatchEvent: function (ev) { if (ev && ev.detail && ev.detail.id === 'dropupload:accepted') acks++; return true; },
+      querySelector: function () { return null; }
+    }
+  };
+  vm.runInNewContext(src || BUS_SRC, sb);
+  if (!listener) throw new Error('bus handler did not register');
+  listener({ detail: { id: 'dropupload:files', files: [{ name: 'a.pdf', size: 1 }] } });
+  return { acks: acks, described: described };
+}
+(function () {
+  var off = busRun({ dropUpload: false });
+  A.eq('bus kill: dropUpload:false -> NO dropupload:accepted ack', off.acks, 0);
+  A.eq('bus kill: dropUpload:false -> describeDrop never called', off.described, 0);
+  var on = busRun({ dropUpload: true });
+  A.eq('bus on: dropUpload:true -> exactly one ack', on.acks, 1);
+  A.eq('bus on: dropUpload:true -> describeDrop called once', on.described, 1);
+  // CONTROL: the kill clause dropped -> the killed run acks again ("no ack when killed" goes red).
+  var CLAUSE = ' || BWN_MODULES.dropUpload === false) return;';
+  if (BUS_SRC.split(CLAUSE).length !== 2) throw new Error('negative control: kill clause not found exactly once - update this harness');
+  var c = busRun({ dropUpload: false }, BUS_SRC.replace(CLAUSE, ') return;'));
+  A.ok('CONTROL: without the kill clause, dropUpload:false still acks + uploads (so the clause is load-bearing)', c.acks === 1 && c.described === 1, JSON.stringify(c));
+})();
+
 Promise.all(pend).then(function () { A.finish(); });

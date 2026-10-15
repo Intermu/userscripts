@@ -1,10 +1,10 @@
 // ==UserScript==
 // @name         BWN Suite - Core (Broadway National)
 // @namespace    broadwaynational.bwn
-// @version      1.94.6
+// @version      1.95.0
 // @downloadURL  https://raw.githubusercontent.com/Intermu/userscripts/main/bwn-suite-core.user.js
 // @updateURL    https://raw.githubusercontent.com/Intermu/userscripts/main/bwn-suite-core.user.js
-// @description  Runs several Umbrava helpers for BWN coordinators, in the browser with no privileged grants. Includes: PO Approval + ETA Builder; WO Assist (GP/ETA, a stall watchdog, DNE calculator, and a next-action playbook); Email Leak Guard (checks recipients against vendor names, PO amounts, and client budget references before an outbound email sends); WO List Heat (a triage overlay + My Day strip on the work-order list, with an optional same-origin Umbrava API scan for deterministic full-board coverage); and the BWN Launcher (opens the Azure Static Web App tools with the current WO's context). Modules share state through sessionStorage/localStorage. The only network calls are same-origin Umbrava GraphQL requests (app.umbrava.com/api/graphql, the app's own session): List Heat's full-board scan and WO Assist's work-order / trip / clock-in / document / purchase-order reads, plus ONE write - BWN Views saves the column layout through Umbrava's own putUserPreference, the same preference the column chooser writes; everything else is offline. Toggle modules in BWN_MODULES below.
+// @description  Runs several Umbrava helpers for BWN coordinators, in the browser with no privileged grants. Includes: PO Approval + ETA Builder; WO Assist (GP/ETA, a stall watchdog, DNE calculator, and a next-action playbook); Email Leak Guard (checks recipients against vendor names, PO amounts, and client budget references before an outbound email sends); WO List Heat (a triage overlay + My Day strip on the work-order list, with an optional same-origin Umbrava API scan for deterministic full-board coverage); and the BWN Launcher (opens the Azure Static Web App tools with the current WO's context). Modules share state through sessionStorage/localStorage. The only network calls are same-origin Umbrava GraphQL requests (app.umbrava.com/api/graphql, the app's own session): List Heat's full-board scan and WO Assist's work-order / trip / clock-in / document / purchase-order reads, plus ONE live write - BWN Views saves the column layout through Umbrava's own putUserPreference, the same preference the column chooser writes; everything else is offline. The other write features (Set ECD, WO-Assist Create task / Change status, Bulk Source Job#, Bulk Operations, Bulk Task Reassign) ship switched OFF and cannot be switched on from the bwn:modules blob or the central governance bundle. Toggle modules in BWN_MODULES below.
 // @match        https://app.umbrava.com/*
 // @match        https://*.umbrava.com/*
 // @run-at       document-start
@@ -24,16 +24,21 @@
   var BWN_MODULES = {
     poApproval: true,    // approval/ETA text buttons in the Send PO modal
     woAssist: true,      // side-docked GP + ETA watchdog + playbook on WO pages
-    woAssistWrites: false, // SHIPPING DEFAULT OFF: renders the WO-Assist guided-WRITE buttons
-                           // (Create task / Change status). When false the buttons never mount,
-                           // so nothing writes for any user until this is flipped after a live
-                           // smoke test. The mutations themselves still route through bwnGqlOp
-                           // with feature:'woAssist' (its kill switch + audit gate) - two gates:
-                           // this flag hides the UI, bwnGqlOp enforces the write governance.
+    woAssistWrites: false, // SHIPPING DEFAULT OFF, WRITER KEY (lower-only, see BWN_WRITER_KEYS): renders
+                           // the WO-Assist guided-WRITE buttons (Create task / Change status). When
+                           // false the buttons never mount, AND both mutations pass
+                           // feature:'woAssistWrites' to bwnGqlOp, so the wrapper itself refuses them
+                           // while this is false - two gates on the same key.
+    woAssistEcd: false,  // SHIPPING DEFAULT OFF, WRITER KEY (lower-only): the Set-ECD write (patchWorkOrder
+                         // priority). Phase 1 decision: off until the ECD path is redesigned. While false,
+                         // ecdHelperOpen returns before any read or dialog (the manual button and the
+                         // core:ecd bus show a "switched off" toast; the auto prompt stays silent), and
+                         // waSetEcd passes feature:'woAssistEcd' so bwnGqlOp refuses the write too.
     actsCard: true,      // WO Assist sub-feature: the NEXT ACTIONS card on the WO page. Off only hides
                          // the card - the engine still runs, so Job View pills + the bus stay fed.
     ecdPrompt: true,     // WO Assist sub-feature: auto-open the Set-ECD prompt when the ECD is missing
-                         // or overdue (the manual "Set ECD..." step button is unaffected).
+                         // or overdue (the manual "Set ECD..." step button is unaffected). Has NO effect
+                         // while woAssistEcd is false: the auto path returns silently in ecdHelperOpen.
     closePreflight: true, // WO Assist sub-feature: the close-out preflight + billing prompt shown when
                          // the status moves to a terminal / Work Complete state.
                          // The three sub-features above apply LIVE from Suite settings (no reload).
@@ -61,13 +66,14 @@
                          // bulkOps alone. The client rank gate + the armed per-batch confirm are the
                          // other two layers; Umbrava's server against the operator's bearer is the real
                          // boundary (needs ops_* roles - see the approval-gate TODO).
-    bulkSource: true,    // ON for coordinators (2026-09-02, after a live write round-trip smoke:
-                         // one Apply stamped Source Job# across 22 WOs at once). Bulk Source Job# -
-                         // per-row checkboxes on the Work Orders list + a dock drawer that stamps
-                         // Source Job# in bulk from a Q/R or RF shorthand (blanks only). Each batch
-                         // still passes a dry-run + a typed confirm, and every write routes through
-                         // bwnGqlOp feature:'bulkSource' (its per-feature kill switch + audit ring)
-                         // via the proven patchWorkOrder. Flip back to false to kill the module.
+    bulkSource: false,   // SHIPPING DEFAULT OFF (Phase 1 decision 7), WRITER KEY (lower-only: bwn:modules
+                         // cannot raise it). Bulk Source Job# - per-row checkboxes on the Work Orders
+                         // list + a dock drawer that stamps Source Job# in bulk from a Q/R or RF
+                         // shorthand (blanks only). While false the module never mounts. When it is
+                         // re-enabled each batch still passes a dry-run + a typed confirm, and every
+                         // write routes through bwnGqlOp feature:'bulkSource' (its per-feature kill
+                         // switch + audit ring) via the proven patchWorkOrder. Re-enabling it is a code
+                         // change + an @version bump + Mike's live gate, never a toggle.
     bulkTask: false,     // SHIPPING DEFAULT OFF: Bulk Task Reassign - paste WO#s (or tick them from a
                          // current assignee's open WOs), pick one person or team, move every EXISTING
                          // open task on them and/or the WO's own Assigned To (never creates a task). The
@@ -119,12 +125,21 @@
 
   var BWN_VER = (typeof GM_info !== 'undefined' && GM_info.script && GM_info.script.version) || '1.51.2';
 
+  // Core's WRITER keys (Phase 1 PR-A, B3): the bwn:modules blob is page-writable, so it may only
+  // LOWER these, never raise them. A writer ships on (or off) in code; turning one on is a code
+  // change + @version bump + live gate. PR-B extends this list to the suite-wide master list.
+  var BWN_WRITER_KEYS = ['woAssistWrites', 'woAssistEcd', 'bulkOps', 'bulkOpsDestructive', 'bulkSource', 'bulkTask', 'recoveryWrites'];
+
   // Module overrides set by the Ops Suite panel; reload to apply. Both scripts
-  // read the shared bwn:modules blob and honor only their own keys.
+  // read the shared bwn:modules blob and honor only their own keys. Writer keys
+  // (BWN_WRITER_KEYS) can only be LOWERED by the blob; every other key may be
+  // raised or lowered as before.
   try {
     var _mp = JSON.parse(localStorage.getItem('bwn:modules') || '{}');
     if (_mp && typeof _mp === 'object') Object.keys(_mp).forEach(function (k) {
-      if (typeof _mp[k] === 'boolean' && k in BWN_MODULES) BWN_MODULES[k] = _mp[k];
+      if (typeof _mp[k] === 'boolean' && k in BWN_MODULES) {
+        BWN_MODULES[k] = (BWN_WRITER_KEYS.indexOf(k) !== -1) ? (BWN_MODULES[k] && _mp[k]) : _mp[k];
+      }
     });
   } catch (e) { /* defaults */ }
 
@@ -1941,14 +1956,16 @@
   bwnGqlOp.setConfirm = function (fn) { _confirmFn = (typeof fn === 'function') ? fn : null; };
   // ===== BWN-OPS-WRAP END v3 =====
 
-  // Console diagnostics/export hook - lets a coordinator or admin read and export the local
-  // audit trail today, before any writer adopts the wrapper. Read-only; carries no PII beyond
-  // what a write chose to record. (Same shape as the suite's other window.__bwn* dev hooks.)
-  // Core-only: NOT part of the paste-identical WRAP block above.
+  // Console diagnostics/export hook - lets a coordinator or admin READ and EXPORT the local
+  // audit trail. Read + export only (Phase 1 PR-A, P1-03): it carries no writer (no bwnGqlOp,
+  // so no setConfirm bypass), no registry, and no audit clear, so a page script cannot use it to
+  // send a write or erase the trail. Carries no PII beyond what a write chose to record.
+  // Core-only: NOT part of the paste-identical WRAP block above. scripts/test-bwn-ops.js pins
+  // the exact key set and the allowlist of every window.__bwn* / window.bwn* assignment in Core.
   try {
     window.__bwnOps = {
-      registry: BWN_OPS, run: bwnGqlOp, corrId: bwnCorrId,
-      audit: { all: bwnAuditAll, export: bwnAuditExport, clear: bwnAuditClear }
+      corrId: bwnCorrId,
+      audit: { all: bwnAuditAll, export: bwnAuditExport }
     };
   } catch (e) { /* non-fatal */ }
   // ===== BWN-OPS END v1 =====
@@ -7073,7 +7090,11 @@
     function ecdToast(msg, sev) {
       BWN.toast(sev || 'success', msg, { id: 'ecd', timeout: 16000 });
     }
-    function ecdHelperOpen(state) {
+    // auto === true only from maybeAutoECD (the automatic prompt). The woAssistEcd guard is the FIRST
+    // statement: while the ECD write is switched off nothing here runs - no notes read, no dialog. A
+    // manual open (button / core:ecd bus) explains why; the automatic path stays silent.
+    function ecdHelperOpen(state, auto) {
+      if (BWN_MODULES.woAssistEcd !== true) { if (!auto) ecdToast('Setting the expected completion date from BWN is switched off for now. Set it in Umbrava.', 'info'); return; }
       if (!onWO() || !currentWOId()) { alert('Open a work order to set its expected completion date.'); return; }
       fetchNotesApi(currentWOId());   // no-op if the engine already warmed it; arms the re-propose below otherwise
       ensureEcdStyle();
@@ -7184,8 +7205,12 @@
     // mutation string is copied VERBATIM from its proven source (do NOT re-shape a selector):
     //   M_ADD_TASK  <- bwn-proposal-actions.user.js  (createTask,     wire-proven 2026-08-17)
     //   PATCH_M     <- bwn-dispatch.user.js           (patchWorkOrder, wire-proven 2026-08-12)
-    // Both mutations pass feature:'woAssist' so Core's per-feature kill switch + audit ring govern
-    // the write; the BWN_MODULES.woAssistWrites flag only gates whether the BUTTONS render.
+    // addTask (A2) and the status patch (B2) pass feature:'woAssistWrites'; the ECD patch passes
+    // feature:'woAssistEcd'. Both are hard-OFF writer keys, so Core's per-feature kill switch refuses
+    // the write while they are false (and the woAssistWrites flag also keeps the BUTTONS unmounted).
+    // Reads keep feature:'woAssist'. NOTE (Phase 1 PR-A, R5): since the swap, woAssist:false no longer
+    // makes the WRAPPER refuse these writes (it still stops the whole module mounting at load). Any
+    // Phase 2 re-enable of woAssistWrites / woAssistEcd MUST keep woAssist as a parent kill.
 
     // A2 - addTask(data: AddTaskInput!). entityType 1 = work order; entityId = the WO number as a
     // String. Do NOT drop metadata: the REST backend 500s without it (proposal-actions capture).
@@ -7202,7 +7227,7 @@
         notifyCreator: false,
         metadata: JSON.stringify({ number: String(woNumber) })
       } }, {
-        feature: 'woAssist',
+        feature: 'woAssistWrites',
         validate: function (v) { var d = v && v.data || {}; if (!d.entityId) return 'no WO number'; if (!String(d.description || '').trim()) return 'empty task text'; return true; },
         ids: { wo: woNumber },
         after: { task: String(taskText || '').slice(0, 40) }
@@ -7242,7 +7267,7 @@
         statusId: { shouldInclude: true, value: targetId }
       } }, {
         confirmed: true,
-        feature: 'woAssist',
+        feature: 'woAssistWrites',
         validate: function (v) { var d = v && v.data || {}; if (!d.workOrderNumber) return 'no WO number'; if (!(d.statusId && Number.isInteger(d.statusId.value))) return 'no target status id'; return true; },
         ids: { wo: woNumber },
         current: currentStatusName, proposed: targetName, irreversible: true,
@@ -7315,7 +7340,7 @@
         if (rec.serviceLevelAgreementId) data.serviceLevelAgreementId = { shouldInclude: true, value: rec.serviceLevelAgreementId };
         return bwnGqlOp('patchWorkOrder', PATCH_M, { data: data }, {
           confirmed: true,
-          feature: 'woAssist',
+          feature: 'woAssistEcd',
           validate: function (v) {
             var d = v && v.data || {};
             if (!d.workOrderNumber) return 'no WO number';
@@ -7591,7 +7616,7 @@
       // falls through and behaves exactly as it did before.
       if (notesReadState(woId) === 'pending') return;
       ecdAutoShownFor = woId;
-      ecdHelperOpen(state);
+      ecdHelperOpen(state, true);
     }
 
     // ---- Status-change preflight (warn-only) ----------------------------------
@@ -17648,6 +17673,17 @@
     // which is what the AI script's NO_RESPONDER path is for.
     try { console.error('[BWN SUITE CORE] DOM handle protocol blocks failed to load:', e); } catch (e2) { }
   }
+
+  // D-K (Mike 2026-10-14): the DOM-Handle write workflow wo-add-note stays OFF until it is under the
+  // governance model. Outside the BWN-DOMC sentinels on purpose: that block is paste-identical with
+  // broadway-internal-ops bwn-domcollect.js (scripts/test-domproj-parity.js), so its bytes still read
+  // enabled: true. Runs unconditionally at Core top level - NOT inside bwnBoot('domHandle', ...) and
+  // not behind any BWN_MODULES read, because a page can write bwn:modules {"domHandle":false} and the
+  // collector stays page-global regardless. DC.workflowsHere reads w.enabled live, so DC.act,
+  // DC.actAsync and a direct DC.execute all refuse wo-add-note. Pinned by scripts/test-domp-bus.js M3c.
+  // BWN-DK-OFF START
+  try { (window.BWNDOMC && window.BWNDOMC.WORKFLOWS || []).forEach(function (w) { if (w && w.id === 'wo-add-note') w.enabled = false; }); } catch (e) { }
+  // BWN-DK-OFF END
 
   // ==========================================================================
   // MODULE: DOM handle protocol responder 1.0  (phase 4, READ-ONLY)

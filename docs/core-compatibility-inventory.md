@@ -211,7 +211,7 @@ Raw `CustomEvent` types (no `detail.id`):
 | `__bwnLauncher` | 11413 | `if (window.__bwnLauncher) return` | once-only guard for the Launcher module |
 | `__bwnWoHeat` | 8281 | once-only guard | List Heat |
 | `__bwnHeatNetHook` | 1151 | once-only guard | GraphQL tap (5.1) |
-| `__bwnOps`, `__bwnPoParity` | 1817, 3063 | none | dev hooks |
+| `__bwnOps`, `__bwnPoParity` | 1817, 3063 | none | dev hooks; `__bwnOps` is read + export of the audit ring only (`corrId`, `audit.all`, `audit.export`) - no writer, no registry, no clear (Phase 1 PR-A) |
 | `BWNDOM`, `BWNDOMC` | ~15401, ~17032 (`root.*`) | **not verified** | DOM Passport. GM-sandboxed `bwn-suite-ai` cannot see them (its comment at ~1788 says so) |
 | `window.fetch`, `XMLHttpRequest.prototype.open/send` | ~1156 | `__bwnHeatNetHook` | Core **wraps** these to observe `/api/graphql` bodies and responses |
 
@@ -404,7 +404,7 @@ consoles. UI visibility only; every write re-checks at execution.
 | `patchWorkOrder` (high, non-idempotent) | WO Assist "Change status" (`WA-WRITES` ~6705) | `woAssistWrites` ships **false** + `feature:'woAssist'` + high-risk confirm + permGate |
 | `patchWorkOrder` (high) | Bulk Ops set-ECD (`BULK-OPS-ENGINE` ~17167) | `bulkOps` ships **false**, rank 4 dock policy, dry run + typed confirm |
 | `addEditJobNote` (moderate) | Bulk Ops add-note (~17297) | same as the Bulk Ops row above |
-| `patchWorkOrder` (high) | Bulk Source / Edit PO#/WO# (`BULK-SOURCE-ENGINE` ~17934) | `bulkSource` **on** (since 2026-09-02), rank 2, dry run + typed confirm, blanks only |
+| `patchWorkOrder` (high) | Bulk Source / Edit PO#/WO# (`BULK-SOURCE-ENGINE` ~17934) | `bulkSource` **OFF** (Phase 1 decision 7, Core 1.95.0; lower-only writer key - `bwn:modules` cannot raise it), rank 2, dry run + typed confirm, blanks only |
 
 Literal `bwnGqlOp('<op>'` call sites in Core: `me`, `workOrder`, `addTask`, `patchWorkOrder`,
 `putUserPreference`, `addEditJobNote`. The bulk engines also pass the op name indirectly.
@@ -435,9 +435,9 @@ user even with `bulkOps` off, a documented `ponytail:` ceiling (header ~14-18).
 | Suite Settings | all (dock / `core:settings`) | drawer | none | `bwn:modules`, `bwn:config` | `BWN-SETTINGS` block | `test-ops-settings.js` |
 | Palette (`palette`) | all | Ctrl/Cmd-K | none | `bwn:cmd` sends | — | **not verified** |
 | visitLog, reminders, notesTimeline, tripCal | WO detail | strips / overlay / `.ics` export | reads only | `bwn:visit:*`, `bwn:reminders`, `core:*` cmds | — | `test-reminders-channel.js` |
-| DOM Handles / Passport (`domHandle`) | all | bus responder | none (no `write:true`) | `domp:*`, `BWNDOM`, `BWNDOMC` | cross-repo parity | `test-domproj-parity.js`, `test-domp-bus.js` |
+| DOM Handles / Passport (`domHandle`) | all | bus responder | none (no `write:true`); wo-add-note disabled by Core BWN-DK-OFF (D-K, PR-A) | `domp:*`, `BWNDOM`, `BWNDOMC` | cross-repo parity | `test-domproj-parity.js`, `test-domp-bus.js` |
 | Bulk Ops (`bulkOps`, off) | dock `bulk-ops` | drawer | writes `patchWorkOrder` | drawer slot | dry run / typed confirm | `test-bulk-ops.js`, `test-bulk-console.js` |
-| Bulk Source (`bulkSource`) | WO list + dock `bulk-source` | row checkboxes + drawer | writes `patchWorkOrder` | drawer slot | blanks-only rule | `test-bulk-source.js` |
+| Bulk Source (`bulkSource`) | WO list + dock `bulk-source` | row checkboxes + drawer (not mounted: flag OFF, Phase 1 decision 7) | writes `patchWorkOrder` | drawer slot | blanks-only rule | `test-bulk-source.js` |
 | permGate (`permGate`) | all | none (data) | reads `me` | `bwn:perm*`, `__bwnPerm` | fail-open/closed rules | `test-perm-block-ledger.js` |
 
 ---

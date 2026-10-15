@@ -154,7 +154,15 @@ function runCases(opsSrc) {
   ok('registry classifies patchWorkOrder as a high-risk write', api.OPS.patchWorkOrder &&
     api.OPS.patchWorkOrder.kind === 'write' && api.OPS.patchWorkOrder.risk === 'high');
   ok('a read carries no risk tier', api.OPS.workOrder && api.OPS.workOrder.kind === 'read' && api.OPS.workOrder.risk === undefined);
-  ok('the console hook exposes the registry + audit', e.api.hook && e.api.hook.registry && e.api.hook.audit && typeof e.api.hook.audit.export === 'function');
+  // P1-03 (Phase 1 PR-A): the console hook is read + export only. No writer (run / setConfirm),
+  // no registry, no audit clear - a page script must not be able to send a write or erase the trail.
+  var hook = e.api.hook || {};
+  eq('hook keys exactly [audit, corrId] (no run, no registry)', Object.keys(hook).sort(), ['audit', 'corrId']);
+  ok('hook.run and hook.registry are undefined', hook.run === undefined && hook.registry === undefined);
+  eq('audit keys exactly [all, export] (no clear)', Object.keys(hook.audit || {}).sort(), ['all', 'export']);
+  ok('hook.corrId() returns a string', typeof hook.corrId === 'function' && typeof hook.corrId() === 'string');
+  ok('hook.audit.all() returns the ring (an array)', hook.audit && typeof hook.audit.all === 'function' && Array.isArray(hook.audit.all()));
+  ok('hook.audit.export() returns the export JSON', hook.audit && typeof hook.audit.export === 'function' && JSON.parse(hook.audit.export()).schema === 1);
 
   // --- corrId ---
   var c1 = api.corrId(), c2 = api.corrId();
@@ -408,7 +416,14 @@ var MUTATIONS = [
   { what: 'F3: the unrecognized-write-envelope guard removed (silent ok on a no-success response)',
     m: function (s) { return mutate(s, "if (!env || typeof env.success !== 'boolean') {", "if (false) {"); } },
   { what: 'F5: the audit reason copies the raw server message back in (PII leak)',
-    m: function (s) { return mutate(s, "writeAudit('error', { tries: tryNo, reason: 'write-refused' });", "writeAudit('error', { tries: tryNo, reason: refused.message });"); } }
+    m: function (s) { return mutate(s, "writeAudit('error', { tries: tryNo, reason: 'write-refused' });", "writeAudit('error', { tries: tryNo, reason: refused.message });"); } },
+  // P1-03 controls (Phase 1 PR-A): each names the ONE assertion it must turn red.
+  { what: 'P1-03: the console hook regains the raw writer (run: bwnGqlOp)',
+    expect: 'hook keys exactly [audit, corrId] (no run, no registry)',
+    m: function (s) { return mutate(s, '      corrId: bwnCorrId,\n', '      run: bwnGqlOp, corrId: bwnCorrId,\n'); } },
+  { what: 'P1-03: the console hook regains audit.clear',
+    expect: 'audit keys exactly [all, export] (no clear)',
+    m: function (s) { return mutate(s, 'audit: { all: bwnAuditAll, export: bwnAuditExport }', 'audit: { all: bwnAuditAll, export: bwnAuditExport, clear: bwnAuditClear }'); } }
 ];
 
 // Confirm-gate coverage for the writes newly adopted in F2. createDraftProposal + editProposal
@@ -598,6 +613,62 @@ function runPermGateCases() {
   });
 }
 
+// P1-03 allowlist (Phase 1 PR-A): every window.__bwn* / window.bwn* assignment in Core is a KNOWN
+// name, so a new page-reachable handle (a writer, a confirm bypass, a trigger) cannot appear
+// silently. Scope: dotted assignments 'window.(__bwn|bwn)<name> =' anywhere in Core. root.BWNDOM*
+// (inside the paste-identical DOM blocks) and the window.fetch wrap are outside this regex on
+// purpose. Bracket assignment (window['__bwn...'] / window["bwn..."]) and Object.defineProperty(window
+// are refused outright, and no allowlisted assignment line or object literal may mention bwnGqlOp or
+// setConfirm (so __bwnOps cannot regain run: and still pass on its name).
+// D-N residuals for PR-B (KNOWN, allowlisted, not yet governed): __bwnHeatScan (page-triggered heat
+// scan) and __bwnDispatchSyncNow (page-triggered dispatch sync).
+var BWN_WINDOW_ALLOWLIST = ['__bwnDispatchSyncNow', '__bwnHeatAck', '__bwnHeatDiag', '__bwnHeatNetHook',
+  '__bwnHeatRefresh', '__bwnHeatRows', '__bwnHeatScan', '__bwnLauncher', '__bwnOps', '__bwnPerm',
+  '__bwnPoParity', '__bwnWoHeat', 'bwnOnRoute', 'bwnReport', 'bwnToast'];
+function windowAllowlistResults(text) {
+  var out = [];
+  var re = /window\.((?:__bwn|bwn)\w*)\s*=(?!=)/g, m, names = [], writerHits = [];
+  while ((m = re.exec(text)) !== null) {
+    if (names.indexOf(m[1]) === -1) names.push(m[1]);
+    var ls = text.lastIndexOf('\n', m.index) + 1, le = text.indexOf('\n', m.index);
+    var stmt = text.slice(ls, le === -1 ? text.length : le);
+    var rest = text.slice(re.lastIndex).replace(/^\s+/, '');
+    if (rest.charAt(0) === '{') {               // object literal: take it to the balanced brace
+      var depth = 0, j = 0;
+      for (; j < rest.length; j++) {
+        if (rest.charAt(j) === '{') depth++;
+        else if (rest.charAt(j) === '}') { depth--; if (depth === 0) break; }
+      }
+      stmt += '\n' + rest.slice(0, j + 1);
+    }
+    if (/bwnGqlOp|setConfirm/.test(stmt)) writerHits.push(m[1]);
+  }
+  names.sort();
+  out.push({ name: 'window.(__bwn|bwn)* assignment names in Core equal the allowlist', ok: JSON.stringify(names) === JSON.stringify(BWN_WINDOW_ALLOWLIST), detail: 'got ' + names.join(',') });
+  out.push({ name: 'no bracket window[\'__bwn...\'] / window["bwn..."] assignment in Core', ok: !/window\[\s*['"](?:__bwn|bwn)/.test(text) });
+  out.push({ name: 'no Object.defineProperty(window ...) in Core', ok: !/Object\.defineProperty\(\s*window\b/.test(text) });
+  out.push({ name: 'no window.(__bwn|bwn)* assignment exposes bwnGqlOp or setConfirm', ok: writerHits.length === 0, detail: writerHits.join(',') });
+  return out;
+}
+function runAllowlistCases() {
+  console.log('\n-- P1-03: Core window.__bwn* / window.bwn* assignment allowlist --');
+  windowAllowlistResults(coreFull).forEach(function (r) { A.ok(r.name, r.ok, r.detail); });
+  var CONTROLS = [
+    { what: 'a new window.__bwnX = bwnGqlOp appended', expect: 'window.(__bwn|bwn)* assignment names in Core equal the allowlist',
+      t: coreFull + '\n  window.__bwnX = bwnGqlOp;\n' },
+    { what: 'a bracket assignment window[\'__bwnX\'] appended', expect: 'no bracket window[\'__bwn...\'] / window["bwn..."] assignment in Core',
+      t: coreFull + '\n  window[\'__bwnX\'] = 1;\n' },
+    { what: 'an Object.defineProperty(window, ...) appended', expect: 'no Object.defineProperty(window ...) in Core',
+      t: coreFull + '\n  Object.defineProperty(window, \'__bwnX\', { value: 1 });\n' },
+    { what: '__bwnOps regains run: bwnGqlOp (allowlisted name, writer value)', expect: 'no window.(__bwn|bwn)* assignment exposes bwnGqlOp or setConfirm',
+      t: mutate(coreFull, '      corrId: bwnCorrId,\n      audit: { all: bwnAuditAll', '      run: bwnGqlOp, corrId: bwnCorrId,\n      audit: { all: bwnAuditAll') }
+  ];
+  CONTROLS.forEach(function (c) {
+    var reds = windowAllowlistResults(c.t).filter(function (r) { return !r.ok; }).map(function (r) { return r.name; });
+    A.ok('CAUGHT: ' + c.what + ' -> "' + c.expect + '" red', reds.indexOf(c.expect) !== -1, 'reds: ' + reds.join(' | '));
+  });
+}
+
 function main() {
   console.log('\n-- the shipped BWN-OPS block --');
   return runCases(S_OPS).then(function (results) {
@@ -611,32 +682,66 @@ function main() {
         catch (err) { A.ok('CAUGHT: ' + mut.what, false, 'mutate() failed: ' + (err && err.message)); return; }
         return runCases(mutated).then(function (rs) {
           var reds = rs.filter(function (r) { return !r.ok; });
+          if (mut.expect) {
+            var named = reds.filter(function (r) { return r.name === mut.expect; });
+            A.ok('CAUGHT: ' + mut.what + ' -> "' + mut.expect + '" red', named.length === 1,
+              named.length ? '' : 'the named assertion stayed green (reds: ' + reds.map(function (r) { return r.name; }).join(' | ') + ')');
+            return;
+          }
           A.ok('CAUGHT: ' + mut.what, reds.length > 0,
             reds.length ? '' : 'mutation produced NO failing case - this control proves nothing');
         });
       });
     }, Promise.resolve());
   }).then(function () {
+    runAllowlistCases();
     // BWN-OPS-WRAP is the generic machinery, pasted byte-identical into every sandbox that
     // adopts bwnGqlOp (the registry + transport differ per file; the wrapper must not). A
     // paste has no mechanism behind it, so this gate goes red if a fix lands in one copy and
     // not the other - same discipline as the bwnAI and BWN-SHARED SHA gates.
     console.log('\n-- BWN-OPS-WRAP paste-identical across adopters --');
-    var ADOPTERS = ['bwn-suite-core.user.js', 'bwn-drop-upload.user.js', 'bwn-dispatch.user.js', 'bwn-temp-vendor.user.js', 'bwn-proposal-actions.user.js', 'bwn-kanban.user.js', 'bwn-proposal-copy.user.js', 'bwn-low-gp.user.js', 'bwn-write-queue.user.js', 'bwn-wo-audit.user.js'];
-    var wraps = ADOPTERS.map(function (f) {
-      var s = fs.readFileSync(path.join(__dirname, '..', f), 'utf8').replace(/\r\n/g, '\n');
-      var a = s.indexOf('// ===== BWN-OPS-WRAP START v3');
-      var b = s.indexOf('// ===== BWN-OPS-WRAP END v3 =====');
-      return { f: f, w: (a !== -1 && b !== -1 && b > a) ? s.slice(a, b) : null };
+    // Phase 1 PR-A (P1-08): bwn-bulk-assets joins the list, and the list is checked against an
+    // AUTO-DISCOVERED set - every root bwn-*.user.js carrying a BWN-OPS-WRAP START marker at ANY
+    // version (R8) - so a new copy cannot sit outside the identity loop just because nobody listed it.
+    var ADOPTERS = ['bwn-suite-core.user.js', 'bwn-drop-upload.user.js', 'bwn-dispatch.user.js', 'bwn-temp-vendor.user.js', 'bwn-proposal-actions.user.js', 'bwn-kanban.user.js', 'bwn-proposal-copy.user.js', 'bwn-low-gp.user.js', 'bwn-write-queue.user.js', 'bwn-wo-audit.user.js', 'bwn-bulk-assets.user.js'];
+    var ROOT_DIR = path.join(__dirname, '..');
+    var TEXTS = {};
+    fs.readdirSync(ROOT_DIR).filter(function (f) { return /^bwn-.*\.user\.js$/.test(f); }).forEach(function (f) {
+      TEXTS[f] = fs.readFileSync(path.join(ROOT_DIR, f), 'utf8').replace(/\r\n/g, '\n');
     });
-    var haveAll = wraps.every(function (x) { return x.w !== null; });
-    A.ok('every listed adopter carries the BWN-OPS-WRAP block', haveAll,
-      wraps.filter(function (x) { return !x.w; }).map(function (x) { return x.f; }).join(','));
-    if (haveAll) {
-      wraps.slice(1).forEach(function (x) {
-        A.ok('BWN-OPS-WRAP is byte-identical in ' + x.f + ' (drift = a fix in one sandbox not the other)', x.w === wraps[0].w);
+    function wrapResults(listed, texts) {
+      var out = [];
+      var discovered = Object.keys(texts).filter(function (f) { return /\/\/ ===== BWN-OPS-WRAP START v\d+/.test(texts[f]); }).sort();
+      out.push({ name: 'auto-discovered WRAP carriers (any version) == the listed ADOPTERS', ok: JSON.stringify(discovered) === JSON.stringify(listed.slice().sort()),
+        detail: 'discovered ' + discovered.join(',') });
+      var wraps = listed.map(function (f) {
+        var s = texts[f] || '';
+        var a = s.indexOf('// ===== BWN-OPS-WRAP START v3');
+        var b = s.indexOf('// ===== BWN-OPS-WRAP END v3 =====');
+        return { f: f, w: (a !== -1 && b !== -1 && b > a) ? s.slice(a, b) : null };
       });
+      var haveAll = wraps.every(function (x) { return x.w !== null; });
+      out.push({ name: 'every listed adopter carries the BWN-OPS-WRAP block', ok: haveAll,
+        detail: wraps.filter(function (x) { return !x.w; }).map(function (x) { return x.f; }).join(',') });
+      if (haveAll) {
+        wraps.slice(1).forEach(function (x) {
+          out.push({ name: 'BWN-OPS-WRAP is byte-identical in ' + x.f + ' (drift = a fix in one sandbox not the other)', ok: x.w === wraps[0].w });
+        });
+      }
+      return out;
     }
+    A.eq('ADOPTERS lists 11 files incl. bwn-bulk-assets', [ADOPTERS.length, ADOPTERS.indexOf('bwn-bulk-assets.user.js') !== -1], [11, true]);
+    wrapResults(ADOPTERS, TEXTS).forEach(function (r) { A.ok(r.name, r.ok, r.detail); });
+    // CONTROL (a): the list minus bulk-assets -> "discovered == listed" goes red.
+    var minus = wrapResults(ADOPTERS.filter(function (f) { return f !== 'bwn-bulk-assets.user.js'; }), TEXTS)
+      .filter(function (r) { return !r.ok; }).map(function (r) { return r.name; });
+    A.ok('CONTROL (a): ADOPTERS minus bwn-bulk-assets -> "discovered == listed" red', minus.indexOf('auto-discovered WRAP carriers (any version) == the listed ADOPTERS') !== -1, minus.join(' | '));
+    // CONTROL (b): one byte flipped inside bulk-assets' WRAP copy (in memory) -> its identity goes red.
+    var drift = {}; Object.keys(TEXTS).forEach(function (f) { drift[f] = TEXTS[f]; });
+    drift['bwn-bulk-assets.user.js'] = mutate(drift['bwn-bulk-assets.user.js'], 'if (opts.feature && BWN_MODULES[opts.feature] === false) {', 'if (opts.feature && BWN_MODULES[opts.feature] === falsE) {');
+    var dReds = wrapResults(ADOPTERS, drift).filter(function (r) { return !r.ok; }).map(function (r) { return r.name; });
+    A.ok('CONTROL (b): a one-byte drift in the bulk-assets WRAP copy -> its identity check red',
+      dReds.indexOf('BWN-OPS-WRAP is byte-identical in bwn-bulk-assets.user.js (drift = a fix in one sandbox not the other)') !== -1, dReds.join(' | '));
     return runProposalGateCases();
   }).then(function () {
     return runUnclassifiedGateCases();

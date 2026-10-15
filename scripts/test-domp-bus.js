@@ -521,8 +521,10 @@ test('M3b even an ARMED session refuses to write on a live WO - the phase-6 regi
   // The bus gate and the arming gate are both bypassed here: a session built with write:true, on
   // the collector directly, no bus in the way. What is left is phase 6's workflow registry, and
   // this world sits on `/work-orders/375038` - the exact route the shipped wo-add-note entry
-  // names. It still refuses, because that entry is disabled. This is the assertion that would go
-  // red the day someone flips a flag without meaning to.
+  // names. This world loads the BWN-DOMC BLOCK BYTES ALONE (paste-identical with the ops repo), in
+  // which wo-add-note reads enabled: true - so the refusal below comes from the control scope, not
+  // from a disabled entry. Core itself switches the entry off right after the block, at BWN-DK-OFF
+  // (D-K, Phase 1 PR-A); M3c proves that override.
   var w = makeWorld();
   var DC = w.sandbox.window.BWNDOMC;
   var s = DC.createSession({ window: w.win, document: w.doc, write: true, rank: 5 });
@@ -538,9 +540,74 @@ test('M3b even an ARMED session refuses to write on a live WO - the phase-6 regi
   var on = DC.WORKFLOWS.filter(function (x) { return x.enabled; }).map(function (x) { return x.id; });
   // A pinned inventory rather than an emptiness check: this still goes red the day a SECOND
   // workflow arrives switched on, which is the change actually worth catching.
-  A.ok('M3b the enabled set is exactly [wo-add-note]', on.join(',') === 'wo-add-note', on.join(','));
+  A.ok('M3b the BLOCK bytes alone enable exactly [wo-add-note] (Core overrides it at BWN-DK-OFF; see M3c)', on.join(',') === 'wo-add-note', on.join(','));
   A.ok('M3b and app.umbrava.com is not in the blanket surface allowlist',
     DC.WRITE_SURFACES['https://app.umbrava.com'] === undefined);
+});
+
+// M3c (D-K, Phase 1 PR-A): Core switches wo-add-note OFF right after the paste-identical BWN-DOMC
+// block, at BWN-DK-OFF. Two things are proven: WHERE the override sits in Core (top level, after the
+// block and its try/catch, before the domHandle bwnBoot - a page can write bwn:modules
+// {"domHandle":false} and skip anything inside that boot), and WHAT it does to all three entry
+// points once run against the real block bytes.
+var CORE_DKOFF = slice(CORE, '  // BWN-DK-OFF START', '  // BWN-DK-OFF END', 'BWN-DK-OFF');
+function dkPositionResults(text) {
+  var out = [];
+  var dk = text.indexOf('  // BWN-DK-OFF START');
+  var domcEnd = text.indexOf('/* BWN-DOMC:END */');
+  var errAt = text.indexOf("console.error('[BWN SUITE CORE] DOM handle protocol blocks failed to load:'");
+  var catchClose = errAt === -1 ? -1 : text.indexOf('\n  }\n', errAt);
+  var boot = text.indexOf("  bwnBoot('domHandle', BWN_MODULES.domHandle, function () {");
+  out.push({ name: 'M3c position: BWN-DK-OFF sits after /* BWN-DOMC:END */ and after the DOM-block catch close',
+    ok: dk !== -1 && domcEnd !== -1 && catchClose !== -1 && dk > domcEnd && dk > catchClose });
+  out.push({ name: 'M3c position: BWN-DK-OFF sits before the domHandle bwnBoot (not inside it)',
+    ok: dk !== -1 && boot !== -1 && dk < boot && !/^\s*bwnBoot\(/m.test(text.slice(catchClose, dk)) });
+  return out;
+}
+dkPositionResults(CORE).forEach(function (r) { A.ok(r.name, r.ok); });
+A.ok('M3c the override snippet reads no BWN_MODULES and calls no bwnBoot (unconditional)',
+  CORE_DKOFF.indexOf('BWN_MODULES') === -1 && CORE_DKOFF.indexOf('bwnBoot(') === -1);
+A.ok('M3c the override snippet carries no byte of the paste-identical block', CORE_DKOFF.indexOf('BWN-DOMC:') === -1);
+// CONTROL (b): the snippet moved INSIDE the domHandle bwnBoot body -> the position pin goes red.
+(function () {
+  var moved = mutate(CORE, CORE_DKOFF + '  // BWN-DK-OFF END\n', '', 'M3c-b remove');
+  moved = mutate(moved, "  bwnBoot('domHandle', BWN_MODULES.domHandle, function () {\n",
+    "  bwnBoot('domHandle', BWN_MODULES.domHandle, function () {\n" + CORE_DKOFF + '  // BWN-DK-OFF END\n', 'M3c-b insert');
+  var reds = dkPositionResults(moved).filter(function (r) { return !r.ok; });
+  A.ok('M3c CONTROL (b): the snippet moved inside the domHandle bwnBoot body -> the position pin goes red', reds.length > 0);
+})();
+
+function m3cResults(snippet) {
+  var out = [];
+  function ok(name, cond, detail) { out.push({ name: name, ok: !!cond, detail: detail }); }
+  var w = makeWorld();
+  vm.runInContext('(function(){ var window = this.window;\n' + snippet + '\n}).call(this)', w.sandbox, { filename: 'core-dk-off.js' });
+  var DC = w.sandbox.window.BWNDOMC;
+  var on = DC.WORKFLOWS.filter(function (x) { return x.enabled; }).map(function (x) { return x.id; });
+  ok('M3c after BWN-DK-OFF the enabled workflow set is []', on.length === 0, on.join(','));
+  var s = DC.createSession({ window: w.win, document: w.doc, write: true, rank: 5 });
+  var snap = DC.refresh(s).snapshot;
+  var h = (snap.elements[0] || {}).h;
+  var here = DC.workflowsHere(s).map(function (x) { return x.id; });
+  ok('M3c DC.workflowsHere has no wo-add-note on /work-orders/375038', here.indexOf('wo-add-note') === -1, here.join(','));
+  var r1 = DC.act(s, { verb: 'click', handle: h, revision: snap.page.revision });
+  ok('M3c DC.act click (armed rank-5) refuses NO_WORKFLOW', r1 && r1.ok === false && r1.code === 'NO_WORKFLOW', JSON.stringify(r1));
+  var r2 = null;
+  DC.actAsync(s, { verb: 'wait_for', handle: h, condition: 'enabled', revision: snap.page.revision }, function (res) { r2 = res; });
+  ok('M3c DC.actAsync wait_for refuses NO_WORKFLOW', r2 && r2.ok === false && r2.code === 'NO_WORKFLOW', JSON.stringify(r2));
+  var r3 = DC.execute(s, 'click', DC.VERBS.click, { handle: h, revision: snap.page.revision });
+  ok('M3c direct DC.execute click (skips writeGate) refuses OUT_OF_WORKFLOW_SCOPE with empty workflows',
+    r3 && r3.ok === false && r3.code === 'OUT_OF_WORKFLOW_SCOPE' && Array.isArray(r3.workflows) && r3.workflows.length === 0, JSON.stringify(r3));
+  return out;
+}
+
+test('M3c Core BWN-DK-OFF switches wo-add-note off for all three entry points (D-K)', function () {
+  m3cResults(CORE_DKOFF).forEach(function (r) { A.ok(r.name, r.ok, r.detail); });
+  // CONTROL (a): the override neutered (w.enabled = false -> void 0) -> the entry stays armed.
+  var neutered = mutate(CORE_DKOFF, 'w.enabled = false;', 'void 0;', 'M3c-a');
+  var reds = m3cResults(neutered).filter(function (r) { return !r.ok; }).map(function (r) { return r.name; });
+  A.ok('M3c CONTROL (a): w.enabled = false -> void 0 turns "no wo-add-note" red',
+    reds.indexOf('M3c DC.workflowsHere has no wo-add-note on /work-orders/375038') !== -1, reds.join(' | '));
 });
 
 test('M4 mutate() throws on a missing target', function () {

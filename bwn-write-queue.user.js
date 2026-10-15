@@ -1,10 +1,10 @@
 // ==UserScript==
 // @name         BWN Write Queue (Broadway National)
 // @namespace    broadwaynational.bwn
-// @version      0.6.3
+// @version      0.7.0
 // @downloadURL  https://raw.githubusercontent.com/Intermu/userscripts/main/bwn-write-queue.user.js
 // @updateURL    https://raw.githubusercontent.com/Intermu/userscripts/main/bwn-write-queue.user.js
-// @description  Drains the Track C write-back queue: claims THIS coordinator's own queued Umbrava write commands from the SWA, confirms each irreversible write, executes it via patchWorkOrder/addEditJobNote, and reports the result. Self-drain; every write is human-confirmed; disabled until you turn it on. v0.5 RETIRES this script's Bulk Operations Console modal - Core (bwn-suite-core, flag bulkOps) is now the single Safe Bulk Operations Console; the drain executor stays here as Track C infrastructure.
+// @description  Drains the Track C write-back queue: claims THIS coordinator's own queued Umbrava write commands from the SWA, confirms each irreversible write, executes it via patchWorkOrder/addEditJobNote, and reports the result. Self-drain; every write is human-confirmed; disabled until you turn it on. v0.5 RETIRES this script's Bulk Operations Console modal - Core (bwn-suite-core, flag bulkOps) is now the single Safe Bulk Operations Console; the drain executor stays here as Track C infrastructure. v0.7 switches OFF the Dashboard picker catalog push (Status/Assign lists keep their last-pushed values) until it has a governed path.
 // @match        https://app.umbrava.com/*
 // @run-at       document-idle
 // @noframes
@@ -38,7 +38,7 @@
 
 (function () {
   "use strict";
-  var VER = "0.6.3";   // keep in lockstep with @version (TM compares versions, not contents)
+  var VER = "0.7.0";   // keep in lockstep with @version (TM compares versions, not contents)
 
   var SWA_BASE = "https://green-stone-0717dab0f.7.azurestaticapps.net";
   var PROXY_URL = SWA_BASE + "/api/wo-write-queue";
@@ -216,7 +216,19 @@
   // bwn:modules {"writeQueue":false} halts every queued write suite-wide, audited outcome:'denied'.
   var bwnGql = gql;
   var BWN_VER = VER;
-  var BWN_MODULES = (function () { try { return JSON.parse(localStorage.getItem('bwn:modules') || '{}') || {}; } catch (e) { return {}; } })();
+  var BWN_MODULES = (function () {
+    var out = {};
+    try {
+      var p = JSON.parse(localStorage.getItem('bwn:modules') || '{}');
+      if (p && typeof p === 'object' && !Array.isArray(p)) {
+        Object.keys(p).forEach(function (k) {
+          if (typeof p[k] === 'boolean') out[k] = p[k];
+        });
+      }
+    } catch (e) {}
+    return out;
+  })();
+  BWN_MODULES.writeQueueCatalog = false;   // hard-OFF (Phase 0 decision 2): unconditional, after the parser, so neither bwn:modules nor bwn:gov can raise it
   var BWN_OPS = {
     patchWorkOrder: { kind: 'write', perm: bwnPermsForPatch, target: 'workOrder', risk: 'high', idempotent: false, retry: 'none',
       ok: 'Work order updated.', fail: 'The work order was not updated.' },
@@ -625,9 +637,11 @@
   function enabled() { return GM_getValue("wq_enabled", false) === true; }
 
   // ---- Catalog push (phase 2): feed the Dashboard's Status/Assign pickers ----
-  // Reads the tenant STATUS list + USER directory and pushes them to /api/catalog-ingest (key-gated + vouched via
-  // userToken, read fresh at send time; the catalogs are not user-specific). Runs on load REGARDLESS of wq_enabled (the pickers
-  // must work for Dashboard users who never enable draining), throttled to once per 6h per browser.
+  // SWITCHED OFF (Phase 1 PR-A, Phase 0 decision 2): BWN_MODULES.writeQueueCatalog is hard-OFF and
+  // wqPushCatalogs returns at its first statement - no read, no POST, no staff directory or bearer
+  // egress. The function is kept for a governed Phase 2 path. When it is re-enabled it reads the
+  // tenant STATUS list + USER directory and pushes them to /api/catalog-ingest (key-gated + vouched via
+  // userToken, read fresh at send time), throttled to once per 6h per browser.
   var CAT_TTL_MS = 6 * 3600000;
   var CAT_STATUS_Q = "query{ workOrderStatuses{ id name isActive } }";
   var CAT_USERS_Q = "query{ users(includeInactiveUsers:false, includeSystemUsers:false){ id firstName lastName emailAddress isInactive isTechnician } }";
@@ -636,6 +650,7 @@
   function wqMapUser(u){ if(!u||u.isInactive) return null; var id=String(u.id||"").trim(); var name=((u.firstName||"")+" "+(u.lastName||"")).trim(); if(!id||!name) return null; return { id:id, name:name, email:String(u.emailAddress||"").trim(), isTechnician:!!u.isTechnician }; }
   // WQ-CAT-PURE-END
   function wqPushCatalogs(force){
+    if (BWN_MODULES.writeQueueCatalog !== true) return;   // hard-OFF: no read, no POST
     if(!ingestKey() || !authToken()) return;                       // need the shared key + a live Umbrava session
     var last = Number(GM_getValue("wq_catalog_ts", 0)) || 0;
     if(!force && (Date.now() - last < CAT_TTL_MS)) return;          // throttle
@@ -789,10 +804,9 @@
   });
   GM_registerMenuCommand("BWN Write Queue: enable draining", function () { GM_setValue("wq_enabled", true); alert("Write-queue draining ENABLED. Each write still waits for your Approve."); });
   GM_registerMenuCommand("BWN Write Queue: disable draining", function () { GM_setValue("wq_enabled", false); alert("Write-queue draining disabled."); });
-  GM_registerMenuCommand("BWN Write Queue: refresh Umbrava catalogs now", function () { GM_setValue("wq_catalog_ts", 0); wqPushCatalogs(true); alert("Refreshing the status + user catalogs for the Dashboard pickers."); });
 
   setInterval(pollTick, POLL_MS);
   setTimeout(pollTick, 3000);
-  setTimeout(function () { wqPushCatalogs(false); }, 5000);   // push catalogs on load (throttled), independent of draining
+  setTimeout(function () { wqPushCatalogs(false); }, 5000);   // returns at the writeQueueCatalog hard-OFF gate (catalog push switched off)
   try { console.log("[BWN Write Queue " + VER + "] loaded" + (enabled() ? " (draining ON)" : " (disabled - use the menu to enable)")); } catch (e) { }
 })();

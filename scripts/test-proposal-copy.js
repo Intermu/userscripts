@@ -38,6 +38,7 @@ function makeEnv(opts) {
   var lsEntries = {};
   if (opts.withToken !== false) lsEntries['@@auth0spajs@@::client::https://app.umbrava.com/api::openid'] = JSON.stringify({ body: { access_token: opts.foreign ? FOREIGN_TOKEN : GOOD_TOKEN } });
   if (opts.roleSlot) lsEntries['bwn:role:last'] = JSON.stringify(opts.roleSlot);
+  if (opts.gov) lsEntries['bwn:gov'] = JSON.stringify(opts.gov);   // Phase 1 PR-A (B4): central kill bundle
   env.localStorage = makeLS(lsEntries);
   env.fetch = function (url, init) {
     var body = init && init.body ? JSON.parse(init.body) : {};
@@ -286,6 +287,65 @@ function loadCore(env) {
     apiU.dupFindMatches({ description: '', subtotal: null }, [{ id: 20, description: '', subtotal: { amount: 5, currency: 'USD', precision: 2 } }]).length === 0);
   A.ok('dupFindMatches: two absent subtotals do not read as equal',
     apiU.dupFindMatches({ description: 'x', subtotal: null }, [{ id: 21, description: 'y', subtotal: null }]).length === 0);
+
+  // ---- Phase 1 PR-A, B4: a central bwn:gov kill reaches proposal-copy's two writes ------------------
+  // Both writes pass feature:'proposalCopy'; the script seeds the key and applies bwn:gov one-way (the
+  // dispatch shape). The two READS (source details + target WO) still run; zero mutation calls.
+  function mutationCalls(env) { return env.calls.filter(function (c) { return c.op === 'CreateDraftProposal' || c.op === 'EditProposal'; }); }
+  function lastAudit(env) { var a = JSON.parse(env.localStorage.getItem('bwn:audit') || '[]'); return a[a.length - 1] || null; }
+  async function killRun(coreSrc, gov, copyOpts) {
+    var env = makeEnv({ replies: baseReplies(), gov: gov }); var ctx = vm.createContext(env);
+    vm.runInContext('(function(){' + coreSrc + '\n; this.__api = { copyProposal: copyProposal }; }).call(globalThis);', ctx);
+    var r = await env.__api.copyProposal(500, 8002, copyOpts || { dryRun: false });
+    return { env: env, r: r };
+  }
+  var GOV_KILL = { v: 1, etag: 't', flags: { globalKillSwitch: true } };
+  var GOV_PC_OFF = { v: 1, etag: 't', flags: { proposalCopy: false } };
+  var k1 = await killRun(S_CORE, GOV_KILL);
+  A.eq('B4 kill: globalKillSwitch -> ZERO CreateDraftProposal / EditProposal calls', mutationCalls(k1.env).length, 0);
+  A.ok('B4 kill: the two reads still ran', k1.env.calls.some(function (c) { return c.op === 'ClientProposalDetails'; }) && k1.env.calls.some(function (c) { return c.op === 'ProposalWO'; }));
+  A.ok('B4 kill: result ok:false', k1.r.ok === false, JSON.stringify(k1.r));
+  var la1 = lastAudit(k1.env);
+  A.ok('B4 kill: bwn:audit records denied feature-off:proposalCopy', la1 && la1.outcome === 'denied' && la1.reason === 'feature-off:proposalCopy', JSON.stringify(la1));
+  var k2 = await killRun(S_CORE, GOV_PC_OFF);
+  A.eq('B4 kill: flags.proposalCopy:false -> ZERO mutation calls', mutationCalls(k2.env).length, 0);
+  A.ok('B4 kill: flags.proposalCopy:false -> ok:false, audited denied', k2.r.ok === false && (lastAudit(k2.env) || {}).reason === 'feature-off:proposalCopy');
+  var k3 = await killRun(S_CORE, GOV_KILL, { dryRun: false, draftId: 5 });
+  A.eq('B4 kill: edit-stage (draftId:5) under a kill -> ZERO EditProposal calls', k3.env.calls.filter(function (c) { return c.op === 'EditProposal'; }).length, 0);
+  A.ok('B4 kill: edit-stage result ok:false', k3.r.ok === false);
+  var k4 = await killRun(S_CORE, null);
+  A.ok('B4 no bundle: the copy still writes (create + edit sent)', k4.r.ok === true && mutationCalls(k4.env).length === 2);
+  // CONTROL (a): feature:'proposalCopy' removed from the create call -> the create kill goes red.
+  var kc1 = await killRun(mutate(S_CORE, "createVars, { feature: 'proposalCopy', confirmed: true", 'createVars, { confirmed: true'), GOV_KILL);
+  A.ok('CONTROL (a): without feature on the create, the kill no longer stops CreateDraftProposal', kc1.env.calls.filter(function (c) { return c.op === 'CreateDraftProposal'; }).length === 1);
+  // CONTROL (b): the seed line removed -> flags.proposalCopy:false no longer reaches the writes.
+  var kc2 = await killRun(mutate(S_CORE, "  if (!('proposalCopy' in BWN_MODULES)) BWN_MODULES.proposalCopy = true;\n", ''), GOV_PC_OFF);
+  A.ok('CONTROL (b): without the seed, flags.proposalCopy:false sends the writes (the seed is load-bearing)', mutationCalls(kc2.env).length === 2);
+
+  // ---- Phase 1 PR-A, P1-05: the console hook is DRY-RUN ONLY -------------------------------------
+  // The hook lives outside S_CORE (after '// ===== ui'); slice it and run it in the SAME IIFE.
+  var S_HOOK = slice('  // ---- console entry point for the live gate', '  var MIN_RANK = 4;', 'console hook');
+  async function hookRun(hookSrc, callOpts) {
+    var env = makeEnv({ replies: baseReplies() }); env.window = {}; var ctx = vm.createContext(env);
+    vm.runInContext('(function(){' + S_CORE + '\n' + hookSrc + '\n; this.__hook = window.__bwnCopyProposal; }).call(globalThis);', ctx);
+    var r = await env.__hook(500, 8002, callOpts);
+    return { env: env, r: r };
+  }
+  var h1 = await hookRun(S_HOOK, { dryRun: false, draftId: 5 });
+  A.eq('hook: __bwnCopyProposal(src, wo, {dryRun:false, draftId:5}) sends ZERO mutation calls', mutationCalls(h1.env).length, 0);
+  A.ok('hook: the result is a dry run', h1.r && h1.r.dryRun === true, JSON.stringify(h1.r).slice(0, 120));
+  var touched = [];
+  var trap = {};
+  Object.defineProperty(trap, 'dryRun', { get: function () { touched.push('dryRun'); return touched.length > 1 ? false : true; } });
+  Object.defineProperty(trap, 'draftId', { get: function () { touched.push('draftId'); return 5; } });
+  var h2 = await hookRun(S_HOOK, trap);
+  A.eq('hook: a getter-bearing options object is never read', touched, []);
+  A.eq('hook: ...and still sends ZERO mutation calls', mutationCalls(h2.env).length, 0);
+  // CONTROL: the old hook body (caller options passed through) -> {dryRun:false} writes.
+  var OLD_HOOK = mutate(S_HOOK, "    window.__bwnCopyProposal = function (sourceProposalId, targetWorkOrderNumber) {\n      return copyProposal(sourceProposalId, targetWorkOrderNumber, { dryRun: true });\n    };",
+    "    window.__bwnCopyProposal = function (sourceProposalId, targetWorkOrderNumber, opts) {\n      opts = opts || {};\n      if (opts.dryRun == null) opts.dryRun = true;\n      return copyProposal(sourceProposalId, targetWorkOrderNumber, opts);\n    };");
+  var hc = await hookRun(OLD_HOOK, { dryRun: false });
+  A.ok('CONTROL: the old pass-through hook WRITES on {dryRun:false} (the zero-mutation assertion is load-bearing)', mutationCalls(hc.env).length > 0);
 
   A.finish();
 })();

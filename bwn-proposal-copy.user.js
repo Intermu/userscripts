@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         BWN Proposal Copy (Broadway National)
 // @namespace    broadwaynational.bwn
-// @version      0.5.5
+// @version      0.6.0
 // @downloadURL  https://raw.githubusercontent.com/Intermu/userscripts/main/bwn-proposal-copy.user.js
 // @updateURL    https://raw.githubusercontent.com/Intermu/userscripts/main/bwn-proposal-copy.user.js
 // @description  Copy a client proposal from an aged-out work order onto a chosen replacement WO as an un-submitted Draft, in one confirmed action. Replays Umbrava's own createDraftProposal + editProposal mutations (line items copied verbatim); never submits, deletes, or retries. Manager-gated visibility. @grant none.
@@ -15,7 +15,7 @@
 (function () {
   'use strict';
 
-  var VER = '0.5.5';   // keep in step with @version
+  var VER = '0.6.0';   // keep in step with @version
   var DRY_RUN = false; // when true, the two WRITE mutations are logged, not sent
   var FONT = "-apple-system,BlinkMacSystemFont,'Segoe UI','Helvetica Neue',Arial,sans-serif";
   var GREEN = '#0d3d26';
@@ -278,6 +278,26 @@
     } catch (e) {}
     return out;
   })();
+  // Central governance (governance-sync, Phase 1 PR-A B4): fold the org flags bwn-suite-ai caches to
+  // bwn:gov into BWN_MODULES as ONE-WAY disables, the SAME shape as bwn-dispatch's bwnApplyGov(). A
+  // remote flags['proposalCopy']===false or flags.globalKillSwitch DISABLES this script's two writes -
+  // the bwnGqlOp per-feature gate below reads BWN_MODULES['proposalCopy'] live (both writes pass
+  // feature:'proposalCopy') - and can NEVER enable one. A local bwn:modules {"proposalCopy":false}
+  // lowers it too. Absent or corrupt bundle keeps the local default. Re-applies on the bwn:gov ping.
+  // PENDING: replaced by the shared BWN-GOV block in PR-B.
+  if (!('proposalCopy' in BWN_MODULES)) BWN_MODULES.proposalCopy = true;
+  function bwnApplyGov() {
+    try {
+      var g = JSON.parse(localStorage.getItem('bwn:gov') || 'null');
+      if (!g || typeof g !== 'object' || !g.flags || typeof g.flags !== 'object') return;
+      var f = g.flags, kill = f.globalKillSwitch === true;
+      Object.keys(BWN_MODULES).forEach(function (k) {
+        if (kill || f[k] === false) BWN_MODULES[k] = false;   // one-way: only ever disable
+      });
+    } catch (e) { /* corrupt bundle -> keep local defaults (safe) */ }
+  }
+  bwnApplyGov();
+  try { document.addEventListener('bwn:gov', function () { bwnApplyGov(); }); } catch (e) { }
   var BWN_OPS = {
     createDraftProposal: { kind: 'write', perm: 'WorkOrderProposal.AddNew', target: 'proposal', risk: 'high', idempotent: false, retry: 'none',
       ok: 'Draft proposal created.', fail: 'The draft proposal was not created.' },
@@ -673,14 +693,14 @@
         // already exists, so fill THAT one instead of creating another orphan $0 draft.
         var created = (opts.draftId != null)
           ? Promise.resolve({ createDraftProposal: { success: true, proposal: { id: opts.draftId } } })
-          : bwnGqlOp('createDraftProposal', M_CREATE_DRAFT, createVars, { confirmed: true, ids: { wo: target.number } });
+          : bwnGqlOp('createDraftProposal', M_CREATE_DRAFT, createVars, { feature: 'proposalCopy', confirmed: true, ids: { wo: target.number } });
         return created
           .catch(function (err) { throw (err && err.stage) ? err : stage('create', (err && err.message) || String(err)); })
           .then(function (r) {
           var res = r && r.createDraftProposal;
           if (!res || res.success !== true || !res.proposal || res.proposal.id == null) throw stage('create', (res && res.message) || 'createDraftProposal reported no success');
           newId = res.proposal.id;
-          return bwnGqlOp('editProposal', M_EDIT, buildEditVars(newId, source), { confirmed: true, ids: { wo: target.number, proposalId: newId }, after: { lineItems: (source.proposalLineItems || []).length } })
+          return bwnGqlOp('editProposal', M_EDIT, buildEditVars(newId, source), { feature: 'proposalCopy', confirmed: true, ids: { wo: target.number, proposalId: newId }, after: { lineItems: (source.proposalLineItems || []).length } })
             .catch(function (err) { throw (err && err.stage) ? err : stage('edit', (err && err.message) || String(err)); });
         }).then(function (r) {
           var res = r && r.editProposal;
@@ -780,17 +800,16 @@
   // the row-injection lifecycle (or an unverified selector) can never prevent it.
   // Runs the copy engine straight, so the copy is testable even while the
   // Proposals-row selectors are unverified and no button has injected. Suite
-  // convention (cf. window.__bwnLauncher, __bwnDispatchSyncNow). Defaults to
-  // DRY-RUN regardless of the DRY_RUN flag - a console call NEVER writes unless
-  // {dryRun:false} is passed explicitly, so it cannot fire a write by accident.
+  // convention (cf. window.__bwnLauncher, __bwnDispatchSyncNow). DRY-RUN ONLY (Phase 1 PR-A,
+  // P1-05): the hook passes a FRESH {dryRun:true} literal and never reads caller options, so a page
+  // script cannot make it write (not with {dryRun:false}, not with a getter-bearing object). Real
+  // copies go through the drawer only (rank >= 4 + the drawer's confirm).
   // (copyProposal is a hoisted function declaration, so referencing it here is safe.)
   try {
-    window.__bwnCopyProposal = function (sourceProposalId, targetWorkOrderNumber, opts) {
-      opts = opts || {};
-      if (opts.dryRun == null) opts.dryRun = true;
-      return copyProposal(sourceProposalId, targetWorkOrderNumber, opts);
+    window.__bwnCopyProposal = function (sourceProposalId, targetWorkOrderNumber) {
+      return copyProposal(sourceProposalId, targetWorkOrderNumber, { dryRun: true });
     };
-    console.info('[BWN PROPOSAL COPY] console entry: __bwnCopyProposal(sourceProposalId, targetWorkOrderNumber, {dryRun:true})  (dry-run default; pass {dryRun:false} to write)');
+    console.info('[BWN PROPOSAL COPY] console entry: __bwnCopyProposal(sourceProposalId, targetWorkOrderNumber) - dry-run only');
   } catch (e) { }
 
   var MIN_RANK = 4;

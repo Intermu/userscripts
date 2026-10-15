@@ -4,7 +4,11 @@
 // WHY THIS EXISTS - the toggle used to do one thing (open a tracked queue item). It now posts an
 // Action note that @-mentions the WO's assignee and then CHASES them: a prompt every 15 minutes
 // until they log a Client note, and after 5 unanswered prompts an Escalation note @-mentioning
-// their supervisor and manager. Three things in there are silent when they break:
+// their supervisor and manager. Phase 1 PR-A (Phase 0 decision 6): that automatic Escalation note is
+// hard-OFF (BWN_MODULES.dropUploadLadderEscalate, gated === true); the 5th prompt tells the person to
+// escalate by hand. Section 5 drives the escalation with the key forced true (the code path is kept
+// for a governed Phase 2); section 5b proves the shipped default posts nothing. Three things in there
+// are silent when they break:
 //   1. the @-mention wire format. The notify rides ENTIRELY inside contentHtml as a TipTap span
 //      (captured live 2026-08-17, proven by bwn-low-gp); actionNoteEmails stays null. A span with
 //      one attribute wrong posts a note that reads fine and notifies NOBODY.
@@ -60,6 +64,7 @@ function build(opts, blockSrc) {
       removeItem: function (k) { delete store[k]; }
     },
     window: {},                                    // no Notification -> the in-page toast floor
+    BWN_MODULES: opts.modules || {},               // Phase 1 PR-A: dropUploadLadderEscalate is read live
     setInterval: function (fn) { state.ticker = fn; return 1; },
     location: { href: 'https://app.umbrava.com/work-orders/371126' },
     toast: function (m) { state.toasts.push(String(m)); },
@@ -241,7 +246,7 @@ function run() {
   }).then(function () {
     // ---- 5. The ladder, driven end to end -----------------------------------
     console.log('# the ladder - 5 prompts, then the supervisor and manager');
-    var L = build({ teamsOf: { 'a-guid': ['T'] }, members: { T: TEAM_T }, notes: [] });
+    var L = build({ teamsOf: { 'a-guid': ['T'] }, members: { T: TEAM_T }, notes: [], modules: { dropUploadLadderEscalate: true } });
     var T0 = L.state.now;
     L.api.ladderPut({
       id: 'L1', woNum: 371126,
@@ -285,6 +290,34 @@ function run() {
         A.ok('...naming the assignee who did not answer', /Dana Coordinator/.test(L.state.posted[0].text), L.state.posted[0].text);
         A.eq('the ladder is closed after escalating (it does not nag forever)', L.api.ladderLoad().length, 0);
       });
+    });
+  }).then(function () {
+    // ---- 5b. Phase 1 PR-A: the shipped default never auto-posts the Escalation note ----------
+    console.log('# PR-A: the 5th prompt posts NOTHING while dropUploadLadderEscalate is off');
+    function toFifth(modules, blockSrc) {
+      var L = build({ teamsOf: { 'a-guid': ['T'] }, members: { T: TEAM_T }, notes: [], modules: modules }, blockSrc);
+      var T0 = L.state.now;
+      L.api.ladderPut({ id: 'LX', woNum: 371126, assigneeId: 'a-guid', assigneeName: 'Dana Coordinator', subject: 'Store 305',
+        startedAt: T0, nextAt: T0 + L.api.LADDER_EVERY, count: 4 });
+      L.state.now = T0 + 5 * L.api.LADDER_EVERY;
+      L.api.ladderTick();
+      return settle().then(settle).then(function () { return L; });
+    }
+    return toFifth({}).then(function (L) {
+      A.eq('default {}: the 5th prompt posts NOTHING', L.state.posted.length, 0);
+      A.eq('default {}: the ladder is closed', L.api.ladderLoad().length, 0);
+      A.ok('default {}: the 5th prompt tells the person to escalate by hand', /Escalation is not posted automatically/.test(L.state.toasts[0] || ''), L.state.toasts[0]);
+      A.ok('default {}: and does not claim it is escalating', !/Escalating to your supervisor/.test(L.state.toasts[0] || ''), L.state.toasts[0]);
+      return toFifth({ dropUploadLadderEscalate: false });
+    }).then(function (L) {
+      A.eq('dropUploadLadderEscalate:false: the 5th prompt posts NOTHING', L.state.posted.length, 0);
+      A.eq('dropUploadLadderEscalate:false: the ladder is closed', L.api.ladderLoad().length, 0);
+      // CONTROL: the === true gate removed -> the default-off run posts the Escalation note.
+      var noGate = BLOCK.replace('          if (BWN_MODULES.dropUploadLadderEscalate === true) {\n            ladderEscalate(cur)', '          if (true) {\n            ladderEscalate(cur)');
+      A.ok('CONTROL: the gate needle is present exactly once (the mutation is not a no-op)', noGate !== BLOCK && BLOCK.split('if (BWN_MODULES.dropUploadLadderEscalate === true) {\n            ladderEscalate(cur)').length === 2);
+      return toFifth({}, noGate);
+    }).then(function (L) {
+      A.ok('CONTROL: without the === true gate, the default-off 5th prompt POSTS ("posted 0" goes red)', L.state.posted.length === 1, 'posted ' + L.state.posted.length);
     });
   }).then(function () {
     // Answering stops it, at any rung.

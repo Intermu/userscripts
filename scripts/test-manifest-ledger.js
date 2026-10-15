@@ -175,8 +175,13 @@ function auditScript(file, src, row) {
   if (!meta) return ['META: no parseable ==UserScript== block'];
 
   var want = RAW_BASE + file;
-  if (meta.updateURL !== want) problems.push('UPDATEURL: @updateURL is ' + meta.updateURL + ', want ' + want);
-  if (meta.downloadURL !== want) problems.push('UPDATEURL: @downloadURL is ' + meta.downloadURL + ', want ' + want);
+  // Phase 1 PR-A (P1-08): a script withheld from distribution may carry @updateURL / @downloadURL
+  // 'none' (or omit them) under a waived.updateurl row - but ONLY while the roster marks it
+  // expectedInstalled:false (R9), and never for a different URL: a foreign host still goes red.
+  var urlWaived = waived(row, 'updateurl') && row.expectedInstalled === false;
+  function urlOk(v) { return v === want || (urlWaived && (v == null || v === 'none')); }
+  if (!urlOk(meta.updateURL)) problems.push('UPDATEURL: @updateURL is ' + meta.updateURL + ', want ' + want);
+  if (!urlOk(meta.downloadURL)) problems.push('UPDATEURL: @downloadURL is ' + meta.downloadURL + ', want ' + want);
 
   if (!meta.version) problems.push('META: no @version');
 
@@ -464,6 +469,26 @@ A.ok('C23 dropping a real declared host from @connect goes red on real shipped b
     manifest.scripts[aiFile]), 'CONNECT'),
   'CONNECT guard did not fire when a hard-coded host lost its declaration');
 
+// P1-08 controls (Phase 1 PR-A): the updateurl waiver covers absent-or-'none' only, and only while the
+// script is not expected to be installed.
+var baFile = 'bwn-bulk-assets.user.js';
+var baSrc = sources[baFile];
+var baRow = manifest.scripts[baFile];
+A.ok('C25 bulk-assets ships @updateURL none and @downloadURL none',
+  /^\/\/ @updateURL\s+none$/m.test(baSrc) && /^\/\/ @downloadURL\s+none$/m.test(baSrc));
+A.ok('C26 bulk-assets with none headers and NO waiver row goes red',
+  fired(auditScript(baFile, baSrc, { expectedInstalled: false }), 'UPDATEURL'),
+  'UPDATEURL guard did not fire on none headers without a waiver');
+A.ok('C27 the updateurl waiver does not cover a foreign @updateURL',
+  fired(auditScript(baFile, baSrc.replace(/^\/\/ @updateURL\s+none$/m, '// @updateURL    https://example.com/x.user.js'), baRow), 'UPDATEURL'),
+  'the waiver silenced a real foreign URL');
+A.ok('C28 the updateurl waiver does not apply when expectedInstalled is true (R9)',
+  fired(auditScript(baFile, baSrc, { expectedInstalled: true, waived: baRow.waived }), 'UPDATEURL'),
+  'the waiver switched off auto-update for an installed-everywhere script');
+A.ok('C29 the updateurl waiver does not silence another check',
+  fired(auditScript(baFile, baSrc.replace('// @namespace    ' + CANON_NS, '// @namespace    evil.example'), baRow), 'NS'),
+  'an updateurl waiver wrongly suppressed the NS guard');
+
 A.ok('C22 a connect waiver does not silence GRANT',
   fired(auditScript(probe, probeSrc.replace(GRANT_NONE, '// @grant        GM_nonesuch'),
     { expectedInstalled: true, waived: { connect: 'unrelated waiver, long enough to pass the reason check' } }), 'GRANT'),
@@ -476,5 +501,45 @@ A.ok('C22 a connect waiver does not silence GRANT',
 A.eq('C24 both @grant spellings of the audio API resolve, and stay Tampermonkey-only',
   ['GM_audio', 'GM.audio', 'GM_audio.setMute'].map(classifyGrant),
   ['tm-only', 'tm-only', 'tm-only']);
+
+// ---- CI wiring self-test (Phase 1 PR-A, P1-14) --------------------------------------------------
+// A harness that is not wired into ci.yml never runs in CI, and a green CI then proves nothing about
+// it. Every scripts/test-*.js must appear in EXACTLY one 'run: node scripts/<file>' line, every wired
+// file must exist, and every '- name:' value that contains ': ' must be quoted (an unquoted colon-space
+// turns the step into a YAML mapping and the workflow parses to zero jobs).
+var CI_PATH = path.join(ROOT, '.github', 'workflows', 'ci.yml');
+var ciText = fs.readFileSync(CI_PATH, 'utf8').replace(/\r\n/g, '\n');
+var testFiles = fs.readdirSync(path.join(ROOT, 'scripts')).filter(function (f) { return /^test-.*\.js$/.test(f); }).sort();
+function ciWiring(text, tests) {
+  var out = { unwired: [], duplicate: [], missing: [], unquoted: [] };
+  var wired = Object.create(null);
+  var re = /^\s*run:\s*node\s+scripts\/(test-[^\s]+\.js)\s*$/gm, m;
+  while ((m = re.exec(text)) !== null) wired[m[1]] = (wired[m[1]] || 0) + 1;
+  tests.forEach(function (f) {
+    if (!wired[f]) out.unwired.push(f);
+    else if (wired[f] > 1) out.duplicate.push(f);
+  });
+  Object.keys(wired).forEach(function (f) { if (tests.indexOf(f) === -1) out.missing.push(f); });
+  var nre = /^\s*-\s+name:\s*(.*)$/gm, n;
+  while ((n = nre.exec(text)) !== null) {
+    var v = n[1].trim();
+    if (v.indexOf(': ') !== -1 && !/^(['"]).*\1$/.test(v)) out.unquoted.push(v);
+  }
+  return out;
+}
+var wiring = ciWiring(ciText, testFiles);
+A.ok('W1 every scripts/test-*.js is wired into ci.yml (no unwired harness)', wiring.unwired.length === 0, wiring.unwired.join(', '));
+A.ok('W2 no harness is wired twice (no duplicate run line)', wiring.duplicate.length === 0, wiring.duplicate.join(', '));
+A.ok('W3 every wired harness exists on disk', wiring.missing.length === 0, wiring.missing.join(', '));
+A.ok('W4 every step name containing ": " is quoted', wiring.unquoted.length === 0, wiring.unquoted.join(' | '));
+A.ok('W5 the wiring scan actually sees the run lines', testFiles.length > 100 && (ciText.match(/run:\s*node\s+scripts\/test-/g) || []).length === testFiles.length,
+  testFiles.length + ' files');
+// Controls on synthetic ci text built from the real file.
+var oneRun = 'run: node scripts/' + testFiles[0];
+var ciMinus = ciText.replace(new RegExp('^.*' + oneRun.replace(/[.*+?^${}()|[\]\\/]/g, '\\$&') + '\\s*\\n', 'm'), '');
+A.ok('W-C1 a run line removed -> "unwired" goes red', ciWiring(ciMinus, testFiles).unwired.indexOf(testFiles[0]) !== -1 && ciMinus !== ciText);
+A.ok('W-C2 a run line duplicated -> "duplicate" goes red', ciWiring(ciText + '\n      - name: dup\n        ' + oneRun + '\n', testFiles).duplicate.indexOf(testFiles[0]) !== -1);
+A.ok('W-C3 a wired file that does not exist -> "missing" goes red', ciWiring(ciText + '\n        run: node scripts/test-ghost-harness.js\n', testFiles).missing.indexOf('test-ghost-harness.js') !== -1);
+A.ok('W-C4 an unquoted "- name: Foo: bar" -> "quoted names" goes red', ciWiring(ciText + '\n      - name: Foo: bar\n', testFiles).unquoted.indexOf('Foo: bar') !== -1);
 
 A.finish();

@@ -480,11 +480,9 @@ console.log('\n-- the shipped call sites: all five ask the same question --');
   // (the v2 gap); List Heat bumps to v3.27. (v3.26 carried Last Note Date; v3.25 added the push.)
   // v3.28 / Core 1.78.15: the audit panel's open tally was factored into auditOpenTally so its
   // heatDone gate is sliced above rather than source-checked. (1.66.35 had added the closure
-  // auto-advance step.) The exact pin is the point: it forces a conscious edit on every Core
-  // bump, so a version can never ride out attached to an unrelated change. It was red on main
-  // from 1.66.33 (the mirror-retirement sweep bumped Core without acknowledging it here) until
-  // 2026-08-06.
-  A.ok('Core is bumped to 1.94.6', core.indexOf('// @version      1.94.6') !== -1);
+  // auto-advance step.) The exact Core @version pin that used to sit here was deleted in Phase 1
+  // PR-A (Core 1.95.0, plan amendment K): it forced an edit here on every unrelated Core bump, and
+  // the manifest ledger already parses @version. The List Heat banner pin below stays.
   A.ok('and List Heat announces v3.28', core.indexOf("console.info('[BWN HEAT] v3.28 loaded on', location.href);") !== -1);
   // Drift guard (1.78.17): the module-inventory banner had read "List Heat 3.24" while the module
   // banner read v3.28 - the two are hand-kept and had silently diverged. Assert they agree so it
