@@ -172,6 +172,9 @@ failures" was pre-enabled.
 
 ## CHANGELOG
 
+- **0.2.6** - Note read-back normalizer decodes `&amp;` last, so a literal `&lt;` typed in a note is no
+  longer double-unescaped to `<` (CodeQL js/double-escaping). Comparison only; nothing renders it.
+
 - **0.2.5** — Mapped the Note History modal (read-only): notes render in a same-origin
   `#notehistoryframe` iframe as `.message`/`.sender`/`.date` blocks, oldest→newest. Implemented
   `verifyNote` to open the History dialog and read the note back from the iframe `.message` nodes

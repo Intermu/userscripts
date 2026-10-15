@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Primark PRIMMS – Bulk Acceptance Assistant
 // @namespace    broadwaynational.com/primms
-// @version      0.2.5
+// @version      0.2.6
 // @description  BWN operator aid for reviewing eligible Umbrava-originated work orders in Primark's PRIMMS/Ostara tenant and (Phase 2, disabled) accepting them with the required note. Phase 1 is read-only + dry-run and makes ZERO network requests. Never touches Umbrava.
 // @author       Broadway National
 // @match        https://primark-ostara.ostarasystems.net/*
@@ -52,7 +52,7 @@
 
   // Constants that are structural, not operator-tunable, kept out of CONFIG.
   const K = {
-    BUILD_ID: '0.2.5',
+    BUILD_ID: '0.2.6',
     PANEL_ID: 'bwn-pba-panel',
     STYLE_ID: 'bwn-pba-style',
     CSS_PREFIX: 'bwn-pba-',
@@ -222,8 +222,9 @@
   function normalizeNoteText(s) {
     return String(s == null ? '' : s)
       .replace(/<[^>]*>/g, ' ')
-      .replace(/&nbsp;/gi, ' ').replace(/&amp;/gi, '&').replace(/&lt;/gi, '<')
+      .replace(/&nbsp;/gi, ' ').replace(/&lt;/gi, '<')
       .replace(/&gt;/gi, '>').replace(/&#39;|&apos;/gi, "'").replace(/&quot;/gi, '"')
+      .replace(/&amp;/gi, '&') // last: decoding it first turns a literal "&lt;" (&amp;lt;) into "<"
       .replace(/\s+/g, ' ').trim();
   }
 
@@ -1602,6 +1603,7 @@
     eq(parseAllowList('a, b\nA b').length, 2, 'parseAllowList dedupes case-insensitively');
     eq(extractIdFromHref('/WorkOrder/Detail/98765?qd=1'), '98765', 'extractIdFromHref path');
     eq(normalizeNoteText('<p>Good  afternoon,&nbsp;thanks</p>'), 'Good afternoon, thanks', 'normalizeNoteText strips tags + entities + ws');
+    eq(normalizeNoteText('a &amp;lt; b &amp;amp; c'), 'a &lt; b &amp; c', 'normalizeNoteText decodes once (no double-unescape)');
     eq(noteTextMatches('<div><p>x Good afternoon, thanks y</p></div>', 'Good afternoon, thanks'), true, 'noteTextMatches finds normalized note in rich-HTML container');
     eq(noteTextMatches('nothing here', 'Good afternoon, thanks'), false, 'noteTextMatches false when absent');
     eq(prepareJHtmlAreaValue(null, 'x'), false, 'prepareJHtmlAreaValue null-safe');

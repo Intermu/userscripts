@@ -30,7 +30,7 @@ Broadway Helpdesk / Rachel / Jane Doe / missing header; frozen signer; `batchCap
 live on 2689724 (Boolean match, no content stored). Add Notes field = plain `textarea[name="Notes"]`
 (jHtmlArea case B).
 
-**Browser self-test (run when installed):** install v0.2.5 in Tampermonkey, open the jobs list with
+**Browser self-test (run when installed):** install v0.2.6 in Tampermonkey, open the jobs list with
 `?bwnPbaSelfTest=1`, read the console for `self-test passed (N)` and `mock-test passed (N)`. Not
 executable outside Tampermonkey (file:// renders static; inline injection is 85 KB) — pure/data
 assertions were verified in Node this session; the DOM suite runs under the flag.
