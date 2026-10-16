@@ -1,10 +1,10 @@
 // ==UserScript==
 // @name         BWN Note Report (Broadway National)
 // @namespace    broadwaynational.bwn
-// @version      1.3.0
+// @version      1.3.1
 // @description  Read-only note activity report for one coordinator over an Eastern-Time date range, with a four-tab Excel export - it replaces pulling each work order's notes by hand. Opens from the shared dock (bwn:dock:*, hosted by bwn-suite-core); without Core a floating "Note Report" button appears bottom-right instead. Pick a user (member-search typeahead, teams filtered out) and a date range: it scopes work orders by that user's tasks (created or completed in the range, or still open with a target start on or before its end), optionally adds WOs they coordinate whose LastNoteDate falls in the range, de-duplicates them, batch-resolves WO details, pulls every note on each WO and keeps the user's own by author id. The preview shows totals, notes per day and a sortable table; Export writes Summary, Notes, Tasks and Flags tabs (past expected completion, open task past target, task activity with no notes, gaps of 2+ business days with no note on an open WO). Read-only by construction: one guarded request path can send only six fixed, named GraphQL queries, POST to same-origin /api/graphql, with the page's own Umbrava session token used transiently and never stored; at most 4 requests in flight, retries only on 429/502/503/504, and UNAUTHENTICATED (which Umbrava returns as HTTP 500) stops the run. No @connect, no keys, nothing is written to storage, nothing leaves the browser except the downloaded workbook.
-// @downloadURL  https://raw.githubusercontent.com/Intermu/userscripts/main/bwn-note-report.user.js
-// @updateURL    https://raw.githubusercontent.com/Intermu/userscripts/main/bwn-note-report.user.js
+// @downloadURL  https://green-stone-0717dab0f.7.azurestaticapps.net/userscripts/bwn-note-report.user.js
+// @updateURL    https://green-stone-0717dab0f.7.azurestaticapps.net/userscripts/bwn-note-report.user.js
 // @match        https://app.umbrava.com/*
 // @require      https://cdnjs.cloudflare.com/ajax/libs/exceljs/4.4.0/exceljs.min.js#sha384=3eaa79d4550ddbfab37f1671042b45d2cb6973d38d23a31866956a9a8f26db44a86900b37fe6ab66f00290b922ae53f3
 // @run-at       document-idle

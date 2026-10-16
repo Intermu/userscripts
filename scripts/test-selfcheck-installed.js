@@ -51,7 +51,7 @@ function header(fields) {
   return lines.join('\n') + '\n(function(){ "use strict"; })();\n';
 }
 
-var RAW = 'https://raw.githubusercontent.com/Intermu/userscripts/main/';
+var RAW = 'https://green-stone-0717dab0f.7.azurestaticapps.net/userscripts/';
 
 // ---- fixtures ----------------------------------------------------------------------------------
 

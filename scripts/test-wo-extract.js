@@ -66,7 +66,7 @@ A.eq('@connect is the SWA host only', meta.connect.join(','), 'green-stone-0717d
 ['GM_xmlhttpRequest', 'GM_getValue', 'GM_setValue', 'GM_registerMenuCommand'].forEach(function (g) {
   A.ok('grants ' + g, meta.grant.indexOf(g) !== -1);
 });
-var RAW = 'https://raw.githubusercontent.com/Intermu/userscripts/main/' + FILE;
+var RAW = 'https://green-stone-0717dab0f.7.azurestaticapps.net/userscripts/' + FILE;
 A.eq('@updateURL is our own raw', meta.updateURL, RAW);
 A.eq('@downloadURL is our own raw', meta.downloadURL, RAW);
 

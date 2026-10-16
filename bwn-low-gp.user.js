@@ -1,13 +1,13 @@
 // ==UserScript==
 // @name         BWN Suite - Low GP Note (Broadway National)
 // @namespace    broadwaynational.bwn
-// @version      0.5.4
+// @version      0.5.5
 // @description  A "Low GP" button beside the global "Search Work Orders" box. Enter a WO#, Tracking#, Source PO#, or Source Job#; it finds the work order, shows a CONFIRM step (WO / client / location / assignee / both note bodies, plus a warn-only notice if the WO already has an active Billing "Low GP" note), then posts TWO notes via Umbrava's own API: a Billing-type note reading "Low GP", and a second note that @-mentions the WO's assignee ("@Name Low GP note added"). The @-mention is the real TipTap mention span the SPA sends (captured live 2026-08-17); actionNoteEmails stays null - the span alone notifies. The mention is skipped when the WO has no assignee user GUID. Same-origin /api/graphql with the app's Auth0 bearer, @grant none, zero egress. Nothing posts until you click Confirm.
 // @match        https://app.umbrava.com/*
 // @run-at       document-idle
 // @grant        none
-// @downloadURL  https://raw.githubusercontent.com/Intermu/userscripts/main/bwn-low-gp.user.js
-// @updateURL    https://raw.githubusercontent.com/Intermu/userscripts/main/bwn-low-gp.user.js
+// @downloadURL  https://green-stone-0717dab0f.7.azurestaticapps.net/userscripts/bwn-low-gp.user.js
+// @updateURL    https://green-stone-0717dab0f.7.azurestaticapps.net/userscripts/bwn-low-gp.user.js
 // ==/UserScript==
 (function () {
   'use strict';
@@ -466,7 +466,7 @@
     while (j < n) { var c = q.charAt(j); if ((c >= 'A' && c <= 'Z') || (c >= 'a' && c <= 'z') || (c >= '0' && c <= '9') || c === '_') j++; else break; }
     return lgGql(q.slice(i, j) || null, query, variables);
   };
-  var BWN_VER = '0.5.4';
+  var BWN_VER = '0.5.5';
 
   // Reader for the server-computed ESC rank (grant-none-safe; mirrors bwnEscRank / bwn-ask). Live
   // bus event trusted directly; the bwn:role:last slot is the cross-refresh fallback (ok + fresh).

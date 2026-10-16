@@ -212,7 +212,8 @@ function looksBwn(meta) {
   if (/broadwaynational/i.test(String(meta.namespace || ''))) return true;
   if (/^BWN\b/.test(String(meta.name || ''))) return true;
   var url = String(meta.downloadURL || meta.updateURL || '');
-  return url.indexOf('Intermu/userscripts') !== -1;
+  return url.indexOf('Intermu/userscripts') !== -1 ||                        // copies not yet on the SWA release
+    url.indexOf('green-stone-0717dab0f.7.azurestaticapps.net/userscripts/') !== -1;
 }
 
 // One installed script -> verdict codes + the evidence each rests on. UNKNOWN is used wherever the

@@ -341,8 +341,8 @@ async function probeAssist(src) {
   // const to lockstep against, the manifest ledger parses @version, and an exact pin here only
   // forced an unrelated edit on every Core bump.
   A.ok('core banner says WO Assist 2.76', coreFull.indexOf('WO Assist 2.76') !== -1, 'module banner drift');
-  A.ok('assist @version is 0.3.7', assistFull.indexOf('// @version      0.3.7') !== -1, 'assist version drift');
-  A.ok("assist VER is '0.3.7'", assistFull.indexOf("var VER = '0.3.7';") !== -1, 'assist VER drift');
+  A.ok('assist @version is 0.3.8', assistFull.indexOf('// @version      0.3.8') !== -1, 'assist version drift');
+  A.ok("assist VER is '0.3.8'", assistFull.indexOf("var VER = '0.3.8';") !== -1, 'assist VER drift');
   // Step 4 hangs the client-response state read off the SAME tick, deliberately: two queues on
   // one refresh cadence is one thing to reason about, and a second timer would be a second
   // thing to drift. Both calls are pinned so dropping either is a red test, not a quiet loss.

@@ -547,12 +547,13 @@ console.log('\ninitialView (0.9.0 - Core Preferences > Default WO view)');
 var mVer = kbFull.match(/@version\s+(\S+)/);
 var mConst = kbFull.match(/var VER = '([^']+)'/);
 A.ok('the metadata @version and the VER constant agree', !!(mVer && mConst) && mVer[1] === mConst[1]);
-A.eq('and this is the version under test', mVer && mVer[1], '0.9.3');
-// The mirror (Intermu/userscripts-public) is being retired now that the source repo is public
-// again; raw URLs must point at the SOURCE repo or auto-update dies with the mirror.
-A.ok('the script points at the source repo raw URL, so it can auto-update at all',
-  /@downloadURL\s+https:\/\/raw\.githubusercontent\.com\/Intermu\/userscripts\/main\/bwn-kanban\.user\.js/.test(kbFull) &&
-  /@updateURL\s+https:\/\/raw\.githubusercontent\.com\/Intermu\/userscripts\/main\/bwn-kanban\.user\.js/.test(kbFull));
+A.eq('and this is the version under test', mVer && mVer[1], '0.9.4');
+// The scripts move into the private broadway-internal-ops repo and are served by its SWA on the
+// anonymous /userscripts/ route; raw.githubusercontent of a private repo 404s, so auto-update
+// must point at the SWA or it dies with the move.
+A.ok('the script points at the SWA /userscripts/ URL, so it can auto-update at all',
+  /@downloadURL\s+https:\/\/green-stone-0717dab0f\.7\.azurestaticapps\.net\/userscripts\/bwn-kanban\.user\.js/.test(kbFull) &&
+  /@updateURL\s+https:\/\/green-stone-0717dab0f\.7\.azurestaticapps\.net\/userscripts\/bwn-kanban\.user\.js/.test(kbFull));
 A.ok('it still runs at document-start, or the capture loses the race with the app',
   /@run-at\s+document-start/.test(kbFull));
 A.ok('and still takes no grant, or the fetch hook lands in the sandbox instead of the page',
