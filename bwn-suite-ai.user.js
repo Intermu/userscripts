@@ -1,9 +1,9 @@
 // ==UserScript==
 // @name         BWN Suite - AI (Broadway National)
 // @namespace    broadwaynational.bwn
-// @version      1.51.0
-// @downloadURL  https://raw.githubusercontent.com/Intermu/userscripts/main/bwn-suite-ai.user.js
-// @updateURL    https://raw.githubusercontent.com/Intermu/userscripts/main/bwn-suite-ai.user.js
+// @version      1.51.1
+// @downloadURL  https://green-stone-0717dab0f.7.azurestaticapps.net/userscripts/bwn-suite-ai.user.js
+// @updateURL    https://green-stone-0717dab0f.7.azurestaticapps.net/userscripts/bwn-suite-ai.user.js
 // @description  The Umbrava tools that call outside APIs, kept separate from the zero-egress Core script. Client Update and WO Audit drafts (Anthropic Claude; draft-only, scrubbed before sending, you review before posting); Find Techs / Find Suppliers (Google Places; vendor leads near a WO); and Job View (opens the Ops-Dashboard job card on the WO page - WO details from Umbrava plus the authored case file and next actions, read-only). Network access is limited by the browser to the declared API hosts and the BWN Static Web App. API keys are stored in Tampermonkey's storage via the menu commands and never enter the page. Runs in the top frame only (@noframes plus an in-code guard): inside a nested frame it starts no timers, fetches or writes. Toggle modules in BWN_MODULES below.
 // @match        https://app.umbrava.com/*
 // @run-at       document-idle

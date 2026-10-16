@@ -13,7 +13,7 @@ Documentation only. No runtime, test, ledger, metadata, or version change accomp
 ## 1. Do Not Break
 
 1. **Single raw-published file.** Tampermonkey installs and updates Core straight from
-   `raw.githubusercontent.com/Intermu/userscripts/main/bwn-suite-core.user.js`. No bundler, no module
+   `green-stone-0717dab0f.7.azurestaticapps.net/userscripts/bwn-suite-core.user.js`. No bundler, no module
    split, no build step is authorized.
 2. **`@grant none`.** Core shares the page `window` on purpose. `@grant none` siblings read Core's
    `window.*` bridges directly (section 3.3). GM-granted siblings live in a sandbox and see Core

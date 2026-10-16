@@ -1,9 +1,9 @@
 // ==UserScript==
 // @name         BWN Proposal Pricing Assistant (Broadway National)
 // @namespace    broadwaynational.bwn
-// @version      0.2.0
-// @downloadURL  https://raw.githubusercontent.com/Intermu/userscripts/main/bwn-proposal-pricing.user.js
-// @updateURL    https://raw.githubusercontent.com/Intermu/userscripts/main/bwn-proposal-pricing.user.js
+// @version      0.2.1
+// @downloadURL  https://green-stone-0717dab0f.7.azurestaticapps.net/userscripts/bwn-proposal-pricing.user.js
+// @updateURL    https://green-stone-0717dab0f.7.azurestaticapps.net/userscripts/bwn-proposal-pricing.user.js
 // @description  Turn a work order's vendor quote into a priced, categorized client proposal WITH a full explanation of how each price was derived - crew size read from the vendor's own line text, the contracted-rate ladder, why a line is left at cost or flagged under water, and the read (never recomputed) GP basis. Coordinator-visible; read-only in this release (no writes, no per-user AI keys). @grant none.
 // @match        https://app.umbrava.com/*
 // @match        https://*.umbrava.com/*
@@ -15,7 +15,7 @@
 (function () {
   'use strict';
 
-  var VER = '0.2.0';   // keep in step with @version
+  var VER = '0.2.1';   // keep in step with @version
   console.info('[BWN PROPOSAL PRICING] v' + VER + ' - price a vendor quote into a client proposal with a full pricing explanation (read-only)');
 
   // ===== auth + gql =========================================================

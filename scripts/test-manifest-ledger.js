@@ -298,8 +298,8 @@ console.log('US-0 manifest ledger: ' + files.length + ' scripts on disk, ' + ros
 
 A.ok('roster is non-empty', rosterKeys.length > 0, 'no rows in userscript-manifest.json');
 A.ok('disk enumeration found scripts', files.length > 0, 'no bwn-*.user.js found under ' + ROOT);
-A.ok('expectedRawBase is the Intermu/userscripts main raw base',
-  RAW_BASE === 'https://raw.githubusercontent.com/Intermu/userscripts/main/', RAW_BASE);
+A.ok('expectedRawBase is the SWA /userscripts/ base (scripts served from broadway-internal-ops)',
+  RAW_BASE === 'https://green-stone-0717dab0f.7.azurestaticapps.net/userscripts/', RAW_BASE);
 
 A.eq('roster and disk agree in both directions', auditRoster(files, rosterKeys), []);
 
@@ -355,7 +355,7 @@ A.ok('C1 mutated @version (vs in-body const) goes red',
   'BODYVER guard did not fire on a bumped @version');
 
 A.ok('C2 wrong @updateURL host goes red',
-  fired(auditScript(probe, probeSrc.replace('https://raw.githubusercontent.com/Intermu/userscripts/main/' + probe,
+  fired(auditScript(probe, probeSrc.replace('https://green-stone-0717dab0f.7.azurestaticapps.net/userscripts/' + probe,
     'https://raw.githubusercontent.com/someone-else/userscripts/main/' + probe), probeRow), 'UPDATEURL'),
   'UPDATEURL guard did not fire on a foreign raw host');
 

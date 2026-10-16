@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         BWN WO Context (Operations Assist)
 // @namespace    broadwaynational.bwn
-// @version      0.1.0
+// @version      0.1.1
 // @description  Read-only Operations Assist. Normalizes the work order you are viewing from BWN Suite Core's already-published context via Broadway's extract endpoint and shows the result in a non-modal dock panel. It issues no Umbrava query of its own, fetches no page content, and never writes anything upstream.
 // @match        https://app.umbrava.com/*
 // @run-at       document-idle
@@ -10,14 +10,14 @@
 // @grant        GM_setValue
 // @grant        GM_registerMenuCommand
 // @connect      green-stone-0717dab0f.7.azurestaticapps.net
-// @downloadURL  https://raw.githubusercontent.com/Intermu/userscripts/main/bwn-wo-extract.user.js
-// @updateURL    https://raw.githubusercontent.com/Intermu/userscripts/main/bwn-wo-extract.user.js
+// @downloadURL  https://green-stone-0717dab0f.7.azurestaticapps.net/userscripts/bwn-wo-extract.user.js
+// @updateURL    https://green-stone-0717dab0f.7.azurestaticapps.net/userscripts/bwn-wo-extract.user.js
 // ==/UserScript==
 
 (function () {
   'use strict';
 
-  var VER = '0.1.0';
+  var VER = '0.1.1';
 
   // ---- Config ---------------------------------------------------------------
   var SWA_BASE = 'https://green-stone-0717dab0f.7.azurestaticapps.net';

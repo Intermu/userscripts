@@ -1,10 +1,10 @@
 // ==UserScript==
 // @name         BWN AI Proposal Assist (Broadway National)
 // @namespace    broadwaynational.bwn
-// @version      0.4.0
+// @version      0.4.1
 // @description  Read-only helper around Umbrava's AI client-proposal generator. Opens from an "AI Proposal" row in the BWN Suite dock (bwn:dock:*, needs bwn-suite-core 1.94.5+) that appears only on a vendor proposal page and the AI preview Generate leads to - there is no floating button. Three opt-in sections, all OFF until switched on: (1) Pre-flight on a vendor proposal's details page reads the line grid by header text and flags line shapes the AI cannot fix later - travel/labor not named "N Man Travel" / "N Man", one line covering several trips, a single lumped Material line, equipment or removal filed under Material/Other, missing $0 Shipping and Disposal, blank Trip #, numeric UOM, vendor total over the client NTE - with a recommended-lines table; (2) a prompt builder that assembles the Generate prompt from form fields in a fixed order with a live 1,000-character hard stop, Copy and Insert (armed before the Generate modal opens, because the modal makes the rest of the page inert), and saved per-client templates; (3) a post-generate checker that passively reads the GenerateAIProposalPreview / ReworkAIProposal responses the app already receives and shows pass/fail (charge below cost, negative or >35% materials markup, travel quantity, non-rate-card ranges, total vs NTE, banned headings, verbatim lines, Materials/Equipment section) plus the server's validationErrors text when Generate fails. With "Work order context" on (0.3.0) it READS eight fixed, named Umbrava GraphQL queries (the work order, its client proposals, the latest client proposal's lines, the PO trips, the POs and their quotes to find this vendor quote by id, the client's active rate card, and the WO notes) through one guarded same-origin path, to add the client NTE, existing client proposals, the earlier split and each trip's Incurred/Proposed status; it never sends a mutation. 0.4.0 adds a rate-card check of the vendor quote lines and a "Draft with AI" button that hands the read facts to bwn-suite-ai 1.50.0+ over the page bus (task 'proposal', server-owned prompt) to write the issue line and per-trip steps, which you review before Copy/Insert. It never reads the app's request headers, never edits the grid, never clicks anything it did not create, never saves, submits or approves.
-// @downloadURL  https://raw.githubusercontent.com/Intermu/userscripts/main/bwn-ai-proposal-assist.user.js
-// @updateURL    https://raw.githubusercontent.com/Intermu/userscripts/main/bwn-ai-proposal-assist.user.js
+// @downloadURL  https://green-stone-0717dab0f.7.azurestaticapps.net/userscripts/bwn-ai-proposal-assist.user.js
+// @updateURL    https://green-stone-0717dab0f.7.azurestaticapps.net/userscripts/bwn-ai-proposal-assist.user.js
 // @match        https://app.umbrava.com/*
 // @run-at       document-start
 // @noframes
@@ -27,7 +27,7 @@
 (function () {
   'use strict';
 
-  var VER = '0.4.0';   // keep in step with @version
+  var VER = '0.4.1';   // keep in step with @version
   // Duplicate-init guard: @grant none shares the page window, so a second install (two copies, a
   // reinstall without reload) sees the first one's stamp and stands down instead of double-tapping.
   if (window.__bwnApaInit) { console.warn('[BWN APA] already initialised (v' + window.__bwnApaInit + ') - second copy inert'); return; }

@@ -1,9 +1,9 @@
 // ==UserScript==
 // @name         BWN Write Queue (Broadway National)
 // @namespace    broadwaynational.bwn
-// @version      0.7.0
-// @downloadURL  https://raw.githubusercontent.com/Intermu/userscripts/main/bwn-write-queue.user.js
-// @updateURL    https://raw.githubusercontent.com/Intermu/userscripts/main/bwn-write-queue.user.js
+// @version      0.7.1
+// @downloadURL  https://green-stone-0717dab0f.7.azurestaticapps.net/userscripts/bwn-write-queue.user.js
+// @updateURL    https://green-stone-0717dab0f.7.azurestaticapps.net/userscripts/bwn-write-queue.user.js
 // @description  Drains the Track C write-back queue: claims THIS coordinator's own queued Umbrava write commands from the SWA, confirms each irreversible write, executes it via patchWorkOrder/addEditJobNote, and reports the result. Self-drain; every write is human-confirmed; disabled until you turn it on. v0.5 RETIRES this script's Bulk Operations Console modal - Core (bwn-suite-core, flag bulkOps) is now the single Safe Bulk Operations Console; the drain executor stays here as Track C infrastructure. v0.7 switches OFF the Dashboard picker catalog push (Status/Assign lists keep their last-pushed values) until it has a governed path.
 // @match        https://app.umbrava.com/*
 // @run-at       document-idle
@@ -38,7 +38,7 @@
 
 (function () {
   "use strict";
-  var VER = "0.7.0";   // keep in lockstep with @version (TM compares versions, not contents)
+  var VER = "0.7.1";   // keep in lockstep with @version (TM compares versions, not contents)
 
   var SWA_BASE = "https://green-stone-0717dab0f.7.azurestaticapps.net";
   var PROXY_URL = SWA_BASE + "/api/wo-write-queue";

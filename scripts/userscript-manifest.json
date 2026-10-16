@@ -1,7 +1,7 @@
 {
   "_comment": "US-0 canonical roster for the installed-vs-repository self-check. This file declares ONLY what the repo bytes cannot tell us: whether a script is expected to be installed on a coordinator machine, and which conformance checks are deliberately waived and why. Everything derivable from disk - @version, @match, @updateURL, @downloadURL, content hash - is read from the shipped file on every run and is NOT duplicated here, so this file cannot drift on those. scripts/test-manifest-ledger.js enforces that this roster and the *.user.js files on disk agree in BOTH directions: a new script with no row here, or a row here with no file, is a red build. Waivers are per-check and must carry a reason.",
   "_schemaVersion": 1,
-  "expectedRawBase": "https://raw.githubusercontent.com/Intermu/userscripts/main/",
+  "expectedRawBase": "https://green-stone-0717dab0f.7.azurestaticapps.net/userscripts/",
   "scripts": {
     "bwn-ai-proposal-assist.user.js": { "expectedInstalled": false },
     "bwn-ask.user.js": {

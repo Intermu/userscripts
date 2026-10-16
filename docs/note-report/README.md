@@ -7,7 +7,7 @@ It replaces the manual loop of pulling each work order's notes by hand.
 ## Install
 
 1. Install the Tampermonkey browser extension.
-2. Open https://raw.githubusercontent.com/Intermu/userscripts/main/bwn-note-report.user.js and
+2. Open https://green-stone-0717dab0f.7.azurestaticapps.net/userscripts/bwn-note-report.user.js and
    click **Install**. It auto-updates from the same URL.
 3. If you had the old **Umbrava Coordinator Note Report** (1.0.0 / 1.1.0, installed by paste),
    delete it in the Tampermonkey dashboard. It has a different name and namespace, so Tampermonkey

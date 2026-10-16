@@ -1,9 +1,9 @@
 // ==UserScript==
 // @name         BWN Suite - Core (Broadway National)
 // @namespace    broadwaynational.bwn
-// @version      1.95.0
-// @downloadURL  https://raw.githubusercontent.com/Intermu/userscripts/main/bwn-suite-core.user.js
-// @updateURL    https://raw.githubusercontent.com/Intermu/userscripts/main/bwn-suite-core.user.js
+// @version      1.95.1
+// @downloadURL  https://green-stone-0717dab0f.7.azurestaticapps.net/userscripts/bwn-suite-core.user.js
+// @updateURL    https://green-stone-0717dab0f.7.azurestaticapps.net/userscripts/bwn-suite-core.user.js
 // @description  Runs several Umbrava helpers for BWN coordinators, in the browser with no privileged grants. Includes: PO Approval + ETA Builder; WO Assist (GP/ETA, a stall watchdog, DNE calculator, and a next-action playbook); Email Leak Guard (checks recipients against vendor names, PO amounts, and client budget references before an outbound email sends); WO List Heat (a triage overlay + My Day strip on the work-order list, with an optional same-origin Umbrava API scan for deterministic full-board coverage); and the BWN Launcher (opens the Azure Static Web App tools with the current WO's context). Modules share state through sessionStorage/localStorage. The only network calls are same-origin Umbrava GraphQL requests (app.umbrava.com/api/graphql, the app's own session): List Heat's full-board scan and WO Assist's work-order / trip / clock-in / document / purchase-order reads, plus ONE live write - BWN Views saves the column layout through Umbrava's own putUserPreference, the same preference the column chooser writes; everything else is offline. The other write features (Set ECD, WO-Assist Create task / Change status, Bulk Source Job#, Bulk Operations, Bulk Task Reassign) ship switched OFF and cannot be switched on from the bwn:modules blob or the central governance bundle. Toggle modules in BWN_MODULES below.
 // @match        https://app.umbrava.com/*
 // @match        https://*.umbrava.com/*
@@ -13225,7 +13225,7 @@
       b.addEventListener('click', BWN.guard(function () { onClick(lb); }, 'launcher:dockclick'));
       return b;
     }
-    function dockLogoUrl() { return 'https://raw.githubusercontent.com/Intermu/userscripts/main/assets/bwn-logo.png'; } // logo now lives with the scripts (source repo), not the SWA host
+    function dockLogoUrl() { return 'https://green-stone-0717dab0f.7.azurestaticapps.net/assets/bwn-logo.png'; } // logo now lives with the scripts (source repo), not the SWA host
     function dockIsCollapsed() { try { return localStorage.getItem(DOCK_COLLAPSED_KEY) === '1'; } catch (e) { return false; } }
     function dockSetCollapsed(v) {
       try { if (v) localStorage.setItem(DOCK_COLLAPSED_KEY, '1'); else localStorage.removeItem(DOCK_COLLAPSED_KEY); } catch (e) { }
